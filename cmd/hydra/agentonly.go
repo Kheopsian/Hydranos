@@ -1,0 +1,245 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/Kheopsian/hydra/internal/agent"
+	"github.com/Kheopsian/hydra/internal/choking"
+	"github.com/Kheopsian/hydra/internal/config"
+	"github.com/Kheopsian/hydra/internal/engine"
+	"github.com/Kheopsian/hydra/internal/store"
+)
+
+// liveEngine is one running engine of an agent node (Option A: a node hosts an
+// arbitrary set of engines, each with an id + role).
+type liveEngine struct {
+	id    string
+	role  string
+	cfg   config.SessionConfig
+	proc  *engine.EngineProcess
+	race  *engine.RaceEngine  // set when role == race
+	hoard *engine.HoardEngine // set when role == hoard
+	rich  engine.RichEngine
+	store *store.AgentStore
+	ann   *engine.HoardAnnouncer
+}
+
+func (le *liveEngine) metas() map[string]*engine.TorrentMeta {
+	if le.race != nil {
+		return le.race.GetTorrentMetas()
+	}
+	return le.hoard.GetTorrentMetas()
+}
+
+// runAgentOnly serves a dedicated data-plane agent node: it owns its Typhon
+// engines (an arbitrary set resolved from config) and their event handlers
+// (ownEvents=true), persists each engine to its own per-agent store, and exposes
+// the HydraAgent gRPC API — no api.Server. Egress is unchanged: the SOCKS5 proxy
+// lives in each engine's Typhon config applied at StartSessionEngine.
+func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, tlsCert, tlsKey string) {
+	if addr == "" {
+		slog.Error("agent-only mode requires --agent-addr")
+		os.Exit(1)
+	}
+	engineCfgs, err := cfg.ResolveEngines()
+	if err != nil {
+		slog.Error("agent-only: invalid engine config", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("starting in AGENT-ONLY mode", "addr", addr, "engines", len(engineCfgs))
+
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		slog.Info("agent-only: signal received, shutting down")
+		cancel()
+	}()
+
+	engine.InitPasskeyOverrides(cfg.AnnouncePasskeys)
+	clientSpoofs := make(map[string]engine.ClientSpoof, len(cfg.AnnounceClients))
+	for host, c := range cfg.AnnounceClients {
+		clientSpoofs[host] = engine.ClientSpoof{PeerIDPrefix: c.PeerIDPrefix, UserAgent: c.UserAgent}
+	}
+	engine.InitClientOverrides(clientSpoofs)
+	engine.InitSecondaryStatsOverrides(cfg.AnnounceSecondaryStats)
+
+	uploadsDir := filepath.Join(cfg.Daemon.DataDir, "uploads")
+
+	// ---- Spawn + build each engine ----
+	var lives []*liveEngine
+	var raceEngines []*engine.RaceEngine
+	stopAll := func() {
+		for _, le := range lives {
+			le.proc.Stop()
+		}
+	}
+	for _, ec := range engineCfgs {
+		eDir := filepath.Join(cfg.Daemon.DataDir, ec.ID)
+		_ = os.MkdirAll(eDir, 0755)
+		sock := filepath.Join(cfg.Daemon.DataDir, ec.ID+".sock")
+		le := &liveEngine{id: ec.ID, role: ec.Role, cfg: ec.SessionConfig}
+		proc, perr := engine.StartSessionEngine(&le.cfg, eDir, sock, ec.Role == "race")
+		if perr != nil {
+			slog.Error("agent-only: start engine", "id", ec.ID, "error", perr)
+			stopAll()
+			os.Exit(1)
+		}
+		le.proc = proc
+		if ec.Role == "race" {
+			var ck engine.ChokingEngineInterface
+			if le.cfg.CustomChoking != nil && le.cfg.CustomChoking.Enabled {
+				ck = choking.NewChokingEngine(le.cfg.CustomChoking)
+			}
+			re := engine.NewRaceEngine(&le.cfg, ck, nil, eDir)
+			re.SetClient(proc.Client())
+			le.race, le.rich = re, re
+			raceEngines = append(raceEngines, re)
+		} else {
+			he := engine.NewHoardEngine(&le.cfg, eDir)
+			he.SetClient(proc.Client())
+			le.hoard, le.rich = he, he
+		}
+		if st, serr := store.OpenAgent(filepath.Join(eDir, "store.db")); serr != nil {
+			slog.Error("agent-only: open store", "id", ec.ID, "error", serr)
+		} else {
+			le.store = st
+		}
+		lives = append(lives, le)
+	}
+
+	// Aggregated race gate: a hoard must not announce an info_hash any race
+	// engine on this node already holds (anti dual-announce), generalised to N
+	// race engines.
+	raceGate := func(infoHash string) bool {
+		for _, r := range raceEngines {
+			if r.HasTorrent(infoHash) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// ---- Start engines, announcers, reload from store ----
+	for _, le := range lives {
+		if le.race != nil {
+			if serr := le.race.Start(ctx); serr != nil {
+				slog.Error("agent-only: race start", "id", le.id, "error", serr)
+				stopAll()
+				os.Exit(1)
+			}
+		} else {
+			if serr := le.hoard.Start(ctx); serr != nil {
+				slog.Error("agent-only: hoard start", "id", le.id, "error", serr)
+				stopAll()
+				os.Exit(1)
+			}
+		}
+		ann := engine.NewHoardAnnouncer(le.proc.Client(), engine.DefaultSingleBinding(le.cfg.ListenPort))
+		if le.hoard != nil {
+			ann.OnObservation = le.hoard.ObserveAnnounce
+			le.hoard.SetBootstrapAnnounce(ann.BootstrapAnnounce)
+			le.hoard.SetReAnnounce(ann.ReAnnounce)
+			ann.SetRaceGate(raceGate)
+			ann.SetOffsetFn(le.hoard.AnnounceOffset)
+		}
+		ann.Start(ctx)
+		le.ann = ann
+
+		if le.store != nil {
+			var imp, errs int
+			if le.race != nil {
+				imp, errs = le.race.ImportFromStore(le.store, uploadsDir)
+			} else {
+				imp, errs = le.hoard.ImportFromStore(le.store, uploadsDir)
+			}
+			slog.Info("agent-only: store reload", "id", le.id, "imported", imp, "errors", errs)
+		}
+	}
+
+	// ---- Periodic store reconcile ----
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				for _, le := range lives {
+					reconcileAgentStore(le.id, le.store, le.metas())
+				}
+			}
+		}
+	}()
+
+	// ---- HydraAgent gRPC (owns events) ----
+	if token == "" {
+		slog.Warn("agent-only served WITHOUT a token (--agent-token) — do not expose off-LAN")
+	}
+	engines := make(map[string]engine.EngineClient, len(lives))
+	for _, le := range lives {
+		engines[le.id] = le.proc.Client()
+	}
+	agentSrv := agent.NewServer(engines, cfg.Daemon.DataDir, token)
+	agentSrv.SetTLS(tlsCert, tlsKey)
+	agentSrv.SetOwnEvents(true)
+	for _, le := range lives {
+		agentSrv.AddRichEngine(le.id, le.rich)
+	}
+	go func() {
+		slog.Info("HydraAgent (agent-only) serving", "addr", addr)
+		if serr := agentSrv.Serve(ctx, addr); serr != nil {
+			slog.Error("agent-only: gRPC server exited", "error", serr)
+		}
+	}()
+
+	slog.Info("agent-only: all systems GO")
+	<-ctx.Done()
+
+	// ---- Graceful shutdown ----
+	slog.Info("agent-only: stopping")
+	for _, le := range lives {
+		if le.ann != nil {
+			le.ann.Stop()
+		}
+	}
+	for _, le := range lives {
+		if le.store != nil {
+			reconcileAgentStore(le.id, le.store, le.metas())
+			le.store.Close()
+		}
+		le.proc.Stop()
+	}
+}
+
+// reconcileAgentStore mirrors one engine's current torrents into its store.
+func reconcileAgentStore(name string, st *store.AgentStore, metas map[string]*engine.TorrentMeta) {
+	if st == nil {
+		return
+	}
+	items := make([]store.AgentSyncItem, 0, len(metas))
+	for ih, m := range metas {
+		items = append(items, store.AgentSyncItem{
+			InfoHash:        ih,
+			SavePath:        m.SavePath,
+			Category:        m.Category,
+			TorrentFilePath: m.TorrentFilePath,
+			CompletedTime:   float64(timeToUnix(m.CompletedTime)),
+		})
+	}
+	if r, err := st.Reconcile(items); err != nil {
+		slog.Warn("agent-only: store reconcile failed", "engine", name, "error", err)
+	} else if r.Inserted+r.Deleted+r.Missing > 0 {
+		slog.Info("agent-only: store reconciled", "engine", name,
+			"ins", r.Inserted, "upd", r.Updated, "del", r.Deleted, "miss", r.Missing)
+	}
+}
