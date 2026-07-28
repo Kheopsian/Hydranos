@@ -1,6 +1,7 @@
 // Hydra WebUI - Dashboard
 
 const API_KEY = localStorage.getItem("hydra_api_key") || "";
+let _provenance = null;
 const POLL_INTERVAL = 1000;
 
 let _sessionBaselineUl = null;
@@ -187,6 +188,141 @@ function promptApiKey(reason) {
     };
     ov.querySelector("#apikey-save").addEventListener("click", save);
     inp.addEventListener("keydown", e => { if (e.key === "Enter") save(); });
+}
+
+// ── qBittorrent import wizard ─────────────────────────────────────────────
+// Onboarding: connect to a running qBittorrent WebUI and seed its library into
+// Hydra (hoard). 3 steps: credentials → preview → live progress (SSE).
+let _importOpen = false;
+function importWizard() {
+    if (_importOpen) return;
+    _importOpen = true;
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    const box = document.createElement("div");
+    box.className = "modal-box";
+    box.style.maxWidth = "560px";
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+    const close = () => { ov.remove(); _importOpen = false; };
+
+    function stepCreds(prefill) {
+        box.innerHTML = `<h3>Import from qBittorrent</h3>
+            <p class="modal-desc">Point Hydra at your qBittorrent WebUI. Hydra seeds the data already on disk (completed torrents skip the hash-check), so nothing is re-downloaded.</p>
+            <input type="text" id="qb-url" placeholder="http://qbittorrent:8080" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.url || "")}">
+            <input type="text" id="qb-user" placeholder="Username" autocomplete="off" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.user || "admin")}">
+            <input type="password" id="qb-pass" placeholder="Password" autocomplete="off" style="width:100%">
+            <p class="modal-desc" id="qb-msg" style="min-height:1em"></p>
+            <div class="modal-actions">
+                <button id="qb-skip">Skip</button>
+                <button class="btn-primary" id="qb-preview">Preview</button>
+            </div>`;
+        box.querySelector("#qb-skip").onclick = () => { localStorage.setItem("hydra_import_dismissed", "1"); close(); };
+        const msg = box.querySelector("#qb-msg");
+        box.querySelector("#qb-preview").onclick = async () => {
+            const creds = {
+                url: box.querySelector("#qb-url").value.trim(),
+                username: box.querySelector("#qb-user").value,
+                password: box.querySelector("#qb-pass").value,
+            };
+            if (!creds.url) { msg.textContent = "Enter the qBittorrent URL."; return; }
+            msg.style.color = ""; msg.textContent = "Connecting…";
+            try {
+                const res = await fetch("/api/import/qbit/preview", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
+                    body: JSON.stringify(creds),
+                });
+                const d = await res.json().catch(() => ({}));
+                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d.error || ("Preview failed (" + res.status + ")"); return; }
+                stepReview(creds, d);
+            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = "Network error: " + e.message; }
+        };
+        box.querySelector("#qb-pass").addEventListener("keydown", e => { if (e.key === "Enter") box.querySelector("#qb-preview").click(); });
+    }
+
+    function stepReview(creds, d) {
+        const prefixes = d.path_prefixes || [];
+        const rows = prefixes.map(p => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+            <code style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p)}">${esc(p)}</code>
+            <span>→</span>
+            <input type="text" class="qb-map" data-from="${esc(p)}" value="${esc(p)}" style="flex:1">
+        </div>`).join("");
+        box.innerHTML = `<h3>Import preview</h3>
+            <p class="modal-desc"><b>${d.total}</b> torrents · <b>${d.completed}</b> complete (seed-mode) · <b>${d.incomplete}</b> partial (verify + resume) · carried upload <b>${formatBytes(d.carried_uploaded_bytes)}</b></p>
+            <p class="modal-desc">Categories: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "—"} — all imported as <b>hoard</b>.</p>
+            <p class="modal-desc" style="margin-bottom:4px">Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:</p>
+            <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || "<i>no paths detected</i>"}</div>
+            <p class="modal-desc" id="qb-msg2" style="min-height:1em"></p>
+            <div class="modal-actions">
+                <button id="qb-back">Back</button>
+                <button class="btn-primary" id="qb-go">Import ${d.total} torrents</button>
+            </div>`;
+        box.querySelector("#qb-back").onclick = () => stepCreds({ url: creds.url, user: creds.username });
+        box.querySelector("#qb-go").onclick = async () => {
+            const path_map = {};
+            box.querySelectorAll(".qb-map").forEach(inp => {
+                const f = inp.dataset.from, t = inp.value.trim();
+                if (t && t !== f) path_map[f] = t;
+            });
+            const msg = box.querySelector("#qb-msg2");
+            msg.style.color = ""; msg.textContent = "Starting…";
+            try {
+                const res = await fetch("/api/import/qbit/start", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
+                    body: JSON.stringify(Object.assign({}, creds, { path_map })),
+                });
+                const d2 = await res.json().catch(() => ({}));
+                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d2.error || ("Start failed (" + res.status + ")"); return; }
+                stepProgress();
+            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = "Network error: " + e.message; }
+        };
+    }
+
+    function stepProgress() {
+        box.innerHTML = `<h3>Importing…</h3>
+            <p class="modal-desc" id="qb-phase">Connecting…</p>
+            <div style="background:var(--border);border-radius:4px;height:10px;overflow:hidden;margin:8px 0">
+                <div id="qb-bar" style="height:100%;width:0;background:var(--accent-hoard);transition:width .2s"></div>
+            </div>
+            <p class="modal-desc" id="qb-stats"></p>
+            <p class="modal-desc" id="qb-cur" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7"></p>
+            <div class="modal-actions"><button class="btn-primary" id="qb-done" style="display:none">Close &amp; reload</button></div>`;
+        const q = API_KEY ? ("?apikey=" + encodeURIComponent(API_KEY)) : "";
+        const es = new EventSource("/api/import/qbit/events" + q);
+        const phase = box.querySelector("#qb-phase"), bar = box.querySelector("#qb-bar"),
+            stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
+            doneBtn = box.querySelector("#qb-done");
+        const labels = { connect: "Connecting to qBittorrent…", categories: "Creating categories…", torrents: "Importing torrents…", done: "Done", error: "Error" };
+        es.onmessage = (ev) => {
+            let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+            phase.style.color = ""; phase.textContent = labels[d.phase] || d.phase;
+            if (d.total > 0) bar.style.width = Math.round(100 * d.done / d.total) + "%";
+            stats.textContent = `${d.done}/${d.total} · ${d.seeded} seeding · ${d.downloading} resuming · ${d.failed} failed`;
+            cur.textContent = d.current ? ("last: " + d.current) : "";
+            if (d.phase === "error") { phase.style.color = "var(--accent-red)"; phase.textContent = "Error: " + (d.error || "unknown"); }
+            if (d.finished) {
+                es.close();
+                if (d.phase !== "error") { bar.style.width = "100%"; phase.textContent = "Import complete"; }
+                doneBtn.style.display = "";
+                doneBtn.onclick = () => location.reload();
+            }
+        };
+        es.onerror = () => { /* EventSource auto-retries; a finished job's stream 404s and stops */ };
+    }
+
+    stepCreds();
+}
+window.importFromQbit = importWizard;
+
+// Offer the import once on a fresh instance (no recorded provenance yet).
+function maybeOfferImport() {
+    if (!API_KEY) return;
+    fetch("/api/provenance", { headers: { "X-Api-Key": API_KEY } })
+        .then(r => r.json())
+        .then(p => { _provenance = p; if (p && !p.present && !localStorage.getItem("hydra_import_dismissed")) importWizard(); })
+        .catch(() => { });
 }
 
 async function api(endpoint, options = {}) {
@@ -409,7 +545,11 @@ async function updateRecords(force) {
     if (ac && Array.isArray(d.milestones)) {
         const ord = ["1st","2nd","3rd","4th","5th","6th","7th","8th","9th","10th"];
         const label = n => (ord[n - 1] || (n + "th")) + " pebibyte";
-        const rows = ['<div class="lead">same counter &middot; carried over from qBittorrent &middot; since Feb 2023</div>'];
+        const rows = [];
+        if (_provenance && _provenance.present) {
+            const since = _provenance.source_date ? new Date(_provenance.source_date * 1000).toLocaleDateString("en-US", { year: "numeric", month: "short" }) : "";
+            rows.push('<div class="lead">same counter &middot; carried over from ' + esc(_provenance.source_client || "a previous client") + (since ? (' &middot; since ' + since) : '') + '</div>');
+        }
         d.milestones.forEach((m, i) => {
             if (!m.observed) {
                 rows.push('<div class="ar"><span class="when">' + label(m.pib) +
@@ -3225,6 +3365,7 @@ async function restartDaemon() {
 }
 
 if (!API_KEY) promptLogin("Sign in to Hydra.");
+if (API_KEY) maybeOfferImport();
 
 
 // ─── Agents ─────────────────────────────────────────
