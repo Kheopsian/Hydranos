@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -391,13 +392,18 @@ func (s *Server) handleQbitStart(c *gin.Context) {
 	importCurrent = job
 	importMu.Unlock()
 
+	slog.Info("qbit import: job accepted", "job", job.get().JobID, "url", req.URL)
 	go s.runQbitImport(job, req)
 	c.JSON(http.StatusOK, gin.H{"job_id": job.get().JobID})
 }
 
 func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 	defer job.finish()
-	fail := func(msg string) { job.update(func(sn *importSnapshot) { sn.Phase = "error"; sn.Error = msg }) }
+	fail := func(msg string) {
+		slog.Error("qbit import failed", "error", msg)
+		job.update(func(sn *importSnapshot) { sn.Phase = "error"; sn.Error = msg })
+	}
+	slog.Info("qbit import: starting", "url", req.URL)
 
 	cl, err := newQbitClient(req.URL)
 	if err != nil {
@@ -414,6 +420,7 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 		return
 	}
 	cats, _ := cl.categories()
+	slog.Info("qbit import: torrent list fetched", "total", len(ts))
 
 	if s.hoardEngine == nil {
 		fail("hoard engine not available")
@@ -485,6 +492,7 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 		}
 		os.Remove(tmp)
 		if addErr != nil {
+			slog.Warn("qbit import: add failed", "name", name, "seed_mode", seed, "save_path", sp, "error", addErr)
 			job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": add: "+addErr.Error()) })
 			continue
 		}
@@ -520,6 +528,7 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 	if s.saveStateFn != nil {
 		s.saveStateFn()
 	}
+	slog.Info("qbit import: complete", "seeded", final.Seeded, "downloading", final.Downloading, "failed", final.Failed)
 	job.update(func(sn *importSnapshot) { sn.Phase = "done" })
 }
 
