@@ -2308,3 +2308,19 @@ footer {
 .cat-agent-row { display: flex; align-items: center; gap: 10px; }
 .cat-agent-lbl { min-width: 130px; display: inline-flex; align-items: center; gap: 6px; }
 .cat-agent-path { flex: 1; }
+
+
+/* Resizable torrent table columns: drag handle on each header's right edge. */
+#race-table thead th[data-col],
+#hoard-table thead th[data-col] { position: relative; }
+.col-grip {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 7px;
+    height: 100%;
+    cursor: col-resize;
+    user-select: none;
+    z-index: 3;
+}
+.col-grip:hover { background: var(--accent-hoard); opacity: 0.5; }
