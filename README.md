@@ -60,33 +60,43 @@ architecture notes.
 
 ---
 
-## Quick start (Docker)
+## Quick start (Docker Compose)
+
+Prebuilt images are published to the GitHub Container Registry, so you do not
+need to build anything:
 
 ```bash
 git clone https://github.com/Kheopsian/hydra
 cd hydra
-docker build -t hydra:latest .
-
-mkdir -p ./data/configs ./data/downloads
-cp configs/default.toml ./data/configs/default.toml   # edit to taste
-
-# Bootstrap a login password (writes a bcrypt hash you paste into [auth]):
-docker run --rm --entrypoint hydra hydra:latest hash-password 'your-password'
-
-docker run -d --name hydra \
-  -p 8199:8199 \                # web UI + API
-  -p 16171:16171 -p 16172:16172 \   # BT listen ports (race, hoard)
-  -v $PWD/data/configs:/configs \
-  -v $PWD/data/downloads:/data \
-  hydra:latest
+docker compose up -d
 ```
 
-Open `http://localhost:8199`, log in with `admin` / your password. The `api_key`
-is auto-generated on first start (see `[daemon] api_key` in the config) and is
-what the REST API and the qBit shim expect as `X-Api-Key`.
+This pulls `ghcr.io/kheopsian/hydra:latest`, seeds a default config into
+`./config` on first start, and serves the web UI on http://localhost:8199.
 
-Forward the BT listen ports on your router for inbound peers (or use one of the
-networking modes below).
+Grab the API key generated on first start (the UI asks for it on first load; it
+is also the `X-Api-Key` header for the REST API and the qBit shim):
+
+```bash
+docker compose logs hydra | grep -i "api key"
+```
+
+Optionally set a login password:
+
+```bash
+docker compose exec hydra hydra hash-password 'your-password'
+# paste the printed bcrypt hash into [auth] password_hash in ./config/default.toml
+docker compose restart hydra
+```
+
+Forward the BT listen ports (16171 race, 16172 hoard) on your router for inbound
+peers, or use one of the networking modes below.
+
+### Build from source instead
+
+```bash
+docker build -t ghcr.io/kheopsian/hydra:latest .   # then: docker compose up -d
+```
 
 ---
 
