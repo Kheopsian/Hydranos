@@ -3515,3 +3515,59 @@ async function restartHydra(){
     try{ await api("/api/restart", {method:"POST"}); }catch(err){}
     alert("Restarting \u2014 reconnect in ~40s.");
 }
+
+
+// ── Resizable torrent table columns (drag the right edge; widths persist) ──
+function initResizableColumns(table, key) {
+    if (!table || table._colResizeInit) return;
+    table._colResizeInit = true;
+    const ths = Array.from(table.querySelectorAll("thead th[data-col]"));
+    if (!ths.length) return;
+    const goFixed = () => {
+        if (table._colFixed) return;
+        // Snapshot current widths while visible, then lock the layout so a drag
+        // only moves the grabbed column instead of reflowing the whole table.
+        ths.forEach(th => { th.style.width = th.offsetWidth + "px"; });
+        table.style.tableLayout = "fixed";
+        table._colFixed = true;
+    };
+    // Restore saved widths (works even while the tab is hidden: no measuring).
+    const saved = JSON.parse(localStorage.getItem(key) || "{}");
+    let anySaved = false;
+    ths.forEach(th => {
+        const w = saved[th.dataset.col];
+        if (w) { th.style.width = w + "px"; anySaved = true; }
+    });
+    if (anySaved) { table.style.tableLayout = "fixed"; table._colFixed = true; }
+    ths.forEach(th => {
+        if (getComputedStyle(th).position === "static") th.style.position = "relative";
+        const grip = document.createElement("div");
+        grip.className = "col-grip";
+        grip.addEventListener("click", e => e.stopPropagation()); // never trigger sort
+        grip.addEventListener("mousedown", e => {
+            e.preventDefault();
+            e.stopPropagation();
+            goFixed();
+            const startX = e.pageX, startW = th.offsetWidth;
+            const move = ev => { th.style.width = Math.max(40, startW + ev.pageX - startX) + "px"; };
+            const up = () => {
+                document.removeEventListener("mousemove", move);
+                document.removeEventListener("mouseup", up);
+                document.body.style.cursor = "";
+                const s = JSON.parse(localStorage.getItem(key) || "{}");
+                s[th.dataset.col] = th.offsetWidth;
+                localStorage.setItem(key, JSON.stringify(s));
+            };
+            document.addEventListener("mousemove", move);
+            document.addEventListener("mouseup", up);
+            document.body.style.cursor = "col-resize";
+        });
+        th.appendChild(grip);
+    });
+}
+function initTorrentColumnResizers() {
+    initResizableColumns(document.getElementById("race-table"), "hydra_cols_race");
+    initResizableColumns(document.getElementById("hoard-table"), "hydra_cols_hoard");
+}
+if (document.readyState !== "loading") initTorrentColumnResizers();
+else document.addEventListener("DOMContentLoaded", initTorrentColumnResizers);
