@@ -1,0 +1,53 @@
+package engine
+
+import "github.com/Kheopsian/hydra/internal/engine/ltclient"
+
+// EngineClient is the minimal surface both engine implementations must
+// satisfy. Keeping this interface narrow means we don't need to change
+// call sites when swapping engines — hoard.go/race.go use only these
+// methods against e.client.
+//
+// Both `*ltclient.Client` (Typhon via Unix-socket JSON-RPC) and
+// `*rqbitclient.Client` (rqbit via HTTP REST) satisfy this interface
+// by sharing the same method signatures. Return types come from the
+// ltclient package; rqbitclient re-exports them for compat.
+type EngineClient interface {
+	// Lifecycle
+	Ping() error
+	Close() error
+	SetEventHandler(handler func(ltclient.Event))
+	// SubscribeEvents opts in to push-based event stream (typhon only;
+	// rqbit has a compat no-op). Must be called after SetEventHandler.
+	SubscribeEvents() error
+
+	// Torrent lifecycle
+	AddTorrent(torrentPath, savePath string, stopped bool) (*ltclient.AddTorrentResult, error)
+	AddTorrentWithOptions(torrentPath, savePath string, stopped, seedMode bool) (*ltclient.AddTorrentResult, error)
+	RemoveTorrent(infoHash string, keepData bool) error
+	StartTorrent(infoHash string) error
+	StopTorrent(infoHash string) error
+	// SetSavePath swaps the engine's in-memory save_path for a torrent and
+	// flushes fastresume. Files must already have been moved on disk.
+	SetSavePath(infoHash, savePath string) error
+	VerifyTorrent(infoHash string) error
+
+	// Queries
+	GetStatus(infoHash string) (*ltclient.TorrentStatus, error)
+	ListTorrents() (*ltclient.ListTorrentsResult, error)
+	GetPeers(infoHash string) ([]ltclient.PeerInfo, error)
+	GetSessionStats() (*ltclient.SessionStats, error)
+	GetFiles(infoHash string) ([]ltclient.FileInfo, error)
+	GetTrackers(infoHash string) ([]ltclient.TrackerInfo, error)
+	GetDiagnostics() (*ltclient.DiagnosticStats, error)
+
+	// Peer injection (patched rqbit endpoint; native in Typhon).
+	AddPeers(infoHash string, peers []struct {
+		IP   string
+		Port int
+	}) error
+}
+
+// Engine IDs recognised by StartEngineProcess.
+const (
+	EngineTyphon = "typhon"
+)

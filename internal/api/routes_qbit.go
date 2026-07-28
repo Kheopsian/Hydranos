@@ -1,0 +1,1005 @@
+package api
+
+import (
+	"fmt"
+	"io"
+	"log/slog"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+// ---------------------------------------------------------------------------
+// Route registration — qBittorrent v2 API compatibility shim
+// ---------------------------------------------------------------------------
+
+func (s *Server) registerQbitRoutes() {
+	v2 := s.router.Group("/api/v2")
+
+	// Auth — always succeed (stateless, autobrr just needs the SID cookie)
+	v2.POST("/auth/login", s.qbitAuthLogin)
+	v2.POST("/auth/logout", s.qbitAuthLogout)
+
+	// App info (Any = GET+POST, cross-seed uses POST for everything)
+	v2.Any("/app/version", s.qbitAppVersion)
+	v2.Any("/app/webapiVersion", s.qbitWebapiVersion)
+	v2.Any("/app/buildInfo", s.qbitBuildInfo)
+	v2.Any("/app/preferences", s.qbitPreferences)
+
+	// Transfer
+	v2.Any("/transfer/info", s.qbitTransferInfo)
+
+	// Torrents
+	v2.Any("/torrents/info", s.qbitTorrentsInfo)
+	v2.Any("/torrents/properties", s.qbitTorrentsProperties)
+	v2.Any("/torrents/files", s.qbitTorrentsFiles)
+	v2.Any("/torrents/trackers", s.qbitTorrentsTrackers)
+	v2.POST("/torrents/add", s.qbitTorrentsAdd)
+	v2.POST("/torrents/delete", s.qbitTorrentsDelete)
+	v2.POST("/torrents/pause", s.qbitTorrentsPause)
+	v2.POST("/torrents/resume", s.qbitTorrentsResume)
+	v2.POST("/torrents/setCategory", s.qbitTorrentsSetCategory)
+
+	// Categories
+	v2.GET("/torrents/categories", s.qbitCategoriesGet)
+	v2.POST("/torrents/createCategory", s.qbitCategoryCreate)
+	v2.POST("/torrents/editCategory", s.qbitCategoryEdit)
+	v2.POST("/torrents/removeCategories", s.qbitCategoriesRemove)
+}
+
+// ===========================================================================
+// Auth
+// ===========================================================================
+
+func (s *Server) qbitAuthLogin(c *gin.Context) {
+	// Always succeed — set SID cookie so autobrr is happy
+	c.SetCookie("SID", "hydra-session-token", 3600*24, "/", "", false, true)
+	c.String(http.StatusOK, "Ok.")
+}
+
+func (s *Server) qbitAuthLogout(c *gin.Context) {
+	c.SetCookie("SID", "", -1, "/", "", false, true)
+	c.String(http.StatusOK, "")
+}
+
+// ===========================================================================
+// App Info
+// ===========================================================================
+
+func (s *Server) qbitAppVersion(c *gin.Context) {
+	c.String(http.StatusOK, "v4.6.0")
+}
+
+func (s *Server) qbitWebapiVersion(c *gin.Context) {
+	c.String(http.StatusOK, "2.9.3")
+}
+
+func (s *Server) qbitBuildInfo(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"qt":         "6.5.3",
+		"libtorrent": "2.0.9.0",
+		"boost":      "1.83.0",
+		"openssl":    "3.1.4",
+		"bitness":    64,
+	})
+}
+
+func (s *Server) qbitPreferences(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"save_path":                 "/downloads",
+		"temp_path_enabled":         false,
+		"listen_port":               s.config.Race.ListenPort,
+		"max_connec":                s.config.Race.MaxConnections,
+		"max_uploads_per_torrent":   s.config.Race.MaxUploadsPerTorrent,
+		"dht":                       false,
+		"pex":                       false,
+		"lsd":                       false,
+		"encryption":                1,
+		"queueing_enabled":          false,
+		"max_active_downloads":      s.config.Race.ActiveDownloads,
+		"max_active_uploads":        s.config.Race.ActiveSeeds,
+		"max_active_torrents":       s.config.Race.ActiveLimit,
+		"web_ui_port":               s.config.Daemon.APIPort,
+		"locale":                    "en",
+		"create_subfolder_enabled":  s.config.Daemon.CreateTorrentFolder,
+		"add_trackers_enabled":      false,
+		"alternative_webui_enabled": false,
+	})
+}
+
+// ===========================================================================
+// Transfer
+// ===========================================================================
+
+func (s *Server) qbitTransferInfo(c *gin.Context) {
+	var dlSpeed, ulSpeed int64
+
+	if s.raceEngine != nil {
+		for _, t := range s.raceEngine.GetAllStatus() {
+			if v, ok := t["download_rate"].(int64); ok {
+				dlSpeed += v
+			}
+			if v, ok := t["upload_rate"].(int64); ok {
+				ulSpeed += v
+			}
+		}
+	}
+
+	if s.hoardEngine != nil {
+		for _, t := range s.hoardEngine.GetTorrentList() {
+			if v, ok := t["download_rate"].(int64); ok {
+				dlSpeed += v
+			}
+			if v, ok := t["upload_rate"].(int64); ok {
+				ulSpeed += v
+			}
+		}
+	}
+
+	sessionUL, sessionDL := getSessionDelta()
+
+	c.JSON(http.StatusOK, gin.H{
+		"dl_info_speed":     dlSpeed,
+		"dl_info_data":      sessionDL,
+		"up_info_speed":     ulSpeed,
+		"up_info_data":      sessionUL,
+		"dl_rate_limit":     0,
+		"up_rate_limit":     0,
+		"dht_nodes":         0,
+		"connection_status": "connected",
+	})
+}
+
+// ===========================================================================
+// Torrents
+// ===========================================================================
+
+func (s *Server) qbitTorrentsInfo(c *gin.Context) {
+	filter := c.DefaultPostForm("filter", c.DefaultQuery("filter", "all"))
+	categoryFilter := c.DefaultPostForm("category", c.Query("category"))
+	hashesFilter := c.DefaultPostForm("hashes", c.Query("hashes"))
+	sortField := c.DefaultPostForm("sort", c.DefaultQuery("sort", "added_on"))
+	reverse := c.DefaultPostForm("reverse", c.DefaultQuery("reverse", "false")) == "true"
+	limitStr := c.DefaultPostForm("limit", c.DefaultQuery("limit", "0"))
+	offsetStr := c.DefaultPostForm("offset", c.DefaultQuery("offset", "0"))
+
+	limit, _ := strconv.Atoi(limitStr)
+	offset, _ := strconv.Atoi(offsetStr)
+
+	// Build hash set for filtering if hashes parameter is provided.
+	var hashSet map[string]bool
+	if hashesFilter != "" {
+		hashSet = make(map[string]bool)
+		for _, h := range strings.Split(hashesFilter, "|") {
+			h = strings.TrimSpace(strings.ToLower(h))
+			if h != "" {
+				hashSet[h] = true
+			}
+		}
+	}
+
+	var allTorrents []map[string]interface{}
+
+	// Collect race torrents
+	if s.raceEngine != nil {
+		for _, t := range s.raceEngine.GetAllStatus() {
+			qt := hydraToQbitTorrent(t, "race")
+			allTorrents = append(allTorrents, qt)
+		}
+	}
+
+	// Collect hoard torrents
+	if s.hoardEngine != nil {
+		for _, t := range s.hoardEngine.GetTorrentList() {
+			qt := hydraToQbitTorrent(t, "hoard")
+			allTorrents = append(allTorrents, qt)
+		}
+	}
+
+	// Filter by hashes
+	if hashSet != nil {
+		filtered := make([]map[string]interface{}, 0)
+		for _, t := range allTorrents {
+			if h, _ := t["hash"].(string); hashSet[h] {
+				filtered = append(filtered, t)
+			}
+		}
+		allTorrents = filtered
+	}
+
+	// Filter by state
+	if filter != "all" {
+		filtered := make([]map[string]interface{}, 0)
+		for _, t := range allTorrents {
+			state, _ := t["state"].(string)
+			if filterStateMatch(state, filter) {
+				filtered = append(filtered, t)
+			}
+		}
+		allTorrents = filtered
+	}
+
+	// Filter by category
+	if categoryFilter != "" {
+		filtered := make([]map[string]interface{}, 0)
+		for _, t := range allTorrents {
+			cat, _ := t["category"].(string)
+			if cat == categoryFilter {
+				filtered = append(filtered, t)
+			}
+		}
+		allTorrents = filtered
+	}
+
+	// Sort
+	sort.Slice(allTorrents, func(i, j int) bool {
+		vi := allTorrents[i][sortField]
+		vj := allTorrents[j][sortField]
+		less := compareValues(vi, vj)
+		if reverse {
+			return !less
+		}
+		return less
+	})
+
+	// Pagination
+	total := len(allTorrents)
+	if offset > 0 && offset < total {
+		allTorrents = allTorrents[offset:]
+	}
+	if limit > 0 && limit < len(allTorrents) {
+		allTorrents = allTorrents[:limit]
+	}
+
+	c.JSON(http.StatusOK, allTorrents)
+}
+
+func (s *Server) qbitTorrentsProperties(c *gin.Context) {
+	hash := strings.ToLower(c.DefaultPostForm("hash", c.Query("hash")))
+	if hash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hash required"})
+		return
+	}
+
+	var detail map[string]interface{}
+	hoardEngine := false
+	if s.raceEngine != nil && s.raceEngine.HasTorrent(hash) {
+		detail = s.raceEngine.GetTorrentDetail(hash)
+	} else if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
+		detail = s.hoardEngine.GetTorrentDetail(hash)
+		hoardEngine = true
+	}
+
+	if detail == nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+
+	// In standard qBit, properties.save_path is the *download dir*
+	// (parent of the torrent's content). Hoard's Typhon-internal
+	// save_path is the content path itself (`<download_dir>/<wrapper>`),
+	// so trim the wrapper off here to match the qBit semantic that
+	// cross-seed expects when reconstructing on-disk paths.
+	savePath := getStr(detail, "save_path")
+	if hoardEngine {
+		savePath = filepath.Dir(savePath)
+	}
+
+	// Map to qBit properties format
+	props := gin.H{
+		"save_path":                savePath,
+		"creation_date":            getInt64(detail, "added_time"),
+		"piece_size":               getInt64(detail, "piece_length"),
+		"comment":                  "",
+		"total_wasted":             0,
+		"total_uploaded":           getInt64(detail, "total_uploaded"),
+		"total_uploaded_session":   getInt64(detail, "total_uploaded"),
+		"total_downloaded":         getInt64(detail, "total_downloaded"),
+		"total_downloaded_session": getInt64(detail, "total_downloaded"),
+		"up_limit":                 -1,
+		"dl_limit":                 -1,
+		"time_elapsed":             time.Now().Unix() - getInt64(detail, "added_time"),
+		"seeding_time":             0,
+		"nb_connections":           getInt64(detail, "num_peers"),
+		"share_ratio":              getRatio(detail),
+		"addition_date":            getInt64(detail, "added_time"),
+		"completion_date":          getInt64(detail, "completed_time"),
+		"created_by":               "",
+		"dl_speed_avg":             0,
+		"dl_speed":                 getInt64(detail, "download_rate"),
+		"eta":                      getETA(detail),
+		"last_seen":                time.Now().Unix(),
+		"peers":                    getInt64(detail, "num_peers"),
+		"peers_total":              getInt64(detail, "num_peers"),
+		"seeds":                    getInt64(detail, "num_seeds"),
+		"seeds_total":              getInt64(detail, "num_seeds"),
+		"total_size":               getInt64(detail, "total_size"),
+		"up_speed_avg":             0,
+		"up_speed":                 getInt64(detail, "upload_rate"),
+	}
+
+	c.JSON(http.StatusOK, props)
+}
+
+func (s *Server) qbitTorrentsFiles(c *gin.Context) {
+	hash := strings.ToLower(c.DefaultPostForm("hash", c.Query("hash")))
+	if hash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hash required"})
+		return
+	}
+
+	var detail map[string]interface{}
+	hoardEngine := false
+	if s.raceEngine != nil && s.raceEngine.HasTorrent(hash) {
+		detail = s.raceEngine.GetTorrentDetail(hash)
+	} else if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
+		detail = s.hoardEngine.GetTorrentDetail(hash)
+		hoardEngine = true
+	}
+
+	if detail == nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+
+	// Hoard wraps every torrent in a release-named folder, so the
+	// Typhon-internal save_path = `<download_dir>/<release_folder>` and
+	// per-file paths are relative to that folder. Cross-seed reconstructs
+	// `save_path + files[i].name` directly (it bypasses the info.name
+	// folder in its single-file codepath), so prefix every file with the
+	// wrapper folder for hoard to land paths at
+	// `<download_dir>/<release_folder>/<file>` — what's actually on disk.
+	// Race uses a shared save_path with no per-torrent wrapper, so its
+	// files keep their bare relative names.
+	prefix := ""
+	if hoardEngine {
+		prefix = filepath.Base(getStr(detail, "save_path")) + "/"
+	}
+
+	// If the engine provides files, map them
+	if rawFiles, ok := detail["files"].([]interface{}); ok {
+		qbitFiles := make([]gin.H, 0, len(rawFiles))
+		for i, raw := range rawFiles {
+			f, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			qbitFiles = append(qbitFiles, gin.H{
+				"index":        i,
+				"name":         prefix + getStr(f, "path"),
+				"size":         getInt64(f, "size"),
+				"progress":     getFloat(f, "progress"),
+				"priority":     1,
+				"is_seed":      false,
+				"piece_range":  []int{0, 0},
+				"availability": 1.0,
+			})
+		}
+		c.JSON(http.StatusOK, qbitFiles)
+		return
+	}
+
+	// Fallback: single-file torrent
+	c.JSON(http.StatusOK, []gin.H{{
+		"index":        0,
+		"name":         prefix + getStr(detail, "name"),
+		"size":         getInt64(detail, "total_size"),
+		"progress":     getFloat(detail, "progress"),
+		"priority":     1,
+		"is_seed":      false,
+		"piece_range":  []int{0, 0},
+		"availability": 1.0,
+	}})
+}
+
+func (s *Server) qbitTorrentsTrackers(c *gin.Context) {
+	hash := strings.ToLower(c.DefaultPostForm("hash", c.Query("hash")))
+	if hash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hash required"})
+		return
+	}
+
+	var detail map[string]interface{}
+	if s.raceEngine != nil && s.raceEngine.HasTorrent(hash) {
+		detail = s.raceEngine.GetTorrentDetail(hash)
+	} else if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
+		detail = s.hoardEngine.GetTorrentDetail(hash)
+	}
+
+	if detail == nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+
+	result := []gin.H{
+		{
+			"url":            "** [DHT] **",
+			"status":         2,
+			"tier":           "",
+			"num_peers":      0,
+			"num_seeds":      0,
+			"num_leeches":    0,
+			"num_downloaded": 0,
+			"msg":            "",
+		},
+		{
+			"url":            "** [PeX] **",
+			"status":         2,
+			"tier":           "",
+			"num_peers":      0,
+			"num_seeds":      0,
+			"num_leeches":    0,
+			"num_downloaded": 0,
+			"msg":            "",
+		},
+		{
+			"url":            "** [LSD] **",
+			"status":         2,
+			"tier":           "",
+			"num_peers":      0,
+			"num_seeds":      0,
+			"num_leeches":    0,
+			"num_downloaded": 0,
+			"msg":            "",
+		},
+	}
+
+	if trackers, ok := detail["trackers"].([]interface{}); ok {
+		for _, raw := range trackers {
+			tr, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			status := 2 // working
+			msg := getStr(tr, "message")
+			if msg != "" {
+				status = 4 // not working
+			}
+			result = append(result, gin.H{
+				"url":            getStr(tr, "url"),
+				"status":         status,
+				"tier":           getInt64(tr, "tier"),
+				"num_peers":      0,
+				"num_seeds":      getInt64(tr, "scrape_complete"),
+				"num_leeches":    getInt64(tr, "scrape_incomplete"),
+				"num_downloaded": 0,
+				"msg":            msg,
+			})
+		}
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) qbitTorrentsAdd(c *gin.Context) {
+	// Parse multipart form
+	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		c.String(http.StatusBadRequest, "Bad request")
+		return
+	}
+
+	savePath := c.PostForm("savepath")
+	category := c.PostForm("category")
+	tags := c.PostForm("tags")
+	// qBit's `skip_checking=true` means "trust the on-disk payload, do
+	// not hash-verify". Cross-seed sets this on every inject because it
+	// has just hardlinked the staged payload into linkDir and the new
+	// torrent's pieces should map to the existing bytes 1:1. Without it,
+	// Hydra/Typhon would fall back to a fresh download instead of
+	// recognising the pre-staged content and going straight to seed.
+	skipChecking := c.PostForm("skip_checking") == "true"
+
+	// Determine mode from category
+	mode := "race"
+	cats := loadCategories(s.config.Daemon.DataDir)
+	for _, cat := range cats {
+		if strings.EqualFold(cat.Name, category) {
+			mode = cat.Mode
+			if savePath == "" {
+				savePath = cat.SavePath
+			}
+			break
+		}
+	}
+
+	// Check for magnet URLs first
+	urls := c.PostForm("urls")
+	if urls != "" {
+		for _, magnetURI := range strings.Split(urls, "\n") {
+			magnetURI = strings.TrimSpace(magnetURI)
+			if magnetURI == "" {
+				continue
+			}
+
+			switch mode {
+			case "race":
+				if s.raceEngine != nil {
+					_, err := s.raceEngine.AddTorrent("", magnetURI, savePath, nil, category)
+					if err != nil {
+						c.String(http.StatusInternalServerError, "Fails.")
+						return
+					}
+				}
+			case "hoard":
+				if s.hoardEngine != nil {
+					_, err := s.hoardEngine.AddTorrent("", savePath, category)
+					if err != nil {
+						c.String(http.StatusInternalServerError, "Fails.")
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Check for uploaded .torrent files
+	form := c.Request.MultipartForm
+	if form != nil && form.File != nil {
+		for _, fileHeaders := range form.File {
+			for _, fh := range fileHeaders {
+				f, err := fh.Open()
+				if err != nil {
+					continue
+				}
+
+				tmpDir := filepath.Join(s.config.Daemon.DataDir, "uploads")
+				os.MkdirAll(tmpDir, 0755)
+				tmpPath := filepath.Join(tmpDir, fh.Filename)
+
+				out, err := os.Create(tmpPath)
+				if err != nil {
+					f.Close()
+					continue
+				}
+				io.Copy(out, f)
+				out.Close()
+				f.Close()
+
+				switch mode {
+				case "race":
+					if s.raceEngine != nil {
+						if skipChecking {
+							s.raceEngine.AddTorrentSeedMode(tmpPath, savePath, category)
+						} else {
+							s.raceEngine.AddTorrent(tmpPath, "", savePath, nil, category)
+						}
+					}
+				case "hoard":
+					if s.hoardEngine != nil {
+						if skipChecking {
+							s.hoardEngine.AddTorrentSeedMode(tmpPath, savePath, category)
+						} else {
+							s.hoardEngine.AddTorrent(tmpPath, savePath, category)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	_ = tags // reserved for future use
+	c.String(http.StatusOK, "Ok.")
+}
+
+func (s *Server) qbitTorrentsDelete(c *gin.Context) {
+	hashes := c.PostForm("hashes")
+	deleteFilesStr := c.PostForm("deleteFiles")
+	deleteFiles := deleteFilesStr == "true" || deleteFilesStr == "1"
+
+	for _, hash := range parseHashes(hashes) {
+		// Stats absorption gérée par le callback OnBeforeRemove de l'engine.
+		if s.raceEngine != nil && s.raceEngine.HasTorrent(hash) {
+			if err := s.raceEngine.RemoveTorrent(hash, deleteFiles); err != nil {
+				slog.Warn("qbit-shim: race remove returned error", "info_hash", hash, "delete_files", deleteFiles, "err", err)
+			}
+		}
+		if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
+			s.hoardEngine.RemoveTorrent(hash, deleteFiles)
+		}
+		if s.stateManager != nil {
+			s.stateManager.RemoveTorrent(hash)
+		}
+	}
+
+	c.String(http.StatusOK, "")
+}
+
+func (s *Server) qbitTorrentsPause(c *gin.Context) {
+	// Hydra doesn't support per-torrent pause in race mode.
+	// For hoard, we could implement it, but for now just acknowledge.
+	c.String(http.StatusOK, "")
+}
+
+func (s *Server) qbitTorrentsResume(c *gin.Context) {
+	c.String(http.StatusOK, "")
+}
+
+func (s *Server) qbitTorrentsSetCategory(c *gin.Context) {
+	// Acknowledge but no-op for now — category is set at add time
+	c.String(http.StatusOK, "")
+}
+
+// ===========================================================================
+// Categories (qBit format)
+// ===========================================================================
+
+func (s *Server) qbitCategoriesGet(c *gin.Context) {
+	cats := loadCategories(s.config.Daemon.DataDir)
+	result := make(map[string]gin.H, len(cats))
+	for _, cat := range cats {
+		result[cat.Name] = gin.H{
+			"name":     cat.Name,
+			"savePath": cat.SavePath,
+		}
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) qbitCategoryCreate(c *gin.Context) {
+	name := c.PostForm("category")
+	savePath := c.PostForm("savePath")
+
+	if name == "" {
+		c.String(http.StatusBadRequest, "category name required")
+		return
+	}
+
+	cats := loadCategories(s.config.Daemon.DataDir)
+	for _, existing := range cats {
+		if existing.Name == name {
+			c.String(http.StatusConflict, "category exists")
+			return
+		}
+	}
+
+	cats = append(cats, category{Name: name, SavePath: savePath, Mode: "hoard"})
+	saveCategories(s.config.Daemon.DataDir, cats)
+
+	c.String(http.StatusOK, "")
+}
+
+func (s *Server) qbitCategoryEdit(c *gin.Context) {
+	name := c.PostForm("category")
+	savePath := c.PostForm("savePath")
+
+	cats := loadCategories(s.config.Daemon.DataDir)
+	for i, cat := range cats {
+		if cat.Name == name {
+			cats[i].SavePath = savePath
+			saveCategories(s.config.Daemon.DataDir, cats)
+			c.String(http.StatusOK, "")
+			return
+		}
+	}
+	c.String(http.StatusNotFound, "category not found")
+}
+
+func (s *Server) qbitCategoriesRemove(c *gin.Context) {
+	names := c.PostForm("categories")
+	toRemove := make(map[string]bool)
+	for _, name := range strings.Split(names, "\n") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			toRemove[name] = true
+		}
+	}
+
+	cats := loadCategories(s.config.Daemon.DataDir)
+	newCats := make([]category, 0, len(cats))
+	for _, cat := range cats {
+		if !toRemove[cat.Name] {
+			newCats = append(newCats, cat)
+		}
+	}
+	saveCategories(s.config.Daemon.DataDir, newCats)
+
+	c.String(http.StatusOK, "")
+}
+
+// ===========================================================================
+// Helper functions
+// ===========================================================================
+
+// hydraStateToQbit maps Hydra's internal state string to qBittorrent state.
+func hydraStateToQbit(state string, progress float64, uploadRate, downloadRate int64) string {
+	switch state {
+	case "downloading":
+		if downloadRate > 0 {
+			return "downloading"
+		}
+		return "stalledDL"
+	case "seeding":
+		if uploadRate > 0 {
+			return "uploading"
+		}
+		return "stalledUP"
+	case "checking", "checking_files":
+		return "checkingDL"
+	case "paused":
+		if progress >= 1.0 {
+			return "pausedUP"
+		}
+		return "pausedDL"
+	case "queued":
+		if progress >= 1.0 {
+			return "queuedUP"
+		}
+		return "queuedDL"
+	case "error":
+		return "error"
+	case "moving":
+		return "moving"
+	case "allocating":
+		return "allocating"
+	default:
+		if progress >= 1.0 {
+			return "stalledUP"
+		}
+		return "stalledDL"
+	}
+}
+
+// hydraToQbitTorrent converts a Hydra torrent status map to qBittorrent format.
+func hydraToQbitTorrent(t map[string]interface{}, engineName string) map[string]interface{} {
+	progress := getFloat(t, "progress")
+	dlRate := getInt64(t, "download_rate")
+	ulRate := getInt64(t, "upload_rate")
+	stateStr := getStr(t, "state")
+
+	qbitState := hydraStateToQbit(stateStr, progress, ulRate, dlRate)
+	totalSize := getInt64(t, "total_size")
+	downloaded := getInt64(t, "total_downloaded")
+	uploaded := getInt64(t, "total_uploaded")
+
+	addedOn := getInt64(t, "added_time")
+	if addedOn == 0 {
+		addedOn = time.Now().Unix()
+	}
+
+	cat := getStr(t, "category")
+	if cat == "" {
+		cat = engineName
+	}
+
+	// For completed torrents, Rain reports Bytes.Downloaded = 0 (it only
+	// counts bytes downloaded during this session). Fix up the values so
+	// *arr apps see consistent completion data.
+	completed := downloaded
+	amountLeft := totalSize - downloaded
+	if progress >= 1.0 {
+		completed = totalSize
+		amountLeft = 0
+		if downloaded == 0 {
+			downloaded = totalSize
+		}
+	}
+
+	ratio := float64(0)
+	if downloaded > 0 {
+		ratio = float64(uploaded) / float64(downloaded)
+	}
+
+	eta := int64(8640000) // default: infinity
+	if dlRate > 0 && totalSize > 0 {
+		if amountLeft > 0 {
+			eta = amountLeft / dlRate
+		} else {
+			eta = 0
+		}
+	}
+
+	// qBit clients (cross-seed in particular) reconstruct the on-disk
+	// content path as save_path + name. Hoard wraps every torrent in a
+	// release-named folder under the configured download dir, so the
+	// Typhon-internal save_path is `<download_dir>/<release_folder>` and
+	// the inner `name` is BEP-3 info.name (filename for single-file,
+	// folder for multi). To present that wrapper layout consistently we
+	// expose name = basename(save_path), giving a qBit "multi-file with
+	// info.name = release folder" semantic that lets cross-seed hardlink
+	// files at the right path. Race shares save_path (`/race/torrents`)
+	// without a per-torrent wrapper, so the inner name stays correct.
+	qbitName := getStr(t, "name")
+	if engineName == "hoard" {
+		qbitName = filepath.Base(getStr(t, "save_path"))
+	}
+	return map[string]interface{}{
+		"hash":           getStr(t, "info_hash"),
+		"name":           qbitName,
+		"state":          qbitState,
+		"progress":       progress,
+		"size":           totalSize,
+		"total_size":     totalSize,
+		"dlspeed":        dlRate,
+		"upspeed":        ulRate,
+		"num_seeds":      getInt64(t, "num_seeds"),
+		"num_leechs":     getInt64(t, "num_peers"),
+		"num_complete":   getInt64(t, "num_seeds"),
+		"num_incomplete": getInt64(t, "num_peers"),
+		"ratio":          math.Round(ratio*100) / 100,
+		"eta":            eta,
+		"added_on":       addedOn,
+		"completion_on":  getInt64(t, "completed_time"),
+		"category":       cat,
+		"tags":           fmt.Sprintf("hydra:%s", engineName),
+		"save_path":      filepath.Dir(getStr(t, "save_path")),
+		"content_path":   getStr(t, "save_path"),
+		"downloaded":     downloaded,
+		"uploaded":       uploaded,
+		"amount_left":    amountLeft,
+		"completed":      completed,
+		"seen_complete":  0,
+		"priority":       0,
+		"seq_dl":         false,
+		"f_l_piece_prio": false,
+		"auto_tmm":       false,
+		"super_seeding":  false,
+		"force_start":    false,
+		"magnet_uri":     "",
+		"time_active":    time.Now().Unix() - addedOn,
+		"tracker":        getStr(t, "tracker"),
+		"availability":   getFloat(t, "availability"),
+	}
+}
+
+// filterStateMatch returns true if a qBit state name matches the given filter name.
+func filterStateMatch(qbitState, filterName string) bool {
+	switch filterName {
+	case "all":
+		return true
+	case "downloading":
+		return qbitState == "downloading" || qbitState == "stalledDL" ||
+			qbitState == "checkingDL" || qbitState == "queuedDL" ||
+			qbitState == "allocating"
+	case "seeding":
+		return qbitState == "uploading" || qbitState == "stalledUP" ||
+			qbitState == "queuedUP" || qbitState == "checkingUP"
+	case "completed":
+		return qbitState == "uploading" || qbitState == "stalledUP" ||
+			qbitState == "pausedUP" || qbitState == "queuedUP" ||
+			qbitState == "checkingUP"
+	case "paused":
+		return qbitState == "pausedDL" || qbitState == "pausedUP"
+	case "active":
+		return qbitState == "downloading" || qbitState == "uploading"
+	case "inactive":
+		return qbitState == "stalledDL" || qbitState == "stalledUP" ||
+			qbitState == "pausedDL" || qbitState == "pausedUP"
+	case "stalled":
+		return qbitState == "stalledDL" || qbitState == "stalledUP"
+	case "stalled_uploading":
+		return qbitState == "stalledUP"
+	case "stalled_downloading":
+		return qbitState == "stalledDL"
+	case "errored":
+		return qbitState == "error"
+	case "resumed":
+		return qbitState != "pausedDL" && qbitState != "pausedUP"
+	default:
+		return true
+	}
+}
+
+// parseHashes splits a pipe-separated or comma-separated hash string.
+func parseHashes(hashesStr string) []string {
+	hashesStr = strings.TrimSpace(hashesStr)
+	if hashesStr == "" || hashesStr == "all" {
+		return nil
+	}
+
+	var hashes []string
+	// qBit uses pipe separator
+	if strings.Contains(hashesStr, "|") {
+		hashes = strings.Split(hashesStr, "|")
+	} else {
+		hashes = strings.Split(hashesStr, ",")
+	}
+
+	result := make([]string, 0, len(hashes))
+	for _, h := range hashes {
+		h = strings.TrimSpace(strings.ToLower(h))
+		if h != "" {
+			result = append(result, h)
+		}
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// Value extraction helpers (safe access to map[string]interface{})
+// ---------------------------------------------------------------------------
+
+func getStr(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func getInt64(m map[string]interface{}, key string) int64 {
+	if v, ok := m[key]; ok {
+		switch n := v.(type) {
+		case int64:
+			return n
+		case int:
+			return int64(n)
+		case float64:
+			return int64(n)
+		case int32:
+			return int64(n)
+		case uint64:
+			return int64(n)
+		}
+	}
+	return 0
+}
+
+func getFloat(m map[string]interface{}, key string) float64 {
+	if v, ok := m[key]; ok {
+		switch n := v.(type) {
+		case float64:
+			return n
+		case float32:
+			return float64(n)
+		case int64:
+			return float64(n)
+		case int:
+			return float64(n)
+		}
+	}
+	return 0
+}
+
+func getRatio(m map[string]interface{}) float64 {
+	ul := getInt64(m, "total_uploaded")
+	dl := getInt64(m, "total_downloaded")
+	if dl == 0 {
+		return 0
+	}
+	return math.Round(float64(ul)/float64(dl)*100) / 100
+}
+
+func getETA(m map[string]interface{}) int64 {
+	dlRate := getInt64(m, "download_rate")
+	totalSize := getInt64(m, "total_size")
+	downloaded := getInt64(m, "total_downloaded")
+	if dlRate <= 0 || totalSize <= 0 {
+		return 8640000
+	}
+	remaining := totalSize - downloaded
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining / dlRate
+}
+
+// compareValues provides a generic less-than comparison for sorting.
+func compareValues(a, b interface{}) bool {
+	switch va := a.(type) {
+	case string:
+		if vb, ok := b.(string); ok {
+			return va < vb
+		}
+	case int64:
+		if vb, ok := b.(int64); ok {
+			return va < vb
+		}
+	case int:
+		if vb, ok := b.(int); ok {
+			return va < vb
+		}
+	case float64:
+		if vb, ok := b.(float64); ok {
+			return va < vb
+		}
+	}
+	return fmt.Sprintf("%v", a) < fmt.Sprintf("%v", b)
+}

@@ -1,0 +1,6 @@
+.git
+.gitignore
+typhon-engine/target
+hydra-engine/build
+**/*.md
+**/.DS_Store

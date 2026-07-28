@@ -1,0 +1,37 @@
+syntax = "proto3";
+package hydraagent;
+option go_package = "github.com/Kheopsian/hydra/internal/agentpb;agentpb";
+
+// HydraAgent mirrors the Go engine.EngineClient interface over gRPC by
+// tunneling each method call as JSON. The `engine` field selects which local
+// engine session (e.g. "race" or "hoard") the agent routes the call to. This
+// keeps the wire contract a thin, drift-free mirror of EngineClient: the agent
+// json.Marshals ltclient return types, the front json.Unmarshals into the very
+// same Go types — no per-type proto messages to keep in sync.
+service HydraAgent {
+  // Call invokes one EngineClient method (see internal/engine/grpcclient for
+  // the method-name registry and JSON param/result envelopes).
+  rpc Call(CallRequest) returns (CallReply);
+  // Subscribe streams the engine event bus as JSON-encoded ltclient.Event
+  // frames (mirror of EngineClient.SetEventHandler + SubscribeEvents).
+  rpc Subscribe(SubscribeRequest) returns (stream EventFrame);
+}
+
+message CallRequest {
+  string engine = 1; // "race" | "hoard"
+  string method = 2; // EngineClient method, snake_case
+  bytes params = 3;  // JSON-encoded params envelope (method-specific)
+}
+
+message CallReply {
+  bytes result = 1; // JSON-encoded result (method-specific), empty if none
+  string error = 2; // non-empty => the call failed on the agent
+}
+
+message SubscribeRequest {
+  string engine = 1; // "race" | "hoard"
+}
+
+message EventFrame {
+  bytes payload = 1; // JSON-encoded ltclient.Event
+}

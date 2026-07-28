@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hydra - Torrent Daemon</title>
+    <link rel="icon" type="image/png" href="/static/hydra-logo.png">
+    <link rel="stylesheet" href="/static/style.css?v=1.2.4">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div id="startup-overlay">
+        <div class="startup-content">
+            <img src="/static/hydra-logo.png" alt="Hydra" class="startup-logo">
+            <h1 class="startup-title">HYDRA</h1>
+            <p class="startup-phase" id="startup-phase">Initializing…</p>
+            <div class="startup-track">
+                <div class="startup-bar" id="startup-bar"></div>
+            </div>
+            <div class="startup-counter">
+                <span id="startup-restored">0</span>
+                <span class="startup-sep">/</span>
+                <span id="startup-total">—</span>
+                <span class="startup-unit">torrents</span>
+            </div>
+        </div>
+    </div>
+
+    <header>
+        <div class="logo">
+            <img src="/static/hydra-logo.png" alt="Hydra" class="logo-icon">
+            <div class="logo-text">
+                <h1>HYDRA</h1>
+                <span class="subtitle">Torrent Daemon <span id="header-version"></span></span>
+            </div>
+        </div>
+        <div class="header-stats">
+            <div class="stat hide-mobile" id="uptime">
+                <span class="stat-label">Uptime</span>
+                <span class="stat-value" id="uptime-value">--</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label" id="ul-label">Upload</span>
+                <span class="stat-value" id="total-upload">--</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label" id="dl-label">Download</span>
+                <span class="stat-value" id="total-download">--</span>
+            </div>
+            <div class="stat hide-mobile">
+                <span class="stat-label">UL Day</span>
+                <span class="stat-value stat-session" id="day-upload">--</span>
+            </div>
+            <div class="stat hide-mobile">
+                <span class="stat-label">DL Day</span>
+                <span class="stat-value stat-session" id="day-download">--</span>
+            </div>
+            <div class="stat hide-mobile">
+                <span class="stat-label">UL total</span>
+                <span class="stat-value stat-total" id="total-ul-alltime">--</span>
+            </div>
+            <div class="stat hide-mobile">
+                <span class="stat-label">DL total</span>
+                <span class="stat-value stat-total" id="total-dl-alltime">--</span>
+            </div>
+            <div class="stat hide-mobile">
+                <span class="stat-label">Ratio</span>
+                <span class="stat-value" id="header-ratio" style="color:var(--accent-purple)">--</span>
+            </div>
+            <div class="health-dot" id="health-dot" title="Checking..."></div>
+        </div>
+    </header>
+
+    <nav>
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="race">Race</button>
+        <button class="tab" data-tab="hoard">Hoard</button>
+        <button class="tab" data-tab="categories">Categories</button>
+        <button class="tab" data-tab="agents">Agents</button>
+        <button class="tab" data-tab="config">Config</button>
+        <button class="tab" data-tab="benchmark">Benchmark</button>
+        <button class="tab" data-tab="add">+ Add Torrent</button>
+    </nav>
+
+    <main>
+        <!-- Overview -->
+        <section id="tab-overview" class="tab-content active">
+            <div class="cards">
+
+                <!-- Milestone + acceleration -->
+                <div class="card wide">
+                    <h3>All-time upload <span class="tag" id="ov-milestone-tag">&#9670; 2 PiB milestone</span></h3>
+                    <div class="card-body">
+                        <div class="milestone">
+                            <div class="num" id="ov-milestone-num">&mdash;</div>
+                            <div class="side">
+                                <div class="cap">ratio <b id="ov-ratio">&mdash;</b> &nbsp;&middot;&nbsp; <b id="ov-dl-total">&mdash;</b> downloaded &nbsp;&middot;&nbsp; <b id="ov-torrents-total">&mdash;</b> torrents seeding</div>
+                                <div class="track"><div class="fill" id="ov-milestone-fill"></div></div>
+                                <div class="prowl"><span id="ov-milestone-cur">&mdash;</span><span class="goal" id="ov-milestone-goal">&#9670; 2.00 PiB</span></div>
+                                <div class="prowl"><span id="ov-milestone-togo">&mdash;</span><span></span></div>
+                            </div>
+                        </div>
+                        <div class="accel" id="ov-accel">
+                            <div class="lead">same counter &middot; carried over from qBittorrent &middot; since Feb 2023</div>
+                            <div class="ar"><span class="when">1st pebibyte</span><span class="via">libtorrent (C++) &middot; qBittorrent</span><span class="dur">~2.5 years</span></div>
+                            <div class="ar hot"><span class="when">2nd pebibyte</span><span class="via">Typhon (Rust) &middot; Hydra</span><span class="dur">10 months</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Race Engine -->
+                <div class="card">
+                    <h3>Race Engine <span class="tag" style="color:var(--accent-race)">burst</span></h3>
+                    <div class="card-body">
+                        <div class="metric"><span>Torrents</span><span id="race-count">0</span></div>
+                        <div class="metric"><span>With peers</span><span id="race-with-peers">0</span></div>
+                        <div class="metric"><span>Upload</span><span class="hi" id="race-upload">0</span></div>
+                        <div class="metric"><span>Download</span><span id="race-download">0</span></div>
+                        <div class="metric"><span>Peers</span><span id="race-peers">0</span></div>
+                        <div class="metric"><span>Session ratio</span><span id="race-ov-ratio">0.00</span></div>
+                    </div>
+                </div>
+
+                <!-- Hoard Engine -->
+                <div class="card">
+                    <h3>Hoard Engine <span class="tag" style="color:var(--accent-hoard)">long-term</span></h3>
+                    <div class="card-body">
+                        <div class="metric"><span>Torrents</span><span id="hoard-total">0</span></div>
+                        <div class="metric"><span>With peers</span><span id="hoard-with-peers">0</span></div>
+                        <div class="metric"><span>Upload</span><span class="hi" id="hoard-upload">0</span></div>
+                        <div class="metric"><span>Download</span><span id="hoard-download">0</span></div>
+                        <div class="metric"><span>Peers</span><span id="hoard-connections">0</span></div>
+                        <div class="metric"><span>Session ratio</span><span id="hoard-ov-ratio">0.00</span></div>
+                    </div>
+                </div>
+
+                <!-- Records (all-time, bench.db) -->
+                <div class="card">
+                    <h3>Records <span class="tag" style="color:var(--accent-purple)">all-time</span></h3>
+                    <div class="card-body">
+                        <div class="metric"><span>Peak upload <small>Jul 8</small></span><span class="hi">5.01 Gbps</span></div>
+                        <div class="metric"><span>Peak download <small>Jul 4</small></span><span>2.72 Gbps</span></div>
+                        <div class="metric"><span>Peak swarm peers <small>Jun 29</small></span><span>21,027</span></div>
+                        <div class="metric"><span>Best upload day <small>Jul 8</small></span><span class="hi">9.7 TiB</span></div>
+                        <div class="metric"><span>Peak live seeds <small>Jul 7</small></span><span>494</span></div>
+                        <div class="metric"><span>Best line test <small>Jul 6</small></span><span>4.96 Gbps</span></div>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- Race -->
+        <section id="tab-race" class="tab-content">
+            <div class="section-header">
+                <h2>Race Torrents</h2>
+                <div class="choking-toggle">
+                    <span id="choking-status"></span>
+                </div>
+            </div>
+            <div class="race-stats-bar">
+                <span>Downloading: <strong id="race-active-dl">0</strong></span>
+                <span>Uploading: <strong id="race-active-seeds">0</strong></span>
+                <span>Current UL: <strong id="race-current-ul">0 B/s</strong></span>
+                <span>Ratio: <strong id="race-session-ratio">0.00</strong></span>
+                <span>Grabbed: <strong id="race-session-grabbed">0</strong></span>
+                <span>Avg Share: <strong id="race-avg-share">—</strong></span>
+            </div>
+            <table id="race-table">
+                <thead>
+                    <tr>
+                        <th data-col="name" onclick="sortRace(this)">Name</th>
+                        <th data-col="total_size" onclick="sortRace(this)">Size</th>
+                        <th data-col="progress" onclick="sortRace(this)">Progress</th>
+                        <th data-col="swarm_seeds" onclick="sortRace(this)">Seeds</th>
+                        <th data-col="swarm_leechers" onclick="sortRace(this)">Leechers</th>
+                        <th data-col="download_rate" onclick="sortRace(this)">Down</th>
+                        <th data-col="upload_rate" onclick="sortRace(this)">Up</th>
+                        <th data-col="ratio" onclick="sortRace(this)">Ratio</th>
+                        <th data-col="added_time" onclick="sortRace(this)">Added</th>
+                        <th data-col="completed_time" onclick="sortRace(this)">Completed</th>
+                        <th data-col="agent" onclick="sortRace(this)">Agent</th>
+                    </tr>
+                </thead>
+                <tbody id="race-tbody">
+                    <tr><td colspan="10" class="empty">No race torrents</td></tr>
+                </tbody>
+            </table>
+
+            <!-- Detail panel -->
+            <div id="torrent-detail" class="detail-panel" style="display:none">
+                <div class="detail-header">
+                    <h3 id="detail-name"></h3>
+                    <button class="btn-close" onclick="closeDetail()">&times;</button>
+                </div>
+
+                <div class="detail-tabs">
+                    <button class="detail-tab active" onclick="switchDetailTab('info')">Info</button>
+                    <button class="detail-tab" onclick="switchDetailTab('timeline')">Timeline</button>
+                </div>
+
+                <div id="detail-tab-info">
+                <div class="detail-grid">
+                    <div class="card">
+                        <h3>General</h3>
+                        <div class="card-body">
+                            <div class="metric"><span>State</span><span id="detail-state"></span></div>
+                            <div class="metric"><span>Progress</span><span id="detail-progress"></span></div>
+                            <div class="metric"><span>Size</span><span id="detail-size"></span></div>
+                            <div class="metric"><span>Downloaded</span><span id="detail-downloaded"></span></div>
+                            <div class="metric"><span>Uploaded</span><span id="detail-uploaded"></span></div>
+                            <div class="metric"><span>Ratio</span><span id="detail-ratio"></span></div>
+                            <div class="metric"><span>Save Path</span><span id="detail-path"></span></div>
+                            <div class="metric"><span>Info Hash</span><span id="detail-hash" class="mono"></span></div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>Speed & Connections</h3>
+                        <div class="card-body">
+                            <div class="metric"><span>Download</span><span id="detail-dl-speed"></span></div>
+                            <div class="metric"><span>Upload</span><span id="detail-ul-speed"></span></div>
+                            <div class="metric"><span>Avg Download</span><span id="detail-avg-dl"></span></div>
+                            <div class="metric"><span>Avg Upload</span><span id="detail-avg-ul"></span></div>
+                            <div class="metric"><span>Connected Peers</span><span id="detail-peers-count"></span></div>
+                            <div class="metric"><span>Connected Seeds</span><span id="detail-seeds-count"></span></div>
+                            <div class="metric"><span>Swarm Seeds</span><span id="detail-swarm-seeds"></span></div>
+                            <div class="metric"><span>Swarm Leechers</span><span id="detail-swarm-leechers"></span></div>
+                            <div class="metric"><span>Pieces</span><span id="detail-pieces"></span></div>
+                            <div class="metric"><span>Piece Size</span><span id="detail-piece-size"></span></div>
+                            <div class="metric"><span>Active Time</span><span id="detail-active-time"></span></div>
+                            <div class="metric"><span>Seeding Time</span><span id="detail-seeding-time"></span></div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>Choking</h3>
+                        <div class="card-body">
+                            <div class="metric"><span>Peers Scored</span><span id="detail-choking-scored"></span></div>
+                            <div class="metric"><span>Unchoked</span><span id="detail-choking-unchoked"></span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top:16px">
+                    <h3>Connected Peers</h3>
+
+                <div class="card" style="margin-top:12px" id="detail-pieces-card" style="display:none">
+                    <h3>Pieces <small id="detail-pieces-info"></small></h3>
+                    <div class="card-body" style="padding:8px">
+                        <canvas id="detail-pieces-canvas" height="40" style="width:100%;image-rendering:pixelated"></canvas>
+                    </div>
+                </div>
+                    <table id="detail-peers-table">
+                        <thead>
+                            <tr>
+                                <th>IP</th>
+                                <th>Client</th>
+                                <th>Progress</th>
+                                <th>Down</th>
+                                <th>Up</th>
+                                <th>Downloaded</th>
+                                <th>Uploaded</th>
+                                <th>Flags</th>
+                            </tr>
+                        </thead>
+                        <tbody id="detail-peers-tbody">
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="card" style="margin-top:16px">
+                    <h3>Trackers</h3>
+                    <table id="detail-trackers-table">
+                        <thead>
+                            <tr>
+                                <th>Tracker</th>
+                                <th>Status</th>
+                                <th>Next</th>
+                                <th>Scrape</th>
+                            </tr>
+                        </thead>
+                        <tbody id="detail-trackers-tbody">
+                        </tbody>
+                    </table>
+                </div>
+                </div><!-- /detail-tab-info -->
+
+                <div id="detail-tab-timeline" style="display:none">
+                    <!-- Result banner -->
+                    <div id="tl-result" class="tl-result" style="display:none"></div>
+
+                    <!-- Meta grid -->
+                    <div id="tl-meta" class="tl-meta-grid" style="display:none"></div>
+
+                    <!-- Race progress chart -->
+                    <div class="card" style="margin-bottom:10px">
+                        <h3 class="card-title-sm">Race Progress</h3>
+                        <div style="position:relative;height:200px">
+                            <canvas id="tl-progress-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- DL speed by peer chart -->
+                    <div class="card" style="margin-bottom:10px">
+                        <h3 class="card-title-sm">Download by Peer</h3>
+                        <div style="position:relative;height:160px">
+                            <canvas id="tl-peer-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Peer snapshot table -->
+                    <div class="card" style="margin-bottom:10px">
+                        <h3 class="card-title-sm">Peers at <span id="tl-peer-time">—</span></h3>
+                        <table class="detail-table" id="tl-peer-table">
+                            <thead>
+                                <tr>
+                                    <th>IP</th>
+                                    <th>Client</th>
+                                    <th>DL</th>
+                                    <th>Progress</th>
+                                    <th>Flags</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tl-peer-tbody"></tbody>
+                        </table>
+                    </div>
+
+                    <!-- Event log -->
+                    <div class="card">
+                        <h3 class="card-title-sm">Events <small id="tl-events-count"></small></h3>
+                        <div id="tl-events-log"></div>
+                    </div>
+                </div><!-- /detail-tab-timeline -->
+            </div>
+        </section>
+
+        <!-- Hoard -->
+        <section id="tab-hoard" class="tab-content">
+            <div class="section-header">
+                <h2>Hoard Torrents</h2>
+                <div class="hoard-summary">
+                    <span id="hoard-summary-text"></span>
+                </div>
+            </div>
+            <div class="hoard-stats-bar">
+                <div class="hoard-bar-uploading" id="hoard-bar-uploading"></div>
+                <div class="hoard-bar-with-peers" id="hoard-bar-with-peers"></div>
+            </div>
+            <div class="hoard-stats-legend">
+                <span class="legend-uploading">Uploading</span>
+                <span class="legend-with-peers">With Peers</span>
+            </div>
+            <div class="hoard-filter-bar">
+                <input type="text" id="hoard-search" placeholder="Search…" oninput="renderHoardTable()">
+                <span id="hoard-filter-count"></span>
+            </div>
+            <div class="hoard-chips-row">
+                <button class="chip chip-state active" data-state="" onclick="setHoardStateFilter(this, '')">All</button>
+                <button class="chip chip-state" data-state="seeding" onclick="setHoardStateFilter(this, 'seeding')">Seeding</button>
+                <button class="chip chip-state chip-active-seed" data-state="__active__" onclick="setHoardStateFilter(this, '__active__')">Actively Seeding</button>
+                <button class="chip chip-state" data-state="downloading" onclick="setHoardStateFilter(this, 'downloading')">Downloading</button>
+                <button class="chip chip-state" data-state="paused" onclick="setHoardStateFilter(this, 'paused')">Parked</button>
+                <button class="chip chip-state" data-state="checking_files" onclick="setHoardStateFilter(this, 'checking_files')">Checking</button>
+                <button class="chip chip-state chip-tracker-err" data-state="__tracker_err__" onclick="setHoardStateFilter(this, '__tracker_err__')">Tracker Error</button>
+                <button class="chip chip-state chip-torrent-err" data-state="__error__" onclick="setHoardStateFilter(this, '__error__')">Error</button>
+            </div>
+            <div class="hoard-chips-row hoard-chips-cats" id="hoard-cat-chips"></div>
+            <table id="hoard-table">
+                <thead>
+                    <tr>
+                        <th data-col="name" onclick="sortHoard(this)">Name</th>
+                        <th data-col="total_size" onclick="sortHoard(this)">Size</th>
+                        <th data-col="state" onclick="sortHoard(this)">State</th>
+                        <th data-col="progress" onclick="sortHoard(this)">Progress</th>
+                        <th data-col="swarm_seeds" onclick="sortHoard(this)">Seeds</th>
+                        <th data-col="swarm_leechers" onclick="sortHoard(this)">Leechers</th>
+                        <th data-col="download_rate" onclick="sortHoard(this)">Down</th>
+                        <th data-col="upload_rate" onclick="sortHoard(this)">Up</th>
+                        <th data-col="ratio" onclick="sortHoard(this)">Ratio</th>
+                        <th data-col="category" onclick="sortHoard(this)">Category</th>
+                        <th data-col="added_time" onclick="sortHoard(this)">Added</th>
+                        <th data-col="completed_time" onclick="sortHoard(this)">Completed</th>
+                        <th data-col="agent" onclick="sortHoard(this)">Agent</th>
+                    </tr>
+                </thead>
+                <tbody id="hoard-tbody">
+                    <tr><td colspan="12" class="empty">No hoard torrents</td></tr>
+                </tbody>
+            </table>
+
+            <!-- Hoard detail panel -->
+            <div id="hoard-detail-panel" class="detail-panel" style="display:none">
+                <div class="detail-header">
+                    <h3 id="h-detail-name"></h3>
+                    <button class="btn-close" onclick="closeHoardDetail()">&times;</button>
+                </div>
+                <div class="detail-grid">
+                    <div class="card">
+                        <h3>General</h3>
+                        <div class="card-body">
+                            <div class="metric"><span>State</span><span id="h-detail-state"></span></div>
+                            <div class="metric"><span>Progress</span><span id="h-detail-progress"></span></div>
+                            <div class="metric"><span>Size</span><span id="h-detail-size"></span></div>
+                            <div class="metric"><span>Downloaded</span><span id="h-detail-downloaded"></span></div>
+                            <div class="metric"><span>Uploaded</span><span id="h-detail-uploaded"></span></div>
+                            <div class="metric"><span>Ratio</span><span id="h-detail-ratio"></span></div>
+                            <div class="metric"><span>Save Path</span><span id="h-detail-path" style="font-size:11px"></span></div>
+                            <div class="metric"><span>Info Hash</span><span id="h-detail-hash" class="mono"></span></div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>Speed &amp; Connections</h3>
+                        <div class="card-body">
+                            <div class="metric"><span>Download</span><span id="h-detail-dl-speed"></span></div>
+                            <div class="metric"><span>Upload</span><span id="h-detail-ul-speed"></span></div>
+                            <div class="metric"><span>Avg Upload</span><span id="h-detail-avg-ul"></span></div>
+                            <div class="metric"><span>Connected Peers</span><span id="h-detail-peers-count"></span></div>
+                            <div class="metric"><span>Connected Seeds</span><span id="h-detail-seeds-count"></span></div>
+                            <div class="metric"><span>Pieces</span><span id="h-detail-pieces"></span></div>
+                            <div class="metric"><span>Piece Size</span><span id="h-detail-piece-size"></span></div>
+                            <div class="metric"><span>Active Time</span><span id="h-detail-active-time"></span></div>
+                            <div class="metric"><span>Seeding Time</span><span id="h-detail-seeding-time"></span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card" style="margin-top:16px">
+                    <h3>Connected Peers</h3>
+
+                <div class="card" style="margin-top:12px" id="h-detail-pieces-card" style="display:none">
+                    <h3>Pieces <small id="h-detail-pieces-info"></small></h3>
+                    <div class="card-body" style="padding:8px">
+                        <canvas id="h-detail-pieces-canvas" height="40" style="width:100%;image-rendering:pixelated"></canvas>
+                    </div>
+                </div>
+                    <table id="h-detail-peers-table">
+                        <thead><tr>
+                            <th>IP</th><th>Client</th><th>Progress</th>
+                            <th>Down</th><th>Up</th><th>Downloaded</th><th>Uploaded</th><th>Flags</th>
+                        </tr></thead>
+                        <tbody id="h-detail-peers-tbody"></tbody>
+                    </table>
+                </div>
+                <div class="card" style="margin-top:16px">
+                    <h3>Trackers</h3>
+                    <table id="h-detail-trackers-table">
+                        <thead><tr><th>Tracker</th><th>Status</th><th>Next</th><th>Scrape</th></tr></thead>
+                        <tbody id="h-detail-trackers-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- Categories -->
+        <section id="tab-categories" class="tab-content">
+            <div class="section-header">
+                <h2>Categories</h2>
+                <button class="btn-small" onclick="showCategoryForm()">+ New</button>
+            </div>
+
+            <div id="category-form" class="card" style="display:none; margin-bottom:16px">
+                <div class="card-body">
+                    <div class="cat-form-grid">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" id="cat-name" placeholder="movies-race">
+                        </div>
+                        <div class="form-group">
+                            <label>Mode</label>
+                            <select id="cat-mode">
+                                <option value="race">Race</option>
+                                <option value="hoard">Hoard</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="grid-column:1/-1">
+                            <label>Save Path</label>
+                            <input type="text" id="cat-save-path" placeholder="/mnt/race/movies" style="width:100%" autocomplete="off">
+                        </div>
+                        <div class="form-group" style="grid-column:1/-1">
+                            <label>Strategy</label>
+                            <select id="cat-strategy">
+                                <option value="all">all — fan-out to every placement agent (multi-home)</option>
+                                <option value="least_torrents">least_torrents — pick the agent with fewest torrents</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="grid-column:1/-1">
+                            <label>Placement &amp; per-agent save path</label>
+                            <div id="cat-placement" class="cat-placement"></div>
+                            <div class="sr-desc">Which agents host new torrents in this category. Blank per-agent path = the flat save path above. Only "local" until remote agents are configured.</div>
+                        </div>
+                    </div>
+                    <div class="cat-form-actions">
+                        <button class="btn-primary" onclick="saveCategory()">Save</button>
+                        <button class="btn-cancel" onclick="hideCategoryForm()">Cancel</button>
+                    </div>
+                    <div id="cat-result" class="result-msg"></div>
+                </div>
+            </div>
+
+            <table id="categories-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Mode</th>
+                        <th>Save Path</th>
+                        <th>Placement</th>
+                        <th>Strategy</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="categories-tbody">
+                    <tr><td colspan="6" class="empty">No categories</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Config -->
+        <!-- Agents -->
+        <section id="tab-agents" class="tab-content">
+            <div class="section-header">
+                <h2>Agents</h2>
+                <button class="btn-small" onclick="showAgentForm()">+ New</button>
+            </div>
+            <div id="agent-form" class="card" style="display:none; margin-bottom:16px">
+                <div class="card-body">
+                    <div class="cat-form-grid">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" id="ag-name" placeholder="seedbox-de" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Address (host:port)</label>
+                            <input type="text" id="ag-addr" placeholder="10.0.0.2:9090" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Token <span class="sr-desc">bearer, optional</span></label>
+                            <input type="text" id="ag-token" placeholder="(none)" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>TLS CA path <span class="sr-desc">on the front, optional</span></label>
+                            <input type="text" id="ag-tlsca" placeholder="(plaintext)" autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="cat-form-actions">
+                        <button class="btn-small" onclick="testAgent()">Test</button>
+                        <button class="btn-primary" onclick="saveAgent()">Save</button>
+                        <button class="btn-cancel" onclick="hideAgentForm()">Cancel</button>
+                    </div>
+                    <div id="ag-result" class="result-msg"></div>
+                </div>
+            </div>
+            <table id="agents-table">
+                <thead>
+                    <tr><th>Name</th><th>Address</th><th>Kind</th><th>Status</th><th>Actions</th></tr>
+                </thead>
+                <tbody id="agents-tbody">
+                    <tr><td colspan="5" class="empty">No agents</td></tr>
+                </tbody>
+            </table>
+            <div id="agents-removed" class="agents-removed"></div>
+            <div class="section-header" style="margin-top:24px">
+                <h2>Local engines</h2>
+                <button class="btn-small" onclick="showEngineForm()">+ Add engine</button>
+            </div>
+            <div id="engine-form" style="display:none;margin-bottom:8px">
+                <input type="text" id="eng-id" placeholder="hoard2" autocomplete="off">
+                <select id="eng-role"><option value="hoard">hoard</option><option value="race">race</option></select>
+                <input type="number" id="eng-port" placeholder="port (auto)" style="width:110px">
+                <button class="btn-small" onclick="addEngine()">Add</button>
+                <button class="btn-small" onclick="hideEngineForm()">Cancel</button>
+            </div>
+            <table id="engines-table"><thead><tr><th>ID</th><th>Role</th><th>Port</th><th>Actions</th></tr></thead>
+                <tbody id="engines-tbody"><tr><td colspan="4" class="empty">No extra engines</td></tr></tbody></table>
+            <div id="restart-banner" style="display:none;margin-top:8px;padding:8px;background:#3a2a00;border-radius:4px">
+                Config changed — restart to apply. <button class="btn-small" onclick="restartHydra()">Restart now</button>
+            </div>
+        </section>
+
+        <section id="tab-config" class="tab-content">
+            <div class="section-header">
+                <h2>Configuration</h2>
+            </div>
+            <div class="card">
+                <h3>Account</h3>
+                <div class="card-body">
+                    <div class="settings-row">
+                        <div class="sr-label"><span class="sr-key">Change password</span><span class="sr-desc">Sets [auth] password_hash (bcrypt). You stay logged in.</span></div>
+                        <div class="sr-field"><input type="password" id="newpass-input" class="sr-input" placeholder="New password (min 6)"><button class="btn-small btn-accent" onclick="changePassword()" style="margin-left:6px">Change</button></div>
+                    </div>
+                    <div id="newpass-result" class="result-msg" style="margin-top:8px"></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header-row">
+                    <h3>Advanced settings (default.toml)</h3>
+                    <button class="btn-small btn-accent" onclick="saveSettings()">Save</button>
+                </div>
+                <div id="settings-restart-banner" class="result-msg" style="display:none;margin:8px 0"></div>
+                <div class="card-body">
+                    <div id="settings-editor">Loading…</div>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- Benchmark -->
+        <section id="tab-benchmark" class="tab-content">
+
+            <!-- Live metrics -->
+            <div class="bm-metrics-grid">
+                <div class="bm-metric-card">
+                    <span class="bm-metric-label">Upload Race</span>
+                    <span class="bm-metric-value" id="bm-race-upload">--</span>
+                </div>
+                <div class="bm-metric-card">
+                    <span class="bm-metric-label">Download Race</span>
+                    <span class="bm-metric-value" id="bm-race-download">--</span>
+                </div>
+                <div class="bm-metric-card">
+                    <span class="bm-metric-label">Upload Hoard</span>
+                    <span class="bm-metric-value" id="bm-hoard-upload">--</span>
+                </div>
+                <div class="bm-metric-card">
+                    <span class="bm-metric-label">Peers Race</span>
+                    <span class="bm-metric-value" id="bm-race-peers">--</span>
+                </div>
+                <div class="bm-metric-card">
+                    <span class="bm-metric-label">IOWait</span>
+                    <span class="bm-metric-value" id="bm-iowait">--</span>
+                </div>
+                <div class="bm-metric-card">
+                    <span class="bm-metric-label">ARC Hit Rate</span>
+                    <span class="bm-metric-value" id="bm-arc-hit">--</span>
+                </div>
+                <div class="bm-metric-card">
+                    <span class="bm-metric-label">ARC Miss/s</span>
+                    <span class="bm-metric-value" id="bm-arc-miss">--</span>
+                </div>
+                <div class="bm-metric-card">
+                    <span class="bm-metric-label">ARC Size</span>
+                    <span class="bm-metric-value" id="bm-arc-size">--</span>
+                </div>
+            </div>
+
+            <!-- Range selector + charts -->
+            <div class="bm-range-bar">
+                <div class="bm-range-btns">
+                    <button class="bm-range-btn active" data-span="900">15m</button>
+                    <button class="bm-range-btn" data-span="3600">1h</button>
+                    <button class="bm-range-btn" data-span="21600">6h</button>
+                    <button class="bm-range-btn" data-span="86400">24h</button>
+                    <button class="bm-range-btn" data-span="604800">7d</button>
+                    <button class="bm-range-btn" data-span="2592000">30d</button>
+                </div>
+                <span class="bm-range-hint" id="bm-range-hint"></span>
+            </div>
+
+            <div class="bm-charts-grid">
+                <div class="bm-chart-container">
+                    <div class="bm-chart-title">Upload Speed</div>
+                    <div class="bm-chart-wrap"><canvas id="chart-upload"></canvas></div>
+                </div>
+                <div class="bm-chart-container">
+                    <div class="bm-chart-title">Total Uploaded <span id="bm-bar-duration-uploaded" style="opacity:0.5"></span></div>
+                    <div class="bm-chart-wrap"><canvas id="chart-total-uploaded"></canvas></div>
+                </div>
+                <div class="bm-chart-container">
+                    <div class="bm-chart-title">Currently Uploading</div>
+                    <div class="bm-chart-wrap"><canvas id="chart-uploading"></canvas></div>
+                </div>
+                <div class="bm-chart-container">
+                    <div class="bm-chart-title">Race Events <span id="bm-bar-duration-events" style="opacity:0.5"></span></div>
+                    <div class="bm-chart-wrap"><canvas id="chart-share"></canvas></div>
+                </div>
+                <div class="bm-chart-container">
+                    <div class="bm-chart-title">IOWait %</div>
+                    <div class="bm-chart-wrap"><canvas id="chart-iowait"></canvas></div>
+                </div>
+                <div class="bm-chart-container">
+                    <div class="bm-chart-title">ARC Miss / sec</div>
+                    <div class="bm-chart-wrap"><canvas id="chart-arc-miss"></canvas></div>
+                </div>
+            </div>
+
+            <!-- VPN Speedtest -->
+            <div class="bm-vpn-section">
+                <div class="bm-vpn-header">
+                    <h3 class="bm-compare-title">VPN Speedtest</h3>
+                    <button class="bm-range-btn" id="vpn-run-btn" onclick="runVpnSpeedtest()">▶ Run now</button>
+                </div>
+                <div class="bm-vpn-cards">
+                    <div class="bm-metric-card">
+                        <span class="bm-metric-label">Upload VPN</span>
+                        <span class="bm-metric-value" id="vpn-ul">--</span>
+                    </div>
+                    <div class="bm-metric-card">
+                        <span class="bm-metric-label">Download VPN</span>
+                        <span class="bm-metric-value" id="vpn-dl">--</span>
+                    </div>
+                    <div class="bm-metric-card">
+                        <span class="bm-metric-label">Dernier test</span>
+                        <span class="bm-metric-value bm-vpn-ts" id="vpn-ts">--</span>
+                    </div>
+                </div>
+                <div class="bm-chart-container">
+                    <div class="bm-chart-title">VPN Upload / Download (Mbps) — last 7 days</div>
+                    <div class="bm-chart-wrap"><canvas id="chart-vpn"></canvas></div>
+                </div>
+            </div>
+
+            <!-- Comparaison A/B -->
+            <div class="bm-compare-section">
+                <h3 class="bm-compare-title">Comparaison A / B</h3>
+                <p class="bm-compare-desc">Define two contiguous periods to compare the impact of a config change.</p>
+                <div class="bm-compare-pickers">
+                    <div class="bm-picker-group">
+                        <label>Start of period 1</label>
+                        <input type="datetime-local" id="cmp-start">
+                    </div>
+                    <div class="bm-picker-sep">→</div>
+                    <div class="bm-picker-group">
+                        <label>Point milieu (changement)</label>
+                        <input type="datetime-local" id="cmp-mid">
+                    </div>
+                    <div class="bm-picker-sep">→</div>
+                    <div class="bm-picker-group">
+                        <label>End of period 2</label>
+                        <input type="datetime-local" id="cmp-end">
+                    </div>
+                    <button class="btn-primary bm-compare-btn" onclick="runCompare()">Comparer</button>
+                </div>
+                <div id="cmp-result" style="display:none">
+                    <div class="bm-compare-counts" id="cmp-counts"></div>
+                    <table class="bm-compare-table">
+                        <thead>
+                            <tr>
+                                <th>Metric</th>
+                                <th>P1 avg</th>
+                                <th>P1 max</th>
+                                <th>P2 avg</th>
+                                <th>P2 max</th>
+                                <th>Δ avg</th>
+                            </tr>
+                        </thead>
+                        <tbody id="cmp-tbody"></tbody>
+                    </table>
+                </div>
+                <div id="cmp-error" class="result-msg error" style="display:none"></div>
+            </div>
+
+        </section>
+
+
+
+
+        <!-- Add Torrent -->
+        <section id="tab-add" class="tab-content">
+            <div class="add-form-container">
+                <h2>Add Torrent</h2>
+                <form id="add-torrent-form">
+                    <div class="form-group">
+                        <label>Mode</label>
+                        <div class="mode-selector">
+                            <button type="button" class="mode-btn active" data-mode="race">Race</button>
+                            <button type="button" class="mode-btn" data-mode="hoard">Hoard</button>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="torrent-path-group">
+                        <label for="torrent-path">Torrent File Path</label>
+                        <input type="text" id="torrent-path" placeholder="/path/to/file.torrent">
+                    </div>
+
+                    <div class="form-group" id="magnet-group">
+                        <label for="magnet-uri">Magnet URI (race only)</label>
+                        <input type="text" id="magnet-uri" placeholder="magnet:?xt=urn:btih:...">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="torrent-category">Category <span style="color:var(--text-secondary);font-weight:normal">(optional — overrides mode + save path)</span></label>
+                        <div style="display:flex;gap:8px;align-items:center">
+                            <select id="torrent-category" style="flex:1"></select>
+                            <button type="button" class="btn-small" onclick="activateTab('categories');showCategoryForm()" title="Create a category">+ New</button>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="save-path">Save Path</label>
+                        <input type="text" id="save-path" placeholder="/data/race" value="/data">
+                    </div>
+
+                    <div class="form-group" id="upload-group">
+                        <label for="torrent-upload">Or Upload .torrent <span style="color:var(--text-secondary);font-weight:normal">(multi-select supported)</span></label>
+                        <input type="file" id="torrent-upload" accept=".torrent" multiple>
+                    </div>
+
+                    <button type="submit" class="btn-primary" id="add-btn">Add Torrent</button>
+                    <div id="add-result" class="result-msg"></div>
+                </form>
+            </div>
+        </section>
+    </main>
+
+    <!-- Remove modal -->
+    <div id="remove-modal" class="modal-overlay" style="display:none">
+        <div class="modal">
+            <h3>Remove Torrent</h3>
+            <p>What do you want to do?</p>
+            <div class="modal-actions">
+                <button class="btn-modal btn-keep" onclick="confirmRemove(false)">Remove torrent only</button>
+                <button class="btn-modal btn-delete" onclick="confirmRemove(true)">Remove torrent + delete files</button>
+                <button class="btn-modal btn-cancel" onclick="closeRemoveModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <span>Hydra Torrent Daemon <span id="footer-version">v0.1.0</span></span>
+        <span id="last-update">Last update: --</span>
+    </footer>
+
+    <div id="fs-dropdown" class="fs-dropdown" style="display:none"></div>
+
+    <!-- Context menu -->
+    <div id="ctx-menu" class="ctx-menu" style="display:none">
+        <div class="ctx-label" id="ctx-label">1 torrent selected</div>
+        <div class="ctx-separator"></div>
+        <div class="ctx-item" onclick="_reannounceSelected()">Reannounce</div>
+        <div class="ctx-item" id="ctx-change-category" onclick="_showCategoryPicker(event)">Change category &rsaquo;</div>
+        <div class="ctx-separator"></div>
+        <div class="ctx-item" onclick="_removeSelected(false)">Remove torrent</div>
+        <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
+    </div>
+
+    <script src="/static/app.js?v=1.3.3"></script>
+</body>
+</html>
