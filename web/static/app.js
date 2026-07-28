@@ -3571,3 +3571,65 @@ function initTorrentColumnResizers() {
 }
 if (document.readyState !== "loading") initTorrentColumnResizers();
 else document.addEventListener("DOMContentLoaded", initTorrentColumnResizers);
+
+
+// ─── Piece availability map (restored: dropped by the 2026-07-10 overview
+// refactor, which broke the torrent detail panel with a ReferenceError). ───
+function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
+    const card = document.getElementById(cardId || "detail-pieces-card");
+    const canvas = document.getElementById(canvasId);
+    const info = document.getElementById(infoId);
+
+    if (!piecesHave || piecesHave.length === 0) {
+        if (card) card.style.display = "none";
+        return;
+    }
+    if (card) card.style.display = "";
+
+    const total = piecesHave.length;
+    const have = piecesHave.filter(p => p === 1).length;
+    const missing = total - have;
+    if (info) info.textContent = `(${have}/${total} — ${missing} missing)`;
+
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const width = canvas.parentElement.clientWidth - 16;
+    canvas.width = width;
+    canvas.height = 40;
+    ctx.clearRect(0, 0, width, 40);
+
+    for (let x = 0; x < width; x++) {
+        const startPiece = Math.floor(x * total / width);
+        const endPiece = Math.floor((x + 1) * total / width);
+        if (startPiece >= total) break;
+
+        let colHave = 0;
+        let colTotal = Math.max(endPiece - startPiece, 1);
+        let maxAvail = 0;
+
+        for (let p = startPiece; p < endPiece && p < total; p++) {
+            if (piecesHave[p]) colHave++;
+            if (piecesAvail && piecesAvail[p] !== undefined) {
+                maxAvail = Math.max(maxAvail, piecesAvail[p]);
+            }
+        }
+
+        const ratio = colHave / colTotal;
+
+        if (ratio >= 1) {
+            ctx.fillStyle = "#2ecc71";
+        } else if (ratio > 0) {
+            ctx.fillStyle = "#f39c12";
+        } else {
+            if (maxAvail === 0) {
+                ctx.fillStyle = "#e74c3c";
+            } else if (maxAvail <= 2) {
+                ctx.fillStyle = "#e67e22";
+            } else {
+                ctx.fillStyle = "#555";
+            }
+        }
+
+        ctx.fillRect(x, 0, 1, 40);
+    }
+}
