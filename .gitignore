@@ -1,0 +1,25 @@
+# Binaries
+hydra
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+/tmp/
+redeploy-*.log
+
+# Manual backups / working-tree junk
+*.bak
+*.bak.*
+*.broken*
+*.prev
+*.prev.*
+typhon-engine.prev*

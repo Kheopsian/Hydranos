@@ -1,0 +1,532 @@
+package ltclient
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Client connects to a hydra-engine Unix socket and provides a typed API.
+//
+// A dedicated reader goroutine (readLoop) consumes the socket continuously and
+// fan-outs frames in two directions: typhon events → SetEventHandler callback,
+// RPC responses → per-id waiting channel used by call(). Without this separate
+// reader, events would only be drained while some call() happened to be active,
+// causing them to batch up between RPCs.
+type Client struct {
+	socketPath string
+	conn       net.Conn
+	scanner    *bufio.Scanner
+
+	writeMu sync.Mutex // serializes writes on the socket
+	idSeq   atomic.Int64
+
+	// Bulk lane: a SECOND connection carrying large responses (list_torrents,
+	// ~75MB at 100k torrents). Keeping them off the primary connection stops a
+	// giant response from head-of-line-blocking the reader and from holding the
+	// primary rpcSem — which was timing out small RPCs like get_status and
+	// blanking the torrent-detail panel under load.
+	bulkConn    net.Conn
+	bulkWriteMu sync.Mutex
+	bulkSem     chan struct{}
+
+	// pending is indexed by request id. The reader fulfills a call() by
+	// delivering the matching response line on ch and removing the entry.
+	pendingMu sync.Mutex
+	pending   map[int64]chan pendingResp
+
+	// Event handling
+	eventMu sync.Mutex
+	onEvent func(Event)
+
+	done   chan struct{}
+	closed atomic.Bool
+
+	// rpcSem borne le nombre de RPC call() concurrentes. 2.4.10 enleve la
+	// serialisation du mutex global et laisse N loops Go tirer sur typhon-engine
+	// en parallele, causant contention des locks torrent-level cote Rust. Borner
+	// a 8 garde du parallelisme tout en laissant respirer l'engine.
+	rpcSem chan struct{}
+}
+
+// pendingResp carries either the raw response line or a transport error
+// (connection closed while waiting).
+type pendingResp struct {
+	raw []byte
+	err error
+}
+
+// callTimeout bounds how long a single call() waits for its response.
+// Long enough for slow ops (verify, list_torrents on 13k items) while
+// still unblocking on engine deadlock.
+const callTimeout = 120 * time.Second
+
+// Connect creates a new client connected to the given Unix socket and starts
+// the background reader.
+func Connect(socketPath string) (*Client, error) {
+	conn, err := net.DialTimeout("unix", socketPath, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("ltclient: connect %s: %w", socketPath, err)
+	}
+
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 1024*1024), 256*1024*1024) // 1MB init, 256MB max line (list_torrents ~17MB @24k torrents; 256MB ~= 370k)
+
+	// Second connection for the bulk lane (list_torrents). The engine's RPC
+	// server accepts multiple connections, each served independently.
+	bulkConn, berr := net.DialTimeout("unix", socketPath, 10*time.Second)
+	if berr != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ltclient: connect(bulk) %s: %w", socketPath, berr)
+	}
+	bulkScanner := bufio.NewScanner(bulkConn)
+	bulkScanner.Buffer(make([]byte, 1024*1024), 256*1024*1024)
+
+	c := &Client{
+		socketPath: socketPath,
+		conn:       conn,
+		scanner:    scanner,
+		bulkConn:   bulkConn,
+		bulkSem:    make(chan struct{}, 4),
+		pending:    make(map[int64]chan pendingResp),
+		done:       make(chan struct{}),
+		rpcSem:     make(chan struct{}, 8),
+	}
+
+	go c.readLoop(c.scanner, true)
+	go c.readLoop(bulkScanner, false)
+	return c, nil
+}
+
+// SetEventHandler sets a callback for events pushed by the engine.
+func (c *Client) SetEventHandler(handler func(Event)) {
+	c.eventMu.Lock()
+	c.onEvent = handler
+	c.eventMu.Unlock()
+}
+
+// Close closes the connection. The reader goroutine exits and all pending
+// calls fail with a "connection closed" error.
+func (c *Client) Close() error {
+	if c.closed.Swap(true) {
+		return nil
+	}
+	err := c.conn.Close()
+	if c.bulkConn != nil {
+		c.bulkConn.Close()
+	}
+	close(c.done)
+	return err
+}
+
+// readLoop is the single consumer of the socket. It dispatches events to the
+// registered handler and routes RPC responses to the per-id channel. Exits on
+// connection close or unrecoverable read error, draining all pending calls.
+func (c *Client) readLoop(scanner *bufio.Scanner, drainOnExit bool) {
+	if drainOnExit {
+		defer c.drainPending(errors.New("ltclient: connection closed"))
+	}
+
+	for {
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil && !c.closed.Load() {
+				slog.Warn("ltclient: read loop exiting", "error", err)
+			}
+			return
+		}
+
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		// Copy — scanner reuses its buffer on the next Scan.
+		buf := make([]byte, len(line))
+		copy(buf, line)
+
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(buf, &raw); err != nil {
+			slog.Warn("ltclient: bad JSON from engine", "error", err)
+			continue
+		}
+
+		if _, hasEvent := raw["event"]; hasEvent {
+			var ev Event
+			if err := json.Unmarshal(buf, &ev); err != nil {
+				continue
+			}
+			c.eventMu.Lock()
+			handler := c.onEvent
+			c.eventMu.Unlock()
+			if handler != nil {
+				// Don't block the reader — handlers may do heavy work
+				// (json unmarshal into 13k-entry maps, mutex contention).
+				go handler(ev)
+			}
+			continue
+		}
+
+		// RPC response — route by id.
+		var resp Response
+		if err := json.Unmarshal(buf, &resp); err != nil {
+			slog.Warn("ltclient: unmarshal response envelope", "error", err)
+			continue
+		}
+
+		c.pendingMu.Lock()
+		ch, ok := c.pending[resp.ID]
+		if ok {
+			delete(c.pending, resp.ID)
+		}
+		c.pendingMu.Unlock()
+		if !ok {
+			slog.Warn("ltclient: orphan response", "id", resp.ID)
+			continue
+		}
+		// ch is buffered (cap 1) — non-blocking.
+		ch <- pendingResp{raw: buf}
+	}
+}
+
+// drainPending fails every outstanding call with err. Called when the reader
+// exits so that in-flight callers don't hang.
+func (c *Client) drainPending(err error) {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	for id, ch := range c.pending {
+		ch <- pendingResp{err: err}
+		delete(c.pending, id)
+	}
+}
+
+// call sends a JSON-RPC request and waits for the matching response.
+//
+// Register-before-write is important: if we wrote first and the engine replied
+// faster than this goroutine could insert into `pending`, the reader would
+// discard the response as orphan.
+func (c *Client) call(method string, params interface{}) (json.RawMessage, error) {
+	return c.callVia(c.conn, &c.writeMu, c.rpcSem, method, params)
+}
+
+// callBulk routes over the dedicated bulk connection (large responses like
+// list_torrents), so they never contend with small RPCs on the primary lane.
+func (c *Client) callBulk(method string, params interface{}) (json.RawMessage, error) {
+	return c.callVia(c.bulkConn, &c.bulkWriteMu, c.bulkSem, method, params)
+}
+
+func (c *Client) callVia(conn net.Conn, wmu *sync.Mutex, sem chan struct{}, method string, params interface{}) (json.RawMessage, error) {
+	if c.closed.Load() {
+		return nil, errors.New("ltclient: client closed")
+	}
+
+	// Patch 2: borne les RPC concurrentes pour ne pas saturer typhon-engine.
+	// Timeout court si bloque : eviter que tout se bloque derriere 8 RPC lentes.
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	case <-time.After(5 * time.Second):
+		return nil, errors.New("ltclient: rpc semaphore acquire timeout (engine saturated?)")
+	}
+
+	id := c.idSeq.Add(1)
+
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("ltclient: marshal params: %w", err)
+	}
+
+	req := Request{
+		ID:     id,
+		Method: method,
+		Params: paramsJSON,
+	}
+
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("ltclient: marshal request: %w", err)
+	}
+	reqBytes = append(reqBytes, '\n')
+
+	ch := make(chan pendingResp, 1)
+	c.pendingMu.Lock()
+	c.pending[id] = ch
+	c.pendingMu.Unlock()
+
+	wmu.Lock()
+	_, werr := conn.Write(reqBytes)
+	wmu.Unlock()
+	if werr != nil {
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+		return nil, fmt.Errorf("ltclient: write: %w", werr)
+	}
+
+	select {
+	case pr := <-ch:
+		if pr.err != nil {
+			return nil, pr.err
+		}
+		var resp Response
+		if err := json.Unmarshal(pr.raw, &resp); err != nil {
+			return nil, fmt.Errorf("ltclient: unmarshal response: %w", err)
+		}
+		if resp.Error != "" {
+			return nil, fmt.Errorf("ltclient: engine error: %s", resp.Error)
+		}
+		// Legacy contract: callers unmarshal the full line directly into
+		// their own result struct (unknown fields like "id" are ignored).
+		return pr.raw, nil
+	case <-time.After(callTimeout):
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+		return nil, fmt.Errorf("ltclient: timeout waiting for response id=%d method=%s", id, method)
+	}
+}
+
+// Ping checks connectivity.
+func (c *Client) Ping() error {
+	_, err := c.call("ping", map[string]interface{}{})
+	return err
+}
+
+// AddTorrent adds a torrent from a .torrent file.
+func (c *Client) AddTorrent(torrentPath, savePath string, stopped bool) (*AddTorrentResult, error) {
+	return c.AddTorrentWithOptions(torrentPath, savePath, stopped, false)
+}
+
+// AddTorrentWithOptions adds a torrent with seed_mode support.
+// seed_mode=true skips verification (trust data is complete).
+func (c *Client) AddTorrentWithOptions(torrentPath, savePath string, stopped, seedMode bool) (*AddTorrentResult, error) {
+	raw, err := c.call("add_torrent", AddTorrentParams{
+		TorrentPath: torrentPath,
+		SavePath:    savePath,
+		Stopped:     stopped,
+		SeedMode:    seedMode,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result AddTorrentResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal add_torrent: %w", err)
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("ltclient: %s", result.Error)
+	}
+	return &result, nil
+}
+
+// RemoveTorrent removes a torrent. If keepData is true, files are kept.
+func (c *Client) RemoveTorrent(infoHash string, keepData bool) error {
+	_, err := c.call("remove_torrent", map[string]interface{}{
+		"info_hash": infoHash,
+		"keep_data": keepData,
+	})
+	return err
+}
+
+// StartTorrent resumes a paused torrent.
+func (c *Client) StartTorrent(infoHash string) error {
+	_, err := c.call("start_torrent", map[string]interface{}{
+		"info_hash": infoHash,
+	})
+	return err
+}
+
+// StopTorrent pauses a torrent.
+func (c *Client) StopTorrent(infoHash string) error {
+	_, err := c.call("stop_torrent", map[string]interface{}{
+		"info_hash": infoHash,
+	})
+	return err
+}
+
+// SetSavePath swaps the in-memory save_path for a running torrent and
+// flushes fastresume. Caller must have stopped the torrent and moved
+// the files on disk before invoking this.
+func (c *Client) SetSavePath(infoHash, savePath string) error {
+	_, err := c.call("set_save_path", map[string]interface{}{
+		"info_hash": infoHash,
+		"save_path": savePath,
+	})
+	return err
+}
+
+// VerifyTorrent forces a data integrity re-check.
+func (c *Client) VerifyTorrent(infoHash string) error {
+	_, err := c.call("verify_torrent", map[string]interface{}{
+		"info_hash": infoHash,
+	})
+	return err
+}
+
+// GetStatus returns detailed status for a single torrent.
+func (c *Client) GetStatus(infoHash string) (*TorrentStatus, error) {
+	raw, err := c.call("get_status", map[string]interface{}{
+		"info_hash": infoHash,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var status TorrentStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal status: %w", err)
+	}
+	return &status, nil
+}
+
+// SubscribeEvents opts into push-based events from the engine.
+// After this call the engine will emit Event frames ({"event":"...","data":{...}})
+// on the same socket (alongside regular request/reply pairs). The reader
+// goroutine dispatches them to the SetEventHandler callback as they arrive.
+//
+// Typhon emits at least: torrent_added, torrent_removed, stats_snapshot.
+// See typhon-engine/src/rpc/events.rs for the full event set.
+//
+// Called once per Client lifetime (after SetEventHandler).
+func (c *Client) SubscribeEvents() error {
+	_, err := c.call("subscribe_events", map[string]interface{}{})
+	return err
+}
+
+// ListTorrents returns all torrents in the session.
+func (c *Client) ListTorrents() (*ListTorrentsResult, error) {
+	raw, err := c.callBulk("list_torrents", map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	var result ListTorrentsResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal list: %w", err)
+	}
+	return &result, nil
+}
+
+// GetPeers returns connected peers for a torrent.
+func (c *Client) GetPeers(infoHash string) ([]PeerInfo, error) {
+	raw, err := c.call("get_peers", map[string]interface{}{
+		"info_hash": infoHash,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result GetPeersResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal peers: %w", err)
+	}
+	return result.Peers, nil
+}
+
+// AddPeers injects peers into a torrent.
+func (c *Client) AddPeers(infoHash string, peers []struct {
+	IP   string
+	Port int
+}) error {
+	peerList := make([]map[string]interface{}, len(peers))
+	for i, p := range peers {
+		peerList[i] = map[string]interface{}{"ip": p.IP, "port": p.Port}
+	}
+	_, err := c.call("add_peers", map[string]interface{}{
+		"info_hash": infoHash,
+		"peers":     peerList,
+	})
+	return err
+}
+
+// SetUploadLimit sets the session upload rate limit in bytes/s (0 = unlimited).
+func (c *Client) SetUploadLimit(limitBytes int) error {
+	_, err := c.call("set_upload_limit", map[string]interface{}{
+		"limit_bytes": limitBytes,
+	})
+	return err
+}
+
+// SetDownloadLimit sets the session download rate limit in bytes/s (0 = unlimited).
+func (c *Client) SetDownloadLimit(limitBytes int) error {
+	_, err := c.call("set_download_limit", map[string]interface{}{
+		"limit_bytes": limitBytes,
+	})
+	return err
+}
+
+// SetListenPort hot-rebinds the engine TCP peer listener to a new port with
+// no restart (torrents + live peer connections kept). Used when a dynamic
+// upstream port rotates (gluetun / Proton port-forward).
+func (c *Client) SetListenPort(port int) error {
+	_, err := c.call("set_listen_port", map[string]interface{}{
+		"port": port,
+	})
+	return err
+}
+
+// GetSessionStats returns aggregate session statistics.
+func (c *Client) GetSessionStats() (*SessionStats, error) {
+	raw, err := c.call("get_session_stats", map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	var stats SessionStats
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal session_stats: %w", err)
+	}
+	return &stats, nil
+}
+
+// GetFiles returns the file list for a torrent.
+func (c *Client) GetFiles(infoHash string) ([]FileInfo, error) {
+	raw, err := c.call("get_files", map[string]interface{}{
+		"info_hash": infoHash,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result GetFilesResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal files: %w", err)
+	}
+	return result.Files, nil
+}
+
+// TrackerInfo represents a single tracker entry.
+type TrackerInfo struct {
+	URL       string          `json:"url"`
+	Tier      int             `json:"tier"`
+	Verified  bool            `json:"verified"`
+	Endpoints json.RawMessage `json:"endpoints"`
+}
+
+// GetTrackers returns tracker info for a torrent.
+func (c *Client) GetTrackers(infoHash string) ([]TrackerInfo, error) {
+	raw, err := c.call("get_trackers", map[string]interface{}{"info_hash": infoHash})
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Trackers []TrackerInfo `json:"trackers"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	return result.Trackers, nil
+}
+
+// GetDiagnostics returns deep libtorrent session diagnostics.
+func (c *Client) GetDiagnostics() (*DiagnosticStats, error) {
+	raw, err := c.call("get_diagnostics", map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	var stats DiagnosticStats
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal diagnostics: %w", err)
+	}
+	return &stats, nil
+}

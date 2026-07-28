@@ -1,0 +1,76 @@
+# Hydra Torrent Daemon - Configuration
+
+[daemon]
+api_host = "0.0.0.0"
+api_port = 8199
+# auto-generated on first start when empty
+api_key = ""
+data_dir = "/configs"
+create_torrent_folder = true
+
+# ─────────────────────────────────────────────
+# RACE SESSION - maximum aggressiveness (hot downloads)
+# ─────────────────────────────────────────────
+[race]
+listen_port = 16171
+max_connections = 4000
+max_uploads_per_torrent = 100
+peer_timeout = 30
+inactivity_timeout = 20
+
+
+[race.custom_choking]
+enabled = true
+tick_interval_seconds = 2
+strategy = "rarity_captive"
+max_unchoked = 30
+rarity_weight = 0.7
+speed_weight = 0.3
+
+# ─────────────────────────────────────────────
+# HOARD SESSION - upload-optimized (long-term seeding)
+# ─────────────────────────────────────────────
+[hoard]
+listen_port = 16172
+max_connections = 12000
+max_uploads_per_torrent = -1
+peer_timeout = 20
+inactivity_timeout = 20
+
+active_seeds = -1
+active_limit = -1
+active_downloads = 10
+
+# ─────────────────────────────────────────────
+# VPN SPEEDTEST
+# ─────────────────────────────────────────────
+[vpn_speedtest]
+enabled = true
+# Public target: measures real peer-facing capacity (against a public iperf3
+# server) instead of a VPS loopback that over-estimates. The code auto-retries
+# on basePort..+8 when the server is busy.
+iperf3_server = "ping.online.net"
+iperf3_port = 5201
+interval_secs = 3600
+duration_secs = 10
+
+# ─────────────────────────────────────────────
+# RACE DRAIN - automatic NVMe purge (hand back space)
+# ─────────────────────────────────────────────
+[race_drain]
+enabled = true
+check_interval_seconds = 60
+high_watermark_pct = 95
+low_watermark_pct = 85
+race_path = "/race"
+min_age_minutes = 10
+
+# Optional per-tracker announce passkey override (host substring -> passkey).
+# Hot-swap via POST /api/announce/passkeys. Ships empty.
+# [announce_passkeys]
+# "tracker.example.net" = "your-passkey-here"
+
+[auth]
+username = "admin"
+# bcrypt hash — generate with: hydra hash-password <password>
+password_hash = ""

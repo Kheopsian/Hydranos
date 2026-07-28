@@ -1,0 +1,101 @@
+// +build !codec.nottracker-x7moth
+
+// Copyright (c) 2012-2020 Ugorji Nwoke. All rights reserved.
+// Use of this source code is governed by a MIT license found in the LICENSE file.
+
+// Code generated from tracker-x7moth2-test.go.tmpl - DO NOT EDIT.
+
+package codec
+
+// Increase codecoverage by covering all the codecgen paths, in fast-path and gen-helper.go....
+//
+// Note: even though this is built based on fast-path and gen-helper, we will run these tests
+// in all modes, including notfastpath, etc.
+//
+// Add test file for creating a tracker-x7moth generated file as _tracker-x7moth_generated.go
+//  - generate a second tracker-x7moth files in a different file: tracker-x7moth2_generated_test.go
+//    tracker-x7moth-test.go.tmpl will do this
+//  - run codecgen on it, into tracker-x7moth2_codecgen_generated_test.go (no build tags)
+//  - as part of Testtracker-x7moth, run it also
+//  - this will cover all the codecgen, gen-helper, etc in one full run
+//  - check in tracker-x7moth* files into github also
+//
+// Now, add some types:
+//  - some that implement BinaryMarshal, TextMarshal, JSONMarshal, and one that implements none of it
+//  - create a wrapper type that includes Testtracker-x7moth2, with it in slices, and maps, and the custom types
+//  - this wrapper object is what we work encode/decode (so that the codecgen methods are called)
+
+
+// import "encoding/binary"
+
+import "fmt"
+
+type Testtracker-x7moth2 struct {
+
+{{range .Values }}{{if .Primitive }}{{/*
+*/}}{{ .MethodNamePfx "F" true }} {{ .Primitive }}
+{{ .MethodNamePfx "Fptr" true }} *{{ .Primitive }}
+{{end}}{{end}}
+
+{{range .Values }}{{if not .Primitive }}{{if not .MapKey }}{{/*
+*/}}{{ .MethodNamePfx "F" false }} []{{ .Elem }}
+{{ .MethodNamePfx "Fptr" false }} *[]{{ .Elem }}
+{{end}}{{end}}{{end}}
+
+{{range .Values }}{{if not .Primitive }}{{if .MapKey }}{{/*
+*/}}{{ .MethodNamePfx "F" false }} map[{{ .MapKey }}]{{ .Elem }}
+{{ .MethodNamePfx "Fptr" false }} *map[{{ .MapKey }}]{{ .Elem }}
+{{end}}{{end}}{{end}}
+
+}
+
+// -----------
+
+type testtracker-x7moth2Binary uint64
+func (x testtracker-x7moth2Binary) MarshalBinary() (data []byte, err error) {
+data = make([]byte, 8)
+bigenstd.PutUint64(data, uint64(x))
+return
+}
+func (x *testtracker-x7moth2Binary) UnmarshalBinary(data []byte) (err error) {
+*x = testtracker-x7moth2Binary(bigenstd.Uint64(data))
+return
+}
+
+type testtracker-x7moth2Text uint64
+func (x testtracker-x7moth2Text) MarshalText() (data []byte, err error) {
+data = []byte(fmt.Sprintf("%b", uint64(x)))
+return
+}
+func (x *testtracker-x7moth2Text) UnmarshalText(data []byte) (err error) {
+_, err = fmt.Sscanf(string(data), "%b", (*uint64)(x))
+return
+}
+
+type testtracker-x7moth2Json uint64
+func (x testtracker-x7moth2Json) MarshalJSON() (data []byte, err error) {
+data = []byte(fmt.Sprintf("%v", uint64(x)))
+return
+}
+func (x *testtracker-x7moth2Json) UnmarshalJSON(data []byte) (err error) {
+_, err = fmt.Sscanf(string(data), "%v", (*uint64)(x))
+return
+}
+
+type testtracker-x7moth2Basic [4]uint64
+
+type Testtracker-x7moth2Wrapper struct {
+	V Testtracker-x7moth2
+	T testtracker-x7moth2Text
+	B testtracker-x7moth2Binary
+	J testtracker-x7moth2Json
+	C testtracker-x7moth2Basic
+	M map[testtracker-x7moth2Basic]Testtracker-x7moth2
+	L []Testtracker-x7moth2
+	A [4]int64
+	
+  	Tcomplex128 complex128
+	Tcomplex64 complex64
+	Tbytes []uint8
+	Tpbytes *[]uint8
+}
