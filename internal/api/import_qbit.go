@@ -490,7 +490,10 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 		} else {
 			_, addErr = s.hoardEngine.AddTorrent(tmp, sp, cn)
 		}
-		os.Remove(tmp)
+		// Keep the .torrent in uploads/ (persistent /config volume): the durable
+		// store captures the metainfo BLOB by reading TorrentFilePath at sync
+		// time, so deleting it here would drop the torrent from the store on the
+		// next restart (torrent added to the live engine but not persisted).
 		if addErr != nil {
 			slog.Warn("qbit import: add failed", "name", name, "seed_mode", seed, "save_path", sp, "error", addErr)
 			job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": add: "+addErr.Error()) })
