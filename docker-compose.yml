@@ -1,7 +1,7 @@
 # Minimal single-node (monolith) Hydra using the prebuilt image.
-# First start seeds a default config into ./config; grab your generated API key with:
-#   docker compose logs hydra | grep -i "api key"
-# then open http://localhost:8199
+# First start seeds a default config into ./config and generates an admin login.
+# Log in at http://localhost:8199 with user "admin" and the temporary password:
+#   docker compose logs hydra | grep "temporary admin password"
 services:
   hydra:
     image: ghcr.io/kheopsian/hydra:latest
@@ -16,5 +16,5 @@ services:
       - "16172:16172/tcp"    # hoard engine BT listen
       - "16172:16172/udp"    # hoard uTP
     volumes:
-      - ./config:/configs    # config, resume data, SQLite store (persistent)
+      - ./config:/config    # config, resume data, SQLite store (persistent)
       - ./data:/data         # torrent payload data

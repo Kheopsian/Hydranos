@@ -155,7 +155,7 @@ Each engine can reach the swarm in one of several ways; pick per your setup:
   # docker-compose, gluetun service. {{PORTS}} is substituted by gluetun.
   environment:
     - VPN_PORT_FORWARDING=on
-    - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'hydra set-listen-port /configs/hoard.sock {{PORTS}}'
+    - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'hydra set-listen-port /config/hoard.sock {{PORTS}}'
   ```
 
   ⚠️ **One forwarded port serves one engine.** Two engines are two processes and

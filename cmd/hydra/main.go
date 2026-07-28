@@ -96,7 +96,7 @@ func main() {
 		}
 	}()
 
-	configPath := flag.String("config", "/configs/default.toml", "Path to TOML config file")
+	configPath := flag.String("config", "/config/default.toml", "Path to TOML config file")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	frontOnly := flag.Bool("front-only", false, "run as a controller node: no local engine, drive remote [[agent]]s only")
 	agentAddr := flag.String("agent-addr", "", "if set, also serve the HydraAgent gRPC data-plane on this addr (e.g. :9090)")

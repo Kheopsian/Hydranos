@@ -164,7 +164,7 @@ func DefaultConfig() *HydraConfig {
 			APIHost:             "0.0.0.0",
 			APIPort:             8199,
 			APIKey:              "", // vide -> genere aleatoirement au 1er boot
-			DataDir:             "/configs",
+			DataDir:             "/config",
 			CreateTorrentFolder: true,
 		},
 		Race: SessionConfig{
