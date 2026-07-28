@@ -140,7 +140,14 @@ func procStat(pid int) (bool, int64) {
 	return true, 0
 }
 
-var watchdogDumpDir = "/config"
+// watchdogDumpDir follows HYDRA_CONFIG_DIR (the config/data volume) so crash
+// dumps land on the persistent mount; defaults to /config.
+var watchdogDumpDir = func() string {
+	if d := os.Getenv("HYDRA_CONFIG_DIR"); d != "" {
+		return d
+	}
+	return "/config"
+}()
 
 // dumpEngineMem snapshots the engine's memory composition to durable state
 // before the watchdog kills it. smaps_rollup gives anon (heap) vs file-backed
