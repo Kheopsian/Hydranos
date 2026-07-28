@@ -11,6 +11,10 @@ func qbitStub() *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
+		if r.FormValue("username") == "bypass" {
+			w.WriteHeader(http.StatusNoContent) // 204: auth-bypass / proxy style
+			return
+		}
 		if r.FormValue("username") == "admin" && r.FormValue("password") == "secret" {
 			w.Write([]byte("Ok."))
 			return
@@ -48,6 +52,9 @@ func TestQbitClientFlow(t *testing.T) {
 	}
 	if err := cl.login("admin", "secret"); err != nil {
 		t.Fatalf("login: %v", err)
+	}
+	if err := cl.login("bypass", ""); err != nil {
+		t.Fatalf("login should accept a 204 (auth-bypass): %v", err)
 	}
 	ts, err := cl.torrentsInfo()
 	if err != nil || len(ts) != 3 {

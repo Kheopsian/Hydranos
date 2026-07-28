@@ -69,7 +69,11 @@ func (q *qbitClient) login(user, pass string) error {
 	if strings.Contains(string(body), "Fails") {
 		return fmt.Errorf("invalid qBittorrent username/password")
 	}
-	if resp.StatusCode != http.StatusOK {
+	// Accept any 2xx/3xx: some setups (WebUI auth bypassed by IP/subnet, or a
+	// reverse proxy in front) answer 204 No Content or a redirect on an already
+	// valid session. Only a 4xx/5xx is a real failure. torrents/info right after
+	// is the real auth gate.
+	if resp.StatusCode >= 400 {
 		return fmt.Errorf("qBittorrent login failed (HTTP %d)", resp.StatusCode)
 	}
 	return nil
@@ -93,6 +97,9 @@ func (q *qbitClient) torrentsInfo() ([]qbitTorrent, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("qBittorrent rejected the session (bad credentials, or WebUI auth bypass is off)")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("torrents/info HTTP %d", resp.StatusCode)
 	}
