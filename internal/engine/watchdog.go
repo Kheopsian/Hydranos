@@ -140,7 +140,7 @@ func procStat(pid int) (bool, int64) {
 	return true, 0
 }
 
-var watchdogDumpDir = "/configs"
+var watchdogDumpDir = "/config"
 
 // dumpEngineMem snapshots the engine's memory composition to durable state
 // before the watchdog kills it. smaps_rollup gives anon (heap) vs file-backed

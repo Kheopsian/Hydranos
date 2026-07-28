@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # jemalloc heap profiling on the Rust engine (low-overhead sampling every
 # 512KB). Dumps triggered on SIGUSR1 by the watchdog. Go (hydra) ignores it.
-ENV MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/configs/jeprof
+ENV MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/config/jeprof
 COPY --from=typhon-builder /build/typhon-engine/target/release/typhon-engine /usr/local/bin/hydra-engine
 
 COPY --from=go-builder /hydra /usr/local/bin/hydra

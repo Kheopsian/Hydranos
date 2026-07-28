@@ -10,7 +10,7 @@ import (
 // prod state.json into a throwaway DB and reports counts, timing and DB size.
 // Run inside a container that mounts appdata so container-paths resolve, e.g.:
 //
-//	STATE_PATH=/configs/state.json DB_OUT=/tmp/dry.db go test -run RealVolume -v
+//	STATE_PATH=/config/state.json DB_OUT=/tmp/dry.db go test -run RealVolume -v
 func TestImportRealVolume(t *testing.T) {
 	sp := os.Getenv("STATE_PATH")
 	if sp == "" {

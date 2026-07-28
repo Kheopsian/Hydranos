@@ -5,7 +5,7 @@ api_host = "0.0.0.0"
 api_port = 8199
 # auto-generated on first start when empty
 api_key = ""
-data_dir = "/configs"
+data_dir = "/config"
 create_torrent_folder = true
 
 # ─────────────────────────────────────────────
