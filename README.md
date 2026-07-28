@@ -74,17 +74,23 @@ docker compose up -d
 This pulls `ghcr.io/kheopsian/hydra:latest`, seeds a default config into
 `./config` on first start, and serves the web UI on http://localhost:8199.
 
-Grab the API key generated on first start. It is written to `./config/default.toml`
-as `api_key` (a fresh install starts with `api_key = ""`; an existing key is never
-overwritten). The web UI prompts for it on first load, and it is the `X-Api-Key`
-header for the native REST API (`/api/*`). The qBittorrent shim (`/api/v2/*`) uses
-qBittorrent's own login instead and does not check this key.
+On first start Hydra generates an admin login and an API key and writes both to
+`./config/default.toml`. Log into the web UI with username `admin` and the
+temporary password printed once in the logs, then change it from the UI:
+
+```bash
+docker compose logs hydra | grep "temporary admin password"
+```
+
+The API key (`[daemon] api_key`) is the `X-Api-Key` header for the native REST
+API (`/api/*`). The qBittorrent shim (`/api/v2/*`) uses qBittorrent's own login
+instead and does not check this key:
 
 ```bash
 grep api_key ./config/default.toml
 ```
 
-Optionally set a login password:
+To change the admin password later, use the UI (Settings) or:
 
 ```bash
 docker compose exec hydra hydra hash-password 'your-password'

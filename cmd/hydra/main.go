@@ -154,6 +154,35 @@ func main() {
 			slog.Error("failed to generate API key", "err", e)
 		}
 	}
+	// Mot de passe admin auto-genere au 1er demarrage UNIQUEMENT si vide, sur le
+	// modele de l'api_key : hash bcrypt persiste dans [auth] password_hash, et le
+	// plaintext logge UNE fois (au boot suivant password_hash != "" -> pas de
+	// regeneration). Sans ca une install fraiche (password_hash="") ne peut pas se
+	// connecter a l'UI (/api/login renvoie 503 "auth not configured").
+	if cfg.Auth.PasswordHash == "" {
+		pb := make([]byte, 9)
+		if _, e := rand.Read(pb); e == nil {
+			pw := hex.EncodeToString(pb) // 18 chars hex, copy-paste safe
+			if h, eh := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost); eh == nil {
+				cfg.Auth.PasswordHash = string(h)
+				if data, e2 := os.ReadFile(*configPath); e2 == nil {
+					if doc, e3 := config.SetTOMLValue(string(data), "auth", "password_hash", fmt.Sprintf("%q", string(h))); e3 == nil {
+						if e4 := os.WriteFile(*configPath, []byte(doc), 0644); e4 == nil {
+							slog.Warn("generated a temporary admin password (CHANGE IT via the UI or 'hydra hash-password')", "username", cfg.Auth.Username, "password", pw)
+						} else {
+							slog.Warn("generated admin password not persisted (ephemeral this run)", "err", e4, "password", pw)
+						}
+					} else {
+						slog.Warn("generated admin password not persisted (no password_hash line?)", "err", e3, "password", pw)
+					}
+				}
+			} else {
+				slog.Error("failed to hash generated admin password", "err", eh)
+			}
+		} else {
+			slog.Error("failed to generate admin password", "err", e)
+		}
+	}
 	// ---- Resolve the engines this node runs (Option A). A legacy default.toml
 	// with [race]/[hoard] yields exactly those two; [[engine]] blocks override.
 	engineCfgs, engErr := cfg.ResolveEngines()
