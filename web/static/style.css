@@ -2324,3 +2324,13 @@ footer {
     z-index: 3;
 }
 .col-grip:hover { background: var(--accent-hoard); opacity: 0.5; }
+
+
+/* Truncate overflowing cell text (long torrent names) with an ellipsis when a
+   column is resized narrow, instead of spilling into the neighbouring column. */
+#race-table tbody td,
+#hoard-table tbody td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
