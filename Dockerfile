@@ -31,7 +31,9 @@ COPY --from=typhon-builder /build/typhon-engine/target/release/typhon-engine /us
 COPY --from=go-builder /hydra /usr/local/bin/hydra
 COPY web/ /app/web/
 COPY configs/ /app/configs/
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /app
 ENV GOMEMLIMIT=8GiB
-ENTRYPOINT ["hydra", "--config", "/configs/default.toml"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
