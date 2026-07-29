@@ -1,5 +1,9 @@
 # Hydra
 
+<p align="center">
+  <img src="web/static/hydra-banner.png" alt="Hydra" width="100%">
+</p>
+
 A self-hosted BitTorrent daemon built for **scale and seeding**: a Go control
 plane driving a purpose-built Rust engine ("Typhon"). Hydra holds **100k+
 torrents** in a single instance, exposes a live web UI, a native REST API, and a
@@ -26,6 +30,40 @@ just works.
   save-path per agent.
 - **Drop-in.** A qBittorrent v2 API shim means autobrr, Sonarr/Radarr,
   cross-seed, etc. talk to Hydra unchanged.
+- **Data-aware adds.** Add a torrent whose data is already on disk (a re-add,
+  a cross-seed, or a half-finished download) and Hydra hash-checks what's
+  there instead of blindly re-downloading over it: verified pieces are kept
+  and served, the rest is fetched. `skip_checking=true` still short-circuits
+  the check for a fast trust-add.
+
+---
+
+## Screenshots
+
+**Overview** — live dashboard: global up/down, seeding/leeching counts,
+per-session throughput, all streamed over SSE.
+
+![Overview](docs/img/hydra_01_overview.png)
+
+**Race** — per-torrent detail with live peer speed and progress timelines for
+the hot download you're racing.
+
+![Race timeline](docs/img/hydra_02_race_timeline.png)
+
+**Hoard** — the long-term seeding set: tens of thousands of torrents in one
+virtualized, push-updated table.
+
+![Hoard](docs/img/hydra_03_hoard.png)
+
+**Agents** — run engines across several machines and manage them from one
+front: status, free space, and per-engine roles.
+
+![Agents](docs/img/hydra_04_agents.png)
+
+**Benchmark** — built-in throughput history so you can see exactly what your
+box sustains.
+
+![Benchmark](docs/img/hydra_05_benchmark.png)
 
 ---
 
@@ -221,8 +259,10 @@ image; it's the recommended path.
 - **Native REST** under `/api/*`, authenticated with `X-Api-Key`. Full reference:
   [`docs/API.md`](docs/API.md).
 - **qBittorrent shim** under `/api/v2/*` for compatibility with autobrr, the
-  `*arr` suite, cross-seed, etc. Use `skip_checking=true` to seed data already on
-  disk without re-hashing.
+  `*arr` suite, cross-seed, etc. `skip_checking=true` seeds data already on disk
+  without re-hashing (trust-fast); `POST /api/v2/torrents/recheck` — or the
+  native `POST /api/hoard/torrents/<hash>/verify` — forces a hash-check of
+  on-disk data (hoard engine only).
 
 ---
 
