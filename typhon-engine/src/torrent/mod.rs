@@ -12,6 +12,9 @@ use tracing::{info, warn};
 
 use meta::{InfoHash, TorrentState, TorrentStatus};
 use crate::disk::DiskManager;
+use std::sync::OnceLock;
+use tokio::sync::Semaphore;
+use sha1::{Sha1, Digest};
 
 pub struct TorrentManager {
     torrents: DashMap<InfoHash, Arc<TorrentState>>,
@@ -407,4 +410,131 @@ fn remove_empty_dirs_recursive(dir: &std::path::Path) {
         }
     }
     let _ = std::fs::remove_dir(dir);
+}
+
+
+/// Bounds how many rechecks hash the disk at once. Recheck is triggered per
+/// add / per explicit request (never a boot-wide O(N) scan), but a burst of
+/// re-adds could otherwise thrash the disk -- cap concurrent checks.
+fn recheck_sem() -> &'static Semaphore {
+    static S: OnceLock<Semaphore> = OnceLock::new();
+    S.get_or_init(|| Semaphore::new(2))
+}
+
+impl TorrentManager {
+    /// True if the torrent's first file already exists on disk at its
+    /// save_path. Cheap gate for auto-recheck: a fresh download with no data
+    /// on disk returns false and skips the (all-miss) check.
+    pub fn first_file_exists(&self, info_hash: &InfoHash) -> bool {
+        let t = match self.get(info_hash) {
+            Some(t) => t,
+            None => return false,
+        };
+        let f0 = match t.meta.files.first() {
+            Some(f) => f,
+            None => return false,
+        };
+        let save_path = t.save_path.read().clone();
+        let full = if t.meta.multi_file {
+            save_path.join(&t.meta.name).join(&f0.path)
+        } else {
+            save_path.join(&f0.path)
+        };
+        full.exists()
+    }
+
+    /// Hash-check data already on disk and populate the picker with the pieces
+    /// that verify. Runs in the background: the torrent shows status Checking
+    /// until done, then Seeding (all pieces valid) or Downloading (the picker
+    /// fetches whatever did not verify). Requires a picker (download-mode add);
+    /// a seed_mode torrent has none and is rejected -- its data is trusted by
+    /// explicit skip_checking, which stays the trust-fast path.
+    pub fn recheck(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
+        let t = self.get(info_hash).ok_or("torrent not found")?;
+        if t.picker.is_none() {
+            return Err("cannot recheck a seed_mode torrent (no picker)".into());
+        }
+        if !t.is_paused.load(Ordering::Relaxed) {
+            t.status
+                .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        }
+        let mgr = self.clone();
+        let ih = *info_hash;
+        tokio::spawn(async move {
+            let _permit = recheck_sem().acquire().await;
+            mgr.run_recheck(ih, t).await;
+        });
+        Ok(())
+    }
+
+    async fn run_recheck(&self, ih: InfoHash, t: Arc<TorrentState>) {
+        let num_pieces = t.meta.num_pieces();
+        let picker = match t.picker.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        // Recheck is authoritative: clear prior have bits, then re-derive from
+        // disk. Otherwise a now-corrupt piece keeps its stale have bit.
+        picker.lock().unwrap().reset_have();
+        let mut have = 0u32;
+        for piece in 0..num_pieces {
+            if t.is_removed.load(Ordering::Relaxed) {
+                return; // torrent removed mid-check -> drop out
+            }
+            if let Some(data) = crate::disk::read_piece_for_check(&t, piece).await {
+                let expected = t.meta.pieces[piece as usize];
+                let mut hasher = Sha1::new();
+                hasher.update(&data);
+                let mut computed = [0u8; 20];
+                computed.copy_from_slice(&hasher.finalize());
+                if computed == expected {
+                    picker.lock().unwrap().set_have(piece);
+                    have += 1;
+                }
+            }
+        }
+
+        let complete = num_pieces > 0 && have >= num_pieces;
+        if t.is_paused.load(Ordering::Relaxed) {
+            t.status
+                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        } else if complete {
+            if t.completed_time.load(Ordering::Relaxed) == 0 {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                t.completed_time.store(now, Ordering::Relaxed);
+            }
+            t.status
+                .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        } else {
+            t.status
+                .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        }
+
+        // Persist the verified bitfield so a restart does not re-check from
+        // scratch (mirrors the resume written at add / on piece completion).
+        let bitfield = hex_encode_bytes(&picker.lock().unwrap().export_bitfield());
+        let rd = fastresume::ResumeData {
+            info_hash: hex_encode(&ih),
+            torrent_path: t.torrent_file_path.clone(),
+            save_path: t.save_path.read().to_string_lossy().to_string(),
+            seed_mode: t.seed_mode,
+            paused: t.is_paused.load(Ordering::Relaxed),
+            total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
+            total_downloaded: t.total_downloaded.load(Ordering::Relaxed),
+            added_time: t.added_time,
+            completed_time: t.completed_time.load(Ordering::Relaxed),
+            bitfield,
+        };
+        fastresume::save(&self.resume_dir, &ih, &rd);
+        info!(
+            "[recheck] {} verified {}/{} pieces -> {}",
+            &hex_encode(&ih)[..8],
+            have,
+            num_pieces,
+            if complete { "seeding" } else { "downloading" }
+        );
+    }
 }

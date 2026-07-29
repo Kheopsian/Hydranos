@@ -22,6 +22,7 @@ pub fn dispatch(
         "stop_torrent" => stop_torrent(params, torrent_mgr),
         "set_save_path" => set_save_path(params, torrent_mgr),
         "verify_torrent" => verify_torrent(params, torrent_mgr),
+        "recheck_torrent" => verify_torrent(params, torrent_mgr),
         "get_status" => get_status(params, torrent_mgr),
         "list_torrents" => list_torrents(torrent_mgr),
         "get_peers" => get_peers(params, torrent_mgr),
@@ -50,7 +51,15 @@ fn add_torrent(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
     let seed_mode = params.get("seed_mode").and_then(|v| v.as_bool()).unwrap_or(false);
 
     match mgr.add_torrent(torrent_path, save_path, stopped, seed_mode) {
-        Ok((ih, name)) => json!({"info_hash": hex_encode(&ih), "name": name}),
+        Ok((ih, name)) => {
+            // Data already on disk at save_path (re-add / cross-seed / a
+            // download resumed elsewhere)? Hash-check it instead of blindly
+            // re-downloading over it. seed_mode (skip_checking) stays trust-fast.
+            if !seed_mode && !stopped && mgr.first_file_exists(&ih) {
+                let _ = mgr.recheck(&ih);
+            }
+            json!({"info_hash": hex_encode(&ih), "name": name})
+        }
         Err(e) => json!({"error": e}),
     }
 }
@@ -96,12 +105,11 @@ fn set_save_path(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
 }
 
 fn verify_torrent(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
-    // TODO: implement actual verification
+    // Hash-check data on disk and repopulate the picker (async, background).
     let ih = match get_info_hash(params) { Ok(ih) => ih, Err(e) => return e };
-    if mgr.get(&ih).is_some() {
-        json!({"ok": true})
-    } else {
-        json!({"error": "torrent not found"})
+    match mgr.recheck(&ih) {
+        Ok(()) => json!({"ok": true, "checking": true}),
+        Err(e) => json!({"error": e}),
     }
 }
 

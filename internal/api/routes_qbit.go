@@ -45,6 +45,7 @@ func (s *Server) registerQbitRoutes() {
 	v2.POST("/torrents/delete", s.qbitTorrentsDelete)
 	v2.POST("/torrents/pause", s.qbitTorrentsPause)
 	v2.POST("/torrents/resume", s.qbitTorrentsResume)
+	v2.POST("/torrents/recheck", s.qbitTorrentsRecheck)
 	v2.POST("/torrents/setCategory", s.qbitTorrentsSetCategory)
 
 	// Categories
@@ -1002,4 +1003,26 @@ func compareValues(a, b interface{}) bool {
 		}
 	}
 	return fmt.Sprintf("%v", a) < fmt.Sprintf("%v", b)
+}
+
+// qbitTorrentsRecheck forces a data re-hash (recheck) of the given torrents.
+// Maps to the native verify path, which is hoard-only: the race engine has no
+// picker to record per-piece verification. "all" is intentionally NOT honoured
+// -- a mass recheck over the whole hoard (100k+) would be a disk storm; callers
+// (autobrr/*arr) pass explicit hashes.
+func (s *Server) qbitTorrentsRecheck(c *gin.Context) {
+	for _, hash := range parseHashes(c.PostForm("hashes")) {
+		hash = strings.ToLower(hash)
+		if hash == "" || hash == "all" {
+			continue
+		}
+		if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
+			s.hoardEngine.VerifyTorrent(hash)
+			continue
+		}
+		if ra, mode, ok := s.findRemoteOwner(hash); ok {
+			ra.anyClient().ActionRouted(mode, "verify", hash, false, "", "")
+		}
+	}
+	c.String(http.StatusOK, "")
 }
