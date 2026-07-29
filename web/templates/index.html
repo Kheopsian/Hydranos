@@ -758,11 +758,12 @@
                 <h2>Add Torrent</h2>
                 <form id="add-torrent-form">
                     <div class="form-group">
-                        <label>Mode</label>
-                        <div class="mode-selector">
-                            <button type="button" class="mode-btn active" data-mode="race">Race</button>
-                            <button type="button" class="mode-btn" data-mode="hoard">Hoard</button>
+                        <label for="torrent-category">Category</label>
+                        <div style="display:flex;gap:8px;align-items:center">
+                            <select id="torrent-category" style="flex:1"></select>
+                            <button type="button" class="btn-small" onclick="activateTab('categories');showCategoryForm()" title="Create a category">+ New</button>
                         </div>
+                        <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Sets the save path and mode automatically. Change them under Advanced.</div>
                     </div>
 
                     <div class="form-group" id="torrent-path-group">
@@ -770,28 +771,31 @@
                         <input type="text" id="torrent-path" placeholder="/path/to/file.torrent">
                     </div>
 
+                    <div class="form-group" id="upload-group">
+                        <label for="torrent-upload">Or Upload .torrent <span style="color:var(--text-secondary);font-weight:normal">(multi-select supported)</span></label>
+                        <input type="file" id="torrent-upload" accept=".torrent" multiple>
+                    </div>
+
                     <div class="form-group" id="magnet-group">
                         <label for="magnet-uri">Magnet URI (race only)</label>
                         <input type="text" id="magnet-uri" placeholder="magnet:?xt=urn:btih:...">
                     </div>
 
-                    <div class="form-group">
-                        <label for="torrent-category">Category <span style="color:var(--text-secondary);font-weight:normal">(optional — overrides mode + save path)</span></label>
-                        <div style="display:flex;gap:8px;align-items:center">
-                            <select id="torrent-category" style="flex:1"></select>
-                            <button type="button" class="btn-small" onclick="activateTab('categories');showCategoryForm()" title="Create a category">+ New</button>
+                    <details class="add-advanced" style="margin-bottom:16px">
+                        <summary style="cursor:pointer;color:var(--text-secondary)">Advanced — override mode &amp; save path</summary>
+                        <div class="form-group" style="margin-top:12px">
+                            <label>Mode</label>
+                            <div class="mode-selector">
+                                <button type="button" class="mode-btn active" data-mode="race">Race</button>
+                                <button type="button" class="mode-btn" data-mode="hoard">Hoard</button>
+                            </div>
                         </div>
-                    </div>
 
-                    <div class="form-group">
-                        <label for="save-path">Save Path</label>
-                        <input type="text" id="save-path" placeholder="/data/race" value="/data">
-                    </div>
-
-                    <div class="form-group" id="upload-group">
-                        <label for="torrent-upload">Or Upload .torrent <span style="color:var(--text-secondary);font-weight:normal">(multi-select supported)</span></label>
-                        <input type="file" id="torrent-upload" accept=".torrent" multiple>
-                    </div>
+                        <div class="form-group">
+                            <label for="save-path">Save Path</label>
+                            <input type="text" id="save-path" placeholder="Auto-filled from category — or set a path">
+                        </div>
+                    </details>
 
                     <button type="submit" class="btn-primary" id="add-btn">Add Torrent</button>
                     <div id="add-result" class="result-msg"></div>

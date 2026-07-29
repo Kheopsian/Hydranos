@@ -252,6 +252,39 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 					}
 				}
 				e.mu.Unlock()
+				// Seed the stats cache with the static metadata from the add
+				// event NOW. GetTorrentList() and the SSE list hydration read
+				// cachedStats; without this a freshly-added torrent surfaces with
+				// an empty name (the UI falls back to its info-hash) until the 60s
+				// refreshStats backfills it — the "add → refresh shows the id →
+				// refresh again shows the name" bug. Separate lock (not nested in
+				// e.mu) to avoid any ordering hazard.
+				state := "downloading"
+				if data.SeedMode {
+					state = "seeding"
+				}
+				e.cachedStatsMu.Lock()
+				st, ok := e.cachedStats[data.InfoHash]
+				if !ok {
+					st = &TorrentStats{InfoHash: data.InfoHash}
+					e.cachedStats[data.InfoHash] = st
+				}
+				if st.Name == "" {
+					st.Name = data.Name
+				}
+				if st.SavePath == "" {
+					st.SavePath = data.SavePath
+				}
+				if st.TotalSize == 0 {
+					st.TotalSize = data.TotalSize
+				}
+				if st.State == "" {
+					st.State = state
+				}
+				if st.AddedTime == 0 {
+					st.AddedTime = time.Now().Unix()
+				}
+				e.cachedStatsMu.Unlock()
 			}
 		case "torrent_removed":
 			var data ltclient.TorrentRemovedData

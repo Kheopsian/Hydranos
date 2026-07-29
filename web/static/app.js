@@ -31,8 +31,8 @@ async function fetchPortForward() {
 
         // Build tooltip
         let lines = [
-            `Race :${d.race_port} — ${d.race_peers} peers ${d.race_connectable ? "✓" : "✗"}`,
-            `Hoard :${d.hoard_port} — ${d.hoard_peers} peers ${d.hoard_connectable ? "✓" : "✗"}`,
+            `Race :${d.race_port} — ${d.race_peers} peers ${d.race_connectable ? "" : "✗"}`,
+            `Hoard :${d.hoard_port} — ${d.hoard_peers} peers ${d.hoard_connectable ? "" : "✗"}`,
             `IP: ${d.public_ip}`,
         ];
         if (warnings.length) lines = [...warnings, "", ...lines];
@@ -588,8 +588,8 @@ let selectedHoardTorrent = null;
 let hoardDetailTimer = null;
 
 // Race sort
-let _raceSortCol = "added_time";
-let _raceSortAsc = false;
+let _raceSortCol = localStorage.getItem("hydra_race_sort_col") || "added_time";
+let _raceSortAsc = localStorage.getItem("hydra_race_sort_asc") === "1";
 
 function sortRace(th) {
     const col = th.dataset.col;
@@ -599,6 +599,8 @@ function sortRace(th) {
         _raceSortCol = col;
         _raceSortAsc = true;
     }
+    localStorage.setItem("hydra_race_sort_col", _raceSortCol);
+    localStorage.setItem("hydra_race_sort_asc", _raceSortAsc ? "1" : "0");
     document.querySelectorAll("#race-table thead th").forEach(h => {
         h.classList.remove("sort-asc", "sort-desc");
     });
@@ -612,8 +614,8 @@ let _hoardLastFetch = 0;
 let _hoardStatsPainted = false;
 let _hoardStateFilter = "";
 let _hoardCatFilter = "";
-let _hoardSortCol = "added_time";
-let _hoardSortAsc = false;
+let _hoardSortCol = localStorage.getItem("hydra_hoard_sort_col") || "added_time";
+let _hoardSortAsc = localStorage.getItem("hydra_hoard_sort_asc") === "1";
 const HOARD_FETCH_INTERVAL = 30000; // bumped 2026-04-19: SSE /api/events fournit le live, ce poll reste un backstop statique (name, category, scrape)
 const HOARD_RENDER_LIMIT = 500;
 
@@ -655,7 +657,7 @@ async function updateRaceTorrents() {
             return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="race" data-agent="${t.agent || 'local'}"
                 onclick="handleRowClick(event,'${t.info_hash}','race')"
                 oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','race')">
-                <td title="${t.info_hash}">${t.name || t.info_hash.substring(0, 16)}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' ✓ HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>
+                <td title="${t.info_hash}">${t.name || t.info_hash.substring(0, 16)}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>
                 <td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>
                 <td>
                     <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
@@ -1061,7 +1063,7 @@ function renderTimelineEvents(events, t0) {
         return;
     }
 
-    const iconMap = { added: "+", first_peer: "P", first_upload: "U", completed: "\u2713",
+    const iconMap = { added: "+", first_peer: "P", first_upload: "U", completed: "",
         uploader_injected: "\u21e8", injection_hit: "\u2605", announce: "A" };
     const hlEvents = new Set(["completed"]);
 
@@ -1201,6 +1203,8 @@ function sortHoard(th) {
         _hoardSortCol = col;
         _hoardSortAsc = true;
     }
+    localStorage.setItem("hydra_hoard_sort_col", _hoardSortCol);
+    localStorage.setItem("hydra_hoard_sort_asc", _hoardSortAsc ? "1" : "0");
     document.querySelectorAll("#hoard-table thead th").forEach(h => {
         h.classList.remove("sort-asc", "sort-desc");
     });
@@ -1715,9 +1719,9 @@ function buildSeedboxBadge(p) {
     const sessionsOk = p.num_sessions > 10;
 
     const checks = [
-        `${speedOk ? "✓" : "✗"} Avg speed > 10 MB/s (${formatSpeed(p.avg_speed)})`,
-        `${reliabilityOk ? "✓" : "✗"} Reliability > 80% (${(p.reliability * 100).toFixed(0)}%)`,
-        `${sessionsOk ? "✓" : "✗"} Sessions > 10 (${p.num_sessions})`,
+        `${speedOk ? "" : "✗"} Avg speed > 10 MB/s (${formatSpeed(p.avg_speed)})`,
+        `${reliabilityOk ? "" : "✗"} Reliability > 80% (${(p.reliability * 100).toFixed(0)}%)`,
+        `${sessionsOk ? "" : "✗"} Sessions > 10 (${p.num_sessions})`,
     ].join("\n");
 
     if (p.is_seedbox) {
@@ -1759,6 +1763,7 @@ async function confirmRemove(deleteFiles) {
 
 // ─── Add torrent ────────────────────────────────────────
 
+let _addMsgTimer = null;
 document.getElementById("add-torrent-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const resultEl = document.getElementById("add-result");
@@ -1767,6 +1772,8 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
     const fileInput = document.getElementById("torrent-upload");
 
     btn.disabled = true;
+    if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+    btn.textContent = "Adding\u2026";
     resultEl.className = "result-msg";
     resultEl.style.display = "none";
 
@@ -1826,7 +1833,10 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                     resultEl.className = "result-msg " + (ok > 0 ? "" : "error");
                 }
                 resultEl.style.display = "block";
+                clearTimeout(_addMsgTimer);
+                if (fail === 0) _addMsgTimer = setTimeout(() => { resultEl.style.display = "none"; }, 6000);
                 fileInput.value = "";
+                btn.textContent = btn.dataset.label || "Add Torrent";
                 btn.disabled = false;
                 updateOverview(); updateRaceTorrents(); updateHoardStats();
                 return;
@@ -1857,8 +1867,17 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
             });
         }
 
-        resultEl.textContent = `Added: ${result.info_hash} (${result.mode})`;
+        const _fname = (fileInput.files && fileInput.files[0])
+            ? fileInput.files[0].name.replace(/\.torrent$/i, "")
+            : ((document.getElementById("torrent-path").value.split("/").pop() || "").replace(/\.torrent$/i, "") || (result.info_hash || "").slice(0, 16));
+        const _cat = document.getElementById("torrent-category").value;
+        resultEl.innerHTML = `Added <b>${esc(_fname)}</b> \u2192 <b>${esc(result.mode)}</b>${_cat ? " \u00b7 " + esc(_cat) : ""}`;
         resultEl.className = "result-msg success";
+        resultEl.style.display = "";
+        clearTimeout(_addMsgTimer);
+        _addMsgTimer = setTimeout(() => { resultEl.style.display = "none"; }, 6000);
+        btn.textContent = "Added";
+        setTimeout(() => { btn.textContent = btn.dataset.label || "Add Torrent"; }, 1500);
 
         // Reset form
         document.getElementById("torrent-path").value = "";
@@ -1872,6 +1891,8 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
     } catch (err) {
         resultEl.textContent = "Error: " + err.message;
         resultEl.className = "result-msg error";
+        resultEl.style.display = "";
+        btn.textContent = btn.dataset.label || "Add Torrent";
     } finally {
         btn.disabled = false;
     }
@@ -2157,10 +2178,12 @@ document.getElementById("torrent-category").addEventListener("change", async (e)
     if (!name) return;
     try {
         const cats = await api("/api/categories");
-        if (cats[name]) {
-            document.getElementById("save-path").value = cats[name].save_path;
+        // /api/categories returns an ARRAY of {name, save_path, mode, ...}.
+        const cat = Array.isArray(cats) ? cats.find(c => c.name === name) : (cats || {})[name];
+        if (cat) {
+            if (cat.save_path) document.getElementById("save-path").value = cat.save_path;
             document.querySelectorAll(".mode-btn").forEach(b => {
-                b.classList.toggle("active", b.dataset.mode === cats[name].mode);
+                b.classList.toggle("active", b.dataset.mode === cat.mode);
             });
         }
     } catch {}
@@ -3149,7 +3172,7 @@ async function copyField(id, btn) {
     }
     if (btn) {
         const t = btn.textContent;
-        btn.textContent = "\u2713";
+        btn.textContent = "";
         setTimeout(() => { btn.textContent = t; }, 1200);
     }
 }
@@ -3229,11 +3252,16 @@ async function updateSettings() {
             <input type="text" id="settings-search" class="settings-search" placeholder="Search a setting\u2026" oninput="filterSettings()">
             <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> Show advanced settings</label>
             <span id="settings-search-count" class="settings-search-count"></span>
-        </div><div class="settings-groups">`;
+        </div>`;
 
+        const _activeDomSaved = localStorage.getItem("hydra_settings_tab");
+        let _tabsHtml = "";
+        let _panelsHtml = "";
+        let _firstDom = null;
         for (const dom of order) {
             const sections = buckets[dom.id];
             if (!sections || !sections.length) continue;
+            if (!_firstDom) _firstDom = dom.id;
             let count = 0;
             let body = "";
             for (const { path, scalars } of sections) {
@@ -3256,16 +3284,15 @@ async function updateSettings() {
                 }
                 body += `<div class="settings-section"><div class="settings-section-title">[${esc(path)}]</div>${rows}</div>`;
             }
-            html += `<details class="settings-group" open>
-                <summary class="settings-group-head">
-                    <span class="sg-title">${esc(dom.label)}</span>
-                    <span class="sg-count">${count}</span>
-                </summary>
-                <div class="settings-group-body">${body}</div>
-            </details>`;
+            _tabsHtml += `<button type="button" class="settings-tab" data-domain="${dom.id}" onclick="showSettingsPanel('${dom.id}')"><span class="sg-title">${esc(dom.label)}</span> <span class="sg-count">${count}</span></button>`;
+            _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div></div>`;
         }
-        html += "</div>";
+        html += `<div class="settings-tabs" id="settings-tabs">${_tabsHtml}</div><div class="settings-panels" id="settings-panels">${_panelsHtml}</div>`;
         editor.innerHTML = html;
+        {
+            const _active = (_activeDomSaved && buckets[_activeDomSaved] && buckets[_activeDomSaved].length) ? _activeDomSaved : _firstDom;
+            if (_active) showSettingsPanel(_active);
+        }
         filterSettings();
         const banner = document.getElementById("settings-restart-banner");
         if (banner) banner.style.display = "none";
@@ -3275,16 +3302,26 @@ async function updateSettings() {
 }
 
 // Filtre live : masque les lignes/sections/groupes sans match, ouvre les groupes qui matchent.
+function showSettingsPanel(id) {
+    document.querySelectorAll("#settings-panels .settings-panel").forEach((pn) => { pn.hidden = pn.dataset.domain !== id; });
+    document.querySelectorAll("#settings-tabs .settings-tab").forEach((t) => { t.classList.toggle("active", t.dataset.domain === id); });
+    localStorage.setItem("hydra_settings_tab", id);
+}
+
 function filterSettings() {
     const box = document.getElementById("settings-search");
     if (!box) return;
     const q = box.value.trim().toLowerCase();
     const advBox = document.getElementById("settings-show-adv");
     const showAdv = !!(advBox && advBox.checked);
+    const searching = !!q;
+    const active = localStorage.getItem("hydra_settings_tab");
+    const tabs = document.getElementById("settings-tabs");
+    if (tabs) tabs.style.display = searching ? "none" : "";
     let shown = 0;
-    document.querySelectorAll(".settings-group").forEach((g) => {
-        let gVisible = 0;
-        g.querySelectorAll(".settings-section").forEach((sec) => {
+    document.querySelectorAll(".settings-panel").forEach((panel) => {
+        let pVisible = 0;
+        panel.querySelectorAll(".settings-section").forEach((sec) => {
             let secVisible = 0;
             sec.querySelectorAll(".settings-row").forEach((r) => {
                 const advOk = showAdv || !r.dataset.adv;
@@ -3293,10 +3330,11 @@ function filterSettings() {
                 if (m) { secVisible++; shown++; }
             });
             sec.style.display = secVisible ? "" : "none";
-            gVisible += secVisible;
+            pVisible += secVisible;
         });
-        g.style.display = gVisible ? "" : "none";
-        if (q) g.open = gVisible > 0;
+        // Search mode: reveal every panel that has a match. Tab mode: only the
+        // active panel is shown (the tab bar drives which one).
+        panel.hidden = searching ? (pVisible === 0) : (panel.dataset.domain !== active);
     });
     const c = document.getElementById("settings-search-count");
     if (c) c.textContent = shown + (showAdv ? " settings" : " common");
@@ -3421,7 +3459,7 @@ async function testAgent() {
     if (!p.addr) { _agResult("Address required", false); return; }
     try {
         const res = await api("/api/agents/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
-        if (res.online) _agResult("\u2713 reachable", true);
+        if (res.online) _agResult(" reachable", true);
         else _agResult("\u2717 unreachable: " + (res.error || ""), false);
     } catch (e) { _agResult("Error: " + e.message, false); }
 }
