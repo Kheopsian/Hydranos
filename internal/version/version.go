@@ -1,11 +1,11 @@
 package version
 
 // Version is the single source of truth.
-var Version = "3.5.0-typhon"
+var Version = "3.6.0-typhon"
 
 // PeerFingerprintID is the 8-byte BEP-20 peer_id prefix. Azureus-style
 // -HY<MMmpb>- where each digit is one char. Bumped when Version changes.
-var PeerFingerprintID = "-HY3500-"
+var PeerFingerprintID = "-HY3600-"
 
 // PeerFingerprint returns the BEP-20 peer_id prefix.
 func PeerFingerprint() string {

@@ -376,6 +376,7 @@ function activateTab(name) {
     content.classList.add("active");
     window.location.hash = name;
     if (name === "config") updateSettings();
+    else if (name === "changelog") loadChangelog();
     else if (name === "agents") { updateAgents(); updateEngines(); }
 }
 
@@ -416,6 +417,7 @@ async function checkHealth() {
             const v = "v" + data.version;
             document.getElementById("header-version").textContent = v;
             document.getElementById("footer-version").textContent = v;
+            checkForUpdate();
         }
     } catch {
         const dot = document.getElementById("health-dot");
@@ -3698,4 +3700,120 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
 
         ctx.fillRect(x, 0, 1, 40);
     }
+}
+
+// ─── Column visibility (right-click a table header) ─────────────────────────
+function _colHiddenSet(tableId) {
+    try { return new Set(JSON.parse(localStorage.getItem("hydra_cols_" + tableId) || "[]")); }
+    catch (_) { return new Set(); }
+}
+function _colSaveSet(tableId, set) {
+    localStorage.setItem("hydra_cols_" + tableId, JSON.stringify([...set]));
+}
+// Hide by column position (nth-child) via an injected <style>, so it survives
+// the constant SSE re-render of the table body (per-cell inline styles wouldn't).
+function applyColumnVisibility(tableId) {
+    const hidden = _colHiddenSet(tableId);
+    let css = "";
+    hidden.forEach(n => {
+        css += `#${tableId} thead th:nth-child(${n}),#${tableId} tbody td:nth-child(${n}){display:none}`;
+    });
+    let st = document.getElementById("colvis-" + tableId);
+    if (!st) { st = document.createElement("style"); st.id = "colvis-" + tableId; document.head.appendChild(st); }
+    st.textContent = css;
+}
+function showColumnMenu(ev, tableId) {
+    ev.preventDefault();
+    document.querySelectorAll(".col-menu").forEach(m => m.remove());
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    const ths = [...table.querySelectorAll("thead th")];
+    const hidden = _colHiddenSet(tableId);
+    const menu = document.createElement("div");
+    menu.className = "col-menu ctx-menu";
+    menu.style.display = "block";
+    menu.style.position = "fixed";
+    menu.style.zIndex = "9999";
+    menu.innerHTML = `<div class="ctx-label">Columns</div><div class="ctx-separator"></div>` +
+        `<div class="ctx-scroll">` +
+        ths.map((th, i) => {
+            const n = i + 1;
+            const label = (th.textContent || th.dataset.col || ("col " + n)).trim();
+            const on = !hidden.has(n);
+            return `<div class="ctx-item" onclick="toggleColumn('${tableId}',${n},this)"><span class="col-chk">${on ? "\u2713" : ""}</span>${esc(label)}</div>`;
+        }).join("") + `</div>`;
+    document.body.appendChild(menu);
+    menu.style.left = Math.min(ev.clientX, window.innerWidth - 240) + "px";
+    menu.style.top = Math.min(ev.clientY, window.innerHeight - menu.offsetHeight - 8) + "px";
+}
+function toggleColumn(tableId, n, el) {
+    const hidden = _colHiddenSet(tableId);
+    if (hidden.has(n)) hidden.delete(n); else hidden.add(n);
+    _colSaveSet(tableId, hidden);
+    applyColumnVisibility(tableId);
+    if (el) { const chk = el.querySelector(".col-chk"); if (chk) chk.textContent = hidden.has(n) ? "" : "\u2713"; }
+}
+document.addEventListener("click", e => {
+    if (!e.target.closest(".col-menu")) document.querySelectorAll(".col-menu").forEach(m => m.remove());
+});
+(function initColumnVisibility() {
+    const wire = () => {
+        ["hoard-table", "race-table"].forEach(tid => {
+            applyColumnVisibility(tid);
+            const thead = document.querySelector("#" + tid + " thead");
+            if (thead && !thead.dataset.colMenuWired) {
+                thead.dataset.colMenuWired = "1";
+                thead.addEventListener("contextmenu", e => showColumnMenu(e, tid));
+            }
+        });
+    };
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wire);
+    else wire();
+})();
+
+// ─── Changelog (renders the repo CHANGELOG.md, single source) ───────────────
+function _renderMarkdown(md) {
+    const esc = t => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const inline = t => esc(t)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    const out = [];
+    let inList = false;
+    const closeList = () => { if (inList) { out.push("</ul>"); inList = false; } };
+    for (const raw of md.split("\n")) {
+        const line = raw.replace(/\s+$/, "");
+        if (/^### /.test(line)) { closeList(); out.push("<h3>" + inline(line.slice(4)) + "</h3>"); }
+        else if (/^## /.test(line)) { closeList(); out.push("<h2>" + inline(line.slice(3)) + "</h2>"); }
+        else if (/^# /.test(line)) { closeList(); out.push("<h1>" + inline(line.slice(2)) + "</h1>"); }
+        else if (/^---+$/.test(line)) { closeList(); out.push("<hr>"); }
+        else if (/^[-*] /.test(line)) { if (!inList) { out.push("<ul>"); inList = true; } out.push("<li>" + inline(line.slice(2)) + "</li>"); }
+        else if (line.trim() === "") { closeList(); }
+        else { closeList(); out.push("<p>" + inline(line) + "</p>"); }
+    }
+    closeList();
+    return out.join("\n");
+}
+async function loadChangelog() {
+    const el = document.getElementById("changelog-body");
+    if (!el || el.dataset.loaded) return;
+    try {
+        const res = await fetch("/static/CHANGELOG.md", { cache: "no-cache" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        el.innerHTML = _renderMarkdown(await res.text());
+        el.dataset.loaded = "1";
+    } catch (e) { el.textContent = "Failed to load changelog: " + e.message; }
+}
+
+async function checkForUpdate() {
+    const el = document.getElementById("update-badge");
+    if (!el) return;
+    try {
+        const d = await api("/api/update-check");
+        if (d && d.enabled && d.update_available) {
+            el.innerHTML = ` <a href="${d.url || '#'}" target="_blank" rel="noopener" class="update-badge" title="A newer version (${esc(d.latest)}) is available">update ${esc(d.latest)}</a>`;
+        } else {
+            el.innerHTML = "";
+        }
+    } catch (_) {}
 }
