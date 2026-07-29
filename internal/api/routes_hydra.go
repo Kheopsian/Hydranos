@@ -1276,7 +1276,8 @@ func (s *Server) handleHoardVerifyTorrent(c *gin.Context) {
 func (s *Server) handleHoardSetCategory(c *gin.Context) {
 	hash := c.Param("info_hash")
 	var body struct {
-		Category string `json:"category"`
+		Category  string `json:"category"`
+		MoveFiles bool   `json:"move_files"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
@@ -1302,13 +1303,19 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "category not found: " + body.Category})
 		return
 	}
-	if targetSavePath == "" {
+	if body.MoveFiles && targetSavePath == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "target category has empty save_path"})
 		return
 	}
 
 	if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
-		if err := s.hoardEngine.SetTorrentCategory(hash, body.Category, targetSavePath); err != nil {
+		var serr error
+		if body.MoveFiles {
+			serr = s.hoardEngine.SetTorrentCategory(hash, body.Category, targetSavePath)
+		} else {
+			serr = s.hoardEngine.SetCategoryLabel(hash, body.Category)
+		}
+		if err := serr; err != nil {
 			msg := err.Error()
 			if strings.Contains(msg, "cross-filesystem") {
 				c.JSON(http.StatusConflict, gin.H{"error": msg})

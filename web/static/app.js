@@ -78,16 +78,44 @@ async function fetchPublicIp() {
 
 // ─── Utilities ──────────────────────────────────────────
 
+function _unitSize() { return localStorage.getItem("hydra_unit_size") || "binary"; }
+function _unitSpeed() { return localStorage.getItem("hydra_unit_speed") || "bytes"; }
+function setUnitPref(kind, value) {
+    localStorage.setItem(kind === "size" ? "hydra_unit_size" : "hydra_unit_speed", value);
+    try { updateOverview(); } catch (_) {}
+    try { if (typeof _scheduleHoardRender === "function") _scheduleHoardRender(); } catch (_) {}
+    try { if (typeof updateRaceTorrents === "function") updateRaceTorrents(); } catch (_) {}
+}
+
 function formatBytes(bytes) {
     if (bytes === 0) return "0 B";
-    const k = 1024;
-    const sizes = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const decimal = _unitSize() === "decimal";
+    const k = decimal ? 1000 : 1024;
+    const sizes = decimal
+        ? ["B", "KB", "MB", "GB", "TB", "PB"]
+        : ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return (bytes / Math.pow(k, i)).toPrecision(4) + " " + sizes[i];
 }
 
 function formatSpeed(bytesPerSec) {
-    return formatBytes(bytesPerSec) + "/s";
+    return _unitSpeed() === "bits" ? formatGbps(bytesPerSec) : formatBytes(bytesPerSec) + "/s";
+}
+
+function _unitsCardHTML() {
+    const sz = _unitSize(), sp = _unitSpeed();
+    const opt = (v, cur, label) => `<option value="${v}"${v === cur ? " selected" : ""}>${label}</option>`;
+    return `<div class="settings-section" style="margin-bottom:18px">
+        <div class="settings-section-title">Display units</div>
+        <div class="settings-row">
+            <div class="sr-label"><span class="sr-key">Sizes</span><span class="sr-desc">Binary (MiB, \u00d71024) or decimal (MB, \u00d71000).</span></div>
+            <div class="sr-field"><select class="sr-input" onchange="setUnitPref('size', this.value)">${opt("binary", sz, "Binary \u2014 KiB / MiB / GiB")}${opt("decimal", sz, "Decimal \u2014 KB / MB / GB")}</select></div>
+        </div>
+        <div class="settings-row">
+            <div class="sr-label"><span class="sr-key">Speeds</span><span class="sr-desc">Bytes per second (MiB/s) or bits per second (Mbps).</span></div>
+            <div class="sr-field"><select class="sr-input" onchange="setUnitPref('speed', this.value)">${opt("bytes", sp, "Bytes/s \u2014 KiB/s, MiB/s")}${opt("bits", sp, "Bits/s \u2014 Mbps, Gbps")}</select></div>
+        </div>
+    </div>`;
 }
 
 // Throughput in bits/s (network convention, decimal) — Option 2: VOLUMES in iB, RATES in Gbps.
@@ -348,6 +376,7 @@ function activateTab(name) {
     content.classList.add("active");
     window.location.hash = name;
     if (name === "config") updateSettings();
+    else if (name === "agents") { updateAgents(); updateEngines(); }
 }
 
 document.querySelectorAll(".tab").forEach(tab => {
@@ -1505,7 +1534,7 @@ function _restoreCtxActionsView() {
     }
 }
 
-async function _showCategoryPicker(ev) {
+async function _showCategoryPicker(ev, move) {
     if (ev) ev.stopPropagation();
     _saveCtxActionsView();
     const hoardOnly = [..._selected.entries()].filter(([, m]) => m === "hoard");
@@ -1524,11 +1553,10 @@ async function _showCategoryPicker(ev) {
         const safePath = esc(c.save_path || "");
         // category name is embedded as a JS string literal — escape quotes.
         const jsName = String(c.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
-        return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\')" title="${safePath}">${safeName}</div>`;
+        return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\', ${move ? "true" : "false"})" title="${safePath}">${safeName}</div>`;
     }).join("");
-    const label = hoardOnly.length > 1
-        ? `Category for ${hoardOnly.length} torrents`
-        : "Category for 1 torrent";
+    const verb = move ? "Move to category" : "Set category (no move)";
+    const label = `${verb} \u2014 ${hoardOnly.length} torrent${hoardOnly.length > 1 ? "s" : ""}`;
     document.getElementById("ctx-menu").innerHTML =
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
@@ -1538,7 +1566,7 @@ async function _showCategoryPicker(ev) {
     _clampCtxMenuToViewport();
 }
 
-async function _changeCategorySelected(catName) {
+async function _changeCategorySelected(catName, move) {
     const entries = [..._selected.entries()].filter(([, m]) => m === "hoard");
     _hideCtxMenu();
     let okCount = 0;
@@ -1551,7 +1579,7 @@ async function _changeCategorySelected(catName) {
                     "X-Api-Key": API_KEY,
                     "Content-Type": "application/json",
                 },
-                body: JSON.stringify({ category: catName }),
+                body: JSON.stringify({ category: catName, move_files: !!move }),
             });
             if (!r.ok) {
                 let msg = `HTTP ${r.status}`;
@@ -3248,7 +3276,7 @@ async function updateSettings() {
         }
 
         const order = SETTINGS_DOMAINS.concat([_SETTINGS_FALLBACK]);
-        let html = `<div class="settings-toolbar">
+        let html = _unitsCardHTML() + `<div class="settings-toolbar">
             <input type="text" id="settings-search" class="settings-search" placeholder="Search a setting\u2026" oninput="filterSettings()">
             <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> Show advanced settings</label>
             <span id="settings-search-count" class="settings-search-count"></span>
