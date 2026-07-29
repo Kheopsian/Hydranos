@@ -312,3 +312,43 @@ async fn read_block_direct(
     .await
     .map_err(|e| format!("spawn_blocking: {}", e))?
 }
+
+
+/// Read a full piece from disk for hash verification. Returns None if any
+/// backing file is missing or too short (the piece isn't fully present on
+/// disk) or on any read error -- the caller treats that as "not have".
+/// Bypasses the read cache: a one-shot cold recheck scan should not evict the
+/// hot blocks we are actively serving.
+pub async fn read_piece_for_check(torrent: &TorrentState, piece: u32) -> Option<Vec<u8>> {
+    let plen = torrent.meta.piece_size(piece);
+    if plen == 0 {
+        return None;
+    }
+    let ops = torrent.meta.map_block(piece, 0, plen);
+    let save_path = torrent.save_path.read().clone();
+    let name = torrent.meta.name.clone();
+    let multi_file = torrent.meta.multi_file;
+
+    tokio::task::spawn_blocking(move || {
+        let mut result = Vec::with_capacity(plen as usize);
+        for op in ops {
+            let full_path = if multi_file {
+                save_path.join(&name).join(&op.path)
+            } else {
+                save_path.join(&op.path)
+            };
+            let file = get_or_open(&full_path).ok()?;
+            let mut buf = vec![0u8; op.length as usize];
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt;
+                file.read_exact_at(&mut buf, op.file_offset).ok()?;
+            }
+            result.extend_from_slice(&buf);
+        }
+        Some(result)
+    })
+    .await
+    .ok()
+    .flatten()
+}

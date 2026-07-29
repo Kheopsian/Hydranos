@@ -27,6 +27,15 @@ impl PiecePicker {
     }
 
     /// Mark a piece as completed.
+    /// Clear all have bits. Used before a recheck re-derives ownership
+    /// from disk: without it set_have could only add pieces, never detect
+    /// a piece that has since become corrupt/missing.
+    pub fn reset_have(&mut self) {
+        for h in self.have.iter_mut() {
+            *h = false;
+        }
+    }
+
     pub fn set_have(&mut self, index: u32) {
         if (index as usize) < self.have.len() {
             self.have[index as usize] = true;
