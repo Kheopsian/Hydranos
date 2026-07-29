@@ -92,6 +92,7 @@ type HoardEngine interface {
 	VerifyDownloading() int
 	VerifyTorrent(infoHash string) error
 	SetTorrentCategory(infoHash, newCategory, newSavePath string) error
+	SetCategoryLabel(infoHash, category string) error
 	// Download slot manager runtime control.
 	GetDownloadSlotStatus() engine.DownloadSlotStats
 	SetDownloadSlotsOverride(max int)

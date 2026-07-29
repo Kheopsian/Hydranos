@@ -1734,6 +1734,26 @@ func (e *HoardEngine) enforceDownloadSlots() {
 }
 
 // ---------------------------------------------------------------------------
+// SetCategoryLabel re-tags a torrent's category WITHOUT moving its files on
+// disk (save_path is unchanged). Use SetTorrentCategory to also relocate the
+// data under the new category's save_path.
+func (e *HoardEngine) SetCategoryLabel(infoHash, category string) error {
+	e.mu.Lock()
+	info, ok := e.torrents[infoHash]
+	if !ok {
+		e.mu.Unlock()
+		return fmt.Errorf("torrent not found")
+	}
+	info.Category = category
+	e.mu.Unlock()
+	e.cachedStatsMu.Lock()
+	if st, ok := e.cachedStats[infoHash]; ok {
+		st.Category = category
+	}
+	e.cachedStatsMu.Unlock()
+	return nil
+}
+
 // SetTorrentCategory — move a torrent between categories at runtime.
 //
 // Stops the torrent, renames its data directory to the target category's
