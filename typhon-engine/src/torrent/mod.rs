@@ -198,6 +198,15 @@ impl TorrentManager {
     pub fn start_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         t.is_paused.store(false, Ordering::Relaxed);
+        // A recheck in progress owns the status. Don't let a start (e.g. from the
+        // download slot manager filling a slot, or a resume) clobber Checking
+        // with Downloading: that flips is_downloading() on and the torrent
+        // re-downloads pieces the recheck is about to mark present (the "re-add
+        // of already-complete data pulls 100-200 MB" bug). run_recheck sets the
+        // final Seeding/Downloading itself when it finishes.
+        if t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
+            return Ok(());
+        }
         if t.seed_mode || t.picker.is_none() {
             t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         } else {

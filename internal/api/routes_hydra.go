@@ -643,11 +643,15 @@ func (s *Server) resolveCategory(category, savePath, mode string) (string, strin
 	}
 	for _, cat := range loadCategories(s.config.Daemon.DataDir) {
 		if strings.EqualFold(cat.Name, category) {
+			// The category is authoritative for the engine role: picking a
+			// category must route there even if the caller also sent a default
+			// mode (the web form always sends one). The save path is only filled
+			// when the caller left it empty, so an explicit path (cross-seed) wins.
+			if cat.Mode != "" {
+				mode = cat.Mode
+			}
 			if savePath == "" {
 				savePath = cat.SavePath
-			}
-			if mode == "" {
-				mode = cat.Mode
 			}
 			break
 		}
@@ -873,6 +877,9 @@ func (s *Server) handleUploadTorrent(c *gin.Context) {
 	savePath, mode = s.resolveCategory(category, savePath, mode)
 	if mode == "" {
 		mode = "race"
+	}
+	if savePath == "" {
+		savePath = "/data"
 	}
 
 	cat := s.categoryByName(category)
