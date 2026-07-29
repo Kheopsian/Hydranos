@@ -440,6 +440,7 @@ func (s *Server) registerHydraRoutes() {
 
 		// Global status
 		api.GET("/status", s.handleStatus)
+		api.GET("/update-check", s.handleUpdateCheck)
 
 		// Server-Sent Events stream (Typhon push → browser).
 		// Emits the same wire-format as Rust: {"event":"stats_snapshot","data":{...}}.
@@ -2278,4 +2279,111 @@ func (s *Server) handleSettingsRestart(c *gin.Context) {
 		time.Sleep(300 * time.Millisecond)
 		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
 	}()
+}
+
+
+// ─── Update check (badge next to the version) ──────────────────────────────
+var (
+	updateCheckMu     sync.Mutex
+	updateCheckAt     time.Time
+	updateCheckLatest string
+	updateCheckURL    string
+)
+
+// handleUpdateCheck reports whether a newer GitHub release exists. The lookup
+// is server-side (avoids browser CORS / GitHub per-IP rate limits) and cached
+// 6h. Opt out with [daemon] update_check_disabled = true. Best-effort: any
+// network error just yields update_available=false.
+func (s *Server) handleUpdateCheck(c *gin.Context) {
+	if s.config.Daemon.UpdateCheckDisabled {
+		c.JSON(http.StatusOK, gin.H{"enabled": false})
+		return
+	}
+	latest, url := fetchLatestRelease()
+	avail := latest != "" && verLess(normVer(Version), normVer(latest))
+	c.JSON(http.StatusOK, gin.H{
+		"enabled":          true,
+		"current":          Version,
+		"latest":           latest,
+		"update_available": avail,
+		"url":              url,
+	})
+}
+
+func fetchLatestRelease() (string, string) {
+	updateCheckMu.Lock()
+	defer updateCheckMu.Unlock()
+	if time.Since(updateCheckAt) < 6*time.Hour && updateCheckLatest != "" {
+		return updateCheckLatest, updateCheckURL
+	}
+	// Use the tags API (works from day one) rather than releases/latest, which
+	// 404s until a GitHub *Release* is actually published. Pick the highest
+	// semver vX.Y.Z tag.
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/Kheopsian/Hydra/tags?per_page=100", nil)
+	if err != nil {
+		return updateCheckLatest, updateCheckURL
+	}
+	req.Header.Set("User-Agent", "Hydra/"+Version)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return updateCheckLatest, updateCheckURL
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		updateCheckAt = time.Now()
+		return updateCheckLatest, updateCheckURL
+	}
+	var tags []struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return updateCheckLatest, updateCheckURL
+	}
+	updateCheckAt = time.Now()
+	best := ""
+	var bestV [3]int
+	for _, t := range tags {
+		if !strings.HasPrefix(t.Name, "v") {
+			continue
+		}
+		v := normVer(t.Name)
+		if best == "" || verLess(bestV, v) {
+			best = t.Name
+			bestV = v
+		}
+	}
+	if best != "" {
+		updateCheckLatest = best
+		updateCheckURL = "https://github.com/Kheopsian/Hydra/releases/tag/" + best
+	}
+	return updateCheckLatest, updateCheckURL
+}
+
+func normVer(v string) [3]int {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	end := len(v)
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if (c < '0' || c > '9') && c != '.' {
+			end = i
+			break
+		}
+	}
+	parts := strings.Split(v[:end], ".")
+	var out [3]int
+	for i := 0; i < len(parts) && i < 3; i++ {
+		n, _ := strconv.Atoi(parts[i])
+		out[i] = n
+	}
+	return out
+}
+
+func verLess(a, b [3]int) bool {
+	for i := 0; i < 3; i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }

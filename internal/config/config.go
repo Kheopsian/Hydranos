@@ -111,6 +111,7 @@ type DaemonConfig struct {
 	APIKey              string `toml:"api_key"`
 	DataDir             string `toml:"data_dir"`
 	CreateTorrentFolder bool   `toml:"create_torrent_folder"`
+	UpdateCheckDisabled bool   `toml:"update_check_disabled"`
 }
 
 // HydraConfig — root configuration.

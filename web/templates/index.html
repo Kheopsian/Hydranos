@@ -31,7 +31,7 @@
             <img src="/static/hydra-logo.png" alt="Hydra" class="logo-icon">
             <div class="logo-text">
                 <h1>HYDRA</h1>
-                <span class="subtitle">Torrent Daemon <span id="header-version"></span></span>
+                <span class="subtitle">Torrent Daemon <span id="header-version"></span><span id="update-badge"></span></span>
             </div>
         </div>
         <div class="header-stats">
@@ -79,6 +79,7 @@
         <button class="tab" data-tab="agents">Agents</button>
         <button class="tab" data-tab="config">Config</button>
         <button class="tab" data-tab="benchmark">Benchmark</button>
+        <button class="tab" data-tab="changelog">Changelog</button>
         <button class="tab" data-tab="add">+ Add Torrent</button>
     </nav>
 
@@ -800,6 +801,13 @@
                     <button type="submit" class="btn-primary" id="add-btn">Add Torrent</button>
                     <div id="add-result" class="result-msg"></div>
                 </form>
+            </div>
+        </section>
+        <!-- Changelog -->
+        <section id="tab-changelog" class="tab-content">
+            <div class="add-form-container">
+                <h2>Changelog</h2>
+                <div id="changelog-body" class="changelog">Loading\u2026</div>
             </div>
         </section>
     </main>
