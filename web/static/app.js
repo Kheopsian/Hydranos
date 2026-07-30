@@ -3122,7 +3122,6 @@ window.addEventListener("load", function () {
     if (b) {
         b.classList.toggle("active", _incognito);
         b.style.color = _incognito ? "var(--accent-purple)" : "#ffffff";
-        b.style.borderColor = _incognito ? "var(--accent-purple)" : "var(--border-color,#30363d)";
         b.title = (_incognito ? "Incognito ON \u2014 " : "") + "Anonymize names, categories & IPs for screenshots";
     }
 });
