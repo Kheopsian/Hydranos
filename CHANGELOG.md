@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.13.1 — 2026-07-30
+
+### Changed
+- Moved the Incognito toggle out of the tab bar into a small icon button in the header (next to the health dot), so it no longer looks like a navigation tab.
+
 ## v3.13.0 — 2026-07-30
 
 ### Changed
