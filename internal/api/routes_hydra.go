@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Kheopsian/hydra/internal/agentwire"
 	"github.com/Kheopsian/hydra/internal/bench"
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
@@ -368,11 +369,13 @@ type engineInfo struct {
 }
 
 type agentInfo struct {
-	Name    string       `json:"name"`
-	Kind    string       `json:"kind"` // "local" | "grpc"
-	Online  bool         `json:"online"`
-	Addr    string       `json:"addr,omitempty"`
-	Engines []engineInfo `json:"engines,omitempty"`
+	Name       string              `json:"name"`
+	Kind       string              `json:"kind"` // "local" | "grpc"
+	Online     bool                `json:"online"`
+	Addr       string              `json:"addr,omitempty"`
+	Engines    []engineInfo        `json:"engines,omitempty"`
+	ExitIP     string              `json:"exit_ip,omitempty"`
+	Interfaces []agentwire.NICInfo `json:"interfaces,omitempty"`
 }
 
 // handleAgentsGet lists the agents a category's placement can target. v1 exposes
@@ -388,7 +391,7 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 		if s.hoardEngine != nil {
 			engs = append(engs, engineInfo{ID: "hoard", Role: "hoard", Online: true})
 		}
-		agents = append(agents, agentInfo{Name: "local", Kind: "local", Online: len(engs) > 0, Engines: engs})
+		agents = append(agents, agentInfo{Name: "local", Kind: "local", Online: len(engs) > 0, Engines: engs, ExitIP: getPublicIP(), Interfaces: localNICs()})
 	}
 	for _, ra := range s.agentsSnapshot() {
 		var engs []engineInfo
@@ -398,7 +401,14 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 			online = online || up
 			engs = append(engs, engineInfo{ID: e.id, Role: e.role, Online: up})
 		}
-		agents = append(agents, agentInfo{Name: ra.name, Kind: "grpc", Addr: ra.addr, Online: online, Engines: engs})
+		var exitIP string
+		var ifaces []agentwire.NICInfo
+		if len(ra.engines) > 0 && ra.engines[0].client != nil {
+			if ni, nerr := ra.engines[0].client.NodeInfo(); nerr == nil {
+				exitIP, ifaces = ni.PublicIP, ni.Interfaces
+			}
+		}
+		agents = append(agents, agentInfo{Name: ra.name, Kind: "grpc", Addr: ra.addr, Online: online, Engines: engs, ExitIP: exitIP, Interfaces: ifaces})
 	}
 	c.JSON(http.StatusOK, agents)
 }
@@ -2172,6 +2182,30 @@ func (s *Server) handleSetSecondaryStats(c *gin.Context) {
 // ---------------------------------------------------------------------------
 // Handlers — Settings (whole-config editor; writes default.toml in place)
 // ---------------------------------------------------------------------------
+
+// localNICs enumerates this host's non-loopback IPv4 interfaces.
+func localNICs() []agentwire.NICInfo {
+	out := []agentwire.NICInfo{}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		up := ifc.Flags&net.FlagUp != 0
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if ip4 := ipnet.IP.To4(); ip4 != nil {
+					out = append(out, agentwire.NICInfo{Name: ifc.Name, IP: ip4.String(), Up: up})
+				}
+			}
+		}
+	}
+	return out
+}
 
 // handleNetworkInterfaces lists the host's non-loopback IPv4 interfaces so the
 // Configuration UI can offer them (name + ip) for engine binding.

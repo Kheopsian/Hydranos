@@ -44,6 +44,8 @@ async function fetchPublicIp() {
     try {
         const d = await api("/api/public-ip");
         if (d.ip && d.ip !== "unknown") {
+            const hdrEl = document.getElementById("header-exit-ip");
+            if (hdrEl) hdrEl.textContent = d.ip;
             // Leak detection: any IP that is NOT our home WAN means we're
             // properly behind a tunnel. Avoids hardcoding takehost IPs which
             // change when DPI bans hit and we rotate to a new VPS IP.
@@ -3467,7 +3469,7 @@ async function updateAgents() {
         const agents = await api("/api/agents");
         const tbody = document.getElementById("agents-tbody");
         if (!agents || !agents.length) {
-            tbody.innerHTML = '<tr><td colspan="5" class="empty">No agents</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="empty">No agents</td></tr>';
             return;
         }
         tbody.innerHTML = agents.map(a => {
@@ -3477,7 +3479,8 @@ async function updateAgents() {
             const actions = a.kind === "local"
                 ? '<span class="sr-desc">built-in</span>'
                 : `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">Edit</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">Delete</button>`;
-            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td>${dot}</td><td>${actions}</td></tr>`;
+            const ifTip = (a.interfaces||[]).map(i=>i.name+": "+i.ip+(i.up?"":" (down)")).join("\n");
+            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono" style="font-size:12px" title="${esc(ifTip)}">${esc(a.exit_ip || "\u2014")}</td><td>${dot}</td><td>${actions}</td></tr>`;
         }).join("");
     } catch (e) { console.error("Failed to update agents:", e); }
 }

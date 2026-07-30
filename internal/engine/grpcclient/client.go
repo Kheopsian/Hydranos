@@ -123,6 +123,13 @@ func (c *Client) ListEngines() ([]agentwire.EngineDescriptor, error) {
 	return out, err
 }
 
+// NodeInfo returns the agent's egress IP + host interfaces (node-level).
+func (c *Client) NodeInfo() (agentwire.NodeInfo, error) {
+	var out agentwire.NodeInfo
+	err := c.call(agentwire.MethodNodeInfo, nil, &out)
+	return out, err
+}
+
 func (c *Client) Close() error {
 	c.eventMu.Lock()
 	if c.cancelSub != nil {

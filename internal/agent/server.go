@@ -10,9 +10,13 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -190,6 +194,9 @@ func reply(v interface{}, err error) (*agentpb.CallReply, error) {
 func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.CallReply, error) {
 	if req.Method == agentwire.MethodListEngines {
 		return s.handleListEngines()
+	}
+	if req.Method == agentwire.MethodNodeInfo {
+		return s.handleNodeInfo()
 	}
 	if req.Method == agentwire.MethodPing {
 		// Node-level liveness, handled before engine resolution so a discovery
@@ -508,4 +515,63 @@ func (s *Server) broadcast(name string, frame []byte) {
 		default: // slow consumer: drop rather than block the engine reader
 		}
 	}
+}
+
+// ---- Node-level info (exit IP + interfaces) ----
+
+var (
+	agentPubIP     string
+	agentPubIPTime time.Time
+	agentPubIPMu   sync.Mutex
+)
+
+// agentPublicIP returns this agent's egress IP (its own tunnel's public IP when
+// behind a per-agent VPN). Cached 5 min. Empty on failure (keeps last value).
+func agentPublicIP() string {
+	agentPubIPMu.Lock()
+	defer agentPubIPMu.Unlock()
+	if agentPubIP != "" && time.Since(agentPubIPTime) < 5*time.Minute {
+		return agentPubIP
+	}
+	cl := &http.Client{Timeout: 8 * time.Second}
+	resp, err := cl.Get("https://api.ipify.org/")
+	if err != nil {
+		return agentPubIP
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return agentPubIP
+	}
+	if ip := strings.TrimSpace(string(b)); ip != "" {
+		agentPubIP, agentPubIPTime = ip, time.Now()
+	}
+	return agentPubIP
+}
+
+func agentNICs() []agentwire.NICInfo {
+	out := []agentwire.NICInfo{}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		up := ifc.Flags&net.FlagUp != 0
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if ip4 := ipnet.IP.To4(); ip4 != nil {
+					out = append(out, agentwire.NICInfo{Name: ifc.Name, IP: ip4.String(), Up: up})
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (s *Server) handleNodeInfo() (*agentpb.CallReply, error) {
+	return reply(agentwire.NodeInfo{PublicIP: agentPublicIP(), Interfaces: agentNICs()}, nil)
 }
