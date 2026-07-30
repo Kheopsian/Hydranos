@@ -288,6 +288,16 @@ async fn main() {
                     None => true, // first-time entry always sent
                 };
                 if moved {
+                    // Live progress so the UI's progress column streams (0..1);
+                    // seeders / seed-mode (no picker) are complete by definition.
+                    let progress: f32 = if st == crate::torrent::meta::TorrentStatus::Seeding as u8 {
+                        1.0
+                    } else if let Some(pk) = t.picker.as_ref() {
+                        let np = t.meta.num_pieces();
+                        if np > 0 { pk.lock().unwrap().num_have() as f32 / np as f32 } else { 0.0 }
+                    } else {
+                        1.0
+                    };
                     changed.push(rpc::events::TorrentStatsMini {
                         info_hash: torrent::hex_encode(&ih),
                         status: st,
@@ -297,6 +307,7 @@ async fn main() {
                         download_rate: t.download_rate.get(),
                         peers_connected: peers as u32,
                         peers_interested: interested as u32,
+                        progress,
                     });
                     last.insert(ih, (ul, dl, st, peers, interested));
                 }

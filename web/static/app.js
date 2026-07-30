@@ -327,7 +327,7 @@ function importWizard() {
             let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
             phase.style.color = ""; phase.textContent = labels[d.phase] || d.phase;
             if (d.total > 0) bar.style.width = Math.round(100 * d.done / d.total) + "%";
-            stats.textContent = `${d.done}/${d.total} · ${d.seeded} seeding · ${d.downloading} resuming · ${d.failed} failed`;
+            stats.textContent = `${d.done}/${d.total} · ${d.seeded} seeding · ${d.downloading} resuming · ${d.failed} failed${d.skipped ? " \u00b7 " + d.skipped + " skipped" : ""}`;
             cur.textContent = d.current ? ("last: " + d.current) : "";
             if (d.phase === "error") { phase.style.color = "var(--accent-red)"; phase.textContent = "Error: " + (d.error || "unknown"); }
             if (d.finished) {
@@ -1600,9 +1600,15 @@ async function _changeCategorySelected(catName, move) {
     if (errors.length > 0) {
         alert(`Category changed to "${catName}": ${okCount} OK, ${errors.length} failure(s).\n\n${errors.join("\n")}`);
     }
-    // Force a refresh so the new category shows in the row.
-    if (typeof updateHoard === "function") updateHoard();
-    else if (typeof renderHoardTable === "function") renderHoardTable();
+    // Optimistic: reflect the new category in the held rows immediately, so it
+    // shows without waiting for the next full refresh.
+    if (Array.isArray(_hoardAllTorrents)) {
+        for (const [hash] of entries) {
+            const t = _hoardAllTorrents.find(x => x.info_hash === hash);
+            if (t) t.category = catName;
+        }
+    }
+    try { if (typeof _scheduleHoardRender === "function") _scheduleHoardRender(); } catch (_) {}
 }
 
 document.addEventListener("click", e => {
@@ -1798,7 +1804,8 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
     e.preventDefault();
     const resultEl = document.getElementById("add-result");
     const btn = document.getElementById("add-btn");
-    const mode = document.querySelector(".mode-btn.active").dataset.mode;
+    const _modeBtn = document.querySelector(".mode-btn.active");
+    const mode = _modeBtn ? _modeBtn.dataset.mode : "race";
     const fileInput = document.getElementById("torrent-upload");
 
     btn.disabled = true;
@@ -3003,6 +3010,7 @@ function setupHoardSSE() {
                 t.total_upload = m.total_uploaded;
                 t.total_download = m.total_downloaded;
                 t.num_peers = m.peers_connected;
+                if (typeof m.progress === "number") t.progress = m.progress;
                 if (t.total_size && t.total_size > 0 && t.total_done > 0) {
                     t.ratio = t.total_upload / t.total_done;
                 }
@@ -3807,9 +3815,14 @@ async function loadChangelog() {
     } catch (e) { el.textContent = "Failed to load changelog: " + e.message; }
 }
 
+let _lastUpdateCheck = 0;
 async function checkForUpdate() {
     const el = document.getElementById("update-badge");
     if (!el) return;
+    // Server caches the GitHub lookup 6h, so polling it every health tick is
+    // pointless — throttle the client to once per 30 min.
+    if (_lastUpdateCheck && Date.now() - _lastUpdateCheck < 1800000) return;
+    _lastUpdateCheck = Date.now();
     try {
         const d = await api("/api/update-check");
         if (d && d.enabled && d.update_available) {

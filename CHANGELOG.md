@@ -3,6 +3,17 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.6.2 — 2026-07-30
+
+### Added
+- Torrent **progress** now streams live in the list — no refresh needed.
+
+### Fixed
+- Changing a torrent's **category** updates the row immediately instead of only after a refresh.
+- The qBittorrent import counts already-present torrents as **skipped** rather than failed.
+- The update-availability check no longer polls every second (throttled on the client; the server already caches it).
+- The Add form no longer breaks when no engine mode is active (falls back to race).
+
 ## v3.6.1 — 2026-07-30
 
 ### Added

@@ -72,4 +72,5 @@ pub struct TorrentStatsMini {
     pub download_rate: u64,
     pub peers_connected: u32,
     pub peers_interested: u32,
+    pub progress: f32,
 }

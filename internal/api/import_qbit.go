@@ -216,6 +216,7 @@ type importSnapshot struct {
 	Seeded      int      `json:"seeded"`
 	Downloading int      `json:"downloading"`
 	Failed      int      `json:"failed"`
+	Skipped     int      `json:"skipped"`
 	Current     string   `json:"current"`
 	Error       string   `json:"error,omitempty"`
 	Errors      []string `json:"errors,omitempty"`
@@ -495,6 +496,12 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 		// time, so deleting it here would drop the torrent from the store on the
 		// next restart (torrent added to the live engine but not persisted).
 		if addErr != nil {
+			// A torrent already in the engine is a skip, not a failure.
+			el := strings.ToLower(addErr.Error())
+			if strings.Contains(el, "already") || strings.Contains(el, "duplicate") || strings.Contains(el, "exists") {
+				job.update(func(sn *importSnapshot) { sn.Skipped++; sn.Done++ })
+				continue
+			}
 			slog.Warn("qbit import: add failed", "name", name, "seed_mode", seed, "save_path", sp, "error", addErr)
 			job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": add: "+addErr.Error()) })
 			continue
@@ -531,7 +538,7 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 	if s.saveStateFn != nil {
 		s.saveStateFn()
 	}
-	slog.Info("qbit import: complete", "seeded", final.Seeded, "downloading", final.Downloading, "failed", final.Failed)
+	slog.Info("qbit import: complete", "seeded", final.Seeded, "downloading", final.Downloading, "skipped", final.Skipped, "failed", final.Failed)
 	job.update(func(sn *importSnapshot) { sn.Phase = "done" })
 }
 
