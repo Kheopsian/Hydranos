@@ -1,0 +1,20 @@
+[Unit]
+Description=Hydra BitTorrent seedbox
+Documentation=https://github.com/Kheopsian/Hydra/wiki
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hydra
+Group=hydra
+# The Typhon engine binary ships next to hydra in /opt/hydra.
+Environment=HYDRA_ENGINE_BIN=/opt/hydra/hydra-engine
+ExecStart=/opt/hydra/hydra --config /etc/hydra/default.toml
+Restart=on-failure
+RestartSec=5
+# One Unix socket per torrent at scale -> raise the fd limit.
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

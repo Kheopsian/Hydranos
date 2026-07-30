@@ -29,8 +29,6 @@ ENV MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/config
 COPY --from=typhon-builder /build/typhon-engine/target/release/typhon-engine /usr/local/bin/hydra-engine
 
 COPY --from=go-builder /hydra /usr/local/bin/hydra
-COPY web/ /app/web/
-COPY CHANGELOG.md /app/web/static/CHANGELOG.md
 COPY configs/ /app/configs/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

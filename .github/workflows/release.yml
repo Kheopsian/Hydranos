@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build Typhon engine
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: cargo build --release --bin typhon-engine
+
+      - name: Build hydra
+        run: CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o hydra ./cmd/hydra
+
+      - name: Package tarball
+        run: |
+          VER="${GITHUB_REF_NAME}"
+          DIR="hydra-${VER}-linux-${{ matrix.arch }}"
+          mkdir -p "$DIR"
+          cp hydra "$DIR"/hydra
+          cp typhon-engine/target/release/typhon-engine "$DIR"/hydra-engine
+          cp configs/default.toml "$DIR"/default.toml.example
+          cp packaging/hydra.service "$DIR"/hydra.service
+          cp packaging/install.sh "$DIR"/install.sh
+          chmod +x "$DIR"/install.sh
+          tar czf "${DIR}.tar.gz" "$DIR"
+          sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+
+      - name: Publish to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            hydra-*-linux-*.tar.gz
+            hydra-*-linux-*.tar.gz.sha256
