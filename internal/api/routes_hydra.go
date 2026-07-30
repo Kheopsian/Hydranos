@@ -558,6 +558,7 @@ func (s *Server) registerHydraRoutes() {
 
 		// Port forward
 		api.GET("/port-forward", s.handlePortForwardStatus)
+		api.GET("/network/interfaces", s.handleNetworkInterfaces)
 
 		// System
 		api.GET("/public-ip", s.handlePublicIP)
@@ -2171,6 +2172,37 @@ func (s *Server) handleSetSecondaryStats(c *gin.Context) {
 // ---------------------------------------------------------------------------
 // Handlers — Settings (whole-config editor; writes default.toml in place)
 // ---------------------------------------------------------------------------
+
+// handleNetworkInterfaces lists the host's non-loopback IPv4 interfaces so the
+// Configuration UI can offer them (name + ip) for engine binding.
+func (s *Server) handleNetworkInterfaces(c *gin.Context) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	type nic struct {
+		Name string `json:"name"`
+		IP   string `json:"ip"`
+		Up   bool   `json:"up"`
+	}
+	out := []nic{}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		up := ifc.Flags&net.FlagUp != 0
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if ip4 := ipnet.IP.To4(); ip4 != nil {
+					out = append(out, nic{Name: ifc.Name, IP: ip4.String(), Up: up})
+				}
+			}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"interfaces": out})
+}
 
 // settingsFilePath returns the daemon TOML config path. Convention:
 // <data_dir>/default.toml (matches the -config default and the container mount).

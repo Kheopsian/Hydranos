@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,6 +141,44 @@ type EngineConfig struct {
 }
 
 // BuildHoardConfig generates a hydra-engine config JSON from the Hydra session config.
+// resolveInterfaceIP returns the first non-loopback IPv4 of a named interface.
+func resolveInterfaceIP(name string) (string, error) {
+	ifc, err := net.InterfaceByName(name)
+	if err != nil {
+		return "", err
+	}
+	addrs, err := ifc.Addrs()
+	if err != nil {
+		return "", err
+	}
+	for _, a := range addrs {
+		if ipnet, ok := a.(*net.IPNet); ok {
+			if ip4 := ipnet.IP.To4(); ip4 != nil && !ip4.IsLoopback() {
+				return ip4.String(), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("interface %s has no IPv4 address", name)
+}
+
+// applyBindInterface resolves cfg.BindInterface (an interface NAME like "wg0")
+// to its current IPv4 and pins the engine's listen + outgoing sockets to it.
+// An explicit listen_interfaces (IP-based) always wins; bind_interface is the
+// friendly path, stable across VPN reconnects where the tunnel IP rotates.
+func applyBindInterface(ec *EngineConfig, cfg *config.SessionConfig) {
+	if cfg.BindInterface == "" || ec.ListenInterfaces != "" {
+		return
+	}
+	ip, err := resolveInterfaceIP(cfg.BindInterface)
+	if err != nil {
+		slog.Warn("bind_interface: could not resolve, not binding", "interface", cfg.BindInterface, "error", err)
+		return
+	}
+	ec.ListenInterfaces = fmt.Sprintf("%s:%d", ip, ec.ListenPort)
+	ec.OutgoingInterfaces = ip
+	slog.Info("bind_interface resolved", "interface", cfg.BindInterface, "ip", ip, "listen_port", ec.ListenPort)
+}
+
 func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 	ulLimit := 0
 	if cfg.UploadRateLimit > 0 {
@@ -235,6 +274,7 @@ func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 			ec.OutgoingInterfaces = strings.Join(ips, ",")
 		}
 	}
+	applyBindInterface(&ec, cfg)
 	return ec
 }
 
@@ -250,7 +290,7 @@ func BuildRaceConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 	}
 	unchokeSlots := -1
 
-	return EngineConfig{
+	ec := EngineConfig{
 		DataDir:                  dataDir,
 		ResumeDir:                dataDir + "/resume",
 		ListenPort:               cfg.ListenPort,
@@ -326,6 +366,8 @@ func BuildRaceConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		// Rate limits
 		UploadLimit: ulLimit,
 	}
+	applyBindInterface(&ec, cfg)
+	return ec
 }
 
 func valOrDefault(v, def int) int {
