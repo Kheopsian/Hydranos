@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	hydraroot "github.com/Kheopsian/hydra"
 	"github.com/Kheopsian/hydra/internal/agent"
 	"github.com/Kheopsian/hydra/internal/agentwire"
 	"github.com/Kheopsian/hydra/internal/api"
@@ -53,6 +54,46 @@ func engineSocketPath(dataDir, name string, tcpPort int) string {
 		return fmt.Sprintf("tcp://127.0.0.1:%d", tcpPort)
 	}
 	return filepath.Join(dataDir, name+".sock")
+}
+
+// resolveConfigPath picks the config file. With --config given explicitly we
+// use it as-is. Otherwise try, in order: the compiled default path, a
+// default.toml next to the executable, then default.toml in the working dir.
+// If none exist, write a fresh default.toml next to the executable (with a
+// relative data_dir) so a freshly-unzipped, double-clicked install just runs.
+func resolveConfigPath(def string, explicit bool) string {
+	if explicit {
+		return def
+	}
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	candidates := []string{def}
+	if exeDir != "" {
+		candidates = append(candidates, filepath.Join(exeDir, "default.toml"))
+	}
+	candidates = append(candidates, "default.toml")
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	// Nothing found — write a fresh default next to the executable.
+	target := "default.toml"
+	if exeDir != "" {
+		target = filepath.Join(exeDir, "default.toml")
+	}
+	doc := hydraroot.DefaultConfigTOML
+	if d, err := config.SetTOMLValue(doc, "daemon", "data_dir", `"data"`); err == nil {
+		doc = d
+	}
+	if err := os.WriteFile(target, []byte(doc), 0644); err != nil {
+		slog.Warn("no config found and could not write a default; using compiled default path", "target", target, "err", err)
+		return def
+	}
+	slog.Info("no config found — wrote a fresh default", "path", target)
+	return target
 }
 
 func main() {
@@ -139,6 +180,18 @@ func main() {
 	slog.Info("Hydra starting", "version", version)
 	api.Version = version
 
+	// Zero-setup start: if the user did not pass --config, look for a
+	// default.toml next to the executable (and CWD); if none exists, write a
+	// fresh one there so a freshly-unzipped, double-clicked install just runs.
+	// Docker/systemd pass --config explicitly and keep their exact path.
+	configExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			configExplicit = true
+		}
+	})
+	*configPath = resolveConfigPath(*configPath, configExplicit)
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		slog.Error("Failed to load config", "path", *configPath, "error", err)
@@ -198,6 +251,20 @@ func main() {
 	}
 	// ---- Resolve the engines this node runs (Option A). A legacy default.toml
 	// with [race]/[hoard] yields exactly those two; [[engine]] blocks override.
+	// Portable data_dir: an empty or relative path resolves next to the
+	// executable, so a zip that runs from anywhere keeps its data beside it.
+	// Absolute paths (Docker /config, bare-metal /var/lib/hydra) are untouched.
+	if cfg.Daemon.DataDir == "" {
+		cfg.Daemon.DataDir = "data"
+	}
+	if !filepath.IsAbs(cfg.Daemon.DataDir) {
+		base := "."
+		if exe, e := os.Executable(); e == nil {
+			base = filepath.Dir(exe)
+		}
+		cfg.Daemon.DataDir = filepath.Join(base, cfg.Daemon.DataDir)
+	}
+
 	engineCfgs, engErr := cfg.ResolveEngines()
 	if engErr != nil {
 		slog.Error("invalid engine config", "error", engErr)

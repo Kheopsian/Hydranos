@@ -90,7 +90,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path $DIR | Out-Null
           Copy-Item hydra.exe "$DIR/hydra.exe"
           Copy-Item typhon-engine/target/release/typhon-engine.exe "$DIR/hydra-engine.exe"
-          Copy-Item configs/default.toml "$DIR/default.toml.example"
           Copy-Item packaging/README-windows.md "$DIR/README.md"
           Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"
           $hash = (Get-FileHash "$DIR.zip" -Algorithm SHA256).Hash.ToLower()

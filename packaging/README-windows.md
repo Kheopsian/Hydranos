@@ -1,39 +1,45 @@
 # Hydra on Windows
 
-This archive contains a native Windows build of Hydra:
+Native Windows build. This archive contains:
 
-- `hydra.exe` — the daemon (web UI + API)
-- `hydra-engine.exe` — the Typhon BitTorrent engine (started automatically by `hydra.exe`)
-- `default.toml.example` — a starting configuration
+- `hydra.exe` — the app (web UI + API). **This is the only one you run.**
+- `hydra-engine.exe` — the BitTorrent engine, started automatically by `hydra.exe`.
 
-## Running
+## Run
 
-1. Copy `default.toml.example` to `default.toml` and edit `data_dir`, the API
-   key, and ports as needed. Use a Windows path for `data_dir`, e.g.
-   `data_dir = "C:\\Hydra\\data"`.
-2. Keep `hydra.exe` and `hydra-engine.exe` in the same folder (the daemon looks
-   for the engine next to itself).
-3. Start it:
+1. Unzip both files into a folder you can write to, e.g. `C:\Hydra` (keep them
+   **together** — the app looks for the engine next to itself).
+2. Double-click **`hydra.exe`** (or run it from a terminal).
 
-   ```
-   hydra.exe --config default.toml
-   ```
+That's it. On first run Hydra writes a `default.toml` and a `data\` folder next
+to itself, generates an API key and a temporary admin password (shown once in
+the console window — note it down), and starts.
 
-4. Open the web UI at `http://127.0.0.1:8199` (or the `api_port` you set).
+3. Open the web UI at `http://127.0.0.1:8199`.
 
-The daemon talks to the engine over a TCP loopback socket (127.0.0.1) — this is
-automatic on Windows; no configuration needed.
+No config file to copy, no `--config` to pass. To change ports or paths later,
+edit the `default.toml` it created and restart.
+
+## Run in the background (as a service)
+
+To run without a console window and start on boot, wrap it with a service
+manager such as [NSSM](https://nssm.cc/):
+
+```
+nssm install Hydra "C:\Hydra\hydra.exe"
+nssm start Hydra
+```
 
 ## VPN
 
-Hydra does not manage the VPN on Windows. Use your VPN client's system-wide or
-per-app binding / kill-switch (Mullvad, AirVPN Eddie, Proton, etc.) — all of
-Hydra's traffic then egresses through the tunnel like any other app. The
-Linux-only fwmark/SO_MARK routing is disabled on Windows by design.
+Hydra does not manage the VPN on Windows — use your VPN client's system-wide or
+per-app binding / kill-switch (Mullvad, AirVPN, Proton, etc.). All of Hydra's
+traffic then goes through the tunnel like any other app.
 
 ## Notes
 
-- To run unattended, wrap `hydra.exe` in a Windows service manager such as
-  [NSSM](https://nssm.cc/) or `sc.exe`.
-- Heap profiling (jemalloc) is Linux-only and absent from this build; the
-  system allocator is used instead.
+- **Windows Firewall** may prompt on first listen — allow it on your private
+  network so peers can reach you.
+- Heap profiling (jemalloc) is Linux-only and absent here; the system allocator
+  is used instead. No difference for normal use.
+- Full docs: https://github.com/Kheopsian/Hydra/wiki/Windows-Install
