@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/Kheopsian/hydra/internal/agentwire"
@@ -2347,7 +2346,7 @@ func (s *Server) handleSettingsRestart(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "restarting"})
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+		selfTerminate()
 	}()
 }
 

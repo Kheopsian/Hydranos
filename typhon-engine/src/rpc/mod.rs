@@ -4,7 +4,7 @@ pub mod types;
 
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::config::EngineConfig;
@@ -54,44 +54,70 @@ pub async fn serve(
             ));
         }
     } else {
-        // Remove stale socket
-        let _ = std::fs::remove_file(socket_path);
+        serve_unix(socket_path, torrent_mgr, disk_mgr, config).await;
+    }
+}
 
-        let listener = match UnixListener::bind(socket_path) {
-            Ok(l) => l,
+#[cfg(unix)]
+async fn serve_unix(
+    socket_path: &str,
+    torrent_mgr: Arc<TorrentManager>,
+    disk_mgr: Arc<DiskManager>,
+    config: Arc<EngineConfig>,
+) {
+    use tokio::net::UnixListener;
+
+    // Remove stale socket
+    let _ = std::fs::remove_file(socket_path);
+
+    let listener = match UnixListener::bind(socket_path) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("[rpc] bind {} failed: {}", socket_path, e);
+            return;
+        }
+    };
+
+    // Make socket world-accessible
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o777)).ok();
+    }
+
+    info!("[rpc] listening on {}", socket_path);
+
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(v) => v,
             Err(e) => {
-                tracing::error!("[rpc] bind {} failed: {}", socket_path, e);
-                return;
+                warn!("[rpc] accept error: {}", e);
+                continue;
             }
         };
-
-        // Make socket world-accessible
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o777)).ok();
-        }
-
-        info!("[rpc] listening on {}", socket_path);
-
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("[rpc] accept error: {}", e);
-                    continue;
-                }
-            };
-            let (reader, writer) = stream.into_split();
-            tokio::spawn(handle_conn(
-                reader,
-                writer,
-                torrent_mgr.clone(),
-                disk_mgr.clone(),
-                config.clone(),
-            ));
-        }
+        let (reader, writer) = stream.into_split();
+        tokio::spawn(handle_conn(
+            reader,
+            writer,
+            torrent_mgr.clone(),
+            disk_mgr.clone(),
+            config.clone(),
+        ));
     }
+}
+
+#[cfg(not(unix))]
+async fn serve_unix(
+    socket_path: &str,
+    _torrent_mgr: Arc<TorrentManager>,
+    _disk_mgr: Arc<DiskManager>,
+    _config: Arc<EngineConfig>,
+) {
+    // No Unix domain sockets on this platform; the daemon is expected to pass a
+    // tcp://host:port endpoint (it defaults to that on Windows).
+    tracing::error!(
+        "[rpc] unix socket path {} unsupported on this platform; use tcp://host:port",
+        socket_path
+    );
 }
 
 // Per-connection JSON-RPC loop, generic over the transport's read/write halves

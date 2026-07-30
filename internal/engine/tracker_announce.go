@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -64,18 +63,7 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		Timeout:   5 * time.Second,
 		KeepAlive: -1,
 	}
-	if b.Fwmark != 0 {
-		mark := b.Fwmark
-		dialer.Control = func(network, address string, c syscall.RawConn) error {
-			var sockErr error
-			if err := c.Control(func(fd uintptr) {
-				sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soMark, int(mark))
-			}); err != nil {
-				return err
-			}
-			return sockErr
-		}
-	}
+	applyFwmark(dialer, int(b.Fwmark))
 	transport := &http.Transport{
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 		DisableKeepAlives: true,
@@ -153,10 +141,6 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		bindingID:       b.ID,
 	}
 }
-
-// soMark is SO_MARK (Linux). Defined here to avoid pulling in
-// golang.org/x/sys for a single integer constant. Value from include/asm-generic/socket.h.
-const soMark = 36
 
 // announceProxyOnce caches the parsed TYPHON_ANNOUNCE_PROXY env at startup.
 // Format expected: socks5h://user:pass@host:port — sets a SOCKS5h dialer for

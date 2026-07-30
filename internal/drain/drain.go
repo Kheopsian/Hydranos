@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Kheopsian/hydra/internal/config"
@@ -146,12 +145,10 @@ func (d *RaceDrain) DrainNow() map[string]interface{} {
 // ---------------------------------------------------------------------------
 
 func (d *RaceDrain) getDiskUsage() (used, total int64, pct float64) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(d.cfg.RacePath, &stat); err != nil {
+	totalBytes, freeBytes, err := fsTotalFree(d.cfg.RacePath)
+	if err != nil {
 		return 0, 0, 0
 	}
-	totalBytes := int64(stat.Blocks) * stat.Bsize
-	freeBytes := int64(stat.Bavail) * stat.Bsize
 	usedBytes := totalBytes - freeBytes
 	if totalBytes > 0 {
 		pct = float64(usedBytes) / float64(totalBytes) * 100

@@ -476,6 +476,7 @@ pub async fn dial_peer(
         source_fwmark: u32,
     ) -> Option<PeerTransport> {
         use crate::peer::SOCKS5_OUTBOUND;
+        #[cfg(unix)]
         use std::os::unix::io::AsRawFd;
         // 3s — on a reachable LAN/WAN peer, TCP connect succeeds in ≤300ms.
         let connect_fut = async move {
@@ -501,6 +502,7 @@ pub async fn dial_peer(
             // the right WG interface. Source IP becomes 10.2.0.2 automatically
             // (the only address bound on every wg-hy* iface, per Proton's
             // shared-Address scheme).
+            #[cfg(unix)]
             if source_fwmark != 0 {
                 let socket = if addr.is_ipv4() {
                     TcpSocket::new_v4().ok()?

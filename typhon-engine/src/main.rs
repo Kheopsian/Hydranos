@@ -3,6 +3,7 @@ use typhon_engine::{config, rpc, torrent, peer, disk, tracker, dht};
 use std::sync::Arc;
 use tracing::{info, error};
 
+#[cfg(not(windows))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -12,6 +13,7 @@ async fn main() {
     // MALLOC_CONF). The Go watchdog raises this on a ballooning engine right
     // before killing it, so the 85GB heap leak (2026-07-09) gets an
     // allocation-site profile the next time it recurs.
+    #[cfg(unix)]
     tokio::spawn(async {
         use tokio::signal::unix::{signal, SignalKind};
         match signal(SignalKind::user_defined1()) {
