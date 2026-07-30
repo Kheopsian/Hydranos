@@ -11,6 +11,10 @@ import (
 // without Unix domain sockets in this path (Windows). Linux defaults to unix.
 const defaultEngineTCP = false
 
+// defaultAPIHost overrides the generated config bind address per platform.
+// Empty = keep the template default (0.0.0.0). Windows binds localhost only.
+const defaultAPIHost = ""
+
 // raiseNofileLimit bumps the process soft RLIMIT_NOFILE toward target so the
 // engines can hold many peer sockets. Best-effort; logs and returns on failure.
 func raiseNofileLimit(target uint64) {
