@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -223,7 +224,76 @@ func DefaultConfig() *HydraConfig {
 
 // Load reads a TOML config file and returns a HydraConfig.
 // Unknown keys are silently ignored (same behavior as the Python version).
+// migrationKeys lists config keys introduced after v1. On load we make sure
+// each exists in the file (additive only — existing lines are never touched
+// or reordered), so upgrading users gain the new options and see them in the
+// Configuration editor without hand-editing default.toml. Curated on purpose:
+// we resurrect only keys we actually want, never the features dropped in the
+// OSS cleanup. Append future keys here.
+var migrationKeys = []struct{ section, key, value string }{
+	{"race", "bind_interface", `""`},
+	{"race", "listen_interfaces", `""`},
+	{"hoard", "bind_interface", `""`},
+	{"hoard", "listen_interfaces", `""`},
+}
+
+// ensureConfigKeys appends any missing migrationKeys to the TOML file in place.
+// Best-effort: any read/parse/write error leaves the file untouched.
+func ensureConfigKeys(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var m map[string]interface{}
+	if err := toml.Unmarshal(data, &m); err != nil {
+		return
+	}
+	has := func(section, key string) bool {
+		sec, ok := m[section].(map[string]interface{})
+		if !ok {
+			return false
+		}
+		_, ok = sec[key]
+		return ok
+	}
+	lines := strings.Split(string(data), "\n")
+	changed := false
+	for _, mk := range migrationKeys {
+		if has(mk.section, mk.key) {
+			continue
+		}
+		newline := mk.key + " = " + mk.value
+		hdr := "[" + mk.section + "]"
+		inserted := false
+		for i, ln := range lines {
+			if strings.TrimSpace(ln) == hdr {
+				out := make([]string, 0, len(lines)+1)
+				out = append(out, lines[:i+1]...)
+				out = append(out, newline)
+				out = append(out, lines[i+1:]...)
+				lines = out
+				inserted = true
+				break
+			}
+		}
+		if !inserted {
+			lines = append(lines, hdr, newline)
+		}
+		sec, ok := m[mk.section].(map[string]interface{})
+		if !ok {
+			sec = map[string]interface{}{}
+			m[mk.section] = sec
+		}
+		sec[mk.key] = mk.value
+		changed = true
+	}
+	if changed {
+		_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+	}
+}
+
 func Load(path string) (*HydraConfig, error) {
+	ensureConfigKeys(path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
