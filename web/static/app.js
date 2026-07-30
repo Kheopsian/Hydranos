@@ -3152,13 +3152,16 @@ const _SETTINGS_DESC = {
     enabled: "Enable this feature.",
 };
 const _SETTINGS_COMMON = new Set([
-    "daemon::api_host", "daemon::api_port", "daemon::api_key", "daemon::data_dir", "daemon::create_torrent_folder",
-    "race::max_connections", "race.custom_choking::enabled", "race.custom_choking::strategy", "race.custom_choking::max_unchoked",
-    "race.predictive_cache::enabled", "race.predictive_cache::preload_pieces",
-    "hoard::max_connections", "hoard::active_downloads", "peer_intel::enabled", "peer_intel::retention_days",
-    "metrics::enabled", "metrics::prometheus_port",
-    "vpn_speedtest::enabled", "vpn_speedtest::interval_secs",
-    "race_drain::enabled", "race_drain::high_watermark_pct", "race_drain::low_watermark_pct",
+    // WebUI / general (mirrors qBittorrent's everyday Options)
+    "daemon::api_host", "daemon::api_port", "daemon::api_key", "daemon::create_torrent_folder",
+    "auth::username", "auth::password_hash",
+    // Connection + Speed + Queueing, per engine (race & hoard)
+    "race::listen_port", "race::bind_interface", "race::max_connections", "race::max_uploads_per_torrent",
+    "race::upload_rate_limit", "race::active_downloads", "race::active_seeds", "race::active_limit",
+    "hoard::listen_port", "hoard::bind_interface", "hoard::max_connections", "hoard::max_uploads_per_torrent",
+    "hoard::upload_rate_limit", "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit",
+    // Common toggles
+    "vpn_speedtest::enabled", "race_drain::enabled",
 ]);
 const _SETTINGS_FALLBACK = { id: "other", label: "Other", icon: "\u{1F4C1}", tops: [] };
 
