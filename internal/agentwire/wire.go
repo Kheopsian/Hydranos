@@ -34,6 +34,7 @@ const (
 	MethodAddRouted      = "add_routed"    // rich placement add: invokes the agent's own Race/Hoard engine
 	MethodActionRouted   = "action_routed" // rich per-torrent op on the agent's own engine
 	MethodListEngines    = "list_engines"  // node-level: enumerate the engines this agent hosts
+	MethodNodeInfo       = "node_info"     // node-level: exit (public) IP + host interfaces
 )
 
 // EngineDescriptor identifies one engine an agent hosts (Option A: a node
@@ -103,4 +104,19 @@ type ActionRoutedParams struct {
 	DeleteFiles bool   `json:"delete_files,omitempty"`
 	Category    string `json:"category,omitempty"`
 	SavePath    string `json:"save_path,omitempty"`
+}
+
+// NICInfo is one host network interface (non-loopback IPv4).
+type NICInfo struct {
+	Name string `json:"name"`
+	IP   string `json:"ip"`
+	Up   bool   `json:"up"`
+}
+
+// NodeInfo is the reply to MethodNodeInfo: an agent's egress (public) IP and
+// its host interfaces, so a front can show where each agent exits and offer
+// interfaces for binding.
+type NodeInfo struct {
+	PublicIP   string    `json:"public_ip"`
+	Interfaces []NICInfo `json:"interfaces"`
 }

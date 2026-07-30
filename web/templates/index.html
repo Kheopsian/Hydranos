@@ -67,6 +67,10 @@
                 <span class="stat-label">Ratio</span>
                 <span class="stat-value" id="header-ratio" style="color:var(--accent-purple)">--</span>
             </div>
+            <div class="stat hide-mobile">
+                <span class="stat-label">Exit IP</span>
+                <span class="stat-value" id="header-exit-ip" style="font-size:13px">--</span>
+            </div>
             <div class="health-dot" id="health-dot" title="Checking..."></div>
         </div>
     </header>
@@ -551,7 +555,7 @@
             </div>
             <table id="agents-table">
                 <thead>
-                    <tr><th>Name</th><th>Address</th><th>Kind</th><th>Status</th><th>Actions</th></tr>
+                    <tr><th>Name</th><th>Address</th><th>Kind</th><th>Exit IP</th><th>Status</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="agents-tbody">
                     <tr><td colspan="5" class="empty">No agents</td></tr>
