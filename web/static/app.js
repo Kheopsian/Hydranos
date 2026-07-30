@@ -242,7 +242,7 @@ function importWizard() {
             <input type="password" id="qb-pass" placeholder="Password" autocomplete="off" style="width:100%">
             <p class="modal-desc" id="qb-msg" style="min-height:1em"></p>
             <div class="modal-actions">
-                <button id="qb-skip">Skip</button>
+                <button id="qb-skip" class="btn-small">Skip</button>
                 <button class="btn-primary" id="qb-preview">Preview</button>
             </div>`;
         box.querySelector("#qb-skip").onclick = () => { localStorage.setItem("hydra_import_dismissed", "1"); close(); };
@@ -3317,6 +3317,8 @@ async function updateSettings() {
             _tabsHtml += `<button type="button" class="settings-tab" data-domain="${dom.id}" onclick="showSettingsPanel('${dom.id}')"><span class="sg-title">${esc(dom.label)}</span> <span class="sg-count">${count}</span></button>`;
             _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div></div>`;
         }
+        _tabsHtml += `<button type="button" class="settings-tab" data-domain="__import" onclick="showSettingsPanel('__import')"><span class="sg-title">Import</span></button>`;
+        _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">Import from qBittorrent</h3><p class="sr-desc" style="margin:.4em 0 1em">Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Already-present torrents are skipped, so it is safe to re-run.</p><button class="btn-primary" onclick="importFromQbit()">Import from qBittorrent</button></div></div>`;
         html += `<div class="settings-tabs" id="settings-tabs">${_tabsHtml}</div><div class="settings-panels" id="settings-panels">${_panelsHtml}</div>`;
         editor.innerHTML = html;
         {

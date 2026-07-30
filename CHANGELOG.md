@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.6.1 — 2026-07-30
+
+### Added
+- **Import** is now a sub-tab of the Config tab — re-run the qBittorrent import any time, not just at the one-time first-run prompt.
+
+### Fixed
+- The qBittorrent import wizard "Skip" button is now styled (was an unstyled white button).
+
 ## v3.6.0 — 2026-07-29
 
 ### Added
