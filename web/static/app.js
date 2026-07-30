@@ -1355,7 +1355,7 @@ function _renderHoardCounts() {
     const container = document.getElementById("hoard-cat-chips");
     if (container) {
         container.innerHTML = cats.map(c =>
-            `<button class="chip chip-cat${c === _hoardCatFilter ? " active" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')">${c} <span class="chip-count">${catCounts[c]}</span></button>`
+            `<button class="chip chip-cat${c === _hoardCatFilter ? " active" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')">${esc(incoCat(c))} <span class="chip-count">${catCounts[c]}</span></button>`
         ).join("");
     }
 
@@ -1962,7 +1962,7 @@ async function updateCategories() {
             tbody.innerHTML = '<tr><td colspan="6" class="empty">No categories</td></tr>';
         } else {
             tbody.innerHTML = cats.map(cat => `<tr>
-                <td><strong>${cat.name}</strong></td>
+                <td><strong>${esc(incoCat(cat.name))}</strong></td>
                 <td><span class="mode-tag mode-${cat.mode}">${cat.mode}</span></td>
                 <td class="mono" style="font-size:12px">${cat.save_path}</td>
                 <td>${((cat.placement && cat.placement.length) ? cat.placement : ["local"]).map(esc).join(", ")}</td>
@@ -1978,7 +1978,7 @@ async function updateCategories() {
         const sel = document.getElementById("torrent-category");
         const current = sel.value;
         sel.innerHTML = '<option value="">— none —</option>' +
-            cats.map(cat => `<option value="${cat.name}"${cat.name === current ? " selected" : ""}>${cat.name}</option>`).join("");
+            cats.map(cat => `<option value="${cat.name}"${cat.name === current ? " selected" : ""}>${esc(incoCat(cat.name))}</option>`).join("");
     } catch (e) {
         console.error("Failed to update categories:", e);
     }
