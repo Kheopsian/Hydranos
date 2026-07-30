@@ -3121,7 +3121,8 @@ window.addEventListener("load", function () {
     const b = document.getElementById("incognito-toggle");
     if (b) {
         b.classList.toggle("active", _incognito);
-        b.style.color = _incognito ? "var(--accent-purple)" : "";
+        b.style.color = _incognito ? "var(--accent-purple)" : "var(--text-primary,#e6edf3)";
+        b.style.borderColor = _incognito ? "var(--accent-purple)" : "var(--border-color,#30363d)";
         b.title = (_incognito ? "Incognito ON \u2014 " : "") + "Anonymize names, categories & IPs for screenshots";
     }
 });

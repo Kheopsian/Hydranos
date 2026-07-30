@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.13.2 — 2026-07-30
+
+### Fixed
+- The index page is served with `Cache-Control: no-cache` so UI updates show up without a manual hard-refresh. Made the Incognito header button clearly visible (bordered icon).
+
 ## v3.13.1 — 2026-07-30
 
 ### Changed

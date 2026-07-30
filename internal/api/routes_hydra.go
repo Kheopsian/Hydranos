@@ -636,6 +636,7 @@ func (s *Server) handleStartup(c *gin.Context) {
 }
 
 func (s *Server) handleIndex(c *gin.Context) {
+	c.Header("Cache-Control", "no-cache")
 	c.HTML(http.StatusOK, "index.html", gin.H{
 		"Version": Version,
 	})
