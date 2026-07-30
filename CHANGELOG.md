@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.9.0 — 2026-07-30
+
+### Changed
+- **qBittorrent import is now pipelined** — a small pool of fetchers pulls `.torrent` files from qBittorrent while a larger pool adds them to the engine concurrently, instead of one torrent at a time. Large libraries import several times faster; the fetch concurrency is kept low so qBittorrent's WebUI stays responsive.
+
+### Fixed
+- The import now carries over the **all-time upload AND download** totals into Hydra's baseline, so the overview ratio/totals reflect your migrated history (previously only a cosmetic line; download was not read at all).
+- Imported torrents keep their **original add date** from qBittorrent instead of showing the moment of import.
+
 ## v3.8.0 — 2026-07-30
 
 ### Added

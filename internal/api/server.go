@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	hydraroot "github.com/Kheopsian/hydra"
 	"github.com/Kheopsian/hydra/internal/agentwire"
@@ -95,6 +96,7 @@ type HoardEngine interface {
 	VerifyTorrent(infoHash string) error
 	SetTorrentCategory(infoHash, newCategory, newSavePath string) error
 	SetCategoryLabel(infoHash, category string) error
+	SetAddedTime(infoHash string, t time.Time)
 	// Download slot manager runtime control.
 	GetDownloadSlotStatus() engine.DownloadSlotStats
 	SetDownloadSlotsOverride(max int)

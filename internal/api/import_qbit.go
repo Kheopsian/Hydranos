@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -81,15 +82,16 @@ func (q *qbitClient) login(user, pass string) error {
 }
 
 type qbitTorrent struct {
-	Hash     string  `json:"hash"`
-	Name     string  `json:"name"`
-	SavePath string  `json:"save_path"`
-	Category string  `json:"category"`
-	Progress float64 `json:"progress"`
-	State    string  `json:"state"`
-	Size     int64   `json:"size"`
-	Uploaded int64   `json:"uploaded"`
-	AddedOn  int64   `json:"added_on"`
+	Hash       string  `json:"hash"`
+	Name       string  `json:"name"`
+	SavePath   string  `json:"save_path"`
+	Category   string  `json:"category"`
+	Progress   float64 `json:"progress"`
+	State      string  `json:"state"`
+	Size       int64   `json:"size"`
+	Uploaded   int64   `json:"uploaded"`
+	Downloaded int64   `json:"downloaded"`
+	AddedOn    int64   `json:"added_on"`
 }
 
 func (q *qbitClient) torrentsInfo() ([]qbitTorrent, error) {
@@ -465,61 +467,109 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 	job.update(func(sn *importSnapshot) { sn.Phase = "torrents" })
 	tmpDir := filepath.Join(s.config.Daemon.DataDir, "uploads")
 	os.MkdirAll(tmpDir, 0755)
-	var carried int64
-	var earliest int64
-	for _, t := range ts {
-		name := t.Name
-		data, err := cl.exportTorrent(t.Hash)
-		if err != nil {
-			job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": export: "+err.Error()) })
-			continue
-		}
-		tmp := filepath.Join(tmpDir, "qbimport-"+t.Hash+".torrent")
-		if err := os.WriteFile(tmp, data, 0644); err != nil {
-			job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": write: "+err.Error()) })
-			continue
-		}
-		cn := t.Category
-		if cn == "" {
-			cn = "imported"
-		}
-		sp := remapPath(t.SavePath, req.PathMap)
-		seed := t.Progress >= 1.0
-		var addErr error
-		if seed {
-			_, addErr = s.hoardEngine.AddTorrentSeedMode(tmp, sp, cn)
-		} else {
-			_, addErr = s.hoardEngine.AddTorrent(tmp, sp, cn)
-		}
-		// Keep the .torrent in uploads/ (persistent /config volume): the durable
-		// store captures the metainfo BLOB by reading TorrentFilePath at sync
-		// time, so deleting it here would drop the torrent from the store on the
-		// next restart (torrent added to the live engine but not persisted).
-		if addErr != nil {
-			// A torrent already in the engine is a skip, not a failure.
-			el := strings.ToLower(addErr.Error())
-			if strings.Contains(el, "already") || strings.Contains(el, "duplicate") || strings.Contains(el, "exists") {
-				job.update(func(sn *importSnapshot) { sn.Skipped++; sn.Done++ })
-				continue
-			}
-			slog.Warn("qbit import: add failed", "name", name, "seed_mode", seed, "save_path", sp, "error", addErr)
-			job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": add: "+addErr.Error()) })
-			continue
-		}
-		carried += t.Uploaded
-		if t.AddedOn > 0 && (earliest == 0 || t.AddedOn < earliest) {
-			earliest = t.AddedOn
-		}
-		job.update(func(sn *importSnapshot) {
-			sn.Done++
-			sn.Current = name
-			if seed {
-				sn.Seeded++
-			} else {
-				sn.Downloading++
-			}
-		})
+	// Pipelined add: a small pool of fetchers pulls .torrent files from qBit
+	// (its WebUI is roughly single-threaded, so keep this low to avoid stalling
+	// its UI) feeding a larger pool of adders hitting the concurrency-safe engine
+	// RPC. Shared counters are mutex-guarded; job.update is already thread-safe.
+	const fetchWorkers = 6
+	const addWorkers = 10
+
+	type addItem struct {
+		t    qbitTorrent
+		tmp  string
+		seed bool
 	}
+
+	var mu sync.Mutex
+	var carried, carriedDL, earliest int64
+
+	addCh := make(chan addItem, addWorkers*2)
+	var addWG sync.WaitGroup
+	for i := 0; i < addWorkers; i++ {
+		addWG.Add(1)
+		go func() {
+			defer addWG.Done()
+			for it := range addCh {
+				name := it.t.Name
+				cn := it.t.Category
+				if cn == "" {
+					cn = "imported"
+				}
+				sp := remapPath(it.t.SavePath, req.PathMap)
+				var ih string
+				var addErr error
+				if it.seed {
+					ih, addErr = s.hoardEngine.AddTorrentSeedMode(it.tmp, sp, cn)
+				} else {
+					ih, addErr = s.hoardEngine.AddTorrent(it.tmp, sp, cn)
+				}
+				// Keep the .torrent in uploads/: the durable store captures the
+				// metainfo BLOB from TorrentFilePath at sync time.
+				if addErr != nil {
+					el := strings.ToLower(addErr.Error())
+					if strings.Contains(el, "already") || strings.Contains(el, "duplicate") || strings.Contains(el, "exists") {
+						job.update(func(sn *importSnapshot) { sn.Skipped++; sn.Done++ })
+						continue
+					}
+					slog.Warn("qbit import: add failed", "name", name, "seed_mode", it.seed, "save_path", sp, "error", addErr)
+					job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": add: "+addErr.Error()) })
+					continue
+				}
+				// Preserve the original qBit add date instead of "now".
+				if ih != "" && it.t.AddedOn > 0 {
+					s.hoardEngine.SetAddedTime(ih, time.Unix(it.t.AddedOn, 0))
+				}
+				seed := it.seed
+				mu.Lock()
+				carried += it.t.Uploaded
+				carriedDL += it.t.Downloaded
+				if it.t.AddedOn > 0 && (earliest == 0 || it.t.AddedOn < earliest) {
+					earliest = it.t.AddedOn
+				}
+				mu.Unlock()
+				job.update(func(sn *importSnapshot) {
+					sn.Done++
+					sn.Current = name
+					if seed {
+						sn.Seeded++
+					} else {
+						sn.Downloading++
+					}
+				})
+			}
+		}()
+	}
+
+	hashCh := make(chan qbitTorrent, fetchWorkers*2)
+	var fetchWG sync.WaitGroup
+	for i := 0; i < fetchWorkers; i++ {
+		fetchWG.Add(1)
+		go func() {
+			defer fetchWG.Done()
+			for t := range hashCh {
+				name := t.Name
+				data, err := cl.exportTorrent(t.Hash)
+				if err != nil {
+					job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": export: "+err.Error()) })
+					continue
+				}
+				tmp := filepath.Join(tmpDir, "qbimport-"+t.Hash+".torrent")
+				if err := os.WriteFile(tmp, data, 0644); err != nil {
+					job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": write: "+err.Error()) })
+					continue
+				}
+				addCh <- addItem{t: t, tmp: tmp, seed: t.Progress >= 1.0}
+			}
+		}()
+	}
+
+	for _, t := range ts {
+		hashCh <- t
+	}
+	close(hashCh)
+	fetchWG.Wait()
+	close(addCh)
+	addWG.Wait()
 
 	// 3. Record provenance (drives the overview "carried over from ..." line).
 	prov, _ := loadProvenance(s.config.Daemon.DataDir)
@@ -534,6 +584,14 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 	final := job.get()
 	prov.ImportedCount += final.Seeded + final.Downloading
 	_ = saveProvenance(s.config.Daemon.DataDir, prov)
+
+	// Fold the historical UL/DL into the persistent all-time baseline so the
+	// overview ratio/totals reflect the imported history (not just the cosmetic
+	// "carried over" line). Skipped/failed torrents never reached these counters,
+	// so a re-import does not double-count.
+	atomic.AddInt64(&baselineUploaded, carried)
+	atomic.AddInt64(&baselineDownloaded, carriedDL)
+	saveBaseline()
 
 	if s.saveStateFn != nil {
 		s.saveStateFn()
