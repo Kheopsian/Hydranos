@@ -88,6 +88,11 @@ func resolveConfigPath(def string, explicit bool) string {
 	if d, err := config.SetTOMLValue(doc, "daemon", "data_dir", `"data"`); err == nil {
 		doc = d
 	}
+	if defaultAPIHost != "" {
+		if d, err := config.SetTOMLValue(doc, "daemon", "api_host", `"`+defaultAPIHost+`"`); err == nil {
+			doc = d
+		}
+	}
 	if err := os.WriteFile(target, []byte(doc), 0644); err != nil {
 		slog.Warn("no config found and could not write a default; using compiled default path", "target", target, "err", err)
 		return def
