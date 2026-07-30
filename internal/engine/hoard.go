@@ -41,7 +41,7 @@ type HoardEngine struct {
 	config  *config.SessionConfig
 	dataDir string
 
-	livePort atomic.Int64 // runtime listen-port override (0 = use config.ListenPort)
+	livePort      atomic.Int64 // runtime listen-port override (0 = use config.ListenPort)
 	expectedTotal atomic.Int64 // store COUNT during boot-from-store import (0=idle) -> total_torrents shows real total, not a climbing count
 
 	// Engine client — satisfied by either *ltclient.Client (Typhon) or
@@ -251,6 +251,11 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 						AddedTime: time.Now(),
 					}
 				}
+				// AddTorrent() populates the canonical Category before Typhon
+				// emits this event; capture it so the seeded cachedStats row
+				// carries the category immediately (else the row shows "none"
+				// until the 60s refreshStats tick).
+				addedCategory := e.torrents[data.InfoHash].Category
 				e.mu.Unlock()
 				// Seed the stats cache with the static metadata from the add
 				// event NOW. GetTorrentList() and the SSE list hydration read
@@ -284,6 +289,9 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 				if st.AddedTime == 0 {
 					st.AddedTime = time.Now().Unix()
 				}
+				if st.Category == "" {
+					st.Category = addedCategory
+				}
 				e.cachedStatsMu.Unlock()
 			}
 		case "torrent_removed":
@@ -303,9 +311,20 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 				return
 			}
 			// Apply delta to cachedStats. Only dynamic fields — static
-			// metadata (name, save_path, category, swarm scrape) is owned
-			// by the periodic refreshStats() loop (now running at 60s as
-			// a backstop for anything not in the event stream).
+			// metadata (name, save_path, swarm scrape) is owned by the
+			// periodic refreshStats() loop (now running at 60s as a backstop
+			// for anything not in the event stream). Category is the
+			// exception: a torrent can transition checking→seeding here well
+			// before the first refresh, so we backfill it from the canonical
+			// e.torrents map to avoid the row surfacing as "none" meanwhile.
+			e.mu.RLock()
+			snapCategories := make(map[string]string, len(data.Torrents))
+			for _, m := range data.Torrents {
+				if info := e.torrents[m.InfoHash]; info != nil {
+					snapCategories[m.InfoHash] = info.Category
+				}
+			}
+			e.mu.RUnlock()
 			e.cachedStatsMu.Lock()
 			for _, m := range data.Torrents {
 				st, exists := e.cachedStats[m.InfoHash]
@@ -315,6 +334,9 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 					// will enrich later.
 					st = &TorrentStats{InfoHash: m.InfoHash}
 					e.cachedStats[m.InfoHash] = st
+				}
+				if st.Category == "" {
+					st.Category = snapCategories[m.InfoHash]
 				}
 				st.UploadRate = m.UploadRate
 				st.DownloadRate = m.DownloadRate
@@ -1122,6 +1144,9 @@ func (e *HoardEngine) refreshStats() {
 			ns.SwarmLeechers = old.SwarmLeechers
 			ns.TrackerError = old.TrackerError
 			ns.TrackerErrorMsg = old.TrackerErrorMsg
+			if ns.Category == "" {
+				ns.Category = old.Category
+			}
 		}
 	}
 	e.cachedStats = newStats
