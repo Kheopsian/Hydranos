@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.13.5 — 2026-07-30
+
+### Changed
+- Incognito now also masks category names in the Categories tab, the category filter chips and category dropdowns (display only; editing/filtering still use the real names).
+
 ## v3.13.4 — 2026-07-30
 
 ### Fixed
