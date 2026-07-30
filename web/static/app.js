@@ -3462,6 +3462,19 @@ function _readSettingField(id, orig) {
     return el.value;
 }
 
+// Which restart a setting needs:
+//   hot    = applied live, no restart (currently: listen_port)
+//   engine = the torrent engines must restart (all [race]/[hoard] knobs)
+//   full   = the whole daemon restarts ([daemon], [auth], services)
+function _settingTier(section, key) {
+    if (section === "daemon" || section === "auth") return "full";
+    if (section === "race" || section === "hoard" || section.startsWith("race.") || section.startsWith("hoard.")) {
+        if (key === "listen_port") return "hot";
+        return "engine";
+    }
+    return "full";
+}
+
 async function saveSettings() {
     const banner = document.getElementById("settings-restart-banner");
     const changes = [];
@@ -3481,20 +3494,47 @@ async function saveSettings() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ changes }),
         });
-        banner.className = "result-msg success";
-        banner.innerHTML = `${r.changed} setting(s) written to default.toml. ` +
-            `⚠️ Restart required to apply engine parameters. ` +
-            `<button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">Apply &amp; restart</button>`;
         for (const ch of changes) {
             const id = "set__" + ch.section + "__" + ch.key;
             if (_settingsOrig[id]) _settingsOrig[id].value = ch.value;
         }
-        // Si on change la clef API, mettre a jour le localStorage de CE navigateur
-        // pour ne pas s'auto-verrouiller (la WebUI lit sa clef depuis la).
+        // If THIS browser's API key changed, update its localStorage so we don't
+        // lock ourselves out (the WebUI reads its key from there).
         const _kc = changes.find(c => c.section === "daemon" && c.key === "api_key");
-        if (_kc) {
-            localStorage.setItem("hydra_api_key", String(_kc.value));
-            banner.innerHTML += ' <span style="color:var(--text-secondary)">(cle API de ce navigateur mise a jour)</span>';
+        if (_kc) { try { localStorage.setItem("hydra_api_key", String(_kc.value)); } catch (e) {} }
+
+        // Tier the change set and do the minimum: apply hot keys live, only
+        // restart when an engine/daemon setting actually changed.
+        let tier = "hot";
+        for (const ch of changes) {
+            const t = _settingTier(ch.section, ch.key);
+            if (t === "full") tier = "full";
+            else if (t === "engine" && tier !== "full") tier = "engine";
+        }
+        const hotApplied = [];
+        for (const ch of changes) {
+            if (_settingTier(ch.section, ch.key) === "hot" && ch.key === "listen_port") {
+                try {
+                    await api(`/api/${ch.section}/listen-port`, {
+                        method: "POST", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ port: Number(ch.value) }),
+                    });
+                    hotApplied.push(`${ch.section} listen port`);
+                } catch (e) { if (tier === "hot") tier = "engine"; } // fall back to restart
+            }
+        }
+        const base = `${r.changed} setting(s) written to default.toml.`;
+        banner.className = "result-msg success";
+        if (tier === "hot") {
+            banner.innerHTML = `${base} Applied live — no restart needed` +
+                (hotApplied.length ? ` (${hotApplied.join(", ")})` : "") + ".";
+        } else {
+            const what = (tier === "full")
+                ? "Daemon/auth settings changed — a full restart is required."
+                : "Engine settings changed — restart the torrent engines to apply.";
+            banner.innerHTML = `${base} ${what} ` +
+                `<button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">Apply &amp; restart</button>`;
+            if (_kc) banner.innerHTML += ' <span style="color:var(--text-secondary)">(API key updated for this browser)</span>';
         }
     } catch (e) {
         banner.className = "result-msg error";
