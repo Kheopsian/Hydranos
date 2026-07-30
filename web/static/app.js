@@ -3228,11 +3228,25 @@ async function copyField(id, btn) {
     }
 }
 
+let _detectedIfaces = [];
+
 function _settingField(id, v, k) {
     if (Array.isArray(v)) {
         // Non-scalaire : lecture seule. Un champ texte editable reecrirait le
         // tableau en string et casserait le type au boot (cf B1 part 3).
         return `<code class="sr-readonly" title="Array \u2014 edit in default.toml">${esc(JSON.stringify(v))}</code>`;
+    }
+    if (k === "bind_interface") {
+        const cur = String(v || "");
+        const names = (_detectedIfaces || []).map((i) => i.name);
+        if (cur && !names.includes(cur)) names.unshift(cur);
+        const optNone = `<option value=""${cur === "" ? " selected" : ""}>\u2014 none (all interfaces) \u2014</option>`;
+        const o = [optNone].concat(names.map((n) => {
+            const nic = (_detectedIfaces || []).find((i) => i.name === n);
+            const lbl = nic ? `${n} \u2014 ${nic.ip}` : n;
+            return `<option value="${esc(n)}"${n === cur ? " selected" : ""}>${esc(lbl)}</option>`;
+        })).join("");
+        return `<select id="${id}" class="sr-input">${o}</select>`;
     }
     const opts = _SETTINGS_ENUM[k];
     if (opts) {
@@ -3287,8 +3301,7 @@ async function updateSettings() {
     try {
         const cfg = await api("/api/settings");
         _settingsOrig = {};
-        let _ifaces = [];
-        try { _ifaces = (await api("/api/network/interfaces")).interfaces || []; } catch (e) {}
+        try { _detectedIfaces = (await api("/api/network/interfaces")).interfaces || []; } catch (e) { _detectedIfaces = []; }
 
         // Bucketise les sections par domaine.
         const buckets = {};
@@ -3301,7 +3314,7 @@ async function updateSettings() {
         }
 
         const order = SETTINGS_DOMAINS.concat([_SETTINGS_FALLBACK]);
-        let html = _unitsCardHTML() + _interfacesCardHTML(_ifaces) + `<div class="settings-toolbar">
+        let html = _unitsCardHTML() + _interfacesCardHTML(_detectedIfaces) + `<div class="settings-toolbar">
             <input type="text" id="settings-search" class="settings-search" placeholder="Search a setting\u2026" oninput="filterSettings()">
             <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> Show advanced settings</label>
             <span id="settings-search-count" class="settings-search-count"></span>
