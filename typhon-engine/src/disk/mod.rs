@@ -248,11 +248,9 @@ impl DiskManager {
                 let file = get_or_open_rw(&full_path)
                     .map_err(|e| format!("open write {:?}: {}", full_path, e))?;
 
-                #[cfg(unix)]
                 {
-                    use std::os::unix::fs::FileExt;
                     let chunk = &data[data_offset..data_offset + op.length as usize];
-                    file.write_at(chunk, op.file_offset)
+                    pwrite_all(&file, chunk, op.file_offset)
                         .map_err(|e| format!("pwrite {:?}: {}", full_path, e))?;
                 }
 
@@ -297,12 +295,8 @@ async fn read_block_direct(
 
             let mut buf = vec![0u8; op.length as usize];
 
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileExt;
-                file.read_at(&mut buf, op.file_offset)
-                    .map_err(|e| format!("pread {:?}: {}", full_path, e))?;
-            }
+            pread_exact(&file, &mut buf, op.file_offset)
+                .map_err(|e| format!("pread {:?}: {}", full_path, e))?;
 
             result.extend_from_slice(&buf);
         }
@@ -313,6 +307,45 @@ async fn read_block_direct(
     .map_err(|e| format!("spawn_blocking: {}", e))?
 }
 
+
+// Cross-platform positional file I/O. Unix uses pread/pwrite (FileExt);
+// Windows uses seek_read/seek_write (looped to match all/exact semantics).
+#[cfg(unix)]
+fn pwrite_all(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(buf, offset)
+}
+#[cfg(windows)]
+fn pwrite_all(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    let mut written = 0usize;
+    while written < buf.len() {
+        let n = file.seek_write(&buf[written..], offset + written as u64)?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "seek_write returned 0"));
+        }
+        written += n;
+    }
+    Ok(())
+}
+#[cfg(unix)]
+fn pread_exact(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buf, offset)
+}
+#[cfg(windows)]
+fn pread_exact(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    let mut read = 0usize;
+    while read < buf.len() {
+        let n = file.seek_read(&mut buf[read..], offset + read as u64)?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "seek_read returned 0"));
+        }
+        read += n;
+    }
+    Ok(())
+}
 
 /// Read a full piece from disk for hash verification. Returns None if any
 /// backing file is missing or too short (the piece isn't fully present on
@@ -339,11 +372,7 @@ pub async fn read_piece_for_check(torrent: &TorrentState, piece: u32) -> Option<
             };
             let file = get_or_open(&full_path).ok()?;
             let mut buf = vec![0u8; op.length as usize];
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileExt;
-                file.read_exact_at(&mut buf, op.file_offset).ok()?;
-            }
+            pread_exact(&file, &mut buf, op.file_offset).ok()?;
             result.extend_from_slice(&buf);
         }
         Some(result)

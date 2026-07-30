@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/Kheopsian/hydra/internal/config"
@@ -1938,11 +1937,7 @@ func hoardCheckSameFs(a, b string) error {
 }
 
 func hoardStatDev(p string) (uint64, error) {
-	var st syscall.Stat_t
-	if err := syscall.Stat(p, &st); err != nil {
-		return 0, err
-	}
-	return uint64(st.Dev), nil
+	return statDev(p)
 }
 
 // hoardStatDevWithAncestors walks up until it finds an existing directory and

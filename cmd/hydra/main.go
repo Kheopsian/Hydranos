@@ -49,7 +49,7 @@ var version = version_pkg.Version
 // on Windows/macOS, which have no Unix domain socket in this IPC path, and
 // handy for testing the TCP transport on Linux.
 func engineSocketPath(dataDir, name string, tcpPort int) string {
-	if os.Getenv("HYDRA_ENGINE_TCP") != "" {
+	if defaultEngineTCP || os.Getenv("HYDRA_ENGINE_TCP") != "" {
 		return fmt.Sprintf("tcp://127.0.0.1:%d", tcpPort)
 	}
 	return filepath.Join(dataDir, name+".sock")
@@ -1369,29 +1369,6 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 		"tracker_error_msg": s.TrackerErrorMsg, "torrent_error": s.TorrentError,
 		"torrent_error_msg": s.TorrentErrorMsg, "uploader": s.Uploader,
 		"injected_peers": s.InjectedPeers, "injection_hit": s.InjectionHit,
-	}
-}
-
-func raiseNofileLimit(target uint64) {
-	var rlim syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim); err != nil {
-		slog.Error("getrlimit failed", "error", err)
-		return
-	}
-	slog.Info("nofile limit", "current_soft", rlim.Cur, "current_hard", rlim.Max, "target", target)
-	if rlim.Cur >= target {
-		return
-	}
-	rlim.Cur = target
-	if rlim.Max < target {
-		rlim.Max = target
-	}
-	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rlim); err != nil {
-		slog.Error("setrlimit failed", "error", err, "target", target)
-	} else {
-		var after syscall.Rlimit
-		_ = syscall.Getrlimit(syscall.RLIMIT_NOFILE, &after)
-		slog.Info("nofile raised", "soft", after.Cur, "hard", after.Max)
 	}
 }
 

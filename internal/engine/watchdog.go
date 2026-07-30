@@ -7,7 +7,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -86,7 +85,7 @@ func StartEngineWatchdog(ctx context.Context, alert WatchdogAlerter, dumpDir str
 						// Ask the engine's jemalloc to dump a heap profile (SIGUSR1
 						// handler in main.rs -> prof.dump to $prof_prefix) BEFORE we
 						// kill it — allocation-site attribution for the heap leak.
-						_ = syscall.Kill(pid, syscall.SIGUSR1)
+						signalHeapDump(pid)
 						time.Sleep(3 * time.Second)
 						alert(
 							fmt.Sprintf("Hydra: moteur %s memoire anormale", tg.name),
@@ -180,5 +179,5 @@ func dumpEngineMem(name string, pid int, rss int64) string {
 // selfRestart triggers the existing SIGTERM graceful shutdown (saveState +
 // engine flush). Docker's `--restart unless-stopped` then reboots a clean pair.
 func selfRestart() {
-	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	selfSIGTERM()
 }

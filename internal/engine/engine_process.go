@@ -394,12 +394,12 @@ func engineBinaryPath() string {
 		return p
 	}
 	if exe, err := os.Executable(); err == nil {
-		cand := filepath.Join(filepath.Dir(exe), "hydra-engine")
+		cand := filepath.Join(filepath.Dir(exe), engineBinaryName)
 		if _, err := os.Stat(cand); err == nil {
 			return cand
 		}
 	}
-	return "/usr/local/bin/hydra-engine"
+	return engineBinaryDefault
 }
 
 // StartEngineProcess starts a hydra-engine child process and connects to its Unix socket.
