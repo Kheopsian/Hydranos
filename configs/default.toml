@@ -13,6 +13,11 @@ create_torrent_folder = true
 # ─────────────────────────────────────────────
 [race]
 listen_port = 16171
+# Pin this engine's peer sockets to one host interface (optional).
+#   bind_interface    = "wg0"          # by NAME, resolved to its IP at start (survives VPN IP changes)
+#   listen_interfaces = "10.0.0.2:PORT" # by IP (advanced; comma-separated for multi-home)
+bind_interface = ""
+listen_interfaces = ""
 max_connections = 4000
 max_uploads_per_torrent = 100
 peer_timeout = 30
@@ -32,6 +37,11 @@ speed_weight = 0.3
 # ─────────────────────────────────────────────
 [hoard]
 listen_port = 16172
+# Pin this engine's peer sockets to one host interface (optional).
+#   bind_interface    = "wg0"          # by NAME, resolved to its IP at start (survives VPN IP changes)
+#   listen_interfaces = "10.0.0.2:PORT" # by IP (advanced; comma-separated for multi-home)
+bind_interface = ""
+listen_interfaces = ""
 max_connections = 12000
 max_uploads_per_torrent = -1
 peer_timeout = 20
