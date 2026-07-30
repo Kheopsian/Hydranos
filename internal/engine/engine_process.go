@@ -410,11 +410,18 @@ func StartEngineProcess(engineCfg EngineConfig, socketPath string) (*EngineProce
 	}
 
 	configPath := socketPath + ".json"
+	if ltclient.IsTCP(socketPath) {
+		// socketPath is "tcp://host:port", not a filesystem path; keep the
+		// engine config file inside the engine data dir instead.
+		configPath = filepath.Join(engineCfg.DataDir, "engine.json")
+	}
 	if err := os.WriteFile(configPath, configData, 0644); err != nil {
 		return nil, fmt.Errorf("write engine config: %w", err)
 	}
 
-	os.Remove(socketPath)
+	if !ltclient.IsTCP(socketPath) {
+		os.Remove(socketPath)
+	}
 
 	cmd := exec.Command(engineBinaryPath(),
 		"--config", configPath,
@@ -432,17 +439,32 @@ func StartEngineProcess(engineCfg EngineConfig, socketPath string) (*EngineProce
 		"config", configPath,
 	)
 
+	// Wait for the engine RPC endpoint to come up. Unix: the socket file
+	// appears (os.Stat). TCP loopback: the port accepts a connection.
+	engineReady := func() bool {
+		if ltclient.IsTCP(socketPath) {
+			c, e := net.DialTimeout("tcp", strings.TrimPrefix(socketPath, "tcp://"), 500*time.Millisecond)
+			if e == nil {
+				c.Close()
+				return true
+			}
+			return false
+		}
+		_, e := os.Stat(socketPath)
+		return e == nil
+	}
+
 	deadline := time.Now().Add(300 * time.Second) // large hoards (60k+) load resume cold > 30s
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); err == nil {
+		if engineReady() {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	if _, err := os.Stat(socketPath); err != nil {
+	if !engineReady() {
 		cmd.Process.Kill()
-		return nil, fmt.Errorf("engine socket not created after 300s: %s", socketPath)
+		return nil, fmt.Errorf("engine endpoint not ready after 300s: %s", socketPath)
 	}
 
 	client, err := ltclient.Connect(socketPath)

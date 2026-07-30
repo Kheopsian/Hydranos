@@ -43,6 +43,18 @@ import (
 
 var version = version_pkg.Version
 
+// engineSocketPath returns the IPC endpoint for a session engine. Default
+// (Linux) is a Unix domain socket under the data dir. Set HYDRA_ENGINE_TCP
+// (any non-empty value) to use a TCP loopback endpoint instead — required
+// on Windows/macOS, which have no Unix domain socket in this IPC path, and
+// handy for testing the TCP transport on Linux.
+func engineSocketPath(dataDir, name string, tcpPort int) string {
+	if os.Getenv("HYDRA_ENGINE_TCP") != "" {
+		return fmt.Sprintf("tcp://127.0.0.1:%d", tcpPort)
+	}
+	return filepath.Join(dataDir, name+".sock")
+}
+
 func main() {
 	// `hydra hash-password <pw>` : imprime un hash bcrypt a coller dans [auth]
 	// password_hash (bootstrap du login, aucune connexion requise).
@@ -287,8 +299,8 @@ func main() {
 	hoardDataDir := filepath.Join(cfg.Daemon.DataDir, "hoard")
 	_ = os.MkdirAll(hoardDataDir, 0755)
 
-	raceSocketPath := filepath.Join(cfg.Daemon.DataDir, "race.sock")
-	hoardSocketPath := filepath.Join(cfg.Daemon.DataDir, "hoard.sock")
+	raceSocketPath := engineSocketPath(cfg.Daemon.DataDir, "race", 9501)
+	hoardSocketPath := engineSocketPath(cfg.Daemon.DataDir, "hoard", 9502)
 
 	slog.Info("Starting race engine process...")
 	raceProc, err := engine.StartSessionEngine(raceCfg, raceDataDir, raceSocketPath, true)
