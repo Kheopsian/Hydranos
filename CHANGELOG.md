@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.13.3 — 2026-07-30
+
+### Fixed
+- Incognito header icon is now white so it is visible on the dark header.
+
 ## v3.13.2 — 2026-07-30
 
 ### Fixed
