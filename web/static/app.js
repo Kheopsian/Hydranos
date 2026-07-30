@@ -1156,7 +1156,7 @@ async function refreshDetail() {
         document.getElementById("detail-downloaded").textContent = formatBytes(d.total_download);
         document.getElementById("detail-uploaded").textContent = formatBytes(d.total_upload);
         document.getElementById("detail-ratio").textContent = d.ratio.toFixed(4);
-        document.getElementById("detail-path").textContent = d.save_path;
+        document.getElementById("detail-path").textContent = incoPath(d.save_path);
         document.getElementById("detail-hash").textContent = d.info_hash;
         renderPieceMap(d.pieces_have, d.pieces_avail, "detail-pieces-canvas", "detail-pieces-info");
         document.getElementById("detail-dl-speed").textContent = formatSpeed(d.download_rate);
@@ -1700,7 +1700,7 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-downloaded").textContent = formatBytes(d.total_download);
         document.getElementById("h-detail-uploaded").textContent = formatBytes(d.total_upload);
         document.getElementById("h-detail-ratio").textContent = d.ratio.toFixed(4);
-        document.getElementById("h-detail-path").textContent = d.save_path;
+        document.getElementById("h-detail-path").textContent = incoPath(d.save_path);
         document.getElementById("h-detail-hash").textContent = d.info_hash;
         renderPieceMap(d.pieces_have, d.pieces_avail, "h-detail-pieces-canvas", "h-detail-pieces-info", "h-detail-pieces-card");
         document.getElementById("h-detail-dl-speed").textContent = formatSpeed(d.download_rate);
@@ -1964,7 +1964,7 @@ async function updateCategories() {
             tbody.innerHTML = cats.map(cat => `<tr>
                 <td><strong>${esc(incoCat(cat.name))}</strong></td>
                 <td><span class="mode-tag mode-${cat.mode}">${cat.mode}</span></td>
-                <td class="mono" style="font-size:12px">${cat.save_path}</td>
+                <td class="mono" style="font-size:12px">${esc(incoPath(cat.save_path))}</td>
                 <td>${((cat.placement && cat.placement.length) ? cat.placement : ["local"]).map(esc).join(", ")}</td>
                 <td>${esc(cat.strategy || "all")}</td>
                 <td>
@@ -3111,6 +3111,12 @@ function incoIP(ip) {
     if (!_incognito || !ip) return ip;
     // TEST-NET-3 (203.0.113.0/24) — reserved for docs/examples, clearly fake.
     return "203.0.113." + (_incoHash(ip) % 254 + 1);
+}
+function incoPath(p) {
+    // Save paths can leak real folders/usernames — replace with a plausible
+    // but fake path, distinct per real path.
+    if (!_incognito || !p) return p;
+    return "/downloads/" + _INCO_CATS[_incoHash(p) % _INCO_CATS.length].toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 function incoExitIP(ip) {
     // Own egress identity: mask with an obviously-redacted value so nobody
