@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/Kheopsian/hydra/internal/engine"
 )
@@ -73,7 +74,8 @@ func (emptyHoardEngine) RestartStuckVerifying() int                      { retur
 func (emptyHoardEngine) VerifyDownloading() int                          { return 0 }
 func (emptyHoardEngine) VerifyTorrent(string) error                      { return errNoLocalEngine }
 func (emptyHoardEngine) SetTorrentCategory(string, string, string) error { return errNoLocalEngine }
-func (emptyHoardEngine) SetCategoryLabel(string, string) error            { return errNoLocalEngine }
+func (emptyHoardEngine) SetCategoryLabel(string, string) error           { return errNoLocalEngine }
+func (emptyHoardEngine) SetAddedTime(string, time.Time)                  {}
 func (emptyHoardEngine) GetDownloadSlotStatus() engine.DownloadSlotStats {
 	return engine.DownloadSlotStats{}
 }

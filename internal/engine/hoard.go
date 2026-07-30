@@ -1779,6 +1779,22 @@ func (e *HoardEngine) SetCategoryLabel(infoHash, category string) error {
 	return nil
 }
 
+// SetAddedTime overrides a torrent's recorded add time (both the canonical
+// TorrentInfo and the stats cache). Used by the qBittorrent import to preserve
+// the original add date instead of the moment of import.
+func (e *HoardEngine) SetAddedTime(infoHash string, t time.Time) {
+	e.mu.Lock()
+	if info, ok := e.torrents[infoHash]; ok {
+		info.AddedTime = t
+	}
+	e.mu.Unlock()
+	e.cachedStatsMu.Lock()
+	if st, ok := e.cachedStats[infoHash]; ok {
+		st.AddedTime = t.Unix()
+	}
+	e.cachedStatsMu.Unlock()
+}
+
 // SetTorrentCategory — move a torrent between categories at runtime.
 //
 // Stops the torrent, renames its data directory to the target category's

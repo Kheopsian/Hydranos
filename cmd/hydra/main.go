@@ -1204,6 +1204,9 @@ func (a *hoardAPIAdapter) AddTrackerToTorrent(infoHash, url string) error {
 	return a.engine.AddTrackerToTorrent(infoHash, url)
 }
 func (a *hoardAPIAdapter) SetListenPort(port int) { a.engine.SetListenPort(port) }
+func (a *hoardAPIAdapter) SetAddedTime(infoHash string, t time.Time) {
+	a.engine.SetAddedTime(infoHash, t)
+}
 func (a *hoardAPIAdapter) HasTorrent(infoHash string) bool {
 	return a.engine.GetTorrentDetail(infoHash) != nil
 }
