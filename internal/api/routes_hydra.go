@@ -2175,6 +2175,9 @@ func (s *Server) handleSetSecondaryStats(c *gin.Context) {
 // settingsFilePath returns the daemon TOML config path. Convention:
 // <data_dir>/default.toml (matches the -config default and the container mount).
 func (s *Server) settingsFilePath() string {
+	if s.config.SourcePath != "" {
+		return s.config.SourcePath
+	}
 	return filepath.Join(s.config.Daemon.DataDir, "default.toml")
 }
 
@@ -2280,7 +2283,6 @@ func (s *Server) handleSettingsRestart(c *gin.Context) {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
 	}()
 }
-
 
 // ─── Update check (badge next to the version) ──────────────────────────────
 var (

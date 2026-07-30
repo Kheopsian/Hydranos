@@ -149,6 +149,11 @@ type HydraConfig struct {
 	// du downloaded sur les trackers qui somment par peer_id (seedpool, torr9).
 	// Defaut (absent) = "clone". POST /api/announce/secondary-stats.
 	AnnounceSecondaryStats map[string]string `toml:"announce_secondary_stats"`
+
+	// SourcePath is the file this config was loaded from (set by Load, never
+	// serialized). Used so the settings editor edits the actual --config file
+	// even when it lives outside data_dir (bare-metal: /etc/hydra vs /var/lib).
+	SourcePath string `toml:"-"`
 }
 
 // ClientSpoofConfig is a per-tracker fake client identity presented to a
@@ -227,6 +232,7 @@ func Load(path string) (*HydraConfig, error) {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	cfg.SourcePath = path
 
 	return cfg, nil
 }
