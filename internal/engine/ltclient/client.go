@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,10 +68,25 @@ type pendingResp struct {
 // still unblocking on engine deadlock.
 const callTimeout = 120 * time.Second
 
-// Connect creates a new client connected to the given Unix socket and starts
-// the background reader.
+// dialTarget maps an engine socket path to a net.Dial (network, address).
+// "tcp://host:port" selects the TCP loopback transport (used on Windows/macOS
+// where the Go<->engine IPC path has no Unix domain socket); anything else is
+// a Unix domain socket path (default, unchanged on Linux).
+func dialTarget(socketPath string) (network, address string) {
+	if a, ok := strings.CutPrefix(socketPath, "tcp://"); ok {
+		return "tcp", a
+	}
+	return "unix", socketPath
+}
+
+// IsTCP reports whether the socket path selects the TCP loopback transport.
+func IsTCP(socketPath string) bool { return strings.HasPrefix(socketPath, "tcp://") }
+
+// Connect creates a new client connected to the given engine endpoint and
+// starts the background reader.
 func Connect(socketPath string) (*Client, error) {
-	conn, err := net.DialTimeout("unix", socketPath, 10*time.Second)
+	network, address := dialTarget(socketPath)
+	conn, err := net.DialTimeout(network, address, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("ltclient: connect %s: %w", socketPath, err)
 	}
@@ -80,7 +96,7 @@ func Connect(socketPath string) (*Client, error) {
 
 	// Second connection for the bulk lane (list_torrents). The engine's RPC
 	// server accepts multiple connections, each served independently.
-	bulkConn, berr := net.DialTimeout("unix", socketPath, 10*time.Second)
+	bulkConn, berr := net.DialTimeout(network, address, 10*time.Second)
 	if berr != nil {
 		conn.Close()
 		return nil, fmt.Errorf("ltclient: connect(bulk) %s: %w", socketPath, berr)
