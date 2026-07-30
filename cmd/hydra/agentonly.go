@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -42,7 +46,7 @@ func (le *liveEngine) metas() map[string]*engine.TorrentMeta {
 // (ownEvents=true), persists each engine to its own per-agent store, and exposes
 // the HydraAgent gRPC API — no api.Server. Egress is unchanged: the SOCKS5 proxy
 // lives in each engine's Typhon config applied at StartSessionEngine.
-func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, tlsCert, tlsKey string) {
+func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, tlsCert, tlsKey string, listenPortHook int) {
 	if addr == "" {
 		slog.Error("agent-only mode requires --agent-addr")
 		os.Exit(1)
@@ -202,6 +206,14 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 		}
 	}()
 
+	// ---- Loopback-only listen-port hook (opt-in) ----
+	// Lets a gluetun sidecar sharing this netns push the VPN's forwarded port
+	// via a plain wget, since agent-only has no api.Server. Bound to 127.0.0.1
+	// ONLY: never reachable off the shared netns, never over the VPN tunnel.
+	if listenPortHook > 0 {
+		startListenPortHook(ctx, listenPortHook, token, lives)
+	}
+
 	slog.Info("agent-only: all systems GO")
 	<-ctx.Done()
 
@@ -242,4 +254,73 @@ func reconcileAgentStore(name string, st *store.AgentStore, metas map[string]*en
 		slog.Info("agent-only: store reconciled", "engine", name,
 			"ins", r.Inserted, "upd", r.Updated, "del", r.Deleted, "miss", r.Missing)
 	}
+}
+
+// startListenPortHook serves a minimal, loopback-only HTTP endpoint that
+// hot-swaps the BT listen port of every engine on this agent node. It exists
+// solely so a gluetun container sharing this process's network namespace can
+// push its rotated forwarded port (VPN_PORT_FORWARDING_UP_COMMAND -> wget)
+// without needing the hydra binary or a gRPC client.
+//
+// Security: the listener is bound to 127.0.0.1 in HARD code — it is reachable
+// only from within the shared netns (gluetun + this agent) and never over the
+// VPN tunnel or the LAN. When a token is set (--agent-token) it is required in
+// the X-API-Key header, matching the monolith's native /api/*/listen-port.
+func startListenPortHook(ctx context.Context, port int, token string, lives []*liveEngine) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/listen-port", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if token != "" && r.Header.Get("X-API-Key") != token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			Port int `json:"port"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Port <= 0 || req.Port > 65535 {
+			http.Error(w, "port out of range (1-65535)", http.StatusBadRequest)
+			return
+		}
+		n := 0
+		for _, le := range lives {
+			var sp interface{ SetListenPort(int) }
+			if le.race != nil {
+				sp = le.race
+			} else if le.hoard != nil {
+				sp = le.hoard
+			}
+			if sp != nil {
+				sp.SetListenPort(req.Port)
+				n++
+			}
+		}
+		slog.Info("agent-only: listen-port hook applied", "port", req.Port, "engines", n)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","port":%d,"engines":%d}`, req.Port, n)
+	})
+
+	// HARD-CODED loopback bind: only the port is configurable, never the host,
+	// so the hook cannot be exposed on the published gRPC addr or the LAN.
+	addr := "127.0.0.1:" + strconv.Itoa(port)
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		slog.Info("agent-only: listen-port hook serving (loopback only)", "addr", addr)
+		if token == "" {
+			slog.Warn("agent-only: listen-port hook has NO token — loopback-only, but set --agent-token for defense-in-depth")
+		}
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("agent-only: listen-port hook exited", "error", err)
+		}
+	}()
 }
