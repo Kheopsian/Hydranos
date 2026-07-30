@@ -256,6 +256,12 @@ func main() {
 	}
 	// ---- Resolve the engines this node runs (Option A). A legacy default.toml
 	// with [race]/[hoard] yields exactly those two; [[engine]] blocks override.
+	// Install the shared SOCKS5 exit BEFORE anything can call getPublicIP
+	// (status snapshots, agents). Otherwise the first public-IP lookup races
+	// the proxy install, goes out direct, and caches the home WAN IP in the
+	// header for 5 minutes at launch.
+	api.SetSocks5Proxy(api.NewSOCKS5DialerFromConfig(cfg.Proxy))
+
 	// Portable data_dir: an empty or relative path resolves next to the
 	// executable, so a zip that runs from anywhere keeps its data beside it.
 	// Absolute paths (Docker /config, bare-metal /var/lib/hydra) are untouched.
@@ -859,7 +865,6 @@ func main() {
 		}
 	}()
 
-	api.SetSocks5Proxy(api.NewSOCKS5DialerFromConfig(cfg.Proxy))
 	api.StartVpnSpeedtestLoop(ctx, cfg.VpnSpeedtest, &benchAPIAdapter{db: benchDB})
 
 	api.SetStartupReady(true)
