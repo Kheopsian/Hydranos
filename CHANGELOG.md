@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.13.7 — 2026-07-30
+
+### Changed
+- Incognito now also masks peer IPs in the torrent detail peers tables and the race progress graph legend.
+
 ## v3.13.6 — 2026-07-30
 
 ### Changed

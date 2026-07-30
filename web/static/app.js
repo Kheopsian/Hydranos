@@ -959,7 +959,7 @@ function renderProgressChart(snapshots, events, t0) {
 
     compEntries.forEach(([ip, info], idx) => {
         datasets.push({
-            label: ip.split(":")[0], data: info.data,
+            label: incoIP(ip.split(":")[0]), data: info.data,
             borderColor: _tlPeerColors[(idx + 2) % _tlPeerColors.length],
             borderWidth: 1.5, borderDash: [4, 2], fill: false,
             tension: 0.2, pointRadius: 0, yAxisID: "y", spanGaps: true,
@@ -1036,7 +1036,7 @@ function renderPeerSpeedChart(snapshots, t0) {
         .slice(0, 8);
 
     const datasets = topPeers.map(([ip, info], idx) => ({
-        label: ip.split(":")[0],
+        label: incoIP(ip.split(":")[0]),
         data: info.data,
         borderColor: _tlPeerColors[idx % _tlPeerColors.length],
         backgroundColor: _tlPeerColors[idx % _tlPeerColors.length] + "33",
@@ -1085,7 +1085,7 @@ function renderTimelinePeers(snapshot, t0) {
                 ? '<span style="color:#3fb950">100%</span>'
                 : `${(p.progress * 100).toFixed(0)}%`;
             return `<tr>
-                <td class="mono" style="font-size:10px">${p.ip}</td>
+                <td class="mono" style="font-size:10px">${incoIP(p.ip)}</td>
                 <td style="font-size:10px">${p.client || "?"}</td>
                 <td>${formatBytes(p.dl_speed || 0)}/s</td>
                 <td>${prog}</td>
@@ -1184,7 +1184,7 @@ async function refreshDetail() {
                     `<span class="peer-flag ${f}">${f}</span>`
                 ).join("");
                 return `<tr>
-                    <td>${p.ip}:${p.port}</td>
+                    <td>${incoIP(p.ip)}:${p.port}</td>
                     <td>${p.client || "-"}</td>
                     <td>${(p.progress * 100).toFixed(0)}%</td>
                     <td>${formatSpeed(p.down_speed)}</td>
@@ -1720,7 +1720,7 @@ async function refreshHoardDetail() {
                     `<span class="peer-flag ${f}">${f}</span>`
                 ).join("");
                 return `<tr>
-                    <td>${p.ip}:${p.port}</td>
+                    <td>${incoIP(p.ip)}:${p.port}</td>
                     <td>${p.client || "-"}</td>
                     <td>${(p.progress * 100).toFixed(0)}%</td>
                     <td>${formatSpeed(p.down_speed)}</td>
