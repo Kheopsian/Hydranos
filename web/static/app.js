@@ -45,7 +45,7 @@ async function fetchPublicIp() {
         const d = await api("/api/public-ip");
         if (d.ip && d.ip !== "unknown") {
             const hdrEl = document.getElementById("header-exit-ip");
-            if (hdrEl) hdrEl.textContent = incoIP(d.ip);
+            if (hdrEl) hdrEl.textContent = incoExitIP(d.ip);
             // Leak detection: any IP that is NOT our home WAN means we're
             // properly behind a tunnel. Avoids hardcoding takehost IPs which
             // change when DPI bans hit and we rotate to a new VPS IP.
@@ -58,7 +58,7 @@ async function fetchPublicIp() {
                 const exitEl = document.getElementById("proxy-exit-ip");
                 // Header v6-bypass row prefers the v6 egress (gost) so the user
                 // can see at a glance that the v6 path is up. Falls back to v4.
-                if (exitEl) exitEl.textContent = incoIP(d.ip_v6 || d.ip);
+                if (exitEl) exitEl.textContent = incoExitIP(d.ip_v6 || d.ip);
             } else {
                 if (el) {
                     el.classList.add("tunnel-leak");
@@ -3112,6 +3112,12 @@ function incoIP(ip) {
     // TEST-NET-3 (203.0.113.0/24) — reserved for docs/examples, clearly fake.
     return "203.0.113." + (_incoHash(ip) % 254 + 1);
 }
+function incoExitIP(ip) {
+    // Own egress identity: mask with an obviously-redacted value so nobody
+    // mistakes it for a real IP on a screenshot.
+    if (!_incognito || !ip) return ip;
+    return "\u2022\u2022\u2022.\u2022\u2022\u2022.\u2022\u2022\u2022.\u2022\u2022\u2022";
+}
 function toggleIncognito() {
     _incognito = !_incognito;
     try { localStorage.setItem("hydra_incognito", _incognito ? "1" : "0"); } catch (e) {}
@@ -3583,7 +3589,7 @@ async function updateAgents() {
                 ? '<span class="sr-desc">built-in</span>'
                 : `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">Edit</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">Delete</button>`;
             const ifTip = (a.interfaces||[]).map(i=>i.name+": "+incoIP(i.ip)+(i.up?"":" (down)")).join("\n");
-            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono" style="font-size:12px" title="${esc(ifTip)}">${esc(incoIP(a.exit_ip) || "\u2014")}</td><td>${dot}</td><td>${actions}</td></tr>`;
+            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono" style="font-size:12px" title="${esc(ifTip)}">${esc(incoExitIP(a.exit_ip) || "\u2014")}</td><td>${dot}</td><td>${actions}</td></tr>`;
         }).join("");
     } catch (e) { console.error("Failed to update agents:", e); }
 }
