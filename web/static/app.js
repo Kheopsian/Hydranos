@@ -45,7 +45,7 @@ async function fetchPublicIp() {
         const d = await api("/api/public-ip");
         if (d.ip && d.ip !== "unknown") {
             const hdrEl = document.getElementById("header-exit-ip");
-            if (hdrEl) hdrEl.textContent = d.ip;
+            if (hdrEl) hdrEl.textContent = incoIP(d.ip);
             // Leak detection: any IP that is NOT our home WAN means we're
             // properly behind a tunnel. Avoids hardcoding takehost IPs which
             // change when DPI bans hit and we rotate to a new VPS IP.
@@ -58,7 +58,7 @@ async function fetchPublicIp() {
                 const exitEl = document.getElementById("proxy-exit-ip");
                 // Header v6-bypass row prefers the v6 egress (gost) so the user
                 // can see at a glance that the v6 path is up. Falls back to v4.
-                if (exitEl) exitEl.textContent = d.ip_v6 || d.ip;
+                if (exitEl) exitEl.textContent = incoIP(d.ip_v6 || d.ip);
             } else {
                 if (el) {
                     el.classList.add("tunnel-leak");
@@ -531,7 +531,7 @@ function _renderStatus(data) {
                     const barColor = isLeak ? "#f85149" : "";
                     return `<div class="tunnel-row">` +
                         `<span class="tunnel-iface"${isLeak ? ' style="color:#f85149"' : ''}>${t.iface}</span>` +
-                        `<span class="tunnel-ip"${ipColor ? ` style="color:${ipColor}"` : ''}>${t.ip}</span>` +
+                        `<span class="tunnel-ip"${ipColor ? ` style="color:${ipColor}"` : ''}>${incoIP(t.ip)}</span>` +
                         `<div class="tunnel-bar-wrap"><div class="tunnel-bar" style="width:${t.tx_pct}%${barColor ? ';background:'+barColor : ''}"></div></div>` +
                         `<span class="tunnel-pct"${isLeak ? ' style="color:#f85149"' : ''}>${t.tx_pct}%</span>` +
                         `</div>`;
@@ -701,7 +701,7 @@ async function updateRaceTorrents() {
             return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="race" data-agent="${t.agent || 'local'}"
                 onclick="handleRowClick(event,'${t.info_hash}','race')"
                 oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','race')">
-                <td title="${t.info_hash}">${t.name || t.info_hash.substring(0, 16)}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>
+                <td title="${t.info_hash}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>
                 <td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>
                 <td>
                     <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
@@ -1149,7 +1149,7 @@ async function refreshDetail() {
         const d = await api(`/api/race/torrents/${selectedTorrent}`);
 
         _detailAddedTime = d.added_time || 0;
-        document.getElementById("detail-name").textContent = d.name;
+        document.getElementById("detail-name").textContent = incoName(d);
         document.getElementById("detail-state").textContent = d.state;
         document.getElementById("detail-progress").textContent = (d.progress * 100).toFixed(1) + "%";
         document.getElementById("detail-size").textContent = formatBytes(d.total_size);
@@ -1306,7 +1306,7 @@ function renderHoardTable() {
         return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="hoard" data-agent="${t.agent || 'local'}"
             onclick="handleRowClick(event,'${t.info_hash}','hoard')"
             oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','hoard')">
-            <td title="${t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash)}">${t.name || t.info_hash.substring(0, 16)}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>
+            <td title="${t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>
             <td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>
             <td><span class="state-badge ${stateClass}">${t.state}</span></td>
             <td>
@@ -1318,7 +1318,7 @@ function renderHoardTable() {
             <td>${formatSpeed(t.download_rate ?? 0)}</td>
             <td>${formatSpeed(t.upload_rate)}</td>
             <td>${ratio}</td>
-            <td>${t.category || "—"}</td>
+            <td>${esc(incoCat(t.category))}</td>
             <td>${formatDate(t.added_time)}</td>
             <td>${formatDate(t.completed_time)}</td>
             <td>${esc(t.agent || "local")}</td>
@@ -1693,7 +1693,7 @@ async function refreshHoardDetail() {
     try {
         const d = await api(`/api/hoard/torrents/${selectedHoardTorrent}`);
 
-        document.getElementById("h-detail-name").textContent = d.name;
+        document.getElementById("h-detail-name").textContent = incoName(d);
         document.getElementById("h-detail-state").textContent = d.state;
         document.getElementById("h-detail-progress").textContent = (d.progress * 100).toFixed(1) + "%";
         document.getElementById("h-detail-size").textContent = formatBytes(d.total_size);
@@ -3079,6 +3079,49 @@ let _settingsOrig = {};
 function _isObj(v) { return v && typeof v === "object" && !Array.isArray(v); }
 
 // Echappement HTML global (le `const esc` historique est local a une autre fonction).
+// ─── Incognito (display-only anonymization for screenshots / demos) ─────────
+// Deterministic per info_hash / string so labels are stable across refreshes.
+// Only the DISPLAY is masked; state keeps real values, so filters/actions work.
+let _incognito = (typeof localStorage !== "undefined" && localStorage.getItem("hydra_incognito") === "1");
+const _INCO_DISTROS = [
+    "ubuntu-24.04.2-desktop-amd64", "debian-12.9.0-amd64-netinst", "fedora-41-workstation-x86_64",
+    "archlinux-2025.01.01-x86_64", "linuxmint-22-cinnamon-64bit", "manjaro-kde-24.0-x86_64",
+    "pop-os_22.04_amd64", "openSUSE-Leap-15.6-DVD-x86_64", "kali-linux-2024.4-installer-amd64",
+    "AlmaLinux-9.5-x86_64-dvd", "Rocky-9.5-x86_64-minimal", "gentoo-install-amd64-2025",
+    "void-live-x86_64-2024", "elementaryos-8.0-stable", "Zorin-OS-17-Core-64bit",
+];
+const _INCO_CATS = ["Ubuntu", "Debian", "Fedora", "Arch", "Mint", "Manjaro", "Pop!_OS", "openSUSE", "Kali", "Rocky"];
+function _incoHash(s) {
+    let h = 5381; s = String(s == null ? "" : s);
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+    return h;
+}
+function incoName(t) {
+    const real = (t && (t.name || (t.info_hash ? t.info_hash.substring(0, 16) : ""))) || "";
+    if (!_incognito) return real;
+    const seed = (t && t.info_hash) || real;
+    return _INCO_DISTROS[_incoHash(seed) % _INCO_DISTROS.length] + ".iso";
+}
+function incoCat(c) {
+    if (!_incognito) return c || "\u2014";
+    if (!c) return "\u2014";
+    return _INCO_CATS[_incoHash(c) % _INCO_CATS.length];
+}
+function incoIP(ip) {
+    if (!_incognito || !ip) return ip;
+    // TEST-NET-3 (203.0.113.0/24) — reserved for docs/examples, clearly fake.
+    return "203.0.113." + (_incoHash(ip) % 254 + 1);
+}
+function toggleIncognito() {
+    _incognito = !_incognito;
+    try { localStorage.setItem("hydra_incognito", _incognito ? "1" : "0"); } catch (e) {}
+    location.reload();
+}
+window.addEventListener("load", function () {
+    const b = document.getElementById("incognito-toggle");
+    if (b) b.classList.toggle("active", _incognito);
+});
+
 function esc(s) {
     return String(s).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 }
@@ -3495,8 +3538,8 @@ async function updateAgents() {
             const actions = a.kind === "local"
                 ? '<span class="sr-desc">built-in</span>'
                 : `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">Edit</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">Delete</button>`;
-            const ifTip = (a.interfaces||[]).map(i=>i.name+": "+i.ip+(i.up?"":" (down)")).join("\n");
-            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono" style="font-size:12px" title="${esc(ifTip)}">${esc(a.exit_ip || "\u2014")}</td><td>${dot}</td><td>${actions}</td></tr>`;
+            const ifTip = (a.interfaces||[]).map(i=>i.name+": "+incoIP(i.ip)+(i.up?"":" (down)")).join("\n");
+            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono" style="font-size:12px" title="${esc(ifTip)}">${esc(incoIP(a.exit_ip) || "\u2014")}</td><td>${dot}</td><td>${actions}</td></tr>`;
         }).join("");
     } catch (e) { console.error("Failed to update agents:", e); }
 }
