@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.13.4 — 2026-07-30
+
+### Fixed
+- Removed the border box around the Incognito header icon (now a plain white icon).
+
 ## v3.13.3 — 2026-07-30
 
 ### Fixed
