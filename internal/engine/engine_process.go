@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -341,6 +342,24 @@ func strOrDefault(v, def string) string {
 	return def
 }
 
+// engineBinaryPath resolves the hydra-engine (Typhon) binary. Order:
+//  1. HYDRA_ENGINE_BIN env override,
+//  2. a "hydra-engine" sitting next to the running hydra binary (tarball /
+//     bare-metal install where both live in the same dir),
+//  3. the Docker image default /usr/local/bin/hydra-engine.
+func engineBinaryPath() string {
+	if p := os.Getenv("HYDRA_ENGINE_BIN"); p != "" {
+		return p
+	}
+	if exe, err := os.Executable(); err == nil {
+		cand := filepath.Join(filepath.Dir(exe), "hydra-engine")
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+	return "/usr/local/bin/hydra-engine"
+}
+
 // StartEngineProcess starts a hydra-engine child process and connects to its Unix socket.
 func StartEngineProcess(engineCfg EngineConfig, socketPath string) (*EngineProcess, error) {
 	configData, err := json.MarshalIndent(engineCfg, "", "  ")
@@ -355,7 +374,7 @@ func StartEngineProcess(engineCfg EngineConfig, socketPath string) (*EngineProce
 
 	os.Remove(socketPath)
 
-	cmd := exec.Command("/usr/local/bin/hydra-engine",
+	cmd := exec.Command(engineBinaryPath(),
 		"--config", configPath,
 		"--socket", socketPath)
 	cmd.Stdout = os.Stdout

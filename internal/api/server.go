@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
 
+	hydraroot "github.com/Kheopsian/hydra"
 	"github.com/Kheopsian/hydra/internal/agentwire"
 	"github.com/Kheopsian/hydra/internal/bench"
 	"github.com/Kheopsian/hydra/internal/config"
@@ -188,15 +190,30 @@ func NewServer(cfg *config.HydraConfig) *Server {
 		config: cfg,
 	}
 
-	// Load HTML templates
-	if tmpl, err := template.ParseGlob("web/templates/*.html"); err == nil {
+	// Load HTML templates from the embedded FS (self-contained binary).
+	if tmpl, err := template.ParseFS(hydraroot.WebAssets, "web/templates/*.html"); err == nil {
 		router.SetHTMLTemplate(tmpl)
 	} else {
 		slog.Warn("Failed to load templates", "error", err)
 	}
 
-	// Static files
-	router.Static("/static", "web/static")
+	// Static files, served from the embedded FS.
+	if staticFS, err := fs.Sub(hydraroot.WebAssets, "web/static"); err == nil {
+		router.StaticFS("/static", http.FS(staticFS))
+	} else {
+		slog.Warn("Failed to mount static assets", "error", err)
+	}
+
+	// Changelog: the UI fetches /changelog.md; serve the embedded root file
+	// (single source, no /static duplication and no wildcard route conflict).
+	router.GET("/changelog.md", func(c *gin.Context) {
+		data, err := hydraroot.WebAssets.ReadFile("CHANGELOG.md")
+		if err != nil {
+			c.String(http.StatusNotFound, "changelog unavailable")
+			return
+		}
+		c.Data(http.StatusOK, "text/markdown; charset=utf-8", data)
+	})
 
 	// Register routes
 	s.registerHydraRoutes()

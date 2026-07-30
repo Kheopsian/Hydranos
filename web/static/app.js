@@ -3808,7 +3808,7 @@ async function loadChangelog() {
     const el = document.getElementById("changelog-body");
     if (!el || el.dataset.loaded) return;
     try {
-        const res = await fetch("/static/CHANGELOG.md", { cache: "no-cache" });
+        const res = await fetch("/changelog.md", { cache: "no-cache" });
         if (!res.ok) throw new Error("HTTP " + res.status);
         el.innerHTML = _renderMarkdown(await res.text());
         el.dataset.loaded = "1";
