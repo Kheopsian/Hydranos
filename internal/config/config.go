@@ -22,6 +22,7 @@ type RaceChokingConfig struct {
 type SessionConfig struct {
 	ListenPort       int    `toml:"listen_port"`
 	ListenInterfaces string `toml:"listen_interfaces"`
+	BindInterface    string `toml:"bind_interface"` // interface NAME (e.g. "wg0"); resolved to its IP at engine start
 	// Optional second TCP listener expecting HAProxy PROXY protocol v2 (real
 	// peer IP in header). Used by the v6 bypass path: peer → VPS haproxy →
 	// the router rdr → the seedbox host [::]:listen_port_proxy_v2. 0 = disabled.

@@ -118,6 +118,17 @@ function _unitsCardHTML() {
     </div>`;
 }
 
+function _interfacesCardHTML(list) {
+    const rows = (list && list.length)
+        ? list.map((i) => `<div class="settings-row"><div class="sr-label"><span class="sr-key">${esc(i.name)}</span><span class="sr-desc">${i.up ? "up" : "down"}</span></div><div class="sr-field"><code class="sr-readonly">${esc(i.ip)}</code></div></div>`).join("")
+        : `<div class="settings-row"><div class="sr-desc">No non-loopback interfaces detected.</div></div>`;
+    return `<div class="settings-section" style="margin-bottom:18px">
+        <div class="settings-section-title">Network interfaces</div>
+        <div class="sr-desc" style="padding:0 0 8px">Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.</div>
+        ${rows}
+    </div>`;
+}
+
 // Throughput in bits/s (network convention, decimal) — Option 2: VOLUMES in iB, RATES in Gbps.
 function formatGbps(bytesPerSec) {
     const bits = (bytesPerSec || 0) * 8;
@@ -3274,6 +3285,8 @@ async function updateSettings() {
     try {
         const cfg = await api("/api/settings");
         _settingsOrig = {};
+        let _ifaces = [];
+        try { _ifaces = (await api("/api/network/interfaces")).interfaces || []; } catch (e) {}
 
         // Bucketise les sections par domaine.
         const buckets = {};
@@ -3286,7 +3299,7 @@ async function updateSettings() {
         }
 
         const order = SETTINGS_DOMAINS.concat([_SETTINGS_FALLBACK]);
-        let html = _unitsCardHTML() + `<div class="settings-toolbar">
+        let html = _unitsCardHTML() + _interfacesCardHTML(_ifaces) + `<div class="settings-toolbar">
             <input type="text" id="settings-search" class="settings-search" placeholder="Search a setting\u2026" oninput="filterSettings()">
             <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> Show advanced settings</label>
             <span id="settings-search-count" class="settings-search-count"></span>
