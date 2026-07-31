@@ -641,6 +641,44 @@ func main() {
 	api.SetStartupProgress(expectedTotal)
 	slog.Info("Hoard Engine: started", "torrents", hoardEngine.TorrentCount())
 
+	// ---- Per-disk seed-slot regulation (HDD quiet mode) ----
+	// Opt-in via [hoard.disk_slots]; off (nil) by default -> no-op.
+	if ds := cfg.Hoard.DiskSlots; ds != nil && ds.Enabled {
+		slotMgr := engine.NewDiskSlotManager(*ds, func(ih string, suspended bool) {
+			if err := hoardEngine.SetServingSuspended(ih, suspended); err != nil {
+				slog.Warn("disk-slots: suspend call failed", "ih", ih, "suspended", suspended, "err", err)
+			}
+		})
+		go func() {
+			tk := time.NewTicker(slotMgr.CycleInterval())
+			defer tk.Stop()
+			slog.Info("disk-slots: regulation enabled", "disks", len(ds.Disks))
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tk.C:
+					sts, err := hoardEngine.ListStatuses()
+					if err != nil {
+						continue
+					}
+					snap := make([]engine.SlotTorrent, 0, len(sts))
+					for _, s := range sts {
+						snap = append(snap, engine.SlotTorrent{
+							InfoHash:       s.InfoHash,
+							SavePath:       s.SavePath,
+							UploadRate:     int64(s.UploadRate),
+							ScrapeSeeders:  s.NumSeeds,
+							ScrapeLeechers: s.ListPeers,
+							Seeding:        s.IsSeeding && !s.IsPaused,
+						})
+					}
+					slotMgr.Tick(snap, time.Now())
+				}
+			}
+		}()
+	}
+
 	// ---- Start Go-canonical tracker announcers ----
 	// Typhon's internal announce loop is disabled via DisableInternalAnnounce
 	// in BuildHoardConfig/BuildRaceConfig. Go now owns all tracker announces,

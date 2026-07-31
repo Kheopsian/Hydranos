@@ -210,6 +210,10 @@ pub struct TorrentState {
     pub peers_connected: AtomicUsize,
     pub peers_interested: AtomicUsize,
     pub is_paused: AtomicBool,
+    /// Anti-thrash: when true, this torrent serves no piece Requests
+    /// (disk reads gated in peer::session), but stays connected and
+    /// announced. Set by the per-disk seed-slot manager; cleared to resume.
+    pub serving_suspended: AtomicBool,
     /// Set by TorrentManager::remove_torrent BEFORE the DashMap entry is
     /// dropped. Peer tasks keep an Arc<TorrentState> alive after the map
     /// entry disappears; they must observe this flag and exit their loop.
@@ -296,6 +300,7 @@ impl TorrentState {
             peers_connected: AtomicUsize::new(0),
             peers_interested: AtomicUsize::new(0),
             is_paused: AtomicBool::new(false),
+            serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
             picker,
             have_tx,

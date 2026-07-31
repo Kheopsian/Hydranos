@@ -365,6 +365,16 @@ func (c *Client) StopTorrent(infoHash string) error {
 	return err
 }
 
+// SetServingSuspended toggles disk-serving suspension (HDD quiet-mode lever):
+// the torrent keeps peers + announces but serves no Requests (zero disk I/O).
+func (c *Client) SetServingSuspended(infoHash string, suspended bool) error {
+	_, err := c.call("set_serving_suspended", map[string]interface{}{
+		"info_hash": infoHash,
+		"suspended": suspended,
+	})
+	return err
+}
+
 // SetSavePath swaps the in-memory save_path for a running torrent and
 // flushes fastresume. Caller must have stopped the torrent and moved
 // the files on disk before invoking this.

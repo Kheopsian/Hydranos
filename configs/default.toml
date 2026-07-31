@@ -84,3 +84,19 @@ min_age_minutes = 10
 username = "admin"
 # bcrypt hash — generate with: hydra hash-password <password>
 password_hash = ""
+
+# --- Advanced: per-disk seed-slot regulation (HDD quiet mode) ---------------
+# Off by default. Bounds concurrent active uploaders per disk so spinning
+# drives stay quiet. Uncomment and list your disks (Windows drive letters).
+# type="ssd" = never capped. Only listed disks are regulated.
+# [hoard.disk_slots]
+# enabled = true
+# default_max_active = 10
+# [[hoard.disk_slots.disk]]
+# key = "D:"
+# type = "hdd"
+# max_active = 10
+# wake_below = 5
+# [[hoard.disk_slots.disk]]
+# key = "C:"
+# type = "ssd"

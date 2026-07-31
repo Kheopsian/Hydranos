@@ -20,6 +20,7 @@ pub fn dispatch(
         "remove_torrent" => remove_torrent(params, torrent_mgr),
         "start_torrent" => start_torrent(params, torrent_mgr),
         "stop_torrent" => stop_torrent(params, torrent_mgr),
+        "set_serving_suspended" => set_serving_suspended(params, torrent_mgr),
         "set_save_path" => set_save_path(params, torrent_mgr),
         "verify_torrent" => verify_torrent(params, torrent_mgr),
         "recheck_torrent" => verify_torrent(params, torrent_mgr),
@@ -87,6 +88,15 @@ fn start_torrent(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
 fn stop_torrent(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
     let ih = match get_info_hash(params) { Ok(ih) => ih, Err(e) => return e };
     match mgr.stop_torrent(&ih) {
+        Ok(()) => json!({"ok": true}),
+        Err(e) => json!({"error": e}),
+    }
+}
+
+fn set_serving_suspended(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
+    let ih = match get_info_hash(params) { Ok(ih) => ih, Err(e) => return e };
+    let suspended = params.get("suspended").and_then(|v| v.as_bool()).unwrap_or(false);
+    match mgr.set_serving_suspended(&ih, suspended) {
         Ok(()) => json!({"ok": true}),
         Err(e) => json!({"error": e}),
     }

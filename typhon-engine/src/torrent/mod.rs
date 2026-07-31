@@ -229,6 +229,16 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// Suspend/resume disk serving for one torrent without pausing it: the
+    /// torrent keeps its peer connections and keeps announcing (seedtime
+    /// preserved), but serves no Piece Requests so it does zero disk I/O.
+    /// Used by the per-disk seed-slot manager for HDD anti-thrash.
+    pub fn set_serving_suspended(&self, info_hash: &InfoHash, suspended: bool) -> Result<(), String> {
+        let t = self.get(info_hash).ok_or("torrent not found")?;
+        t.serving_suspended.store(suspended, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn load_resume_data(&self) -> usize {
         let resumes = fastresume::load_all(&self.resume_dir);
         let mut loaded = 0;
