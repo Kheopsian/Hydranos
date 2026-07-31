@@ -2373,3 +2373,5 @@ footer {
 .exit-ip-stat { cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%2722%27%20height%3D%2722%27%20viewBox%3D%270%200%2024%2024%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-width%3D%272.2%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M23%204v6h-6%27%2F%3E%3Cpath%20d%3D%27M20.49%2015a9%209%200%201%201-2.12-9.36L23%2010%27%2F%3E%3C%2Fsvg%3E") 11 11, pointer; border: 1px solid transparent; border-radius: 999px; padding: 2px 12px; transition: background .15s, border-color .15s; }
 .exit-ip-stat:hover { background: #0d1117; border-color: #30363d; }
 .exit-ip-stat:hover .ip-refresh-btn { color:#58a6ff; }
+
+.exit-ip-stat { cursor: pointer; }
