@@ -471,32 +471,55 @@ const hydraArt120 = `
                                 ---+++++++--              -++-----                       ---------
 `
 
-// PrintHeader prints the ASCII logo + version to the console at startup.
-func PrintHeader(version string) {
+// bannerLayout picks the logo for the current terminal plus its display width.
+// art is empty when the terminal is too narrow for any logo (wordmark only).
+func bannerLayout() (art string, width int) {
 	switch w := termWidth(); {
 	case w == 0:
-		// Detached / non-TTY (docker logs, web log viewers): shown in wide
-		// viewers, so pick a big-but-not-huge logo rather than the compact one.
-		fmt.Fprint(os.Stdout, hydraArt100)
+		// Detached / non-TTY (docker logs, web viewers): a readable mid logo.
+		return hydraArt80, 79
 	case w >= 118:
-		fmt.Fprint(os.Stdout, hydraArt120)
+		return hydraArt120, 118
 	case w >= 98:
-		fmt.Fprint(os.Stdout, hydraArt100)
+		return hydraArt100, 98
 	case w >= 79:
-		fmt.Fprint(os.Stdout, hydraArt80)
+		return hydraArt80, 79
 	case w >= 60:
-		fmt.Fprint(os.Stdout, hydraArt)
+		return hydraArt, 58
+	default:
+		return "", 46
 	}
-	fmt.Fprintf(os.Stdout, "        H Y D R A   -   Typhon engine   -   v%s\n\n", version)
 }
 
-// PrintReady prints the "started" summary + (first run only) the credentials.
+// centered left-pads s to sit centered within a width-column field.
+func centered(s string, width int) string {
+	if pad := (width - len(s)) / 2; pad > 0 {
+		return strings.Repeat(" ", pad) + s
+	}
+	return s
+}
+
+// PrintHeader prints the logo + version line, sized to the terminal.
+func PrintHeader(version string) {
+	art, w := bannerLayout()
+	if art != "" {
+		fmt.Fprint(os.Stdout, art)
+	}
+	line := fmt.Sprintf("H Y D R A   -   Typhon engine   -   v%s", version)
+	fmt.Fprintf(os.Stdout, "%s\n\n", centered(line, w))
+}
+
+// PrintReady prints the "started" summary + (first run only) the credentials,
+// centered to the same width as the logo so it reads as one coherent block.
 func PrintReady(host string, port int, user, pass string, isNew bool) {
+	_, w := bannerLayout()
 	var b strings.Builder
+	bar := "  " + strings.Repeat("-", w) + "\n"
 	url := fmt.Sprintf("http://%s:%d", host, port)
-	b.WriteString("  ------------------------------------------------------------\n")
-	b.WriteString(fmt.Sprintf("   Engines started       API  %s\n", url))
-	b.WriteString("  ------------------------------------------------------------\n\n")
+	b.WriteString(bar)
+	b.WriteString(centered(fmt.Sprintf("Engines started       API  %s", url), w) + "\n")
+	b.WriteString(bar)
+	b.WriteString("\n")
 	if isNew {
 		lines := []string{
 			"LOGIN  (first run - change it)",
@@ -504,21 +527,23 @@ func PrintReady(host string, port int, user, pass string, isNew bool) {
 			"password : " + pass,
 			"saved in : admin-credentials.txt",
 		}
-		w := 0
+		bw := 0
 		for _, l := range lines {
-			if len(l) > w {
-				w = len(l)
+			if len(l) > bw {
+				bw = len(l)
 			}
 		}
-		bar := "   +" + strings.Repeat("-", w+2) + "+\n"
-		b.WriteString(bar)
+		box := []string{"+" + strings.Repeat("-", bw+2) + "+"}
 		for _, l := range lines {
-			b.WriteString(fmt.Sprintf("   | %-*s |\n", w, l))
+			box = append(box, fmt.Sprintf("| %-*s |", bw, l))
 		}
-		b.WriteString(bar)
+		box = append(box, "+"+strings.Repeat("-", bw+2)+"+")
+		for _, l := range box {
+			b.WriteString(centered(l, w) + "\n")
+		}
 	} else {
-		b.WriteString("   Login: credentials already configured (admin-credentials.txt)\n")
+		b.WriteString(centered("Login: credentials already configured (admin-credentials.txt)", w) + "\n")
 	}
-	b.WriteString("\n   Detailed logs -> hydra.log   |   UI \"Logs\" tab\n\n")
+	b.WriteString("\n" + centered("Detailed logs -> hydra.log   |   UI \"Logs\" tab", w) + "\n\n")
 	fmt.Fprint(os.Stdout, b.String())
 }
