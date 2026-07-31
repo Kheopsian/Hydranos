@@ -474,13 +474,17 @@ const hydraArt120 = `
 // PrintHeader prints the ASCII logo + version to the console at startup.
 func PrintHeader(version string) {
 	switch w := termWidth(); {
+	case w == 0:
+		// Detached / non-TTY (docker logs, web log viewers): read in wide
+		// viewers, so show the full-size logo rather than the compact one.
+		fmt.Fprint(os.Stdout, hydraArt120)
 	case w >= 120:
 		fmt.Fprint(os.Stdout, hydraArt120)
 	case w >= 100:
 		fmt.Fprint(os.Stdout, hydraArt100)
 	case w >= 80:
 		fmt.Fprint(os.Stdout, hydraArt80)
-	case w >= 60 || w == 0:
+	case w >= 60:
 		fmt.Fprint(os.Stdout, hydraArt)
 	}
 	fmt.Fprintf(os.Stdout, "        H Y D R A   -   Typhon engine   -   v%s\n\n", version)
