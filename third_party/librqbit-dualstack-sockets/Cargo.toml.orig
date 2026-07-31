@@ -1,0 +1,39 @@
+[package]
+name = "librqbit-dualstack-sockets"
+version = "0.7.0"
+edition = "2024"
+
+description = "utilities for creating dual-stack TCP and UDP tokio sockets"
+license = "Apache-2.0"
+documentation = "https://docs.rs/librqbit-dualstack-sockets"
+repository = "https://github.com/ikatson/librqbit-dualstack-sockets"
+readme = "README.md"
+
+[dependencies]
+axum = { version = "0.8.4", default-features = false, optional = true, features = [
+    "tokio",
+    "http1",
+] }
+backon = "1.5.1"
+socket2 = { version = "0.6", features = ["all"] }
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = ["net"] }
+tracing = "0.1.41"
+network-interface = { version = "2" }
+futures = "0.3.31"
+libc = "0.2.174"
+
+[dev-dependencies]
+anyhow = "1"
+tokio = { version = "1.45.1", features = [
+    "macros",
+    "rt-multi-thread",
+    "io-util",
+    "time",
+] }
+tracing = "0.1.41"
+bstr = "1.12.0"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+# [features]
+# axum = ["dep:axum"]
