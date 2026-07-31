@@ -5,6 +5,8 @@ WORKDIR /build/typhon-engine
 COPY typhon-engine/Cargo.toml typhon-engine/Cargo.lock ./
 COPY typhon-engine/src ./src
 COPY typhon-engine/benches ./benches
+# Vendored crate referenced by [patch.crates-io] path = "../third_party/...".
+COPY third_party /build/third_party
 ENV RUSTFLAGS="--cfg tokio_unstable"
 RUN cargo build --release --bin typhon-engine
 
