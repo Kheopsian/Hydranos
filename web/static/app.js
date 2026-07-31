@@ -40,9 +40,9 @@ async function fetchPortForward() {
     } catch {}
 }
 
-async function fetchPublicIp() {
+async function fetchPublicIp(force) {
     try {
-        const d = await api("/api/public-ip");
+        const d = await api("/api/public-ip" + (force ? "?refresh=1" : ""));
         if (d.ip && d.ip !== "unknown") {
             const hdrEl = document.getElementById("header-exit-ip");
             if (hdrEl) hdrEl.textContent = incoExitIP(d.ip);
@@ -2876,7 +2876,7 @@ function _startNormalPolling() {
     fetchPublicIp();
     fetchPortForward();
     setInterval(poll, POLL_INTERVAL);
-    setInterval(fetchPublicIp, 5 * 60 * 1000);
+    setInterval(fetchPublicIp, 2 * 60 * 1000);
     setInterval(fetchPortForward, 60 * 1000);
     setupHoardSSE();
 }

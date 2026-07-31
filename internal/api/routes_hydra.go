@@ -2004,7 +2004,7 @@ var cachedPublicIP string
 var cachedPublicIPTime time.Time
 
 func getPublicIP() string {
-	if cachedPublicIP != "" && time.Since(cachedPublicIPTime) < 5*time.Minute {
+	if cachedPublicIP != "" && time.Since(cachedPublicIPTime) < 90*time.Second {
 		return cachedPublicIP
 	}
 	ip := fetchPublicIP("https://api.ipify.org/")
@@ -2022,7 +2022,7 @@ var cachedPublicIPv6Time time.Time
 // to dial in v6 — returns our v6 egress (gost VPS in the current stack).
 // Cached 5 min like the v4 variant.
 func getPublicIPv6() string {
-	if cachedPublicIPv6 != "" && time.Since(cachedPublicIPv6Time) < 5*time.Minute {
+	if cachedPublicIPv6 != "" && time.Since(cachedPublicIPv6Time) < 90*time.Second {
 		return cachedPublicIPv6
 	}
 	ip := fetchPublicIP("https://api6.ipify.org/")
@@ -2057,6 +2057,12 @@ func fetchPublicIP(url string) string {
 // ===========================================================================
 
 func (s *Server) handlePublicIP(c *gin.Context) {
+	if c.Query("refresh") == "1" {
+		// Force a fresh lookup (e.g. user just switched Proton server): expire
+		// both caches so getPublicIP{,v6} re-hit the echo service right now.
+		cachedPublicIPTime = time.Time{}
+		cachedPublicIPv6Time = time.Time{}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"ip":    getPublicIP(),
 		"ip_v6": getPublicIPv6(),
