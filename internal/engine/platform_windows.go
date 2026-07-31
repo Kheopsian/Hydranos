@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/windows"
 )
 
 const engineBinaryName = "hydra-engine.exe"
@@ -34,3 +36,24 @@ func signalHeapDump(pid int) {}
 
 // selfSIGTERM exits the process; a Windows service manager restarts it.
 func selfSIGTERM() { os.Exit(1) }
+
+// procStat reports whether the engine process is alive. Windows has no /proc,
+// so liveness is checked via OpenProcess + GetExitCodeProcess (STILL_ACTIVE).
+// RSS is not read here (the watchdog's RSS ceiling is a Linux OOM-prevention
+// feature); returning 0 disables that check on Windows.
+func procStat(pid int) (bool, int64) {
+	if pid <= 0 {
+		return false, 0
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return false, 0 // process gone / not queryable
+	}
+	defer windows.CloseHandle(h)
+	var code uint32
+	if err := windows.GetExitCodeProcess(h, &code); err != nil {
+		return false, 0
+	}
+	const stillActive = 259 // STILL_ACTIVE
+	return code == stillActive, 0
+}

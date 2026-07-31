@@ -107,38 +107,6 @@ func StartEngineWatchdog(ctx context.Context, alert WatchdogAlerter, dumpDir str
 		"hoard_rss_limit_gb", float64(hoardRSSLimit)/1e9)
 }
 
-// procStat reads /proc/<pid>/stat and returns (alive, rssBytes). A process in
-// state Z (zombie) or X (dead) counts as NOT alive. Reads the RSS field
-// (resident set size in pages, overall field 24) and converts to bytes.
-func procStat(pid int) (bool, int64) {
-	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return false, 0 // process gone
-	}
-	s := string(data)
-	// The comm field (field 2) is parenthesised and can itself contain spaces
-	// and parens, so anchor on the LAST ')': state is the token right after it.
-	rp := strings.LastIndexByte(s, ')')
-	if rp < 0 || rp+2 >= len(s) {
-		return false, 0
-	}
-	// rest[0] == field 3 (state); overall field N maps to rest[N-3].
-	rest := strings.Fields(s[rp+2:])
-	if len(rest) < 1 {
-		return false, 0
-	}
-	if state := rest[0]; state == "Z" || state == "X" || state == "x" {
-		return false, 0
-	}
-	// rss is overall field 24 -> rest[21].
-	if len(rest) > 21 {
-		if pages, err := strconv.ParseInt(rest[21], 10, 64); err == nil {
-			return true, pages * int64(os.Getpagesize())
-		}
-	}
-	return true, 0
-}
-
 // watchdogDumpDir follows HYDRA_CONFIG_DIR (the config/data volume) so crash
 // dumps land on the persistent mount; defaults to /config.
 var watchdogDumpDir = func() string {
