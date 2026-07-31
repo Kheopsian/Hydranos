@@ -40,12 +40,37 @@ async function fetchPortForward() {
     } catch {}
 }
 
+let ipScrambleTimer = null;
+// Slot-machine scramble on the exit-IP text while a manual refresh is in flight.
+function startIpScramble(el) {
+    if (!el) return;
+    stopIpScramble();
+    const chars = "0123456789.";
+    el.style.fontFamily = "ui-monospace, monospace";
+    ipScrambleTimer = setInterval(() => {
+        let out = "";
+        for (let i = 0; i < 11; i++) out += chars[(Math.random() * chars.length) | 0];
+        el.textContent = out;
+    }, 45);
+}
+function stopIpScramble() {
+    if (ipScrambleTimer) { clearInterval(ipScrambleTimer); ipScrambleTimer = null; }
+    const el = document.getElementById("header-exit-ip");
+    if (el) el.style.fontFamily = "";
+}
+
 async function fetchPublicIp(force) {
+    const hdrScr = document.getElementById("header-exit-ip");
+    const prevHdr = hdrScr ? hdrScr.textContent : "";
+    let ipUpdated = false;
+    if (force) startIpScramble(hdrScr);
     try {
         const d = await api("/api/public-ip" + (force ? "?refresh=1" : ""));
         if (d.ip && d.ip !== "unknown") {
+            if (force) stopIpScramble();
             const hdrEl = document.getElementById("header-exit-ip");
             if (hdrEl) hdrEl.textContent = incoExitIP(d.ip);
+            ipUpdated = true;
             // Leak detection: any IP that is NOT our home WAN means we're
             // properly behind a tunnel. Avoids hardcoding takehost IPs which
             // change when DPI bans hit and we rotate to a new VPS IP.
@@ -76,6 +101,12 @@ async function fetchPublicIp(force) {
             }
         }
     } catch {}
+    finally {
+        if (force) {
+            stopIpScramble();
+            if (!ipUpdated && hdrScr) hdrScr.textContent = prevHdr;
+        }
+    }
 }
 
 // ─── Utilities ──────────────────────────────────────────
