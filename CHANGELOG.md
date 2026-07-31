@@ -3,6 +3,51 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.19.1 — 2026-07-31
+
+### Fixed
+- **Logs tab now uses the full window width.** It was capped at 600px by the shared add-form container; the tab renders edge-to-edge so long log lines no longer wrap prematurely.
+
+## v3.19.0 — 2026-07-31
+
+### Added
+- **Logs tab.** A new UI tab backed by the in-process log hub: filter by source, level, time window and free text, live-tail over SSE, and copy/export the current view or open a pre-filled issue from a selection.
+
+## v3.18.3 — 2026-07-31
+
+### Changed
+- **Detached banner tuning.** The detached (headless) default is now the 80-wide logo, the version line is centered, and the rule/summary are sized to the logo width for a tidy header in log viewers.
+
+## v3.18.2 — 2026-07-31
+
+### Changed
+- **Banner logo margins tightened.** Side margins on the logo are tight-cropped and the detached default steps up to the 100-wide logo.
+
+## v3.18.1 — 2026-07-31
+
+### Changed
+- **Full-size logo when detached.** When no console width is reported (w==0, e.g. running detached), the banner prints the full-size logo, since those logs are typically read in wide web viewers.
+
+## v3.18.0 — 2026-07-31
+
+### Changed
+- **Adaptive banner ladder.** The startup logo picks between 80/100/120-wide variants based on terminal width, and reads CONOUT$ so the width is detected even when stdout is redirected.
+
+## v3.17.6 — 2026-07-31
+
+### Changed
+- **Exit IP pill cursor.** Uses a standard pointer cursor on the Exit IP pill instead of the custom refresh cursor.
+
+## v3.17.5 — 2026-07-31
+
+### Changed
+- **Exit IP is now a hover pill.** The Exit IP block became a pill with an always-visible refresh icon and a pointer cursor on hover.
+
+## v3.17.4 — 2026-07-31
+
+### Added
+- **Exit IP refresh button.** A refresh button in the Exit IP label, revealed on hover, that spins while a refresh is in flight.
+
 ## v3.17.3 — 2026-07-31
 
 ### Changed
