@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/Kheopsian/hydra/internal/logs"
 	"strings"
 	"time"
 
@@ -426,11 +428,33 @@ func StartEngineProcess(engineCfg EngineConfig, socketPath string) (*EngineProce
 	cmd := exec.Command(engineBinaryPath(),
 		"--config", configPath,
 		"--socket", socketPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Capture engine stdout/stderr into the log hub (tagged engine:race|hoard)
+	// instead of dumping raw onto the console. os.Pipe read ends are scanned;
+	// on pipe-creation failure we fall back to inheriting the parent streams.
+	engSrc := "engine:" + filepath.Base(engineCfg.DataDir)
+	prOut, pwOut, eo := os.Pipe()
+	prErr, pwErr, ee := os.Pipe()
+	if eo == nil {
+		cmd.Stdout = pwOut
+	} else {
+		cmd.Stdout = os.Stdout
+	}
+	if ee == nil {
+		cmd.Stderr = pwErr
+	} else {
+		cmd.Stderr = os.Stderr
+	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start engine process: %w", err)
+	}
+	if eo == nil {
+		pwOut.Close()
+		go func() { logs.Default.IngestStream(engSrc, prOut); prOut.Close() }()
+	}
+	if ee == nil {
+		pwErr.Close()
+		go func() { logs.Default.IngestStream(engSrc, prErr); prErr.Close() }()
 	}
 
 	slog.Info("engine process started",

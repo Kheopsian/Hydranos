@@ -1,7 +1,7 @@
 package version
 
 // Version is the single source of truth.
-var Version = "3.16.4-typhon"
+var Version = "3.16.5-typhon"
 
 // PeerFingerprintID is the Azureus-style BEP-20 peer_id prefix. It MUST be
 // exactly 8 bytes ("-HY####-"): the engine appends a 12-byte random suffix, so
