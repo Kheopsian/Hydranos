@@ -482,6 +482,15 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 
 	var mu sync.Mutex
 	var carried, carriedDL, earliest int64
+	// Tally failure reasons (bucketed) so the completion log explains WHY
+	// torrents failed without one line per torrent. Guarded by mu.
+	failTally := map[string]int{}
+	tallyFail := func(stage, e string) {
+		k := classifyImportErr(stage, e)
+		mu.Lock()
+		failTally[k]++
+		mu.Unlock()
+	}
 
 	addCh := make(chan addItem, addWorkers*2)
 	var addWG sync.WaitGroup
@@ -512,6 +521,7 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 						continue
 					}
 					slog.Warn("qbit import: add failed", "name", name, "seed_mode", it.seed, "save_path", sp, "error", addErr)
+					tallyFail("add", addErr.Error())
 					job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": add: "+addErr.Error()) })
 					continue
 				}
@@ -550,11 +560,13 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 				name := t.Name
 				data, err := cl.exportTorrent(t.Hash)
 				if err != nil {
+					tallyFail("export", err.Error())
 					job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": export: "+err.Error()) })
 					continue
 				}
 				tmp := filepath.Join(tmpDir, "qbimport-"+t.Hash+".torrent")
 				if err := os.WriteFile(tmp, data, 0644); err != nil {
+					tallyFail("write", err.Error())
 					job.update(func(sn *importSnapshot) { sn.Failed++; sn.Done++; appendErr(sn, name+": write: "+err.Error()) })
 					continue
 				}
@@ -595,6 +607,26 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 
 	if s.saveStateFn != nil {
 		s.saveStateFn()
+	}
+	if len(failTally) > 0 {
+		type fr struct {
+			reason string
+			n      int
+		}
+		frs := make([]fr, 0, len(failTally))
+		for r, n := range failTally {
+			frs = append(frs, fr{r, n})
+		}
+		sort.Slice(frs, func(i, j int) bool { return frs[i].n > frs[j].n })
+		parts := make([]string, 0, len(frs))
+		for i, f := range frs {
+			if i >= 15 {
+				parts = append(parts, "...")
+				break
+			}
+			parts = append(parts, fmt.Sprintf("%s x%d", f.reason, f.n))
+		}
+		slog.Warn("qbit import: failure breakdown", "reasons", strings.Join(parts, " | "))
 	}
 	slog.Info("qbit import: complete", "seeded", final.Seeded, "downloading", final.Downloading, "skipped", final.Skipped, "failed", final.Failed)
 	job.update(func(sn *importSnapshot) { sn.Phase = "done" })
@@ -675,4 +707,30 @@ func (s *Server) handleProvenance(c *gin.Context) {
 		"carried_uploaded_bytes": p.CarriedUploadedBytes,
 		"imported_count":         p.ImportedCount,
 	})
+}
+
+// classifyImportErr buckets a raw import error into a stable category so the
+// completion log can summarise why torrents failed (e.g. 300x "export: timeout"
+// vs "export: http 404") without emitting one log line per torrent.
+func classifyImportErr(stage, e string) string {
+	el := strings.ToLower(e)
+	switch {
+	case strings.Contains(el, "timeout") || strings.Contains(el, "deadline exceeded"):
+		return stage + ": timeout"
+	case strings.Contains(el, "connection refused"):
+		return stage + ": connection refused"
+	case strings.Contains(el, "connection reset"):
+		return stage + ": connection reset"
+	case strings.Contains(el, "no such host") || strings.Contains(el, "lookup "):
+		return stage + ": dns/host"
+	case strings.Contains(el, "export http"):
+		if i := strings.Index(el, "export http"); i >= 0 {
+			return stage + ": " + strings.TrimSpace(el[i:])
+		}
+	}
+	// Fallback: first 60 chars so distinct engine errors still group together.
+	if len(el) > 60 {
+		el = el[:60]
+	}
+	return stage + ": " + el
 }
