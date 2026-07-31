@@ -2383,3 +2383,5 @@ footer {
 .logs-controls button:hover, .logs-controls a#logs-issue:hover { border-color:#58a6ff; }
 .logs-controls .logs-live { display:flex; align-items:center; gap:4px; font-size:13px; color:#8b949e; }
 .logs-view { background:#010409; border:1px solid #30363d; border-radius:8px; padding:10px 12px; height:62vh; overflow:auto; font:12px/1.45 ui-monospace,"Cascadia Mono",monospace; white-space:pre; color:#c9d1d9; transition:border-color .2s; }
+
+#tab-logs .add-form-container { max-width: none; }
