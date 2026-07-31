@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydra - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.2.5">
+    <link rel="stylesheet" href="/static/style.css?v=1.2.6">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -67,8 +67,8 @@
                 <span class="stat-label">Ratio</span>
                 <span class="stat-value" id="header-ratio" style="color:var(--accent-purple)">--</span>
             </div>
-            <div class="stat hide-mobile">
-                <span class="stat-label">Exit IP <button type="button" class="ip-refresh-btn" onclick="fetchPublicIp(true)" aria-label="Rafraichir l'IP" title="Rafraichir l'IP maintenant">&#x21bb;</button></span>
+            <div class="stat hide-mobile exit-ip-stat" onclick="fetchPublicIp(true)" title="Rafraichir l'IP maintenant">
+                <span class="stat-label">Exit IP <span class="ip-refresh-btn">&#x21bb;</span></span>
                 <span class="stat-value" id="header-exit-ip" style="font-size:13px">--</span>
             </div>
             <button id="incognito-toggle" type="button" onclick="toggleIncognito()" aria-label="Incognito" title="Anonymize names, categories & IPs for screenshots" style="background:none;border:none;cursor:pointer;color:#ffffff;padding:4px;display:flex;align-items:center">
