@@ -1,0 +1,48 @@
+[package]
+name = "librqbit-dht"
+version = "5.3.1"
+edition = "2021"
+description = "DHT implementation, used in rqbit torrent client."
+license = "Apache-2.0"
+documentation = "https://docs.rs/librqbit-dht"
+repository = "https://github.com/ikatson/rqbit"
+readme = "README.md"
+
+[features]
+default = ["sha1-crypto-hash"]
+sha1-crypto-hash = [
+    "bencode/sha1-crypto-hash",
+    "librqbit-core/sha1-crypto-hash",
+]
+sha1-ring = ["bencode/sha1-ring", "librqbit-core/sha1-ring"]
+
+[dependencies]
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "sync",
+] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+leaky-bucket = "1.1"
+serde_json = "1"
+hex = "0.4"
+bencode = { path = "../bencode", default-features = false, package = "librqbit-bencode", version = "3.1" }
+anyhow = "1"
+parking_lot = "0.12"
+tracing = "0.1"
+backoff = "0.4.0"
+futures = "0.3"
+rand = "0.9"
+indexmap = "2"
+dashmap = { version = "6", features = ["serde"] }
+clone_to_owned = { path = "../clone_to_owned", package = "librqbit-clone-to-owned", version = "3" }
+librqbit-core = { path = "../librqbit_core", default-features = false, version = "5" }
+chrono = { version = "0.4.31", features = ["serde"] }
+tokio-util = "0.7.10"
+bytes = "1.7.1"
+byteorder = "1.5.0"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

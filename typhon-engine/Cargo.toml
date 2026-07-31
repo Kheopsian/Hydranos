@@ -71,3 +71,4 @@ lto = "off"
 
 [patch.crates-io]
 librqbit-dualstack-sockets = { path = "../third_party/librqbit-dualstack-sockets" }
+librqbit-dht = { path = "../third_party/librqbit-dht" }
