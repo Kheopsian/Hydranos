@@ -133,6 +133,9 @@ func (h *Hub) Subscribe() (<-chan Entry, func()) {
 	}
 }
 
+// LevelAtLeast reports whether level is >= min in severity.
+func LevelAtLeast(level, min string) bool { return levelRank(level) >= levelRank(min) }
+
 func levelRank(l string) int {
 	switch strings.ToUpper(l) {
 	case "DEBUG", "TRACE":

@@ -421,9 +421,11 @@ function activateTab(name) {
     tab.classList.add("active");
     content.classList.add("active");
     window.location.hash = name;
+    if (name !== "logs") stopLogsTail();
     if (name === "config") updateSettings();
     else if (name === "changelog") loadChangelog();
     else if (name === "agents") { updateAgents(); updateEngines(); }
+    else if (name === "logs") loadLogs();
 }
 
 document.querySelectorAll(".tab").forEach(tab => {
@@ -3995,4 +3997,100 @@ async function checkForUpdate() {
             el.innerHTML = "";
         }
     } catch (_) {}
+}
+
+
+// ─── Logs tab (in-process hub: filter, live-tail SSE, copy/export/issue) ────
+let logsEntries = [];
+let logsTailSource = null;
+let _logsInit = false;
+
+function logsFilters() {
+    return {
+        source: document.getElementById("logs-source").value,
+        level: document.getElementById("logs-level").value,
+        since: document.getElementById("logs-since").value,
+        q: document.getElementById("logs-q").value.trim(),
+    };
+}
+function fmtLogLine(e) {
+    const ts = String(e.ts || "").replace("T", " ").replace("Z", "").slice(0, 23);
+    return `${ts}  ${String(e.level || "").padEnd(5)} ${String(e.source || "").padEnd(13)} ${e.msg || ""}`;
+}
+function renderLogs() {
+    const el = document.getElementById("logs-body");
+    if (!el) return;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent = logsEntries.length ? logsEntries.map(fmtLogLine).join("\n") : "(no matching entries)";
+    if (atBottom) el.scrollTop = el.scrollHeight;
+    updateIssueLink();
+}
+function logsQuery() {
+    const f = logsFilters();
+    const qs = new URLSearchParams();
+    if (f.source) qs.set("source", f.source);
+    if (f.level) qs.set("level", f.level);
+    if (f.since) qs.set("since", f.since);
+    if (f.q) qs.set("q", f.q);
+    return qs;
+}
+async function loadLogs() {
+    if (!_logsInit) {
+        _logsInit = true;
+        ["logs-source", "logs-level", "logs-since"].forEach(id =>
+            document.getElementById(id).addEventListener("change", onLogsFilterChange));
+        document.getElementById("logs-q").addEventListener("input", onLogsFilterChange);
+        document.getElementById("logs-tail").addEventListener("change", (ev) => {
+            if (ev.target.checked) startLogsTail(); else stopLogsTail();
+        });
+    }
+    const qs = logsQuery();
+    qs.set("limit", "3000");
+    try {
+        const d = await api("/api/logs?" + qs.toString());
+        logsEntries = d.entries || [];
+        renderLogs();
+    } catch (e) {
+        const el = document.getElementById("logs-body");
+        if (el) el.textContent = "Failed to load logs: " + e.message;
+    }
+}
+function onLogsFilterChange() {
+    loadLogs().then(() => { if (document.getElementById("logs-tail").checked) startLogsTail(); });
+}
+function startLogsTail() {
+    stopLogsTail();
+    const qs = logsQuery();
+    qs.set("apikey", API_KEY);
+    logsTailSource = new EventSource("/api/logs/stream?" + qs.toString());
+    logsTailSource.onmessage = (ev) => {
+        try {
+            logsEntries.push(JSON.parse(ev.data));
+            if (logsEntries.length > 5000) logsEntries.splice(0, logsEntries.length - 5000);
+            renderLogs();
+        } catch {}
+    };
+}
+function stopLogsTail() {
+    if (logsTailSource) { logsTailSource.close(); logsTailSource = null; }
+}
+function logsText() { return logsEntries.map(fmtLogLine).join("\n"); }
+function copyLogs() {
+    navigator.clipboard.writeText(logsText());
+    const el = document.getElementById("logs-body");
+    if (el) { const p = el.style.borderColor; el.style.borderColor = "#3fb950"; setTimeout(() => el.style.borderColor = p, 400); }
+}
+function exportLogs() {
+    const blob = new Blob([logsText()], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "hydra-logs.txt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+function updateIssueLink() {
+    const a = document.getElementById("logs-issue");
+    if (!a) return;
+    const body = "**Describe the issue**\n\n\n**Version:** (see the startup banner)\n\n**Logs** (paste from the Logs tab — check for your public IP before posting):\n```\n\n```\n";
+    a.href = "https://github.com/Kheopsian/Hydra/issues/new?title=" + encodeURIComponent("[bug] ") + "&body=" + encodeURIComponent(body);
 }

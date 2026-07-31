@@ -456,6 +456,10 @@ func (s *Server) registerHydraRoutes() {
 		// Emits the same wire-format as Rust: {"event":"stats_snapshot","data":{...}}.
 		api.GET("/events", s.handleSSE)
 
+		// In-process log hub (UI Logs tab)
+		api.GET("/logs", s.handleLogs)
+		api.GET("/logs/stream", s.handleLogsStream)
+
 		// qBittorrent migration (onboarding import)
 		api.POST("/import/qbit/preview", s.handleQbitPreview)
 		api.POST("/import/qbit/start", s.handleQbitStart)

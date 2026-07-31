@@ -191,7 +191,7 @@ func NewServer(cfg *config.HydraConfig) *Server {
 		Output: logs.Default.NewWriter("gin", "INFO"),
 		SkipPaths: []string{"/health", "/api/startup", "/api/status", "/api/events",
 			"/api/hoard/stats", "/api/port-forward", "/api/public-ip",
-			"/api/categories", "/api/agents"},
+			"/api/categories", "/api/agents", "/api/logs", "/api/logs/stream"},
 	}))
 
 	s := &Server{
