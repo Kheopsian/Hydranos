@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -2381,7 +2382,7 @@ func (s *Server) handleUpdateCheck(c *gin.Context) {
 func fetchLatestRelease() (string, string) {
 	updateCheckMu.Lock()
 	defer updateCheckMu.Unlock()
-	if time.Since(updateCheckAt) < 6*time.Hour && updateCheckLatest != "" {
+	if !updateCheckAt.IsZero() && time.Since(updateCheckAt) < 6*time.Hour {
 		return updateCheckLatest, updateCheckURL
 	}
 	// Use the tags API (works from day one) rather than releases/latest, which
@@ -2409,23 +2410,77 @@ func fetchLatestRelease() (string, string) {
 		return updateCheckLatest, updateCheckURL
 	}
 	updateCheckAt = time.Now()
-	best := ""
-	var bestV [3]int
+	cur := normVer(Version)
+	var cands []string
 	for _, t := range tags {
-		if !strings.HasPrefix(t.Name, "v") {
+		if strings.HasPrefix(t.Name, "v") && verLess(cur, normVer(t.Name)) {
+			cands = append(cands, t.Name)
+		}
+	}
+	sort.Slice(cands, func(i, j int) bool { return verLess(normVer(cands[i]), normVer(cands[j])) })
+	// Highest first: pick the newest release that targets THIS platform. A
+	// release with no "Platforms:" label affects all platforms (back-compat),
+	// so users are never silently starved of a genuinely cross-cutting update.
+	for i := len(cands) - 1; i >= 0; i-- {
+		plats := fetchReleasePlatforms(cands[i])
+		if plats == nil || plats[runtime.GOOS] {
+			updateCheckLatest = cands[i]
+			updateCheckURL = "https://github.com/Kheopsian/Hydra/releases/tag/" + cands[i]
+			return updateCheckLatest, updateCheckURL
+		}
+	}
+	updateCheckLatest = ""
+	updateCheckURL = ""
+	return updateCheckLatest, updateCheckURL
+}
+
+// fetchReleasePlatforms returns the set of platforms a release targets, parsed
+// from a "Platforms: linux, windows" line in the release body. nil means the
+// release has no label (or is unreachable) -> treat as affecting all platforms.
+func fetchReleasePlatforms(tag string) map[string]bool {
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/Kheopsian/Hydra/releases/tags/"+tag, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", "Hydra/"+Version)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	var rel struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return nil
+	}
+	return parsePlatforms(rel.Body)
+}
+
+// parsePlatforms extracts the "Platforms:" label from a release body; nil means
+// "all platforms".
+func parsePlatforms(body string) map[string]bool {
+	for _, line := range strings.Split(body, "\n") {
+		low := strings.ToLower(strings.TrimSpace(line))
+		if !strings.HasPrefix(low, "platforms:") {
 			continue
 		}
-		v := normVer(t.Name)
-		if best == "" || verLess(bestV, v) {
-			best = t.Name
-			bestV = v
+		set := map[string]bool{}
+		for _, p := range strings.Split(low[len("platforms:"):], ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				set[p] = true
+			}
 		}
+		if len(set) == 0 {
+			return nil
+		}
+		return set
 	}
-	if best != "" {
-		updateCheckLatest = best
-		updateCheckURL = "https://github.com/Kheopsian/Hydra/releases/tag/" + best
-	}
-	return updateCheckLatest, updateCheckURL
+	return nil
 }
 
 func normVer(v string) [3]int {
