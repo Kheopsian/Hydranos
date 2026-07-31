@@ -206,6 +206,17 @@ func (e *HoardEngine) EventHub() *EventHub { return e.events }
 func (e *HoardEngine) RawEventHub() *EventHub { return e.rawEvents }
 
 // SetClient injects the engine client (set by main.go after engine process starts).
+// SetServingSuspended toggles disk-serving suspension for one torrent (HDD
+// quiet-mode lever): keeps peers + announces, serves no piece Requests (zero
+// disk I/O). Used by the per-disk seed-slot manager.
+func (e *HoardEngine) SetServingSuspended(infoHash string, suspended bool) error {
+	lt, ok := e.client.(*ltclient.Client)
+	if !ok {
+		return fmt.Errorf("serving-suspend unsupported on this engine client")
+	}
+	return lt.SetServingSuspended(infoHash, suspended)
+}
+
 func (e *HoardEngine) SetClient(client EngineClient) {
 	e.client = client
 }

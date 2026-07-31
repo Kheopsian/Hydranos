@@ -182,6 +182,7 @@ pub async fn run(
                                 if !have_requested
                                     || length > 16384
                                     || we_choke
+                                    || torrent.serving_suspended.load(Ordering::Relaxed)
                                 {
                                     if fast_ext {
                                         framed

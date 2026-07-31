@@ -51,6 +51,9 @@ type SessionConfig struct {
 
 	// Sub-sections (race only)
 	CustomChoking *RaceChokingConfig `toml:"custom_choking,omitempty"`
+
+	// Advanced hoard-only: per-disk seed-slot regulation (HDD quiet mode).
+	DiskSlots *DiskSlotsConfig `toml:"disk_slots,omitempty"`
 }
 
 // ArrCleanupConfig — Radarr/Sonarr cleanup settings.
@@ -125,6 +128,29 @@ type AgentConfig struct {
 	Addr  string `toml:"addr"`
 	Token string `toml:"token"`
 	TLSCa string `toml:"tls_ca"`
+}
+
+// DiskEntry is one regulated disk in [hoard.disk_slots]; semantics live in the
+// disk-slots manager (internal/engine).
+type DiskEntry struct {
+	Key       string `toml:"key"`
+	Type      string `toml:"type"`
+	MaxActive int    `toml:"max_active"`
+	WakeBelow int    `toml:"wake_below"`
+}
+
+// DiskSlotsConfig is the advanced [hoard.disk_slots] section (HDD quiet mode).
+// Enabled defaults false -> inert unless explicitly turned on.
+type DiskSlotsConfig struct {
+	Enabled              bool        `toml:"enabled"`
+	Disks                []DiskEntry `toml:"disk"`
+	DefaultMaxActive     int         `toml:"default_max_active"`
+	SuperSeedThreshold   int         `toml:"super_seed_threshold"`
+	CycleSeconds         int         `toml:"cycle_seconds"`
+	PauseCooldownSec     int         `toml:"pause_cooldown_sec"`
+	WakeCooldownSec      int         `toml:"wake_cooldown_sec"`
+	WarmupSec            int         `toml:"warmup_sec"`
+	WakeAgingBonusPerMin float64     `toml:"wake_aging_bonus_per_min"`
 }
 
 type HydraConfig struct {
