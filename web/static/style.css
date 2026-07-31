@@ -2360,3 +2360,9 @@ footer {
 
 .update-badge { display:inline-block; margin-left:8px; padding:1px 8px; border-radius:10px; background:var(--accent-green); color:#0b0f14; font-size:11px; font-weight:600; text-decoration:none; vertical-align:middle; }
 .update-badge:hover { filter:brightness(1.1); }
+
+.ip-refresh-btn { background:none; border:none; cursor:pointer; color:#8b949e; font-size:11px; line-height:1; padding:0 2px; vertical-align:middle; opacity:0; transition:opacity .15s; }
+.ip-refresh-btn:hover { color:#58a6ff; }
+.stat:hover .ip-refresh-btn { opacity:1; }
+.ip-refresh-btn.spin { opacity:1; display:inline-block; animation: iprefreshspin .6s linear infinite; }
+@keyframes iprefreshspin { to { transform: rotate(360deg); } }
