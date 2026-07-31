@@ -63,7 +63,8 @@ async function fetchPublicIp(force) {
     const hdrScr = document.getElementById("header-exit-ip");
     const prevHdr = hdrScr ? hdrScr.textContent : "";
     let ipUpdated = false;
-    if (force) startIpScramble(hdrScr);
+    const rbtn = document.querySelector(".ip-refresh-btn");
+    if (force) { startIpScramble(hdrScr); if (rbtn) rbtn.classList.add("spin"); }
     try {
         const d = await api("/api/public-ip" + (force ? "?refresh=1" : ""));
         if (d.ip && d.ip !== "unknown") {
@@ -104,6 +105,7 @@ async function fetchPublicIp(force) {
     finally {
         if (force) {
             stopIpScramble();
+            if (rbtn) rbtn.classList.remove("spin");
             if (!ipUpdated && hdrScr) hdrScr.textContent = prevHdr;
         }
     }
