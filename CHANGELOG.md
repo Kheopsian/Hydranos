@@ -3,6 +3,64 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.17.3 — 2026-07-31
+
+### Changed
+- **Exit-IP refresh button moved beside the value** in the header, and a manual refresh now plays a brief slot-machine scramble animation on the IP text until the new value lands. The 2-minute background poll still updates silently (no flicker).
+
+## v3.17.2 — 2026-07-31
+
+### Added
+- **Manual "refresh IP now" button** next to the header exit IP. It forces a fresh lookup (`/api/public-ip?refresh=1`) that bypasses the cache — handy right after switching a VPN server.
+
+### Changed
+- **Public-IP freshness.** Backend cache lowered from 5 min to 90 s and the UI poll from 5 min to 2 min. With the cache TTL now shorter than the poll interval, the old aliasing that could leave the shown IP stale for up to ~10 minutes is gone (worst case ~2 min).
+
+## v3.17.1 — 2026-07-31
+
+### Added
+- **Platform-aware update notifications.** Releases now carry a `Platforms:` label (derived in CI from `[windows]`/`[linux]` commit markers; no marker = both), and the in-app update check only notifies when the running OS is targeted — a Windows-only fix no longer nags Linux users, and vice-versa. Releases without a label are treated as affecting all platforms.
+
+## v3.17.0 — 2026-07-31
+
+### Added
+- **Adaptive startup banner.** Hydra detects the console width and prints a detailed hydra logo on wide terminals, a compact one on standard 80-column consoles, and a plain wordmark when very narrow — so the banner never wraps into garbage.
+
+## v3.16.9 — 2026-07-31
+
+### Changed
+- Startup banner: refined the hydra logo eye placement.
+
+## v3.16.8 — 2026-07-31
+
+### Changed
+- Startup banner: reptilian slit eyes on the hydra heads.
+
+## v3.16.7 — 2026-07-31
+
+### Changed
+- Startup banner: added eyes to the hydra logo.
+
+## v3.16.6 — 2026-07-31
+
+### Added
+- **Real hydra logo in the startup banner**, rendered as shaded ASCII from the project emblem (replaces the placeholder wordmark).
+
+## v3.16.5 — 2026-07-31
+
+### Added
+- **In-process log hub + clean startup console.** All logs (Go, HTTP, and the Typhon engine's stdout/stderr) now funnel into a bounded ring buffer plus a `hydra.log` file next to the config, instead of flooding the console. The console shows only a human startup banner; the generated admin password is printed there in a readable box and saved to `admin-credentials.txt` — and never written to the log stream. High-frequency poll endpoints are excluded from HTTP request logging.
+
+## v3.16.4 — 2026-07-31
+
+### Fixed
+- **Windows: the engine watchdog falsely reported the engine dead every ~30 s** and restarted in a loop. Its liveness check read `/proc/<pid>/stat`, which does not exist on Windows; it now uses `OpenProcess` + `GetExitCodeProcess`. (The per-engine RSS ceiling stays Linux-only.)
+
+## v3.16.3 — 2026-07-31
+
+### Fixed
+- **Windows: the DHT crashed immediately with `os error 10054` (WSAECONNRESET)**, taking the engine into a restart loop. The DHT's UDP socket — created directly by `librqbit-dht`, bypassing the dual-stack helper patched in 3.16.1 — now sets `SIO_UDP_CONNRESET` on Windows and tolerates connection-reset errors in its read loop. Linux unaffected.
+
 ## v3.16.2 — 2026-07-31
 
 ### Fixed
