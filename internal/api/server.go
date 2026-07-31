@@ -19,6 +19,8 @@ import (
 	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
 	"github.com/Kheopsian/hydra/internal/state"
 	"github.com/gin-gonic/gin"
+
+	"github.com/Kheopsian/hydra/internal/logs"
 )
 
 // ---------------------------------------------------------------------------
@@ -181,10 +183,15 @@ type Server struct {
 // NewServer creates a new API server with all routes registered.
 func NewServer(cfg *config.HydraConfig) *Server {
 	gin.SetMode(gin.ReleaseMode)
+	gin.DefaultWriter = logs.Default.NewWriter("gin", "INFO")
+	gin.DefaultErrorWriter = logs.Default.NewWriter("gin", "ERROR")
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(gin.LoggerWithConfig(gin.LoggerConfig{
-		SkipPaths: []string{"/health", "/api/startup"},
+		Output: logs.Default.NewWriter("gin", "INFO"),
+		SkipPaths: []string{"/health", "/api/startup", "/api/status", "/api/events",
+			"/api/hoard/stats", "/api/port-forward", "/api/public-ip",
+			"/api/categories", "/api/agents"},
 	}))
 
 	s := &Server{

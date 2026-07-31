@@ -32,6 +32,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 	"github.com/Kheopsian/hydra/internal/health"
+	"github.com/Kheopsian/hydra/internal/logs"
 	"github.com/Kheopsian/hydra/internal/metrics"
 	"github.com/Kheopsian/hydra/internal/notify"
 	"github.com/Kheopsian/hydra/internal/state"
@@ -171,10 +172,16 @@ func main() {
 		os.Exit(0)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	// Structured logging funnels into the in-process hub (ring buffer for the
+	// UI "Logs" tab + hydra.log mirror). The console stays clean: only ERROR
+	// surfaces there, plus the explicit human startup banner below.
+	logHub := logs.Default
+	logger := slog.New(logs.NewMultiHandler(
+		logs.NewSlogHandler(logHub, slog.LevelInfo),
+		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}),
+	))
 	slog.SetDefault(logger)
+	logs.PrintHeader(version)
 
 	// Raise file descriptor limit for the Go process + children.
 	raiseNofileLimit(1000000)
@@ -196,6 +203,7 @@ func main() {
 		}
 	})
 	*configPath = resolveConfigPath(*configPath, configExplicit)
+	logHub.SetMirrorFileBeside(*configPath, "hydra.log")
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -230,6 +238,9 @@ func main() {
 	// plaintext logge UNE fois (au boot suivant password_hash != "" -> pas de
 	// regeneration). Sans ca une install fraiche (password_hash="") ne peut pas se
 	// connecter a l'UI (/api/login renvoie 503 "auth not configured").
+	// Captured for the startup banner + admin-credentials.txt (never logged).
+	var bootUser, bootPass string
+	var bootNewPass bool
 	if cfg.Auth.PasswordHash == "" {
 		pb := make([]byte, 9)
 		if _, e := rand.Read(pb); e == nil {
@@ -239,12 +250,15 @@ func main() {
 				if data, e2 := os.ReadFile(*configPath); e2 == nil {
 					if doc, e3 := config.SetTOMLValue(string(data), "auth", "password_hash", fmt.Sprintf("%q", string(h))); e3 == nil {
 						if e4 := os.WriteFile(*configPath, []byte(doc), 0644); e4 == nil {
-							slog.Warn("generated a temporary admin password (CHANGE IT via the UI or 'hydra hash-password')", "username", cfg.Auth.Username, "password", pw)
+							bootUser, bootPass, bootNewPass = cfg.Auth.Username, pw, true
+							slog.Info("generated a temporary admin password (shown in the console banner + admin-credentials.txt)")
 						} else {
-							slog.Warn("generated admin password not persisted (ephemeral this run)", "err", e4, "password", pw)
+							bootUser, bootPass, bootNewPass = cfg.Auth.Username, pw, true
+							slog.Warn("generated admin password not persisted (ephemeral this run)", "err", e4)
 						}
 					} else {
-						slog.Warn("generated admin password not persisted (no password_hash line?)", "err", e3, "password", pw)
+						bootUser, bootPass, bootNewPass = cfg.Auth.Username, pw, true
+						slog.Warn("generated admin password not persisted (no password_hash line?)", "err", e3)
 					}
 				}
 			} else {
@@ -909,6 +923,11 @@ func main() {
 	slog.Info("============================================================")
 	slog.Info("  All systems GO — Typhon engine")
 	slog.Info("============================================================")
+
+	if bootNewPass {
+		logs.WriteAdminCredentials(*configPath, bootUser, bootPass)
+	}
+	logs.PrintReady(cfg.Daemon.APIHost, cfg.Daemon.APIPort, cfg.Auth.Username, bootPass, bootNewPass)
 
 	_ = notifier
 	_ = metricsCollector
