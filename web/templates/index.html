@@ -643,6 +643,24 @@
                     <tr><td colspan="7" class="empty">No announces yet</td></tr>
                 </tbody>
             </table>
+
+            <div class="card" style="margin-top:20px">
+                <h3>Per-tracker stats</h3>
+                <p class="sr-desc" style="margin:0 0 12px">Upload/download split by tracker across both engines. Sampled every few seconds; cumulative totals are lifetime.</p>
+                <table id="trkstats-table">
+                    <thead>
+                        <tr><th>Tracker</th><th>Engine</th><th>&#8593; rate</th><th>&#8595; rate</th><th>Peers</th><th>Active/Total</th><th>&#8593; total</th><th>&#8595; total</th><th>Ratio</th></tr>
+                    </thead>
+                    <tbody id="trkstats-tbody">
+                        <tr><td colspan="9" class="empty">No tracker stats yet</td></tr>
+                    </tbody>
+                </table>
+                <div style="margin-top:18px">
+                    <label style="margin-right:8px">Chart tracker</label>
+                    <select id="trkstats-select" onchange="loadTrackerStatsChart(this.value)"></select>
+                    <div style="position:relative;height:260px;margin-top:12px"><canvas id="trkstats-chart"></canvas></div>
+                </div>
+            </div>
         </section>
 
         <section id="tab-config" class="tab-content">
@@ -949,6 +967,6 @@
         <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
     </div>
 
-    <script src="/static/app.js?v=1.3.25"></script>
+    <script src="/static/app.js?v=1.3.26"></script>
 </body>
 </html>

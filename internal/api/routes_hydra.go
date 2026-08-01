@@ -553,6 +553,8 @@ func (s *Server) registerHydraRoutes() {
 			bench.GET("/compare", s.handleBenchCompare)
 			bench.GET("/race-events", s.handleRaceEvents)
 			bench.GET("/race-snapshots/:info_hash", s.handleRaceSnapshots)
+			bench.GET("/trackers/current", s.handleTrackerStatsCurrent)
+			bench.GET("/trackers/range", s.handleTrackerStatsRange)
 		}
 
 		// Health / invariant anomalies (integrity, not performance)
@@ -1698,6 +1700,36 @@ func (s *Server) handleBenchCompare(c *gin.Context) {
 	midF, _ := strconv.ParseFloat(c.Query("mid"), 64)
 	endF, _ := strconv.ParseFloat(c.Query("end"), 64)
 	c.JSON(http.StatusOK, s.benchDB.GetComparison(int(startF), int(midF), int(endF)))
+}
+
+func (s *Server) handleTrackerStatsCurrent(c *gin.Context) {
+	if s.benchDB == nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	res := s.benchDB.GetTrackerCurrent()
+	if res == nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+func (s *Server) handleTrackerStatsRange(c *gin.Context) {
+	if s.benchDB == nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	startF, _ := strconv.ParseFloat(c.Query("start"), 64)
+	endF, _ := strconv.ParseFloat(c.Query("end"), 64)
+	step, _ := strconv.Atoi(c.Query("step"))
+	tracker := c.Query("tracker")
+	res := s.benchDB.GetTrackerRange(int(startF), int(endF), step, tracker)
+	if res == nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	c.JSON(http.StatusOK, res)
 }
 
 func (s *Server) handleRaceEvents(c *gin.Context) {

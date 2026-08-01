@@ -144,6 +144,8 @@ type BenchDB interface {
 	GetRaceEvents(start, end float64) []bench.RaceEvent
 	GetRaceEventsForTorrent(infoHash string) []bench.RaceEvent
 	GetRaceSnapshots(infoHash string) []bench.RaceSnapshot
+	GetTrackerCurrent() []map[string]interface{}
+	GetTrackerRange(start, end, step int, tracker string) []map[string]interface{}
 }
 
 // HealthReporter exposes the latest invariant-anomaly report. Satisfied by
