@@ -3835,7 +3835,7 @@ async function updateTrackers() {
                 ? '<span class="mode-tag mode-hoard">set</span>'
                 : '<span class="sr-desc">—</span>';
             const err = r.last_error ? esc(r.last_error) : "—";
-            return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td class="sr-desc" style="max-width:280px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}')">Edit</button></td></tr>`;
+            return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}')">Edit</button></td></tr>`;
         }).join("");
         if (_thtml === _trackersSig) return;
         _trackersSig = _thtml;
