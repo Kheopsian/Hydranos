@@ -21,6 +21,7 @@ type TorrentInfo struct {
 	AddedTime       time.Time `json:"added_time"`
 	CompletedTime   time.Time `json:"completed_time,omitempty"`
 	TorrentFilePath string    `json:"torrent_file_path,omitempty"`
+	Tags            []string  `json:"tags,omitempty"`
 	ContentFolder   *bool     `json:"content_folder,omitempty"`
 	InjectedPeers   int       `json:"injected_peers,omitempty"`
 	InjectionHit    bool      `json:"injection_hit,omitempty"`
@@ -28,37 +29,38 @@ type TorrentInfo struct {
 
 // TorrentStats contains the stats fields exposed by the qBittorrent-compatible API.
 type TorrentStats struct {
-	InfoHash        string  `json:"info_hash"`
-	Name            string  `json:"name"`
-	State           string  `json:"state"`
-	Progress        float64 `json:"progress"`
-	UploadRate      int64   `json:"upload_rate"`
-	DownloadRate    int64   `json:"download_rate"`
-	TotalUpload     int64   `json:"total_upload"`
-	TotalDownload   int64   `json:"total_download"`
-	NumPeers        int     `json:"num_peers"`
-	NumSeeds        int     `json:"num_seeds"`
-	TotalSize       int64   `json:"total_size"`
-	Ratio           float64 `json:"ratio"`
-	SavePath        string  `json:"save_path"`
-	Category        string  `json:"category"`
-	AddedTime       int64   `json:"added_time"`
-	CompletedTime   int64   `json:"completed_time"`
-	SwarmSeeds      int     `json:"swarm_seeds"`
-	SwarmLeechers   int     `json:"swarm_leechers"`
-	TrackerError    bool    `json:"tracker_error"`
-	TrackerErrorMsg string  `json:"tracker_error_msg,omitempty"`
-	IsAnnounced     bool    `json:"is_announced,omitempty"`
-	TrackerHost     string  `json:"tracker_host,omitempty"`
-	TorrentError    bool    `json:"torrent_error"`
-	TorrentErrorMsg string  `json:"torrent_error_msg,omitempty"`
-	ListSeeds       int     `json:"list_seeds"`
-	ListPeers       int     `json:"list_peers"`
-	TotalDone       int64   `json:"total_done"`
-	ContentFolder   *bool   `json:"content_folder,omitempty"`
-	Uploader        string  `json:"uploader,omitempty"`
-	InjectedPeers   int     `json:"injected_peers,omitempty"`
-	InjectionHit    bool    `json:"injection_hit,omitempty"`
+	InfoHash        string   `json:"info_hash"`
+	Name            string   `json:"name"`
+	State           string   `json:"state"`
+	Progress        float64  `json:"progress"`
+	UploadRate      int64    `json:"upload_rate"`
+	DownloadRate    int64    `json:"download_rate"`
+	TotalUpload     int64    `json:"total_upload"`
+	TotalDownload   int64    `json:"total_download"`
+	NumPeers        int      `json:"num_peers"`
+	NumSeeds        int      `json:"num_seeds"`
+	TotalSize       int64    `json:"total_size"`
+	Ratio           float64  `json:"ratio"`
+	SavePath        string   `json:"save_path"`
+	Category        string   `json:"category"`
+	AddedTime       int64    `json:"added_time"`
+	CompletedTime   int64    `json:"completed_time"`
+	SwarmSeeds      int      `json:"swarm_seeds"`
+	SwarmLeechers   int      `json:"swarm_leechers"`
+	TrackerError    bool     `json:"tracker_error"`
+	TrackerErrorMsg string   `json:"tracker_error_msg,omitempty"`
+	IsAnnounced     bool     `json:"is_announced,omitempty"`
+	TrackerHost     string   `json:"tracker_host,omitempty"`
+	Tags            []string `json:"tags,omitempty"`
+	TorrentError    bool     `json:"torrent_error"`
+	TorrentErrorMsg string   `json:"torrent_error_msg,omitempty"`
+	ListSeeds       int      `json:"list_seeds"`
+	ListPeers       int      `json:"list_peers"`
+	TotalDone       int64    `json:"total_done"`
+	ContentFolder   *bool    `json:"content_folder,omitempty"`
+	Uploader        string   `json:"uploader,omitempty"`
+	InjectedPeers   int      `json:"injected_peers,omitempty"`
+	InjectionHit    bool     `json:"injection_hit,omitempty"`
 }
 
 // PeerInfo describes a single connected peer.
@@ -175,6 +177,22 @@ func ltStatusToTorrentStats(s ltclient.TorrentStatus, category, savePath string,
 		IsAnnounced:     s.IsAnnounced,
 		TrackerHost:     s.TrackerHost,
 	}
+}
+
+// normalizeTags trims whitespace, drops empties, and de-dupes a tag list
+// (first occurrence wins). Tags are Go-side labels only.
+func normalizeTags(tags []string) []string {
+	seen := make(map[string]bool, len(tags))
+	var out []string
+	for _, t := range tags {
+		t = strings.TrimSpace(t)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out
 }
 
 // ltPeerToPeerInfo converts an ltclient PeerInfo to our PeerInfo.

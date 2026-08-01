@@ -37,9 +37,9 @@ const (
 
 // HoardEngine wraps an ltclient connection with Hydra-specific bookkeeping.
 type HoardEngine struct {
-	config  *config.SessionConfig
+	config              *config.SessionConfig
 	CreateTorrentFolder bool // daemon-global: wrap single-file torrents in a per-name folder (qBit-style; off by default)
-	dataDir string
+	dataDir             string
 
 	livePort      atomic.Int64 // runtime listen-port override (0 = use config.ListenPort)
 	expectedTotal atomic.Int64 // store COUNT during boot-from-store import (0=idle) -> total_torrents shows real total, not a climbing count
@@ -1169,6 +1169,7 @@ func (e *HoardEngine) refreshStats() {
 		stats := ltStatusToTorrentStats(s, category, savePath, addedTime, completedTime)
 		if info != nil {
 			stats.ContentFolder = info.ContentFolder
+			stats.Tags = info.Tags
 		}
 
 		if stats.Progress >= 1.0 && completedTime.IsZero() && info != nil {
@@ -1196,6 +1197,9 @@ func (e *HoardEngine) refreshStats() {
 			ns.TrackerErrorMsg = old.TrackerErrorMsg
 			if ns.Category == "" {
 				ns.Category = old.Category
+			}
+			if ns.Tags == nil {
+				ns.Tags = old.Tags
 			}
 		}
 	}
@@ -1827,6 +1831,107 @@ func (e *HoardEngine) SetCategoryLabel(infoHash, category string) error {
 	}
 	e.cachedStatsMu.Unlock()
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Tags — qBittorrent-style multi-labels. Go-side only (Typhon never sees them),
+// mirrored into cachedStats for immediate effect and persisted via tags.json.
+// ---------------------------------------------------------------------------
+
+// GetTags returns a copy of a torrent's tags (nil if none / not found).
+func (e *HoardEngine) GetTags(infoHash string) []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if info, ok := e.torrents[infoHash]; ok && len(info.Tags) > 0 {
+		out := make([]string, len(info.Tags))
+		copy(out, info.Tags)
+		return out
+	}
+	return nil
+}
+
+// GetAllTags returns info_hash -> tags for every tagged torrent (backs the
+// tags.json overlay and the /api/tags list).
+func (e *HoardEngine) GetAllTags() map[string][]string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string][]string)
+	for ih, info := range e.torrents {
+		if len(info.Tags) > 0 {
+			cp := make([]string, len(info.Tags))
+			copy(cp, info.Tags)
+			out[ih] = cp
+		}
+	}
+	return out
+}
+
+func (e *HoardEngine) applyTags(infoHash string, tags []string) error {
+	e.mu.Lock()
+	info, ok := e.torrents[infoHash]
+	if !ok {
+		e.mu.Unlock()
+		return fmt.Errorf("torrent not found")
+	}
+	info.Tags = tags
+	e.mu.Unlock()
+	e.cachedStatsMu.Lock()
+	if st, ok := e.cachedStats[infoHash]; ok {
+		st.Tags = tags
+	}
+	e.cachedStatsMu.Unlock()
+	return nil
+}
+
+// SetTags replaces a torrent's tag set (nil/empty clears).
+func (e *HoardEngine) SetTags(infoHash string, tags []string) error {
+	return e.applyTags(infoHash, normalizeTags(tags))
+}
+
+// AddTags unions tags into the torrent's set.
+func (e *HoardEngine) AddTags(infoHash string, tags []string) error {
+	e.mu.RLock()
+	var cur []string
+	if info, ok := e.torrents[infoHash]; ok {
+		cur = info.Tags
+	}
+	e.mu.RUnlock()
+	return e.applyTags(infoHash, normalizeTags(append(append([]string{}, cur...), tags...)))
+}
+
+// RemoveTags removes the given tags (empty list clears all).
+func (e *HoardEngine) RemoveTags(infoHash string, tags []string) error {
+	if len(tags) == 0 {
+		return e.applyTags(infoHash, nil)
+	}
+	drop := make(map[string]bool)
+	for _, t := range normalizeTags(tags) {
+		drop[t] = true
+	}
+	e.mu.RLock()
+	var cur []string
+	if info, ok := e.torrents[infoHash]; ok {
+		cur = info.Tags
+	}
+	e.mu.RUnlock()
+	var kept []string
+	for _, t := range cur {
+		if !drop[t] {
+			kept = append(kept, t)
+		}
+	}
+	return e.applyTags(infoHash, kept)
+}
+
+// RestoreTags applies persisted tags at boot (from the tags.json overlay).
+func (e *HoardEngine) RestoreTags(byHash map[string][]string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for ih, tags := range byHash {
+		if info, ok := e.torrents[ih]; ok && len(tags) > 0 {
+			info.Tags = normalizeTags(tags)
+		}
+	}
 }
 
 // SetAddedTime overrides a torrent's recorded add time (both the canonical

@@ -23,6 +23,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
+	"github.com/Kheopsian/hydra/internal/tagstore"
 	"github.com/gin-gonic/gin"
 )
 
@@ -496,6 +497,7 @@ func (s *Server) registerHydraRoutes() {
 			hoard.POST("/verify-downloading", s.handleHoardVerifyDownloading)
 			hoard.POST("/torrents/:info_hash/verify", s.handleHoardVerifyTorrent)
 			hoard.POST("/torrents/:info_hash/category", s.handleHoardSetCategory)
+			hoard.POST("/torrents/:info_hash/tags", s.handleHoardSetTags)
 			hoard.GET("/download-slots", s.handleHoardDownloadSlotsGet)
 			hoard.POST("/download-slots", s.handleHoardDownloadSlotsSet)
 			hoard.DELETE("/download-slots", s.handleHoardDownloadSlotsClear)
@@ -506,6 +508,7 @@ func (s *Server) registerHydraRoutes() {
 
 		// Categories
 		api.GET("/categories", s.handleCategoriesGet)
+		api.GET("/tags", s.handleGetTags)
 		api.GET("/agents", s.handleAgentsGet)
 		api.POST("/agents", s.handleAgentCreate)
 		api.POST("/agents/test", s.handleAgentTest)
@@ -2120,6 +2123,68 @@ func (s *Server) fanoutAnnounceOverride(p agentwire.AnnounceOverrideParams) (int
 		}
 	}
 	return pushed, failed
+}
+
+// handleHoardSetTags sets/adds/removes a hoard torrent's tags (qBittorrent-style
+// labels). Body: {"tags":[...], "op":"set"|"add"|"remove"} (default set). Tags
+// take effect immediately (cachedStats) and are persisted to the tags.json
+// overlay so they survive restart.
+func (s *Server) handleHoardSetTags(c *gin.Context) {
+	hash := c.Param("info_hash")
+	var body struct {
+		Tags []string `json:"tags"`
+		Op   string   `json:"op"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if s.hoardEngine == nil || !s.hoardEngine.HasTorrent(hash) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
+		return
+	}
+	var err error
+	switch body.Op {
+	case "add":
+		err = s.hoardEngine.AddTags(hash, body.Tags)
+	case "remove":
+		err = s.hoardEngine.RemoveTags(hash, body.Tags)
+	default:
+		err = s.hoardEngine.SetTags(hash, body.Tags)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	s.persistTags()
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "info_hash": hash, "tags": s.hoardEngine.GetTags(hash)})
+}
+
+// persistTags writes the current per-torrent tag assignments to tags.json
+// (best-effort; in-memory tags stay authoritative until the next successful save).
+func (s *Server) persistTags() {
+	if s.hoardEngine == nil {
+		return
+	}
+	_ = tagstore.Save(s.config.Daemon.DataDir, s.hoardEngine.GetAllTags())
+}
+
+// handleGetTags returns the sorted set of distinct tags currently in use.
+func (s *Server) handleGetTags(c *gin.Context) {
+	set := map[string]bool{}
+	if s.hoardEngine != nil {
+		for _, tags := range s.hoardEngine.GetAllTags() {
+			for _, t := range tags {
+				set[t] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for t := range set {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	c.JSON(http.StatusOK, out)
 }
 
 // handleGetPasskeys returns the current per-tracker announce passkey overrides.

@@ -75,6 +75,11 @@ func (emptyHoardEngine) VerifyDownloading() int                          { retur
 func (emptyHoardEngine) VerifyTorrent(string) error                      { return errNoLocalEngine }
 func (emptyHoardEngine) SetTorrentCategory(string, string, string) error { return errNoLocalEngine }
 func (emptyHoardEngine) SetCategoryLabel(string, string) error           { return errNoLocalEngine }
+func (emptyHoardEngine) GetTags(string) []string                         { return nil }
+func (emptyHoardEngine) GetAllTags() map[string][]string                 { return nil }
+func (emptyHoardEngine) SetTags(string, []string) error                  { return errNoLocalEngine }
+func (emptyHoardEngine) AddTags(string, []string) error                  { return errNoLocalEngine }
+func (emptyHoardEngine) RemoveTags(string, []string) error               { return errNoLocalEngine }
 func (emptyHoardEngine) SetAddedTime(string, time.Time)                  {}
 func (emptyHoardEngine) SetContentFolder(string, *bool)                  {}
 func (emptyHoardEngine) GetDownloadSlotStatus() engine.DownloadSlotStats {
