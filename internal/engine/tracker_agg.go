@@ -57,3 +57,24 @@ func (e *HoardEngine) AggregateByTracker() map[string]*TrackerAgg {
 	e.cachedStatsMu.RUnlock()
 	return m
 }
+
+// TrackerHostFor returns the tracker host cached for a torrent, or "" if the
+// torrent is unknown. Used at remove time to attribute a departing torrent's
+// carried-over stats to the right tracker.
+func (e *RaceEngine) TrackerHostFor(infoHash string) string {
+	e.cachedStatsMu.RLock()
+	defer e.cachedStatsMu.RUnlock()
+	if s := e.cachedStats[infoHash]; s != nil {
+		return s.TrackerHost
+	}
+	return ""
+}
+
+func (e *HoardEngine) TrackerHostFor(infoHash string) string {
+	e.cachedStatsMu.RLock()
+	defer e.cachedStatsMu.RUnlock()
+	if s := e.cachedStats[infoHash]; s != nil {
+		return s.TrackerHost
+	}
+	return ""
+}
