@@ -294,7 +294,7 @@ async fn main() {
                     // seeders / seed-mode (no picker) are complete by definition.
                     let progress: f32 = if st == crate::torrent::meta::TorrentStatus::Seeding as u8 {
                         1.0
-                    } else if let Some(pk) = t.picker.as_ref() {
+                    } else if let Some(pk) = t.picker.get() {
                         let np = t.meta.num_pieces();
                         if np > 0 { pk.lock().unwrap().num_have() as f32 / np as f32 } else { 0.0 }
                     } else {

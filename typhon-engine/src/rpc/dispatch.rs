@@ -377,7 +377,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     // Real progress from picker's have count (was a 0.0/1.0 placeholder).
     let (num_have, progress) = if status_u8 == TorrentStatus::Seeding as u8 {
         (t.meta.num_pieces(), 1.0_f64)
-    } else if let Some(ref picker) = t.picker {
+    } else if let Some(picker) = t.picker.get() {
         let n = picker.lock().unwrap().num_have();
         let total = t.meta.num_pieces();
         let p = if total > 0 { n as f64 / total as f64 } else { 0.0 };

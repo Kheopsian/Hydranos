@@ -207,11 +207,11 @@ impl TorrentManager {
         if t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
             return Ok(());
         }
-        if t.seed_mode || t.picker.is_none() {
+        if t.seed_mode || t.picker.get().is_none() {
             t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         } else {
             // Has a picker = was added without seed_mode = download mode
-            let picker = t.picker.as_ref().unwrap();
+            let picker = t.picker.get().unwrap();
             let p = picker.lock().unwrap();
             if p.is_complete() {
                 t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
@@ -272,7 +272,7 @@ impl TorrentManager {
             // recognised as a seed below. Pre-bitfield resume files have an
             // empty string here (serde default) — old behaviour preserved.
             if !rd.bitfield.is_empty() {
-                if let Some(ref picker) = state.picker {
+                if let Some(picker) = state.picker.get() {
                     let bytes = hex_decode_bytes(&rd.bitfield);
                     if !bytes.is_empty() {
                         picker.lock().unwrap().import_bitfield(&bytes);
@@ -288,9 +288,9 @@ impl TorrentManager {
             if rd.paused {
                 state.is_paused.store(true, Ordering::Relaxed);
                 state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
-            } else if rd.seed_mode || state.picker.is_none() {
+            } else if rd.seed_mode || state.picker.get().is_none() {
                 state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-            } else if state.picker.as_ref().unwrap().lock().unwrap().is_complete() {
+            } else if state.picker.get().unwrap().lock().unwrap().is_complete() {
                 state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
             } else {
                 state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
@@ -355,7 +355,7 @@ impl TorrentManager {
     /// between save_all_resume (periodic) and set_save_path (immediate
     /// flush after a category move).
     fn build_resume_data(t: &TorrentState) -> fastresume::ResumeData {
-        let bitfield = match &t.picker {
+        let bitfield = match t.picker.get() {
             Some(p) => hex_encode_bytes(&p.lock().unwrap().export_bitfield()),
             None => String::new(),
         };
@@ -470,9 +470,16 @@ impl TorrentManager {
     /// explicit skip_checking, which stays the trust-fast path.
     pub fn recheck(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        if t.picker.is_none() {
-            return Err("cannot recheck a seed_mode torrent (no picker)".into());
-        }
+        // A seed_mode torrent has no picker (data trusted; no bitfield -> cheap at
+        // scale). To recheck it, create an all-missing picker on demand so
+        // run_recheck can populate it from disk. Only rechecked torrents pay for a
+        // picker; download.rs gates piece requests on picker presence, so a recheck
+        // that finds missing/corrupt pieces will refetch them.
+        let _ = t.picker.get_or_init(|| {
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces()),
+            ))
+        });
         if !t.is_paused.load(Ordering::Relaxed) {
             t.status
                 .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
@@ -488,7 +495,7 @@ impl TorrentManager {
 
     async fn run_recheck(&self, ih: InfoHash, t: Arc<TorrentState>) {
         let num_pieces = t.meta.num_pieces();
-        let picker = match t.picker.as_ref() {
+        let picker = match t.picker.get() {
             Some(p) => p.clone(),
             None => return,
         };

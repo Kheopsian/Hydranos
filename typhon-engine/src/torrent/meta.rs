@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use parking_lot::RwLock;
 use bytes::Bytes;
 use tokio::sync::broadcast;
@@ -222,7 +222,7 @@ pub struct TorrentState {
     pub is_removed: AtomicBool,
 
     // Download mode
-    pub picker: Option<Arc<Mutex<PiecePicker>>>,
+    pub picker: OnceLock<Arc<Mutex<PiecePicker>>>,
     pub have_tx: Option<broadcast::Sender<u32>>,
 
     // Per-torrent rate tracking
@@ -278,11 +278,10 @@ impl TorrentState {
         } else {
             TorrentStatus::Stopped as u8
         };
-        let picker = if !seed_mode {
-            Some(Arc::new(Mutex::new(PiecePicker::new(meta.num_pieces()))))
-        } else {
-            None
-        };
+        let picker: OnceLock<Arc<Mutex<PiecePicker>>> = OnceLock::new();
+        if !seed_mode {
+            let _ = picker.set(Arc::new(Mutex::new(PiecePicker::new(meta.num_pieces()))));
+        }
         // Only downloaders use the have-broadcast; seeders never send/subscribe,
         // so skip the 256-slot ring allocation for every seeder.
         let have_tx = if seed_mode { None } else { Some(broadcast::channel(256).0) };
@@ -326,7 +325,7 @@ impl TorrentState {
                 buf[byte_len - 1] = 0xFF << (8 - trailing);
             }
             Bytes::from(buf)
-        } else if let Some(p) = self.picker.as_ref() {
+        } else if let Some(p) = self.picker.get() {
             // Advertise partial progress during leeching — otherwise peers never
             // request from us and our upload stays at 0 until we fully complete.
             Bytes::from(p.lock().unwrap().export_bitfield())

@@ -87,7 +87,7 @@ pub async fn run(
     // Have broadcasts only matter while we're downloading. Subscribing on
     // seeding torrents pointlessly wakes every task on every piece we
     // complete (we don't complete any) — see feedback_tokio_broadcast_cap.
-    let mut have_rx = if torrent.picker.is_some() && !is_seeding {
+    let mut have_rx = if torrent.picker.get().is_some() && !is_seeding {
         torrent.have_tx.as_ref().map(|tx| tx.subscribe())
     } else {
         None
@@ -177,7 +177,7 @@ pub async fn run(
                                 let have_requested = cur_status == TorrentStatus::Seeding as u8
                                     || torrent
                                         .picker
-                                        .as_ref()
+                                        .get()
                                         .map_or(false, |pk| pk.lock().unwrap().has_piece(index));
                                 if !have_requested
                                     || length > 16384
