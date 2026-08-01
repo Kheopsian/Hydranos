@@ -475,9 +475,9 @@ async function checkHealth() {
             checkForUpdate();
         }
     } catch {
-        const dot = document.getElementById("health-dot");
-        dot.className = "health-dot error";
-        dot.title = "Connection failed";
+        // Do not touch the health dot here: it reflects port-forward / listen
+        // health (owned by fetchPortForward). A single transient /health blip on
+        // a loaded box must not latch it red until the next 60s port check.
     }
 }
 
