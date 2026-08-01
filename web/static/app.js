@@ -3824,7 +3824,7 @@ async function updateTrackers() {
             tbody.innerHTML = '<tr><td colspan="7" class="empty">No announces yet</td></tr>';
             return;
         }
-        tbody.innerHTML = rows.map(r => {
+        const _thtml = rows.map(r => {
             const status = r.ok
                 ? '<span class="mode-tag mode-hoard">ok</span>'
                 : '<span class="mode-tag mode-race">error</span>';
@@ -3837,10 +3837,16 @@ async function updateTrackers() {
             const err = r.last_error ? esc(r.last_error) : "—";
             return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td class="sr-desc" style="max-width:280px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}')">Edit</button></td></tr>`;
         }).join("");
+        if (_thtml === _trackersSig) return;
+        _trackersSig = _thtml;
+        tbody.innerHTML = _thtml;
     } catch (e) { console.error("Failed to update trackers:", e); }
 }
 // --- Per-tracker bench stats (Trackers tab) ---
 let _trkStatsChart = null;
+let _trackersSig = "";
+let _trkStatsSig = "";
+let _trkSelSig = "";
 
 async function loadTrackerStats() {
     try {
@@ -3881,6 +3887,8 @@ function _renderTrackerStatsTable(rows) {
                 `</tr>`;
         });
     });
+    if (html === _trkStatsSig) return;
+    _trkStatsSig = html;
     tbody.innerHTML = html;
 }
 
@@ -3888,10 +3896,14 @@ function _populateTrackerStatsSelect(rows) {
     const sel = document.getElementById("trkstats-select");
     if (!sel) return;
     const trackers = [...new Set(rows.map(r => r.tracker))].sort();
+    const sig = trackers.join("|");
     const cur = sel.value;
-    sel.innerHTML = trackers.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
-    if (trackers.includes(cur)) sel.value = cur;
-    if (sel.value) loadTrackerStatsChart(sel.value);
+    if (sig !== _trkSelSig) {
+        _trkSelSig = sig;
+        sel.innerHTML = trackers.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+        if (trackers.includes(cur)) sel.value = cur;
+    }
+    if (sel.value && !_trkStatsChart) loadTrackerStatsChart(sel.value);
 }
 
 async function loadTrackerStatsChart(tracker) {
