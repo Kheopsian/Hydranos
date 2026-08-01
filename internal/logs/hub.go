@@ -545,7 +545,7 @@ func PrintReady(host string, port int, user, pass string, isNew bool) {
 			b.WriteString(centered(l, w) + "\n")
 		}
 	} else {
-		b.WriteString(centered("Login: credentials already configured (admin-credentials.txt)", w) + "\n")
+		b.WriteString(centered("Login already set. Lost the password? run: hydra reset-password <new>", w) + "\n")
 	}
 	b.WriteString("\n" + centered("Detailed logs -> hydra.log   |   UI \"Logs\" tab", w) + "\n\n")
 	fmt.Fprint(os.Stdout, b.String())

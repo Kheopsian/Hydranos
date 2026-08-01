@@ -425,6 +425,7 @@ function activateTab(name) {
     if (name === "config") updateSettings();
     else if (name === "changelog") loadChangelog();
     else if (name === "agents") { updateAgents(); updateEngines(); }
+    else if (name === "trackers") updateTrackers();
     else if (name === "logs") loadLogs();
 }
 
@@ -446,6 +447,7 @@ window.addEventListener("DOMContentLoaded", () => {
         else if (_hashTab === "hoard") await updateHoardStats();
         else if (_hashTab === "categories") await updateCategories();
         else if (_hashTab === "agents") { await updateAgents(); updateEngines(); }
+        else if (_hashTab === "trackers") await updateTrackers();
         else if (_hashTab === "benchmark") await updateBenchmark();
     });
 });
@@ -2891,6 +2893,7 @@ async function poll() {
         if (activeTab === "hoard") await updateHoardStats();
         if (activeTab === "categories") await updateCategories();
         if (activeTab === "benchmark") await updateBenchmark();
+        if (activeTab === "trackers") await updateTrackers();
     } finally {
         _polling = false;
     }
@@ -3711,7 +3714,83 @@ async function restoreAgent(name) {
 }
 
 
+// ─── Trackers ───────────────────────────────────────────
+const TRACKER_PRESETS = {
+    qb522: { pid: "-qB5220-", ua: "qBittorrent/5.2.2" },
+    qb461: { pid: "-qB4610-", ua: "qBittorrent/4.6.1" },
+    tr405: { pid: "-TR4050-", ua: "Transmission/4.0.5" },
+    de211: { pid: "-DE211s-", ua: "Deluge 2.1.1" },
+};
+function applyTrackerPreset() {
+    const p = TRACKER_PRESETS[document.getElementById("trk-preset").value];
+    if (!p) return;
+    document.getElementById("trk-pid").value = p.pid;
+    document.getElementById("trk-ua").value = p.ua;
+}
+async function updateTrackers() {
+    try {
+        const rows = await api("/api/trackers");
+        const tbody = document.getElementById("trackers-tbody");
+        if (!rows || !rows.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="empty">No announces yet</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r => {
+            const status = r.ok
+                ? '<span class="mode-tag mode-hoard">ok</span>'
+                : '<span class="mode-tag mode-race">error</span>';
+            const spoof = r.spoofed
+                ? `<span class="mode-tag mode-hoard">${esc(r.peer_id_prefix || "spoof")}</span>`
+                : '<span class="sr-desc">—</span>';
+            const passkey = r.passkey_set
+                ? '<span class="mode-tag mode-hoard">set</span>'
+                : '<span class="sr-desc">—</span>';
+            const err = r.last_error ? esc(r.last_error) : "—";
+            return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td class="sr-desc" style="max-width:280px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}')">Edit</button></td></tr>`;
+        }).join("");
+    } catch (e) { console.error("Failed to update trackers:", e); }
+}
+function showTrackerForm(host = "", pid = "", ua = "") {
+    document.getElementById("trk-host").value = host;
+    document.getElementById("trk-preset").value = "";
+    document.getElementById("trk-pid").value = pid;
+    document.getElementById("trk-ua").value = ua;
+    document.getElementById("trk-passkey").value = "";
+    document.getElementById("trk-result").style.display = "none";
+    document.getElementById("trk-form").style.display = "block";
+}
+function hideTrackerForm() { document.getElementById("trk-form").style.display = "none"; }
+function editTracker(host, pid, ua) { showTrackerForm(host, pid, ua); }
+function _trkResult(msg, ok) {
+    const r = document.getElementById("trk-result");
+    r.textContent = msg; r.className = "result-msg " + (ok ? "success" : "error"); r.style.display = "block";
+}
+function _trkHost() { return document.getElementById("trk-host").value.trim(); }
+async function saveTracker() {
+    const host = _trkHost();
+    if (!host) { _trkResult("Host required", false); return; }
+    try {
+        await api("/api/announce/clients", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, peer_id_prefix: document.getElementById("trk-pid").value.trim(), user_agent: document.getElementById("trk-ua").value.trim() }) });
+        const pk = document.getElementById("trk-passkey").value.trim();
+        if (pk) await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: pk }) });
+        hideTrackerForm(); await updateTrackers();
+    } catch (e) { _trkResult("Error: " + e.message, false); }
+}
+async function clearTrackerSpoof() {
+    const host = _trkHost();
+    if (!host) { _trkResult("Host required", false); return; }
+    try { await api("/api/announce/clients", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, peer_id_prefix: "" }) }); hideTrackerForm(); await updateTrackers(); }
+    catch (e) { _trkResult("Error: " + e.message, false); }
+}
+async function clearTrackerPasskey() {
+    const host = _trkHost();
+    if (!host) { _trkResult("Host required", false); return; }
+    try { await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: "" }) }); hideTrackerForm(); await updateTrackers(); }
+    catch (e) { _trkResult("Error: " + e.message, false); }
+}
+
 // --- Local engines (shards) ---
+
 function showEngineForm(){ document.getElementById("engine-form").style.display="block"; }
 function hideEngineForm(){ document.getElementById("engine-form").style.display="none"; }
 async function updateEngines(){
