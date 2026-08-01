@@ -1571,7 +1571,7 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 		"tracker_error_msg": s.TrackerErrorMsg, "torrent_error": s.TorrentError,
 		"torrent_error_msg": s.TorrentErrorMsg, "uploader": s.Uploader,
 		"injected_peers": s.InjectedPeers, "injection_hit": s.InjectionHit,
-		"content_folder": s.ContentFolder,
+		"content_folder": s.ContentFolder, "tags": s.Tags,
 	}
 }
 
