@@ -36,3 +36,31 @@ func Save(dataDir string, m map[string][]string) error {
 	}
 	return os.Rename(tmp, Path(dataDir))
 }
+
+// RegistryPath returns the tags_registry.json path: the set of known tag names,
+// including tags created but not yet assigned (qBittorrent parity).
+func RegistryPath(dataDir string) string { return filepath.Join(dataDir, "tags_registry.json") }
+
+// LoadRegistry reads the known-tag name list (nil on missing/error).
+func LoadRegistry(dataDir string) []string {
+	var out []string
+	b, err := os.ReadFile(RegistryPath(dataDir))
+	if err != nil {
+		return out
+	}
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+// SaveRegistry writes the known-tag name list atomically.
+func SaveRegistry(dataDir string, names []string) error {
+	b, err := json.MarshalIndent(names, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := RegistryPath(dataDir) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, RegistryPath(dataDir))
+}

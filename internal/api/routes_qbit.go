@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/Kheopsian/hydra/internal/tagstore"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,6 +55,11 @@ func (s *Server) registerQbitRoutes() {
 	v2.POST("/torrents/createCategory", s.qbitCategoryCreate)
 	v2.POST("/torrents/editCategory", s.qbitCategoryEdit)
 	v2.POST("/torrents/removeCategories", s.qbitCategoriesRemove)
+	v2.GET("/torrents/tags", s.qbitTorrentsTags)
+	v2.POST("/torrents/createTags", s.qbitCreateTags)
+	v2.POST("/torrents/deleteTags", s.qbitDeleteTags)
+	v2.POST("/torrents/addTags", s.qbitAddTags)
+	v2.POST("/torrents/removeTags", s.qbitRemoveTags)
 }
 
 // ===========================================================================
@@ -165,6 +172,7 @@ func (s *Server) qbitTransferInfo(c *gin.Context) {
 func (s *Server) qbitTorrentsInfo(c *gin.Context) {
 	filter := c.DefaultPostForm("filter", c.DefaultQuery("filter", "all"))
 	categoryFilter := c.DefaultPostForm("category", c.Query("category"))
+	tagFilter := c.DefaultPostForm("tag", c.Query("tag"))
 	hashesFilter := c.DefaultPostForm("hashes", c.Query("hashes"))
 	sortField := c.DefaultPostForm("sort", c.DefaultQuery("sort", "added_on"))
 	reverse := c.DefaultPostForm("reverse", c.DefaultQuery("reverse", "false")) == "true"
@@ -233,6 +241,17 @@ func (s *Server) qbitTorrentsInfo(c *gin.Context) {
 		for _, t := range allTorrents {
 			cat, _ := t["category"].(string)
 			if cat == categoryFilter {
+				filtered = append(filtered, t)
+			}
+		}
+		allTorrents = filtered
+	}
+
+	// Filter by tag (qBittorrent: torrents having the given tag)
+	if tagFilter != "" {
+		filtered := make([]map[string]interface{}, 0)
+		for _, t := range allTorrents {
+			if qbitTagsContains(t, tagFilter) {
 				filtered = append(filtered, t)
 			}
 		}
@@ -574,10 +593,14 @@ func (s *Server) qbitTorrentsAdd(c *gin.Context) {
 					}
 				case "hoard":
 					if s.hoardEngine != nil {
+						var ih string
 						if skipChecking {
-							s.hoardEngine.AddTorrentSeedMode(tmpPath, savePath, category)
+							ih, _ = s.hoardEngine.AddTorrentSeedMode(tmpPath, savePath, category)
 						} else {
-							s.hoardEngine.AddTorrent(tmpPath, savePath, category)
+							ih, _ = s.hoardEngine.AddTorrent(tmpPath, savePath, category)
+						}
+						if ih != "" && tags != "" {
+							s.hoardEngine.AddTags(ih, splitTagsCSV(tags))
 						}
 					}
 				}
@@ -585,7 +608,10 @@ func (s *Server) qbitTorrentsAdd(c *gin.Context) {
 		}
 	}
 
-	_ = tags // reserved for future use
+	if tags != "" {
+		s.registerTags(splitTagsCSV(tags))
+		s.persistTags()
+	}
 	c.String(http.StatusOK, "Ok.")
 }
 
@@ -840,7 +866,7 @@ func hydraToQbitTorrent(t map[string]interface{}, engineName string) map[string]
 		"added_on":       addedOn,
 		"completion_on":  getInt64(t, "completed_time"),
 		"category":       cat,
-		"tags":           fmt.Sprintf("hydra:%s", engineName),
+		"tags":           qbitTagsCSV(t),
 		"save_path":      spDir,
 		"content_path":   contentPath,
 		"downloaded":     downloaded,
@@ -927,6 +953,167 @@ func parseHashes(hashesStr string) []string {
 // ---------------------------------------------------------------------------
 // Value extraction helpers (safe access to map[string]interface{})
 // ---------------------------------------------------------------------------
+
+// ---- qBittorrent tags parity ----
+
+// qbitTagsCSV renders a torrent map's tags ([]string) as a qBit CSV string.
+func qbitTagsCSV(t map[string]interface{}) string {
+	switch v := t["tags"].(type) {
+	case []string:
+		return strings.Join(v, ", ")
+	case []interface{}:
+		parts := make([]string, 0, len(v))
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ", ")
+	}
+	return ""
+}
+
+// qbitTagsContains reports whether a torrent map carries the given tag.
+func qbitTagsContains(t map[string]interface{}, tag string) bool {
+	switch v := t["tags"].(type) {
+	case string:
+		for _, s := range splitTagsCSV(v) {
+			if s == tag {
+				return true
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if s == tag {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, x := range v {
+			if s, ok := x.(string); ok && s == tag {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splitTagsCSV splits a qBit CSV tag string into trimmed, non-empty names.
+func splitTagsCSV(csv string) []string {
+	var out []string
+	for _, t := range strings.Split(csv, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// registerTags adds names to the persisted tag registry (known tags).
+func (s *Server) registerTags(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	reg := map[string]bool{}
+	for _, t := range tagstore.LoadRegistry(s.config.Daemon.DataDir) {
+		reg[t] = true
+	}
+	for _, t := range names {
+		reg[t] = true
+	}
+	out := make([]string, 0, len(reg))
+	for t := range reg {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	_ = tagstore.SaveRegistry(s.config.Daemon.DataDir, out)
+}
+
+// qbitTorrentsTags returns all known tags (registry union assigned).
+func (s *Server) qbitTorrentsTags(c *gin.Context) {
+	set := map[string]bool{}
+	for _, t := range tagstore.LoadRegistry(s.config.Daemon.DataDir) {
+		set[t] = true
+	}
+	if s.hoardEngine != nil {
+		for _, tags := range s.hoardEngine.GetAllTags() {
+			for _, t := range tags {
+				set[t] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for t := range set {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	c.JSON(http.StatusOK, out)
+}
+
+// qbitCreateTags registers new (possibly unassigned) tags.
+func (s *Server) qbitCreateTags(c *gin.Context) {
+	s.registerTags(splitTagsCSV(c.PostForm("tags")))
+	c.String(http.StatusOK, "")
+}
+
+// qbitDeleteTags removes tags from the registry and from every torrent.
+func (s *Server) qbitDeleteTags(c *gin.Context) {
+	names := splitTagsCSV(c.PostForm("tags"))
+	drop := map[string]bool{}
+	for _, t := range names {
+		drop[t] = true
+	}
+	var reg []string
+	for _, t := range tagstore.LoadRegistry(s.config.Daemon.DataDir) {
+		if !drop[t] {
+			reg = append(reg, t)
+		}
+	}
+	_ = tagstore.SaveRegistry(s.config.Daemon.DataDir, reg)
+	if s.hoardEngine != nil && len(names) > 0 {
+		for ih, tags := range s.hoardEngine.GetAllTags() {
+			for _, t := range tags {
+				if drop[t] {
+					s.hoardEngine.RemoveTags(ih, names)
+					break
+				}
+			}
+		}
+		s.persistTags()
+	}
+	c.String(http.StatusOK, "")
+}
+
+// qbitAddTags adds tags to the given torrents (hoard; race is a follow-up).
+func (s *Server) qbitAddTags(c *gin.Context) {
+	tags := splitTagsCSV(c.PostForm("tags"))
+	hashes := parseHashes(c.PostForm("hashes"))
+	if len(tags) > 0 && s.hoardEngine != nil {
+		for _, h := range hashes {
+			if s.hoardEngine.HasTorrent(h) {
+				s.hoardEngine.AddTags(h, tags)
+			}
+		}
+		s.registerTags(tags)
+		s.persistTags()
+	}
+	c.String(http.StatusOK, "")
+}
+
+// qbitRemoveTags removes tags from the given torrents (empty tags = clear all).
+func (s *Server) qbitRemoveTags(c *gin.Context) {
+	tags := splitTagsCSV(c.PostForm("tags"))
+	hashes := parseHashes(c.PostForm("hashes"))
+	if s.hoardEngine != nil {
+		for _, h := range hashes {
+			if s.hoardEngine.HasTorrent(h) {
+				s.hoardEngine.RemoveTags(h, tags)
+			}
+		}
+		s.persistTags()
+	}
+	c.String(http.StatusOK, "")
+}
 
 func getStr(m map[string]interface{}, key string) string {
 	if v, ok := m[key]; ok {
