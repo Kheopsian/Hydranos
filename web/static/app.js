@@ -1562,6 +1562,8 @@ function _showCtxMenu(x, y) {
     const anyHoard = [..._selected.entries()].some(([, m]) => m === "hoard");
     const catItem = document.getElementById("ctx-change-category");
     if (catItem) catItem.style.display = anyHoard ? "" : "none";
+    const rcItem = document.getElementById("ctx-recheck");
+    if (rcItem) rcItem.style.display = anyHoard ? "" : "none";
     menu.style.left = x + "px";
     menu.style.top = y + "px";
     menu.style.display = "block";
@@ -1726,6 +1728,27 @@ async function _reannounceSelected() {
             console.error("Failed to reannounce", hash, err);
         }
     }
+}
+
+// Recheck = hash-check the torrent data on disk (engine verify), resuming
+// from the verified state. Hoard-only: there is no race verify endpoint,
+// and the ctx item is hidden unless the selection has hoard rows. The hoard
+// verify route already forwards to the owning agent for remote torrents.
+async function _recheckSelected() {
+    _hideCtxMenu();
+    const entries = [..._selected.entries()];
+    for (const [hash, mode] of entries) {
+        if (mode !== "hoard") continue;
+        try {
+            await fetch(`/api/hoard/torrents/${hash}/verify`, {
+                method: "POST",
+                headers: { "X-Api-Key": API_KEY },
+            });
+        } catch (err) {
+            console.error("Failed to recheck", hash, err);
+        }
+    }
+    updateHoardStats();
 }
 
 async function _removeSelected(deleteFiles) {
