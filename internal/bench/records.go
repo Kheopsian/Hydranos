@@ -40,17 +40,30 @@ func humanDur(sec float64) string {
 // ce saut (>100 TiB entre 2 samples consecutifs) et on ne considere comme reelle
 // que la periode APRES le dernier saut, pour ne pas polluer "best upload day" ni
 // dater faussement les jalons pre-bench.
-const recordsTTL = 5 * time.Minute
+const recordsTTL = 30 * time.Minute
 
-// GetRecords returns the all-time records aggregate, cached for recordsTTL.
-// The heavy full-scan computation runs on the read-only connection so it never
-// holds the write mutex and stalls the sampler.
+// GetRecords returns the all-time records aggregate. It never blocks on the
+// multi-second computation: it returns the cached value immediately and, when
+// the cache is stale or empty, kicks off a single background refresh on the
+// read-only connection. Before the first compute finishes it returns an empty
+// map; the UI fills in on a later poll. This keeps the endpoint instant even
+// though the underlying full scan of bench_samples is slow.
 func (b *BenchDB) GetRecords() map[string]interface{} {
 	b.recMu.Lock()
-	defer b.recMu.Unlock()
-	if b.recCache != nil && time.Since(b.recAt) < recordsTTL {
-		return b.recCache
+	cache := b.recCache
+	stale := cache == nil || time.Since(b.recAt) >= recordsTTL
+	if stale && !b.recComputing {
+		b.recComputing = true
+		go b.refreshRecords()
 	}
+	b.recMu.Unlock()
+	if cache != nil {
+		return cache
+	}
+	return map[string]interface{}{}
+}
+
+func (b *BenchDB) refreshRecords() {
 	var res map[string]interface{}
 	if b.roConn != nil {
 		res = b.computeRecords(b.roConn)
@@ -59,11 +72,13 @@ func (b *BenchDB) GetRecords() map[string]interface{} {
 		res = b.computeRecords(b.conn)
 		b.mu.Unlock()
 	}
+	b.recMu.Lock()
 	if len(res) > 0 {
 		b.recCache = res
 		b.recAt = time.Now()
 	}
-	return res
+	b.recComputing = false
+	b.recMu.Unlock()
 }
 
 func (b *BenchDB) computeRecords(conn *sql.DB) map[string]interface{} {
