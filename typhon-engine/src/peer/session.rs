@@ -160,11 +160,15 @@ pub async fn run(
                                 dl.on_have_all();
                             }
                             Message::Have { piece } => {
-                                let prev = stats.num_pieces_have.fetch_add(1, Ordering::Relaxed);
-                                if num_pieces > 0 && prev + 1 >= num_pieces {
-                                    stats.is_seed.store(true, Ordering::Relaxed);
+                                // Only count pieces we did not already know from
+                                // this peer -> num_pieces_have can never exceed
+                                // num_pieces (fixes >100% / 200% progress).
+                                if dl.on_have(piece) {
+                                    let prev = stats.num_pieces_have.fetch_add(1, Ordering::Relaxed);
+                                    if num_pieces > 0 && prev + 1 >= num_pieces {
+                                        stats.is_seed.store(true, Ordering::Relaxed);
+                                    }
                                 }
-                                dl.on_have(piece);
                             }
                             Message::Request { index, begin, length } => {
                                 let cur_status = torrent.status.load(Ordering::Relaxed);

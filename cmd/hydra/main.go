@@ -502,9 +502,8 @@ func main() {
 		// l'UL/DL du race comme OFFSET D'ANNONCE -> le hoard reprend l'annonce
 		// sans trou de cumulé côté tracker. Le global reste préservé par
 		// AbsorbStats (l'offset ne touche QUE le cumulé annoncé, pas le global).
-		if hoardEngine.HasTorrent(infoHash) {
-			hoardEngine.AddAnnounceOffset(infoHash, ul, dl)
-		}
+		// [anti-dual removed 2026-08-01] multi-seed is legitimate; no announce
+		// offset handoff. Both engines announce independently.
 		if ul > 0 || dl > 0 {
 			api.AbsorbStats("race", ul, dl)
 			api.AbsorbTrackerStats("race", raceEngine.TrackerHostFor(infoHash), ul, dl)
@@ -760,8 +759,8 @@ func main() {
 	// Anti dual-annonce : le hoard n'annonce PAS un infohash que le race tient
 	// (le race est seul annonceur tant qu'il l'a) + offset de continuité au
 	// handoff race->hoard. Le race lui-même n'est pas gaté (toujours annonceur).
-	hoardAnnouncer.SetRaceGate(raceEngine.HasTorrent)
-	hoardAnnouncer.SetOffsetFn(hoardEngine.AnnounceOffset)
+	// [anti-dual removed 2026-08-01] no race-gate / no announce-offset:
+	// race and hoard both announce + seed the same infohash (legit multi-seed).
 	hoardAnnouncer.Start(ctx)
 	raceAnnouncer := engine.NewHoardAnnouncer(raceProc.Client(), raceAnnounceBindings)
 	raceAnnouncer.SetLivePort(raceEngine.LivePort())
@@ -899,6 +898,31 @@ func main() {
 	api.SetStartupReady(true)
 
 	// ---- Background loops ----
+	// Keep the engine self-dial filter fresh: push our observed public IP to
+	// both engines so we never waste a connect dialing ourselves, even when the
+	// ISP lease changes (correctness is still guaranteed by the peer_id check).
+	go func() {
+		push := func() {
+			ips := api.PublicIPs()
+			if len(ips) == 0 {
+				return
+			}
+			raceEngine.SetSelfIPs(ips)
+			hoardEngine.SetSelfIPs(ips)
+		}
+		push()
+		tk := time.NewTicker(2 * time.Minute)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				push()
+			}
+		}
+	}()
+
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()

@@ -48,20 +48,29 @@ pub static DIAL_SKIPPED_SELF: AtomicU64 = AtomicU64::new(0);
 /// `TYPHON_SELF_IPS=ip1,ip2,...` (comma-separated v4 or v6) to skip those.
 /// Only skips when addr.port() == listen_port — cross-engine dials between
 /// hoard (16172) and race (16171) via public IP are still allowed.
-static SELF_IPS: std::sync::OnceLock<Vec<std::net::IpAddr>> = std::sync::OnceLock::new();
-fn self_ips() -> &'static [std::net::IpAddr] {
-    SELF_IPS.get_or_init(|| {
-        let raw = std::env::var("TYPHON_SELF_IPS").unwrap_or_default();
-        let v: Vec<std::net::IpAddr> = raw.split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
-            .collect();
-        if !v.is_empty() {
-            eprintln!("[tracker] self-dial filter active on {:?}", v);
-        }
-        v
-    })
+// Self-IP set for the pre-dial fast-path. RwLock (not OnceLock) so Go can push
+// the CURRENT public IP at runtime (set_self_ips RPC) instead of relying on a
+// hard-coded TYPHON_SELF_IPS that goes stale when the ISP lease changes. This is
+// only an optimisation to skip the wasted connect; correctness is guaranteed by
+// the peer_id self-check in handshake::outgoing regardless of this list.
+static SELF_IPS: std::sync::RwLock<Vec<std::net::IpAddr>> = std::sync::RwLock::new(Vec::new());
+
+/// Replace the self-IP set (called at startup from env seed, then at runtime by
+/// Go via the set_self_ips RPC with the observed public IP).
+pub fn set_self_ips(ips: Vec<std::net::IpAddr>) {
+    eprintln!("[tracker] self-dial filter set to {:?}", ips);
+    *SELF_IPS.write().unwrap() = ips;
+}
+
+/// Seed the self-IP set from the TYPHON_SELF_IPS env (comma-separated).
+pub fn seed_self_ips_from_env() {
+    let raw = std::env::var("TYPHON_SELF_IPS").unwrap_or_default();
+    let v: Vec<std::net::IpAddr> = raw.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+        .collect();
+    if !v.is_empty() { set_self_ips(v); }
 }
 fn is_self_dial(addr: std::net::SocketAddr, listen_port: u16) -> bool {
     if addr.port() != listen_port { return false; }
@@ -78,7 +87,7 @@ pub fn is_self_ip(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(std::net::IpAddr::V6(v6)),
         v4 => v4,
     };
-    self_ips().iter().any(|ip| *ip == target)
+    SELF_IPS.read().unwrap().iter().any(|ip| *ip == target)
 }
 static DIAL_INFLIGHT: std::sync::OnceLock<dashmap::DashSet<([u8; 20], std::net::SocketAddr)>> = std::sync::OnceLock::new();
 fn dial_inflight() -> &'static dashmap::DashSet<([u8; 20], std::net::SocketAddr)> {

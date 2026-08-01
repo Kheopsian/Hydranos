@@ -493,6 +493,15 @@ func (c *Client) SetListenPort(port int) error {
 	return err
 }
 
+// SetSelfIPs replaces the engine self-dial IP filter with the given public IPs
+// (dynamic — avoids a wasted self-connect when our ISP lease changes).
+func (c *Client) SetSelfIPs(ips []string) error {
+	_, err := c.call("set_self_ips", map[string]interface{}{
+		"ips": ips,
+	})
+	return err
+}
+
 // GetSessionStats returns aggregate session statistics.
 func (c *Client) GetSessionStats() (*SessionStats, error) {
 	raw, err := c.call("get_session_stats", map[string]interface{}{})

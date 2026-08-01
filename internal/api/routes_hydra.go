@@ -2076,6 +2076,16 @@ func getPublicIPv6() string {
 	return cachedPublicIPv6
 }
 
+// PublicIPs returns our current public IPv4 (non-empty) for pushing to the
+// engine self-dial filter. v4 only: inbound is v4 and the v6 lookup can stall.
+func PublicIPs() []string {
+	var out []string
+	if v4 := getPublicIP(); v4 != "" {
+		out = append(out, v4)
+	}
+	return out
+}
+
 // fetchPublicIP is the shared HTTP-via-SOCKS5 dance used by both v4 and v6
 // public-ip lookups. Returns "" on any failure (caller keeps its cached
 // value rather than blanking the UI).

@@ -24,6 +24,14 @@ pub async fn outgoing(
     if &result.info_hash != our_info_hash {
         return Err("info_hash mismatch".into());
     }
+    // Self-connection guard (dynamic, IP-agnostic): if the peer handshakes back
+    // with OUR OWN peer_id, the tracker/DHT handed us our own listener. Abort so
+    // we never loop back onto ourselves — works even when our public IP just
+    // changed and the SELF_IPS pre-filter is momentarily stale. Cross-engine
+    // dials (race<->hoard) use DISTINCT peer_ids so they pass.
+    if &result.peer_id == our_peer_id {
+        return Err("self-connection (own peer_id)".into());
+    }
     Ok(result)
 }
 
