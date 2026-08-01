@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -506,11 +507,13 @@ func main() {
 		}
 		if ul > 0 || dl > 0 {
 			api.AbsorbStats("race", ul, dl)
+			api.AbsorbTrackerStats("race", raceEngine.TrackerHostFor(infoHash), ul, dl)
 		}
 	})
 	hoardEngine.SetOnBeforeRemove(func(infoHash string, ul, dl int64) {
 		if ul > 0 || dl > 0 {
 			api.AbsorbStats("hoard", ul, dl)
+			api.AbsorbTrackerStats("hoard", hoardEngine.TrackerHostFor(infoHash), ul, dl)
 		}
 	})
 
@@ -1150,19 +1153,38 @@ func collectBenchSnapshot(race *engine.RaceEngine, hoard *engine.HoardEngine) ma
 // stats under a read lock, no full-list copy.
 func collectTrackerSamples(race *engine.RaceEngine, hoard *engine.HoardEngine) []bench.TrackerSample {
 	ts := float64(time.Now().Unix())
+	baseline := api.GetTrackerBaseline() // engine\x00tracker -> {UL,DL}: monotone carry-over of removed torrents
 	var out []bench.TrackerSample
+	seen := make(map[string]bool)
 	add := func(eng string, aggs map[string]*engine.TrackerAgg) {
 		for _, a := range aggs {
+			key := eng + "\x00" + a.Tracker
+			seen[key] = true
+			b := baseline[key]
 			out = append(out, bench.TrackerSample{
 				Ts: ts, Engine: eng, Tracker: a.Tracker,
 				UploadRate: a.UploadRate, DownloadRate: a.DownloadRate,
 				Peers: a.Peers, Active: a.Active, Torrents: a.Torrents,
-				CumUploaded: a.CumUploaded, CumDownloaded: a.CumDownloaded,
+				CumUploaded: a.CumUploaded + b[0], CumDownloaded: a.CumDownloaded + b[1],
 			})
 		}
 	}
 	add("race", race.AggregateByTracker())
 	add("hoard", hoard.AggregateByTracker())
+	// Trackers whose torrents are all gone still surface their carried-over total.
+	for key, b := range baseline {
+		if seen[key] {
+			continue
+		}
+		eng, trk := key, ""
+		if i := strings.IndexByte(key, '\x00'); i >= 0 {
+			eng, trk = key[:i], key[i+1:]
+		}
+		out = append(out, bench.TrackerSample{
+			Ts: ts, Engine: eng, Tracker: trk,
+			CumUploaded: b[0], CumDownloaded: b[1],
+		})
+	}
 	return out
 }
 

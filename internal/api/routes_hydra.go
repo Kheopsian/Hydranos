@@ -421,6 +421,7 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 func (s *Server) registerHydraRoutes() {
 	// Initialize baseline persistence
 	initBaselinePersistence(s.config.Daemon.DataDir)
+	initTrackerBaseline(s.config.Daemon.DataDir)
 
 	// Public routes (no auth)
 	s.router.GET("/health", s.handleHealth)
