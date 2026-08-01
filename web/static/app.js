@@ -829,16 +829,24 @@ async function loadTimeline(infoHash) {
         const completedEv = events.find(e => e.event === "completed");
         const t0 = addedEv ? addedEv.ts : (snapshots.length > 0 ? snapshots[0].ts : 0);
 
-        renderTimelineResult(events, snapshots, t0);
-        renderTimelineMeta(events, snapshots, t0);
-        renderProgressChart(snapshots, events, t0);
-        renderPeerSpeedChart(snapshots, t0);
-        renderTimelineEvents(events, t0);
+        // Each render is isolated: a failure in one (e.g. Chart.js unavailable)
+        // must not swallow the rest — notably the peers list and event log.
+        const safe = (fn, label) => { try { fn(); } catch (e) { console.error("timeline render failed:", label, e); } };
+
+        safe(() => renderTimelineResult(events, snapshots, t0), "result");
+        safe(() => renderTimelineMeta(events, snapshots, t0), "meta");
+        if (typeof Chart !== "undefined") {
+            safe(() => renderProgressChart(snapshots, events, t0), "progress-chart");
+            safe(() => renderPeerSpeedChart(snapshots, t0), "peer-chart");
+        } else {
+            console.warn("Chart.js unavailable — skipping timeline graphs");
+        }
+        safe(() => renderTimelineEvents(events, t0), "events");
 
         // Show first snapshot peers
         if (snapshots.length > 0) {
             const mid = snapshots[Math.floor(snapshots.length / 2)];
-            renderTimelinePeers(mid, t0);
+            safe(() => renderTimelinePeers(mid, t0), "peers");
         }
     } catch (e) {
         console.error("Failed to load timeline:", e);
