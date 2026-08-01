@@ -719,7 +719,7 @@ async function updateRaceTorrents() {
         });
 
         if (torrents.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="12" class="empty">No race torrents</td></tr>';
+            tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">No race torrents</td></tr>`;
             return;
         }
 
@@ -739,28 +739,8 @@ async function updateRaceTorrents() {
         });
 
         tbody.innerHTML = torrents.map(t => {
-            const pct = (t.progress * 100).toFixed(1);
-            const ratio = t.ratio.toFixed(2);
             const detailSel = selectedTorrent === t.info_hash ? ' selected' : '';
-            return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="race" data-agent="${t.agent || 'local'}"
-                onclick="handleRowClick(event,'${t.info_hash}','race')"
-                oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','race')">
-                <td title="${t.info_hash}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>
-                <td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>
-                <td>
-                    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
-                    <div class="progress-text">${pct}%</div>
-                </td>
-                <td>${t.swarm_seeds ?? "—"}</td>
-                <td>${t.swarm_leechers ?? "—"}</td>
-                <td>${formatSpeed(t.download_rate)}</td>
-                <td>${formatSpeed(t.upload_rate)}</td>
-                <td>${ratio}</td>
-                <td>${esc(t.tracker_host || "—")}</td>
-                <td>${formatDate(t.added_time)}</td>
-                <td>${formatDate(t.completed_time)}</td>
-                <td>${esc(t.agent || "local")}</td>
-            </tr>`;
+            return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="race" data-agent="${t.agent || 'local'}" onclick="handleRowClick(event,'${t.info_hash}','race')" oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','race')">${renderRowCells("race-table", t)}</tr>`;
         }).join("");
         _updateRowHighlights();
 
@@ -1415,36 +1395,12 @@ function renderHoardTable() {
 
     const tbody = document.getElementById("hoard-tbody");
     if (!visible.length) {
-        tbody.innerHTML = '<tr><td colspan="15" class="empty">No hoard torrents</td></tr>';
+        tbody.innerHTML = `<tr><td colspan="${_visibleCols("hoard-table").length}" class="empty">No hoard torrents</td></tr>`;
         return;
     }
     tbody.innerHTML = visible.map(t => {
-        const stateClass = t.state === "seeding" ? "state-active" : "state-checking";
-        const pct = (t.progress * 100).toFixed(1);
-        const ratio = t.ratio.toFixed(2);
         const detailSel = selectedHoardTorrent === t.info_hash ? " selected" : "";
-        return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="hoard" data-agent="${t.agent || 'local'}"
-            onclick="handleRowClick(event,'${t.info_hash}','hoard')"
-            oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','hoard')">
-            <td title="${t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>
-            <td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>
-            <td><span class="state-badge ${stateClass}">${t.state}</span></td>
-            <td>
-                <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
-                <div class="progress-text">${pct}%</div>
-            </td>
-            <td>${t.swarm_seeds ?? "—"}</td>
-            <td>${t.swarm_leechers ?? "—"}</td>
-            <td>${formatSpeed(t.download_rate ?? 0)}</td>
-            <td>${formatSpeed(t.upload_rate)}</td>
-            <td>${ratio}</td>
-            <td>${esc(t.tracker_host || "—")}</td>
-            <td>${esc(incoCat(t.category))}</td>
-            <td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "—"}</td>
-            <td>${formatDate(t.added_time)}</td>
-            <td>${formatDate(t.completed_time)}</td>
-            <td>${esc(t.agent || "local")}</td>
-        </tr>`;
+        return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="hoard" data-agent="${t.agent || 'local'}" onclick="handleRowClick(event,'${t.info_hash}','hoard')" oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','hoard')">${renderRowCells("hoard-table", t)}</tr>`;
     }).join("");
     _updateRowHighlights();
 }
@@ -4087,64 +4043,143 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
     }
 }
 
-// ─── Column visibility (right-click a table header) ─────────────────────────
-function _colHiddenSet(tableId) {
-    try { return new Set(JSON.parse(localStorage.getItem("hydra_cols_" + tableId) || "[]")); }
-    catch (_) { return new Set(); }
+// ─── Data-driven table columns: order (drag) + visibility + sort ────────────
+// Each column: {id, label, sort (sort key or null), render(t)->"<td>..."}. The
+// header and every row are rendered from this list in the user's saved order,
+// so dragging a header reorders the whole column and hiding one drops it. Both
+// are persisted per-table in localStorage (hydra_colcfg_<table>).
+const TABLE_COLS = {
+    "hoard-table": [
+        { id: "name", label: "Name", sort: "name", render: t => `<td title="${t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
+        { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>` },
+        { id: "state", label: "State", sort: "state", render: t => `<td><span class="state-badge ${t.state === "seeding" ? "state-active" : "state-checking"}">${t.state}</span></td>` },
+        { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
+        { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "—"}</td>` },
+        { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "—"}</td>` },
+        { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate ?? 0)}</td>` },
+        { id: "upload_rate", label: "Up", sort: "upload_rate", render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
+        { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${t.ratio.toFixed(2)}</td>` },
+        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "—")}</td>` },
+        { id: "category", label: "Category", sort: "category", render: t => `<td>${esc(incoCat(t.category))}</td>` },
+        { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "—"}</td>` },
+        { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
+        { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
+        { id: "agent", label: "Agent", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
+    ],
+    "race-table": [
+        { id: "name", label: "Name", sort: "name", render: t => `<td title="${t.info_hash}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
+        { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>` },
+        { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
+        { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "—"}</td>` },
+        { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "—"}</td>` },
+        { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate)}</td>` },
+        { id: "upload_rate", label: "Up", sort: "upload_rate", render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
+        { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${t.ratio.toFixed(2)}</td>` },
+        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "—")}</td>` },
+        { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
+        { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
+        { id: "agent", label: "Agent", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
+    ],
+};
+const _COL_SORTFN = { "hoard-table": "sortHoard", "race-table": "sortRace" };
+
+function _colCfg(tableId) {
+    const ids = TABLE_COLS[tableId].map(c => c.id);
+    let cfg = null;
+    try { cfg = JSON.parse(localStorage.getItem("hydra_colcfg_" + tableId) || "null"); } catch (_) { }
+    if (!cfg || !Array.isArray(cfg.order)) cfg = { order: ids.slice(), hidden: [] };
+    const known = new Set(ids);
+    cfg.order = cfg.order.filter(id => known.has(id));
+    ids.forEach(id => { if (!cfg.order.includes(id)) cfg.order.push(id); });
+    cfg.hidden = Array.isArray(cfg.hidden) ? cfg.hidden.filter(id => known.has(id)) : [];
+    return cfg;
 }
-function _colSaveSet(tableId, set) {
-    localStorage.setItem("hydra_cols_" + tableId, JSON.stringify([...set]));
+function _colSaveCfg(tableId, cfg) { localStorage.setItem("hydra_colcfg_" + tableId, JSON.stringify(cfg)); }
+function _visibleCols(tableId) {
+    const cfg = _colCfg(tableId);
+    const hidden = new Set(cfg.hidden);
+    const byId = {}; TABLE_COLS[tableId].forEach(c => byId[c.id] = c);
+    return cfg.order.map(id => byId[id]).filter(c => c && !hidden.has(c.id));
 }
-// Hide by column position (nth-child) via an injected <style>, so it survives
-// the constant SSE re-render of the table body (per-cell inline styles wouldn't).
-function applyColumnVisibility(tableId) {
-    const hidden = _colHiddenSet(tableId);
-    let css = "";
-    hidden.forEach(n => {
-        css += `#${tableId} thead th:nth-child(${n}),#${tableId} tbody td:nth-child(${n}){display:none}`;
+// Row cells for a torrent in the current column order (used by the renderers).
+function renderRowCells(tableId, t) {
+    return _visibleCols(tableId).map(c => c.render(t)).join("");
+}
+function renderTableHeader(tableId, sortCol, sortAsc) {
+    const thead = document.querySelector("#" + tableId + " thead");
+    if (!thead) return;
+    const fn = _COL_SORTFN[tableId];
+    thead.innerHTML = "<tr>" + _visibleCols(tableId).map(c => {
+        const sortable = c.sort ? ` data-col="${c.sort}" onclick="${fn}(this)"` : "";
+        const cls = (c.sort && c.sort === sortCol) ? (sortAsc ? " sort-asc" : " sort-desc") : "";
+        return `<th class="col-drag${cls}" draggable="true" data-colid="${c.id}"${sortable}>${esc(c.label)}</th>`;
+    }).join("") + "</tr>";
+    _wireHeaderDnD(tableId);
+    // Re-attach the column-width resizers (the innerHTML rebuild dropped them).
+    const _rt = document.getElementById(tableId);
+    if (_rt) { _rt._colResizeInit = false; initResizableColumns(_rt, tableId === "hoard-table" ? "hydra_cols_hoard" : "hydra_cols_race"); }
+}
+let _colDragId = null;
+function _wireHeaderDnD(tableId) {
+    const thead = document.querySelector("#" + tableId + " thead");
+    if (!thead) return;
+    thead.querySelectorAll("th").forEach(th => {
+        th.addEventListener("dragstart", e => { _colDragId = th.dataset.colid; e.dataTransfer.effectAllowed = "move"; });
+        th.addEventListener("dragover", e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; th.classList.add("col-drop"); });
+        th.addEventListener("dragleave", () => th.classList.remove("col-drop"));
+        th.addEventListener("drop", e => {
+            e.preventDefault(); th.classList.remove("col-drop");
+            const target = th.dataset.colid;
+            if (!_colDragId || _colDragId === target) return;
+            const cfg = _colCfg(tableId);
+            const from = cfg.order.indexOf(_colDragId), to = cfg.order.indexOf(target);
+            if (from < 0 || to < 0) return;
+            cfg.order.splice(to, 0, cfg.order.splice(from, 1)[0]);
+            _colSaveCfg(tableId, cfg);
+            _rerenderTable(tableId);
+        });
     });
-    let st = document.getElementById("colvis-" + tableId);
-    if (!st) { st = document.createElement("style"); st.id = "colvis-" + tableId; document.head.appendChild(st); }
-    st.textContent = css;
+}
+function _rerenderTable(tableId) {
+    if (tableId === "hoard-table") { renderTableHeader("hoard-table", _hoardSortCol, _hoardSortAsc); renderHoardTable(); }
+    else if (tableId === "race-table") { renderTableHeader("race-table", _raceSortCol, _raceSortAsc); updateRaceTorrents(); }
 }
 function showColumnMenu(ev, tableId) {
     ev.preventDefault();
     document.querySelectorAll(".col-menu").forEach(m => m.remove());
-    const table = document.getElementById(tableId);
-    if (!table) return;
-    const ths = [...table.querySelectorAll("thead th")];
-    const hidden = _colHiddenSet(tableId);
+    const cfg = _colCfg(tableId);
+    const hidden = new Set(cfg.hidden);
+    const byId = {}; TABLE_COLS[tableId].forEach(c => byId[c.id] = c);
     const menu = document.createElement("div");
     menu.className = "col-menu ctx-menu";
-    menu.style.display = "block";
-    menu.style.position = "fixed";
-    menu.style.zIndex = "9999";
-    menu.innerHTML = `<div class="ctx-label">Columns</div><div class="ctx-separator"></div>` +
-        `<div class="ctx-scroll">` +
-        ths.map((th, i) => {
-            const n = i + 1;
-            const label = (th.textContent || th.dataset.col || ("col " + n)).trim();
-            const on = !hidden.has(n);
-            return `<div class="ctx-item" onclick="toggleColumn('${tableId}',${n},this)"><span class="col-chk">${on ? "\u2713" : ""}</span>${esc(label)}</div>`;
+    menu.style.display = "block"; menu.style.position = "fixed"; menu.style.zIndex = "9999";
+    menu.innerHTML = `<div class="ctx-label">Columns</div><div class="ctx-separator"></div><div class="ctx-scroll">` +
+        cfg.order.map(id => {
+            const col = byId[id]; if (!col) return "";
+            const on = !hidden.has(id);
+            return `<div class="ctx-item" onclick="toggleColumn('${tableId}','${id}',this)"><span class="col-chk">${on ? "✓" : ""}</span>${esc(col.label)}</div>`;
         }).join("") + `</div>`;
     document.body.appendChild(menu);
     menu.style.left = Math.min(ev.clientX, window.innerWidth - 240) + "px";
     menu.style.top = Math.min(ev.clientY, window.innerHeight - menu.offsetHeight - 8) + "px";
 }
-function toggleColumn(tableId, n, el) {
-    const hidden = _colHiddenSet(tableId);
-    if (hidden.has(n)) hidden.delete(n); else hidden.add(n);
-    _colSaveSet(tableId, hidden);
-    applyColumnVisibility(tableId);
-    if (el) { const chk = el.querySelector(".col-chk"); if (chk) chk.textContent = hidden.has(n) ? "" : "\u2713"; }
+function toggleColumn(tableId, id, el) {
+    const cfg = _colCfg(tableId);
+    const set = new Set(cfg.hidden);
+    if (set.has(id)) set.delete(id); else set.add(id);
+    cfg.hidden = [...set];
+    _colSaveCfg(tableId, cfg);
+    _rerenderTable(tableId);
+    if (el) { const chk = el.querySelector(".col-chk"); if (chk) chk.textContent = set.has(id) ? "" : "✓"; }
 }
 document.addEventListener("click", e => {
     if (!e.target.closest(".col-menu")) document.querySelectorAll(".col-menu").forEach(m => m.remove());
 });
-(function initColumnVisibility() {
+(function initTableColumns() {
     const wire = () => {
+        renderTableHeader("hoard-table", _hoardSortCol, _hoardSortAsc);
+        renderTableHeader("race-table", _raceSortCol, _raceSortAsc);
         ["hoard-table", "race-table"].forEach(tid => {
-            applyColumnVisibility(tid);
             const thead = document.querySelector("#" + tid + " thead");
             if (thead && !thead.dataset.colMenuWired) {
                 thead.dataset.colMenuWired = "1";

@@ -2388,3 +2388,9 @@ footer {
 .logs-view { background:#010409; border:1px solid #30363d; border-radius:8px; padding:10px 12px; height:62vh; overflow:auto; font:12px/1.45 ui-monospace,"Cascadia Mono",monospace; white-space:pre; color:#c9d1d9; transition:border-color .2s; }
 
 #tab-logs .add-form-container { max-width: none; }
+
+
+/* Draggable column headers (reorder) */
+th.col-drag { cursor: grab; }
+th.col-drag:active { cursor: grabbing; }
+th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
