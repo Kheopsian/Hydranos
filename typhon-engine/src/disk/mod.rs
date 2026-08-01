@@ -262,6 +262,126 @@ impl DiskManager {
         .await
         .map_err(|e| format!("spawn_blocking: {}", e))?
     }
+
+    /// Resolve a piece block to a single backing file handle + byte offset for
+    /// the sendfile serve path. None when the block spans more than one file
+    /// (caller falls back to the buffered read+send path).
+    pub fn block_file(
+        &self,
+        torrent: &TorrentState,
+        piece: u32,
+        offset: u32,
+        length: u32,
+    ) -> Option<(Arc<File>, u64)> {
+        let ops = torrent.meta.map_block(piece, offset, length);
+        if ops.len() != 1 {
+            return None;
+        }
+        let op = &ops[0];
+        if op.length != length {
+            return None;
+        }
+        let save_path = torrent.save_path.read().clone();
+        let name = torrent.meta.name.clone();
+        let full_path = if torrent.meta.multi_file {
+            save_path.join(&name).join(&op.path)
+        } else {
+            save_path.join(&op.path)
+        };
+        get_or_open(&full_path).ok().map(|f| (f, op.file_offset))
+    }
+}
+
+/// Stream a piece block straight from the page cache to a plaintext TCP peer
+/// via `sendfile(2)`, skipping the userspace copies (read cache -> Bytes ->
+/// codec buffer -> kernel) the buffered path pays. Writes the 13-byte piece
+/// header first, then splices the body.
+///
+/// `Ok(true)` = whole block served; `Ok(false)` = declined without touching
+/// the wire (non-unix); `Err` = failed after the header went out, so the
+/// stream is mid-message and the caller MUST drop the peer.
+/// Non-blocking page-cache residency probe (preadv2 RWF_NOWAIT, 1 byte). True
+/// if the block's first page is already cached -> safe to sendfile without
+/// blocking the reactor. Cold -> caller uses the spawn_blocking buffered path.
+#[cfg(unix)]
+pub fn is_block_resident(file: &File, offset: u64) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let mut b = [0u8; 1];
+    let iov = libc::iovec { iov_base: b.as_mut_ptr() as *mut libc::c_void, iov_len: 1 };
+    // RWF_NOWAIT (0x8): returns EAGAIN instead of blocking if not in page cache.
+    let n = unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, offset as libc::off_t, 0x8) };
+    n == 1
+}
+#[cfg(not(unix))]
+pub fn is_block_resident(_file: &File, _offset: u64) -> bool { false }
+
+#[cfg(unix)]
+pub async fn serve_block_sendfile(
+    sock: &tokio::net::TcpStream,
+    file: &File,
+    offset: u64,
+    index: u32,
+    begin: u32,
+    len: usize,
+) -> std::io::Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    use tokio::io::Interest;
+
+    let mut header = [0u8; 13];
+    header[0..4].copy_from_slice(&((9 + len) as u32).to_be_bytes());
+    header[4] = 7; // MSG_PIECE
+    header[5..9].copy_from_slice(&index.to_be_bytes());
+    header[9..13].copy_from_slice(&begin.to_be_bytes());
+
+    let mut hoff = 0usize;
+    while hoff < header.len() {
+        sock.writable().await?;
+        match sock.try_io(Interest::WRITABLE, || {
+            let n = unsafe {
+                libc::send(
+                    sock.as_raw_fd(),
+                    header[hoff..].as_ptr() as *const libc::c_void,
+                    header.len() - hoff,
+                    libc::MSG_NOSIGNAL,
+                )
+            };
+            if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+        }) {
+            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "send header 0")),
+            Ok(n) => hoff += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
+    let file_fd = file.as_raw_fd();
+    let mut off = offset as libc::off_t;
+    let mut remaining = len;
+    while remaining > 0 {
+        sock.writable().await?;
+        match sock.try_io(Interest::WRITABLE, || {
+            let n = unsafe { libc::sendfile(sock.as_raw_fd(), file_fd, &mut off, remaining) };
+            if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+        }) {
+            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "sendfile 0")),
+            Ok(n) => remaining -= n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+pub async fn serve_block_sendfile(
+    _sock: &tokio::net::TcpStream,
+    _file: &File,
+    _offset: u64,
+    _index: u32,
+    _begin: u32,
+    _len: usize,
+) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 async fn read_block_direct(

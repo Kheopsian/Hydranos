@@ -192,6 +192,40 @@ pub async fn run(
                                     }
                                     continue;
                                 }
+                                // Zero-copy sendfile fast-path: plaintext TCP peer whose
+                                // block lives in a single file. Splices from the page cache
+                                // to the socket, skipping the userspace copies the buffered
+                                // path pays. Any decline falls back to read_block below.
+                                if !is_encrypted {
+                                    if let Some((file, foff)) = disk.block_file(&torrent, index, begin, length) {
+                                        if crate::disk::is_block_resident(&file, foff) {
+                                            if framed.flush().await.is_err() {
+                                                tracing::debug!("[peer-debug] {} BREAK flush-before-sendfile failed", addr);
+                                                break;
+                                            }
+                                            let served = match framed.get_ref().plain_tcp() {
+                                                Some(sock) => crate::disk::serve_block_sendfile(
+                                                    sock, &file, foff, index, begin, length as usize,
+                                                ).await,
+                                                None => Ok(false),
+                                            };
+                                            match served {
+                                                Ok(true) => {
+                                                    let len = length as u64;
+                                                    torrent.total_uploaded.fetch_add(len, Ordering::Relaxed);
+                                                    stats.total_uploaded.fetch_add(len, Ordering::Relaxed);
+                                                    stats.uploaded_last_tick.fetch_add(len, Ordering::Relaxed);
+                                                    continue;
+                                                }
+                                                Ok(false) => {}
+                                                Err(_) => {
+                                                    tracing::debug!("[peer-debug] {} BREAK sendfile mid-stream", addr);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 match disk.read_block(&torrent, index, begin, length).await {
                                     Ok(data) => {
                                         let len = data.len() as u64;
