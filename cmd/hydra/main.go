@@ -38,6 +38,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/state"
 	"github.com/Kheopsian/hydra/internal/store"
 	"github.com/Kheopsian/hydra/internal/system"
+	"github.com/Kheopsian/hydra/internal/tagstore"
 	version_pkg "github.com/Kheopsian/hydra/internal/version"
 
 	"golang.org/x/crypto/bcrypt"
@@ -882,6 +883,13 @@ func main() {
 		}
 	}
 
+	// ---- Restore per-torrent tags from the tags.json overlay (kept separate
+	// from the SQLite store; tags are non-critical labels). ----
+	if tt := tagstore.Load(cfg.Daemon.DataDir); len(tt) > 0 {
+		hoardEngine.RestoreTags(tt)
+		slog.Info("tags: restored from overlay", "torrents", len(tt))
+	}
+
 	// ---- Start secondary modules ----
 	raceDrain.Start(ctx)
 
@@ -1417,6 +1425,17 @@ func (a *hoardAPIAdapter) SetContentFolder(infoHash string, cf *bool) {
 }
 func (a *hoardAPIAdapter) SetCategoryLabel(infoHash, category string) error {
 	return a.engine.SetCategoryLabel(infoHash, category)
+}
+func (a *hoardAPIAdapter) GetTags(infoHash string) []string { return a.engine.GetTags(infoHash) }
+func (a *hoardAPIAdapter) GetAllTags() map[string][]string  { return a.engine.GetAllTags() }
+func (a *hoardAPIAdapter) SetTags(infoHash string, tags []string) error {
+	return a.engine.SetTags(infoHash, tags)
+}
+func (a *hoardAPIAdapter) AddTags(infoHash string, tags []string) error {
+	return a.engine.AddTags(infoHash, tags)
+}
+func (a *hoardAPIAdapter) RemoveTags(infoHash string, tags []string) error {
+	return a.engine.RemoveTags(infoHash, tags)
 }
 func (a *hoardAPIAdapter) GetDownloadSlotStatus() engine.DownloadSlotStats {
 	return a.engine.GetDownloadSlotStatus()

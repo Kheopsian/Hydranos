@@ -98,6 +98,11 @@ type HoardEngine interface {
 	VerifyTorrent(infoHash string) error
 	SetTorrentCategory(infoHash, newCategory, newSavePath string) error
 	SetCategoryLabel(infoHash, category string) error
+	GetTags(infoHash string) []string
+	GetAllTags() map[string][]string
+	SetTags(infoHash string, tags []string) error
+	AddTags(infoHash string, tags []string) error
+	RemoveTags(infoHash string, tags []string) error
 	SetAddedTime(infoHash string, t time.Time)
 	SetContentFolder(infoHash string, cf *bool)
 	// Download slot manager runtime control.
