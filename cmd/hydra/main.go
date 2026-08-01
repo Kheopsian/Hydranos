@@ -1372,6 +1372,7 @@ func (a *hoardAPIAdapter) VerifyTorrent(infoHash string) error {
 func (a *hoardAPIAdapter) SetTorrentCategory(infoHash, newCategory, newSavePath string) error {
 	return a.engine.SetTorrentCategory(infoHash, newCategory, newSavePath)
 }
+func (a *hoardAPIAdapter) SetContentFolder(infoHash string, cf *bool) { a.engine.SetContentFolder(infoHash, cf) }
 func (a *hoardAPIAdapter) SetCategoryLabel(infoHash, category string) error {
 	return a.engine.SetCategoryLabel(infoHash, category)
 }
