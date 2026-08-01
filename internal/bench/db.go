@@ -162,9 +162,10 @@ type BenchDB struct {
 
 	// records cache: the all-time records aggregate is a full scan of
 	// bench_samples (O(N)); recompute at most every recordsTTL.
-	recMu    sync.Mutex
-	recCache map[string]interface{}
-	recAt    time.Time
+	recMu        sync.Mutex
+	recCache     map[string]interface{}
+	recAt        time.Time
+	recComputing bool
 }
 
 // NewBenchDB creates a BenchDB but does not open it yet.
@@ -238,6 +239,8 @@ func (b *BenchDB) Open() error {
 	} else {
 		slog.Warn("bench_db: read-only connection failed; records fall back to the write connection", "err", roErr)
 	}
+
+	go b.GetRecords() // warm the records cache off the request path
 
 	slog.Info("bench_db: opened", "path", b.path)
 	return nil
