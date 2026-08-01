@@ -18,6 +18,7 @@ type TorrentMeta struct {
 	CompletedTime   float64 `json:"completed_time,omitempty"`
 	TotalUploaded   int64   `json:"total_uploaded,omitempty"`
 	TotalDownloaded int64   `json:"total_downloaded,omitempty"`
+	ContentFolder   *bool   `json:"content_folder,omitempty"`
 }
 
 // State represents the persisted daemon state.

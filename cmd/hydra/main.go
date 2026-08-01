@@ -428,6 +428,7 @@ func main() {
 	raceEngine.SetClient(raceProc.Client())
 
 	hoardEngine := engine.NewHoardEngine(hoardCfg, hoardDataDir)
+	hoardEngine.CreateTorrentFolder = cfg.Daemon.CreateTorrentFolder
 	hoardEngine.SetClient(hoardProc.Client())
 
 	// ---- Optional: HydraAgent gRPC data-plane (pivot 25/07) ----
@@ -784,6 +785,7 @@ func main() {
 					SavePath:        meta.SavePath,
 					TorrentFilePath: meta.TorrentFilePath,
 					Category:        meta.Category,
+					ContentFolder:   meta.ContentFolder,
 				}
 			}
 			hoardEngine.ImportFromState(hoardMetas)
@@ -794,6 +796,7 @@ func main() {
 					ct = time.Time{}
 				}
 				hoardEngine.RestoreMetadata(ih, meta.Category, meta.SavePath, meta.TorrentFilePath, ct)
+				hoardEngine.SetContentFolder(ih, meta.ContentFolder)
 				// Gap-fill (mirror of the race block): if a torrent lives in
 				// state.json but not in the engine (e.g. present in state.json but
 				// missing from the store), re-add it as long as its .torrent file
@@ -802,6 +805,7 @@ func main() {
 					if _, serr := os.Stat(meta.TorrentFilePath); serr == nil {
 						if _, aerr := hoardEngine.AddTorrentSeedMode(meta.TorrentFilePath, meta.SavePath, meta.Category); aerr == nil {
 							hoardEngine.RestoreMetadata(ih, meta.Category, meta.SavePath, meta.TorrentFilePath, ct)
+							hoardEngine.SetContentFolder(ih, meta.ContentFolder)
 						}
 					}
 				}
@@ -970,6 +974,7 @@ func saveState(stateMgr *state.Manager, race *engine.RaceEngine, hoard *engine.H
 			TorrentFilePath: m.TorrentFilePath,
 			Category:        m.Category,
 			CompletedTime:   float64(timeToUnix(m.CompletedTime)),
+			ContentFolder:   m.ContentFolder,
 		}
 	}
 
@@ -980,6 +985,7 @@ func saveState(stateMgr *state.Manager, race *engine.RaceEngine, hoard *engine.H
 			TorrentFilePath: m.TorrentFilePath,
 			Category:        m.Category,
 			CompletedTime:   float64(timeToUnix(m.CompletedTime)),
+			ContentFolder:   m.ContentFolder,
 		}
 	}
 
@@ -1503,6 +1509,7 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 		"tracker_error_msg": s.TrackerErrorMsg, "torrent_error": s.TorrentError,
 		"torrent_error_msg": s.TorrentErrorMsg, "uploader": s.Uploader,
 		"injected_peers": s.InjectedPeers, "injection_hit": s.InjectionHit,
+		"content_folder": s.ContentFolder,
 	}
 }
 

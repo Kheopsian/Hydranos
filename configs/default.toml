@@ -6,7 +6,7 @@ api_port = 8199
 # auto-generated on first start when empty
 api_key = ""
 data_dir = "/config"
-create_torrent_folder = true
+create_torrent_folder = false
 
 # ─────────────────────────────────────────────
 # RACE SESSION - maximum aggressiveness (hot downloads)

@@ -21,6 +21,7 @@ type TorrentInfo struct {
 	AddedTime       time.Time `json:"added_time"`
 	CompletedTime   time.Time `json:"completed_time,omitempty"`
 	TorrentFilePath string    `json:"torrent_file_path,omitempty"`
+	ContentFolder   *bool     `json:"content_folder,omitempty"`
 	InjectedPeers   int       `json:"injected_peers,omitempty"`
 	InjectionHit    bool      `json:"injection_hit,omitempty"`
 }
@@ -53,6 +54,7 @@ type TorrentStats struct {
 	ListSeeds       int     `json:"list_seeds"`
 	ListPeers       int     `json:"list_peers"`
 	TotalDone       int64   `json:"total_done"`
+	ContentFolder   *bool   `json:"content_folder,omitempty"`
 	Uploader        string  `json:"uploader,omitempty"`
 	InjectedPeers   int     `json:"injected_peers,omitempty"`
 	InjectionHit    bool    `json:"injection_hit,omitempty"`
@@ -325,6 +327,7 @@ type TorrentMeta struct {
 	TorrentFilePath string
 	Category        string
 	CompletedTime   time.Time
+	ContentFolder   *bool
 }
 
 // Dummy for unused imports

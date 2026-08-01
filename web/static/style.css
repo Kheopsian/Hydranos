@@ -2382,6 +2382,9 @@ footer {
 .logs-controls button, .logs-controls a#logs-issue { background:#21262d; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; padding:5px 10px; cursor:pointer; text-decoration:none; font-size:13px; }
 .logs-controls button:hover, .logs-controls a#logs-issue:hover { border-color:#58a6ff; }
 .logs-controls .logs-live { display:flex; align-items:center; gap:4px; font-size:13px; color:#8b949e; }
+.logs-controls select { width:auto; flex:0 0 auto; }
+.logs-controls input[type=checkbox] { width:auto; flex:0 0 auto; margin:0; -webkit-appearance:auto; appearance:auto; }
+.logs-controls .logs-live { flex:0 0 auto; }
 .logs-view { background:#010409; border:1px solid #30363d; border-radius:8px; padding:10px 12px; height:62vh; overflow:auto; font:12px/1.45 ui-monospace,"Cascadia Mono",monospace; white-space:pre; color:#c9d1d9; transition:border-color .2s; }
 
 #tab-logs .add-form-container { max-width: none; }
