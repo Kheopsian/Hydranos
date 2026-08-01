@@ -38,6 +38,7 @@ const (
 // HoardEngine wraps an ltclient connection with Hydra-specific bookkeeping.
 type HoardEngine struct {
 	config  *config.SessionConfig
+	CreateTorrentFolder bool // daemon-global: wrap single-file torrents in a per-name folder (qBit-style; off by default)
 	dataDir string
 
 	livePort      atomic.Int64 // runtime listen-port override (0 = use config.ListenPort)
@@ -266,6 +267,7 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 				// carries the category immediately (else the row shows "none"
 				// until the 60s refreshStats tick).
 				addedCategory := e.torrents[data.InfoHash].Category
+				addedCF := e.torrents[data.InfoHash].ContentFolder
 				e.mu.Unlock()
 				// Seed the stats cache with the static metadata from the add
 				// event NOW. GetTorrentList() and the SSE list hydration read
@@ -301,6 +303,9 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 				}
 				if st.Category == "" {
 					st.Category = addedCategory
+				}
+				if st.ContentFolder == nil {
+					st.ContentFolder = addedCF
 				}
 				e.cachedStatsMu.Unlock()
 			}
@@ -581,7 +586,7 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 				".iso", ".img", ".nfo", ".srt", ".sub", ".idx", ".rar", ".zip":
 				cleanName = strings.TrimSuffix(name, filepath.Ext(name))
 			}
-			if !strings.HasSuffix(savePath, cleanName) && !strings.HasSuffix(savePath, name) {
+			if !seedMode && (multiFile || e.CreateTorrentFolder) && !strings.HasSuffix(savePath, cleanName) && !strings.HasSuffix(savePath, name) {
 				savePath = filepath.Join(savePath, cleanName)
 			}
 		}
@@ -605,6 +610,11 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 		return "", fmt.Errorf("hoard: add torrent: %w", err)
 	}
 
+	var cf *bool
+	if !seedMode {
+		v := multiFile || e.CreateTorrentFolder
+		cf = &v
+	}
 	info := &TorrentInfo{
 		InfoHash:        infoHash,
 		Name:            result.Name,
@@ -612,6 +622,7 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 		Category:        category,
 		AddedTime:       time.Now(),
 		TorrentFilePath: torrentPath,
+		ContentFolder:   cf,
 	}
 
 	e.mu.Lock()
@@ -648,12 +659,26 @@ func (e *HoardEngine) ImportFromState(entries map[string]*TorrentMeta) (imported
 			continue
 		}
 
-		_, err := e.addTorrentSeedMode(meta.TorrentFilePath, meta.SavePath, meta.Category)
+		ihRestore, err := e.addTorrentSeedMode(meta.TorrentFilePath, meta.SavePath, meta.Category)
+		if err == nil && meta.ContentFolder != nil {
+			e.mu.Lock()
+			if inf := e.torrents[ihRestore]; inf != nil {
+				inf.ContentFolder = meta.ContentFolder
+			}
+			e.mu.Unlock()
+		}
 		if err != nil {
 			if strings.Contains(err.Error(), "duplicate") {
 				if data, rerr := os.ReadFile(meta.TorrentFilePath); rerr == nil {
 					if ih, perr := infoHashFromTorrentFile(data); perr == nil {
 						e.RestoreMetadata(ih, meta.Category, meta.SavePath, meta.TorrentFilePath, meta.CompletedTime)
+						if meta.ContentFolder != nil {
+							e.mu.Lock()
+							if inf := e.torrents[ih]; inf != nil {
+								inf.ContentFolder = meta.ContentFolder
+							}
+							e.mu.Unlock()
+						}
 						imported++
 						continue
 					}
@@ -839,6 +864,17 @@ func (e *HoardEngine) TorrentCount() int {
 	return len(e.torrents)
 }
 
+func (e *HoardEngine) SetContentFolder(infoHash string, cf *bool) {
+	if cf == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if inf := e.torrents[infoHash]; inf != nil {
+		inf.ContentFolder = cf
+	}
+}
+
 func (e *HoardEngine) GetTorrentMetas() map[string]*TorrentMeta {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -849,6 +885,7 @@ func (e *HoardEngine) GetTorrentMetas() map[string]*TorrentMeta {
 			TorrentFilePath: info.TorrentFilePath,
 			Category:        info.Category,
 			CompletedTime:   info.CompletedTime,
+			ContentFolder:   info.ContentFolder,
 		}
 	}
 	return metas
@@ -1130,6 +1167,9 @@ func (e *HoardEngine) refreshStats() {
 		}
 
 		stats := ltStatusToTorrentStats(s, category, savePath, addedTime, completedTime)
+		if info != nil {
+			stats.ContentFolder = info.ContentFolder
+		}
 
 		if stats.Progress >= 1.0 && completedTime.IsZero() && info != nil {
 			now := time.Now()
@@ -1838,6 +1878,8 @@ func (e *HoardEngine) SetTorrentCategory(infoHash, newCategory, newCategorySaveP
 	}
 	oldOnDisk := info.SavePath
 	oldCategory := info.Category
+	torrentName := info.Name
+	wrapped := info.ContentFolder == nil || *info.ContentFolder
 	e.mu.RUnlock()
 
 	if oldOnDisk == "" {
@@ -1853,6 +1895,67 @@ func (e *HoardEngine) SetTorrentCategory(infoHash, newCategory, newCategorySaveP
 	}
 	oldEngineSavePath := st.SavePath
 	isMultiFile := oldEngineSavePath != oldOnDisk
+
+	// Loose single-file (create_torrent_folder off): the payload is a bare file
+	// living directly in the category dir (info.SavePath == category dir), with
+	// no per-torrent folder to rename. Move the file itself. (B1)
+	if !isMultiFile && !wrapped {
+		if torrentName == "" {
+			return fmt.Errorf("cannot move loose single-file torrent: unknown file name")
+		}
+		oldFile := filepath.Join(oldOnDisk, torrentName)
+		newFile := filepath.Join(newCategorySavePath, torrentName)
+		if oldFile == newFile && (newCategory == "" || newCategory == oldCategory) {
+			return nil
+		}
+		if err := hoardCheckSameFs(oldOnDisk, newCategorySavePath); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(newCategorySavePath, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", newCategorySavePath, err)
+		}
+		if _, err := os.Stat(newFile); err == nil {
+			return fmt.Errorf("destination already exists: %s", newFile)
+		}
+		if err := e.client.StopTorrent(infoHash); err != nil {
+			return fmt.Errorf("stop torrent: %w", err)
+		}
+		time.Sleep(150 * time.Millisecond)
+		if err := os.Rename(oldFile, newFile); err != nil {
+			_ = e.client.StartTorrent(infoHash)
+			return fmt.Errorf("rename %s -> %s: %w", oldFile, newFile, err)
+		}
+		if err := e.client.SetSavePath(infoHash, newCategorySavePath); err != nil {
+			_ = os.Rename(newFile, oldFile)
+			_ = e.client.StartTorrent(infoHash)
+			return fmt.Errorf("set engine save_path: %w", err)
+		}
+		e.mu.Lock()
+		if inf, ok := e.torrents[infoHash]; ok {
+			inf.SavePath = newCategorySavePath
+			if newCategory != "" {
+				inf.Category = newCategory
+			}
+		}
+		e.mu.Unlock()
+		e.cachedStatsMu.Lock()
+		if st, ok := e.cachedStats[infoHash]; ok {
+			st.SavePath = newCategorySavePath
+			if newCategory != "" {
+				st.Category = newCategory
+			}
+		}
+		e.cachedStatsMu.Unlock()
+		if err := e.client.StartTorrent(infoHash); err != nil {
+			slog.Warn("hoard: restart after category change failed", "info_hash", infoHash, "error", err)
+		}
+		if e.reAnnounce != nil {
+			go e.reAnnounce(infoHash, st.TotalSize)
+		}
+		slog.Info("hoard: changed category (loose single-file)", "info_hash", infoHash,
+			"from_category", oldCategory, "to_category", newCategory, "from_file", oldFile, "to_file", newFile)
+		return nil
+	}
 
 	rootName := filepath.Base(oldOnDisk)
 	newOnDisk := filepath.Join(newCategorySavePath, rootName)
@@ -1905,6 +2008,14 @@ func (e *HoardEngine) SetTorrentCategory(infoHash, newCategory, newCategorySaveP
 		}
 	}
 	e.mu.Unlock()
+	e.cachedStatsMu.Lock()
+	if st, ok := e.cachedStats[infoHash]; ok {
+		st.SavePath = newOnDisk
+		if newCategory != "" {
+			st.Category = newCategory
+		}
+	}
+	e.cachedStatsMu.Unlock()
 
 	if err := e.client.StartTorrent(infoHash); err != nil {
 		slog.Warn("hoard: restart after category change failed",

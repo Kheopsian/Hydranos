@@ -199,7 +199,7 @@ func DefaultConfig() *HydraConfig {
 			APIPort:             8199,
 			APIKey:              "", // vide -> genere aleatoirement au 1er boot
 			DataDir:             "/config",
-			CreateTorrentFolder: true,
+			CreateTorrentFolder: false,
 		},
 		Race: SessionConfig{
 			ListenPort:           16171,

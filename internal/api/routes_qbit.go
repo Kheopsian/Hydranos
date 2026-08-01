@@ -807,8 +807,20 @@ func hydraToQbitTorrent(t map[string]interface{}, engineName string) map[string]
 	// files at the right path. Race shares save_path (`/race/torrents`)
 	// without a per-torrent wrapper, so the inner name stays correct.
 	qbitName := getStr(t, "name")
+	spDir := filepath.Dir(getStr(t, "save_path"))
+	contentPath := getStr(t, "save_path")
 	if engineName == "hoard" {
-		qbitName = filepath.Base(getStr(t, "save_path"))
+		wrapped := true // legacy/nil -> torrents predate the setting, all wrapped
+		if cf, ok := t["content_folder"].(*bool); ok && cf != nil {
+			wrapped = *cf
+		}
+		if wrapped {
+			qbitName = filepath.Base(getStr(t, "save_path"))
+		} else {
+			// unwrapped single-file (create_torrent_folder off): natural qBit single-file
+			spDir = getStr(t, "save_path")
+			contentPath = filepath.Join(getStr(t, "save_path"), qbitName)
+		}
 	}
 	return map[string]interface{}{
 		"hash":           getStr(t, "info_hash"),
@@ -829,8 +841,8 @@ func hydraToQbitTorrent(t map[string]interface{}, engineName string) map[string]
 		"completion_on":  getInt64(t, "completed_time"),
 		"category":       cat,
 		"tags":           fmt.Sprintf("hydra:%s", engineName),
-		"save_path":      filepath.Dir(getStr(t, "save_path")),
-		"content_path":   getStr(t, "save_path"),
+		"save_path":      spDir,
+		"content_path":   contentPath,
 		"downloaded":     downloaded,
 		"uploaded":       uploaded,
 		"amount_left":    amountLeft,

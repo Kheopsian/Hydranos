@@ -432,9 +432,14 @@ document.querySelectorAll(".tab").forEach(tab => {
     tab.addEventListener("click", () => activateTab(tab.dataset.tab));
 });
 
-// Restore tab from URL hash on load
-const _hashTab = window.location.hash.replace("#", "");
-if (_hashTab && document.getElementById("tab-" + _hashTab)) {
+// Restore tab from URL hash on load. Deferred to DOMContentLoaded so module-level
+// state declared later in this file (e.g. _logsInit) is already initialized when a
+// tab loader runs. A parse-time activateTab("logs") otherwise hits a TDZ
+// ReferenceError ("Cannot access '_logsInit' before initialization"), the fetch
+// never fires, and the Logs tab stays stuck on "Loading..." after a refresh.
+window.addEventListener("DOMContentLoaded", () => {
+    const _hashTab = window.location.hash.replace("#", "");
+    if (!_hashTab || !document.getElementById("tab-" + _hashTab)) return;
     activateTab(_hashTab);
     window.addEventListener("load", async () => {
         if (_hashTab === "race") await updateRaceTorrents();
@@ -443,7 +448,7 @@ if (_hashTab && document.getElementById("tab-" + _hashTab)) {
         else if (_hashTab === "agents") { await updateAgents(); updateEngines(); }
         else if (_hashTab === "benchmark") await updateBenchmark();
     });
-}
+});
 
 // ─── Mode selector ──────────────────────────────────────
 
@@ -3192,7 +3197,7 @@ const _SETTINGS_DESC = {
     api_port: "TCP port for the HTTP API and WebUI.",
     api_key: "Secret required in the X-API-Key header to call the API.",
     data_dir: "Root directory for daemon state (categories, DBs, configs).",
-    create_torrent_folder: "Put each torrent's files in their own subfolder under the save path.",
+    create_torrent_folder: "Create a per-torrent subfolder for single-file torrents (like qBittorrent's subfolder option). Off = single files saved directly in the category folder; multi-file torrents always keep their own folder. Applies to newly added torrents only.",
     // session (race/hoard)
     listen_port: "TCP/UDP port this session listens on for incoming peers.",
     listen_interfaces: "Comma-separated ip:port bind list (multi-homing).",
