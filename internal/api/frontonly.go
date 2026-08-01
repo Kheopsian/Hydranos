@@ -76,6 +76,7 @@ func (emptyHoardEngine) VerifyTorrent(string) error                      { retur
 func (emptyHoardEngine) SetTorrentCategory(string, string, string) error { return errNoLocalEngine }
 func (emptyHoardEngine) SetCategoryLabel(string, string) error           { return errNoLocalEngine }
 func (emptyHoardEngine) SetAddedTime(string, time.Time)                  {}
+func (emptyHoardEngine) SetContentFolder(string, *bool)                  {}
 func (emptyHoardEngine) GetDownloadSlotStatus() engine.DownloadSlotStats {
 	return engine.DownloadSlotStats{}
 }

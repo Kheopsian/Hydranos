@@ -85,6 +85,7 @@ type qbitTorrent struct {
 	Hash       string  `json:"hash"`
 	Name       string  `json:"name"`
 	SavePath   string  `json:"save_path"`
+	ContentPath string `json:"content_path"`
 	Category   string  `json:"category"`
 	Progress   float64 `json:"progress"`
 	State      string  `json:"state"`
@@ -508,7 +509,27 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 				var ih string
 				var addErr error
 				if it.seed {
-					ih, addErr = s.hoardEngine.AddTorrentSeedMode(it.tmp, sp, cn)
+					// Replicate qBit exact on-disk layout from content_path: stat tells multi
+					// (a dir) from single (the file); derive the content dir + whether the
+					// torrent has its own subfolder so shim/move behave correctly.
+					resolvedSave := sp
+					var cf *bool
+					if cp := remapPath(it.t.ContentPath, req.PathMap); cp != "" {
+						if fi, statErr := os.Stat(cp); statErr == nil {
+							v := true
+							if fi.IsDir() {
+								resolvedSave = cp
+							} else {
+								resolvedSave = filepath.Dir(cp)
+								v = filepath.Dir(cp) != sp
+							}
+							cf = &v
+						}
+					}
+					ih, addErr = s.hoardEngine.AddTorrentSeedMode(it.tmp, resolvedSave, cn)
+					if addErr == nil && cf != nil {
+						s.hoardEngine.SetContentFolder(ih, cf)
+					}
 				} else {
 					ih, addErr = s.hoardEngine.AddTorrent(it.tmp, sp, cn)
 				}
