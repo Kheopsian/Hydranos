@@ -464,6 +464,12 @@ func (h *HoardAnnouncer) announceAllTiers(infoHash string, totalSize, left, uplo
 		}
 	}
 
+	// Fold this cycle's per-tracker results into the per-host registry that
+	// backs the Trackers UI tab (built from live announces = hot set only).
+	for turl, to := range obs.Trackers {
+		trackerReg.recordAnnounce(trackerHostOf(turl), infoHash, to.OK, to.ErrorMsg)
+	}
+
 	// Floor the interval so a misbehaving tracker can't pin us at 1s loops.
 	if maxInterval > 0 {
 		d := time.Duration(maxInterval) * time.Second

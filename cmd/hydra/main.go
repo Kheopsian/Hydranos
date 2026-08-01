@@ -119,7 +119,47 @@ func main() {
 		return
 	}
 
+	// `hydra reset-password <newpass> [config]` : hash <newpass> and write it into
+	// [auth] password_hash of the config in one step, so a locked-out admin can
+	// recover without hand-editing TOML (the generated first-run password is never
+	// stored in cleartext). Config path defaults to ${HYDRA_CONFIG_DIR}/default.toml
+	// (else /config/default.toml), matching the daemon's own resolution.
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: hydra reset-password <newpassword> [config-path]")
+			os.Exit(2)
+		}
+		cfgPath := "/config/default.toml"
+		if len(os.Args) >= 4 {
+			cfgPath = os.Args[3]
+		} else if d := os.Getenv("HYDRA_CONFIG_DIR"); d != "" {
+			cfgPath = filepath.Join(d, "default.toml")
+		}
+		h, err := bcrypt.GenerateFromPassword([]byte(os.Args[2]), bcrypt.DefaultCost)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "read config", cfgPath, ":", err)
+			os.Exit(1)
+		}
+		doc, err := config.SetTOMLValue(string(data), "auth", "password_hash", fmt.Sprintf("%q", string(h)))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "set password_hash:", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(cfgPath, []byte(doc), 0644); err != nil {
+			fmt.Fprintln(os.Stderr, "write config", cfgPath, ":", err)
+			os.Exit(1)
+		}
+		fmt.Printf("admin password updated in %s - restart Hydra to apply\n", cfgPath)
+		return
+	}
+
 	// `hydra set-listen-port <engine-socket> <port>` : push a new BT listen port
+
 	// to a running engine over its Unix socket (hot rebind, no restart). Meant to
 	// be run by gluetun's VPN_PORT_FORWARDING_UP_COMMAND inside an agent container,
 	// where there is no api.Server to POST to. Works for any engine socket.
@@ -1372,7 +1412,9 @@ func (a *hoardAPIAdapter) VerifyTorrent(infoHash string) error {
 func (a *hoardAPIAdapter) SetTorrentCategory(infoHash, newCategory, newSavePath string) error {
 	return a.engine.SetTorrentCategory(infoHash, newCategory, newSavePath)
 }
-func (a *hoardAPIAdapter) SetContentFolder(infoHash string, cf *bool) { a.engine.SetContentFolder(infoHash, cf) }
+func (a *hoardAPIAdapter) SetContentFolder(infoHash string, cf *bool) {
+	a.engine.SetContentFolder(infoHash, cf)
+}
 func (a *hoardAPIAdapter) SetCategoryLabel(infoHash, category string) error {
 	return a.engine.SetCategoryLabel(infoHash, category)
 }

@@ -448,6 +448,9 @@ func (s *Server) registerHydraRoutes() {
 		api.GET("/announce/secondary-stats", s.handleGetSecondaryStats)
 		api.POST("/announce/secondary-stats", s.handleSetSecondaryStats)
 
+		// Per-host tracker aggregate (announce health + override state)
+		api.GET("/trackers", s.handleGetTrackers)
+
 		// Global status
 		api.GET("/status", s.handleStatus)
 		api.GET("/update-check", s.handleUpdateCheck)
@@ -2166,6 +2169,32 @@ func (s *Server) handleSetClient(c *gin.Context) {
 	}
 	engine.SetClientOverride(req.Host, req.PeerIDPrefix, req.UserAgent)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides()})
+}
+
+// handleGetTrackers returns the per-host tracker aggregate (built from live
+// announces, hot set only) joined with the client-spoof and passkey override
+// state. Backs the Trackers tab: one row per distinct tracker host.
+func (s *Server) handleGetTrackers(c *gin.Context) {
+	stats := engine.TrackerSnapshot()
+	type trackerRow struct {
+		engine.TrackerStat
+		Spoofed      bool   `json:"spoofed"`
+		PeerIDPrefix string `json:"peer_id_prefix,omitempty"`
+		UserAgent    string `json:"user_agent,omitempty"`
+		PasskeySet   bool   `json:"passkey_set"`
+	}
+	rows := make([]trackerRow, 0, len(stats))
+	for _, st := range stats {
+		row := trackerRow{TrackerStat: st}
+		if sp, ok := engine.ClientSpoofForHost(st.Host); ok {
+			row.Spoofed = true
+			row.PeerIDPrefix = sp.PeerIDPrefix
+			row.UserAgent = sp.UserAgent
+		}
+		row.PasskeySet = engine.PasskeyOverrideForHost(st.Host)
+		rows = append(rows, row)
+	}
+	c.JSON(http.StatusOK, rows)
 }
 
 // handleGetSecondaryStats returns the current per-tracker secondary-announce

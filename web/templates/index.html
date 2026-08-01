@@ -84,6 +84,7 @@
         <button class="tab" data-tab="hoard">Hoard</button>
         <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="agents">Agents</button>
+        <button class="tab" data-tab="trackers">Trackers</button>
         <button class="tab" data-tab="config">Config</button>
         <button class="tab" data-tab="benchmark">Benchmark</button>
         <button class="tab" data-tab="changelog">Changelog</button>
@@ -582,6 +583,61 @@
             <div id="restart-banner" style="display:none;margin-top:8px;padding:8px;background:#3a2a00;border-radius:4px">
                 Config changed — restart to apply. <button class="btn-small" onclick="restartHydra()">Restart now</button>
             </div>
+        </section>
+
+        <section id="tab-trackers" class="tab-content">
+            <div class="section-header">
+                <h2>Trackers</h2>
+                <button class="btn-small" onclick="showTrackerForm()">+ Manual host</button>
+            </div>
+            <p class="sr-desc" style="margin:0 0 12px">Trackers we are actively announcing to (hot torrents only). Override the announced client identity (peer_id + User-Agent) to pass a tracker's client whitelist, or override the announce passkey. Applies on the next announce, no restart.</p>
+            <div id="trk-form" class="card" style="display:none;margin-bottom:16px">
+                <div class="card-body">
+                    <div class="cat-form-grid">
+                        <div class="form-group">
+                            <label>Host <span class="sr-desc">substring matched in tracker URL</span></label>
+                            <input type="text" id="trk-host" placeholder="tracker.example.net" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Client preset</label>
+                            <select id="trk-preset" onchange="applyTrackerPreset()">
+                                <option value="">(custom)</option>
+                                <option value="qb522">qBittorrent 5.2.2</option>
+                                <option value="qb461">qBittorrent 4.6.1</option>
+                                <option value="tr405">Transmission 4.0.5</option>
+                                <option value="de211">Deluge 2.1.1</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>peer_id prefix <span class="sr-desc">8 chars, e.g. -qB5220-</span></label>
+                            <input type="text" id="trk-pid" placeholder="(no spoof)" maxlength="8" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>User-Agent</label>
+                            <input type="text" id="trk-ua" placeholder="qBittorrent/5.2.2" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Passkey <span class="sr-desc">leave blank = unchanged</span></label>
+                            <input type="text" id="trk-passkey" placeholder="(unchanged)" autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="cat-form-actions">
+                        <button class="btn-primary" onclick="saveTracker()">Save</button>
+                        <button class="btn-small" onclick="clearTrackerSpoof()">Clear spoof</button>
+                        <button class="btn-small btn-danger" onclick="clearTrackerPasskey()">Clear passkey</button>
+                        <button class="btn-cancel" onclick="hideTrackerForm()">Cancel</button>
+                    </div>
+                    <div id="trk-result" class="result-msg"></div>
+                </div>
+            </div>
+            <table id="trackers-table">
+                <thead>
+                    <tr><th>Tracker</th><th>Torrents</th><th>Status</th><th>Client spoof</th><th>Passkey</th><th>Last error</th><th>Actions</th></tr>
+                </thead>
+                <tbody id="trackers-tbody">
+                    <tr><td colspan="7" class="empty">No announces yet</td></tr>
+                </tbody>
+            </table>
         </section>
 
         <section id="tab-config" class="tab-content">
