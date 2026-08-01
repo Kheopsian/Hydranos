@@ -2101,6 +2101,27 @@ func AbsorbStats(engine string, ul, dl int64) {
 	}
 }
 
+// fanoutAnnounceOverride pushes an announce override to every connected remote
+// agent so a global setting (client spoof / passkey) stays consistent across
+// the fleet. Best-effort, returns (pushed, failed): an unreachable agent counts
+// as failed, not fatal (it re-seeds from its own toml on restart, and re-saving
+// re-pushes). Read stays local -- the front is the source of truth.
+func (s *Server) fanoutAnnounceOverride(p agentwire.AnnounceOverrideParams) (int, int) {
+	pushed, failed := 0, 0
+	for _, ra := range s.agentsSnapshot() {
+		cl := ra.anyClient()
+		if cl == nil {
+			continue
+		}
+		if err := cl.SetAnnounceOverride(p); err != nil {
+			failed++
+		} else {
+			pushed++
+		}
+	}
+	return pushed, failed
+}
+
 // handleGetPasskeys returns the current per-tracker announce passkey overrides.
 func (s *Server) handleGetPasskeys(c *gin.Context) {
 	c.JSON(http.StatusOK, engine.GetPasskeyOverrides())
@@ -2147,7 +2168,8 @@ func (s *Server) handleSetPasskey(c *gin.Context) {
 		return
 	}
 	engine.SetPasskeyOverride(req.Host, req.Passkey)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "passkeys": engine.GetPasskeyOverrides()})
+	pushed, failed := s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "passkey", Host: req.Host, Passkey: req.Passkey})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "passkeys": engine.GetPasskeyOverrides(), "agents_pushed": pushed, "agents_failed": failed})
 }
 
 // handleGetClients returns the current per-tracker client spoof overrides.
@@ -2168,7 +2190,8 @@ func (s *Server) handleSetClient(c *gin.Context) {
 		return
 	}
 	engine.SetClientOverride(req.Host, req.PeerIDPrefix, req.UserAgent)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides()})
+	pushed, failed := s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "client", Host: req.Host, PeerIDPrefix: req.PeerIDPrefix, UserAgent: req.UserAgent})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides(), "agents_pushed": pushed, "agents_failed": failed})
 }
 
 // handleGetTrackers returns the per-host tracker aggregate (built from live

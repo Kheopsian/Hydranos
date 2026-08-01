@@ -16,25 +16,27 @@ const (
 // EngineClient method (SetEventHandler is local-only; SubscribeEvents maps to
 // the Subscribe stream; Close is local).
 const (
-	MethodPing           = "ping"
-	MethodAddTorrent     = "add_torrent" // covers AddTorrent + AddTorrentWithOptions
-	MethodRemoveTorrent  = "remove_torrent"
-	MethodStartTorrent   = "start_torrent"
-	MethodStopTorrent    = "stop_torrent"
-	MethodSetSavePath    = "set_save_path"
-	MethodVerifyTorrent  = "verify_torrent"
-	MethodGetStatus      = "get_status"
-	MethodListTorrents   = "list_torrents"
-	MethodGetPeers       = "get_peers"
-	MethodGetSessionStat = "get_session_stats"
-	MethodGetFiles       = "get_files"
-	MethodGetTrackers    = "get_trackers"
-	MethodGetDiagnostics = "get_diagnostics"
-	MethodAddPeers       = "add_peers"
-	MethodAddRouted      = "add_routed"    // rich placement add: invokes the agent's own Race/Hoard engine
-	MethodActionRouted   = "action_routed" // rich per-torrent op on the agent's own engine
-	MethodListEngines    = "list_engines"  // node-level: enumerate the engines this agent hosts
-	MethodNodeInfo       = "node_info"     // node-level: exit (public) IP + host interfaces
+	MethodPing                 = "ping"
+	MethodAddTorrent           = "add_torrent" // covers AddTorrent + AddTorrentWithOptions
+	MethodRemoveTorrent        = "remove_torrent"
+	MethodStartTorrent         = "start_torrent"
+	MethodStopTorrent          = "stop_torrent"
+	MethodSetSavePath          = "set_save_path"
+	MethodVerifyTorrent        = "verify_torrent"
+	MethodGetStatus            = "get_status"
+	MethodListTorrents         = "list_torrents"
+	MethodGetPeers             = "get_peers"
+	MethodGetSessionStat       = "get_session_stats"
+	MethodGetFiles             = "get_files"
+	MethodGetTrackers          = "get_trackers"
+	MethodGetDiagnostics       = "get_diagnostics"
+	MethodAddPeers             = "add_peers"
+	MethodAddRouted            = "add_routed"             // rich placement add: invokes the agent's own Race/Hoard engine
+	MethodActionRouted         = "action_routed"          // rich per-torrent op on the agent's own engine
+	MethodListEngines          = "list_engines"           // node-level: enumerate the engines this agent hosts
+	MethodNodeInfo             = "node_info"              // node-level: exit (public) IP + host interfaces
+	MethodGetAnnounceOverrides = "get_announce_overrides" // node-level: read passkey + client-spoof maps
+	MethodSetAnnounceOverride  = "set_announce_override"  // node-level: set/clear one announce override
 )
 
 // EngineDescriptor identifies one engine an agent hosts (Option A: a node
@@ -42,6 +44,31 @@ const (
 type EngineDescriptor struct {
 	ID   string `json:"id"`
 	Role string `json:"role"`
+}
+
+// ClientSpoofWire mirrors engine.ClientSpoof on the wire (agentwire must not
+// import engine).
+type ClientSpoofWire struct {
+	PeerIDPrefix string `json:"peer_id_prefix"`
+	UserAgent    string `json:"user_agent"`
+}
+
+// AnnounceOverrides is the reply to MethodGetAnnounceOverrides: an agent's
+// per-host announce override maps.
+type AnnounceOverrides struct {
+	Passkeys map[string]string          `json:"passkeys"`
+	Clients  map[string]ClientSpoofWire `json:"clients"`
+}
+
+// AnnounceOverrideParams is the params envelope for MethodSetAnnounceOverride.
+// Kind selects the map ("passkey" | "client"); an empty value clears that
+// host's override (same semantics as the local /api/announce/* endpoints).
+type AnnounceOverrideParams struct {
+	Kind         string `json:"kind"`
+	Host         string `json:"host"`
+	Passkey      string `json:"passkey,omitempty"`
+	PeerIDPrefix string `json:"peer_id_prefix,omitempty"`
+	UserAgent    string `json:"user_agent,omitempty"`
 }
 
 // AddParams is the params envelope for MethodAddTorrent. The .torrent bytes are

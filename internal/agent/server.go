@@ -198,6 +198,18 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 	if req.Method == agentwire.MethodNodeInfo {
 		return s.handleNodeInfo()
 	}
+	if req.Method == agentwire.MethodGetAnnounceOverrides {
+		return s.handleGetAnnounceOverrides()
+	}
+	if req.Method == agentwire.MethodSetAnnounceOverride {
+		var p agentwire.AnnounceOverrideParams
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return nil, err
+			}
+		}
+		return s.handleSetAnnounceOverride(p)
+	}
 	if req.Method == agentwire.MethodPing {
 		// Node-level liveness, handled before engine resolution so a discovery
 		// ping (engine id not yet known / absent on this node) still succeeds.
@@ -574,4 +586,32 @@ func agentNICs() []agentwire.NICInfo {
 
 func (s *Server) handleNodeInfo() (*agentpb.CallReply, error) {
 	return reply(agentwire.NodeInfo{PublicIP: agentPublicIP(), Interfaces: agentNICs()}, nil)
+}
+
+// handleGetAnnounceOverrides returns this agent's per-host passkey + client
+// spoof override maps (node-level; the announce overrides are process-global).
+func (s *Server) handleGetAnnounceOverrides() (*agentpb.CallReply, error) {
+	cl := engine.GetClientOverrides()
+	out := agentwire.AnnounceOverrides{
+		Passkeys: engine.GetPasskeyOverrides(),
+		Clients:  make(map[string]agentwire.ClientSpoofWire, len(cl)),
+	}
+	for h, c := range cl {
+		out.Clients[h] = agentwire.ClientSpoofWire{PeerIDPrefix: c.PeerIDPrefix, UserAgent: c.UserAgent}
+	}
+	return reply(out, nil)
+}
+
+// handleSetAnnounceOverride sets (or clears, on empty value) one announce
+// override on this agent, mirroring the local POST /api/announce/* handlers.
+func (s *Server) handleSetAnnounceOverride(p agentwire.AnnounceOverrideParams) (*agentpb.CallReply, error) {
+	switch p.Kind {
+	case "passkey":
+		engine.SetPasskeyOverride(p.Host, p.Passkey)
+	case "client":
+		engine.SetClientOverride(p.Host, p.PeerIDPrefix, p.UserAgent)
+	default:
+		return reply(nil, fmt.Errorf("unknown announce override kind %q", p.Kind))
+	}
+	return reply(nil, nil)
 }
