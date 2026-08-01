@@ -50,6 +50,21 @@ impl CryptoStream {
     pub fn plain(stream: PeerTransport) -> Self {
         Self { inner: stream, encrypt: None, decrypt: None, pending_write: Vec::new() }
     }
+
+    /// Raw TCP socket ref for the zero-copy `sendfile` serve fast-path.
+    /// `Some` ONLY when plaintext (no RC4 to apply), no half-encrypted bytes
+    /// queued, and the transport is TCP (uTP has no fd sendfile can target).
+    /// Caller MUST flush the `Framed` sink first so codec bytes precede the
+    /// spliced block on the wire.
+    pub fn plain_tcp(&self) -> Option<&tokio::net::TcpStream> {
+        if self.encrypt.is_some() || !self.pending_write.is_empty() {
+            return None;
+        }
+        match &self.inner {
+            PeerTransport::Tcp(s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 impl AsyncRead for CryptoStream {
