@@ -154,6 +154,17 @@ type BenchDB struct {
 	mu   sync.Mutex
 	conn *sql.DB
 	path string
+
+	// roConn is a dedicated read-only connection for heavy, unbounded read
+	// aggregates (records) so they never hold the write mutex and stall the
+	// 5s sampler. Enabled by WAL on the main connection.
+	roConn *sql.DB
+
+	// records cache: the all-time records aggregate is a full scan of
+	// bench_samples (O(N)); recompute at most every recordsTTL.
+	recMu    sync.Mutex
+	recCache map[string]interface{}
+	recAt    time.Time
 }
 
 // NewBenchDB creates a BenchDB but does not open it yet.
@@ -210,13 +221,33 @@ func (b *BenchDB) Open() error {
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN global_uploaded INTEGER DEFAULT 0")
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN global_downloaded INTEGER DEFAULT 0")
 
+	// WAL lets a read-only connection run concurrently with the 5s writer
+	// instead of every reader/writer serialising on one connection.
+	db.Exec("PRAGMA journal_mode=WAL")
+	db.Exec("PRAGMA busy_timeout=5000")
+	db.SetMaxOpenConns(1)
+
 	b.conn = db
+
+	// Dedicated read-only connection for heavy aggregate reads (records),
+	// so a multi-second full scan never blocks writes or other endpoints.
+	if ro, roErr := sql.Open("sqlite", "file:"+b.path+"?mode=ro"); roErr == nil {
+		ro.Exec("PRAGMA busy_timeout=5000")
+		ro.SetMaxOpenConns(2)
+		b.roConn = ro
+	} else {
+		slog.Warn("bench_db: read-only connection failed; records fall back to the write connection", "err", roErr)
+	}
+
 	slog.Info("bench_db: opened", "path", b.path)
 	return nil
 }
 
 // Close closes the database.
 func (b *BenchDB) Close() error {
+	if b.roConn != nil {
+		b.roConn.Close()
+	}
 	if b.conn != nil {
 		return b.conn.Close()
 	}
