@@ -2194,29 +2194,81 @@ func (s *Server) handleSetClient(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides(), "agents_pushed": pushed, "agents_failed": failed})
 }
 
-// handleGetTrackers returns the per-host tracker aggregate (built from live
-// announces, hot set only) joined with the client-spoof and passkey override
-// state. Backs the Trackers tab: one row per distinct tracker host.
+// handleGetTrackers returns the per-host tracker aggregate joined with the
+// client-spoof and passkey override state, backing the Trackers tab. It MERGES
+// the local announce registry with every connected remote agent's, so a
+// front-only node (no local engine) still sees and manages the whole fleet's
+// trackers. Overrides are global (fanned out to all agents), hence one row per
+// host; the override columns come from the local maps (the front's source of
+// truth). sources lists which nodes announce to each host.
 func (s *Server) handleGetTrackers(c *gin.Context) {
-	stats := engine.TrackerSnapshot()
+	merged := map[string]*engine.TrackerStat{}
+	sources := map[string][]string{}
+	fold := func(stats []engine.TrackerStat, node string) {
+		for i := range stats {
+			st := stats[i]
+			if m := merged[st.Host]; m != nil {
+				m.Torrents += st.Torrents
+				m.Announces += st.Announces
+				m.Errors += st.Errors
+				if st.OK {
+					m.OK = true
+				}
+				if m.LastError == "" && st.LastError != "" {
+					m.LastError = st.LastError
+				}
+				if st.LastAnnounce.After(m.LastAnnounce) {
+					m.LastAnnounce = st.LastAnnounce
+				}
+				sources[st.Host] = append(sources[st.Host], node)
+				continue
+			}
+			cp := st
+			merged[st.Host] = &cp
+			sources[st.Host] = []string{node}
+		}
+	}
+	fold(engine.TrackerSnapshot(), "local")
+	for _, ra := range s.agentsSnapshot() {
+		cl := ra.anyClient()
+		if cl == nil {
+			continue
+		}
+		ws, err := cl.TrackerSnapshot()
+		if err != nil {
+			continue
+		}
+		stats := make([]engine.TrackerStat, len(ws))
+		for i, w := range ws {
+			stats[i] = engine.TrackerStat{Host: w.Host, Torrents: w.Torrents, OK: w.OK, LastError: w.LastError, LastAnnounce: w.LastAnnounce, Announces: w.Announces, Errors: w.Errors}
+		}
+		fold(stats, ra.name)
+	}
 	type trackerRow struct {
 		engine.TrackerStat
-		Spoofed      bool   `json:"spoofed"`
-		PeerIDPrefix string `json:"peer_id_prefix,omitempty"`
-		UserAgent    string `json:"user_agent,omitempty"`
-		PasskeySet   bool   `json:"passkey_set"`
+		Spoofed      bool     `json:"spoofed"`
+		PeerIDPrefix string   `json:"peer_id_prefix,omitempty"`
+		UserAgent    string   `json:"user_agent,omitempty"`
+		PasskeySet   bool     `json:"passkey_set"`
+		Sources      []string `json:"sources"`
 	}
-	rows := make([]trackerRow, 0, len(stats))
-	for _, st := range stats {
-		row := trackerRow{TrackerStat: st}
-		if sp, ok := engine.ClientSpoofForHost(st.Host); ok {
+	rows := make([]trackerRow, 0, len(merged))
+	for host, m := range merged {
+		row := trackerRow{TrackerStat: *m, Sources: sources[host]}
+		if sp, ok := engine.ClientSpoofForHost(host); ok {
 			row.Spoofed = true
 			row.PeerIDPrefix = sp.PeerIDPrefix
 			row.UserAgent = sp.UserAgent
 		}
-		row.PasskeySet = engine.PasskeyOverrideForHost(st.Host)
+		row.PasskeySet = engine.PasskeyOverrideForHost(host)
 		rows = append(rows, row)
 	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Torrents != rows[j].Torrents {
+			return rows[i].Torrents > rows[j].Torrents
+		}
+		return rows[i].Host < rows[j].Host
+	})
 	c.JSON(http.StatusOK, rows)
 }
 

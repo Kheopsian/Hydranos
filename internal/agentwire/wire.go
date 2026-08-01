@@ -6,6 +6,8 @@
 // *params* need envelopes here.
 package agentwire
 
+import "time"
+
 // Engine session identifiers carried in CallRequest.engine / SubscribeRequest.engine.
 const (
 	EngineRace  = "race"
@@ -37,6 +39,7 @@ const (
 	MethodNodeInfo             = "node_info"              // node-level: exit (public) IP + host interfaces
 	MethodGetAnnounceOverrides = "get_announce_overrides" // node-level: read passkey + client-spoof maps
 	MethodSetAnnounceOverride  = "set_announce_override"  // node-level: set/clear one announce override
+	MethodTrackerSnapshot      = "tracker_snapshot"       // node-level: per-host announce aggregate
 )
 
 // EngineDescriptor identifies one engine an agent hosts (Option A: a node
@@ -58,6 +61,18 @@ type ClientSpoofWire struct {
 type AnnounceOverrides struct {
 	Passkeys map[string]string          `json:"passkeys"`
 	Clients  map[string]ClientSpoofWire `json:"clients"`
+}
+
+// TrackerStatWire mirrors engine.TrackerStat: the per-host announce aggregate an
+// agent exposes so a front can merge every node's trackers into one view.
+type TrackerStatWire struct {
+	Host         string    `json:"host"`
+	Torrents     int       `json:"torrents"`
+	OK           bool      `json:"ok"`
+	LastError    string    `json:"last_error"`
+	LastAnnounce time.Time `json:"last_announce"`
+	Announces    int64     `json:"announces"`
+	Errors       int64     `json:"errors"`
 }
 
 // AnnounceOverrideParams is the params envelope for MethodSetAnnounceOverride.

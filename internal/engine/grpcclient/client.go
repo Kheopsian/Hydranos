@@ -142,6 +142,13 @@ func (c *Client) SetAnnounceOverride(p agentwire.AnnounceOverrideParams) error {
 	return c.call(agentwire.MethodSetAnnounceOverride, p, nil)
 }
 
+// TrackerSnapshot returns the agent's per-host announce aggregate (node-level).
+func (c *Client) TrackerSnapshot() ([]agentwire.TrackerStatWire, error) {
+	var out []agentwire.TrackerStatWire
+	err := c.call(agentwire.MethodTrackerSnapshot, nil, &out)
+	return out, err
+}
+
 func (c *Client) Close() error {
 	c.eventMu.Lock()
 	if c.cancelSub != nil {

@@ -210,6 +210,9 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		}
 		return s.handleSetAnnounceOverride(p)
 	}
+	if req.Method == agentwire.MethodTrackerSnapshot {
+		return reply(engine.TrackerSnapshot(), nil)
+	}
 	if req.Method == agentwire.MethodPing {
 		// Node-level liveness, handled before engine resolution so a discovery
 		// ping (engine id not yet known / absent on this node) still succeeds.
