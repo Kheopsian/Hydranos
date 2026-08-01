@@ -429,9 +429,15 @@ var (
 
 func loadSecondaryAnnounceProxy() *url.URL {
 	secondaryAnnounceProxyOnce.Do(func() {
-		raw := strings.TrimSpace(os.Getenv("TYPHON_ANNOUNCE_V6_PROXY"))
+		// [secondary announce removed 2026-08-01] force-disabled regardless of
+		// env: the XORed 2nd peer_id registered a SECOND peer per torrent (torr9
+		// x2 token hack) => the "duplicate peer" look on trackers. qBit/libtorrent
+		// does v4/v6 with the SAME peer_id (one peer, two addresses). Rollback =
+		// restore the env read below.
+		raw := ""
+		_ = os.Getenv("TYPHON_ANNOUNCE_V6_PROXY")
 		if raw == "" {
-			slog.Info("tracker_announce: TYPHON_ANNOUNCE_V6_PROXY not set — no secondary announce")
+			slog.Info("tracker_announce: secondary announce disabled (removed 2026-08-01)")
 			return
 		}
 		u, err := url.Parse(raw)

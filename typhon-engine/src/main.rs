@@ -91,6 +91,10 @@ async fn main() {
         }
     }
 
+    // Seed the self-dial IP filter from env; Go refreshes it at runtime with the
+    // observed public IP via the set_self_ips RPC (no more hard-coded staleness).
+    tracker::seed_self_ips_from_env();
+
     // Configure outbound SOCKS5 proxy (used for v6 peer dials to avoid Free leak).
     if !config.socks5_outbound_host.is_empty() {
         info!(

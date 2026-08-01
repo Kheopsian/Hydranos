@@ -77,17 +77,29 @@ impl DownloadState {
         }
     }
 
-    /// Process incoming Have from peer.
-    pub fn on_have(&mut self, piece: u32) {
+    /// Process incoming Have from peer. Returns true iff the piece bit was
+    /// NEWLY set. The caller gates num_pieces_have on this so a duplicate /
+    /// redundant Have (peer re-announcing a piece already in its bitfield)
+    /// can no longer inflate progress past 100% (the 200%-in-peerlist bug).
+    pub fn on_have(&mut self, piece: u32) -> bool {
+        // Ignore Have for an out-of-range piece index (buggy/malicious peer).
+        if (piece as usize) >= self.torrent.meta.num_pieces() as usize {
+            return false;
+        }
         let byte_idx = piece as usize / 8;
         let bit_idx = 7 - (piece % 8);
         if byte_idx >= self.peer_bitfield.len() {
             self.peer_bitfield.resize(byte_idx + 1, 0);
         }
-        self.peer_bitfield[byte_idx] |= 1 << bit_idx;
+        let mask = 1u8 << bit_idx;
+        if self.peer_bitfield[byte_idx] & mask != 0 {
+            return false; // already known -> do not double-count
+        }
+        self.peer_bitfield[byte_idx] |= mask;
         if let Some(picker) = self.torrent.picker.get() {
             picker.lock().unwrap().add_have(piece);
         }
+        true
     }
 
     pub fn on_unchoke(&mut self) {

@@ -35,6 +35,7 @@ pub fn dispatch(
         "get_files" => get_files(params, torrent_mgr),
         "get_diagnostics" => get_diagnostics(torrent_mgr, config),
         "set_listen_port" => set_listen_port(params),
+        "set_self_ips" => set_self_ips(params),
         _ => json!({"error": format!("unknown method: {}", method)}),
     }
 }
@@ -506,4 +507,21 @@ fn get_info_hash(params: &Value) -> Result<[u8; 20], Value> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| json!({"error": "missing info_hash"}))?;
     hex_decode(hex).map_err(|e| json!({"error": e}))
+}
+
+// Replace the tracker self-dial IP set at runtime. Go pushes the current public
+// IP(s) here so the self-dial pre-filter never goes stale. params: {"ips":[...]}
+fn set_self_ips(params: &Value) -> Value {
+    let arr = match params.get("ips").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return json!({"error": "missing ips"}),
+    };
+    let ips: Vec<std::net::IpAddr> = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        .collect();
+    let count = ips.len();
+    crate::tracker::set_self_ips(ips);
+    json!({"ok": true, "count": count})
 }

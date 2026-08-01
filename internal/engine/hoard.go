@@ -754,6 +754,18 @@ func (e *HoardEngine) LivePort() *atomic.Int64 { return &e.livePort }
 
 // SetListenPort hot-rebinds the engine peer listener + updates the announce
 // port, with no restart. No-op for a remote (non-ltclient) engine client.
+// SetSelfIPs pushes our current public IP(s) to the engine self-dial filter
+// (dynamic; no-op for a remote non-ltclient engine).
+func (e *HoardEngine) SetSelfIPs(ips []string) {
+	lt, ok := e.client.(*ltclient.Client)
+	if !ok {
+		return
+	}
+	if err := lt.SetSelfIPs(ips); err != nil {
+		slog.Warn("hoard: set_self_ips failed", "err", err)
+	}
+}
+
 func (e *HoardEngine) SetListenPort(port int) {
 	if port <= 0 || port > 65535 {
 		slog.Warn("hoard: SetListenPort out of range", "port", port)
