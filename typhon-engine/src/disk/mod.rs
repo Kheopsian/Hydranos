@@ -300,6 +300,27 @@ impl DiskManager {
 /// `Ok(true)` = whole block served; `Ok(false)` = declined without touching
 /// the wire (non-unix); `Err` = failed after the header went out, so the
 /// stream is mid-message and the caller MUST drop the peer.
+/// True if `path` lives on a ZFS filesystem (statfs magic). Serving from ZFS
+/// goes through the buffered read()+cache path so blocks flow through the ARC:
+/// sendfile/splice bypass the ARC on ZoL, so a zero-copy serve would dump the
+/// served hot-set into dumb page-cache LRU and starve the ARC. Non-ZFS backends
+/// (e.g. NVMe/XFS) keep the zero-copy fast path (CPU-bound, ARC irrelevant).
+#[cfg(unix)]
+pub fn path_is_zfs(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let c = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    st.f_type as u64 == 0x2fc12fc1 // ZFS_SUPER_MAGIC
+}
+#[cfg(not(unix))]
+pub fn path_is_zfs(_path: &std::path::Path) -> bool { false }
+
 /// Non-blocking page-cache residency probe (preadv2 RWF_NOWAIT, 1 byte). True
 /// if the block's first page is already cached -> safe to sendfile without
 /// blocking the reactor. Cold -> caller uses the spawn_blocking buffered path.
