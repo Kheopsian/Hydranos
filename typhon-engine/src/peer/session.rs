@@ -93,6 +93,11 @@ pub async fn run(
         None
     };
 
+    // Zero-copy sendfile serve only off non-ZFS storage (NVMe/XFS race). On ZFS
+    // (hoard), sendfile bypasses the ARC on ZoL -> the served hot-set would fill
+    // dumb page-cache LRU and starve the ARC; the buffered read()+cache path
+    // keeps blocks in the ARC (compressed, scan-resistant, prefetch).
+    let serve_zerocopy = !is_encrypted && !crate::disk::path_is_zfs(torrent.save_path.read().as_path());
     let mut local_choking_gen: u32 = stats.choking_gen.load(Ordering::Relaxed);
 
     loop {
@@ -200,7 +205,7 @@ pub async fn run(
                                 // block lives in a single file. Splices from the page cache
                                 // to the socket, skipping the userspace copies the buffered
                                 // path pays. Any decline falls back to read_block below.
-                                if !is_encrypted {
+                                if serve_zerocopy {
                                     if let Some((file, foff)) = disk.block_file(&torrent, index, begin, length) {
                                         if crate::disk::is_block_resident(&file, foff) {
                                             if framed.flush().await.is_err() {
