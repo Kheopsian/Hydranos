@@ -701,6 +701,7 @@ let _hoardStatsPainted = false;
 let _hoardStateFilter = "";
 let _hoardCatFilter = "";
 let _hoardTrackerFilter = "";
+let _hoardTagFilter = "";
 let _hoardSortCol = localStorage.getItem("hydra_hoard_sort_col") || "added_time";
 let _hoardSortAsc = localStorage.getItem("hydra_hoard_sort_asc") === "1";
 const HOARD_FETCH_INTERVAL = 30000; // bumped 2026-04-19: SSE /api/events fournit le live, ce poll reste un backstop statique (name, category, scrape)
@@ -1289,6 +1290,73 @@ function setHoardTrackerFilter(el, value) {
     renderHoardTable();
 }
 
+function setHoardTagFilter(el, value) {
+    _hoardTagFilter = _hoardTagFilter === value ? "" : value;
+    document.querySelectorAll(".chip-tag").forEach(c => c.classList.toggle("active", c.dataset.tag === _hoardTagFilter && _hoardTagFilter !== ""));
+    renderHoardTable();
+}
+
+// --- Tags context-menu editor (hoard-only, multi-select) ---
+async function _showTagPicker(ev) {
+    if (ev) ev.stopPropagation();
+    _saveCtxActionsView();
+    const hoardOnly = [..._selected.entries()].filter(([, m]) => m === "hoard");
+    if (hoardOnly.length === 0) return;
+    let known = [];
+    try { known = await api("/api/tags"); } catch (e) { known = []; }
+    const firstRow = _hoardAllTorrents.find(t => t.info_hash === hoardOnly[0][0]);
+    const cur = new Set((firstRow && firstRow.tags) || []);
+    const esch = s => String(s).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+    const rows = known.map(t => {
+        const jsT = String(t).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        const on = cur.has(t);
+        return `<div class="ctx-item" onclick="_toggleTagSelected('${jsT}', ${on ? "false" : "true"})">${on ? "✓ " : " "}${esch(t)}</div>`;
+    }).join("");
+    const label = `Edit tags — ${hoardOnly.length} torrent${hoardOnly.length > 1 ? "s" : ""}`;
+    document.getElementById("ctx-menu").innerHTML =
+        `<div class="ctx-label">${label}</div>` +
+        `<div class="ctx-separator"></div>` +
+        `<div class="ctx-item" onclick="_restoreCtxActionsView()">&lsaquo; Retour</div>` +
+        `<div class="ctx-separator"></div>` +
+        `<div style="padding:6px 10px"><input type="text" id="ctx-new-tag" placeholder="new tag + Enter" style="width:100%" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();_addNewTagSelected();}"></div>` +
+        `<div class="ctx-separator"></div>` +
+        `<div class="ctx-scroll">${rows || '<div class="ctx-item" style="opacity:.6">No tags yet</div>'}</div>`;
+    _clampCtxMenuToViewport();
+}
+
+async function _applyTagOp(tags, op) {
+    const entries = [..._selected.entries()].filter(([, m]) => m === "hoard");
+    for (const [hash] of entries) {
+        try {
+            await fetch(`/api/hoard/torrents/${hash}/tags`, {
+                method: "POST",
+                headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
+                body: JSON.stringify({ tags, op }),
+            });
+            const row = _hoardAllTorrents.find(t => t.info_hash === hash);
+            if (row) {
+                const set = new Set(row.tags || []);
+                if (op === "add") tags.forEach(t => set.add(t));
+                else tags.forEach(t => set.delete(t));
+                row.tags = [...set];
+            }
+        } catch (e) { console.error("tag op failed", hash, e); }
+    }
+    renderHoardTable();
+    _renderHoardCounts();
+}
+
+function _toggleTagSelected(tag, add) {
+    _applyTagOp([tag], add ? "add" : "remove").then(() => _showTagPicker(null));
+}
+
+function _addNewTagSelected() {
+    const el = document.getElementById("ctx-new-tag");
+    const val = ((el && el.value) || "").trim();
+    if (!val) return;
+    _applyTagOp([val], "add").then(() => _showTagPicker(null));
+}
+
 function sortHoard(th) {
     const col = th.dataset.col;
     if (_hoardSortCol === col) {
@@ -1315,6 +1383,7 @@ function renderHoardTable() {
     if (search) filtered = filtered.filter(t => (t.name || t.info_hash).toLowerCase().includes(search));
     if (catFilter) filtered = filtered.filter(t => (t.category || "") === catFilter);
     if (_hoardTrackerFilter) filtered = filtered.filter(t => (t.tracker_host || "") === _hoardTrackerFilter);
+    if (_hoardTagFilter) filtered = filtered.filter(t => (t.tags || []).includes(_hoardTagFilter));
     if (stateFilter === "__active__") filtered = filtered.filter(t => t.state === "seeding" && t.upload_rate > 0);
     else if (stateFilter === "__tracker_err__") filtered = filtered.filter(t => t.tracker_error);
     else if (stateFilter === "__error__") filtered = filtered.filter(t => t.torrent_error);
@@ -1346,7 +1415,7 @@ function renderHoardTable() {
 
     const tbody = document.getElementById("hoard-tbody");
     if (!visible.length) {
-        tbody.innerHTML = '<tr><td colspan="14" class="empty">No hoard torrents</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="15" class="empty">No hoard torrents</td></tr>';
         return;
     }
     tbody.innerHTML = visible.map(t => {
@@ -1371,6 +1440,7 @@ function renderHoardTable() {
             <td>${ratio}</td>
             <td>${esc(t.tracker_host || "—")}</td>
             <td>${esc(incoCat(t.category))}</td>
+            <td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "—"}</td>
             <td>${formatDate(t.added_time)}</td>
             <td>${formatDate(t.completed_time)}</td>
             <td>${esc(t.agent || "local")}</td>
@@ -1418,6 +1488,16 @@ function _renderHoardCounts() {
     if (trkContainer) {
         trkContainer.innerHTML = trks.map(h =>
             `<button class="chip chip-tracker${h === _hoardTrackerFilter ? " active" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')">${esc(h)} <span class="chip-count">${trkCounts[h]}</span></button>`
+        ).join("");
+    }
+
+    const tagCounts = {};
+    _hoardAllTorrents.forEach(t => { (t.tags || []).forEach(tg => { tagCounts[tg] = (tagCounts[tg] || 0) + 1; }); });
+    const tagNames = Object.keys(tagCounts).sort();
+    const tagContainer = document.getElementById("hoard-tag-chips");
+    if (tagContainer) {
+        tagContainer.innerHTML = tagNames.map(tg =>
+            `<button class="chip chip-tag${tg === _hoardTagFilter ? " active" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')">${esc(tg)} <span class="chip-count">${tagCounts[tg]}</span></button>`
         ).join("");
     }
 
@@ -1564,6 +1644,8 @@ function _showCtxMenu(x, y) {
     if (catItem) catItem.style.display = anyHoard ? "" : "none";
     const rcItem = document.getElementById("ctx-recheck");
     if (rcItem) rcItem.style.display = anyHoard ? "" : "none";
+    const tgItem = document.getElementById("ctx-edit-tags");
+    if (tgItem) tgItem.style.display = anyHoard ? "" : "none";
     menu.style.left = x + "px";
     menu.style.top = y + "px";
     menu.style.display = "block";
