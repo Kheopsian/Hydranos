@@ -130,6 +130,18 @@ func (c *Client) NodeInfo() (agentwire.NodeInfo, error) {
 	return out, err
 }
 
+// GetAnnounceOverrides returns the agent's per-host announce override maps.
+func (c *Client) GetAnnounceOverrides() (agentwire.AnnounceOverrides, error) {
+	var out agentwire.AnnounceOverrides
+	err := c.call(agentwire.MethodGetAnnounceOverrides, nil, &out)
+	return out, err
+}
+
+// SetAnnounceOverride pushes one announce override to the agent (node-level).
+func (c *Client) SetAnnounceOverride(p agentwire.AnnounceOverrideParams) error {
+	return c.call(agentwire.MethodSetAnnounceOverride, p, nil)
+}
+
 func (c *Client) Close() error {
 	c.eventMu.Lock()
 	if c.cancelSub != nil {
