@@ -49,6 +49,7 @@ type TorrentStats struct {
 	TrackerError    bool    `json:"tracker_error"`
 	TrackerErrorMsg string  `json:"tracker_error_msg,omitempty"`
 	IsAnnounced     bool    `json:"is_announced,omitempty"`
+	TrackerHost     string  `json:"tracker_host,omitempty"`
 	TorrentError    bool    `json:"torrent_error"`
 	TorrentErrorMsg string  `json:"torrent_error_msg,omitempty"`
 	ListSeeds       int     `json:"list_seeds"`
@@ -172,6 +173,7 @@ func ltStatusToTorrentStats(s ltclient.TorrentStatus, category, savePath string,
 		TrackerError:    s.TrackerError,
 		TrackerErrorMsg: s.TrackerErrorMsg,
 		IsAnnounced:     s.IsAnnounced,
+		TrackerHost:     s.TrackerHost,
 	}
 }
 

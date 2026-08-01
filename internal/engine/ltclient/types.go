@@ -58,6 +58,7 @@ type TorrentStatus struct {
 	SeedingTime     int     `json:"seeding_time"`
 	ActiveTime      int     `json:"active_time"`
 	CurrentTracker  string  `json:"current_tracker"`
+	TrackerHost     string  `json:"tracker_host"`
 	IsPaused        bool    `json:"is_paused"`
 	IsFinished      bool    `json:"is_finished"`
 	IsSeeding       bool    `json:"is_seeding"`

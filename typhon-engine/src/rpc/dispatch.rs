@@ -352,6 +352,14 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     })
 }
 
+/// tracker_host_of extracts the bare host from a tracker announce URL, e.g.
+/// "https://tk.tr4ker.net/announce/KEY" -> "tk.tr4ker.net". Lets the list view
+/// label each torrent with its (static) tracker without a per-torrent RPC.
+fn tracker_host_of(url: &str) -> String {
+    let s = url.split("://").nth(1).unwrap_or(url);
+    s.split(|c| c == '/' || c == ':').next().unwrap_or("").to_string()
+}
+
 pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let status_u8 = t.status.load(Ordering::Relaxed);
     let is_paused = t.is_paused.load(Ordering::Relaxed);
@@ -402,6 +410,9 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let tracker_error = t.last_announce_error.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
+    let tracker_host = t.meta.trackers.iter().flatten().next()
+        .map(|u| tracker_host_of(u))
+        .unwrap_or_default();
 
     json!({
         "info_hash": hex_encode(&t.info_hash),
@@ -426,6 +437,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         "seeding_time": seeding_time,
         "active_time": active_time,
         "current_tracker": current_tracker,
+        "tracker_host": tracker_host,
         "is_paused": is_paused,
         "is_finished": progress >= 1.0,
         "is_seeding": status_u8 == TorrentStatus::Seeding as u8,
