@@ -700,6 +700,7 @@ let _hoardLastFetch = 0;
 let _hoardStatsPainted = false;
 let _hoardStateFilter = "";
 let _hoardCatFilter = "";
+let _hoardTrackerFilter = "";
 let _hoardSortCol = localStorage.getItem("hydra_hoard_sort_col") || "added_time";
 let _hoardSortAsc = localStorage.getItem("hydra_hoard_sort_asc") === "1";
 const HOARD_FETCH_INTERVAL = 30000; // bumped 2026-04-19: SSE /api/events fournit le live, ce poll reste un backstop statique (name, category, scrape)
@@ -717,7 +718,7 @@ async function updateRaceTorrents() {
         });
 
         if (torrents.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="11" class="empty">No race torrents</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="12" class="empty">No race torrents</td></tr>';
             return;
         }
 
@@ -754,6 +755,7 @@ async function updateRaceTorrents() {
                 <td>${formatSpeed(t.download_rate)}</td>
                 <td>${formatSpeed(t.upload_rate)}</td>
                 <td>${ratio}</td>
+                <td>${esc(t.tracker_host || "—")}</td>
                 <td>${formatDate(t.added_time)}</td>
                 <td>${formatDate(t.completed_time)}</td>
                 <td>${esc(t.agent || "local")}</td>
@@ -1281,6 +1283,12 @@ function setHoardCatFilter(el, value) {
     renderHoardTable();
 }
 
+function setHoardTrackerFilter(el, value) {
+    _hoardTrackerFilter = _hoardTrackerFilter === value ? "" : value;
+    document.querySelectorAll(".chip-tracker").forEach(c => c.classList.toggle("active", c.dataset.tracker === _hoardTrackerFilter && _hoardTrackerFilter !== ""));
+    renderHoardTable();
+}
+
 function sortHoard(th) {
     const col = th.dataset.col;
     if (_hoardSortCol === col) {
@@ -1306,6 +1314,7 @@ function renderHoardTable() {
     let filtered = _hoardAllTorrents;
     if (search) filtered = filtered.filter(t => (t.name || t.info_hash).toLowerCase().includes(search));
     if (catFilter) filtered = filtered.filter(t => (t.category || "") === catFilter);
+    if (_hoardTrackerFilter) filtered = filtered.filter(t => (t.tracker_host || "") === _hoardTrackerFilter);
     if (stateFilter === "__active__") filtered = filtered.filter(t => t.state === "seeding" && t.upload_rate > 0);
     else if (stateFilter === "__tracker_err__") filtered = filtered.filter(t => t.tracker_error);
     else if (stateFilter === "__error__") filtered = filtered.filter(t => t.torrent_error);
@@ -1337,7 +1346,7 @@ function renderHoardTable() {
 
     const tbody = document.getElementById("hoard-tbody");
     if (!visible.length) {
-        tbody.innerHTML = '<tr><td colspan="13" class="empty">No hoard torrents</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="14" class="empty">No hoard torrents</td></tr>';
         return;
     }
     tbody.innerHTML = visible.map(t => {
@@ -1360,6 +1369,7 @@ function renderHoardTable() {
             <td>${formatSpeed(t.download_rate ?? 0)}</td>
             <td>${formatSpeed(t.upload_rate)}</td>
             <td>${ratio}</td>
+            <td>${esc(t.tracker_host || "—")}</td>
             <td>${esc(incoCat(t.category))}</td>
             <td>${formatDate(t.added_time)}</td>
             <td>${formatDate(t.completed_time)}</td>
@@ -1398,6 +1408,16 @@ function _renderHoardCounts() {
     if (container) {
         container.innerHTML = cats.map(c =>
             `<button class="chip chip-cat${c === _hoardCatFilter ? " active" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')">${esc(incoCat(c))} <span class="chip-count">${catCounts[c]}</span></button>`
+        ).join("");
+    }
+
+    const trkCounts = {};
+    _hoardAllTorrents.forEach(t => { const h = t.tracker_host || ""; if (h) trkCounts[h] = (trkCounts[h] || 0) + 1; });
+    const trks = Object.keys(trkCounts).sort();
+    const trkContainer = document.getElementById("hoard-tracker-chips");
+    if (trkContainer) {
+        trkContainer.innerHTML = trks.map(h =>
+            `<button class="chip chip-tracker${h === _hoardTrackerFilter ? " active" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')">${esc(h)} <span class="chip-count">${trkCounts[h]}</span></button>`
         ).join("");
     }
 

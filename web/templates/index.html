@@ -187,13 +187,14 @@
                         <th data-col="download_rate" onclick="sortRace(this)">Down</th>
                         <th data-col="upload_rate" onclick="sortRace(this)">Up</th>
                         <th data-col="ratio" onclick="sortRace(this)">Ratio</th>
+                        <th data-col="tracker_host" onclick="sortRace(this)">Tracker</th>
                         <th data-col="added_time" onclick="sortRace(this)">Added</th>
                         <th data-col="completed_time" onclick="sortRace(this)">Completed</th>
                         <th data-col="agent" onclick="sortRace(this)">Agent</th>
                     </tr>
                 </thead>
                 <tbody id="race-tbody">
-                    <tr><td colspan="10" class="empty">No race torrents</td></tr>
+                    <tr><td colspan="12" class="empty">No race torrents</td></tr>
                 </tbody>
             </table>
 
@@ -373,6 +374,7 @@
                 <button class="chip chip-state chip-tracker-err" data-state="__tracker_err__" onclick="setHoardStateFilter(this, '__tracker_err__')">Tracker Error</button>
                 <button class="chip chip-state chip-torrent-err" data-state="__error__" onclick="setHoardStateFilter(this, '__error__')">Error</button>
             </div>
+            <div class="hoard-chips-row hoard-chips-trackers" id="hoard-tracker-chips"></div>
             <div class="hoard-chips-row hoard-chips-cats" id="hoard-cat-chips"></div>
             <table id="hoard-table">
                 <thead>
@@ -386,6 +388,7 @@
                         <th data-col="download_rate" onclick="sortHoard(this)">Down</th>
                         <th data-col="upload_rate" onclick="sortHoard(this)">Up</th>
                         <th data-col="ratio" onclick="sortHoard(this)">Ratio</th>
+                        <th data-col="tracker_host" onclick="sortHoard(this)">Tracker</th>
                         <th data-col="category" onclick="sortHoard(this)">Category</th>
                         <th data-col="added_time" onclick="sortHoard(this)">Added</th>
                         <th data-col="completed_time" onclick="sortHoard(this)">Completed</th>
@@ -393,7 +396,7 @@
                     </tr>
                 </thead>
                 <tbody id="hoard-tbody">
-                    <tr><td colspan="12" class="empty">No hoard torrents</td></tr>
+                    <tr><td colspan="14" class="empty">No hoard torrents</td></tr>
                 </tbody>
             </table>
 
