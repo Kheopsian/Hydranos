@@ -906,6 +906,7 @@ func main() {
 			case <-ticker.C:
 				snap := collectBenchSnapshot(raceEngine, hoardEngine)
 				benchDB.Insert(snap)
+				benchDB.InsertTrackerSamples(collectTrackerSamples(raceEngine, hoardEngine))
 
 				raceTorrents := raceEngine.GetTorrentList()
 				now := float64(time.Now().Unix())
@@ -1142,6 +1143,27 @@ func collectBenchSnapshot(race *engine.RaceEngine, hoard *engine.HoardEngine) ma
 	}
 
 	return snap
+}
+
+// collectTrackerSamples rolls up both engines by tracker host for the bench
+// tick — one row per (engine, tracker). Cheap: each engine folds its cached
+// stats under a read lock, no full-list copy.
+func collectTrackerSamples(race *engine.RaceEngine, hoard *engine.HoardEngine) []bench.TrackerSample {
+	ts := float64(time.Now().Unix())
+	var out []bench.TrackerSample
+	add := func(eng string, aggs map[string]*engine.TrackerAgg) {
+		for _, a := range aggs {
+			out = append(out, bench.TrackerSample{
+				Ts: ts, Engine: eng, Tracker: a.Tracker,
+				UploadRate: a.UploadRate, DownloadRate: a.DownloadRate,
+				Peers: a.Peers, Active: a.Active, Torrents: a.Torrents,
+				CumUploaded: a.CumUploaded, CumDownloaded: a.CumDownloaded,
+			})
+		}
+	}
+	add("race", race.AggregateByTracker())
+	add("hoard", hoard.AggregateByTracker())
+	return out
 }
 
 // peerRatePrev holds the previous snapshot's cumulative totals for a single
@@ -1555,6 +1577,12 @@ func (a *benchAPIAdapter) GetRaceEventsForTorrent(infoHash string) []bench.RaceE
 }
 func (a *benchAPIAdapter) GetRaceSnapshots(infoHash string) []bench.RaceSnapshot {
 	return a.db.GetRaceSnapshots(infoHash)
+}
+func (a *benchAPIAdapter) GetTrackerCurrent() []map[string]interface{} {
+	return a.db.GetTrackerCurrent()
+}
+func (a *benchAPIAdapter) GetTrackerRange(start, end, step int, tracker string) []map[string]interface{} {
+	return a.db.GetTrackerRange(start, end, step, tracker)
 }
 
 func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {

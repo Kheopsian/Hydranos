@@ -425,7 +425,7 @@ function activateTab(name) {
     if (name === "config") updateSettings();
     else if (name === "changelog") loadChangelog();
     else if (name === "agents") { updateAgents(); updateEngines(); }
-    else if (name === "trackers") updateTrackers();
+    else if (name === "trackers") { updateTrackers(); loadTrackerStats(); }
     else if (name === "logs") loadLogs();
 }
 
@@ -447,7 +447,7 @@ window.addEventListener("DOMContentLoaded", () => {
         else if (_hashTab === "hoard") await updateHoardStats();
         else if (_hashTab === "categories") await updateCategories();
         else if (_hashTab === "agents") { await updateAgents(); updateEngines(); }
-        else if (_hashTab === "trackers") await updateTrackers();
+        else if (_hashTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
         else if (_hashTab === "benchmark") await updateBenchmark();
     });
 });
@@ -2982,7 +2982,7 @@ async function poll() {
         if (activeTab === "hoard") await updateHoardStats();
         if (activeTab === "categories") await updateCategories();
         if (activeTab === "benchmark") await updateBenchmark();
-        if (activeTab === "trackers") await updateTrackers();
+        if (activeTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
     } finally {
         _polling = false;
     }
@@ -3839,6 +3839,89 @@ async function updateTrackers() {
         }).join("");
     } catch (e) { console.error("Failed to update trackers:", e); }
 }
+// --- Per-tracker bench stats (Trackers tab) ---
+let _trkStatsChart = null;
+
+async function loadTrackerStats() {
+    try {
+        const rows = await api("/api/benchmark/trackers/current");
+        _renderTrackerStatsTable(rows || []);
+        _populateTrackerStatsSelect(rows || []);
+    } catch (e) { console.error("Failed to load tracker stats:", e); }
+}
+
+function _renderTrackerStatsTable(rows) {
+    const tbody = document.getElementById("trkstats-tbody");
+    if (!tbody) return;
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="empty">No tracker stats yet</td></tr>';
+        return;
+    }
+    const byTracker = {};
+    rows.forEach(r => { (byTracker[r.tracker] = byTracker[r.tracker] || []).push(r); });
+    const trackers = Object.keys(byTracker).sort();
+    let html = "";
+    trackers.forEach(trk => {
+        const engs = byTracker[trk].sort((a, b) => a.engine.localeCompare(b.engine));
+        engs.forEach((r, i) => {
+            const tag = r.engine === "hoard"
+                ? '<span class="mode-tag mode-hoard">hoard</span>'
+                : '<span class="mode-tag mode-race">race</span>';
+            const ratio = r.cum_downloaded > 0 ? (r.cum_uploaded / r.cum_downloaded).toFixed(2) : "∞";
+            html += `<tr>` +
+                `<td>${i === 0 ? `<strong>${esc(trk)}</strong>` : ""}</td>` +
+                `<td>${tag}</td>` +
+                `<td>${formatSpeed(r.upload_rate)}</td>` +
+                `<td>${formatSpeed(r.download_rate)}</td>` +
+                `<td>${Math.round(r.peers)}</td>` +
+                `<td>${Math.round(r.active)}/${Math.round(r.torrents)}</td>` +
+                `<td>${formatBytes(r.cum_uploaded)}</td>` +
+                `<td>${formatBytes(r.cum_downloaded)}</td>` +
+                `<td>${ratio}</td>` +
+                `</tr>`;
+        });
+    });
+    tbody.innerHTML = html;
+}
+
+function _populateTrackerStatsSelect(rows) {
+    const sel = document.getElementById("trkstats-select");
+    if (!sel) return;
+    const trackers = [...new Set(rows.map(r => r.tracker))].sort();
+    const cur = sel.value;
+    sel.innerHTML = trackers.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+    if (trackers.includes(cur)) sel.value = cur;
+    if (sel.value) loadTrackerStatsChart(sel.value);
+}
+
+async function loadTrackerStatsChart(tracker) {
+    if (!tracker) return;
+    try {
+        const end = Math.floor(Date.now() / 1000);
+        const start = end - 24 * 3600;
+        const rows = await api(`/api/benchmark/trackers/range?start=${start}&end=${end}&tracker=${encodeURIComponent(tracker)}`);
+        _renderTrackerStatsChart(rows || []);
+    } catch (e) { console.error("Failed to load tracker chart:", e); }
+}
+
+function _renderTrackerStatsChart(rows) {
+    if (typeof Chart === "undefined") return;
+    const tsSet = [...new Set(rows.map(r => r.ts))].sort((a, b) => a - b);
+    const hoardMap = {}, raceMap = {};
+    rows.forEach(r => { (r.engine === "hoard" ? hoardMap : raceMap)[r.ts] = r.upload_rate; });
+    const labels = tsSet.map(t => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    const hoardSeries = tsSet.map(t => hoardMap[t] ?? null);
+    const raceSeries = tsSet.map(t => raceMap[t] ?? null);
+    if (!_trkStatsChart) {
+        _trkStatsChart = _mkDualChart("trkstats-chart", "hoard ↑", "#2ea043", "race ↑", "#d29922", formatSpeed);
+        _trkStatsChart.options.plugins.legend.display = true;
+    }
+    _trkStatsChart.data.labels = labels;
+    _trkStatsChart.data.datasets[0].data = hoardSeries;
+    _trkStatsChart.data.datasets[1].data = raceSeries;
+    _trkStatsChart.update();
+}
+
 function showTrackerForm(host = "", pid = "", ua = "") {
     document.getElementById("trk-host").value = host;
     document.getElementById("trk-preset").value = "";

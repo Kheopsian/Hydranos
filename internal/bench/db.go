@@ -193,6 +193,10 @@ func (b *BenchDB) Open() error {
 		db.Close()
 		return err
 	}
+	if _, err := db.Exec(trackerSamplesDDL); err != nil {
+		db.Close()
+		return err
+	}
 	// Migrate: add columns that may not exist in older databases.
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN race_uploading REAL DEFAULT 0")
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN race_avg_share REAL DEFAULT 0")
@@ -274,6 +278,7 @@ func (b *BenchDB) PurgeOld() {
 	b.conn.Exec("DELETE FROM vpn_speedtest WHERE ts < ?", cutoff)
 	b.conn.Exec("DELETE FROM race_events WHERE ts < ?", cutoff)
 	b.conn.Exec("DELETE FROM race_snapshots WHERE ts < ?", cutoff)
+	b.conn.Exec("DELETE FROM tracker_samples WHERE ts < ?", cutoff)
 }
 
 // InsertVpn stores a VPN speed test result.
