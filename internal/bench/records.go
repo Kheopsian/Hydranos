@@ -40,17 +40,41 @@ func humanDur(sec float64) string {
 // ce saut (>100 TiB entre 2 samples consecutifs) et on ne considere comme reelle
 // que la periode APRES le dernier saut, pour ne pas polluer "best upload day" ni
 // dater faussement les jalons pre-bench.
+const recordsTTL = 5 * time.Minute
+
+// GetRecords returns the all-time records aggregate, cached for recordsTTL.
+// The heavy full-scan computation runs on the read-only connection so it never
+// holds the write mutex and stalls the sampler.
 func (b *BenchDB) GetRecords() map[string]interface{} {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.conn == nil {
+	b.recMu.Lock()
+	defer b.recMu.Unlock()
+	if b.recCache != nil && time.Since(b.recAt) < recordsTTL {
+		return b.recCache
+	}
+	var res map[string]interface{}
+	if b.roConn != nil {
+		res = b.computeRecords(b.roConn)
+	} else {
+		b.mu.Lock()
+		res = b.computeRecords(b.conn)
+		b.mu.Unlock()
+	}
+	if len(res) > 0 {
+		b.recCache = res
+		b.recAt = time.Now()
+	}
+	return res
+}
+
+func (b *BenchDB) computeRecords(conn *sql.DB) map[string]interface{} {
+	if conn == nil {
 		return map[string]interface{}{}
 	}
 
 	// --- t_clean : 1er sample propre apres le dernier saut > 100 TiB ---
 	const jumpCap = 100.0 * (1 << 40)
 	var tClean, firstTs float64
-	if rows, err := b.conn.Query("SELECT ts, global_uploaded FROM bench_samples ORDER BY ts"); err == nil {
+	if rows, err := conn.Query("SELECT ts, global_uploaded FROM bench_samples ORDER BY ts"); err == nil {
 		var prevV float64
 		havePrev, haveFirst := false, false
 		for rows.Next() {
@@ -73,13 +97,13 @@ func (b *BenchDB) GetRecords() map[string]interface{} {
 	}
 
 	var now sql.NullFloat64
-	b.conn.QueryRow("SELECT MAX(ts) FROM bench_samples").Scan(&now)
+	conn.QueryRow("SELECT MAX(ts) FROM bench_samples").Scan(&now)
 
 	// peak renvoie (ts, valeur) du max d'une expression sur bench_samples.
 	peak := func(expr string) (float64, float64, bool) {
 		var t, v sql.NullFloat64
 		q := "SELECT ts, (" + expr + ") v FROM bench_samples WHERE (" + expr + ") IS NOT NULL ORDER BY v DESC LIMIT 1"
-		if err := b.conn.QueryRow(q).Scan(&t, &v); err != nil || !v.Valid {
+		if err := conn.QueryRow(q).Scan(&t, &v); err != nil || !v.Valid {
 			return 0, 0, false
 		}
 		return t.Float64, v.Float64, true
@@ -105,7 +129,7 @@ func (b *BenchDB) GetRecords() map[string]interface{} {
 	// Best upload day = max(delta global_uploaded) par jour, PERIODE PROPRE
 	{
 		var t, delta sql.NullFloat64
-		err := b.conn.QueryRow(
+		err := conn.QueryRow(
 			"SELECT MAX(ts) ts, MAX(global_uploaded)-MIN(global_uploaded) delta "+
 				"FROM bench_samples WHERE ts>=? GROUP BY CAST(ts/86400 AS INT) ORDER BY delta DESC LIMIT 1",
 			tClean).Scan(&t, &delta)
@@ -120,15 +144,15 @@ func (b *BenchDB) GetRecords() map[string]interface{} {
 	// Best line test = vpn_speedtest max ul_mbps -> Gbps
 	{
 		var t, ul sql.NullFloat64
-		if err := b.conn.QueryRow("SELECT ts, ul_mbps FROM vpn_speedtest ORDER BY ul_mbps DESC LIMIT 1").Scan(&t, &ul); err == nil && ul.Valid {
+		if err := conn.QueryRow("SELECT ts, ul_mbps FROM vpn_speedtest ORDER BY ul_mbps DESC LIMIT 1").Scan(&t, &ul); err == nil && ul.Valid {
 			records = append(records, rec("Best line test", round2(ul.Float64/1000), "Gbps", dayDate(t.Float64), false))
 		}
 	}
 
 	// --- Jalons PiB ---
 	var gmax, gminClean sql.NullFloat64
-	b.conn.QueryRow("SELECT MAX(global_uploaded) FROM bench_samples").Scan(&gmax)
-	b.conn.QueryRow("SELECT MIN(global_uploaded) FROM bench_samples WHERE ts>=?", tClean).Scan(&gminClean)
+	conn.QueryRow("SELECT MAX(global_uploaded) FROM bench_samples").Scan(&gmax)
+	conn.QueryRow("SELECT MIN(global_uploaded) FROM bench_samples WHERE ts>=?", tClean).Scan(&gminClean)
 	curPib := gmax.Float64 / pibBytes
 
 	milestones := []map[string]interface{}{}
@@ -137,7 +161,7 @@ func (b *BenchDB) GetRecords() map[string]interface{} {
 		m := map[string]interface{}{"pib": k}
 		if gminClean.Float64 < thr { // vu passer sous->sur dans la periode propre = vrai franchissement
 			var mts sql.NullFloat64
-			b.conn.QueryRow("SELECT MIN(ts) FROM bench_samples WHERE global_uploaded>=? AND ts>=?", thr, tClean).Scan(&mts)
+			conn.QueryRow("SELECT MIN(ts) FROM bench_samples WHERE global_uploaded>=? AND ts>=?", thr, tClean).Scan(&mts)
 			m["observed"] = true
 			m["ts"] = mts.Float64
 			m["date"] = isoDate(mts.Float64)
@@ -156,7 +180,7 @@ func (b *BenchDB) GetRecords() map[string]interface{} {
 	// Prochain jalon + ETA (debit moyen 7 derniers jours)
 	nextPib := int(curPib) + 1
 	var w0, w1, wt0, wt1 sql.NullFloat64
-	b.conn.QueryRow(
+	conn.QueryRow(
 		"SELECT MIN(global_uploaded),MAX(global_uploaded),MIN(ts),MAX(ts) FROM bench_samples WHERE ts>=?",
 		now.Float64-7*86400).Scan(&w0, &w1, &wt0, &wt1)
 	rate := 0.0 // bytes/s
