@@ -50,14 +50,14 @@ impl DownloadState {
     }
 
     pub fn is_downloading(&self) -> bool {
-        self.torrent.picker.is_some() &&
+        self.torrent.picker.get().is_some() &&
         self.torrent.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8
     }
 
     /// Process incoming Bitfield from peer.
     pub fn on_bitfield(&mut self, data: &[u8]) {
         self.peer_bitfield = data.to_vec();
-        if let Some(ref picker) = self.torrent.picker {
+        if let Some(picker) = self.torrent.picker.get() {
             picker.lock().unwrap().add_bitfield(data);
         }
     }
@@ -72,7 +72,7 @@ impl DownloadState {
         if trailing > 0 {
             self.peer_bitfield[byte_len - 1] = 0xFF << (8 - trailing);
         }
-        if let Some(ref picker) = self.torrent.picker {
+        if let Some(picker) = self.torrent.picker.get() {
             picker.lock().unwrap().add_bitfield(&self.peer_bitfield);
         }
     }
@@ -85,7 +85,7 @@ impl DownloadState {
             self.peer_bitfield.resize(byte_idx + 1, 0);
         }
         self.peer_bitfield[byte_idx] |= 1 << bit_idx;
-        if let Some(ref picker) = self.torrent.picker {
+        if let Some(picker) = self.torrent.picker.get() {
             picker.lock().unwrap().add_have(piece);
         }
     }
@@ -102,7 +102,7 @@ impl DownloadState {
     /// Check if we should send Interested to this peer.
     pub fn should_be_interested(&self) -> bool {
         if !self.is_downloading() { return false; }
-        if let Some(ref picker) = self.torrent.picker {
+        if let Some(picker) = self.torrent.picker.get() {
             let p = picker.lock().unwrap();
             p.pick_piece(&self.peer_bitfield).is_some()
         } else {
@@ -124,7 +124,7 @@ impl DownloadState {
             return Vec::new();
         }
 
-        let picker = match &self.torrent.picker {
+        let picker = match self.torrent.picker.get() {
             Some(p) => p,
             None => return Vec::new(),
         };
@@ -163,7 +163,7 @@ impl DownloadState {
             return None;
         }
 
-        let picker = match &self.torrent.picker {
+        let picker = match self.torrent.picker.get() {
             Some(p) => p,
             None => return None,
         };
@@ -235,7 +235,7 @@ impl DownloadState {
     /// piece in `started_pieces` leaks into the picker's `pending` map and
     /// is never re-picked — the torrent stalls near completion.
     pub fn on_disconnect(&mut self) {
-        if let Some(ref picker) = self.torrent.picker {
+        if let Some(picker) = self.torrent.picker.get() {
             let mut p = picker.lock().unwrap();
             if !self.peer_bitfield.is_empty() {
                 p.remove_bitfield(&self.peer_bitfield);
