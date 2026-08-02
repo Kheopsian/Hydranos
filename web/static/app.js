@@ -491,8 +491,8 @@ function _renderStatus(data) {
         if (data.race) {
             document.getElementById("race-count").textContent = data.race.torrents;
             document.getElementById("race-with-peers").textContent = data.race.torrents_with_peers || 0;
-            document.getElementById("race-upload").textContent = formatGbps(data.race.total_upload_rate);
-            document.getElementById("race-download").textContent = formatGbps(data.race.total_download_rate);
+            document.getElementById("race-upload").textContent = formatSpeed(data.race.total_upload_rate);
+            document.getElementById("race-download").textContent = formatSpeed(data.race.total_download_rate);
             document.getElementById("race-peers").textContent = data.race.total_peers;
             document.getElementById("race-ov-ratio").textContent = (data.race.session_ratio || 0).toFixed(2);
 
@@ -506,8 +506,8 @@ function _renderStatus(data) {
             // Header speeds (Option 2 : Gbps)
             const _raceUlRateCurrent = data.race.total_upload_rate || 0; window._lastRaceUlRate = _raceUlRateCurrent; window._lastRaceDlRate = data.race.total_download_rate || 0; const hydraUl = _raceUlRateCurrent + (data.hoard?.active_upload_rate || 0);
             const hydraDl = data.race.total_download_rate + (data.hoard?.active_download_rate || 0);
-            document.getElementById("total-upload").textContent = formatGbps(hydraUl);
-            document.getElementById("total-download").textContent = formatGbps(hydraDl);
+            document.getElementById("total-upload").textContent = formatSpeed(hydraUl);
+            document.getElementById("total-download").textContent = formatSpeed(hydraDl);
         }
 
         // Hoard stats
@@ -515,8 +515,8 @@ function _renderStatus(data) {
             document.getElementById("hoard-total").textContent = data.hoard.total_torrents;
             document.getElementById("hoard-with-peers").textContent = data.hoard.torrents_with_peers;
             document.getElementById("hoard-connections").textContent = data.hoard.active_peers;
-            document.getElementById("hoard-upload").textContent = formatGbps(data.hoard.active_upload_rate);
-            document.getElementById("hoard-download").textContent = formatGbps(data.hoard.active_download_rate);
+            document.getElementById("hoard-upload").textContent = formatSpeed(data.hoard.active_upload_rate);
+            document.getElementById("hoard-download").textContent = formatSpeed(data.hoard.active_download_rate);
             const hSU = data.hoard.session_uploaded || 0, hSD = data.hoard.session_downloaded || 0;
             document.getElementById("hoard-ov-ratio").textContent = (hSD > 0 ? hSU / hSD : 0).toFixed(2);
             const ovt = document.getElementById("ov-torrents-total");
