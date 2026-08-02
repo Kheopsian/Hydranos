@@ -1,6 +1,7 @@
 /* Hydra WebUI - Dark Theme */
 
 :root {
+    color-scheme: dark;
     --bg-primary: #080c14;
     --bg-secondary: rgba(14, 20, 36, 0.75);
     --bg-tertiary: #111d30;
@@ -625,6 +626,7 @@ tr:hover td {
 }
 
 input, select, textarea {
+    color-scheme: dark;
     width: 100%;
     padding: 10px 12px;
     background: rgba(255, 255, 255, 0.05);
@@ -656,10 +658,6 @@ select {
     cursor: pointer;
 }
 
-select option {
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-}
 
 input[type="file"] {
     color: var(--text-secondary);
