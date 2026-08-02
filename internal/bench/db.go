@@ -99,7 +99,9 @@ const vpnDDL = `
 CREATE TABLE IF NOT EXISTS vpn_speedtest (
     ts      REAL NOT NULL,
     ul_mbps REAL NOT NULL,
-    dl_mbps REAL NOT NULL
+    dl_mbps REAL NOT NULL,
+    ul_torrent_mbps REAL DEFAULT 0,
+    dl_torrent_mbps REAL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_vpn_ts ON vpn_speedtest(ts);
 `
@@ -221,6 +223,8 @@ func (b *BenchDB) Open() error {
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN race_session_uploaded INTEGER DEFAULT 0")
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN global_uploaded INTEGER DEFAULT 0")
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN global_downloaded INTEGER DEFAULT 0")
+	db.Exec("ALTER TABLE vpn_speedtest ADD COLUMN ul_torrent_mbps REAL DEFAULT 0")
+	db.Exec("ALTER TABLE vpn_speedtest ADD COLUMN dl_torrent_mbps REAL DEFAULT 0")
 
 	// WAL lets a read-only connection run concurrently with the 5s writer
 	// instead of every reader/writer serialising on one connection.
@@ -316,14 +320,14 @@ func (b *BenchDB) PurgeOld() {
 }
 
 // InsertVpn stores a VPN speed test result.
-func (b *BenchDB) InsertVpn(ts, ulMbps, dlMbps float64) {
+func (b *BenchDB) InsertVpn(ts, ulMbps, dlMbps, ulTorrentMbps, dlTorrentMbps float64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.conn == nil {
 		return
 	}
-	b.conn.Exec("INSERT INTO vpn_speedtest (ts, ul_mbps, dl_mbps) VALUES (?, ?, ?)",
-		ts, ulMbps, dlMbps)
+	b.conn.Exec("INSERT INTO vpn_speedtest (ts, ul_mbps, dl_mbps, ul_torrent_mbps, dl_torrent_mbps) VALUES (?, ?, ?, ?, ?)",
+		ts, ulMbps, dlMbps, ulTorrentMbps, dlTorrentMbps)
 }
 
 // PersistHealth upserts the health invariant counters. gauges overwrite the
@@ -510,21 +514,21 @@ func (b *BenchDB) GetVpnLatest() map[string]interface{} {
 	if b.conn == nil {
 		return nil
 	}
-	var ts, ul, dl float64
+	var ts, ul, dl, ult, dlt float64
 	err := b.conn.QueryRow(
-		"SELECT ts, ul_mbps, dl_mbps FROM vpn_speedtest ORDER BY ts DESC LIMIT 1",
-	).Scan(&ts, &ul, &dl)
+		"SELECT ts, ul_mbps, dl_mbps, ul_torrent_mbps, dl_torrent_mbps FROM vpn_speedtest ORDER BY ts DESC LIMIT 1",
+	).Scan(&ts, &ul, &dl, &ult, &dlt)
 	if err != nil {
 		return nil
 	}
-	return map[string]interface{}{"ts": ts, "ul_mbps": ul, "dl_mbps": dl}
+	return map[string]interface{}{"ts": ts, "ul_mbps": ul, "dl_mbps": dl, "ul_torrent_mbps": ult, "dl_torrent_mbps": dlt}
 }
 
 // GetVpnRange returns VPN speed tests in the given time range.
 func (b *BenchDB) GetVpnRange(start, end float64) []map[string]interface{} {
 	b.mu.Lock()
 	rows, err := b.conn.Query(
-		"SELECT ts, ul_mbps, dl_mbps FROM vpn_speedtest WHERE ts >= ? AND ts <= ? ORDER BY ts",
+		"SELECT ts, ul_mbps, dl_mbps, ul_torrent_mbps, dl_torrent_mbps FROM vpn_speedtest WHERE ts >= ? AND ts <= ? ORDER BY ts",
 		start, end)
 	b.mu.Unlock()
 	if err != nil {
@@ -534,9 +538,9 @@ func (b *BenchDB) GetVpnRange(start, end float64) []map[string]interface{} {
 
 	var result []map[string]interface{}
 	for rows.Next() {
-		var ts, ul, dl float64
-		if rows.Scan(&ts, &ul, &dl) == nil {
-			result = append(result, map[string]interface{}{"ts": ts, "ul_mbps": ul, "dl_mbps": dl})
+		var ts, ul, dl, ult, dlt float64
+		if rows.Scan(&ts, &ul, &dl, &ult, &dlt) == nil {
+			result = append(result, map[string]interface{}{"ts": ts, "ul_mbps": ul, "dl_mbps": dl, "ul_torrent_mbps": ult, "dl_torrent_mbps": dlt})
 		}
 	}
 	return result

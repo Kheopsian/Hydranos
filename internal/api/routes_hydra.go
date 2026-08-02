@@ -1856,7 +1856,8 @@ func (s *Server) handleVPNSpeedtestRun(c *gin.Context) {
 		return
 	}
 	if s.benchDB != nil {
-		s.benchDB.InsertVpn(result["ts"].(float64), result["ul_mbps"].(float64), result["dl_mbps"].(float64))
+		s.benchDB.InsertVpn(result["ts"].(float64), result["ul_mbps"].(float64), result["dl_mbps"].(float64),
+			result["ul_torrent_mbps"].(float64), result["dl_torrent_mbps"].(float64))
 	}
 	c.JSON(http.StatusOK, result)
 }
