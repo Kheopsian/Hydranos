@@ -75,31 +75,16 @@ async function fetchPublicIp(force) {
             // Leak detection: any IP that is NOT our home WAN means we're
             // properly behind a tunnel. Avoids hardcoding takehost IPs which
             // change when DPI bans hit and we rotate to a new VPS IP.
-            const homeWanIPs = ["203.0.113.10", "203.0.113.11"];
+            // Direct mode (prod direct depuis 2026-08-01) : l'IP maison EST
+            // l'exit voulu, plus une fuite. Le dot suit le port-forward/listen.
             const el = document.getElementById("tunnel-info");
             const dot = document.getElementById("health-dot");
-            if (!homeWanIPs.includes(d.ip)) {
-                if (el) el.classList.remove("tunnel-leak");
-                if (dot) dot.title = "VPN: " + d.ip + (d.ip_v6 ? " / " + d.ip_v6 : "");
-                const exitEl = document.getElementById("proxy-exit-ip");
-                // Header v6-bypass row prefers the v6 egress (gost) so the user
-                // can see at a glance that the v6 path is up. Falls back to v4.
-                if (exitEl) exitEl.textContent = incoExitIP(d.ip_v6 || d.ip);
-            } else {
-                if (el) {
-                    el.classList.add("tunnel-leak");
-                    // Append leak row
-                    const existing = el.querySelector(".tunnel-leak-row");
-                    if (!existing) {
-                        el.insertAdjacentHTML("beforeend",
-                            `<div class="tunnel-row tunnel-leak-row"><span class="tunnel-iface" style="color:#f85149;font-weight:700">LEAK</span><span class="tunnel-ip" style="color:#f85149;font-weight:700">${d.ip}</span></div>`);
-                    }
-                }
-                if (dot) {
-                    dot.style.background = "#f85149";
-                    dot.title = "LEAK! IP: " + d.ip;
-                }
-            }
+            if (el) el.classList.remove("tunnel-leak");
+            const _leakRow = el && el.querySelector(".tunnel-leak-row");
+            if (_leakRow) _leakRow.remove();
+            if (dot) { dot.style.background = ""; dot.title = "Exit IP: " + d.ip + (d.ip_v6 ? " / " + d.ip_v6 : ""); }
+            const exitEl = document.getElementById("proxy-exit-ip");
+            if (exitEl) exitEl.textContent = incoExitIP(d.ip_v6 || d.ip);
         }
     } catch {}
     finally {
