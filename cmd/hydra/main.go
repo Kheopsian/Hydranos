@@ -608,9 +608,6 @@ func main() {
 	// Edge-triggered ntfy alerts on high-severity anomalies (topic overridable
 	// via HYDRA_NTFY_TOPIC; empty disables push). nil sender = safe no-op.
 	ntfyTopic := os.Getenv("HYDRA_NTFY_TOPIC")
-	if ntfyTopic == "" {
-		ntfyTopic = "ntfy-topic-example"
-	}
 	healthNtfy := notify.NewNtfy(ntfyTopic)
 	healthScanner := health.NewScanner(
 		hoardEngine.ListStatuses,
