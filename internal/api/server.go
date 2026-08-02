@@ -138,7 +138,7 @@ type BenchDB interface {
 	GetRecords() map[string]interface{}
 	GetRange(start, end, step int) []map[string]interface{}
 	GetComparison(start, mid, end int) map[string]interface{}
-	InsertVpn(ts, ulMbps, dlMbps float64)
+	InsertVpn(ts, ulMbps, dlMbps, ulTorrentMbps, dlTorrentMbps float64)
 	GetVpnLatest() map[string]interface{}
 	GetVpnRange(start, end float64) []map[string]interface{}
 	GetRaceEvents(start, end float64) []bench.RaceEvent

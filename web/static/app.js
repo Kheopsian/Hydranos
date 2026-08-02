@@ -2839,6 +2839,8 @@ async function updateBenchmark() {
         if (vpnLatest && vpnLatest.ts) {
             document.getElementById("vpn-ul").textContent = (vpnLatest.ul_mbps ?? 0).toFixed(1) + " Mbps";
             document.getElementById("vpn-dl").textContent = (vpnLatest.dl_mbps ?? 0).toFixed(1) + " Mbps";
+            document.getElementById("vpn-ul-total").textContent = ((vpnLatest.ul_mbps ?? 0) + (vpnLatest.ul_torrent_mbps ?? 0)).toFixed(1) + " Mbps";
+            document.getElementById("vpn-dl-total").textContent = ((vpnLatest.dl_mbps ?? 0) + (vpnLatest.dl_torrent_mbps ?? 0)).toFixed(1) + " Mbps";
             document.getElementById("vpn-ts").textContent = new Date(vpnLatest.ts * 1000).toLocaleString();
         }
         if (_bmCharts.vpn && vpnHistory.length > 0) {
@@ -2874,6 +2876,8 @@ async function runVpnSpeedtest() {
         const result = await api("/api/vpn-speedtest/run", { method: "POST" });
         document.getElementById("vpn-ul").textContent = (result.ul_mbps ?? 0).toFixed(1) + " Mbps";
         document.getElementById("vpn-dl").textContent = (result.dl_mbps ?? 0).toFixed(1) + " Mbps";
+        document.getElementById("vpn-ul-total").textContent = ((result.ul_mbps ?? 0) + (result.ul_torrent_mbps ?? 0)).toFixed(1) + " Mbps";
+        document.getElementById("vpn-dl-total").textContent = ((result.dl_mbps ?? 0) + (result.dl_torrent_mbps ?? 0)).toFixed(1) + " Mbps";
         document.getElementById("vpn-ts").textContent = new Date(result.ts * 1000).toLocaleString();
     } catch (e) {
         console.error("VPN speedtest error:", e);

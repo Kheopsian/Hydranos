@@ -994,6 +994,19 @@ func main() {
 		}
 	}()
 
+	api.SetLoadSampler(func() (float64, float64) {
+		var ul, dl float64
+		if raceEngine != nil {
+			st := raceEngine.GetAllStatus()
+			ul += toFloat(st["upload_rate"])
+			dl += toFloat(st["download_rate"])
+		}
+		if hoardEngine != nil {
+			st := hoardEngine.GetAllStatus()
+			ul += toFloat(st["upload_rate"])
+		}
+		return ul, dl
+	})
 	api.StartVpnSpeedtestLoop(ctx, cfg.VpnSpeedtest, &benchAPIAdapter{db: benchDB})
 
 	api.SetStartupReady(true)
@@ -1607,7 +1620,9 @@ func (a *benchAPIAdapter) GetRange(start, end, step int) []map[string]interface{
 func (a *benchAPIAdapter) GetComparison(start, mid, end int) map[string]interface{} {
 	return a.db.GetComparison(start, mid, end)
 }
-func (a *benchAPIAdapter) InsertVpn(ts, ulMbps, dlMbps float64) { a.db.InsertVpn(ts, ulMbps, dlMbps) }
+func (a *benchAPIAdapter) InsertVpn(ts, ulMbps, dlMbps, ulTorrentMbps, dlTorrentMbps float64) {
+	a.db.InsertVpn(ts, ulMbps, dlMbps, ulTorrentMbps, dlTorrentMbps)
+}
 func (a *benchAPIAdapter) GetVpnLatest() map[string]interface{} { return a.db.GetVpnLatest() }
 func (a *benchAPIAdapter) GetVpnRange(start, end float64) []map[string]interface{} {
 	return a.db.GetVpnRange(start, end)

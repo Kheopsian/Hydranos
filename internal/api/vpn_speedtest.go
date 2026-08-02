@@ -23,6 +23,15 @@ import (
 // Public iperf3 endpoints (ex. ping.online.net) listen on a port range and
 // reject extra clients with "the server is busy". We retry across
 // basePort..basePort+8 until one slot succeeds.
+// loadSampler, when set, returns the current aggregate engine throughput in
+// bytes/sec as (upload, download). It lets a running speedtest capture the
+// concurrent torrent load so the UI can report the real link throughput
+// (speedtest + concurrent seeding), which share the same WAN.
+var loadSampler func() (ulBps, dlBps float64)
+
+// SetLoadSampler wires the engine-throughput source. Called once at startup.
+func SetLoadSampler(fn func() (ulBps, dlBps float64)) { loadSampler = fn }
+
 func runIperf3(server string, basePort, duration int) (map[string]interface{}, error) {
 	var lastErr error
 	for offset := 0; offset < 9; offset++ {
@@ -53,11 +62,11 @@ func runIperf3OnPort(server string, port, duration int) (map[string]interface{},
 		targetPort = fwd.LocalPort()
 	}
 
-	ul, err := runIperf3Test(targetHost, targetPort, duration, false)
+	ul, ulLoad, err := runIperf3Test(targetHost, targetPort, duration, false)
 	if err != nil {
 		slog.Debug("iperf3 upload error", "port", port, "error", err)
 	}
-	dl, err2 := runIperf3Test(targetHost, targetPort, duration, true)
+	dl, dlLoad, err2 := runIperf3Test(targetHost, targetPort, duration, true)
 	if err2 != nil {
 		slog.Debug("iperf3 download error", "port", port, "error", err2)
 	}
@@ -65,13 +74,15 @@ func runIperf3OnPort(server string, port, duration int) (map[string]interface{},
 		return nil, fmt.Errorf("iperf3 failed: ul=%v dl=%v", err, err2)
 	}
 	return map[string]interface{}{
-		"ul_mbps": ul,
-		"dl_mbps": dl,
-		"ts":      float64(time.Now().Unix()),
+		"ul_mbps":         ul,
+		"dl_mbps":         dl,
+		"ul_torrent_mbps": ulLoad,
+		"dl_torrent_mbps": dlLoad,
+		"ts":              float64(time.Now().Unix()),
 	}, nil
 }
 
-func runIperf3Test(server string, port, duration int, reverse bool) (float64, error) {
+func runIperf3Test(server string, port, duration int, reverse bool) (float64, float64, error) {
 	args := []string{"-c", server, "-p", fmt.Sprintf("%d", port), "-t", fmt.Sprintf("%d", duration), "-P", "4", "-J"}
 	if reverse {
 		args = append(args, "-R")
@@ -80,10 +91,44 @@ func runIperf3Test(server string, port, duration int, reverse bool) (float64, er
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(duration+30)*time.Second)
 	defer cancel()
 
+	// Sample the concurrent torrent throughput over exactly this run window.
+	// The speedtest shares the WAN with seeding, so TCP squeezes seeding while
+	// the test runs; averaging the load over precisely this window (not a wide
+	// window that also captures full-speed seeding before/after the test) is
+	// what keeps "speedtest + load = real link throughput" from exceeding the
+	// physical link.
+	stop := make(chan struct{})
+	var lmu sync.Mutex
+	var loadSum float64
+	var loadN int
+	if loadSampler != nil {
+		go func() {
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					ul, dl := loadSampler()
+					v := ul
+					if reverse {
+						v = dl
+					}
+					lmu.Lock()
+					loadSum += v
+					loadN++
+					lmu.Unlock()
+				}
+			}
+		}()
+	}
+
 	cmd := exec.CommandContext(ctx, "iperf3", args...)
 	out, err := cmd.Output()
+	close(stop)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	var data struct {
@@ -97,7 +142,7 @@ func runIperf3Test(server string, port, duration int, reverse bool) (float64, er
 		} `json:"end"`
 	}
 	if err := json.Unmarshal(out, &data); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	bits := data.End.SumReceived.BitsPerSecond
@@ -105,8 +150,16 @@ func runIperf3Test(server string, port, duration int, reverse bool) (float64, er
 		bits = data.End.SumSent.BitsPerSecond
 	}
 	mbps := bits / 1e6
-	// Round to 1 decimal
-	return float64(int(mbps*10+0.5)) / 10, nil
+
+	loadMbps := 0.0
+	lmu.Lock()
+	if loadN > 0 {
+		loadMbps = (loadSum / float64(loadN)) * 8 / 1e6
+	}
+	lmu.Unlock()
+
+	round1 := func(x float64) float64 { return float64(int(x*10+0.5)) / 10 }
+	return round1(mbps), round1(loadMbps), nil
 }
 
 // StartVpnSpeedtestLoop launches the periodic VPN speedtest collector.
@@ -160,7 +213,8 @@ func runAndStore(cfg config.VpnSpeedtestConfig, benchDB BenchDB) {
 	slog.Info("vpn_speedtest: completed",
 		"ul_mbps", result["ul_mbps"], "dl_mbps", result["dl_mbps"])
 	if benchDB != nil {
-		benchDB.InsertVpn(result["ts"].(float64), result["ul_mbps"].(float64), result["dl_mbps"].(float64))
+		benchDB.InsertVpn(result["ts"].(float64), result["ul_mbps"].(float64), result["dl_mbps"].(float64),
+			result["ul_torrent_mbps"].(float64), result["dl_torrent_mbps"].(float64))
 	}
 }
 

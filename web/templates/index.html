@@ -772,17 +772,25 @@
             <!-- VPN Speedtest -->
             <div class="bm-vpn-section">
                 <div class="bm-vpn-header">
-                    <h3 class="bm-compare-title">VPN Speedtest</h3>
+                    <h3 class="bm-compare-title">Speedtest</h3>
                     <button class="bm-range-btn" id="vpn-run-btn" onclick="runVpnSpeedtest()">▶ Run now</button>
                 </div>
                 <div class="bm-vpn-cards">
                     <div class="bm-metric-card">
-                        <span class="bm-metric-label">Upload VPN</span>
+                        <span class="bm-metric-label">Upload (test seul)</span>
                         <span class="bm-metric-value" id="vpn-ul">--</span>
                     </div>
                     <div class="bm-metric-card">
-                        <span class="bm-metric-label">Download VPN</span>
+                        <span class="bm-metric-label">Download (test seul)</span>
                         <span class="bm-metric-value" id="vpn-dl">--</span>
+                    </div>
+                    <div class="bm-metric-card">
+                        <span class="bm-metric-label">Total lien &uarr; (test + seed)</span>
+                        <span class="bm-metric-value" id="vpn-ul-total">--</span>
+                    </div>
+                    <div class="bm-metric-card">
+                        <span class="bm-metric-label">Total lien &darr; (test + seed)</span>
+                        <span class="bm-metric-value" id="vpn-dl-total">--</span>
                     </div>
                     <div class="bm-metric-card">
                         <span class="bm-metric-label">Dernier test</span>
@@ -790,7 +798,7 @@
                     </div>
                 </div>
                 <div class="bm-chart-container">
-                    <div class="bm-chart-title">VPN Upload / Download (Mbps) — last 7 days</div>
+                    <div class="bm-chart-title">Upload / Download (Mbps) — last 7 days</div>
                     <div class="bm-chart-wrap"><canvas id="chart-vpn"></canvas></div>
                 </div>
             </div>
@@ -967,6 +975,6 @@
         <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
     </div>
 
-    <script src="/static/app.js?v=1.3.30"></script>
+    <script src="/static/app.js?v=1.3.31"></script>
 </body>
 </html>
