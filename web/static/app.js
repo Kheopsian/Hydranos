@@ -1161,6 +1161,19 @@ function formatDuration(seconds) {
     return `${s}s`;
 }
 
+// displayRatio mirrors the torrent-list ratio (total_upload / bytes-we-have)
+// instead of the engine's raw upload/download. For our own uploads we never
+// downloaded, so download==0 -> engine ratio is 0; measuring against the data
+// we actually hold (done = total_done, or total_size*progress as fallback)
+// gives the same meaningful ratio the table shows.
+function displayRatio(d) {
+    let done = (d.total_done && d.total_done > 0)
+        ? d.total_done
+        : (d.total_size > 0 ? d.total_size * (d.progress || 0) : 0);
+    if (done > 0) return d.total_upload / done;
+    return d.ratio || 0;
+}
+
 async function refreshDetail() {
     if (!selectedTorrent) return;
     try {
@@ -1173,7 +1186,7 @@ async function refreshDetail() {
         document.getElementById("detail-size").textContent = formatBytes(d.total_size);
         document.getElementById("detail-downloaded").textContent = formatBytes(d.total_download);
         document.getElementById("detail-uploaded").textContent = formatBytes(d.total_upload);
-        document.getElementById("detail-ratio").textContent = d.ratio.toFixed(4);
+        document.getElementById("detail-ratio").textContent = displayRatio(d).toFixed(4);
         document.getElementById("detail-path").textContent = incoPath(d.save_path);
         document.getElementById("detail-hash").textContent = d.info_hash;
         renderPieceMap(d.pieces_have, d.pieces_avail, "detail-pieces-canvas", "detail-pieces-info");
@@ -1815,7 +1828,7 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-size").textContent = formatBytes(d.total_size);
         document.getElementById("h-detail-downloaded").textContent = formatBytes(d.total_download);
         document.getElementById("h-detail-uploaded").textContent = formatBytes(d.total_upload);
-        document.getElementById("h-detail-ratio").textContent = d.ratio.toFixed(4);
+        document.getElementById("h-detail-ratio").textContent = displayRatio(d).toFixed(4);
         document.getElementById("h-detail-path").textContent = incoPath(d.save_path);
         document.getElementById("h-detail-hash").textContent = d.info_hash;
         renderPieceMap(d.pieces_have, d.pieces_avail, "h-detail-pieces-canvas", "h-detail-pieces-info", "h-detail-pieces-card");
