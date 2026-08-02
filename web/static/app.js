@@ -3114,6 +3114,11 @@ function setupHoardSSE() {
             if (!_hydMap) _hydMap = new Map(_hoardAllTorrents.map(t => [t.info_hash, t]));
             if (Array.isArray(data.torrents) && data.torrents.length) {
                 for (const t of data.torrents) {
+                    // Ratio against data-held (matches the detail panel). The
+                    // server sends upload/download, which is 0 for our own
+                    // uploads (download==0); recompute at ingest so the list
+                    // and the sort agree with the detail.
+                    if (t.total_size > 0 && t.total_done > 0) t.ratio = t.total_upload / t.total_done;
                     _hydMap.set(t.info_hash, t);
                     if (_resyncing) _resyncSeen.add(t.info_hash);
                 }
@@ -4163,7 +4168,7 @@ const TABLE_COLS = {
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "—"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate ?? 0)}</td>` },
         { id: "upload_rate", label: "Up", sort: "upload_rate", render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
-        { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${t.ratio.toFixed(2)}</td>` },
+        { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "—")}</td>` },
         { id: "category", label: "Category", sort: "category", render: t => `<td>${esc(incoCat(t.category))}</td>` },
         { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "—"}</td>` },
@@ -4179,7 +4184,7 @@ const TABLE_COLS = {
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "—"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate)}</td>` },
         { id: "upload_rate", label: "Up", sort: "upload_rate", render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
-        { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${t.ratio.toFixed(2)}</td>` },
+        { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "—")}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
