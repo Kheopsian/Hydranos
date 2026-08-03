@@ -693,6 +693,7 @@ const HOARD_FETCH_INTERVAL = 30000; // bumped 2026-04-19: SSE /api/events fourni
 const HOARD_RENDER_LIMIT = 500;
 
 async function updateRaceTorrents() {
+    loadRacePolicy();
     try {
         let torrents = await api("/api/race/torrents");
         const tbody = document.getElementById("race-tbody");
@@ -2970,6 +2971,62 @@ async function runCompare() {
 }
 
 // ─── Metrics uptime ─────────────────────────────────────
+
+// ─── Race drain policy panel (Phase 1) ─────────────────
+async function loadRacePolicy() {
+    let st;
+    try { st = await api("/api/drain/status"); } catch (e) { return; }
+    const pctEl = document.getElementById("rp-disk-pct");
+    if (!pctEl) return;
+    const pct = st.disk_used_pct || 0;
+    const free = (st.disk_total || 0) - (st.disk_used || 0);
+    pctEl.textContent = pct.toFixed(0) + "%";
+    document.getElementById("rp-disk-free").textContent = formatBytes(free);
+    document.getElementById("rp-fill").style.width = Math.min(100, pct) + "%";
+    document.getElementById("rp-mark-low").style.left = (st.low_watermark || 0) + "%";
+    document.getElementById("rp-mark-high").style.left = (st.high_watermark || 0) + "%";
+    _rpSet("rp-enabled", st.enabled, true);
+    _rpSet("rp-high", st.high_watermark);
+    _rpSet("rp-low", st.low_watermark);
+    _rpSet("rp-minage", st.min_age_minutes);
+    _rpSet("rp-interval", st.check_interval);
+}
+function _rpSet(id, val, isCheck) {
+    const el = document.getElementById(id);
+    if (!el || el === document.activeElement) return; // never clobber what the user is typing
+    if (isCheck) el.checked = !!val; else el.value = val;
+}
+async function _rpSave(key, value) {
+    try {
+        await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }) });
+        document.getElementById("rp-apply").style.display = "";
+    } catch (e) { alert("Save failed: " + e.message); }
+}
+async function _rpRestart() {
+    if (!confirm("Restart Hydra now to apply the race drain settings?")) return;
+    try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
+}
+async function _rpDrainNow(btn) {
+    btn.disabled = true; const t = btn.textContent; btn.textContent = "Draining…";
+    try { await api("/api/drain/now", { method: "POST" }); } catch (e) {}
+    btn.disabled = false; btn.textContent = t;
+    loadRacePolicy();
+}
+async function _rpToggleHist() {
+    const box = document.getElementById("rp-hist");
+    if (box.style.display !== "none") { box.style.display = "none"; return; }
+    let h;
+    try { h = await api("/api/drain/history"); } catch (e) { h = []; }
+    if (h && h.length) {
+        box.innerHTML = "<table><thead><tr><th>When</th><th>Before</th><th>After</th><th>Freed</th><th>Removed</th></tr></thead><tbody>" +
+            h.map(d => `<tr><td>${new Date((d.timestamp || 0) * 1000).toLocaleString()}</td><td>${d.before_pct ?? 0}%</td><td>${d.after_pct ?? 0}%</td><td>${formatBytes(d.freed || 0)}</td><td>${d.removed_count || 0}</td></tr>`).join("") +
+            "</tbody></table>";
+    } else {
+        box.innerHTML = '<div class="rp-muted" style="font-size:12px">No drains yet.</div>';
+    }
+    box.style.display = "";
+}
 
 async function updateUptime() {
     try {

@@ -2392,3 +2392,32 @@ footer {
 th.col-drag { cursor: grab; }
 th.col-drag:active { cursor: grabbing; }
 th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
+
+
+/* Race drain policy panel (Phase 1) */
+.race-policy{background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:14px}
+.rp-line{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.rp-gauge{width:120px;height:10px;border-radius:6px;background:var(--bg-tertiary);border:1px solid var(--border);position:relative;overflow:hidden;flex-shrink:0}
+.rp-fill{height:100%;width:0;background:linear-gradient(90deg,var(--accent-green),var(--accent-yellow));transition:width .3s}
+.rp-mark{position:absolute;top:-3px;width:2px;height:16px;background:var(--accent-red);opacity:.85}
+.rp-mark.low{background:var(--accent-hoard);opacity:.6}
+.rp-disk{font-size:12.5px;color:var(--text-secondary);white-space:nowrap}
+.rp-disk b{color:var(--text-primary)}
+.rp-sep{width:1px;height:22px;background:var(--border)}
+.rp-field{display:flex;align-items:center;gap:5px;font-size:12.5px;color:var(--text-secondary);white-space:nowrap}
+.rp-field input[type=number]{width:48px;background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-primary);border-radius:6px;padding:4px 6px;font-size:12.5px;text-align:right}
+.rp-muted{color:var(--text-muted)}
+.rp-spacer{flex:1}
+.rp-sw{position:relative;width:34px;height:19px;display:inline-block;flex-shrink:0}
+.rp-sw input{opacity:0;width:0;height:0}
+.rp-slider{position:absolute;inset:0;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:19px;cursor:pointer;transition:.15s}
+.rp-slider:before{content:"";position:absolute;height:11px;width:11px;left:3px;top:3px;background:var(--text-secondary);border-radius:50%;transition:.15s}
+.rp-sw input:checked+.rp-slider{background:rgba(63,185,80,.2);border-color:var(--accent-green)}
+.rp-sw input:checked+.rp-slider:before{transform:translateX(15px);background:var(--accent-green)}
+.rp-btn{padding:6px 12px;background:rgba(240,136,62,.1);border:1px solid rgba(240,136,62,.4);border-radius:7px;color:var(--accent-race);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
+.rp-btn.ghost{background:rgba(88,166,255,.08);border-color:rgba(88,166,255,.35);color:var(--accent-hoard)}
+.rp-btn:disabled{opacity:.5;cursor:default}
+.rp-hist{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}
+.rp-hist table{width:100%;border-collapse:collapse;font-size:12px}
+.rp-hist th{text-align:left;color:var(--text-muted);font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.04em;padding:4px 8px}
+.rp-hist td{padding:5px 8px;border-top:1px solid var(--border);color:var(--text-secondary)}

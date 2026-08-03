@@ -176,6 +176,22 @@
                 <span>Grabbed: <strong id="race-session-grabbed">0</strong></span>
                 <span>Avg Share: <strong id="race-avg-share">—</strong></span>
             </div>
+            <div class="race-policy" id="race-policy">
+                <div class="rp-line">
+                    <div class="rp-gauge"><div class="rp-fill" id="rp-fill"></div><div class="rp-mark low" id="rp-mark-low"></div><div class="rp-mark" id="rp-mark-high"></div></div>
+                    <div class="rp-disk"><b id="rp-disk-pct">—</b> · <span id="rp-disk-free">—</span> free</div>
+                    <div class="rp-sep"></div>
+                    <label class="rp-field"><span class="rp-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSave('enabled', this.checked)"><span class="rp-slider"></span></span> Auto-drain</label>
+                    <div class="rp-field">drain <input type="number" id="rp-high" min="1" max="100" onchange="_rpSave('high_watermark_pct', parseInt(this.value))">&rarr;<input type="number" id="rp-low" min="1" max="100" onchange="_rpSave('low_watermark_pct', parseInt(this.value))"> %</div>
+                    <div class="rp-field">keep <input type="number" id="rp-minage" min="0" onchange="_rpSave('min_age_minutes', parseInt(this.value))"> min</div>
+                    <div class="rp-field rp-muted">check <input type="number" id="rp-interval" min="5" onchange="_rpSave('check_interval_seconds', parseInt(this.value))"> s</div>
+                    <div class="rp-spacer"></div>
+                    <button class="rp-btn ghost" id="rp-apply" style="display:none" onclick="_rpRestart()">Apply &amp; restart</button>
+                    <button class="rp-btn" onclick="_rpDrainNow(this)">Drain now</button>
+                    <button class="rp-btn ghost" onclick="_rpToggleHist()">History</button>
+                </div>
+                <div class="rp-hist" id="rp-hist" style="display:none"></div>
+            </div>
             <table id="race-table">
                 <thead>
                     <tr>
@@ -975,6 +991,6 @@
         <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
     </div>
 
-    <script src="/static/app.js?v=1.3.35"></script>
+    <script src="/static/app.js?v=1.3.36"></script>
 </body>
 </html>
