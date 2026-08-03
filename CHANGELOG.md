@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.33.3 — 2026-08-03
+
+### Fixed
+- **The Speedtest total-throughput labels are now English.** The cards added in 3.33.0 shipped with French labels (test only / total link); corrected for consistency with the rest of the tab.
+
 ## v3.33.2 — 2026-08-03
 
 ### Fixed
