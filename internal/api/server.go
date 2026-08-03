@@ -123,6 +123,11 @@ type HoardEngine interface {
 }
 
 // RaceDrainService abstracts the NVMe drain subsystem.
+// GraduationReporter surfaces in-flight race->hoard copies for the UI.
+type GraduationReporter interface {
+	GraduationsSnapshot() []map[string]interface{}
+}
+
 type RaceDrainService interface {
 	GetStatus() map[string]interface{}
 	GetHistory() []map[string]interface{}
@@ -169,6 +174,7 @@ type Server struct {
 	hoardEngine    HoardEngine
 	stateManager   *state.Manager
 	raceDrain      RaceDrainService
+	gradReporter   GraduationReporter
 	arrCleanup     ArrCleanupService
 	benchDB        BenchDB
 	healthReporter HealthReporter
@@ -391,6 +397,8 @@ func (s *Server) SetSaveStateCallback(fn func()) {
 }
 
 // SetRaceDrain injects the RaceDrain service.
+func (s *Server) SetGraduationReporter(g GraduationReporter) { s.gradReporter = g }
+
 func (s *Server) SetRaceDrain(rd RaceDrainService) {
 	s.raceDrain = rd
 }

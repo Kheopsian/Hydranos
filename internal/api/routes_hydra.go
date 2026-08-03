@@ -538,6 +538,7 @@ func (s *Server) registerHydraRoutes() {
 			drain.GET("/status", s.handleDrainStatus)
 			drain.GET("/history", s.handleDrainHistory)
 			drain.POST("/now", s.handleDrainNow)
+			drain.GET("/graduations", s.handleGraduations)
 		}
 
 		// Arr cleanup
@@ -1661,6 +1662,14 @@ func (s *Server) handleFSBrowse(c *gin.Context) {
 // ===========================================================================
 // Handlers — Drain
 // ===========================================================================
+
+func (s *Server) handleGraduations(c *gin.Context) {
+	if s.gradReporter == nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	c.JSON(http.StatusOK, s.gradReporter.GraduationsSnapshot())
+}
 
 func (s *Server) handleDrainStatus(c *gin.Context) {
 	if s.raceDrain == nil {

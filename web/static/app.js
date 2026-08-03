@@ -3022,6 +3022,20 @@ async function loadRacePolicy() {
     const _act = (st.age_ratio_action === "hoard") ? "hoard" : "delete";
     const _ad = document.getElementById("rp-act-delete"), _ah = document.getElementById("rp-act-hoard");
     if (_ad && _ah && !_rpDirty.has("__action__")) { _ad.classList.toggle("on", _act === "delete"); _ah.classList.toggle("on", _act === "hoard"); }
+    _rpLoadGraduations();
+}
+async function _rpLoadGraduations() {
+    const box = document.getElementById("rp-grad");
+    if (!box) return;
+    let g;
+    try { g = await api("/api/drain/graduations"); } catch (e) { return; }
+    if (!g || !g.length) { box.innerHTML = ""; return; }
+    box.innerHTML = '<div class="rp2-grad-title">Graduating to hoard</div>' + g.map(x => {
+        const pct = Math.min(100, x.pct || 0);
+        return `<div class="rp2-grad-row"><div class="rp2-grad-name" title="${esc(x.name || "")}">${esc(x.name || x.info_hash)}</div>`
+            + `<div class="rp2-grad-bar"><div class="rp2-grad-fill" style="width:${pct.toFixed(1)}%"></div></div>`
+            + `<div class="rp2-grad-pct">${formatBytes(x.copied || 0)} / ${formatBytes(x.total || 0)}</div></div>`;
+    }).join("");
 }
 function _rpSetMode(m) {
     document.getElementById("rp-mode-and").classList.toggle("on", m === "and");
