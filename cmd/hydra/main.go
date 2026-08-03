@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -525,6 +526,7 @@ func main() {
 		cfg.RaceDrain,
 		&raceDrainAdapter{engine: raceEngine},
 	)
+	raceDrain.SetGraduator(&graduator{race: raceEngine, hoard: hoardEngine, dataDir: cfg.Daemon.DataDir})
 	benchDBPath := filepath.Join(cfg.Daemon.DataDir, "bench.db")
 	benchDB := bench.NewBenchDB(benchDBPath)
 	if err := benchDB.Open(); err != nil {
@@ -1699,4 +1701,147 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 	}()
 	slog.Info("front-only API started", "addr", fmt.Sprintf("http://%s:%d", cfg.Daemon.APIHost, cfg.Daemon.APIPort))
 	<-ctx.Done()
+}
+
+// ---------------------------------------------------------------------------
+// Graduation: move a race torrent to the hoard engine via the category link.
+// ---------------------------------------------------------------------------
+
+type graduator struct {
+	race    *engine.RaceEngine
+	hoard   *engine.HoardEngine
+	dataDir string
+}
+
+type gradCat struct {
+	SavePath   string `json:"save_path"`
+	Mode       string `json:"mode"`
+	GraduateTo string `json:"graduate_to"`
+}
+
+func readGradCategories(dataDir string) map[string]gradCat {
+	out := map[string]gradCat{}
+	data, err := os.ReadFile(filepath.Join(dataDir, "categories.json"))
+	if err != nil {
+		return out
+	}
+	var m map[string]gradCat
+	if json.Unmarshal(data, &m) != nil {
+		return out
+	}
+	return m
+}
+
+func treeSize(p string) (int64, error) {
+	var total int64
+	err := filepath.Walk(p, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func copyPath(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return copyFile(src, dst)
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := copyPath(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Graduate moves one race torrent to its linked hoard category. Safe order:
+// copy NVMe->ZFS, verify size, register in hoard (hash-verifies), deregister
+// from race WITHOUT deleting (files already copied; AbsorbStats keeps the
+// global totals), then remove the NVMe source copy. Any failure aborts before
+// the source is touched. The hoard announces fresh from zero, so no tracker
+// over-credit (per-torrent display counter carry is a separate follow-up).
+func (g *graduator) Graduate(infoHash string) (bool, error) {
+	savePath, torrentFile, name, cat, ok := g.race.GraduationInfo(infoHash)
+	if !ok {
+		return false, fmt.Errorf("race torrent %s not found", infoHash)
+	}
+	cats := readGradCategories(g.dataDir)
+	rc, ok := cats[cat]
+	if !ok || rc.GraduateTo == "" {
+		return false, nil // no link -> skip, never delete
+	}
+	hc, ok := cats[rc.GraduateTo]
+	if !ok || hc.Mode != "hoard" || hc.SavePath == "" {
+		return false, fmt.Errorf("invalid graduate_to %q (must be a hoard category with a save_path)", rc.GraduateTo)
+	}
+	if name == "" || torrentFile == "" {
+		return false, fmt.Errorf("missing name or torrent file for %s", infoHash)
+	}
+	src := filepath.Join(savePath, name)
+	if _, err := os.Stat(src); err != nil {
+		return false, fmt.Errorf("source content not found at %s: %w", src, err)
+	}
+	dst := filepath.Join(hc.SavePath, name)
+	if _, err := os.Stat(dst); err == nil {
+		return false, fmt.Errorf("destination already exists: %s", dst)
+	}
+	if err := copyPath(src, dst); err != nil {
+		os.RemoveAll(dst)
+		return false, fmt.Errorf("copy %s -> %s: %w", src, dst, err)
+	}
+	ss, _ := treeSize(src)
+	ds, _ := treeSize(dst)
+	if ss != ds {
+		os.RemoveAll(dst)
+		return false, fmt.Errorf("size mismatch after copy (src=%d dst=%d)", ss, ds)
+	}
+	if _, err := g.hoard.AddTorrentSeedMode(torrentFile, hc.SavePath, rc.GraduateTo); err != nil {
+		os.RemoveAll(dst)
+		return false, fmt.Errorf("hoard add-seed failed: %w", err)
+	}
+	if err := g.race.RemoveTorrent(infoHash, false); err != nil {
+		slog.Warn("graduate: race remove failed after hoard add", "info_hash", infoHash, "error", err)
+	}
+	os.RemoveAll(src)
+	slog.Info("graduate: race->hoard", "name", name, "category", rc.GraduateTo, "dest", hc.SavePath)
+	return true, nil
 }

@@ -1053,3 +1053,14 @@ func (e *RaceEngine) StopTorrent(infoHash string) error {
 	}
 	return e.client.StopTorrent(infoHash)
 }
+
+// GraduationInfo returns the fields the graduation mover needs for one torrent.
+func (e *RaceEngine) GraduationInfo(infoHash string) (savePath, torrentFilePath, name, category string, ok bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	info, exists := e.torrents[infoHash]
+	if !exists {
+		return "", "", "", "", false
+	}
+	return info.SavePath, info.TorrentFilePath, info.Name, info.Category, true
+}
