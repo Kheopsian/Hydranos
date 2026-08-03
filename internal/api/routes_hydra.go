@@ -814,6 +814,35 @@ func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, catego
 	return r.InfoHash, nil
 }
 
+// raceDiskFull reports whether a new race torrent should be rejected because the
+// NVMe is (near) full. It first triggers an emergency drain, then rechecks, so a
+// burst of grabs is only refused when even draining cannot make room. Returns
+// (true, message) to reject with 507. No-op unless add_block_enabled.
+func (s *Server) raceDiskFull() (bool, string) {
+	if s.raceDrain == nil || !s.config.RaceDrain.AddBlockEnabled {
+		return false, ""
+	}
+	over := func() (bool, float64, int64) {
+		st := s.raceDrain.GetStatus()
+		pct, _ := st["disk_used_pct"].(float64)
+		used, _ := st["disk_used"].(int64)
+		total, _ := st["disk_total"].(int64)
+		free := total - used
+		reserve := int64(s.config.RaceDrain.ReserveFreeGB) * 1_000_000_000
+		high := float64(s.config.RaceDrain.HighWatermarkPct)
+		bad := (high > 0 && pct >= high) || (reserve > 0 && free < reserve)
+		return bad, pct, free
+	}
+	if bad, _, _ := over(); !bad {
+		return false, ""
+	}
+	s.raceDrain.DrainNow()
+	if bad, pct, free := over(); bad {
+		return true, fmt.Sprintf("race NVMe full: %.0f%% used, %.1f GB free — add rejected (drain could not free enough)", pct, float64(free)/1e9)
+	}
+	return false, ""
+}
+
 func (s *Server) handleAddTorrent(c *gin.Context) {
 	var req struct {
 		TorrentPath string   `json:"torrent_path"`
@@ -832,6 +861,13 @@ func (s *Server) handleAddTorrent(c *gin.Context) {
 	mode := req.Mode
 	if mode == "" {
 		mode = "race"
+	}
+
+	if mode == "race" {
+		if blocked, msg := s.raceDiskFull(); blocked {
+			c.JSON(http.StatusInsufficientStorage, gin.H{"error": msg})
+			return
+		}
 	}
 
 	cat := s.categoryByName(req.Category)

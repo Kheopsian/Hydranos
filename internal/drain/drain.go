@@ -105,17 +105,22 @@ func (d *RaceDrain) GetStatus() map[string]interface{} {
 	d.mu.Unlock()
 
 	return map[string]interface{}{
-		"enabled":         d.cfg.Enabled,
-		"running":         d.running,
-		"disk_used_pct":   roundPct(pct),
-		"disk_used":       used,
-		"disk_total":      total,
-		"high_watermark":  d.cfg.HighWatermarkPct,
-		"low_watermark":   d.cfg.LowWatermarkPct,
-		"check_interval":  d.cfg.CheckIntervalSeconds,
-		"min_age_minutes": d.cfg.MinAgeMinutes,
-		"last_drain":      lastDrain,
-		"stats":           statsCopy,
+		"enabled":           d.cfg.Enabled,
+		"running":           d.running,
+		"disk_used_pct":     roundPct(pct),
+		"disk_used":         used,
+		"disk_total":        total,
+		"high_watermark":    d.cfg.HighWatermarkPct,
+		"low_watermark":     d.cfg.LowWatermarkPct,
+		"check_interval":    d.cfg.CheckIntervalSeconds,
+		"min_age_minutes":   d.cfg.MinAgeMinutes,
+		"max_age_hours":     d.cfg.MaxAgeHours,
+		"min_ratio":         d.cfg.MinRatio,
+		"age_ratio_mode":    d.cfg.AgeRatioMode,
+		"add_block_enabled": d.cfg.AddBlockEnabled,
+		"reserve_free_gb":   d.cfg.ReserveFreeGB,
+		"last_drain":        lastDrain,
+		"stats":             statsCopy,
 	}
 }
 
@@ -160,6 +165,8 @@ func (d *RaceDrain) doCheck() map[string]interface{} {
 	d.mu.Lock()
 	d.stats["checks"] = d.stats["checks"].(int) + 1
 	d.mu.Unlock()
+
+	d.evictByAgeRatio()
 
 	used, total, pct := d.getDiskUsage()
 
@@ -303,4 +310,76 @@ func toInt64Val(v interface{}) int64 {
 	default:
 		return 0
 	}
+}
+
+// evictByAgeRatio is the second drain trigger, independent of disk pressure:
+// delete race torrents that are old enough and/or seeded enough. Both criteria
+// off (0) = no-op. The min-age floor still protects torrents still racing.
+func (d *RaceDrain) evictByAgeRatio() {
+	ageEnabled := d.cfg.MaxAgeHours > 0
+	ratioEnabled := d.cfg.MinRatio > 0
+	if !ageEnabled && !ratioEnabled {
+		return
+	}
+	torrents := d.race.GetAllStatus()
+	now := float64(time.Now().Unix())
+	minAge := float64(d.cfg.MinAgeMinutes) * 60
+	maxAge := float64(d.cfg.MaxAgeHours) * 3600
+	orMode := d.cfg.AgeRatioMode == "or"
+
+	var removed []map[string]interface{}
+	var freed int64
+	for _, t := range torrents {
+		added := toFloat64Val(t["added_time"])
+		if added <= 0 {
+			added = now
+		}
+		age := now - added
+		if age < minAge {
+			continue
+		}
+		ratio := toFloat64Val(t["ratio"])
+		aMet := ageEnabled && age >= maxAge
+		rMet := ratioEnabled && ratio >= d.cfg.MinRatio
+		var evict bool
+		if orMode {
+			evict = aMet || rMet
+		} else {
+			evict = true
+			if ageEnabled && !aMet {
+				evict = false
+			}
+			if ratioEnabled && !rMet {
+				evict = false
+			}
+		}
+		if !evict {
+			continue
+		}
+		ih, _ := t["info_hash"].(string)
+		if err := d.race.RemoveTorrent(ih, true); err != nil {
+			continue
+		}
+		size := toInt64Val(t["total_size"])
+		freed += size
+		name, _ := t["name"].(string)
+		removed = append(removed, map[string]interface{}{"name": name, "size": size})
+	}
+	if len(removed) == 0 {
+		return
+	}
+	d.mu.Lock()
+	d.stats["torrents_removed"] = d.stats["torrents_removed"].(int) + len(removed)
+	if bf, ok := d.stats["bytes_freed"].(int64); ok {
+		d.stats["bytes_freed"] = bf + freed
+	}
+	d.history = append(d.history, map[string]interface{}{
+		"timestamp": time.Now().Unix(), "reason": "age/ratio",
+		"freed": freed, "removed_count": len(removed), "removed": removed,
+	})
+	if len(d.history) > 20 {
+		d.history = d.history[len(d.history)-20:]
+	}
+	d.mu.Unlock()
+	slog.Info("drain: age/ratio eviction", "removed", len(removed), "freed_gb", float64(freed)/1e9)
 }
