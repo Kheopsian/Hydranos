@@ -2429,3 +2429,44 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .rp-seg button{background:var(--bg-tertiary);color:var(--text-secondary);border:none;padding:3px 9px;font-size:11.5px;font-weight:600;cursor:pointer;border-right:1px solid var(--border)}
 .rp-seg button:last-child{border-right:none}
 .rp-seg button.on{background:rgba(188,140,255,.16);color:var(--accent-purple)}
+
+
+/* Race policy panel v2 (redesigned — one line per policy, info pills) */
+.rp2{background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;position:relative;z-index:2}
+.rp2-row{display:flex;align-items:center;gap:12px;padding:9px 14px;flex-wrap:wrap;border-top:1px solid var(--border)}
+.rp2-row:first-child{border-top:none}
+.rp2-gauge{width:150px;height:11px;border-radius:6px;background:var(--bg-tertiary);border:1px solid var(--border);position:relative;overflow:hidden;flex-shrink:0}
+.rp2-fill{height:100%;width:0;background:linear-gradient(90deg,var(--accent-green),var(--accent-yellow));transition:width .3s}
+.rp2-mark{position:absolute;top:-3px;width:2px;height:17px;background:var(--accent-red);opacity:.85}
+.rp2-mark.low{background:var(--accent-hoard);opacity:.6}
+.rp2-disk{font-size:13px;color:var(--text-secondary)}
+.rp2-disk b{color:var(--text-primary);font-size:15px}
+.rp2-spacer{flex:1}
+.rp2-btn{padding:6px 12px;background:rgba(240,136,62,.1);border:1px solid rgba(240,136,62,.4);border-radius:7px;color:var(--accent-race);font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap}
+.rp2-btn.ghost{background:rgba(88,166,255,.08);border-color:rgba(88,166,255,.35);color:var(--accent-hoard)}
+.rp2-btn:disabled{opacity:.5;cursor:default}
+.rp2-lbl{display:flex;align-items:center;gap:6px;width:180px;flex-shrink:0;font-size:13px;font-weight:600;color:var(--text-primary)}
+.rp2-body{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12.5px;color:var(--text-secondary);transition:opacity .15s}
+.rp2-body.off{opacity:.32;pointer-events:none}
+.rp2-f{display:flex;align-items:center;gap:5px;white-space:nowrap}
+.rp2-f input[type=number]{width:50px;background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-primary);border-radius:6px;padding:4px 6px;text-align:right;font-size:12.5px}
+.rp2-f.dim{color:var(--text-muted)}
+.rp2-sw{position:relative;width:36px;height:20px;flex-shrink:0}
+.rp2-sw input{opacity:0;width:0;height:0}
+.rp2-sl{position:absolute;inset:0;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:20px;cursor:pointer;transition:.15s}
+.rp2-sl:before{content:"";position:absolute;height:12px;width:12px;left:3px;top:3px;background:var(--text-secondary);border-radius:50%;transition:.15s}
+.rp2-sw input:checked+.rp2-sl{background:rgba(63,185,80,.2);border-color:var(--accent-green)}
+.rp2-sw input:checked+.rp2-sl:before{transform:translateX(16px);background:var(--accent-green)}
+.rp2-seg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.rp2-seg button{background:var(--bg-tertiary);color:var(--text-secondary);border:none;padding:3px 9px;font-size:11.5px;font-weight:600;cursor:pointer;border-right:1px solid var(--border)}
+.rp2-seg button:last-child{border-right:none}
+.rp2-seg button.on{background:rgba(188,140,255,.16);color:var(--accent-purple)}
+.rp2-seg.act button.on{background:rgba(240,136,62,.16);color:var(--accent-race)}
+.rp2-info{position:relative;display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid var(--text-muted);background:var(--bg-tertiary);color:var(--text-secondary);font-size:9px;font-style:italic;font-weight:700;cursor:help;flex-shrink:0}
+.rp2-info:hover{border-color:var(--accent-hoard);color:var(--accent-hoard);background:rgba(88,166,255,.1)}
+.rp2-info .rp2-tip{display:none;position:absolute;top:135%;left:0;width:280px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:6px;padding:9px 11px;font-size:11px;font-style:normal;font-weight:400;color:var(--text-secondary);line-height:1.5;z-index:20;box-shadow:0 6px 18px rgba(0,0,0,.45);white-space:normal}
+.rp2-info:hover .rp2-tip{display:block}
+.rp2-hist{padding:0 14px 12px}
+.rp2-hist table{width:100%;border-collapse:collapse;font-size:12px}
+.rp2-hist th{text-align:left;color:var(--text-muted);font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.04em;padding:4px 8px}
+.rp2-hist td{padding:5px 8px;border-top:1px solid var(--border);color:var(--text-secondary)}

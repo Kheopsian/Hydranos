@@ -519,10 +519,7 @@ func (s *Server) qbitTorrentsAdd(c *gin.Context) {
 	}
 
 	if mode == "race" {
-		if blocked, msg := s.raceDiskFull(); blocked {
-			c.String(http.StatusInsufficientStorage, msg)
-			return
-		}
+		s.raceDrainOnAddIfFull()
 	}
 
 	// Check for magnet URLs first
