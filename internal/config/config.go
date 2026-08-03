@@ -97,6 +97,8 @@ type RaceDrainConfig struct {
 	MaxAgeHours  int     `toml:"max_age_hours"`
 	MinRatio     float64 `toml:"min_ratio"`
 	AgeRatioMode string  `toml:"age_ratio_mode"`
+	// Action when the age/ratio trigger fires: "delete" (default) or "hoard" (graduate).
+	AgeRatioAction string `toml:"age_ratio_action"`
 	// API admission guard: reject race adds when the NVMe is (near) full.
 	AddBlockEnabled bool `toml:"add_block_enabled"`
 	ReserveFreeGB   int  `toml:"reserve_free_gb"`
@@ -255,6 +257,7 @@ func DefaultConfig() *HydraConfig {
 			MaxAgeHours:          0,
 			MinRatio:             0,
 			AgeRatioMode:         "and",
+			AgeRatioAction:       "delete",
 			AddBlockEnabled:      true,
 			ReserveFreeGB:        0,
 		},
@@ -277,6 +280,7 @@ var migrationKeys = []struct{ section, key, value string }{
 	{"race_drain", "max_age_hours", `0`},
 	{"race_drain", "min_ratio", `0.0`},
 	{"race_drain", "age_ratio_mode", `"and"`},
+	{"race_drain", "age_ratio_action", `"delete"`},
 	{"race_drain", "add_block_enabled", `true`},
 	{"race_drain", "reserve_free_gb", `0`},
 }

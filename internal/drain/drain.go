@@ -29,6 +29,7 @@ type RaceEngineForDrain interface {
 type RaceDrain struct {
 	cfg  config.RaceDrainConfig
 	race RaceEngineForDrain
+	grad Graduator
 
 	mu        sync.Mutex
 	running   bool
@@ -119,6 +120,7 @@ func (d *RaceDrain) GetStatus() map[string]interface{} {
 		"age_ratio_mode":    d.cfg.AgeRatioMode,
 		"add_block_enabled": d.cfg.AddBlockEnabled,
 		"reserve_free_gb":   d.cfg.ReserveFreeGB,
+		"age_ratio_action":  d.cfg.AgeRatioAction,
 		"last_drain":        lastDrain,
 		"stats":             statsCopy,
 	}
@@ -357,12 +359,23 @@ func (d *RaceDrain) evictByAgeRatio() {
 			continue
 		}
 		ih, _ := t["info_hash"].(string)
-		if err := d.race.RemoveTorrent(ih, true); err != nil {
-			continue
-		}
 		size := toInt64Val(t["total_size"])
-		freed += size
 		name, _ := t["name"].(string)
+		if d.cfg.AgeRatioAction == "hoard" && d.grad != nil {
+			ok, gerr := d.grad.Graduate(ih)
+			if gerr != nil {
+				slog.Warn("drain: graduate failed", "name", name, "error", gerr)
+				continue
+			}
+			if !ok {
+				continue // no category link -> leave the torrent on race
+			}
+		} else {
+			if err := d.race.RemoveTorrent(ih, true); err != nil {
+				continue
+			}
+		}
+		freed += size
 		removed = append(removed, map[string]interface{}{"name": name, "size": size})
 	}
 	if len(removed) == 0 {
@@ -383,3 +396,13 @@ func (d *RaceDrain) evictByAgeRatio() {
 	d.mu.Unlock()
 	slog.Info("drain: age/ratio eviction", "removed", len(removed), "freed_gb", float64(freed)/1e9)
 }
+
+// Graduator moves a race torrent to the hoard engine (data + registration).
+// Returns (true,nil) when moved, (false,nil) when skipped (e.g. no category
+// link), or (false,err) on failure.
+type Graduator interface {
+	Graduate(infoHash string) (bool, error)
+}
+
+// SetGraduator wires the race->hoard graduation mover (called once at startup).
+func (d *RaceDrain) SetGraduator(g Graduator) { d.grad = g }

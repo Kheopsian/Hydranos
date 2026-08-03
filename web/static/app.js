@@ -3009,11 +3009,19 @@ async function loadRacePolicy() {
     const _mode = (st.age_ratio_mode === "or") ? "or" : "and";
     const _ea = document.getElementById("rp-mode-and"), _eo = document.getElementById("rp-mode-or");
     if (_ea && _eo && !_rpDirty.has("__mode__")) { _ea.classList.toggle("on", _mode === "and"); _eo.classList.toggle("on", _mode === "or"); }
+    const _act = (st.age_ratio_action === "hoard") ? "hoard" : "delete";
+    const _ad = document.getElementById("rp-act-delete"), _ah = document.getElementById("rp-act-hoard");
+    if (_ad && _ah && !_rpDirty.has("__action__")) { _ad.classList.toggle("on", _act === "delete"); _ah.classList.toggle("on", _act === "hoard"); }
 }
 function _rpSetMode(m) {
     document.getElementById("rp-mode-and").classList.toggle("on", m === "and");
     document.getElementById("rp-mode-or").classList.toggle("on", m === "or");
     _rpSave("age_ratio_mode", m);
+}
+function _rpSetAction(a) {
+    document.getElementById("rp-act-delete").classList.toggle("on", a === "delete");
+    document.getElementById("rp-act-hoard").classList.toggle("on", a === "hoard");
+    _rpSave("age_ratio_action", a);
 }
 let _rpDirty = new Set();
 function _rpSet(id, val, isCheck) {
@@ -3028,6 +3036,7 @@ async function _rpSave(key, value) {
     const _idmap = { high_watermark_pct: "rp-high", low_watermark_pct: "rp-low", min_age_minutes: "rp-minage", check_interval_seconds: "rp-interval", enabled: "rp-enabled", max_age_hours: "rp-maxage", min_ratio: "rp-minratio", add_block_enabled: "rp-block", reserve_free_gb: "rp-reserve" };
     if (_idmap[key]) _rpDirty.add(_idmap[key]);
     if (key === "age_ratio_mode") _rpDirty.add("__mode__");
+    if (key === "age_ratio_action") _rpDirty.add("__action__");
     try {
         await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }) });
