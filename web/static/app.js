@@ -2138,19 +2138,30 @@ async function showCategoryForm(name = null) {
     document.getElementById("cat-result").style.display = "none";
     document.getElementById("category-form").style.display = "block";
 
-    let cat = null;
-    if (name) {
-        try {
-            const cats = await api("/api/categories");
-            cat = (cats || []).find(c => c.name === name) || null;
-        } catch (e) { console.error("load category", e); }
-        if (cat) {
-            document.getElementById("cat-mode").value = cat.mode;
-            document.getElementById("cat-save-path").value = cat.save_path;
-            document.getElementById("cat-strategy").value = cat.strategy || "all";
-        }
+    let allCats = [];
+    try { allCats = (await api("/api/categories")) || []; } catch (e) { console.error("load categories", e); }
+    let cat = name ? (allCats.find(c => c.name === name) || null) : null;
+    if (cat) {
+        document.getElementById("cat-mode").value = cat.mode;
+        document.getElementById("cat-save-path").value = cat.save_path;
+        document.getElementById("cat-strategy").value = cat.strategy || "all";
     }
+    _populateGraduateSelect(allCats, cat ? cat.graduate_to : "", name);
+    _catModeChanged();
     await _renderCatPlacement(cat);
+}
+function _populateGraduateSelect(cats, current, selfName) {
+    const sel = document.getElementById("cat-graduate-to");
+    if (!sel) return;
+    const hoard = (cats || []).filter(c => c.mode === "hoard" && c.save_path && c.name !== selfName);
+    sel.innerHTML = '<option value="">\u2014 none (no graduation) \u2014</option>' +
+        hoard.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join("");
+    sel.value = current || "";
+}
+function _catModeChanged() {
+    const race = document.getElementById("cat-mode").value === "race";
+    const w = document.getElementById("cat-graduate-wrap");
+    if (w) w.style.display = race ? "" : "none";
 }
 
 // _renderCatPlacement fills #cat-placement with one checkbox + save-path input
@@ -2334,7 +2345,8 @@ async function saveCategory() {
             if (v) agents[inp.dataset.agent] = v;
         });
         const strategy = document.getElementById("cat-strategy").value;
-        const payload = { name, save_path, mode, placement, agents, strategy };
+        const graduate_to = mode === "race" ? (document.getElementById("cat-graduate-to").value || "") : "";
+        const payload = { name, save_path, mode, placement, agents, strategy, graduate_to };
         if (_editingCategory) {
             await api(`/api/categories/${encodeURIComponent(_editingCategory)}`, {
                 method: "PUT",

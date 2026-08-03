@@ -506,7 +506,7 @@
                         </div>
                         <div class="form-group">
                             <label>Mode</label>
-                            <select id="cat-mode">
+                            <select id="cat-mode" onchange="_catModeChanged()">
                                 <option value="race">Race</option>
                                 <option value="hoard">Hoard</option>
                             </select>
@@ -514,6 +514,11 @@
                         <div class="form-group" style="grid-column:1/-1">
                             <label>Save Path</label>
                             <input type="text" id="cat-save-path" placeholder="/mnt/race/movies" style="width:100%" autocomplete="off">
+                        </div>
+                        <div class="form-group" id="cat-graduate-wrap" style="grid-column:1/-1;display:none">
+                            <label>Graduate to (hoard category)</label>
+                            <select id="cat-graduate-to"><option value="">&mdash; none (no graduation) &mdash;</option></select>
+                            <div class="sr-desc">Race only. When a torrent in this category graduates, it moves to this hoard category&#39;s storage and label.</div>
                         </div>
                         <div class="form-group" style="grid-column:1/-1">
                             <label>Strategy</label>
@@ -1000,6 +1005,6 @@
         <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
     </div>
 
-    <script src="/static/app.js?v=1.3.37"></script>
+    <script src="/static/app.js?v=1.3.38"></script>
 </body>
 </html>
