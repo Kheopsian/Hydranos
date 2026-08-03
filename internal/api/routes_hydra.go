@@ -845,6 +845,21 @@ func (s *Server) raceDiskFull() (bool, string) {
 	return false, ""
 }
 
+// raceDrainOnAddIfFull triggers a background emergency drain when a new race add
+// lands on a (near) full NVMe. It never blocks the add — missing a grab is worse
+// than a transient disk-full that the drain resolves. No-op if the drain is off.
+func (s *Server) raceDrainOnAddIfFull() {
+	if s.raceDrain == nil || !s.config.RaceDrain.Enabled {
+		return
+	}
+	st := s.raceDrain.GetStatus()
+	pct, _ := st["disk_used_pct"].(float64)
+	high := float64(s.config.RaceDrain.HighWatermarkPct)
+	if high > 0 && pct >= high {
+		go s.raceDrain.DrainNow()
+	}
+}
+
 func (s *Server) handleAddTorrent(c *gin.Context) {
 	var req struct {
 		TorrentPath string   `json:"torrent_path"`
@@ -866,10 +881,7 @@ func (s *Server) handleAddTorrent(c *gin.Context) {
 	}
 
 	if mode == "race" {
-		if blocked, msg := s.raceDiskFull(); blocked {
-			c.JSON(http.StatusInsufficientStorage, gin.H{"error": msg})
-			return
-		}
+		s.raceDrainOnAddIfFull()
 	}
 
 	cat := s.categoryByName(req.Category)

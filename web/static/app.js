@@ -3004,8 +3004,16 @@ async function loadRacePolicy() {
     _rpSet("rp-interval", st.check_interval);
     _rpSet("rp-maxage", st.max_age_hours);
     _rpSet("rp-minratio", st.min_ratio);
-    _rpSet("rp-block", st.add_block_enabled, true);
-    _rpSet("rp-reserve", st.reserve_free_gb);
+    if (!_rpDirty.has("rp-enabled")) {
+        const _bd = document.getElementById("rp-body-drain");
+        if (_bd) _bd.classList.toggle("off", !st.enabled);
+    }
+    if (!_rpDirty.has("rp-ar-enabled")) {
+        const _are = document.getElementById("rp-ar-enabled");
+        if (_are) _are.checked = !!st.age_ratio_enabled;
+        const _bar = document.getElementById("rp-body-ar");
+        if (_bar) _bar.classList.toggle("off", !st.age_ratio_enabled);
+    }
     const _mode = (st.age_ratio_mode === "or") ? "or" : "and";
     const _ea = document.getElementById("rp-mode-and"), _eo = document.getElementById("rp-mode-or");
     if (_ea && _eo && !_rpDirty.has("__mode__")) { _ea.classList.toggle("on", _mode === "and"); _eo.classList.toggle("on", _mode === "or"); }
@@ -3017,6 +3025,18 @@ function _rpSetMode(m) {
     document.getElementById("rp-mode-and").classList.toggle("on", m === "and");
     document.getElementById("rp-mode-or").classList.toggle("on", m === "or");
     _rpSave("age_ratio_mode", m);
+}
+function _rpSaveEnabled(on) {
+    _rpDirty.add("rp-enabled");
+    const b = document.getElementById("rp-body-drain");
+    if (b) b.classList.toggle("off", !on);
+    _rpSave("enabled", on);
+}
+function _rpSaveAR(on) {
+    _rpDirty.add("rp-ar-enabled");
+    const b = document.getElementById("rp-body-ar");
+    if (b) b.classList.toggle("off", !on);
+    _rpSave("age_ratio_enabled", on);
 }
 function _rpSetAction(a) {
     document.getElementById("rp-act-delete").classList.toggle("on", a === "delete");

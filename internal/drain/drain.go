@@ -121,6 +121,7 @@ func (d *RaceDrain) GetStatus() map[string]interface{} {
 		"add_block_enabled": d.cfg.AddBlockEnabled,
 		"reserve_free_gb":   d.cfg.ReserveFreeGB,
 		"age_ratio_action":  d.cfg.AgeRatioAction,
+		"age_ratio_enabled": d.cfg.AgeRatioEnabled,
 		"last_drain":        lastDrain,
 		"stats":             statsCopy,
 	}
@@ -318,6 +319,9 @@ func toInt64Val(v interface{}) int64 {
 // delete race torrents that are old enough and/or seeded enough. Both criteria
 // off (0) = no-op. The min-age floor still protects torrents still racing.
 func (d *RaceDrain) evictByAgeRatio() {
+	if !d.cfg.AgeRatioEnabled {
+		return
+	}
 	ageEnabled := d.cfg.MaxAgeHours > 0
 	ratioEnabled := d.cfg.MinRatio > 0
 	if !ageEnabled && !ratioEnabled {

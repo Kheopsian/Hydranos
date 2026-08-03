@@ -176,31 +176,34 @@
                 <span>Grabbed: <strong id="race-session-grabbed">0</strong></span>
                 <span>Avg Share: <strong id="race-avg-share">—</strong></span>
             </div>
-            <div class="race-policy" id="race-policy">
-                <div class="rp-line">
-                    <div class="rp-gauge"><div class="rp-fill" id="rp-fill"></div><div class="rp-mark low" id="rp-mark-low"></div><div class="rp-mark" id="rp-mark-high"></div></div>
-                    <div class="rp-disk"><b id="rp-disk-pct">—</b> · <span id="rp-disk-free">—</span> free</div>
-                    <div class="rp-sep"></div>
-                    <label class="rp-field"><span class="rp-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSave('enabled', this.checked)"><span class="rp-slider"></span></span> Auto-drain</label>
-                    <div class="rp-field">drain <input type="number" id="rp-high" min="1" max="100" onchange="_rpSave('high_watermark_pct', parseInt(this.value))">&rarr;<input type="number" id="rp-low" min="1" max="100" onchange="_rpSave('low_watermark_pct', parseInt(this.value))"> %</div>
-                    <div class="rp-field">keep <input type="number" id="rp-minage" min="0" onchange="_rpSave('min_age_minutes', parseInt(this.value))"> min</div>
-                    <div class="rp-field rp-muted">check <input type="number" id="rp-interval" min="5" onchange="_rpSave('check_interval_seconds', parseInt(this.value))"> s</div>
-                    <div class="rp-spacer"></div>
-                    <button class="rp-btn ghost" id="rp-apply" style="display:none" onclick="_rpRestart()">Apply &amp; restart</button>
-                    <button class="rp-btn" onclick="_rpDrainNow(this)">Drain now</button>
-                    <button class="rp-btn ghost" onclick="_rpToggleHist()">History</button>
+            <div class="rp2" id="race-policy">
+                <div class="rp2-row">
+                    <div class="rp2-gauge"><div class="rp2-fill" id="rp-fill"></div><div class="rp2-mark low" id="rp-mark-low"></div><div class="rp2-mark" id="rp-mark-high"></div></div>
+                    <div class="rp2-disk"><b id="rp-disk-pct">—</b> used · <span id="rp-disk-free">—</span> free</div>
+                    <div class="rp2-spacer"></div>
+                    <button class="rp2-btn ghost" id="rp-apply" style="display:none" onclick="_rpRestart()">Apply &amp; restart</button>
+                    <button class="rp2-btn" onclick="_rpDrainNow(this)">Drain now</button>
+                    <button class="rp2-btn ghost" onclick="_rpToggleHist()">History</button>
                 </div>
-                <div class="rp-line rp-line2">
-                    <span class="rp-cap">On age/ratio match:</span>
-                    <div class="rp-field rp-seg"><button type="button" id="rp-act-delete" class="on" onclick="_rpSetAction('delete')">Delete</button><button type="button" id="rp-act-hoard" onclick="_rpSetAction('hoard')">Move&nbsp;&rarr;&nbsp;hoard</button></div>
-                    <div class="rp-field">older than <input type="number" id="rp-maxage" min="0" onchange="_rpSave('max_age_hours', parseInt(this.value)||0)"> h</div>
-                    <div class="rp-field rp-seg"><button type="button" id="rp-mode-and" class="on" onclick="_rpSetMode('and')">AND</button><button type="button" id="rp-mode-or" onclick="_rpSetMode('or')">OR</button></div>
-                    <div class="rp-field">ratio &ge; <input type="number" id="rp-minratio" min="0" step="0.1" onchange="_rpSave('min_ratio', parseFloat(this.value)||0)"></div>
-                    <div class="rp-sep"></div>
-                    <label class="rp-field"><span class="rp-sw"><input type="checkbox" id="rp-block" onchange="_rpSave('add_block_enabled', this.checked)"><span class="rp-slider"></span></span> Block add when full</label>
-                    <div class="rp-field rp-muted">reserve <input type="number" id="rp-reserve" min="0" onchange="_rpSave('reserve_free_gb', parseInt(this.value)||0)"> GB</div>
+                <div class="rp2-row">
+                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSaveEnabled(this.checked)"><span class="rp2-sl"></span></label>Emergency drain<span class="rp2-info">i<span class="rp2-tip">Every <b>check</b>s Hydra looks at the /race disk. Above the <b>start</b> mark it deletes the <b>oldest</b> torrents (never younger than the floor) until usage drops to <b>down&nbsp;to</b>. The data is erased &mdash; this is the safety valve, not graduation.</span></span></div>
+                    <div class="rp2-body" id="rp-body-drain">
+                        <div class="rp2-f">start <input type="number" id="rp-high" min="1" max="100" onchange="_rpSave('high_watermark_pct', parseInt(this.value))">%</div>
+                        <div class="rp2-f">down to <input type="number" id="rp-low" min="1" max="100" onchange="_rpSave('low_watermark_pct', parseInt(this.value))">%</div>
+                        <div class="rp2-f">keep <input type="number" id="rp-minage" min="0" onchange="_rpSave('min_age_minutes', parseInt(this.value))">min</div>
+                        <div class="rp2-f dim">check <input type="number" id="rp-interval" min="5" onchange="_rpSave('check_interval_seconds', parseInt(this.value))">s</div>
+                    </div>
                 </div>
-                <div class="rp-hist" id="rp-hist" style="display:none"></div>
+                <div class="rp2-row">
+                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-ar-enabled" onchange="_rpSaveAR(this.checked)"><span class="rp2-sl"></span></label>Handle old races<span class="rp2-info">i<span class="rp2-tip">Independent of disk pressure. A race matching the age/ratio rule (<b>AND</b>/<b>OR</b>) is handled by the chosen <b>action</b>: <b>Delete</b> erases it, or <b>Move&nbsp;&rarr;&nbsp;hoard</b> graduates it &mdash; copied to its linked hoard category on ZFS, kept seeding, removed from the NVMe. No category link &rarr; skipped, never deleted.</span></span></div>
+                    <div class="rp2-body" id="rp-body-ar">
+                        <div class="rp2-f">older <input type="number" id="rp-maxage" min="0" onchange="_rpSave('max_age_hours', parseInt(this.value)||0)">h</div>
+                        <div class="rp2-f rp2-seg"><button type="button" id="rp-mode-and" class="on" onclick="_rpSetMode('and')">AND</button><button type="button" id="rp-mode-or" onclick="_rpSetMode('or')">OR</button></div>
+                        <div class="rp2-f">ratio &ge; <input type="number" id="rp-minratio" min="0" step="0.1" onchange="_rpSave('min_ratio', parseFloat(this.value)||0)"></div>
+                        <div class="rp2-f rp2-seg act"><button type="button" id="rp-act-delete" class="on" onclick="_rpSetAction('delete')">Delete</button><button type="button" id="rp-act-hoard" onclick="_rpSetAction('hoard')">Move&nbsp;&rarr;&nbsp;hoard</button></div>
+                    </div>
+                </div>
+                <div class="rp2-hist" id="rp-hist" style="display:none"></div>
             </div>
             <table id="race-table">
                 <thead>
@@ -1006,6 +1009,6 @@
         <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
     </div>
 
-    <script src="/static/app.js?v=1.3.40"></script>
+    <script src="/static/app.js?v=1.3.41"></script>
 </body>
 </html>
