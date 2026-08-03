@@ -195,7 +195,7 @@
                     </div>
                 </div>
                 <div class="rp2-row">
-                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-ar-enabled" onchange="_rpSaveAR(this.checked)"><span class="rp2-sl"></span></label>Handle old races<span class="rp2-info">i<span class="rp2-tip">Independent of disk pressure. A race matching the age/ratio rule (<b>AND</b>/<b>OR</b>) is handled by the chosen <b>action</b>: <b>Delete</b> erases it, or <b>Move&nbsp;&rarr;&nbsp;hoard</b> graduates it &mdash; copied to its linked hoard category on ZFS, kept seeding, removed from the NVMe. No category link &rarr; skipped, never deleted.</span></span></div>
+                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-ar-enabled" onchange="_rpSaveAR(this.checked)"><span class="rp2-sl"></span></label>Handle old races<span class="rp2-info">i<span class="rp2-tip">Independent of disk pressure. A race matching the age/ratio rule (<b>AND</b>/<b>OR</b>) is handled by the chosen <b>action</b>: <b>Delete</b> erases it, or <b>Move&nbsp;&rarr;&nbsp;hoard</b> graduates it &mdash; copied to its linked hoard category's storage, kept seeding, removed from the race disk. No category link &rarr; skipped, never deleted.</span></span></div>
                     <div class="rp2-body" id="rp-body-ar">
                         <div class="rp2-f">older <input type="number" id="rp-maxage" min="0" onchange="_rpSave('max_age_hours', parseInt(this.value)||0)">h</div>
                         <div class="rp2-f rp2-seg"><button type="button" id="rp-mode-and" class="on" onclick="_rpSetMode('and')">AND</button><button type="button" id="rp-mode-or" onclick="_rpSetMode('or')">OR</button></div>
@@ -1011,6 +1011,6 @@
         <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
     </div>
 
-    <script src="/static/app.js?v=1.3.44"></script>
+    <script src="/static/app.js?v=1.3.45"></script>
 </body>
 </html>
