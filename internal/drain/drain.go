@@ -171,6 +171,10 @@ func (d *RaceDrain) doCheck() map[string]interface{} {
 
 	d.evictByAgeRatio()
 
+	if !d.cfg.Enabled {
+		return nil
+	}
+
 	used, total, pct := d.getDiskUsage()
 
 	if pct < float64(d.cfg.HighWatermarkPct) {

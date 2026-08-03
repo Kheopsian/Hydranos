@@ -3014,6 +3014,7 @@ async function loadRacePolicy() {
         const _bar = document.getElementById("rp-body-ar");
         if (_bar) _bar.classList.toggle("off", !st.age_ratio_enabled);
     }
+    _rpUpdateDrainBtn();
     const _mode = (st.age_ratio_mode === "or") ? "or" : "and";
     const _ea = document.getElementById("rp-mode-and"), _eo = document.getElementById("rp-mode-or");
     if (_ea && _eo && !_rpDirty.has("__mode__")) { _ea.classList.toggle("on", _mode === "and"); _eo.classList.toggle("on", _mode === "or"); }
@@ -3030,12 +3031,24 @@ function _rpSaveEnabled(on) {
     _rpDirty.add("rp-enabled");
     const b = document.getElementById("rp-body-drain");
     if (b) b.classList.toggle("off", !on);
+    _rpUpdateDrainBtn();
     _rpSave("enabled", on);
+}
+// Drain now only does something when a policy is on; grey it out otherwise.
+function _rpUpdateDrainBtn() {
+    const b = document.getElementById("rp-drain-now");
+    if (!b) return;
+    const en = document.getElementById("rp-enabled");
+    const ar = document.getElementById("rp-ar-enabled");
+    const any = (en && en.checked) || (ar && ar.checked);
+    b.disabled = !any;
+    b.title = any ? "" : "Enable a policy first";
 }
 function _rpSaveAR(on) {
     _rpDirty.add("rp-ar-enabled");
     const b = document.getElementById("rp-body-ar");
     if (b) b.classList.toggle("off", !on);
+    _rpUpdateDrainBtn();
     _rpSave("age_ratio_enabled", on);
 }
 function _rpSetAction(a) {
