@@ -1562,6 +1562,7 @@ func (s *Server) handleCategoryUpdate(c *gin.Context) {
 			if update.Strategy != "" {
 				cats[i].Strategy = update.Strategy
 			}
+			cats[i].GraduateTo = update.GraduateTo
 			found = true
 			break
 		}
