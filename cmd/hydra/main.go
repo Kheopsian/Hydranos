@@ -526,7 +526,8 @@ func main() {
 		cfg.RaceDrain,
 		&raceDrainAdapter{engine: raceEngine},
 	)
-	raceDrain.SetGraduator(&graduator{race: raceEngine, hoard: hoardEngine, dataDir: cfg.Daemon.DataDir})
+	gradr := &graduator{race: raceEngine, hoard: hoardEngine, dataDir: cfg.Daemon.DataDir, active: map[string]*gradProgress{}}
+	raceDrain.SetGraduator(gradr)
 	benchDBPath := filepath.Join(cfg.Daemon.DataDir, "bench.db")
 	benchDB := bench.NewBenchDB(benchDBPath)
 	if err := benchDB.Open(); err != nil {
@@ -596,6 +597,7 @@ func main() {
 	}
 	apiServer.LoadPersistedAgents()
 	apiServer.SetRaceDrain(raceDrain)
+	apiServer.SetGraduationReporter(gradr)
 	apiServer.SetArrCleanup(arrCleanup)
 	apiServer.SetBenchDB(&benchAPIAdapter{db: benchDB})
 	apiServer.SetSaveStateCallback(func() {
@@ -1707,10 +1709,49 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 // Graduation: move a race torrent to the hoard engine via the category link.
 // ---------------------------------------------------------------------------
 
+type gradProgress struct {
+	Name    string
+	Copied  int64 // atomic
+	Total   int64
+	Started int64
+}
+
 type graduator struct {
 	race    *engine.RaceEngine
 	hoard   *engine.HoardEngine
 	dataDir string
+	mu      sync.Mutex
+	active  map[string]*gradProgress
+}
+
+// GraduationsSnapshot lists the graduations currently copying (for the UI).
+func (g *graduator) GraduationsSnapshot() []map[string]interface{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := []map[string]interface{}{}
+	for ih, p := range g.active {
+		copied := atomic.LoadInt64(&p.Copied)
+		pct := 0.0
+		if p.Total > 0 {
+			pct = float64(copied) / float64(p.Total) * 100
+		}
+		out = append(out, map[string]interface{}{
+			"info_hash": ih, "name": p.Name, "copied": copied,
+			"total": p.Total, "pct": pct, "started": p.Started,
+		})
+	}
+	return out
+}
+
+type countingWriter struct {
+	w io.Writer
+	n *int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	m, err := c.w.Write(p)
+	atomic.AddInt64(c.n, int64(m))
+	return m, err
 }
 
 type gradCat struct {
@@ -1746,7 +1787,7 @@ func treeSize(p string) (int64, error) {
 	return total, err
 }
 
-func copyFile(src, dst string) error {
+func copyFile(src, dst string, counter *int64) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -1759,7 +1800,11 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	var w io.Writer = out
+	if counter != nil {
+		w = &countingWriter{w: out, n: counter}
+	}
+	if _, err := io.Copy(w, in); err != nil {
 		out.Close()
 		return err
 	}
@@ -1770,13 +1815,13 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-func copyPath(src, dst string) error {
+func copyPath(src, dst string, counter *int64) error {
 	info, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() {
-		return copyFile(src, dst)
+		return copyFile(src, dst, counter)
 	}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return err
@@ -1786,7 +1831,7 @@ func copyPath(src, dst string) error {
 		return err
 	}
 	for _, e := range entries {
-		if err := copyPath(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+		if err := copyPath(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), counter); err != nil {
 			return err
 		}
 	}
@@ -1824,7 +1869,21 @@ func (g *graduator) Graduate(infoHash string) (bool, error) {
 	if _, err := os.Stat(dst); err == nil {
 		return false, fmt.Errorf("destination already exists: %s", dst)
 	}
-	if err := copyPath(src, dst); err != nil {
+	g.mu.Lock()
+	if _, busy := g.active[infoHash]; busy {
+		g.mu.Unlock()
+		return false, nil // already graduating this one
+	}
+	total, _ := treeSize(src)
+	prog := &gradProgress{Name: name, Total: total, Started: time.Now().Unix()}
+	g.active[infoHash] = prog
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		delete(g.active, infoHash)
+		g.mu.Unlock()
+	}()
+	if err := copyPath(src, dst, &prog.Copied); err != nil {
 		os.RemoveAll(dst)
 		return false, fmt.Errorf("copy %s -> %s: %w", src, dst, err)
 	}
