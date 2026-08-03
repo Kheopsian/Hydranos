@@ -3008,19 +3008,26 @@ async function loadRacePolicy() {
     _rpSet("rp-reserve", st.reserve_free_gb);
     const _mode = (st.age_ratio_mode === "or") ? "or" : "and";
     const _ea = document.getElementById("rp-mode-and"), _eo = document.getElementById("rp-mode-or");
-    if (_ea && _eo) { _ea.classList.toggle("on", _mode === "and"); _eo.classList.toggle("on", _mode === "or"); }
+    if (_ea && _eo && !_rpDirty.has("__mode__")) { _ea.classList.toggle("on", _mode === "and"); _eo.classList.toggle("on", _mode === "or"); }
 }
 function _rpSetMode(m) {
     document.getElementById("rp-mode-and").classList.toggle("on", m === "and");
     document.getElementById("rp-mode-or").classList.toggle("on", m === "or");
     _rpSave("age_ratio_mode", m);
 }
+let _rpDirty = new Set();
 function _rpSet(id, val, isCheck) {
     const el = document.getElementById(id);
-    if (!el || el === document.activeElement) return; // never clobber what the user is typing
+    // Race settings are restart-required, so drain/status still reports the OLD
+    // value until a restart. Once the user edits a field, stop the poll from
+    // clobbering their pending choice (until page reload).
+    if (!el || el === document.activeElement || _rpDirty.has(id)) return;
     if (isCheck) el.checked = !!val; else el.value = val;
 }
 async function _rpSave(key, value) {
+    const _idmap = { high_watermark_pct: "rp-high", low_watermark_pct: "rp-low", min_age_minutes: "rp-minage", check_interval_seconds: "rp-interval", enabled: "rp-enabled", max_age_hours: "rp-maxage", min_ratio: "rp-minratio", add_block_enabled: "rp-block", reserve_free_gb: "rp-reserve" };
+    if (_idmap[key]) _rpDirty.add(_idmap[key]);
+    if (key === "age_ratio_mode") _rpDirty.add("__mode__");
     try {
         await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }) });
