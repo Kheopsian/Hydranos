@@ -294,12 +294,13 @@ func (s *Server) absorbTorrentStats(infoHash string) {
 // ---------------------------------------------------------------------------
 
 type category struct {
-	Name      string            `json:"name"`
-	SavePath  string            `json:"save_path"`
-	Mode      string            `json:"mode"`
-	Agents    map[string]string `json:"agents,omitempty"`    // per-agent save_path override; empty = flat SavePath (local agent)
-	Placement []string          `json:"placement,omitempty"` // agent names hosting new torrents; empty = ["local"]
-	Strategy  string            `json:"strategy,omitempty"`  // pick among Placement: all|least_torrents|least_load (default all)
+	Name       string            `json:"name"`
+	SavePath   string            `json:"save_path"`
+	Mode       string            `json:"mode"`
+	GraduateTo string            `json:"graduate_to,omitempty"` // race only: target hoard category for graduation
+	Agents     map[string]string `json:"agents,omitempty"`      // per-agent save_path override; empty = flat SavePath (local agent)
+	Placement  []string          `json:"placement,omitempty"`   // agent names hosting new torrents; empty = ["local"]
+	Strategy   string            `json:"strategy,omitempty"`    // pick among Placement: all|least_torrents|least_load (default all)
 }
 
 // SavePathFor returns the save_path for the given agent, falling back to the flat
@@ -313,11 +314,12 @@ func (cat category) SavePathFor(agent string) string {
 
 // categoryJSON is the on-disk format: {"save_path": "...", "mode": "..."}.
 type categoryJSON struct {
-	SavePath  string            `json:"save_path"`
-	Mode      string            `json:"mode"`
-	Agents    map[string]string `json:"agents,omitempty"`
-	Placement []string          `json:"placement,omitempty"`
-	Strategy  string            `json:"strategy,omitempty"`
+	SavePath   string            `json:"save_path"`
+	Mode       string            `json:"mode"`
+	GraduateTo string            `json:"graduate_to,omitempty"`
+	Agents     map[string]string `json:"agents,omitempty"`
+	Placement  []string          `json:"placement,omitempty"`
+	Strategy   string            `json:"strategy,omitempty"`
 }
 
 func categoriesFile(dataDir string) string {
@@ -336,7 +338,7 @@ func loadCategories(dataDir string) []category {
 	}
 	cats := make([]category, 0, len(catMap))
 	for name, cj := range catMap {
-		cats = append(cats, category{Name: name, SavePath: cj.SavePath, Mode: cj.Mode, Agents: cj.Agents, Placement: cj.Placement, Strategy: cj.Strategy})
+		cats = append(cats, category{Name: name, SavePath: cj.SavePath, Mode: cj.Mode, GraduateTo: cj.GraduateTo, Agents: cj.Agents, Placement: cj.Placement, Strategy: cj.Strategy})
 	}
 	sort.Slice(cats, func(i, j int) bool { return cats[i].Name < cats[j].Name })
 	return cats
@@ -345,7 +347,7 @@ func loadCategories(dataDir string) []category {
 func saveCategories(dataDir string, cats []category) error {
 	catMap := make(map[string]categoryJSON, len(cats))
 	for _, cat := range cats {
-		catMap[cat.Name] = categoryJSON{SavePath: cat.SavePath, Mode: cat.Mode, Agents: cat.Agents, Placement: cat.Placement, Strategy: cat.Strategy}
+		catMap[cat.Name] = categoryJSON{SavePath: cat.SavePath, Mode: cat.Mode, GraduateTo: cat.GraduateTo, Agents: cat.Agents, Placement: cat.Placement, Strategy: cat.Strategy}
 	}
 	data, err := json.MarshalIndent(catMap, "", "  ")
 	if err != nil {
