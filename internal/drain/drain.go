@@ -169,16 +169,20 @@ func (d *RaceDrain) doCheck() map[string]interface{} {
 	d.stats["checks"] = d.stats["checks"].(int) + 1
 	d.mu.Unlock()
 
-	d.evictByAgeRatio()
+	// The age/ratio policy runs on its own, independently of the emergency
+	// drain. Keep its outcome: it is the only thing that happens when the
+	// emergency drain is off, and returning nil there made "Drain now" answer
+	// "no_drain_needed" even right after it had graduated torrents.
+	ageRatio := d.evictByAgeRatio()
 
 	if !d.cfg.Enabled {
-		return nil
+		return ageRatio
 	}
 
 	used, total, pct := d.getDiskUsage()
 
 	if pct < float64(d.cfg.HighWatermarkPct) {
-		return nil
+		return ageRatio
 	}
 
 	slog.Warn("drain: disk usage above high watermark, starting drain",
@@ -322,14 +326,23 @@ func toInt64Val(v interface{}) int64 {
 // evictByAgeRatio is the second drain trigger, independent of disk pressure:
 // delete race torrents that are old enough and/or seeded enough. Both criteria
 // off (0) = no-op. The min-age floor still protects torrents still racing.
-func (d *RaceDrain) evictByAgeRatio() {
+// evictByAgeRatio applies the age/ratio policy and returns what it did, or nil
+// when it did nothing (policy off, no threshold set, or nothing matched). The
+// caller reports this to the user, so "did nothing" must stay distinguishable
+// from "moved something".
+func (d *RaceDrain) evictByAgeRatio() map[string]interface{} {
 	if !d.cfg.AgeRatioEnabled {
-		return
+		return nil
 	}
 	ageEnabled := d.cfg.MaxAgeHours > 0
 	ratioEnabled := d.cfg.MinRatio > 0
 	if !ageEnabled && !ratioEnabled {
-		return
+		// Policy armed but with no trigger: max_age_hours and min_ratio are
+		// both 0, so nothing can ever match. Say so rather than staying mute.
+		return map[string]interface{}{
+			"status": "no_threshold",
+			"reason": "age/ratio",
+		}
 	}
 	torrents := d.race.GetAllStatus()
 	now := float64(time.Now().Unix())
@@ -339,6 +352,7 @@ func (d *RaceDrain) evictByAgeRatio() {
 
 	var removed []map[string]interface{}
 	var freed int64
+	matched, noLink, failed := 0, 0, 0
 	for _, t := range torrents {
 		added := toFloat64Val(t["added_time"])
 		if added <= 0 {
@@ -366,6 +380,7 @@ func (d *RaceDrain) evictByAgeRatio() {
 		if !evict {
 			continue
 		}
+		matched++
 		ih, _ := t["info_hash"].(string)
 		size := toInt64Val(t["total_size"])
 		name, _ := t["name"].(string)
@@ -373,13 +388,16 @@ func (d *RaceDrain) evictByAgeRatio() {
 			ok, gerr := d.grad.Graduate(ih)
 			if gerr != nil {
 				slog.Warn("drain: graduate failed", "name", name, "error", gerr)
+				failed++
 				continue
 			}
 			if !ok {
-				continue // no category link -> leave the torrent on race
+				noLink++ // no category link -> leave the torrent on race
+				continue
 			}
 		} else {
 			if err := d.race.RemoveTorrent(ih, true); err != nil {
+				failed++
 				continue
 			}
 		}
@@ -387,22 +405,34 @@ func (d *RaceDrain) evictByAgeRatio() {
 		removed = append(removed, map[string]interface{}{"name": name, "size": size})
 	}
 	if len(removed) == 0 {
-		return
+		// Nothing moved. Separate "no torrent met the thresholds" from "some
+		// did but could not graduate" — the second is a configuration problem
+		// (a race category with no hoard category linked) and must not read as
+		// a quiet success.
+		return map[string]interface{}{
+			"status": "no_match", "reason": "age/ratio",
+			"matched": matched, "no_category_link": noLink, "failed": failed,
+		}
+	}
+	entry := map[string]interface{}{
+		"timestamp": time.Now().Unix(), "reason": "age/ratio",
+		"action": d.cfg.AgeRatioAction,
+		"freed":  freed, "removed_count": len(removed), "removed": removed,
+		"matched": matched, "no_category_link": noLink, "failed": failed,
 	}
 	d.mu.Lock()
 	d.stats["torrents_removed"] = d.stats["torrents_removed"].(int) + len(removed)
 	if bf, ok := d.stats["bytes_freed"].(int64); ok {
 		d.stats["bytes_freed"] = bf + freed
 	}
-	d.history = append(d.history, map[string]interface{}{
-		"timestamp": time.Now().Unix(), "reason": "age/ratio",
-		"freed": freed, "removed_count": len(removed), "removed": removed,
-	})
+	d.history = append(d.history, entry)
 	if len(d.history) > 20 {
 		d.history = d.history[len(d.history)-20:]
 	}
 	d.mu.Unlock()
-	slog.Info("drain: age/ratio eviction", "removed", len(removed), "freed_gb", float64(freed)/1e9)
+	slog.Info("drain: age/ratio eviction", "action", d.cfg.AgeRatioAction,
+		"removed", len(removed), "freed_gb", float64(freed)/1e9)
+	return entry
 }
 
 // Graduator moves a race torrent to the hoard engine (data + registration).

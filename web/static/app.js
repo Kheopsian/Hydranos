@@ -3049,15 +3049,23 @@ function _rpSaveEnabled(on) {
     _rpUpdateDrainBtn();
     _rpSave("enabled", on);
 }
-// Drain now only does something when a policy is on; grey it out otherwise.
+// Drain now only does something when a policy is on AND armed. The age/ratio
+// policy with max_age_hours and min_ratio both at 0 can never match anything,
+// so a button that looks enabled there is a lie — say why instead.
 function _rpUpdateDrainBtn() {
     const b = document.getElementById("rp-drain-now");
     if (!b) return;
+    const num = id => { const e = document.getElementById(id); return e ? parseFloat(e.value) || 0 : 0; };
     const en = document.getElementById("rp-enabled");
     const ar = document.getElementById("rp-ar-enabled");
-    const any = (en && en.checked) || (ar && ar.checked);
+    const emergencyOn = !!(en && en.checked);
+    const arOn = !!(ar && ar.checked);
+    const arArmed = arOn && (num("rp-maxage") > 0 || num("rp-minratio") > 0);
+    const any = emergencyOn || arArmed;
     b.disabled = !any;
-    b.title = any ? "" : "Enable a policy first";
+    if (any) b.title = "";
+    else if (arOn) b.title = "Set a max age or a min ratio first — the policy has no trigger";
+    else b.title = "Enable a policy first";
 }
 function _rpSaveAR(on) {
     _rpDirty.add("rp-ar-enabled");
@@ -3090,6 +3098,9 @@ async function _rpSave(key, value) {
             body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }) });
         document.getElementById("rp-apply").style.display = "";
     } catch (e) { alert("Save failed: " + e.message); }
+    // Thresholds decide whether the age/ratio policy can fire at all, so the
+    // Drain now button has to be re-evaluated after any field edit too.
+    _rpUpdateDrainBtn();
 }
 async function _rpRestart() {
     if (!confirm("Restart Hydra now to apply the race drain settings?")) return;
@@ -3097,9 +3108,44 @@ async function _rpRestart() {
 }
 async function _rpDrainNow(btn) {
     btn.disabled = true; const t = btn.textContent; btn.textContent = "Draining…";
-    try { await api("/api/drain/now", { method: "POST" }); } catch (e) {}
+    let msg;
+    try {
+        const r = await api("/api/drain/now", { method: "POST" });
+        msg = _rpDrainMsg(r);
+    } catch (e) {
+        msg = "Failed: " + (e && e.message ? e.message : "unknown error");
+    }
     btn.disabled = false; btn.textContent = t;
+    _rpUpdateDrainBtn();
+    _rpDrainResult(msg);
     loadRacePolicy();
+}
+// Turn a /api/drain/now response into one line. A drain that legitimately did
+// nothing must still say so — reporting nothing is what made the button look
+// dead even when it had run.
+function _rpDrainMsg(r) {
+    if (!r || typeof r !== "object") return "Nothing to do.";
+    if (r.status === "no_threshold")
+        return "Policy is on but has no trigger: set a max age or a min ratio.";
+    if (r.status === "no_match") {
+        if (r.no_category_link)
+            return `${r.no_category_link} torrent(s) matched but their category has no hoard category linked — nothing moved.`;
+        if (r.failed) return `${r.failed} torrent(s) matched but failed — see the logs.`;
+        return "Nothing matched the thresholds.";
+    }
+    if (r.status === "no_drain_needed") return "Nothing to do: disk is below the start mark.";
+    const n = r.removed_count || 0;
+    if (!n) return "Nothing to do.";
+    const verb = r.action === "hoard" ? "graduated" : "removed";
+    let s = `${n} torrent(s) ${verb}, ${formatBytes(r.freed || 0)}.`;
+    if (r.no_category_link) s += ` ${r.no_category_link} skipped (no linked category).`;
+    return s;
+}
+function _rpDrainResult(msg) {
+    const el = document.getElementById("rp-drain-result");
+    if (!el) { console.log("[drain]", msg); return; }
+    el.textContent = msg;
+    el.style.display = "";
 }
 async function _rpToggleHist() {
     const box = document.getElementById("rp-hist");
