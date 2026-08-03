@@ -2104,7 +2104,7 @@ async function updateCategories() {
 
         // Update table
         if (!cats || cats.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty">No categories</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="empty">No categories</td></tr>';
         } else {
             tbody.innerHTML = cats.map(cat => `<tr>
                 <td><strong>${esc(incoCat(cat.name))}</strong></td>
@@ -2112,6 +2112,7 @@ async function updateCategories() {
                 <td class="mono" style="font-size:12px">${esc(incoPath(cat.save_path))}</td>
                 <td>${((cat.placement && cat.placement.length) ? cat.placement : ["local"]).map(esc).join(", ")}</td>
                 <td>${esc(cat.strategy || "all")}</td>
+                <td>${cat.graduate_to ? '\u2192 ' + esc(incoCat(cat.graduate_to)) : '<span style="color:var(--text-muted)">\u2014</span>'}</td>
                 <td>
                     <button class="btn-small" onclick="editCategory('${cat.name}')">Edit</button>
                     <button class="btn-small btn-danger" onclick="deleteCategory('${cat.name}')">Delete</button>
