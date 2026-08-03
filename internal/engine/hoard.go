@@ -1845,6 +1845,37 @@ func (e *HoardEngine) SetCategoryLabel(infoHash, category string) error {
 	return nil
 }
 
+// ClearCategoryLabel drops the given category label from every torrent that
+// carries it (no file move) and returns how many were cleared. Used when a
+// category is deleted so torrents do not keep a dangling label; they become
+// uncategorized, like qBittorrent's delete-category behaviour. Persisted with
+// the next store snapshot (mutates e.torrents, which the snapshot reads).
+func (e *HoardEngine) ClearCategoryLabel(category string) int {
+	if category == "" {
+		return 0
+	}
+	e.mu.Lock()
+	hits := make([]string, 0)
+	for ih, info := range e.torrents {
+		if info.Category == category {
+			info.Category = ""
+			hits = append(hits, ih)
+		}
+	}
+	e.mu.Unlock()
+	if len(hits) == 0 {
+		return 0
+	}
+	e.cachedStatsMu.Lock()
+	for _, ih := range hits {
+		if st, ok := e.cachedStats[ih]; ok {
+			st.Category = ""
+		}
+	}
+	e.cachedStatsMu.Unlock()
+	return len(hits)
+}
+
 // ---------------------------------------------------------------------------
 // Tags — qBittorrent-style multi-labels. Go-side only (Typhon never sees them),
 // mirrored into cachedStats for immediate effect and persisted via tags.json.

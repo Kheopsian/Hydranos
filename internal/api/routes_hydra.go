@@ -1563,7 +1563,14 @@ func (s *Server) handleCategoryDelete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	// Deleting a category must not leave torrents pointing at a dangling label:
+	// clear it from every hoard torrent that carried it (no file move), like
+	// qBittorrent (the torrents become uncategorized).
+	cleared := 0
+	if s.hoardEngine != nil {
+		cleared = s.hoardEngine.ClearCategoryLabel(name)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "cleared": cleared})
 }
 
 // ===========================================================================

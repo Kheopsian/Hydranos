@@ -98,6 +98,7 @@ type HoardEngine interface {
 	VerifyTorrent(infoHash string) error
 	SetTorrentCategory(infoHash, newCategory, newSavePath string) error
 	SetCategoryLabel(infoHash, category string) error
+	ClearCategoryLabel(category string) int
 	GetTags(infoHash string) []string
 	GetAllTags() map[string][]string
 	SetTags(infoHash string, tags []string) error
