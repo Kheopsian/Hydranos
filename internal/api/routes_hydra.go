@@ -1847,7 +1847,7 @@ func (s *Server) handleVPNSpeedtestHistory(c *gin.Context) {
 func (s *Server) handleVPNSpeedtestRun(c *gin.Context) {
 	cfg := s.config.VpnSpeedtest
 	if !cfg.Enabled || cfg.Iperf3Server == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "iperf3_server non configuré dans [vpn_speedtest]"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "iperf3_server not configured in [vpn_speedtest]"})
 		return
 	}
 	result, err := runIperf3(cfg.Iperf3Server, cfg.Iperf3Port, cfg.DurationSecs)
