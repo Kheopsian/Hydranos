@@ -1504,6 +1504,9 @@ func (a *hoardAPIAdapter) SetContentFolder(infoHash string, cf *bool) {
 func (a *hoardAPIAdapter) SetCategoryLabel(infoHash, category string) error {
 	return a.engine.SetCategoryLabel(infoHash, category)
 }
+func (a *hoardAPIAdapter) ClearCategoryLabel(category string) int {
+	return a.engine.ClearCategoryLabel(category)
+}
 func (a *hoardAPIAdapter) GetTags(infoHash string) []string { return a.engine.GetTags(infoHash) }
 func (a *hoardAPIAdapter) GetAllTags() map[string][]string  { return a.engine.GetAllTags() }
 func (a *hoardAPIAdapter) SetTags(infoHash string, tags []string) error {

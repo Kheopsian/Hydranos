@@ -75,6 +75,7 @@ func (emptyHoardEngine) VerifyDownloading() int                          { retur
 func (emptyHoardEngine) VerifyTorrent(string) error                      { return errNoLocalEngine }
 func (emptyHoardEngine) SetTorrentCategory(string, string, string) error { return errNoLocalEngine }
 func (emptyHoardEngine) SetCategoryLabel(string, string) error           { return errNoLocalEngine }
+func (emptyHoardEngine) ClearCategoryLabel(string) int                   { return 0 }
 func (emptyHoardEngine) GetTags(string) []string                         { return nil }
 func (emptyHoardEngine) GetAllTags() map[string][]string                 { return nil }
 func (emptyHoardEngine) SetTags(string, []string) error                  { return errNoLocalEngine }
