@@ -92,6 +92,14 @@ type RaceDrainConfig struct {
 	LowWatermarkPct      int    `toml:"low_watermark_pct"`
 	RacePath             string `toml:"race_path"`
 	MinAgeMinutes        int    `toml:"min_age_minutes"`
+	// Age/ratio auto-eviction (second trigger, independent of disk pressure).
+	// Both 0 = disabled. AgeRatioMode is "and" (default) or "or".
+	MaxAgeHours  int     `toml:"max_age_hours"`
+	MinRatio     float64 `toml:"min_ratio"`
+	AgeRatioMode string  `toml:"age_ratio_mode"`
+	// API admission guard: reject race adds when the NVMe is (near) full.
+	AddBlockEnabled bool `toml:"add_block_enabled"`
+	ReserveFreeGB   int  `toml:"reserve_free_gb"`
 }
 
 // NotifyConfig — Discord webhook notification settings.
@@ -244,6 +252,11 @@ func DefaultConfig() *HydraConfig {
 			LowWatermarkPct:      85,
 			RacePath:             "/race",
 			MinAgeMinutes:        10,
+			MaxAgeHours:          0,
+			MinRatio:             0,
+			AgeRatioMode:         "and",
+			AddBlockEnabled:      true,
+			ReserveFreeGB:        0,
 		},
 	}
 }
@@ -261,6 +274,11 @@ var migrationKeys = []struct{ section, key, value string }{
 	{"race", "listen_interfaces", `""`},
 	{"hoard", "bind_interface", `""`},
 	{"hoard", "listen_interfaces", `""`},
+	{"race_drain", "max_age_hours", `0`},
+	{"race_drain", "min_ratio", `0.0`},
+	{"race_drain", "age_ratio_mode", `"and"`},
+	{"race_drain", "add_block_enabled", `true`},
+	{"race_drain", "reserve_free_gb", `0`},
 }
 
 // ensureConfigKeys appends any missing migrationKeys to the TOML file in place.

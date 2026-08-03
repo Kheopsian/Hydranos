@@ -2990,6 +2990,18 @@ async function loadRacePolicy() {
     _rpSet("rp-low", st.low_watermark);
     _rpSet("rp-minage", st.min_age_minutes);
     _rpSet("rp-interval", st.check_interval);
+    _rpSet("rp-maxage", st.max_age_hours);
+    _rpSet("rp-minratio", st.min_ratio);
+    _rpSet("rp-block", st.add_block_enabled, true);
+    _rpSet("rp-reserve", st.reserve_free_gb);
+    const _mode = (st.age_ratio_mode === "or") ? "or" : "and";
+    const _ea = document.getElementById("rp-mode-and"), _eo = document.getElementById("rp-mode-or");
+    if (_ea && _eo) { _ea.classList.toggle("on", _mode === "and"); _eo.classList.toggle("on", _mode === "or"); }
+}
+function _rpSetMode(m) {
+    document.getElementById("rp-mode-and").classList.toggle("on", m === "and");
+    document.getElementById("rp-mode-or").classList.toggle("on", m === "or");
+    _rpSave("age_ratio_mode", m);
 }
 function _rpSet(id, val, isCheck) {
     const el = document.getElementById(id);
