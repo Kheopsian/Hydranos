@@ -1367,9 +1367,11 @@ function renderHoardTable() {
 
     let filtered = _hoardAllTorrents;
     if (search) filtered = filtered.filter(t => (t.name || t.info_hash).toLowerCase().includes(search));
-    if (catFilter) filtered = filtered.filter(t => (t.category || "") === catFilter);
+    if (catFilter === "__none__") filtered = filtered.filter(t => !(t.category));
+    else if (catFilter) filtered = filtered.filter(t => (t.category || "") === catFilter);
     if (_hoardTrackerFilter) filtered = filtered.filter(t => (t.tracker_host || "") === _hoardTrackerFilter);
-    if (_hoardTagFilter) filtered = filtered.filter(t => (t.tags || []).includes(_hoardTagFilter));
+    if (_hoardTagFilter === "__none__") filtered = filtered.filter(t => !(t.tags && t.tags.length));
+    else if (_hoardTagFilter) filtered = filtered.filter(t => (t.tags || []).includes(_hoardTagFilter));
     if (stateFilter === "__active__") filtered = filtered.filter(t => t.state === "seeding" && t.upload_rate > 0);
     else if (stateFilter === "__tracker_err__") filtered = filtered.filter(t => t.tracker_error);
     else if (stateFilter === "__error__") filtered = filtered.filter(t => t.torrent_error);
@@ -1436,11 +1438,18 @@ function _renderHoardCounts() {
         if (c) catCounts[c] = (catCounts[c] || 0) + 1;
     });
     const cats = Object.keys(catCounts).sort();
+    const nUncat = _hoardAllTorrents.filter(t => !(t.category)).length;
     const container = document.getElementById("hoard-cat-chips");
     if (container) {
-        container.innerHTML = cats.map(c =>
+        let html = cats.map(c =>
             `<button class="chip chip-cat${c === _hoardCatFilter ? " active" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')">${esc(incoCat(c))} <span class="chip-count">${catCounts[c]}</span></button>`
         ).join("");
+        // Meta-filter: only meaningful when at least one real category exists and
+        // some torrents lack one (e.g. after a category was deleted).
+        if (cats.length > 0 && nUncat > 0) {
+            html = `<button class="chip chip-cat chip-none${_hoardCatFilter === "__none__" ? " active" : ""}" data-cat="__none__" style="font-style:italic;opacity:.85" onclick="setHoardCatFilter(this,'__none__')">Uncategorized <span class="chip-count">${nUncat}</span></button>` + html;
+        }
+        container.innerHTML = html;
     }
 
     const trkCounts = {};
@@ -1456,11 +1465,17 @@ function _renderHoardCounts() {
     const tagCounts = {};
     _hoardAllTorrents.forEach(t => { (t.tags || []).forEach(tg => { tagCounts[tg] = (tagCounts[tg] || 0) + 1; }); });
     const tagNames = Object.keys(tagCounts).sort();
+    const nUntagged = _hoardAllTorrents.filter(t => !(t.tags && t.tags.length)).length;
     const tagContainer = document.getElementById("hoard-tag-chips");
     if (tagContainer) {
-        tagContainer.innerHTML = tagNames.map(tg =>
+        let html = tagNames.map(tg =>
             `<button class="chip chip-tag${tg === _hoardTagFilter ? " active" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')">${esc(tg)} <span class="chip-count">${tagCounts[tg]}</span></button>`
         ).join("");
+        // Untagged meta-filter: only when tags are actually in use.
+        if (tagNames.length > 0 && nUntagged > 0) {
+            html = `<button class="chip chip-tag chip-none${_hoardTagFilter === "__none__" ? " active" : ""}" data-tag="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTagFilter(this,'__none__')">Untagged <span class="chip-count">${nUntagged}</span></button>` + html;
+        }
+        tagContainer.innerHTML = html;
     }
 
     document.querySelectorAll("#hoard-table thead th").forEach(h => {
