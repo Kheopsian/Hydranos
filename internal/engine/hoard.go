@@ -577,6 +577,7 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 
 	// Build save_path with torrent name subfolder.
 	multiFile := isMultiFileTorrent(torrentBytes)
+	savePathIsContentRoot := false
 	if savePath != "" {
 		if name := nameFromTorrentFile(torrentBytes); name != "" {
 			cleanName := name
@@ -589,13 +590,22 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 			if !seedMode && (multiFile || e.CreateTorrentFolder) && !strings.HasSuffix(savePath, cleanName) && !strings.HasSuffix(savePath, name) {
 				savePath = filepath.Join(savePath, cleanName)
 			}
+			base := filepath.Base(savePath)
+			savePathIsContentRoot = base == name || base == cleanName
 		}
 	}
 
-	// For multi-file torrents, libtorrent creates a subdir named after the torrent
-	// inside save_path. So save_path should be the PARENT directory.
+	// A multi-file torrent gets its own info.name subdir created by the engine
+	// inside the engine save_path, so the engine save_path must be the PARENT
+	// of the content root.
+	//
+	// Only strip a level when save_path really IS the content root (the join
+	// above just made it one, or the caller passed it that way). A seed-mode
+	// add — a cross-seed injection — passes the directory that *contains* the
+	// content root and skips the join, so stripping there points the engine one
+	// directory too high and it looks for the data where it does not exist.
 	engineSavePath := savePath
-	if multiFile && savePath != "" {
+	if multiFile && savePath != "" && savePathIsContentRoot {
 		engineSavePath = filepath.Dir(savePath)
 	}
 
@@ -628,6 +638,21 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 	e.mu.Lock()
 	e.torrents[infoHash] = info
 	e.mu.Unlock()
+
+	// Seed the path shape into the stats cache now. Both fields are otherwise
+	// only filled by the 60s refreshStats tick, and until then the qBit shim
+	// falls back to the Go save_path — which for a multi-file torrent is the
+	// content root, so `save_path + name` would double the release directory
+	// for any client polling in that window.
+	e.cachedStatsMu.Lock()
+	st, ok := e.cachedStats[infoHash]
+	if !ok {
+		st = &TorrentStats{InfoHash: infoHash}
+		e.cachedStats[infoHash] = st
+	}
+	st.MultiFile = multiFile
+	st.EngineSavePath = engineSavePath
+	e.cachedStatsMu.Unlock()
 
 	if !silent {
 		slog.Info("hoard: torrent added", "info_hash", infoHash[:minStr(len(infoHash), 16)])
@@ -1262,6 +1287,21 @@ func (e *HoardEngine) GetTorrentFiles(infoHash string) []string {
 		result[i] = f.Path
 	}
 	return result
+}
+
+// GetTorrentFileList returns the file list for a torrent as path/size pairs.
+// Paths are BEP-3 relative: relative to the info.name directory for a
+// multi-file torrent, and equal to info.name for a single-file one.
+func (e *HoardEngine) GetTorrentFileList(infoHash string) []map[string]interface{} {
+	files, err := e.client.GetFiles(infoHash)
+	if err != nil || len(files) == 0 {
+		return nil
+	}
+	out := make([]map[string]interface{}, 0, len(files))
+	for _, f := range files {
+		out = append(out, map[string]interface{}{"path": f.Path, "size": f.Size})
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

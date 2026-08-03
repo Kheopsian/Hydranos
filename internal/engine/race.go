@@ -411,6 +411,21 @@ func (e *RaceEngine) HasTorrent(infoHash string) bool {
 	return ok
 }
 
+// GetTorrentFileList returns the file list for a torrent as path/size pairs.
+// Paths are BEP-3 relative: relative to the info.name directory for a
+// multi-file torrent, and equal to info.name for a single-file one.
+func (e *RaceEngine) GetTorrentFileList(infoHash string) []map[string]interface{} {
+	files, err := e.client.GetFiles(infoHash)
+	if err != nil || len(files) == 0 {
+		return nil
+	}
+	out := make([]map[string]interface{}, 0, len(files))
+	for _, f := range files {
+		out = append(out, map[string]interface{}{"path": f.Path, "size": f.Size})
+	}
+	return out
+}
+
 func (e *RaceEngine) AddTrackerToTorrent(infoHash, url string) error {
 	// TODO: add set_trackers command to hydra-engine
 	return nil

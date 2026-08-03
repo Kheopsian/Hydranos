@@ -289,12 +289,10 @@ func (s *Server) qbitTorrentsProperties(c *gin.Context) {
 	}
 
 	var detail map[string]interface{}
-	hoardEngine := false
 	if s.raceEngine != nil && s.raceEngine.HasTorrent(hash) {
 		detail = s.raceEngine.GetTorrentDetail(hash)
 	} else if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
 		detail = s.hoardEngine.GetTorrentDetail(hash)
-		hoardEngine = true
 	}
 
 	if detail == nil {
@@ -302,14 +300,12 @@ func (s *Server) qbitTorrentsProperties(c *gin.Context) {
 		return
 	}
 
-	// In standard qBit, properties.save_path is the *download dir*
-	// (parent of the torrent's content). Hoard's Typhon-internal
-	// save_path is the content path itself (`<download_dir>/<wrapper>`),
-	// so trim the wrapper off here to match the qBit semantic that
-	// cross-seed expects when reconstructing on-disk paths.
-	savePath := getStr(detail, "save_path")
-	if hoardEngine {
-		savePath = filepath.Dir(savePath)
+	// properties.save_path is the directory the content root sits in —
+	// i.e. the engine save_path, same as torrents/info reports. See the
+	// path-semantics note in hydraToQbitTorrent.
+	savePath := getStr(detail, "engine_save_path")
+	if savePath == "" {
+		savePath = getStr(detail, "save_path")
 	}
 
 	// Map to qBit properties format
@@ -356,12 +352,13 @@ func (s *Server) qbitTorrentsFiles(c *gin.Context) {
 	}
 
 	var detail map[string]interface{}
-	hoardEngine := false
+	var engineFiles []map[string]interface{}
 	if s.raceEngine != nil && s.raceEngine.HasTorrent(hash) {
 		detail = s.raceEngine.GetTorrentDetail(hash)
+		engineFiles = s.raceEngine.GetTorrentFileList(hash)
 	} else if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
 		detail = s.hoardEngine.GetTorrentDetail(hash)
-		hoardEngine = true
+		engineFiles = s.hoardEngine.GetTorrentFileList(hash)
 	}
 
 	if detail == nil {
@@ -369,54 +366,46 @@ func (s *Server) qbitTorrentsFiles(c *gin.Context) {
 		return
 	}
 
-	// Hoard wraps every torrent in a release-named folder, so the
-	// Typhon-internal save_path = `<download_dir>/<release_folder>` and
-	// per-file paths are relative to that folder. Cross-seed reconstructs
-	// `save_path + files[i].name` directly (it bypasses the info.name
-	// folder in its single-file codepath), so prefix every file with the
-	// wrapper folder for hoard to land paths at
-	// `<download_dir>/<release_folder>/<file>` — what's actually on disk.
-	// Race uses a shared save_path with no per-torrent wrapper, so its
-	// files keep their bare relative names.
+	// Engine file paths are BEP-3 relative paths: for a multi-file torrent
+	// they are relative to the info.name directory, which Typhon creates
+	// under the engine save_path; for a single-file torrent the one path
+	// IS info.name, sitting directly in the engine save_path. torrents/info
+	// reports save_path = engine save_path, so the names here must carry
+	// the info.name directory for multi-file torrents and nothing extra for
+	// single-file ones — anything else makes cross-seed's
+	// `save_path + files[i].name` miss the file on disk.
+	name := getStr(detail, "name")
 	prefix := ""
-	if hoardEngine {
-		prefix = filepath.Base(getStr(detail, "save_path")) + "/"
+	if b, _ := detail["multi_file"].(bool); b {
+		prefix = name + "/"
 	}
 
-	// If the engine provides files, map them
-	if rawFiles, ok := detail["files"].([]interface{}); ok {
-		qbitFiles := make([]gin.H, 0, len(rawFiles))
-		for i, raw := range rawFiles {
-			f, ok := raw.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			qbitFiles = append(qbitFiles, gin.H{
-				"index":        i,
-				"name":         prefix + getStr(f, "path"),
-				"size":         getInt64(f, "size"),
-				"progress":     getFloat(f, "progress"),
-				"priority":     1,
-				"is_seed":      false,
-				"piece_range":  []int{0, 0},
-				"availability": 1.0,
-			})
-		}
-		c.JSON(http.StatusOK, qbitFiles)
-		return
+	// Typhon reports the real file list; fall back to the single-file
+	// shape only when it is unavailable (engine down, torrent metadata
+	// not loaded yet).
+	if len(engineFiles) == 0 {
+		engineFiles = []map[string]interface{}{{
+			"path": name,
+			"size": getInt64(detail, "total_size"),
+		}}
+		prefix = ""
 	}
 
-	// Fallback: single-file torrent
-	c.JSON(http.StatusOK, []gin.H{{
-		"index":        0,
-		"name":         prefix + getStr(detail, "name"),
-		"size":         getInt64(detail, "total_size"),
-		"progress":     getFloat(detail, "progress"),
-		"priority":     1,
-		"is_seed":      false,
-		"piece_range":  []int{0, 0},
-		"availability": 1.0,
-	}})
+	progress := getFloat(detail, "progress")
+	qbitFiles := make([]gin.H, 0, len(engineFiles))
+	for i, f := range engineFiles {
+		qbitFiles = append(qbitFiles, gin.H{
+			"index":        i,
+			"name":         prefix + getStr(f, "path"),
+			"size":         getInt64(f, "size"),
+			"progress":     progress,
+			"priority":     1,
+			"is_seed":      false,
+			"piece_range":  []int{0, 0},
+			"availability": 1.0,
+		})
+	}
+	c.JSON(http.StatusOK, qbitFiles)
 }
 
 func (s *Server) qbitTorrentsTrackers(c *gin.Context) {
@@ -830,31 +819,28 @@ func hydraToQbitTorrent(t map[string]interface{}, engineName string) map[string]
 	}
 
 	// qBit clients (cross-seed in particular) reconstruct the on-disk
-	// content path as save_path + name. Hoard wraps every torrent in a
-	// release-named folder under the configured download dir, so the
-	// Typhon-internal save_path is `<download_dir>/<release_folder>` and
-	// the inner `name` is BEP-3 info.name (filename for single-file,
-	// folder for multi). To present that wrapper layout consistently we
-	// expose name = basename(save_path), giving a qBit "multi-file with
-	// info.name = release folder" semantic that lets cross-seed hardlink
-	// files at the right path. Race shares save_path (`/race/torrents`)
-	// without a per-torrent wrapper, so the inner name stays correct.
+	// content path as save_path + name, and the per-file path as
+	// save_path + files[i].name. Both must agree with what Typhon
+	// actually writes, which is always
+	//     <engine save_path>/<info.name if multi-file>/<file path>
+	// for BOTH engines (see typhon-engine/src/disk/mod.rs). So the qBit
+	// view is the plain BEP-3 one: save_path = the engine save_path,
+	// name = info.name, content_path = the two joined. That holds for a
+	// hoard wrapper folder (create_torrent_folder on -> the wrapper IS
+	// the engine save_path) as much as for race's shared save_path.
+	//
+	// Do NOT derive name from basename(save_path): for a single-file
+	// torrent the engine save_path is the containing directory, so that
+	// yields the parent folder's name instead of the release, and the
+	// matching prefix in qbitTorrentsFiles then doubles the directory
+	// segment (`.../Torr9/Torr9/file.mkv`), which breaks every
+	// cross-seed link built from the client torrent list.
 	qbitName := getStr(t, "name")
-	spDir := filepath.Dir(getStr(t, "save_path"))
-	contentPath := getStr(t, "save_path")
-	if engineName == "hoard" {
-		wrapped := true // legacy/nil -> torrents predate the setting, all wrapped
-		if cf, ok := t["content_folder"].(*bool); ok && cf != nil {
-			wrapped = *cf
-		}
-		if wrapped {
-			qbitName = filepath.Base(getStr(t, "save_path"))
-		} else {
-			// unwrapped single-file (create_torrent_folder off): natural qBit single-file
-			spDir = getStr(t, "save_path")
-			contentPath = filepath.Join(getStr(t, "save_path"), qbitName)
-		}
+	spDir := getStr(t, "engine_save_path")
+	if spDir == "" {
+		spDir = getStr(t, "save_path")
 	}
+	contentPath := filepath.Join(spDir, qbitName)
 	return map[string]interface{}{
 		"hash":           getStr(t, "info_hash"),
 		"name":           qbitName,

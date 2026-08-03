@@ -42,6 +42,8 @@ type TorrentStats struct {
 	TotalSize       int64    `json:"total_size"`
 	Ratio           float64  `json:"ratio"`
 	SavePath        string   `json:"save_path"`
+	EngineSavePath  string   `json:"engine_save_path,omitempty"`
+	MultiFile       bool     `json:"multi_file"`
 	Category        string   `json:"category"`
 	AddedTime       int64    `json:"added_time"`
 	CompletedTime   int64    `json:"completed_time"`
@@ -164,6 +166,8 @@ func ltStatusToTorrentStats(s ltclient.TorrentStatus, category, savePath string,
 		TotalSize:       s.TotalSize,
 		Ratio:           ratio,
 		SavePath:        savePath,
+		EngineSavePath:  s.SavePath,
+		MultiFile:       s.MultiFile,
 		Category:        category,
 		AddedTime:       at,
 		CompletedTime:   ct,
