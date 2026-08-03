@@ -2900,7 +2900,7 @@ async function runCompare() {
     resEl.style.display = "none";
 
     if (!startVal || !midVal || !endVal) {
-        errEl.textContent = "Renseignez les trois dates.";
+        errEl.textContent = "Fill in all three dates.";
         errEl.style.display = "block";
         return;
     }
