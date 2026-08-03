@@ -22,9 +22,10 @@ type emptyRaceEngine struct{}
 // NewEmptyRaceEngine returns a no-op RaceEngine for front-only mode.
 func NewEmptyRaceEngine() RaceEngine { return emptyRaceEngine{} }
 
-func (emptyRaceEngine) GetAllStatus() []map[string]interface{}         { return nil }
-func (emptyRaceEngine) GetTorrentDetail(string) map[string]interface{} { return nil }
-func (emptyRaceEngine) GetTorrentStatus(string) map[string]interface{} { return nil }
+func (emptyRaceEngine) GetAllStatus() []map[string]interface{}             { return nil }
+func (emptyRaceEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
+func (emptyRaceEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
+func (emptyRaceEngine) GetTorrentStatus(string) map[string]interface{}     { return nil }
 func (emptyRaceEngine) AddTorrent(string, string, string, []string, string) (string, error) {
 	return "", errNoLocalEngine
 }
@@ -52,11 +53,12 @@ type emptyHoardEngine struct{}
 // NewEmptyHoardEngine returns a no-op HoardEngine for front-only mode.
 func NewEmptyHoardEngine() HoardEngine { return emptyHoardEngine{} }
 
-func (emptyHoardEngine) GetAllStatus() map[string]interface{}           { return map[string]interface{}{} }
-func (emptyHoardEngine) GetTorrentList() []map[string]interface{}       { return nil }
-func (emptyHoardEngine) GetTorrentListJSON() []json.RawMessage          { return nil }
-func (emptyHoardEngine) GetSessionTotals() (int64, int64)               { return 0, 0 }
-func (emptyHoardEngine) GetTorrentDetail(string) map[string]interface{} { return nil }
+func (emptyHoardEngine) GetAllStatus() map[string]interface{}               { return map[string]interface{}{} }
+func (emptyHoardEngine) GetTorrentList() []map[string]interface{}           { return nil }
+func (emptyHoardEngine) GetTorrentListJSON() []json.RawMessage              { return nil }
+func (emptyHoardEngine) GetSessionTotals() (int64, int64)                   { return 0, 0 }
+func (emptyHoardEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
+func (emptyHoardEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
 func (emptyHoardEngine) AddTorrent(string, string, string) (string, error) {
 	return "", errNoLocalEngine
 }

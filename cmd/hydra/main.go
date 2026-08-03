@@ -1403,6 +1403,9 @@ func (a *raceAPIAdapter) GetSessionTotals() (int64, int64) { return a.engine.Get
 func (a *raceAPIAdapter) GetTorrentDetail(infoHash string) map[string]interface{} {
 	return a.engine.GetTorrentDetail(infoHash)
 }
+func (a *raceAPIAdapter) GetTorrentFileList(infoHash string) []map[string]interface{} {
+	return a.engine.GetTorrentFileList(infoHash)
+}
 func (a *raceAPIAdapter) GetTorrentStatus(infoHash string) map[string]interface{} {
 	return a.GetTorrentDetail(infoHash)
 }
@@ -1466,6 +1469,9 @@ func (a *hoardAPIAdapter) GetTorrentListJSON() []json.RawMessage {
 func (a *hoardAPIAdapter) GetSessionTotals() (int64, int64) { return a.engine.GetSessionTotals() }
 func (a *hoardAPIAdapter) GetTorrentDetail(infoHash string) map[string]interface{} {
 	return a.engine.GetTorrentDetail(infoHash)
+}
+func (a *hoardAPIAdapter) GetTorrentFileList(infoHash string) []map[string]interface{} {
+	return a.engine.GetTorrentFileList(infoHash)
 }
 func (a *hoardAPIAdapter) AddTorrentSeedMode(torrentPath, savePath, category string) (string, error) {
 	return a.engine.AddTorrentSeedMode(torrentPath, savePath, category)
@@ -1654,6 +1660,7 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 		"total_download": s.TotalDownload, "num_peers": s.NumPeers,
 		"num_seeds": s.NumSeeds, "total_size": s.TotalSize,
 		"ratio": s.Ratio, "save_path": s.SavePath,
+		"engine_save_path": s.EngineSavePath, "multi_file": s.MultiFile,
 		"category": s.Category, "added_time": s.AddedTime,
 		"completed_time": s.CompletedTime, "swarm_seeds": s.SwarmSeeds,
 		"swarm_leechers": s.SwarmLeechers, "tracker_error": s.TrackerError,

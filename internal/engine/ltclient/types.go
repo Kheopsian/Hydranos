@@ -41,6 +41,7 @@ type TorrentStatus struct {
 	State           string  `json:"state"`
 	Progress        float64 `json:"progress"`
 	TotalSize       int64   `json:"total_size"`
+	MultiFile       bool    `json:"multi_file"`
 	TotalDone       int64   `json:"total_done"`
 	TotalUpload     int64   `json:"total_upload"`
 	TotalDownload   int64   `json:"total_download"`

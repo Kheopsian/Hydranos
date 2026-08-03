@@ -421,6 +421,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         "state": state,
         "progress": progress,
         "total_size": t.meta.total_size,
+        "multi_file": t.meta.multi_file,
         "total_done": total_done,
         "total_upload": t.total_uploaded.load(Ordering::Relaxed),
         "total_download": t.total_downloaded.load(Ordering::Relaxed),
