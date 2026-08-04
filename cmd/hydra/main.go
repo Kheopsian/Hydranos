@@ -518,17 +518,15 @@ func main() {
 		// AbsorbStats (l'offset ne touche QUE le cumulé annoncé, pas le global).
 		// [anti-dual removed 2026-08-01] multi-seed is legitimate; no announce
 		// offset handoff. Both engines announce independently.
-		if ul > 0 || dl > 0 {
-			// One transaction: the carry-overs and the torrent's row move
-			// together, so a crash here can no longer double-count the torrent
-			// or lose its lifetime bytes.
-			api.AbsorbOnRemove("race", raceEngine.TrackerHostFor(infoHash), infoHash, ul, dl)
-		}
+		// Unconditional: the torrent's row must go now, not at the next
+		// five-minute sync. A restart inside that window used to re-import a
+		// torrent the user had just deleted, and it came back from the dead
+		// (issue #13). One transaction, so the carry-overs and the row move
+		// together and a crash can neither double-count nor lose the bytes.
+		api.AbsorbOnRemove("race", raceEngine.TrackerHostFor(infoHash), infoHash, ul, dl)
 	})
 	hoardEngine.SetOnBeforeRemove(func(infoHash string, ul, dl int64) {
-		if ul > 0 || dl > 0 {
-			api.AbsorbOnRemove("hoard", hoardEngine.TrackerHostFor(infoHash), infoHash, ul, dl)
-		}
+		api.AbsorbOnRemove("hoard", hoardEngine.TrackerHostFor(infoHash), infoHash, ul, dl)
 	})
 
 	// ---- Secondary modules ----
@@ -1133,6 +1131,8 @@ func syncStore(st *store.Store, raceMetas, hoardMetas map[string]*engine.Torrent
 			items = append(items, store.SyncItem{
 				InfoHash:        ih,
 				Session:         sess,
+				Paused:          m.UserPaused,
+				Tags:            m.Tags,
 				SavePath:        m.SavePath,
 				Category:        m.Category,
 				TorrentFilePath: m.TorrentFilePath,
@@ -1717,7 +1717,7 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 		"tracker_error_msg": s.TrackerErrorMsg, "torrent_error": s.TorrentError,
 		"torrent_error_msg": s.TorrentErrorMsg, "uploader": s.Uploader,
 		"injected_peers": s.InjectedPeers, "injection_hit": s.InjectionHit,
-		"content_folder": s.ContentFolder, "tags": s.Tags,
+		"content_folder": s.ContentFolder, "tags": s.Tags, "user_paused": s.UserPaused,
 		"tracker_host": s.TrackerHost,
 	}
 }

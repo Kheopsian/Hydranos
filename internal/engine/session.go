@@ -354,6 +354,11 @@ type TorrentMeta struct {
 	Category        string
 	CompletedTime   time.Time
 	ContentFolder   *bool
+	// UserPaused rides along so the periodic store sync carries the intent even
+	// for a torrent whose row does not exist yet — the immediate UPDATE on pause
+	// silently touches nothing in that window.
+	UserPaused bool
+	Tags       []string
 }
 
 // Dummy for unused imports

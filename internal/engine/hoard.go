@@ -923,6 +923,8 @@ func (e *HoardEngine) GetTorrentMetas() map[string]*TorrentMeta {
 			Category:        info.Category,
 			CompletedTime:   info.CompletedTime,
 			ContentFolder:   info.ContentFolder,
+			UserPaused:      info.UserPaused,
+			Tags:            info.Tags,
 		}
 	}
 	return metas
@@ -1207,6 +1209,7 @@ func (e *HoardEngine) refreshStats() {
 		if info != nil {
 			stats.ContentFolder = info.ContentFolder
 			stats.Tags = info.Tags
+			stats.UserPaused = info.UserPaused
 		}
 
 		if stats.Progress >= 1.0 && completedTime.IsZero() && info != nil {
