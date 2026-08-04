@@ -400,6 +400,19 @@ func main() {
 	} else {
 		torStore = ts
 		defer torStore.Close()
+		// Hand the store to the API layer before anything reads a counter, and
+		// fold in the JSON sidecars while nothing else is writing them. Both
+		// must happen before initBaselinePersistence, which is what decides
+		// whether the store or the files are authoritative.
+		api.SetStore(torStore)
+		if rep := store.MigrateSidecars(cfg.Daemon.DataDir, torStore); !rep.Empty() || len(rep.Errors) > 0 {
+			if len(rep.Errors) > 0 {
+				slog.Error("store: sidecar import had errors — originals kept in place",
+					"report", rep.String(), "errors", rep.Errors)
+			} else {
+				slog.Info("store: imported JSON sidecars (originals renamed .migrated)", "report", rep.String())
+			}
+		}
 		go func() {
 			if n, _ := torStore.Count(store.Hoard); n == 0 {
 				if r, ierr := torStore.ImportLegacy(filepath.Join(cfg.Daemon.DataDir, "state.json")); ierr != nil {
@@ -506,14 +519,15 @@ func main() {
 		// [anti-dual removed 2026-08-01] multi-seed is legitimate; no announce
 		// offset handoff. Both engines announce independently.
 		if ul > 0 || dl > 0 {
-			api.AbsorbStats("race", ul, dl)
-			api.AbsorbTrackerStats("race", raceEngine.TrackerHostFor(infoHash), ul, dl)
+			// One transaction: the carry-overs and the torrent's row move
+			// together, so a crash here can no longer double-count the torrent
+			// or lose its lifetime bytes.
+			api.AbsorbOnRemove("race", raceEngine.TrackerHostFor(infoHash), infoHash, ul, dl)
 		}
 	})
 	hoardEngine.SetOnBeforeRemove(func(infoHash string, ul, dl int64) {
 		if ul > 0 || dl > 0 {
-			api.AbsorbStats("hoard", ul, dl)
-			api.AbsorbTrackerStats("hoard", hoardEngine.TrackerHostFor(infoHash), ul, dl)
+			api.AbsorbOnRemove("hoard", hoardEngine.TrackerHostFor(infoHash), infoHash, ul, dl)
 		}
 	})
 
@@ -886,11 +900,34 @@ func main() {
 		}
 	}
 
-	// ---- Restore per-torrent tags from the tags.json overlay (kept separate
-	// from the SQLite store; tags are non-critical labels). ----
-	if tt := tagstore.Load(cfg.Daemon.DataDir); len(tt) > 0 {
+	// ---- Restore per-torrent tags. They live on the torrent row now, so they
+	// cannot outlive the torrent; the tags.json overlay is only read on a node
+	// with no store (an upgrading installation had its file imported into the
+	// store at Open and renamed aside). ----
+	if torStore != nil {
+		if tt, terr := torStore.AllTags(); terr != nil {
+			slog.Error("tags: restore from store failed", "error", terr)
+		} else if len(tt) > 0 {
+			hoardEngine.RestoreTags(tt)
+			slog.Info("tags: restored from store", "torrents", len(tt))
+		}
+	} else if tt := tagstore.Load(cfg.Daemon.DataDir); len(tt) > 0 {
 		hoardEngine.RestoreTags(tt)
 		slog.Info("tags: restored from overlay", "torrents", len(tt))
+	}
+
+	// ---- Re-apply the user's pause intent. The engines have just reloaded
+	// everything in a running state, so without this a paused torrent would
+	// quietly start seeding again on every restart — the exact failure the
+	// feature exists to prevent. ----
+	if torStore != nil {
+		if paused, perr := torStore.PausedSet(); perr != nil {
+			slog.Error("pause: restoring intent failed", "error", perr)
+		} else if len(paused) > 0 {
+			h := hoardEngine.RestoreUserPaused(paused)
+			r := raceEngine.RestoreUserPaused(paused)
+			slog.Info("pause: restored user intent", "hoard", h, "race", r, "stored", len(paused))
+		}
 	}
 
 	// ---- Start secondary modules ----
@@ -1404,6 +1441,9 @@ func (a *raceAPIAdapter) GetAllStatusJSON() []json.RawMessage {
 	return out
 }
 func (a *raceAPIAdapter) GetSessionTotals() (int64, int64) { return a.engine.GetSessionTotals() }
+func (a *raceAPIAdapter) SetUserPaused(ih string, paused bool) error {
+	return a.engine.SetUserPaused(ih, paused)
+}
 func (a *raceAPIAdapter) GetTorrentDetail(infoHash string) map[string]interface{} {
 	return a.engine.GetTorrentDetail(infoHash)
 }
@@ -1498,7 +1538,13 @@ func (a *hoardAPIAdapter) SetAddedTime(infoHash string, t time.Time) {
 func (a *hoardAPIAdapter) HasTorrent(infoHash string) bool {
 	return a.engine.GetTorrentDetail(infoHash) != nil
 }
-func (a *hoardAPIAdapter) PauseAll() int              { return a.engine.PauseAll() }
+func (a *hoardAPIAdapter) PauseAll() int { return a.engine.PauseAll() }
+func (a *hoardAPIAdapter) SetUserPaused(ih string, paused bool) error {
+	return a.engine.SetUserPaused(ih, paused)
+}
+func (a *hoardAPIAdapter) MarkAllUserPaused(paused bool) int {
+	return a.engine.MarkAllUserPaused(paused)
+}
 func (a *hoardAPIAdapter) ResumeAll() int             { return a.engine.ResumeAll() }
 func (a *hoardAPIAdapter) RestartStuckVerifying() int { return a.engine.RestartStuckVerifying() }
 func (a *hoardAPIAdapter) VerifyDownloading() int     { return a.engine.VerifyDownloading() }

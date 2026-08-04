@@ -264,7 +264,7 @@ func (e *RaceEngine) startAllResumed() {
 
 	started := 0
 	for _, ih := range hashes {
-		if err := e.client.StartTorrent(ih); err == nil {
+		if err := e.autoStart(ih); err == nil {
 			started++
 		}
 	}

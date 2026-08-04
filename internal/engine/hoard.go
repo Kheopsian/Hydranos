@@ -487,7 +487,7 @@ func (e *HoardEngine) staggerStart() {
 
 	started := 0
 	for i, s := range result.Torrents {
-		if err := e.client.StartTorrent(s.InfoHash); err != nil {
+		if err := e.autoStart(s.InfoHash); err != nil {
 			slog.Warn("hoard: stagger start failed", "ih", s.InfoHash[:minStr(len(s.InfoHash), 8)], "error", err)
 			continue
 		}
@@ -837,7 +837,7 @@ func (e *HoardEngine) ResumeAll() int {
 	count := 0
 	for _, s := range result.Torrents {
 		if s.IsPaused {
-			if err := e.client.StartTorrent(s.InfoHash); err == nil {
+			if err := e.autoStart(s.InfoHash); err == nil {
 				count++
 			}
 		}
@@ -1396,7 +1396,7 @@ func (e *HoardEngine) manageVerifyBatches() int {
 
 	slog.Info("hoard: verify throttle — starting batch", "starting", slots, "active", activeVerify, "remaining", len(parked)-slots)
 	for i := 0; i < slots; i++ {
-		e.client.StartTorrent(parked[i])
+		e.autoStart(parked[i])
 	}
 	return len(parked) - slots
 }
@@ -1902,7 +1902,7 @@ func (e *HoardEngine) enforceDownloadSlots() {
 	for _, t := range incomplete {
 		shouldBeActive := targetSet[t.InfoHash]
 		if shouldBeActive && !t.Active {
-			e.client.StartTorrent(t.InfoHash)
+			e.autoStart(t.InfoHash)
 			e.slotParkedMu.Lock()
 			delete(e.slotParked, t.InfoHash)
 			e.slotParkedMu.Unlock()
@@ -2207,12 +2207,12 @@ func (e *HoardEngine) SetTorrentCategory(infoHash, newCategory, newCategorySaveP
 		}
 		time.Sleep(150 * time.Millisecond)
 		if err := os.Rename(oldFile, newFile); err != nil {
-			_ = e.client.StartTorrent(infoHash)
+			_ = e.autoStart(infoHash)
 			return fmt.Errorf("rename %s -> %s: %w", oldFile, newFile, err)
 		}
 		if err := e.client.SetSavePath(infoHash, newCategorySavePath); err != nil {
 			_ = os.Rename(newFile, oldFile)
-			_ = e.client.StartTorrent(infoHash)
+			_ = e.autoStart(infoHash)
 			return fmt.Errorf("set engine save_path: %w", err)
 		}
 		e.mu.Lock()
@@ -2231,7 +2231,7 @@ func (e *HoardEngine) SetTorrentCategory(infoHash, newCategory, newCategorySaveP
 			}
 		}
 		e.cachedStatsMu.Unlock()
-		if err := e.client.StartTorrent(infoHash); err != nil {
+		if err := e.autoStart(infoHash); err != nil {
 			slog.Warn("hoard: restart after category change failed", "info_hash", infoHash, "error", err)
 		}
 		if e.reAnnounce != nil {
@@ -2268,7 +2268,7 @@ func (e *HoardEngine) SetTorrentCategory(infoHash, newCategory, newCategorySaveP
 	time.Sleep(150 * time.Millisecond)
 
 	if err := os.Rename(oldOnDisk, newOnDisk); err != nil {
-		_ = e.client.StartTorrent(infoHash)
+		_ = e.autoStart(infoHash)
 		return fmt.Errorf("rename %s -> %s: %w", oldOnDisk, newOnDisk, err)
 	}
 
@@ -2281,7 +2281,7 @@ func (e *HoardEngine) SetTorrentCategory(infoHash, newCategory, newCategorySaveP
 
 	if err := e.client.SetSavePath(infoHash, newEngineSavePath); err != nil {
 		_ = os.Rename(newOnDisk, oldOnDisk)
-		_ = e.client.StartTorrent(infoHash)
+		_ = e.autoStart(infoHash)
 		return fmt.Errorf("set engine save_path: %w", err)
 	}
 
@@ -2302,7 +2302,7 @@ func (e *HoardEngine) SetTorrentCategory(infoHash, newCategory, newCategorySaveP
 	}
 	e.cachedStatsMu.Unlock()
 
-	if err := e.client.StartTorrent(infoHash); err != nil {
+	if err := e.autoStart(infoHash); err != nil {
 		slog.Warn("hoard: restart after category change failed",
 			"info_hash", infoHash, "error", err)
 	}

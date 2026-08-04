@@ -22,6 +22,7 @@ type emptyRaceEngine struct{}
 // NewEmptyRaceEngine returns a no-op RaceEngine for front-only mode.
 func NewEmptyRaceEngine() RaceEngine { return emptyRaceEngine{} }
 
+func (emptyRaceEngine) SetUserPaused(string, bool) error                   { return nil }
 func (emptyRaceEngine) GetAllStatus() []map[string]interface{}             { return nil }
 func (emptyRaceEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
 func (emptyRaceEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
@@ -71,6 +72,8 @@ func (emptyHoardEngine) AddTrackerToTorrent(string, string) error        { retur
 func (emptyHoardEngine) SetListenPort(int)                               {}
 func (emptyHoardEngine) HasTorrent(string) bool                          { return false }
 func (emptyHoardEngine) PauseAll() int                                   { return 0 }
+func (emptyHoardEngine) SetUserPaused(string, bool) error                { return nil }
+func (emptyHoardEngine) MarkAllUserPaused(bool) int                      { return 0 }
 func (emptyHoardEngine) ResumeAll() int                                  { return 0 }
 func (emptyHoardEngine) RestartStuckVerifying() int                      { return 0 }
 func (emptyHoardEngine) VerifyDownloading() int                          { return 0 }

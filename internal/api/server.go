@@ -58,6 +58,7 @@ func SetStartupReady(ready bool) {
 
 // RaceEngine abstracts the race (speed-oriented) torrent engine.
 type RaceEngine interface {
+	SetUserPaused(infoHash string, paused bool) error
 	GetAllStatus() []map[string]interface{}
 	GetTorrentDetail(infoHash string) map[string]interface{}
 	GetTorrentFileList(infoHash string) []map[string]interface{}
@@ -95,6 +96,8 @@ type HoardEngine interface {
 	HasTorrent(infoHash string) bool
 	PauseAll() int
 	ResumeAll() int
+	SetUserPaused(infoHash string, paused bool) error
+	MarkAllUserPaused(paused bool) int
 	RestartStuckVerifying() int
 	VerifyDownloading() int
 	VerifyTorrent(infoHash string) error
