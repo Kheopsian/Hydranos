@@ -334,16 +334,11 @@ func (d *RaceDrain) evictByAgeRatio() map[string]interface{} {
 	if !d.cfg.AgeRatioEnabled {
 		return nil
 	}
-	ageEnabled := d.cfg.MaxAgeHours > 0
-	ratioEnabled := d.cfg.MinRatio > 0
-	if !ageEnabled && !ratioEnabled {
-		// Policy armed but with no trigger: max_age_hours and min_ratio are
-		// both 0, so nothing can ever match. Say so rather than staying mute.
-		return map[string]interface{}{
-			"status": "no_threshold",
-			"reason": "age/ratio",
-		}
-	}
+	// A threshold of 0 is NOT a disabled axis, it is an absent constraint:
+	// "older than 0h" and "ratio at least 0" are true of every torrent. The
+	// toggle is what turns the policy on or off, so the thresholds do not need
+	// to double as an off switch. With both at 0 the policy therefore matches
+	// everything past the min-age floor, which stays the only guard.
 	torrents := d.race.GetAllStatus()
 	now := float64(time.Now().Unix())
 	minAge := float64(d.cfg.MinAgeMinutes) * 60
@@ -363,19 +358,13 @@ func (d *RaceDrain) evictByAgeRatio() map[string]interface{} {
 			continue
 		}
 		ratio := toFloat64Val(t["ratio"])
-		aMet := ageEnabled && age >= maxAge
-		rMet := ratioEnabled && ratio >= d.cfg.MinRatio
+		aMet := age >= maxAge
+		rMet := ratio >= d.cfg.MinRatio
 		var evict bool
 		if orMode {
 			evict = aMet || rMet
 		} else {
-			evict = true
-			if ageEnabled && !aMet {
-				evict = false
-			}
-			if ratioEnabled && !rMet {
-				evict = false
-			}
+			evict = aMet && rMet
 		}
 		if !evict {
 			continue

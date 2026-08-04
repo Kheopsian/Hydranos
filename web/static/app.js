@@ -3049,23 +3049,39 @@ function _rpSaveEnabled(on) {
     _rpUpdateDrainBtn();
     _rpSave("enabled", on);
 }
-// Drain now only does something when a policy is on AND armed. The age/ratio
-// policy with max_age_hours and min_ratio both at 0 can never match anything,
-// so a button that looks enabled there is a lie — say why instead.
+// Drain now only does something when a policy is on; grey it out otherwise.
+// A threshold of 0 means "no constraint on that axis", not "off", so 0/0 is a
+// working policy that matches everything past the min-age floor.
 function _rpUpdateDrainBtn() {
     const b = document.getElementById("rp-drain-now");
     if (!b) return;
-    const num = id => { const e = document.getElementById(id); return e ? parseFloat(e.value) || 0 : 0; };
     const en = document.getElementById("rp-enabled");
     const ar = document.getElementById("rp-ar-enabled");
-    const emergencyOn = !!(en && en.checked);
-    const arOn = !!(ar && ar.checked);
-    const arArmed = arOn && (num("rp-maxage") > 0 || num("rp-minratio") > 0);
-    const any = emergencyOn || arArmed;
+    const any = (en && en.checked) || (ar && ar.checked);
     b.disabled = !any;
-    if (any) b.title = "";
-    else if (arOn) b.title = "Set a max age or a min ratio first — the policy has no trigger";
-    else b.title = "Enable a policy first";
+    b.title = any ? "" : "Enable a policy first";
+    _rpUpdateUnbounded();
+}
+// An unconstrained policy (both thresholds 0) whose action is Delete erases
+// every race torrent past the floor. That is irreversible, so say it plainly
+// before it runs rather than after.
+function _rpUnboundedDelete() {
+    const ar = document.getElementById("rp-ar-enabled");
+    if (!ar || !ar.checked) return false;
+    const num = id => { const e = document.getElementById(id); return e ? parseFloat(e.value) || 0 : 0; };
+    if (num("rp-maxage") > 0 || num("rp-minratio") > 0) return false;
+    const del = document.getElementById("rp-act-delete");
+    return !!(del && del.classList.contains("on"));
+}
+function _rpUpdateUnbounded() {
+    const w = document.getElementById("rp-warn");
+    if (!w) return;
+    if (_rpUnboundedDelete()) {
+        w.textContent = "Both thresholds are 0, so every race torrent past the keep floor matches — and the action is Delete. Their data will be erased.";
+        w.style.display = "";
+    } else {
+        w.style.display = "none";
+    }
 }
 function _rpSaveAR(on) {
     _rpDirty.add("rp-ar-enabled");
@@ -3078,6 +3094,7 @@ function _rpSetAction(a) {
     document.getElementById("rp-act-delete").classList.toggle("on", a === "delete");
     document.getElementById("rp-act-hoard").classList.toggle("on", a === "hoard");
     _rpSave("age_ratio_action", a);
+    _rpUpdateUnbounded();
 }
 let _rpDirty = new Set();
 function _rpSet(id, val, isCheck) {
@@ -3107,6 +3124,8 @@ async function _rpRestart() {
     try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
 }
 async function _rpDrainNow(btn) {
+    if (_rpUnboundedDelete() &&
+        !confirm("Both thresholds are 0, so this deletes EVERY race torrent older than the keep floor, data included.\n\nRun it?")) return;
     btn.disabled = true; const t = btn.textContent; btn.textContent = "Draining…";
     let msg;
     try {
@@ -3125,8 +3144,6 @@ async function _rpDrainNow(btn) {
 // dead even when it had run.
 function _rpDrainMsg(r) {
     if (!r || typeof r !== "object") return "Nothing to do.";
-    if (r.status === "no_threshold")
-        return "Policy is on but has no trigger: set a max age or a min ratio.";
     if (r.status === "no_match") {
         if (r.no_category_link)
             return `${r.no_category_link} torrent(s) matched but their category has no hoard category linked — nothing moved.`;
