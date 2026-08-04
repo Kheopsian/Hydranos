@@ -195,7 +195,13 @@ func (s *Server) qbitTorrentsInfo(c *gin.Context) {
 		}
 	}
 
-	var allTorrents []map[string]interface{}
+	// Non-nil: an empty listing must marshal as [], never null. qBittorrent
+	// always answers with an array and clients dereference it directly --
+	// cross-seed calls torrents.find(...) straight on the parsed body, so a
+	// null throws there instead of reading as "no torrents". The window is
+	// real: at boot, before the engines have restored their state, the
+	// default filter=all skips every filter block and the slice stays empty.
+	allTorrents := make([]map[string]interface{}, 0)
 
 	// Collect race torrents
 	if s.raceEngine != nil {
