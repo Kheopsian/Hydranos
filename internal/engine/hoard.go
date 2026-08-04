@@ -1878,16 +1878,22 @@ func (e *HoardEngine) enforceDownloadSlots() {
 			evictees = append(evictees, t)
 		}
 	}
-	if len(evictees) > maxEvict {
-		// Reprieve the most-seeded evictees and drop an equal number of the
-		// least-seeded newcomers, so the pool size is unchanged.
+	// A reprieve is a SWAP, never a widening: each evictee kept costs one
+	// newcomer, so the pool size is unchanged and the cap can only slow churn
+	// down, never overshoot maxSlots. Capping the reprieve at len(newcomers) is
+	// what enforces that — and it matters most right after boot, where stagger
+	// start has every incomplete torrent running, there are no newcomers at all,
+	// and the pool has to shed thousands of slots in one tick to reach maxSlots.
+	if reprieve := len(evictees) - maxEvict; reprieve > 0 && len(newcomers) > 0 {
+		if reprieve > len(newcomers) {
+			reprieve = len(newcomers)
+		}
+		// Keep the most-seeded evictees, drop the least-seeded newcomers.
 		sort.SliceStable(evictees, func(i, j int) bool { return evictees[i].Seeds > evictees[j].Seeds })
 		sort.SliceStable(newcomers, func(i, j int) bool { return newcomers[i].Seeds < newcomers[j].Seeds })
-		for i := 0; i < len(evictees)-maxEvict; i++ {
+		for i := 0; i < reprieve; i++ {
 			targetSet[evictees[i].InfoHash] = true
-			if i < len(newcomers) {
-				delete(targetSet, newcomers[i].InfoHash)
-			}
+			delete(targetSet, newcomers[i].InfoHash)
 		}
 	}
 
