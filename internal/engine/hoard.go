@@ -1447,6 +1447,29 @@ const (
 	downloadSlotInterval       = 30 * time.Second
 	progressEvalWindow         = 90 * time.Second
 	progressMinBytes     int64 = 256 * 1024
+
+	// A torrent that just got a slot keeps it for at least this long before the
+	// ranking is allowed to evict it. Without this, the probe quota handed out
+	// slots that lasted exactly one tick: the probe sort is oldest-LastTry-first
+	// and taking a slot stamps LastTry=now, so any never-tried torrent outranked
+	// the torrent that had just started. 30s of residency is not enough to
+	// connect to a swarm, so nothing in the probe pool could ever finish — and
+	// the progress check then punished them for the stall it had caused.
+	slotMinResidency = 5 * time.Minute
+
+	// Per-tick ceiling on evictions, as a fraction of maxSlots. Stop/start drops
+	// every peer connection and restarts the ramp from zero, so a slot pool that
+	// turns over faster than it connects downloads nothing. Observed in prod
+	// before the sticky rule below: 1800 of 2000 slots swapped per 30s tick.
+	// This is a backstop — if the ranking ever churns again, it churns slowly.
+	slotMaxEvictFrac = 20
+
+	// Bytes/s below which an active torrent counts as making no progress. Kept
+	// consistent with progressMinBytes/progressEvalWindow (~2.9 KB/s), and used
+	// as an escape hatch: total_done is quantised to piece_length engine-side
+	// (typhon dispatch.rs torrent_to_json), so a genuine download spread across
+	// several large partial pieces can report delta=0 over a whole window.
+	progressMinRate = 3000
 )
 
 var slotCooldownLevels = []time.Duration{
@@ -1644,64 +1667,72 @@ func (e *HoardEngine) enforceDownloadSlots() {
 		Seeds    int
 		Active   bool
 		Bytes    int64
+		Rate     int
 	}
 
 	var incomplete []dlTorrent
 	var actives []string
+	byHash := make(map[string]int, len(result.Torrents))
 
 	for _, s := range result.Torrents {
 		if s.IsFinished || s.Progress >= 1.0 {
 			continue
 		}
 		isActive := !s.IsPaused && s.State == "downloading"
+		byHash[s.InfoHash] = len(incomplete)
 		incomplete = append(incomplete, dlTorrent{
 			InfoHash: s.InfoHash,
 			Seeds:    swarmSeeds[s.InfoHash], // tracker-scrape seeds from announce cache
 			Active:   isActive,
 			Bytes:    s.TotalDone,
+			Rate:     s.DownloadRate,
 		})
 		if isActive {
 			actives = append(actives, s.InfoHash)
 		}
 	}
 
-	// Phase 1: Progress check for active torrents
+	// Phase 1: Progress check for active torrents.
+	//
+	// This also produces `sticky`: the torrents that hold a slot and are not
+	// failing the progress rule. Phase 2 hands those their slot back before it
+	// ranks anything, which is the whole point — the ranking below sorts on
+	// tracker-scrape seed counts and has no idea whether a torrent is currently
+	// downloading. Without the sticky pass, a torrent pulling 8 MB/s competed
+	// on equal footing with 18k parked ones, and lost whenever the (heavily
+	// tied) seed sort reshuffled.
+	sticky := make(map[string]bool, len(actives))
+	demoted := make(map[string]bool)
 	e.slotProgressMu.Lock()
 	var activityDemoted int
 	for _, ih := range actives {
 		// Pinned torrents are exempt from activity-based demotion.
 		if e.IsPinned(ih) {
+			sticky[ih] = true
 			continue
 		}
+		idx, ok := byHash[ih]
+		if !ok {
+			continue
+		}
+		t := incomplete[idx]
 		pi, exists := e.slotProgress[ih]
 		if !exists {
-			// Find bytes for this torrent
-			var bytes int64
-			for _, t := range incomplete {
-				if t.InfoHash == ih {
-					bytes = t.Bytes
-					break
-				}
-			}
 			e.slotProgress[ih] = &slotProgressInfo{
 				unparkAt:      now,
-				bytesAtUnpark: bytes,
+				bytesAtUnpark: t.Bytes,
 			}
+			sticky[ih] = true
 			continue
 		}
 		if now.Before(pi.unparkAt.Add(progressEvalWindow)) {
+			// Still inside its evaluation window: too early to judge, so it
+			// keeps the slot. A torrent needs time to announce and connect.
+			sticky[ih] = true
 			continue
 		}
-		// Evaluate progress
-		var currentBytes int64
-		for _, t := range incomplete {
-			if t.InfoHash == ih {
-				currentBytes = t.Bytes
-				break
-			}
-		}
-		delta := currentBytes - pi.bytesAtUnpark
-		if delta < progressMinBytes {
+		delta := t.Bytes - pi.bytesAtUnpark
+		if delta < progressMinBytes && t.Rate < progressMinRate {
 			// No progress — demote with cooldown
 			level := pi.backoffLevel
 			if level >= len(slotCooldownLevels) {
@@ -1713,14 +1744,16 @@ func (e *HoardEngine) enforceDownloadSlots() {
 			e.slotParkedMu.Lock()
 			e.slotParked[ih] = true
 			e.slotParkedMu.Unlock()
+			demoted[ih] = true
 			activityDemoted++
 		} else {
 			// Good progress — reset window, decay backoff
 			pi.unparkAt = now
-			pi.bytesAtUnpark = currentBytes
+			pi.bytesAtUnpark = t.Bytes
 			if pi.backoffLevel > 0 {
 				pi.backoffLevel--
 			}
+			sticky[ih] = true
 		}
 	}
 	e.slotProgressMu.Unlock()
@@ -1759,9 +1792,16 @@ func (e *HoardEngine) enforceDownloadSlots() {
 	}
 	e.slotProgressMu.Unlock()
 
-	// Sort by seeds descending (most seeded = fastest to complete).
-	sort.Slice(eligible, func(i, j int) bool {
-		return eligible[i].Seeds > eligible[j].Seeds
+	// Sort by seeds descending (most seeded = fastest to complete), info_hash
+	// breaking ties. The tiebreak is not cosmetic: most of the pool sits at the
+	// same seed count (0 for anything the announce cache has never seen), and
+	// an unstable sort over a huge tie group reshuffles the "top N" on every
+	// tick — which turned the slot pool into a lottery redrawn every 30s.
+	sort.SliceStable(eligible, func(i, j int) bool {
+		if eligible[i].Seeds != eligible[j].Seeds {
+			return eligible[i].Seeds > eligible[j].Seeds
+		}
+		return eligible[i].InfoHash < eligible[j].InfoHash
 	})
 
 	targetSet := make(map[string]bool)
@@ -1773,6 +1813,28 @@ func (e *HoardEngine) enforceDownloadSlots() {
 			targetSet[t.InfoHash] = true
 		}
 	}
+
+	// Sticky: a torrent that already holds a slot and is not failing the
+	// progress rule keeps it, ahead of both quotas. Also honour a minimum
+	// residency for torrents that only just got a slot, so the probe rotation
+	// below cannot evict them before they have had a chance to connect.
+	e.slotProgressMu.Lock()
+	for _, t := range incomplete {
+		if len(targetSet) >= maxSlots {
+			break
+		}
+		if demoted[t.InfoHash] {
+			continue
+		}
+		young := false
+		if pi := e.slotProgress[t.InfoHash]; pi != nil && t.Active {
+			young = now.Before(pi.unparkAt.Add(slotMinResidency))
+		}
+		if sticky[t.InfoHash] || young {
+			targetSet[t.InfoHash] = true
+		}
+	}
+	e.slotProgressMu.Unlock()
 
 	// Main quota: the most-seeded eligible torrents (fastest to finish).
 	// Probe quota: reserve a slice for the longest-waiting torrents so the
@@ -1797,6 +1859,35 @@ func (e *HoardEngine) enforceDownloadSlots() {
 		})
 		for i := 0; i < len(remaining) && len(targetSet) < maxSlots; i++ {
 			targetSet[remaining[i].InfoHash] = true
+		}
+	}
+
+	// Phase 2b: bound per-tick turnover. Demotions are exempt (the progress rule
+	// already justified those); this only caps rank-driven eviction, so a future
+	// ranking bug degrades throughput instead of collapsing it.
+	maxEvict := maxSlots / slotMaxEvictFrac
+	if maxEvict < 1 {
+		maxEvict = 1
+	}
+	var evictees, newcomers []dlTorrent
+	for _, t := range incomplete {
+		switch {
+		case targetSet[t.InfoHash] && !t.Active && !e.IsPinned(t.InfoHash):
+			newcomers = append(newcomers, t)
+		case !targetSet[t.InfoHash] && t.Active && !demoted[t.InfoHash]:
+			evictees = append(evictees, t)
+		}
+	}
+	if len(evictees) > maxEvict {
+		// Reprieve the most-seeded evictees and drop an equal number of the
+		// least-seeded newcomers, so the pool size is unchanged.
+		sort.SliceStable(evictees, func(i, j int) bool { return evictees[i].Seeds > evictees[j].Seeds })
+		sort.SliceStable(newcomers, func(i, j int) bool { return newcomers[i].Seeds < newcomers[j].Seeds })
+		for i := 0; i < len(evictees)-maxEvict; i++ {
+			targetSet[evictees[i].InfoHash] = true
+			if i < len(newcomers) {
+				delete(targetSet, newcomers[i].InfoHash)
+			}
 		}
 	}
 
