@@ -3,6 +3,29 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.42.1 — 2026-08-04
+
+### Fixed
+- **A deleted torrent came back after a restart.** Removing a torrent dropped it
+  from the engine immediately but left its row in the store until the next
+  five-minute sync, and booting reloads from the store — so a restart inside
+  that window resurrected it, tags, category and all. The row is now dropped in
+  the same transaction that carries the torrent's lifetime bytes away, at the
+  moment of removal. (Issue #13, reproduced on a test instance: delete, restart
+  within five minutes, torrent back.)
+- **The torrent list never exposed the pause intent.** `/api/hoard/torrents`
+  builds each row field by field and had no `user_paused`, so the UI could not
+  tell a torrent you paused from one a scheduler is holding — the same omission
+  that hid `tracker_host` in v3.29.3.
+- **Tags and pause set on a freshly added torrent were lost on restart.** Both
+  are written with an UPDATE, which quietly touches nothing while the torrent's
+  row does not exist yet — and the row only appears at the next five-minute
+  sync. Both now ride along with that sync, so the state lands whichever path
+  gets there first.
+- **A restored pause did not show as paused until the next stats refresh**, as
+  the intent was not projected into the stats cache the way tags and category
+  already were.
+
 ## v3.42.0 — 2026-08-04
 
 ### Added

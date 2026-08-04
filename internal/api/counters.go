@@ -50,16 +50,17 @@ func durable() *store.Store { return durableStore.Load() }
 // be missing a torrent the engine still holds; the periodic reconcile puts that
 // back. That window is self-healing, the one it replaces was not.
 func AbsorbOnRemove(engineName, tracker, infoHash string, ul, dl int64) {
-	if ul <= 0 && dl <= 0 {
-		return
-	}
 	if tracker == "" {
 		tracker = "(none)"
 	}
 
-	// In-memory first: these are what every reader in the process sees.
-	absorbGlobalMem(engineName, ul, dl)
-	absorbTrackerMem(engineName, tracker, ul, dl)
+	// In-memory first: these are what every reader in the process sees. A
+	// torrent that never moved a byte still has to lose its row, so only the
+	// absorbing is conditional.
+	if ul > 0 || dl > 0 {
+		absorbGlobalMem(engineName, ul, dl)
+		absorbTrackerMem(engineName, tracker, ul, dl)
+	}
 
 	st := durable()
 	if st == nil {

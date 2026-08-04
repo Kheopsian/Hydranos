@@ -633,6 +633,8 @@ func (e *RaceEngine) GetTorrentMetas() map[string]*TorrentMeta {
 			TorrentFilePath: info.TorrentFilePath,
 			Category:        info.Category,
 			CompletedTime:   info.CompletedTime,
+			UserPaused:      info.UserPaused,
+			Tags:            info.Tags,
 		}
 	}
 	return metas
