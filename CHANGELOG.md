@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.41.3 — 2026-08-04
+
+### Fixed
+- **Two blank rows in the race policy header.** The drain-result and warning
+  messages each lived inside a permanent row wrapper, so while the message was
+  hidden the wrapper still contributed its padding and separator line — the
+  panel showed two empty stripes between the disk gauge and the policy toggles.
+  The message elements are now the rows themselves, so hiding a message hides
+  its stripe.
+
 ## v3.41.2 — 2026-08-04
 
 ### Fixed
