@@ -43,6 +43,12 @@ type Record struct {
 	CompletedTime   float64
 	TotalUploaded   int64
 	TotalDownloaded int64
+	// Paused is the user's intent, not the scheduler's: a torrent held back by
+	// the download or disk slot managers is not paused, it is queued. Only a
+	// human (or an API call made on their behalf) sets this, and nothing
+	// automatic clears it — that is what makes it survive a restart meaningfully.
+	Paused bool
+	Tags   []string
 }
 
 // Store is a SQLite-backed torrent identity store. Safe for concurrent use.
@@ -82,6 +88,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if err := migrate(db, migrationsMonolith); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -102,8 +112,9 @@ func (s *Store) Put(r *Record) error {
 	_, err := s.db.Exec(`
         INSERT INTO torrents
             (info_hash, session, torrent, save_path, category,
-             added_time, completed_time, total_uploaded, total_downloaded)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             added_time, completed_time, total_uploaded, total_downloaded,
+             paused, tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(info_hash) DO UPDATE SET
             session          = excluded.session,
             torrent          = excluded.torrent,
@@ -112,9 +123,12 @@ func (s *Store) Put(r *Record) error {
             added_time       = excluded.added_time,
             completed_time   = excluded.completed_time,
             total_uploaded   = excluded.total_uploaded,
-            total_downloaded = excluded.total_downloaded
+            total_downloaded = excluded.total_downloaded,
+            paused           = excluded.paused,
+            tags             = excluded.tags
     `, r.InfoHash, string(r.Session), r.Torrent, r.SavePath, r.Category,
-		r.AddedTime, r.CompletedTime, r.TotalUploaded, r.TotalDownloaded)
+		r.AddedTime, r.CompletedTime, r.TotalUploaded, r.TotalDownloaded,
+		boolToInt(r.Paused), encodeTags(r.Tags))
 	if err != nil {
 		return fmt.Errorf("store put %s: %w", r.InfoHash, err)
 	}
@@ -164,7 +178,8 @@ func (s *Store) Delete(infoHash string) error {
 func (s *Store) Get(infoHash string) (r *Record, ok bool, err error) {
 	row := s.db.QueryRow(`
         SELECT info_hash, session, torrent, save_path, category,
-               added_time, completed_time, total_uploaded, total_downloaded
+               added_time, completed_time, total_uploaded, total_downloaded,
+               paused, tags
         FROM torrents WHERE info_hash = ?`, infoHash)
 	rec, err := scan(row)
 	if err == sql.ErrNoRows {
@@ -180,7 +195,8 @@ func (s *Store) Get(infoHash string) (r *Record, ok bool, err error) {
 func (s *Store) BySession(sess Session) ([]*Record, error) {
 	rows, err := s.db.Query(`
         SELECT info_hash, session, torrent, save_path, category,
-               added_time, completed_time, total_uploaded, total_downloaded
+               added_time, completed_time, total_uploaded, total_downloaded,
+               paused, tags
         FROM torrents WHERE session = ?`, string(sess))
 	if err != nil {
 		return nil, err
@@ -201,11 +217,16 @@ type scanner interface{ Scan(dest ...any) error }
 func scan(sc scanner) (*Record, error) {
 	var r Record
 	var sess string
+	var paused int
+	var tags string
 	if err := sc.Scan(&r.InfoHash, &sess, &r.Torrent, &r.SavePath, &r.Category,
-		&r.AddedTime, &r.CompletedTime, &r.TotalUploaded, &r.TotalDownloaded); err != nil {
+		&r.AddedTime, &r.CompletedTime, &r.TotalUploaded, &r.TotalDownloaded,
+		&paused, &tags); err != nil {
 		return nil, err
 	}
 	r.Session = Session(sess)
+	r.Paused = paused != 0
+	r.Tags = decodeTags(tags)
 	return &r, nil
 }
 

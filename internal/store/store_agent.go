@@ -33,6 +33,9 @@ type AgentRecord struct {
 	CompletedTime   float64
 	TotalUploaded   int64
 	TotalDownloaded int64
+	// Paused is the user's intent — see Record.Paused.
+	Paused bool
+	Tags   []string
 }
 
 const schemaAgent = `
@@ -62,6 +65,10 @@ func OpenAgent(path string) (*AgentStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("init agent schema: %w", err)
 	}
+	if err := migrate(db, migrationsAgent); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &AgentStore{db: db}, nil
 }
 
@@ -81,13 +88,15 @@ func (s *AgentStore) Put(r *AgentRecord) error {
 	defer s.wmux.Unlock()
 	_, err := s.db.Exec(`
         INSERT INTO torrents
-            (info_hash, torrent, save_path, category, added_time, completed_time, total_uploaded, total_downloaded)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (info_hash, torrent, save_path, category, added_time, completed_time, total_uploaded, total_downloaded, paused, tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(info_hash) DO UPDATE SET
             torrent=excluded.torrent, save_path=excluded.save_path, category=excluded.category,
             added_time=excluded.added_time, completed_time=excluded.completed_time,
-            total_uploaded=excluded.total_uploaded, total_downloaded=excluded.total_downloaded`,
-		r.InfoHash, r.Torrent, r.SavePath, r.Category, r.AddedTime, r.CompletedTime, r.TotalUploaded, r.TotalDownloaded)
+            total_uploaded=excluded.total_uploaded, total_downloaded=excluded.total_downloaded,
+            paused=excluded.paused, tags=excluded.tags`,
+		r.InfoHash, r.Torrent, r.SavePath, r.Category, r.AddedTime, r.CompletedTime, r.TotalUploaded, r.TotalDownloaded,
+		boolToInt(r.Paused), encodeTags(r.Tags))
 	if err != nil {
 		return fmt.Errorf("agent store put %s: %w", r.InfoHash, err)
 	}
@@ -122,7 +131,7 @@ func (s *AgentStore) Delete(infoHash string) error {
 // Get returns a single record; ok is false if absent.
 func (s *AgentStore) Get(infoHash string) (*AgentRecord, bool, error) {
 	row := s.db.QueryRow(`
-        SELECT info_hash, torrent, save_path, category, added_time, completed_time, total_uploaded, total_downloaded
+        SELECT info_hash, torrent, save_path, category, added_time, completed_time, total_uploaded, total_downloaded, paused, tags
         FROM torrents WHERE info_hash=?`, infoHash)
 	r, err := scanAgent(row)
 	if err == sql.ErrNoRows {
@@ -137,7 +146,7 @@ func (s *AgentStore) Get(infoHash string) (*AgentRecord, bool, error) {
 // All returns every stored record (used to reload the engine at boot).
 func (s *AgentStore) All() ([]*AgentRecord, error) {
 	rows, err := s.db.Query(`
-        SELECT info_hash, torrent, save_path, category, added_time, completed_time, total_uploaded, total_downloaded
+        SELECT info_hash, torrent, save_path, category, added_time, completed_time, total_uploaded, total_downloaded, paused, tags
         FROM torrents`)
 	if err != nil {
 		return nil, err
@@ -262,10 +271,15 @@ func (s *AgentStore) Reconcile(items []AgentSyncItem) (SyncResult, error) {
 
 func scanAgent(sc scanner) (*AgentRecord, error) {
 	var r AgentRecord
+	var paused int
+	var tags string
 	if err := sc.Scan(&r.InfoHash, &r.Torrent, &r.SavePath, &r.Category,
-		&r.AddedTime, &r.CompletedTime, &r.TotalUploaded, &r.TotalDownloaded); err != nil {
+		&r.AddedTime, &r.CompletedTime, &r.TotalUploaded, &r.TotalDownloaded,
+		&paused, &tags); err != nil {
 		return nil, err
 	}
+	r.Paused = paused != 0
+	r.Tags = decodeTags(tags)
 	return &r, nil
 }
 
@@ -281,7 +295,7 @@ func SplitLegacyDB(srcPath string, race, hoard *AgentStore) (raceN, hoardN int, 
 	defer src.Close()
 
 	rows, err := src.Query(`
-        SELECT info_hash, session, torrent, save_path, category, added_time, completed_time, total_uploaded, total_downloaded
+        SELECT info_hash, session, torrent, save_path, category, added_time, completed_time, total_uploaded, total_downloaded, paused, tags
         FROM torrents`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("split: query src: %w", err)
@@ -291,10 +305,15 @@ func SplitLegacyDB(srcPath string, race, hoard *AgentStore) (raceN, hoardN int, 
 	for rows.Next() {
 		var r AgentRecord
 		var sess string
+		var paused int
+		var tags string
 		if err := rows.Scan(&r.InfoHash, &sess, &r.Torrent, &r.SavePath, &r.Category,
-			&r.AddedTime, &r.CompletedTime, &r.TotalUploaded, &r.TotalDownloaded); err != nil {
+			&r.AddedTime, &r.CompletedTime, &r.TotalUploaded, &r.TotalDownloaded,
+			&paused, &tags); err != nil {
 			return raceN, hoardN, err
 		}
+		r.Paused = paused != 0
+		r.Tags = decodeTags(tags)
 		dst := hoard
 		if Session(sess) == Race {
 			dst = race
