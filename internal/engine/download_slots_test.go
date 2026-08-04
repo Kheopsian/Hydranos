@@ -133,6 +133,24 @@ func TestEnforceDownloadSlotsIsStableAcrossTicks(t *testing.T) {
 	}
 }
 
+// Right after boot, stagger start has every incomplete torrent running, so the
+// pool has thousands of slots to shed and no incoming torrent to trade against.
+// The per-tick eviction cap must not hold those slots open: it caps churn by
+// swapping, so with nothing to swap for it does not apply. Prod once came back
+// up with 19976 active slots against a 2000 limit because of this.
+func TestEnforceDownloadSlotsConvergesFromFullyActive(t *testing.T) {
+	const maxSlots = 200
+	e, c := newSlotTestEngine(t, maxSlots, 4000)
+	for _, ih := range c.order {
+		c.torrents[ih].State, c.torrents[ih].IsPaused = "downloading", false
+	}
+
+	e.enforceDownloadSlots()
+	if got := len(activeSet(c)); got != maxSlots {
+		t.Fatalf("after one tick: %d active, want %d", got, maxSlots)
+	}
+}
+
 // Pinned torrents hold a slot regardless of rank, and the pool still fills.
 func TestEnforceDownloadSlotsHonoursPins(t *testing.T) {
 	const maxSlots = 10
