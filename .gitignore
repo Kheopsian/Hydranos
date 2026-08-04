@@ -23,3 +23,6 @@ redeploy-*.log
 *.prev
 *.prev.*
 typhon-engine.prev*
+
+# build scratch (sendfile bench copies) — never track
+.sendfile-build/
