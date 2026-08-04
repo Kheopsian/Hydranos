@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
+	"github.com/Kheopsian/hydra/internal/store"
 	"github.com/Kheopsian/hydra/internal/tagstore"
 	"github.com/gin-gonic/gin"
 )
@@ -169,6 +171,14 @@ func initBaselinePersistence(dataDir string) {
 }
 
 func loadBaseline() {
+	// The store is authoritative once there is one; baseline.json is only read
+	// on a node that has no database (front-only). An installation upgrading
+	// from the JSON era has already had its file imported into the store by
+	// store.MigrateSidecars before this runs.
+	if loadCountersFromStore() {
+		return
+	}
+
 	var bl struct {
 		TotalUploaded   int64 `json:"total_uploaded"`
 		TotalDownloaded int64 `json:"total_downloaded"`
@@ -183,13 +193,20 @@ func loadBaseline() {
 }
 
 func saveBaseline() {
+	ul := atomic.LoadInt64(&baselineUploaded)
+	dl := atomic.LoadInt64(&baselineDownloaded)
+
+	if st := durable(); st != nil {
+		if err := st.CounterSet(store.CounterGlobal, ul, dl); err != nil {
+			logCounterErr("save global baseline", err)
+		}
+		return
+	}
+
 	bl := struct {
 		TotalUploaded   int64 `json:"total_uploaded"`
 		TotalDownloaded int64 `json:"total_downloaded"`
-	}{
-		TotalUploaded:   atomic.LoadInt64(&baselineUploaded),
-		TotalDownloaded: atomic.LoadInt64(&baselineDownloaded),
-	}
+	}{TotalUploaded: ul, TotalDownloaded: dl}
 	data, err := json.MarshalIndent(bl, "", "  ")
 	if err != nil {
 		return
@@ -484,6 +501,9 @@ func (s *Server) registerHydraRoutes() {
 			race.POST("/settings", s.handleRaceSettingsPost)
 			race.GET("/timeline/:info_hash", s.handleRaceTimeline)
 			race.POST("/torrents/:info_hash/purge", s.handleRacePurge)
+			race.POST("/torrents/:info_hash/pause", s.handleRacePause)
+			race.POST("/torrents/:info_hash/resume", s.handleRaceResume)
+			race.POST("/pause", s.handleRacePauseBulk)
 			race.POST("/listen-port", s.handleRaceSetListenPort)
 		}
 
@@ -493,6 +513,9 @@ func (s *Server) registerHydraRoutes() {
 			hoard.GET("/stats", s.handleHoardStats)
 			hoard.GET("/torrents", s.handleHoardTorrents)
 			hoard.GET("/torrents/:info_hash", s.handleHoardTorrentDetail)
+			hoard.POST("/torrents/:info_hash/pause", s.handleHoardPause)
+			hoard.POST("/torrents/:info_hash/resume", s.handleHoardResume)
+			hoard.POST("/pause", s.handleHoardPauseBulk)
 			hoard.POST("/pause-all", s.handleHoardPauseAll)
 			hoard.POST("/resume-all", s.handleHoardResumeAll)
 			hoard.POST("/listen-port", s.handleHoardSetListenPort)
@@ -1303,6 +1326,9 @@ func (s *Server) handleHoardPauseAll(c *gin.Context) {
 		return
 	}
 	count := s.hoardEngine.PauseAll()
+	// The intent is the user's, so it is recorded like any other pause.
+	s.hoardEngine.MarkAllUserPaused(true)
+	persistPausedSession(store.Hoard, true)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "paused": count})
 }
 
@@ -1312,6 +1338,8 @@ func (s *Server) handleHoardResumeAll(c *gin.Context) {
 		return
 	}
 	count := s.hoardEngine.ResumeAll()
+	s.hoardEngine.MarkAllUserPaused(false)
+	persistPausedSession(store.Hoard, false)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "resumed": count})
 }
 
@@ -2196,6 +2224,16 @@ func (s *Server) handlePublicIP(c *gin.Context) {
 // saignent pas au retrait du torrent (sa contribution lifetime sort de
 // SUM(t.total_uploaded) côté Typhon).
 func AbsorbStats(engine string, ul, dl int64) {
+	absorbGlobalMem(engine, ul, dl)
+	if ul > 0 || dl > 0 {
+		saveBaseline()
+	}
+}
+
+// absorbGlobalMem is the in-memory half of AbsorbStats, split out so the
+// atomic removal path (AbsorbOnRemove) can update what readers see and then
+// persist in one transaction instead of two.
+func absorbGlobalMem(engine string, ul, dl int64) {
 	if ul > 0 {
 		atomic.AddInt64(&baselineUploaded, ul)
 	}
@@ -2209,9 +2247,6 @@ func AbsorbStats(engine string, ul, dl int64) {
 	case "race":
 		atomic.AddInt64(&sessionOffsetRaceUL, -ul)
 		atomic.AddInt64(&sessionOffsetRaceDL, -dl)
-	}
-	if ul > 0 || dl > 0 {
-		saveBaseline()
 	}
 }
 
@@ -2267,17 +2302,46 @@ func (s *Server) handleHoardSetTags(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	s.persistTags()
+	s.persistTagsFor(hash)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "info_hash": hash, "tags": s.hoardEngine.GetTags(hash)})
 }
 
-// persistTags writes the current per-torrent tag assignments to tags.json
-// (best-effort; in-memory tags stay authoritative until the next successful save).
-func (s *Server) persistTags() {
+// persistTagsFor writes the current tag assignments of the named torrents. With
+// a store that is one transaction touching only the rows that changed; a
+// front-only node has no database and falls back to rewriting the whole overlay.
+func (s *Server) persistTagsFor(hashes ...string) {
+	if s.hoardEngine == nil || len(hashes) == 0 {
+		return
+	}
+	st := durable()
+	if st == nil {
+		_ = tagstore.Save(s.config.Daemon.DataDir, s.hoardEngine.GetAllTags())
+		return
+	}
+	m := make(map[string][]string, len(hashes))
+	for _, h := range hashes {
+		m[h] = s.hoardEngine.GetTags(h) // empty list clears the row
+	}
+	if _, err := st.SetTagsBulk(m); err != nil {
+		slog.Error("tags: persist failed", "count", len(m), "err", err)
+	}
+}
+
+// persistTagsAll reconciles every stored tag assignment with the engine. Used on
+// the paths that cannot name what changed — deleting a tag across the whole
+// library, or adding torrents whose hashes the caller did not collect.
+func (s *Server) persistTagsAll() {
 	if s.hoardEngine == nil {
 		return
 	}
-	_ = tagstore.Save(s.config.Daemon.DataDir, s.hoardEngine.GetAllTags())
+	st := durable()
+	if st == nil {
+		_ = tagstore.Save(s.config.Daemon.DataDir, s.hoardEngine.GetAllTags())
+		return
+	}
+	if _, err := st.ReplaceAllTags(s.hoardEngine.GetAllTags()); err != nil {
+		slog.Error("tags: full persist failed", "err", err)
+	}
 }
 
 // handleGetTags returns the sorted set of distinct tags currently in use.

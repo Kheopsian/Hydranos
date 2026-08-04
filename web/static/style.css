@@ -2481,3 +2481,8 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .rp2-grad-fill{height:100%;background:linear-gradient(90deg,var(--accent-hoard),var(--accent-purple));transition:width .4s}
 .rp2-grad-pct{width:100px;text-align:right;flex-shrink:0;color:var(--text-muted)}
 .rp2-grad-title{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);font-weight:700;padding:8px 0 2px}
+
+/* Pause is the user's decision; queued is a scheduler holding a slot. Two
+   different situations, so two different colours. */
+.state-badge.state-paused{background:rgba(139,148,158,.15);color:var(--text-dim,#8b949e)}
+.state-badge.state-queued{background:rgba(88,166,255,.12);color:var(--accent-blue,#58a6ff)}

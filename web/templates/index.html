@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydra - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.2.12">
+    <link rel="stylesheet" href="/static/style.css?v=1.2.13">
     <script src="/static/chart.umd.min.js"></script>
 </head>
 <body>
@@ -1003,6 +1003,9 @@
     <div id="ctx-menu" class="ctx-menu" style="display:none">
         <div class="ctx-label" id="ctx-label">1 torrent selected</div>
         <div class="ctx-separator"></div>
+        <div class="ctx-item" id="ctx-pause" onclick="_pauseSelected(true)">Pause</div>
+        <div class="ctx-item" id="ctx-resume" onclick="_pauseSelected(false)">Resume</div>
+        <div class="ctx-separator"></div>
         <div class="ctx-item" onclick="_reannounceSelected()">Reannounce</div>
         <div class="ctx-item" id="ctx-recheck" onclick="_recheckSelected()">Recheck</div>
         <div class="ctx-item" id="ctx-change-category" onclick="_showCategoryPicker(event,false)">Change category &rsaquo;</div>
@@ -1013,6 +1016,6 @@
         <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
     </div>
 
-    <script src="/static/app.js?v=1.3.45"></script>
+    <script src="/static/app.js?v=1.3.46"></script>
 </body>
 </html>

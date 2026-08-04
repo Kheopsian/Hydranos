@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Kheopsian/hydra/internal/store"
 	"github.com/Kheopsian/hydra/internal/tagstore"
 )
 
@@ -603,7 +604,7 @@ func (s *Server) qbitTorrentsAdd(c *gin.Context) {
 
 	if tags != "" {
 		s.registerTags(splitTagsCSV(tags))
-		s.persistTags()
+		s.persistTagsAll()
 	}
 	c.String(http.StatusOK, "Ok.")
 }
@@ -631,13 +632,46 @@ func (s *Server) qbitTorrentsDelete(c *gin.Context) {
 	c.String(http.StatusOK, "")
 }
 
-func (s *Server) qbitTorrentsPause(c *gin.Context) {
-	// Hydra doesn't support per-torrent pause in race mode.
-	// For hoard, we could implement it, but for now just acknowledge.
-	c.String(http.StatusOK, "")
-}
+func (s *Server) qbitTorrentsPause(c *gin.Context)  { s.qbitSetPaused(c, true) }
+func (s *Server) qbitTorrentsResume(c *gin.Context) { s.qbitSetPaused(c, false) }
 
-func (s *Server) qbitTorrentsResume(c *gin.Context) {
+// qbitSetPaused implements the qBittorrent pause/resume verbs. A pause arriving
+// here counts as the user's own intent — autobrr, Sonarr and friends act on
+// their behalf, and qBittorrent's semantics are that a paused torrent stays
+// paused. So it is sticky and survives a restart, exactly like a click in the
+// UI, and no scheduler will lift it.
+//
+// "hashes=all" is qBittorrent's wildcard for the whole library.
+func (s *Server) qbitSetPaused(c *gin.Context, paused bool) {
+	raw := c.PostForm("hashes")
+	if raw == "all" {
+		if s.hoardEngine != nil {
+			if paused {
+				s.hoardEngine.PauseAll()
+			} else {
+				s.hoardEngine.ResumeAll()
+			}
+			s.hoardEngine.MarkAllUserPaused(paused)
+			persistPausedSession(store.Hoard, paused)
+		}
+		c.String(http.StatusOK, "")
+		return
+	}
+
+	var hoardHit, raceHit []string
+	for _, h := range parseHashes(raw) {
+		switch {
+		case s.hoardEngine != nil && s.hoardEngine.HasTorrent(h):
+			if s.hoardEngine.SetUserPaused(h, paused) == nil {
+				hoardHit = append(hoardHit, h)
+			}
+		case s.raceEngine != nil:
+			if s.raceEngine.SetUserPaused(h, paused) == nil {
+				raceHit = append(raceHit, h)
+			}
+		}
+	}
+	persistPaused(append(hoardHit, raceHit...), paused)
 	c.String(http.StatusOK, "")
 }
 
@@ -728,7 +762,20 @@ func (s *Server) qbitCategoriesRemove(c *gin.Context) {
 // ===========================================================================
 
 // hydraStateToQbit maps Hydra's internal state string to qBittorrent state.
-func hydraStateToQbit(state string, progress float64, uploadRate, downloadRate int64) string {
+//
+// userPaused separates the two ways a torrent can be sitting still, and the
+// distinction is not cosmetic: to Sonarr, "paused" means a human halted this
+// deliberately, "queued" means it is waiting its turn and all is well, and
+// "stalled" means the download is broken — which triggers its dead-download
+// handling. A torrent held back by one of our schedulers is queued, never
+// stalled.
+func hydraStateToQbit(state string, progress float64, uploadRate, downloadRate int64, userPaused bool) string {
+	if userPaused {
+		if progress >= 1.0 {
+			return "pausedUP"
+		}
+		return "pausedDL"
+	}
 	switch state {
 	case "downloading":
 		if downloadRate > 0 {
@@ -747,7 +794,9 @@ func hydraStateToQbit(state string, progress float64, uploadRate, downloadRate i
 			return "pausedUP"
 		}
 		return "pausedDL"
-	case "queued":
+	case "queued", "stopped":
+		// A scheduler is holding this one back. It is not broken and nobody
+		// asked for it to stop, so it is queued.
 		if progress >= 1.0 {
 			return "queuedUP"
 		}
@@ -773,7 +822,7 @@ func hydraToQbitTorrent(t map[string]interface{}, engineName string) map[string]
 	ulRate := getInt64(t, "upload_rate")
 	stateStr := getStr(t, "state")
 
-	qbitState := hydraStateToQbit(stateStr, progress, ulRate, dlRate)
+	qbitState := hydraStateToQbit(stateStr, progress, ulRate, dlRate, getBool(t, "user_paused"))
 	totalSize := getInt64(t, "total_size")
 	downloaded := getInt64(t, "total_downloaded")
 	uploaded := getInt64(t, "total_uploaded")
@@ -999,9 +1048,29 @@ func splitTagsCSV(csv string) []string {
 	return out
 }
 
+// tagRegistry returns the known tag names — including ones created but not yet
+// worn by any torrent, which is why the set cannot be derived from the torrents.
+func (s *Server) tagRegistry() []string {
+	if st := durable(); st != nil {
+		names, err := st.TagNames()
+		if err != nil {
+			slog.Error("tags: reading registry failed", "err", err)
+			return nil
+		}
+		return names
+	}
+	return tagstore.LoadRegistry(s.config.Daemon.DataDir)
+}
+
 // registerTags adds names to the persisted tag registry (known tags).
 func (s *Server) registerTags(names []string) {
 	if len(names) == 0 {
+		return
+	}
+	if st := durable(); st != nil {
+		if err := st.AddTagNames(names); err != nil {
+			slog.Error("tags: registering failed", "err", err)
+		}
 		return
 	}
 	reg := map[string]bool{}
@@ -1019,10 +1088,25 @@ func (s *Server) registerTags(names []string) {
 	_ = tagstore.SaveRegistry(s.config.Daemon.DataDir, out)
 }
 
+// unregisterTags drops names from the registry.
+func (s *Server) unregisterTags(names []string) {
+	if st := durable(); st != nil {
+		if err := st.DeleteTagNames(names); err != nil {
+			slog.Error("tags: unregistering failed", "err", err)
+		}
+		return
+	}
+	drop := map[string]bool{}
+	for _, t := range names {
+		drop[t] = true
+	}
+	s.unregisterTags(names)
+}
+
 // qbitTorrentsTags returns all known tags (registry union assigned).
 func (s *Server) qbitTorrentsTags(c *gin.Context) {
 	set := map[string]bool{}
-	for _, t := range tagstore.LoadRegistry(s.config.Daemon.DataDir) {
+	for _, t := range s.tagRegistry() {
 		set[t] = true
 	}
 	if s.hoardEngine != nil {
@@ -1069,7 +1153,7 @@ func (s *Server) qbitDeleteTags(c *gin.Context) {
 				}
 			}
 		}
-		s.persistTags()
+		s.persistTagsAll()
 	}
 	c.String(http.StatusOK, "")
 }
@@ -1085,7 +1169,7 @@ func (s *Server) qbitAddTags(c *gin.Context) {
 			}
 		}
 		s.registerTags(tags)
-		s.persistTags()
+		s.persistTagsFor(hashes...)
 	}
 	c.String(http.StatusOK, "")
 }
@@ -1100,9 +1184,18 @@ func (s *Server) qbitRemoveTags(c *gin.Context) {
 				s.hoardEngine.RemoveTags(h, tags)
 			}
 		}
-		s.persistTags()
+		s.persistTagsFor(hashes...)
 	}
 	c.String(http.StatusOK, "")
+}
+
+func getBool(m map[string]interface{}, key string) bool {
+	if v, ok := m[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
 }
 
 func getStr(m map[string]interface{}, key string) string {

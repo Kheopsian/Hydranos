@@ -1624,6 +1624,15 @@ function _showCtxMenu(x, y) {
     if (rcItem) rcItem.style.display = anyHoard ? "" : "none";
     const tgItem = document.getElementById("ctx-edit-tags");
     if (tgItem) tgItem.style.display = anyHoard ? "" : "none";
+    // Offer whichever of Pause/Resume the selection can actually act on. A
+    // mixed selection gets both.
+    const intents = [..._selected.keys()].map(_isUserPaused);
+    const anyPaused = intents.some(v => v === true || v === null);
+    const anyRunning = intents.some(v => v === false || v === null);
+    const pItem = document.getElementById("ctx-pause");
+    if (pItem) pItem.style.display = anyRunning ? "" : "none";
+    const rItem = document.getElementById("ctx-resume");
+    if (rItem) rItem.style.display = anyPaused ? "" : "none";
     menu.style.left = x + "px";
     menu.style.top = y + "px";
     menu.style.display = "block";
@@ -1794,6 +1803,56 @@ async function _reannounceSelected() {
 // from the verified state. Hoard-only: there is no race verify endpoint,
 // and the ctx item is hidden unless the selection has hoard rows. The hoard
 // verify route already forwards to the owning agent for remote torrents.
+// Whether the user paused this torrent: true, false, or null when we cannot
+// tell (only the hoard list is held in memory). The engine is authoritative —
+// this just decides which menu entries are worth offering.
+// What the row should say. "Paused" is the user's own decision; "Queued" is a
+// scheduler holding the torrent back, which is normal and temporary. Keeping
+// them apart is the whole point of the pause intent — same split qBittorrent
+// makes, so the words already mean what people expect.
+function displayState(t) {
+    if (t.user_paused) {
+        return { label: "paused", cls: "state-paused", title: "Paused by you — survives a restart" };
+    }
+    if (t.state === "stopped" || t.state === "queued") {
+        return { label: "queued", cls: "state-queued", title: "Waiting for a slot" };
+    }
+    return {
+        label: t.state,
+        cls: t.state === "seeding" ? "state-active" : "state-checking",
+        title: t.state,
+    };
+}
+
+function _isUserPaused(hash) {
+    const t = _hoardAllTorrents.find(x => x.info_hash === hash);
+    return t ? !!t.user_paused : null;
+}
+
+// Pause or resume the selection. This writes the user's intent: it outlives a
+// restart and no scheduler will undo it.
+async function _pauseSelected(paused) {
+    _hideCtxMenu();
+    const byEngine = { hoard: [], race: [] };
+    for (const [hash, mode] of _selected.entries()) {
+        (byEngine[mode] || byEngine.hoard).push(hash);
+    }
+    for (const engine of ["hoard", "race"]) {
+        const hashes = byEngine[engine];
+        if (!hashes.length) continue;
+        try {
+            await fetch(`/api/${engine}/pause`, {
+                method: "POST",
+                headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
+                body: JSON.stringify({ hashes, paused }),
+            });
+        } catch (err) {
+            console.error(`Failed to ${paused ? "pause" : "resume"} ${engine}`, err);
+        }
+    }
+    updateHoardStats();
+}
+
 async function _recheckSelected() {
     _hideCtxMenu();
     const entries = [..._selected.entries()];
@@ -4385,7 +4444,7 @@ const TABLE_COLS = {
     "hoard-table": [
         { id: "name", label: "Name", sort: "name", render: t => `<td title="${t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>` },
-        { id: "state", label: "State", sort: "state", render: t => `<td><span class="state-badge ${t.state === "seeding" ? "state-active" : "state-checking"}">${t.state}</span></td>` },
+        { id: "state", label: "State", sort: "state", render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${d.title}">${d.label}</span></td>`; } },
         { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "—"}</td>` },
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "—"}</td>` },

@@ -22,6 +22,7 @@ type TorrentInfo struct {
 	CompletedTime   time.Time `json:"completed_time,omitempty"`
 	TorrentFilePath string    `json:"torrent_file_path,omitempty"`
 	Tags            []string  `json:"tags,omitempty"`
+	UserPaused      bool      `json:"user_paused,omitempty"`
 	ContentFolder   *bool     `json:"content_folder,omitempty"`
 	InjectedPeers   int       `json:"injected_peers,omitempty"`
 	InjectionHit    bool      `json:"injection_hit,omitempty"`
@@ -54,6 +55,7 @@ type TorrentStats struct {
 	IsAnnounced     bool     `json:"is_announced,omitempty"`
 	TrackerHost     string   `json:"tracker_host,omitempty"`
 	Tags            []string `json:"tags,omitempty"`
+	UserPaused      bool     `json:"user_paused,omitempty"`
 	TorrentError    bool     `json:"torrent_error"`
 	TorrentErrorMsg string   `json:"torrent_error_msg,omitempty"`
 	ListSeeds       int      `json:"list_seeds"`

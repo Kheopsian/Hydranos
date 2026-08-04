@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/Kheopsian/hydra/internal/store"
 )
 
 // Per-(engine, tracker) monotone carry-over. When a torrent is removed its
@@ -30,6 +32,13 @@ func AbsorbTrackerStats(engine, tracker string, ul, dl int64) {
 	if tracker == "" {
 		tracker = "(none)"
 	}
+	absorbTrackerMem(engine, tracker, ul, dl)
+	saveTrackerBaselineKey(engine, tracker)
+}
+
+// absorbTrackerMem is the in-memory half, split out so the atomic removal path
+// can update readers and persist in a single transaction.
+func absorbTrackerMem(engine, tracker string, ul, dl int64) {
 	k := trackerKey(engine, tracker)
 	trackerBaselineMu.Lock()
 	if ul > 0 {
@@ -39,7 +48,23 @@ func AbsorbTrackerStats(engine, tracker string, ul, dl int64) {
 		trackerBaselineDL[k] += dl
 	}
 	trackerBaselineMu.Unlock()
-	saveTrackerBaseline()
+}
+
+// saveTrackerBaselineKey persists one tracker's carry-over. With a store that is
+// a single row; the JSON fallback has no choice but to rewrite the whole file.
+func saveTrackerBaselineKey(engine, tracker string) {
+	st := durable()
+	if st == nil {
+		saveTrackerBaseline()
+		return
+	}
+	k := trackerKey(engine, tracker)
+	trackerBaselineMu.Lock()
+	ul, dl := trackerBaselineUL[k], trackerBaselineDL[k]
+	trackerBaselineMu.Unlock()
+	if err := st.CounterSet(store.TrackerCounterKey(engine, tracker), ul, dl); err != nil {
+		logCounterErr("save tracker baseline", err)
+	}
 }
 
 // GetTrackerBaseline returns a snapshot keyed by engine+"\x00"+tracker, value
@@ -69,6 +94,12 @@ type trackerBaselineEntry struct {
 
 func initTrackerBaseline(dataDir string) {
 	trackerBaselineFile = filepath.Join(dataDir, "baseline_trackers.json")
+	// loadBaseline() already repopulated both the global and the per-tracker
+	// carry-overs from the store when there is one; the file is the no-database
+	// fallback only.
+	if durable() != nil {
+		return
+	}
 	data, err := os.ReadFile(trackerBaselineFile)
 	if err != nil {
 		return
@@ -87,6 +118,20 @@ func initTrackerBaseline(dataDir string) {
 }
 
 func saveTrackerBaseline() {
+	if st := durable(); st != nil {
+		snap := GetTrackerBaseline()
+		for k, v := range snap {
+			eng, trk := k, ""
+			if i := strings.IndexByte(k, '\x00'); i >= 0 {
+				eng, trk = k[:i], k[i+1:]
+			}
+			if err := st.CounterSet(store.TrackerCounterKey(eng, trk), v[0], v[1]); err != nil {
+				logCounterErr("save tracker baselines", err)
+				return
+			}
+		}
+		return
+	}
 	if trackerBaselineFile == "" {
 		return
 	}

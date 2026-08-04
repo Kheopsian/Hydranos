@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,7 +62,12 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 		if err := json.Unmarshal(data, &m); err != nil {
 			fail("tags.json parse", err)
 		} else {
-			n, err := s.importTags(m)
+			for ih, tags := range m {
+				if len(tags) == 0 {
+					delete(m, ih) // nothing to carry over
+				}
+			}
+			n, err := s.SetTagsBulk(m)
 			rep.TaggedTorrents = n
 			if err != nil {
 				fail("tags.json import", err)
@@ -150,11 +156,43 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 	return rep
 }
 
-// importTags writes a whole tags.json in one transaction. Torrents the store
-// does not know about are skipped rather than resurrected — the JSON overlay
-// had no referential integrity, so it accumulated entries for torrents removed
-// long ago, and this is where that debt gets dropped.
-func (s *Store) importTags(m map[string][]string) (int, error) {
+// ReplaceAllTags makes the stored tags exactly match m, in one transaction:
+// everything is cleared first, then m is applied. Use it on the rare paths where
+// the caller cannot name which torrents changed (deleting a tag everywhere, or
+// an import); prefer SetTagsBulk with an explicit hash list otherwise, since
+// this one has to touch every tagged row.
+func (s *Store) ReplaceAllTags(m map[string][]string) (int, error) {
+	s.wmux.Lock()
+	defer s.wmux.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	// The clear and the re-apply are one transaction on purpose: committing the
+	// clear on its own would mean a crash at the wrong moment wipes every tag.
+	if _, err := tx.Exec(`UPDATE torrents SET tags = '' WHERE tags != ''`); err != nil {
+		return 0, fmt.Errorf("clear tags: %w", err)
+	}
+	n, err := applyTags(tx, m)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// SetTagsBulk writes a batch of tag assignments in one transaction, and returns
+// how many rows it touched. An entry for a torrent the store does not know is
+// skipped rather than resurrected — the JSON overlay had no referential
+// integrity and had accumulated entries for torrents removed long ago, so this
+// is also where that debt gets dropped.
+//
+// An empty tag list clears that torrent's tags, which is how a removal is
+// expressed: callers pass the current state of every hash they touched.
+func (s *Store) SetTagsBulk(m map[string][]string) (int, error) {
 	if len(m) == 0 {
 		return 0, nil
 	}
@@ -165,6 +203,19 @@ func (s *Store) importTags(m map[string][]string) (int, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	n, err := applyTags(tx, m)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// applyTags writes a tag map inside an open transaction, returning how many
+// rows existed to be written.
+func applyTags(tx *sql.Tx, m map[string][]string) (int, error) {
 	stmt, err := tx.Prepare(`UPDATE torrents SET tags = ? WHERE info_hash = ?`)
 	if err != nil {
 		return 0, err
@@ -172,19 +223,13 @@ func (s *Store) importTags(m map[string][]string) (int, error) {
 	defer stmt.Close()
 	n := 0
 	for ih, tags := range m {
-		if len(tags) == 0 {
-			continue
-		}
 		res, err := stmt.Exec(encodeTags(tags), ih)
 		if err != nil {
-			return n, fmt.Errorf("import tags %s: %w", ih, err)
+			return n, fmt.Errorf("set tags %s: %w", ih, err)
 		}
 		if aff, _ := res.RowsAffected(); aff > 0 {
 			n++
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
 	}
 	return n, nil
 }

@@ -3,6 +3,48 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.42.0 — 2026-08-04
+
+### Added
+- **Manual pause, and it stays paused.** Torrents can be paused and resumed
+  from the right-click menu, from the native API, and through the qBittorrent
+  shim — whose pause and resume verbs had been acknowledging requests without
+  doing anything. What gets recorded is the *intent*, on the torrent's own row
+  in the store, so it survives a restart. This is deliberately not the same
+  thing as being stopped: the download and disk slot managers stop and start
+  torrents constantly, and a torrent they are holding back now reads as
+  **queued** while one you paused reads as **paused**. The schedulers read the
+  intent and never write it, so freeing a slot can no longer quietly undo your
+  decision. Pausing everything persists too — a restart after "pause all" would
+  otherwise resume the whole library.
+
+### Changed
+- **The database schema can be upgraded now.** The table definitions were
+  `CREATE TABLE IF NOT EXISTS`, which meant a new column would silently only
+  ever reach people who started from an empty database. Schema changes are now
+  ordered migrations recorded in `PRAGMA user_version`, each applied in one
+  transaction with its own version bump. Opening a database written by a newer
+  Hydra fails with an explanation instead of running against a shape it does
+  not understand.
+- **Tags and the lifetime counters moved out of their JSON sidecars** and onto
+  the torrent row and a counters table. `tags.json`, `tags_registry.json`,
+  `baseline.json` and `baseline_trackers.json` are imported once at startup and
+  renamed `.migrated` — kept, never deleted. A node with no database of its own
+  (front-only) still uses the files.
+
+### Fixed
+- **Removing a torrent can no longer lose or double-count its lifetime bytes.**
+  Folding a removed torrent's upload into the carry-over totals and deleting its
+  row were two writes to two different files with no transaction spanning them,
+  so a crash in between either counted the torrent twice on the next boot or
+  dropped its bytes permanently — and lifetime upload cannot be recomputed from
+  anything else. Both now happen in a single commit.
+- **A torrent waiting for a slot no longer reports itself as stalled to the
+  \*arr apps.** The state a stopped torrent actually carries had no case in the
+  qBittorrent state mapping and fell through to `stalledDL`/`stalledUP`, which
+  is what Sonarr treats as a broken download. It now reports `queuedDL`/
+  `queuedUP`, and a genuinely user-paused torrent reports `pausedDL`/`pausedUP`.
+
 ## v3.41.3 — 2026-08-04
 
 ### Fixed
