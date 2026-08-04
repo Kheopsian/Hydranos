@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydra - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.2.11">
+    <link rel="stylesheet" href="/static/style.css?v=1.2.12">
     <script src="/static/chart.umd.min.js"></script>
 </head>
 <body>
@@ -185,8 +185,8 @@
                     <button class="rp2-btn" id="rp-drain-now" onclick="_rpDrainNow(this)">Drain now</button>
                     <button class="rp2-btn ghost" onclick="_rpToggleHist()">History</button>
                 </div>
-                <div class="rp2-row"><div class="rp2-drain-result" id="rp-drain-result" style="display:none"></div></div>
-                <div class="rp2-row"><div class="rp2-warn" id="rp-warn" style="display:none"></div></div>
+                <div class="rp2-row rp2-drain-result" id="rp-drain-result" style="display:none"></div>
+                <div class="rp2-row rp2-warn" id="rp-warn" style="display:none"></div>
                 <div class="rp2-row">
                     <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSaveEnabled(this.checked)"><span class="rp2-sl"></span></label>Emergency drain<span class="rp2-info">i<span class="rp2-tip">Every <b>check</b>s Hydra looks at the /race disk. Above the <b>start</b> mark it deletes the <b>oldest</b> torrents (never younger than the floor) until usage drops to <b>down&nbsp;to</b>. The data is erased &mdash; this is the safety valve, not graduation.</span></span></div>
                     <div class="rp2-body" id="rp-body-drain">
