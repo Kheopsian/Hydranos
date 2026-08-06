@@ -466,6 +466,9 @@ func (s *Server) registerHydraRoutes() {
 		api.GET("/announce/clients", s.handleGetClients)
 		api.POST("/announce/clients", s.handleSetClient)
 
+		api.GET("/opt/flags", s.handleGetOptFlags)
+		api.POST("/opt/flags", s.handleSetOptFlag)
+
 		api.GET("/announce/secondary-stats", s.handleGetSecondaryStats)
 		api.POST("/announce/secondary-stats", s.handleSetSecondaryStats)
 
@@ -2432,6 +2435,32 @@ func (s *Server) handleSetClient(c *gin.Context) {
 	engine.SetClientOverride(req.Host, req.PeerIDPrefix, req.UserAgent)
 	pushed, failed := s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "client", Host: req.Host, PeerIDPrefix: req.PeerIDPrefix, UserAgent: req.UserAgent})
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides(), "agents_pushed": pushed, "agents_failed": failed})
+}
+
+// handleGetOptFlags reports the state of the hot-swappable IPC optimisation
+// flags (see internal/engine/ltclient/opt.go).
+func (s *Server) handleGetOptFlags(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"flags": ltclient.OptFlags()})
+}
+
+// handleSetOptFlag toggles one optimisation at runtime, so a profiling ladder
+// can measure each one in isolation without a restart (a restart resets the
+// per-torrent upload counters, which costs real tracker credit).
+func (s *Server) handleSetOptFlag(c *gin.Context) {
+	var req struct {
+		Flag string `json:"flag"`
+		On   bool   `json:"on"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !ltclient.SetOptFlag(req.Flag, req.On) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown flag: " + req.Flag})
+		return
+	}
+	slog.Info("opt flag set", "flag", req.Flag, "on", req.On)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "flags": ltclient.OptFlags()})
 }
 
 // handleGetTrackers returns the per-host tracker aggregate joined with the
