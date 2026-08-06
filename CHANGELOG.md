@@ -7,99 +7,26 @@ All notable changes to Hydra are documented here. This project follows
 
 ### Changed
 
-- **The four control-plane optimisations are now on by default.** They shipped
-  switched off in 3.43.2 so they could be measured against the running system
-  rather than against a memory of it. On a production instance holding 107k
-  torrents, over 900-second windows with the states interleaved twice, the Go
-  process went from **67.4% of a core to 39.8%** — a 41% reduction — while peak
-  resident memory stayed flat at 2.8GB. The window that carried the
-  optimisations was also carrying *more* traffic than the reference window,
-  3.19 Gbps against 2.69, so the saving is not an artefact of a quieter swarm.
-  Two identical reference windows drifted 3.0% apart, which is the noise this
-  result stands against.
-
-  The four are `ipc_prealloc` (size a large IPC frame in one allocation instead
-  of climbing the append doubling cascade), `list_cache` (share one decoded
-  torrent listing between the schedulers that ask for it), `qbit_snapshot`
-  (build the qBittorrent listing once and share it for two seconds) and
-  `totals_cache` (memoise the cumulative transfer totals for one second).
-  They were measured as a group: the individual contributions are not separated
-  here, and they overlap by construction, since sharing a decoded listing
-  removes frames that preallocation would otherwise have made cheaper.
-
-  Every one of them remains switchable at runtime through `/api/opt/flags`.
-  Turning one off restores the previous code path exactly, which is a faster
-  rollback than a restart — and a cheaper one, since restarting resets the
-  per-torrent upload counters that trackers credit by maximum.
-
-- **`list_cache` now fires at all.** It had measured as doing exactly nothing,
-  which turned out to be a bug rather than a property: its lifetime was a
-  three-second constant, while the three schedulers that would share the
-  snapshot tick at ten, thirty and sixty seconds. Every caller therefore always
-  found the snapshot expired and decoded its own copy of the full listing. The
-  lifetime is now adjustable through `list_cache_ttl_ms` and defaults to nine
-  seconds, just under the fastest of those tickers.
-
-- **The engine got faster too, which was not the intent.** The Rust hoard engine
-  did not change, yet its processor use fell about 17% in the same measurement.
-  Asking for the torrent listing less often means the engine serialises its
-  ~100MB reply less often: the saving lands on both sides of the interprocess
-  channel, not only on the side that was optimised.
+- **Four control-plane optimisations are now on by default**, measured at
+  −41% CPU on the Go process with resident memory unchanged. Each one stays
+  switchable at runtime through `/api/opt/flags`.
+- **`list_cache` fires at all now.** Its lifetime was a three-second constant
+  while the schedulers sharing it tick at ten seconds and above, so every
+  caller always found it expired. It is adjustable now and defaults to nine.
 
 ### Notes
 
-- **`gogc` stays a knob and keeps the Go default of 100.** Raising it to 200 was
-  measured alongside the rest: it gave back a further 6.6 points of processor
-  time and cost three extra gigabytes of resident memory, peaking at 6.0GB
-  against an 8GiB memory limit. The ZFS cache on the test host was not disturbed
-  (51.5GB in every state, which refutes the concern that a fatter heap would
-  starve it), but the headroom against the memory limit shrinks as the catalogue
-  grows, and exhausting it would trade a small processor win for collector
-  thrashing. It is available for anyone whose machine has memory to spare, and
-  it is not set for you.
+- `gogc` stays a knob at the Go default of 100: raising it bought 6.6 points of
+  CPU for three extra gigabytes of resident memory.
 
 ## v3.43.2 — 2026-08-06
 
 ### Added
 
-- **Five runtime knobs for profiling the control plane, every one of them off
-  by default.** A CPU profile at 107k torrents put the Go side at 70% of a core
-  while serving no bytes at all: 28% in garbage collection, 30% decoding JSON,
-  10.8% in the qBittorrent shim and 7.7% in the SSE pusher. Each knob gates one
-  optimisation so it can be switched at runtime and measured against a real
-  baseline rather than a remembered one. Restarting to compare is not an option
-  here: it resets the per-torrent upload counters, and trackers credit upload by
-  maximum per torrent, so an A/B by restart costs real credit.
-  - `ipc_prealloc` sizes the IPC frame buffer in one allocation, from the
-    largest frame seen so far. Growing it by repeated append made a ~100MB
-    torrent listing climb the doubling cascade and allocate roughly twice the
-    frame in intermediates that are discarded immediately; that one function
-    accounts for 37% of every byte the process allocates, and the collector
-    bill follows the bytes. Only the first overflow triggers it, so small
-    frames still return on the first read without paying for a large
-    allocation.
-  - `qbit_snapshot` builds the qBittorrent listing once and shares it for two
-    seconds. The web UI has been pushed over SSE for a while, which leaves this
-    endpoint as the last large REST listing - and it is polled by the *arr
-    stack, cross-seed and autobrr at a rate that is not ours to set. Callers
-    receive a copy of the slice, because each one sorts it in place.
-  - `totals_cache` memoises the cumulative upload and download totals for one
-    second. The SSE pusher asks on every tick, and each call rescanned the
-    whole torrent set.
-  - `list_cache_ttl_ms` makes the shared listing TTL adjustable. It had been a
-    three-second constant, which could never fire: the schedulers that would
-    use it tick at ten, thirty and sixty seconds, so every caller always found
-    the snapshot expired and decoded its own copy. That is why turning
-    `list_cache` on had measured as exactly nothing. It now defaults to nine
-    seconds, just under the fastest of those tickers.
-  - `gogc` sets the collector target percentage without a restart. Against a
-    637MB live heap and roughly 170MB/s of allocation churn, the default
-    collects about every four seconds. Raising it trades resident memory for
-    processor time, and on a ZFS host that memory is taken from the cache the
-    seeding tier reads through, so it is not free.
-
-Nothing changes until one of these is switched on: this release behaves exactly
-like the one before it.
+- **Five runtime knobs for profiling the control plane, all off by default**:
+  `ipc_prealloc`, `qbit_snapshot`, `totals_cache`, `list_cache_ttl_ms` and
+  `gogc`, switchable through `/api/opt/flags`. They ship off so each can be
+  measured against the running system; nothing changes until one is turned on.
 
 ## v3.43.1 — 2026-08-06
 
