@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation and wiki
+    url: https://github.com/Kheopsian/Hydra/wiki
+    about: Setup, configuration and the qBittorrent shim are documented here.
+  - name: API reference
+    url: https://github.com/Kheopsian/Hydra/blob/main/docs/API.md
+    about: Check the endpoint reference before reporting an API bug.
