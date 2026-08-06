@@ -3,6 +3,49 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.43.2 — 2026-08-06
+
+### Added
+
+- **Five runtime knobs for profiling the control plane, every one of them off
+  by default.** A CPU profile at 107k torrents put the Go side at 70% of a core
+  while serving no bytes at all: 28% in garbage collection, 30% decoding JSON,
+  10.8% in the qBittorrent shim and 7.7% in the SSE pusher. Each knob gates one
+  optimisation so it can be switched at runtime and measured against a real
+  baseline rather than a remembered one. Restarting to compare is not an option
+  here: it resets the per-torrent upload counters, and trackers credit upload by
+  maximum per torrent, so an A/B by restart costs real credit.
+  - `ipc_prealloc` sizes the IPC frame buffer in one allocation, from the
+    largest frame seen so far. Growing it by repeated append made a ~100MB
+    torrent listing climb the doubling cascade and allocate roughly twice the
+    frame in intermediates that are discarded immediately; that one function
+    accounts for 37% of every byte the process allocates, and the collector
+    bill follows the bytes. Only the first overflow triggers it, so small
+    frames still return on the first read without paying for a large
+    allocation.
+  - `qbit_snapshot` builds the qBittorrent listing once and shares it for two
+    seconds. The web UI has been pushed over SSE for a while, which leaves this
+    endpoint as the last large REST listing - and it is polled by the *arr
+    stack, cross-seed and autobrr at a rate that is not ours to set. Callers
+    receive a copy of the slice, because each one sorts it in place.
+  - `totals_cache` memoises the cumulative upload and download totals for one
+    second. The SSE pusher asks on every tick, and each call rescanned the
+    whole torrent set.
+  - `list_cache_ttl_ms` makes the shared listing TTL adjustable. It had been a
+    three-second constant, which could never fire: the schedulers that would
+    use it tick at ten, thirty and sixty seconds, so every caller always found
+    the snapshot expired and decoded its own copy. That is why turning
+    `list_cache` on had measured as exactly nothing. It now defaults to nine
+    seconds, just under the fastest of those tickers.
+  - `gogc` sets the collector target percentage without a restart. Against a
+    637MB live heap and roughly 170MB/s of allocation churn, the default
+    collects about every four seconds. Raising it trades resident memory for
+    processor time, and on a ZFS host that memory is taken from the cache the
+    seeding tier reads through, so it is not free.
+
+Nothing changes until one of these is switched on: this release behaves exactly
+like the one before it.
+
 ## v3.43.1 — 2026-08-06
 
 ### Fixed
