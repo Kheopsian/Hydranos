@@ -23,8 +23,15 @@ import (
 //	                              list has been SSE-pushed since 3.2x)
 //	startSnapshotPusher    7.7%  of which statusPayload 5.3%
 //
-// Both default OFF so the deployed binary behaves exactly like the previous
-// one until an experiment turns them on.
+// Both ship ON as of 3.44.0. Measured on prod over interleaved 900s windows,
+// turning the four control-plane flags on took the Go process from 67.4% of a
+// core to 39.8% while resident memory stayed flat (2873MB peak against 2821MB),
+// and did so during a window carrying MORE traffic than the reference one, so
+// the gain is not an artefact of a quieter swarm.
+//
+// Turning either one off restores the previous code path exactly, which is the
+// fastest rollback available: a restart would reset the per-torrent upload
+// counters that trackers credit by maximum.
 
 var (
 	// optQbitSnapshot: build the qBittorrent listing once and share it for a
@@ -47,8 +54,8 @@ const (
 )
 
 func init() {
-	optQbitSnapshot.Store(false)
-	optTotalsCache.Store(false)
+	optQbitSnapshot.Store(true)
+	optTotalsCache.Store(true)
 }
 
 // SetOptFlag turns one HTTP-side optimisation on or off. Returns false if the
@@ -88,8 +95,12 @@ func init() { gogcCurrent.Store(100) }
 // value. Raising it trades resident memory for CPU: with a 637MB live heap and
 // ~170MB/s of allocation churn, GOGC=100 collects every four seconds or so.
 //
-// Careful on this box: the heap it stops reclaiming is memory the ZFS ARC would
-// otherwise hold, and the hoard tier reads through the ARC.
+// Measured and rejected as a default on 2026-08-06: at GOGC=200 the control
+// plane gave back 6.6 points of CPU and cost three extra gigabytes of resident
+// memory, peaking at 6.0GB against a GOMEMLIMIT of 8GiB. The ZFS ARC was not
+// disturbed after all (51.5GB in every state), but that headroom against the
+// memory limit shrinks as the catalogue grows, and running out of it trades a
+// small CPU win for collector thrashing. It defaults to the Go default of 100.
 func SetGOGC(percent int) int {
 	prev := debug.SetGCPercent(percent)
 	gogcCurrent.Store(int64(percent))

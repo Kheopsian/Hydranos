@@ -25,9 +25,32 @@ import "sync/atomic"
 //
 // So ipc_route carries the win and ships ON. ipc_frame ships ON too: its effect
 // on the total is below the noise floor, but it provably deletes ~27s/600s of
-// quadratic rescanning and cannot cost anything. list_cache stays OFF — a TTL
-// cache never fires when the callers tick 10s apart; sharing one snapshot
-// between them needs to be explicit, which is a different change.
+// quadratic rescanning and cannot cost anything.
+//
+// list_cache measured as exactly nothing at the time, and the reason turned out
+// to be a bug rather than a property: its TTL was a 3s constant while the three
+// schedulers that would use it tick at 10s, 30s and 60s, so every caller always
+// found the snapshot expired. With the TTL adjustable and set just under the
+// fastest ticker it fires, and it ships ON as of 3.44.0.
+//
+// Measured again on prod 2026-08-06, 900s windows, 107k torrents, states
+// interleaved A/B/C twice (drift between two identical A windows: 3.0%):
+//
+//	A  all off, GOGC 100      go 67.4%   RSS peak 2873MB
+//	B  four flags on          go 39.8%   RSS peak 2821MB   at HIGHER load
+//	C  B plus GOGC 200        go 33.2%   RSS peak 5864MB
+//
+// B is the configuration that ships: -41% on the control plane at no cost in
+// memory, and it also took 17% off the Rust hoard engine, which nobody had
+// predicted — fewer list_torrents calls means the engine serialises its ~100MB
+// reply less often, so the saving lands on both sides of the IPC.
+//
+// C is not worth it and does not ship: 6.6 points of CPU for three extra
+// gigabytes of resident memory. The ZFS ARC turned out to be untouched (51.5GB
+// throughout, refuting the concern that a fatter heap would starve it), but
+// GOMEMLIMIT is 8GiB and C already peaked at 6.0GB — at a larger catalogue that
+// headroom disappears and the collector would start thrashing. GOGC stays a
+// knob, defaulting to the Go default of 100.
 
 var (
 	// optFrame: assemble a socket frame in ONE pass over the bytes.
@@ -61,8 +84,8 @@ func init() {
 	// regression that no restart can beat for speed.
 	optFrame.Store(true)
 	optRoute.Store(true)
-	optListCache.Store(false)
-	optPrealloc.Store(false)
+	optListCache.Store(true)
+	optPrealloc.Store(true)
 	listCacheTTL.Store(9 * 1000 * 1000 * 1000) // 9s: just under the 10s ticker
 }
 
