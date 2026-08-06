@@ -192,9 +192,18 @@ func main() {
 	}
 
 	// pprof profiler (localhost only) — added 2026-07-22 to diagnose Go CPU usage.
+	// Port 6060 is NOT usable in prod: hydra runs --network host and CrowdSec
+	// already owns 6060 there, so the bind failed silently and prod had no
+	// profiler for two weeks. Default to 6061; HYDRA_PPROF_ADDR overrides, and
+	// the failure is now logged loudly enough to notice.
 	go func() {
-		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
-			slog.Warn("pprof server exited", "err", err)
+		addr := os.Getenv("HYDRA_PPROF_ADDR")
+		if addr == "" {
+			addr = "127.0.0.1:6061"
+		}
+		slog.Info("pprof listening", "addr", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			slog.Error("pprof server could not listen (profiler unavailable)", "addr", addr, "err", err)
 		}
 	}()
 

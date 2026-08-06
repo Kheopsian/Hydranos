@@ -3,6 +3,51 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.43.0 — 2026-08-06
+
+### Changed
+
+- **The control plane no longer parses every engine reply up to four times.**
+  A CPU profile of a 107k-torrent instance showed the Go side burning roughly a
+  third of its time in the IPC read loop, on a listing it had already read: each
+  frame from the engine was decoded once to test whether it was an event, once
+  more for its id, again for its error field, and only then by the caller that
+  actually wanted the data. On a `list_torrents` frame — about 100 MB at this
+  scale — that is three full JSON walks thrown away per reply. Routing now takes
+  a single header-only decode. Measured over 600-second windows on a live
+  instance, the Go process drops from 88-96% of a core to about 75%; the
+  drift between two identical control windows was around 9%, so the win is well
+  clear of the noise but should be read as a range, not a figure.
+- **Frame assembly stopped re-scanning what it had already scanned.** Reading a
+  frame walked the entire accumulated buffer again on every refill, the way
+  `bufio.Scanner` does internally — quadratic in frame size, which is exactly
+  the wrong shape for a 100 MB listing. Frames are now assembled in one pass.
+  This one deletes a measurable ~27 seconds of rescanning per 600-second window,
+  but its effect on total CPU sits below the noise floor: it ships because it
+  cannot cost anything, not because the total moved.
+
+### Added
+
+- **`GET`/`POST /api/opt/flags` toggles each IPC optimisation at runtime.**
+  Turning a flag off restores the previous code path exactly, which makes it a
+  faster rollback than any restart — and restarts are not free here, since they
+  reset the per-torrent upload counters that trackers credit by maximum. The
+  same switch is what let each optimisation be measured in isolation against a
+  real baseline rather than a remembered one. `ipc_frame` and `ipc_route` ship
+  on; `list_cache` ships off, because a 3-second shared snapshot never survives
+  callers that tick 10 seconds apart — sharing that snapshot deliberately is a
+  different change.
+
+### Fixed
+
+- **The profiler had been dead in production for two weeks without saying so.**
+  pprof bound to `127.0.0.1:6060`, but Hydra runs with host networking and
+  CrowdSec already holds 6060 there, so the bind failed and the error was logged
+  at warning level and never seen — while `curl` against the port answered 200,
+  because CrowdSec was answering. It now defaults to 6061, honours
+  `HYDRA_PPROF_ADDR`, logs the address it listens on, and reports a failed bind
+  as an error.
+
 ## v3.42.2 — 2026-08-04
 
 ### Fixed

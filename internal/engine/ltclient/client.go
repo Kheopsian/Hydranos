@@ -2,9 +2,11 @@ package ltclient
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"strings"
@@ -23,7 +25,7 @@ import (
 type Client struct {
 	socketPath string
 	conn       net.Conn
-	scanner    *bufio.Scanner
+	reader     *bufio.Reader
 
 	writeMu sync.Mutex // serializes writes on the socket
 	idSeq   atomic.Int64
@@ -46,6 +48,11 @@ type Client struct {
 	eventMu sync.Mutex
 	onEvent func(Event)
 
+	// Shared list_torrents snapshot, gated by the list_cache flag (opt.go).
+	listMu       sync.Mutex
+	listCache    *ListTorrentsResult
+	listCachedAt time.Time
+
 	done   chan struct{}
 	closed atomic.Bool
 
@@ -61,6 +68,12 @@ type Client struct {
 type pendingResp struct {
 	raw []byte
 	err error
+
+	// errMsg is the engine-side error field, already read by the reader while
+	// routing. routed says it is trustworthy (the reader ran the single-pass
+	// path), letting callVia skip a full re-parse of the frame.
+	errMsg string
+	routed bool
 }
 
 // callTimeout bounds how long a single call() waits for its response.
@@ -91,8 +104,11 @@ func Connect(socketPath string) (*Client, error) {
 		return nil, fmt.Errorf("ltclient: connect %s: %w", socketPath, err)
 	}
 
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 1024*1024), 256*1024*1024) // 1MB init, 256MB max line (list_torrents ~17MB @24k torrents; 256MB ~= 370k)
+	// bufio.Reader, not bufio.Scanner: frames are assembled by readFrame below,
+	// which can do it in one pass. Scanner re-scanned the whole accumulated
+	// token on every refill — quadratic on the ~100MB list_torrents frame.
+	// The 1MB buffer is the read chunk, no longer a cap on frame size.
+	reader := bufio.NewReaderSize(conn, 1024*1024)
 
 	// Second connection for the bulk lane (list_torrents). The engine's RPC
 	// server accepts multiple connections, each served independently.
@@ -101,13 +117,12 @@ func Connect(socketPath string) (*Client, error) {
 		conn.Close()
 		return nil, fmt.Errorf("ltclient: connect(bulk) %s: %w", socketPath, berr)
 	}
-	bulkScanner := bufio.NewScanner(bulkConn)
-	bulkScanner.Buffer(make([]byte, 1024*1024), 256*1024*1024)
+	bulkReader := bufio.NewReaderSize(bulkConn, 1024*1024)
 
 	c := &Client{
 		socketPath: socketPath,
 		conn:       conn,
-		scanner:    scanner,
+		reader:     reader,
 		bulkConn:   bulkConn,
 		bulkSem:    make(chan struct{}, 4),
 		pending:    make(map[int64]chan pendingResp),
@@ -115,8 +130,8 @@ func Connect(socketPath string) (*Client, error) {
 		rpcSem:     make(chan struct{}, 8),
 	}
 
-	go c.readLoop(c.scanner, true)
-	go c.readLoop(bulkScanner, false)
+	go c.readLoop(c.reader, true)
+	go c.readLoop(bulkReader, false)
 	return c, nil
 }
 
@@ -144,35 +159,32 @@ func (c *Client) Close() error {
 // readLoop is the single consumer of the socket. It dispatches events to the
 // registered handler and routes RPC responses to the per-id channel. Exits on
 // connection close or unrecoverable read error, draining all pending calls.
-func (c *Client) readLoop(scanner *bufio.Scanner, drainOnExit bool) {
+func (c *Client) readLoop(r *bufio.Reader, drainOnExit bool) {
 	if drainOnExit {
 		defer c.drainPending(errors.New("ltclient: connection closed"))
 	}
 
 	for {
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil && !c.closed.Load() {
+		buf, err := readFrame(r)
+		if err != nil {
+			if !c.closed.Load() && err != io.EOF {
 				slog.Warn("ltclient: read loop exiting", "error", err)
 			}
 			return
 		}
-
-		line := scanner.Bytes()
-		if len(line) == 0 {
+		if len(buf) == 0 {
 			continue
 		}
 
-		// Copy — scanner reuses its buffer on the next Scan.
-		buf := make([]byte, len(line))
-		copy(buf, line)
-
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(buf, &raw); err != nil {
+		// Route the frame. head.Event/ID/Error is all routing needs; the
+		// caller decodes the payload itself from the same bytes.
+		head, err := routeFrame(buf)
+		if err != nil {
 			slog.Warn("ltclient: bad JSON from engine", "error", err)
 			continue
 		}
 
-		if _, hasEvent := raw["event"]; hasEvent {
+		if head.Event != "" {
 			var ev Event
 			if err := json.Unmarshal(buf, &ev); err != nil {
 				continue
@@ -188,25 +200,94 @@ func (c *Client) readLoop(scanner *bufio.Scanner, drainOnExit bool) {
 			continue
 		}
 
-		// RPC response — route by id.
-		var resp Response
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			slog.Warn("ltclient: unmarshal response envelope", "error", err)
-			continue
-		}
-
 		c.pendingMu.Lock()
-		ch, ok := c.pending[resp.ID]
+		ch, ok := c.pending[head.ID]
 		if ok {
-			delete(c.pending, resp.ID)
+			delete(c.pending, head.ID)
 		}
 		c.pendingMu.Unlock()
 		if !ok {
-			slog.Warn("ltclient: orphan response", "id", resp.ID)
+			slog.Warn("ltclient: orphan response", "id", head.ID)
 			continue
 		}
-		// ch is buffered (cap 1) — non-blocking.
-		ch <- pendingResp{raw: buf}
+		// ch is buffered (cap 1) — non-blocking. errMsg/routed let callVia skip
+		// re-parsing the whole frame just to read back the error field.
+		ch <- pendingResp{raw: buf, errMsg: head.Error, routed: optRoute.Load()}
+	}
+}
+
+// frameHead is everything routing needs from a frame. It deliberately omits
+// result/data: encoding/json then SKIPS those values instead of allocating a
+// RawMessage copy of them, which on a 100MB list_torrents frame is the whole
+// cost. See opt.go for why this is gated.
+type frameHead struct {
+	ID    int64  `json:"id"`
+	Error string `json:"error"`
+	Event string `json:"event"`
+}
+
+// routeFrame extracts the routing header from a frame.
+func routeFrame(buf []byte) (frameHead, error) {
+	var head frameHead
+	if optRoute.Load() {
+		// One pass, values skipped.
+		return head, json.Unmarshal(buf, &head)
+	}
+
+	// Baseline path: the pre-3.42.4 behaviour, kept so the OFF rung of a
+	// measurement ladder is a real baseline. Parses the frame twice — once to
+	// test for "event", once into the full Response (which also allocates a
+	// copy of result/data).
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(buf, &raw); err != nil {
+		return head, err
+	}
+	if _, hasEvent := raw["event"]; hasEvent {
+		head.Event = "event"
+		return head, nil
+	}
+	var resp Response
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		return head, err
+	}
+	head.ID, head.Error = resp.ID, resp.Error
+	return head, nil
+}
+
+// readFrame reads one newline-terminated frame and returns it. The returned
+// slice is owned by the caller (no shared buffer to copy out of, unlike the
+// bufio.Scanner this replaced).
+func readFrame(r *bufio.Reader) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			buf = append(buf, chunk...)
+			if !optFrame.Load() {
+				// Baseline path: bufio.Scanner re-scanned the ENTIRE
+				// accumulated token for the delimiter on every refill. That
+				// rescan is the quadratic cost we are measuring against; the
+				// result is discarded because ReadSlice already told us the
+				// delimiter is not in this chunk.
+				_ = bytes.IndexByte(buf, '\n')
+			}
+			continue
+		}
+		if err != nil {
+			if len(buf) > 0 && err == io.EOF {
+				// Trailing bytes without a newline: incomplete frame, drop it.
+				return nil, io.EOF
+			}
+			return nil, err
+		}
+		// Drop the trailing '\n' to match the old Scanner contract.
+		chunk = chunk[:len(chunk)-1]
+		if buf == nil {
+			out := make([]byte, len(chunk))
+			copy(out, chunk)
+			return out, nil
+		}
+		return append(buf, chunk...), nil
 	}
 }
 
@@ -289,12 +370,20 @@ func (c *Client) callVia(conn net.Conn, wmu *sync.Mutex, sem chan struct{}, meth
 		if pr.err != nil {
 			return nil, pr.err
 		}
-		var resp Response
-		if err := json.Unmarshal(pr.raw, &resp); err != nil {
-			return nil, fmt.Errorf("ltclient: unmarshal response: %w", err)
-		}
-		if resp.Error != "" {
-			return nil, fmt.Errorf("ltclient: engine error: %s", resp.Error)
+		if pr.routed {
+			// The reader already extracted the error field in its single pass.
+			if pr.errMsg != "" {
+				return nil, fmt.Errorf("ltclient: engine error: %s", pr.errMsg)
+			}
+		} else {
+			// Baseline path: parse the whole frame a third time for one string.
+			var resp Response
+			if err := json.Unmarshal(pr.raw, &resp); err != nil {
+				return nil, fmt.Errorf("ltclient: unmarshal response: %w", err)
+			}
+			if resp.Error != "" {
+				return nil, fmt.Errorf("ltclient: engine error: %s", resp.Error)
+			}
 		}
 		// Legacy contract: callers unmarshal the full line directly into
 		// their own result struct (unknown fields like "id" are ignored).
@@ -425,6 +514,12 @@ func (c *Client) SubscribeEvents() error {
 
 // ListTorrents returns all torrents in the session.
 func (c *Client) ListTorrents() (*ListTorrentsResult, error) {
+	if optListCache.Load() {
+		if r := c.cachedList(); r != nil {
+			return r, nil
+		}
+	}
+
 	raw, err := c.callBulk("list_torrents", map[string]interface{}{})
 	if err != nil {
 		return nil, err
@@ -433,7 +528,37 @@ func (c *Client) ListTorrents() (*ListTorrentsResult, error) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("ltclient: unmarshal list: %w", err)
 	}
+
+	if optListCache.Load() {
+		c.listMu.Lock()
+		c.listCache = &result
+		c.listCachedAt = time.Now()
+		c.listMu.Unlock()
+	}
 	return &result, nil
+}
+
+// cachedList returns a private copy of the shared snapshot if it is fresh
+// enough, else nil. Three schedulers (reconcile, enforceDownloadSlots,
+// refreshStats) each pulled and decoded their own copy of all 107k torrents;
+// this lets them share one pull.
+//
+// The copy is not optional: enforceDownloadSlots sorts what it gets, so handing
+// out the same backing array would let one caller reorder another's view mid-
+// scan. Copying a slice of structs is a memmove — cheap next to decoding 100MB
+// of JSON, which is the whole point.
+func (c *Client) cachedList() *ListTorrentsResult {
+	c.listMu.Lock()
+	defer c.listMu.Unlock()
+	if c.listCache == nil || time.Since(c.listCachedAt) > ListCacheTTL {
+		return nil
+	}
+	out := &ListTorrentsResult{
+		Torrents: make([]TorrentStatus, len(c.listCache.Torrents)),
+		Count:    c.listCache.Count,
+	}
+	copy(out.Torrents, c.listCache.Torrents)
+	return out
 }
 
 // GetPeers returns connected peers for a torrent.
