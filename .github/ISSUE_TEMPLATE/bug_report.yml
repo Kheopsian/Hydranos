@@ -10,12 +10,15 @@ body:
         qBittorrent-compatible shim: knowing which one you were talking to
         usually cuts the search in half.
 
+        Only the first few fields are required. Fill in what you can and
+        leave the rest empty — we can always ask in a comment.
+
   - type: input
     id: version
     attributes:
       label: Hydra version
       description: Run `hydra -version`, or `curl localhost:PORT/health`. Include the image tag if you run Docker.
-      placeholder: "3.42.5-typhon (ghcr.io/kheopsian/hydra:3.42.5)"
+      placeholder: "3.43.0-typhon (ghcr.io/kheopsian/hydra:3.43.0)"
     validations:
       required: true
 
@@ -49,13 +52,6 @@ body:
     validations:
       required: true
 
-  - type: input
-    id: client
-    attributes:
-      label: Third-party client involved
-      description: Leave empty if none. Include its version.
-      placeholder: "autobrr 1.63.0, Sonarr 4.0.15, cross-seed 6.12"
-
   - type: textarea
     id: what-happened
     attributes:
@@ -75,6 +71,13 @@ body:
     validations:
       required: true
 
+  - type: input
+    id: client
+    attributes:
+      label: Third-party client involved
+      description: Leave empty if none. Include its version.
+      placeholder: "autobrr 1.63.0, Sonarr 4.0.15, cross-seed 6.12"
+
   - type: textarea
     id: logs
     attributes:
@@ -85,29 +88,28 @@ body:
         announce URLs before pasting.
       render: text
 
-  - type: textarea
-    id: scale
-    attributes:
-      label: Setup and scale
-      description: >
-        Roughly how many torrents, which engines/tiers you run (race, hoard,
-        extra sessions), the filesystem behind your save paths (ZFS, ext4,
-        XFS, network mount) and your egress mode (direct, SOCKS5, PROXY-v2
-        relay, gluetun). Several bugs only appear past a certain size or on a
-        specific filesystem, so this is worth filling in even when it feels
-        irrelevant.
-      placeholder: |
-        ~40k torrents, race + hoard, save paths on ZFS, gluetun with port rebind
-    validations:
-      required: true
-
   - type: input
     id: os
     attributes:
       label: Host OS and architecture
       placeholder: "Unraid 7.0 / x86_64"
-    validations:
-      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >
+        Mostly useful for transfer and storage problems. Two things help:
+        the filesystem behind your save paths, and how your traffic leaves
+        the box (direct, SOCKS5, PROXY-v2 relay, gluetun).
+
+
+        Not sure about the filesystem? Run `df -T /path/to/your/save/dir`.
+        On Unraid, point it at the pool rather than the share — `/mnt/user`
+        reports `shfs`, which hides what is actually underneath, so use
+        `df -T /mnt/cache/...` (and `zfs list` if you are on ZFS).
+      placeholder: |
+        save paths on ZFS (/mnt/cache), gluetun with port rebind
 
   - type: textarea
     id: config
