@@ -42,6 +42,13 @@ var (
 	// into Response for the id, once more in callVia for the error field.
 	optRoute atomic.Bool
 
+	// optPrealloc: size the frame buffer from the largest frame seen so far.
+	// OFF grows it by repeated append, which for a ~100MB list_torrents frame
+	// walks the doubling cascade and allocates roughly twice the frame size in
+	// throwaway intermediates. readFrame is 37% of all bytes allocated by the
+	// process, and the GC bill follows the bytes.
+	optPrealloc atomic.Bool
+
 	// optListCache: serve list_torrents from a short-lived shared snapshot.
 	// OFF lets every caller (hoardScheduler.reconcile 66%, enforceDownloadSlots
 	// 22%, refreshStats 11%) pull and decode its own copy of all torrents.
@@ -55,6 +62,8 @@ func init() {
 	optFrame.Store(true)
 	optRoute.Store(true)
 	optListCache.Store(false)
+	optPrealloc.Store(false)
+	listCacheTTL.Store(9 * 1000 * 1000 * 1000) // 9s: just under the 10s ticker
 }
 
 // Flag names as accepted by the API. Kept in one place so the endpoint, the
@@ -63,6 +72,7 @@ const (
 	FlagFrame     = "ipc_frame"
 	FlagRoute     = "ipc_route"
 	FlagListCache = "list_cache"
+	FlagPrealloc  = "ipc_prealloc"
 )
 
 // SetOptFlag turns one optimisation on or off. Returns false if the name is
@@ -75,6 +85,8 @@ func SetOptFlag(name string, on bool) bool {
 		optRoute.Store(on)
 	case FlagListCache:
 		optListCache.Store(on)
+	case FlagPrealloc:
+		optPrealloc.Store(on)
 	default:
 		return false
 	}
@@ -87,10 +99,29 @@ func OptFlags() map[string]bool {
 		FlagFrame:     optFrame.Load(),
 		FlagRoute:     optRoute.Load(),
 		FlagListCache: optListCache.Load(),
+		FlagPrealloc:  optPrealloc.Load(),
 	}
 }
 
-// ListCacheTTL bounds how stale a shared list snapshot may be. The callers are
-// schedulers running on 10s+ ticks over 100k torrents; a couple of seconds of
-// staleness cannot change a slot decision, and the flag is off by default.
-const ListCacheTTL = 3 * 1000 * 1000 * 1000 // 3s in nanoseconds
+// listCacheTTL bounds how stale a shared list snapshot may be, in nanoseconds.
+//
+// It is a variable, not a constant, because the original 3s could never fire:
+// the three schedulers tick at 10s, 30s and 60s, so every caller always found
+// the snapshot expired and decoded its own copy. Measured effect of the flag
+// was consequently zero. A TTL just under the fastest ticker lets the 30s and
+// 60s callers ride on the 10s one. The callers are schedulers over 100k
+// torrents; a few seconds of staleness cannot change a slot decision.
+var listCacheTTL atomic.Int64
+
+// ListCacheTTL reports the current snapshot TTL as a duration in nanoseconds.
+func ListCacheTTL() int64 { return listCacheTTL.Load() }
+
+// SetListCacheTTL sets the snapshot TTL in nanoseconds. Values below zero are
+// ignored; zero disables reuse without touching the flag.
+func SetListCacheTTL(ns int64) bool {
+	if ns < 0 {
+		return false
+	}
+	listCacheTTL.Store(ns)
+	return true
+}

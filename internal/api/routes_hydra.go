@@ -89,8 +89,14 @@ func GetRaceSessionDelta() (ul, dl int64) {
 	return
 }
 
-// GetHoardSessionDelta returns hoard UL/DL transferred since boot.
+// GetHoardSessionDelta returns hoard UL/DL transferred since boot. Memoised
+// for a second when totals_cache is on: the SSE pusher asks on every tick and
+// the underlying call rescans the torrent set.
 func GetHoardSessionDelta() (ul, dl int64) {
+	return memoHoardDelta.get(getHoardSessionDeltaUncached)
+}
+
+func getHoardSessionDeltaUncached() (ul, dl int64) {
 	if hoardTotalFunc == nil {
 		return 0, 0
 	}
@@ -218,8 +224,13 @@ func saveBaseline() {
 	os.Rename(tmp, baselineFile)
 }
 
-// getRainTotals returns current cumulative UL/DL from Rain (Bolt).
+// getRainTotals returns current cumulative UL/DL from Rain (Bolt). Memoised
+// for a second under totals_cache; getGlobalTotals rides on this one too.
 func getRainTotals() (ul, dl int64) {
+	return memoRain.get(getRainTotalsUncached)
+}
+
+func getRainTotalsUncached() (ul, dl int64) {
 	if sessionTotalFunc != nil {
 		return sessionTotalFunc()
 	}
@@ -2440,7 +2451,18 @@ func (s *Server) handleSetClient(c *gin.Context) {
 // handleGetOptFlags reports the state of the hot-swappable IPC optimisation
 // flags (see internal/engine/ltclient/opt.go).
 func (s *Server) handleGetOptFlags(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"flags": ltclient.OptFlags()})
+	flags := map[string]bool{}
+	for k, v := range ltclient.OptFlags() {
+		flags[k] = v
+	}
+	for k, v := range OptFlags() {
+		flags[k] = v
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"flags":             flags,
+		"gogc":              GOGC(),
+		"list_cache_ttl_ms": ltclient.ListCacheTTL() / 1e6,
+	})
 }
 
 // handleSetOptFlag toggles one optimisation at runtime, so a profiling ladder
@@ -2448,19 +2470,40 @@ func (s *Server) handleGetOptFlags(c *gin.Context) {
 // per-torrent upload counters, which costs real tracker credit).
 func (s *Server) handleSetOptFlag(c *gin.Context) {
 	var req struct {
-		Flag string `json:"flag"`
-		On   bool   `json:"on"`
+		Flag  string `json:"flag"`
+		On    bool   `json:"on"`
+		Value int64  `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if !ltclient.SetOptFlag(req.Flag, req.On) {
+	// Two knobs carry a value rather than a boolean.
+	switch req.Flag {
+	case "gogc":
+		if req.Value < 10 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "gogc must be >= 10"})
+			return
+		}
+		prev := SetGOGC(int(req.Value))
+		slog.Info("GOGC set", "percent", req.Value, "previous", prev)
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "gogc": GOGC(), "previous": prev})
+		return
+	case "list_cache_ttl_ms":
+		if !ltclient.SetListCacheTTL(req.Value * 1e6) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ttl must be >= 0"})
+			return
+		}
+		slog.Info("list cache TTL set", "ms", req.Value)
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "list_cache_ttl_ms": ltclient.ListCacheTTL() / 1e6})
+		return
+	}
+	if !ltclient.SetOptFlag(req.Flag, req.On) && !SetOptFlag(req.Flag, req.On) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown flag: " + req.Flag})
 		return
 	}
 	slog.Info("opt flag set", "flag", req.Flag, "on", req.On)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "flags": ltclient.OptFlags()})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "flags": ltclient.OptFlags(), "http_flags": OptFlags()})
 }
 
 // handleGetTrackers returns the per-host tracker aggregate joined with the
