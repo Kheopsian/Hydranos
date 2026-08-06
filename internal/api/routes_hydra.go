@@ -2423,7 +2423,8 @@ func (s *Server) handleSetPasskey(c *gin.Context) {
 	}
 	engine.SetPasskeyOverride(req.Host, req.Passkey)
 	pushed, failed := s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "passkey", Host: req.Host, Passkey: req.Passkey})
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "passkeys": engine.GetPasskeyOverrides(), "agents_pushed": pushed, "agents_failed": failed})
+	persisted := persistedFlag(s.persistPasskey(req.Host, req.Passkey), "passkey", req.Host)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "passkeys": engine.GetPasskeyOverrides(), "agents_pushed": pushed, "agents_failed": failed, "persisted": persisted})
 }
 
 // handleGetClients returns the current per-tracker client spoof overrides.
@@ -2445,7 +2446,8 @@ func (s *Server) handleSetClient(c *gin.Context) {
 	}
 	engine.SetClientOverride(req.Host, req.PeerIDPrefix, req.UserAgent)
 	pushed, failed := s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "client", Host: req.Host, PeerIDPrefix: req.PeerIDPrefix, UserAgent: req.UserAgent})
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides(), "agents_pushed": pushed, "agents_failed": failed})
+	persisted := persistedFlag(s.persistClientSpoof(req.Host, req.PeerIDPrefix, req.UserAgent), "client", req.Host)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides(), "agents_pushed": pushed, "agents_failed": failed, "persisted": persisted})
 }
 
 // handleGetOptFlags reports the state of the hot-swappable IPC optimisation
@@ -2603,7 +2605,8 @@ func (s *Server) handleSetSecondaryStats(c *gin.Context) {
 		return
 	}
 	engine.SetSecondaryStatsOverride(req.Host, req.Mode)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "secondary_stats": engine.GetSecondaryStatsOverrides()})
+	persisted := persistedFlag(s.persistSecondaryStats(req.Host, req.Mode), "secondary_stats", req.Host)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "secondary_stats": engine.GetSecondaryStatsOverrides(), "persisted": persisted})
 }
 
 // ---------------------------------------------------------------------------
@@ -2674,6 +2677,96 @@ func (s *Server) settingsFilePath() string {
 	return filepath.Join(s.config.Daemon.DataDir, "default.toml")
 }
 
+// configWriteMu serializes the read-modify-write cycles on the daemon TOML, so
+// two saves landing together cannot lose one another's edit.
+var configWriteMu sync.Mutex
+
+// editConfigFile applies edit to the daemon TOML and writes the result back
+// atomically, refusing any document that would no longer parse or no longer
+// decode into the typed config. Same guards, backup and tmp+rename as the
+// settings editor: the tracker editor must not be able to corrupt a file the
+// settings editor protects.
+func (s *Server) editConfigFile(edit func(string) (string, error)) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+	path := s.settingsFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	doc, err := edit(string(data))
+	if err != nil {
+		return err
+	}
+	if _, err := config.ParseTOMLMap([]byte(doc)); err != nil {
+		return fmt.Errorf("edited config no longer parses: %w", err)
+	}
+	if err := config.ValidateTyped([]byte(doc)); err != nil {
+		return fmt.Errorf("edit would break the config schema: %w", err)
+	}
+	_ = os.WriteFile(path+".bak-settings", data, 0644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(doc), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// persistClientSpoof mirrors a hot client-spoof override into [announce_clients]
+// so it survives a restart. Without this the override lives only in the engine's
+// map and the next boot rebuilds that map from the config file alone — the
+// override silently disappears (issue #3).
+func (s *Server) persistClientSpoof(host, peerIDPrefix, userAgent string) error {
+	section := "announce_clients." + config.QuoteTOMLKey(host)
+	return s.editConfigFile(func(doc string) (string, error) {
+		if strings.TrimSpace(peerIDPrefix) == "" {
+			return config.DeleteTOMLTable(doc, section), nil
+		}
+		return config.SetTOMLTable(doc, section, [][2]string{
+			{"peer_id_prefix", strconv.Quote(peerIDPrefix)},
+			{"user_agent", strconv.Quote(userAgent)},
+		})
+	})
+}
+
+// persistPasskey mirrors a hot passkey override into [announce_passkeys].
+func (s *Server) persistPasskey(host, passkey string) error {
+	return s.editConfigFile(func(doc string) (string, error) {
+		key := config.QuoteTOMLKey(host)
+		if strings.TrimSpace(passkey) == "" {
+			return config.PruneEmptyTable(config.DeleteTOMLKey(doc, "announce_passkeys", key), "announce_passkeys"), nil
+		}
+		return config.SetTOMLTable(doc, "announce_passkeys",
+			[][2]string{{key, strconv.Quote(passkey)}})
+	})
+}
+
+// persistSecondaryStats mirrors a hot secondary-stats mode into
+// [announce_secondary_stats]. "clone" is the default, so it is stored as an
+// absence rather than a value.
+func (s *Server) persistSecondaryStats(host, mode string) error {
+	return s.editConfigFile(func(doc string) (string, error) {
+		key := config.QuoteTOMLKey(host)
+		m := strings.TrimSpace(mode)
+		if m == "" || m == "clone" {
+			return config.PruneEmptyTable(config.DeleteTOMLKey(doc, "announce_secondary_stats", key), "announce_secondary_stats"), nil
+		}
+		return config.SetTOMLTable(doc, "announce_secondary_stats",
+			[][2]string{{key, strconv.Quote(m)}})
+	})
+}
+
+// persistedFlag runs a persistence attempt and reports it to the caller instead
+// of failing the request: the hot change already applied, and a read-only config
+// file should not make the override look rejected. The UI shows the difference.
+func persistedFlag(err error, kind, host string) bool {
+	if err != nil {
+		slog.Warn("announce override applied but not persisted", "kind", kind, "host", host, "error", err)
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleSettingsGet(c *gin.Context) {
 	data, err := os.ReadFile(s.settingsFilePath())
 	if err != nil {
@@ -2723,6 +2816,8 @@ func (s *Server) handleSettingsPost(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no changes"})
 		return
 	}
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
 	path := s.settingsFilePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
