@@ -1,0 +1,46 @@
+name: Feature request
+description: Suggest something Hydra should be able to do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >
+        Describe the situation rather than the solution. Knowing the workflow
+        you are stuck on usually leads to a better feature than the one that
+        was asked for.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Hydra to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How do you work around it today?
+      description: Leave empty if you do not.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Hydra does this touch?
+      multiple: true
+      options:
+        - Web UI
+        - Native REST API
+        - qBittorrent shim / third-party compatibility
+        - Engine and transfer behaviour
+        - Scheduling, slots and queueing
+        - Agents / distributed setup
+        - Networking and egress
+        - Packaging and deployment
+        - Documentation
+        - Other
+    validations:
+      required: true

@@ -1,0 +1,117 @@
+name: Bug report
+description: Something in Hydra does not behave the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. The fields below exist
+        because Hydra spans a Go control plane, a Rust engine and a
+        qBittorrent-compatible shim: knowing which one you were talking to
+        usually cuts the search in half.
+
+  - type: input
+    id: version
+    attributes:
+      label: Hydra version
+      description: Run `hydra -version`, or `curl localhost:PORT/health`. Include the image tag if you run Docker.
+      placeholder: "3.42.5-typhon (ghcr.io/kheopsian/hydra:3.42.5)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How do you run Hydra?
+      options:
+        - Docker (docker-compose.yml from the repo)
+        - Docker (custom compose / Unraid / other orchestrator)
+        - Bare binary
+        - Built from source
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface shows the problem?
+      description: If a third-party tool is involved, pick the qBittorrent shim.
+      multiple: true
+      options:
+        - Web UI
+        - Native REST API (/api/*)
+        - qBittorrent shim (/api/v2/*)
+        - Engine / transfer behaviour (speed, peers, stalling)
+        - Startup, persistence or state restore
+        - Agents / distributed setup
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: Third-party client involved
+      description: Leave empty if none. Include its version.
+      placeholder: "autobrr 1.63.0, Sonarr 4.0.15, cross-seed 6.12"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact request if it is an API issue (curl with the header redacted is ideal).
+      placeholder: |
+        1. Add a torrent whose data is already on disk
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >
+        Hydra logs around the failure, and the Typhon engine lines if the
+        problem is transfer-related. Redact API keys, tracker passkeys and
+        announce URLs before pasting.
+      render: text
+
+  - type: textarea
+    id: scale
+    attributes:
+      label: Setup and scale
+      description: >
+        Roughly how many torrents, which engines/tiers you run (race, hoard,
+        extra sessions), the filesystem behind your save paths (ZFS, ext4,
+        XFS, network mount) and your egress mode (direct, SOCKS5, PROXY-v2
+        relay, gluetun). Several bugs only appear past a certain size or on a
+        specific filesystem, so this is worth filling in even when it feels
+        irrelevant.
+      placeholder: |
+        ~40k torrents, race + hoard, save paths on ZFS, gluetun with port rebind
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Host OS and architecture
+      placeholder: "Unraid 7.0 / x86_64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The relevant part of your config, secrets removed.
+      render: toml
