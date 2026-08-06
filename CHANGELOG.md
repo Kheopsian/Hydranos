@@ -3,6 +3,33 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.44.1 — 2026-08-06
+
+### Fixed
+
+- **A tracker override set from the interface now survives a restart.** The
+  tracker editor writes a client spoof, a passkey or a secondary-stats mode
+  straight into the announce registry, where it takes effect on the very next
+  announce. Nothing ever wrote it down. At boot that registry is rebuilt from
+  the config file alone, so every override placed through the UI was silently
+  gone the moment the daemon came back, and the only way to keep one was to
+  hand-edit `default.toml` — which is why anyone who had done that never saw
+  the bug. The three routes now mirror what they set into `[announce_clients]`,
+  `[announce_passkeys]` and `[announce_secondary_stats]`, reusing the settings
+  editor's machinery: the file is edited line by line so comments, ordering and
+  every unrelated line survive, the result must still parse *and* still decode
+  into the typed config before it is committed, and the write goes through a
+  backup and an atomic rename. Persisting is deliberately not allowed to fail
+  the request — the hot change has already applied, so a read-only config file
+  yields `"persisted": false` and a warning rather than an override that looks
+  rejected while being live. Clearing an override removes it from the file, and
+  takes the enclosing table with it once it holds nothing else. One gap remains,
+  and it is worth stating: overrides are pushed to remote agents when they are
+  set, but an agent that restarts does not get them back, because the control
+  plane does not re-push at boot. Single-node installs never meet this.
+
+  Closes #3.
+
 ## v3.44.0 — 2026-08-06
 
 ### Changed
