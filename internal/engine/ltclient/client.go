@@ -257,11 +257,26 @@ func routeFrame(buf []byte) (frameHead, error) {
 // readFrame reads one newline-terminated frame and returns it. The returned
 // slice is owned by the caller (no shared buffer to copy out of, unlike the
 // bufio.Scanner this replaced).
+// frameHint remembers the largest frame seen, so the next big one can be
+// allocated once instead of climbing the append doubling cascade. Guarded by
+// optPrealloc; see opt.go.
+var frameHint atomic.Int64
+
 func readFrame(r *bufio.Reader) ([]byte, error) {
 	var buf []byte
 	for {
 		chunk, err := r.ReadSlice('\n')
 		if err == bufio.ErrBufferFull {
+			// First overflow: this frame does not fit the bufio buffer, so it
+			// is one of the big ones (list_torrents). Size it in one shot from
+			// the high-water mark instead of doubling our way there. Done HERE
+			// and not on entry: small frames return on the first ReadSlice and
+			// must not pay for a 100MB allocation.
+			if buf == nil && optPrealloc.Load() {
+				if h := frameHint.Load(); h > int64(len(chunk)) {
+					buf = make([]byte, 0, h)
+				}
+			}
 			buf = append(buf, chunk...)
 			if !optFrame.Load() {
 				// Baseline path: bufio.Scanner re-scanned the ENTIRE
@@ -287,7 +302,15 @@ func readFrame(r *bufio.Reader) ([]byte, error) {
 			copy(out, chunk)
 			return out, nil
 		}
-		return append(buf, chunk...), nil
+		out := append(buf, chunk...)
+		if optPrealloc.Load() {
+			// An eighth of headroom so a frame that grows slightly does not
+			// immediately force a reallocation.
+			if want := int64(len(out) + len(out)/8); want > frameHint.Load() {
+				frameHint.Store(want)
+			}
+		}
+		return out, nil
 	}
 }
 
@@ -550,7 +573,7 @@ func (c *Client) ListTorrents() (*ListTorrentsResult, error) {
 func (c *Client) cachedList() *ListTorrentsResult {
 	c.listMu.Lock()
 	defer c.listMu.Unlock()
-	if c.listCache == nil || time.Since(c.listCachedAt) > ListCacheTTL {
+	if c.listCache == nil || time.Since(c.listCachedAt).Nanoseconds() > listCacheTTL.Load() {
 		return nil
 	}
 	out := &ListTorrentsResult{

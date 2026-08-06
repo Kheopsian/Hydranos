@@ -201,23 +201,26 @@ func (s *Server) qbitTorrentsInfo(c *gin.Context) {
 	// null throws there instead of reading as "no torrents". The window is
 	// real: at boot, before the engines have restored their state, the
 	// default filter=all skips every filter block and the slice stays empty.
-	allTorrents := make([]map[string]interface{}, 0)
-
-	// Collect race torrents
-	if s.raceEngine != nil {
-		for _, t := range s.raceEngine.GetAllStatus() {
-			qt := hydraToQbitTorrent(t, "race")
-			allTorrents = append(allTorrents, qt)
+	// Built once and shared for a couple of seconds when qbit_snapshot is on:
+	// the *arr stack, cross-seed and autobrr all poll this endpoint at a rate
+	// we do not control, and each poll was rebuilding a map per torrent.
+	// qbitSnapshot hands back a copy of the slice (the sort below is in place),
+	// sharing the maps, which are read-only once built.
+	allTorrents := qbitSnapshot(func() []map[string]interface{} {
+		// Non-nil: an empty listing must marshal as [], never null.
+		out := make([]map[string]interface{}, 0)
+		if s.raceEngine != nil {
+			for _, t := range s.raceEngine.GetAllStatus() {
+				out = append(out, hydraToQbitTorrent(t, "race"))
+			}
 		}
-	}
-
-	// Collect hoard torrents
-	if s.hoardEngine != nil {
-		for _, t := range s.hoardEngine.GetTorrentList() {
-			qt := hydraToQbitTorrent(t, "hoard")
-			allTorrents = append(allTorrents, qt)
+		if s.hoardEngine != nil {
+			for _, t := range s.hoardEngine.GetTorrentList() {
+				out = append(out, hydraToQbitTorrent(t, "hoard"))
+			}
 		}
-	}
+		return out
+	})
 
 	// Filter by hashes
 	if hashSet != nil {
