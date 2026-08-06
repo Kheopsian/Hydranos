@@ -117,6 +117,13 @@ pub struct PeerStats {
     /// Bytes uploaded to this peer since the choking engine last tick.
     /// Used to score peers by actual upload speed; reset to 0 by the engine.
     pub uploaded_last_tick: AtomicU64,
+    /// Transfer rates for this peer. Nothing ticks these in the background:
+    /// at a hundred thousand torrents a periodic sweep over every connected
+    /// peer would cost O(all peers) forever to feed a panel that is almost
+    /// never open. `get_peers` samples them instead, so the rate is a delta
+    /// over whatever interval the caller polls at.
+    pub dl_rate: RateTracker,
+    pub ul_rate: RateTracker,
 }
 
 impl PeerStats {
@@ -142,6 +149,8 @@ impl PeerStats {
             choked: AtomicBool::new(true),
             choking_gen: AtomicU32::new(0),
             uploaded_last_tick: AtomicU64::new(0),
+            dl_rate: RateTracker::new(),
+            ul_rate: RateTracker::new(),
         }
     }
 }

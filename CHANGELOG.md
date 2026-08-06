@@ -3,6 +3,26 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.43.1 — 2026-08-06
+
+### Fixed
+
+- **Per-peer transfer rates are no longer reported as zero.** The peer panel
+  showed every connection at 0 B/s no matter what it was doing, on torrents
+  visibly moving hundreds of megabytes. Nothing was wrong with the display or
+  with the plumbing between the engine and the control plane: the engine had
+  simply never filled the field, emitting a literal `0` for both directions next
+  to a TODO. The cumulative byte counters per peer already existed, so only the
+  derivative was missing. Rates are now sampled inside the `get_peers` call
+  rather than from a background tick — at a hundred thousand torrents, sweeping
+  every connected peer on a timer would cost O(all peers) forever to feed a
+  panel that is almost never open, whereas this call only happens while someone
+  is actually looking. The delta therefore lands over the caller's own polling
+  interval. One consequence worth knowing: the first reading for a freshly
+  connected peer is still 0, by design. The rate tracker seeds its reference
+  point before it will emit anything, which is what stops a peer restored with a
+  resumed byte count from reporting a single absurd spike.
+
 ## v3.43.0 — 2026-08-06
 
 ### Changed

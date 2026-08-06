@@ -164,14 +164,25 @@ fn get_peers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
         let progress = if total_pieces > 0 {
             num_pieces as f64 / total_pieces as f64
         } else { 0.0 };
+        // Sample the rates here rather than from a background tick: this call
+        // only happens while someone is looking at the peer panel, so the delta
+        // lands over the caller's own polling interval and costs nothing the
+        // rest of the time. The first sample for a freshly connected peer
+        // reports 0 by design — RateTracker seeds its reference point before it
+        // will emit anything, which is what stops a peer that arrives with a
+        // resumed byte count from reporting an absurd one-off spike.
+        let dl_total = p.total_downloaded.load(Ordering::Relaxed);
+        let ul_total = p.total_uploaded.load(Ordering::Relaxed);
+        p.dl_rate.update(dl_total);
+        p.ul_rate.update(ul_total);
         json!({
             "ip": p.addr.ip().to_string(),
             "port": p.addr.port(),
             "client": p.client,
-            "dl_rate": 0,  // TODO: compute from delta over connection duration or last snapshot
-            "ul_rate": 0,
-            "total_download": p.total_downloaded.load(Ordering::Relaxed),
-            "total_upload": p.total_uploaded.load(Ordering::Relaxed),
+            "dl_rate": p.dl_rate.get(),
+            "ul_rate": p.ul_rate.get(),
+            "total_download": dl_total,
+            "total_upload": ul_total,
             "progress": progress,
             "flags": flags,
             "num_pieces": num_pieces,
