@@ -3,9 +3,23 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Manual trigger, so a missed push event can be replayed without touching a
+  # published tag. GitHub does not replay triggers it dropped - Actions was in
+  # a major outage when v3.44.0 was pushed, and the tag stayed orphaned.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (e.g. v3.44.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+# The tag this run is about. On a tag push it is the pushed tag, which keeps the
+# automatic path byte-identical to what it was; on a manual run it is the input.
+env:
+  REL_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   meta:
@@ -14,11 +28,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Compute affected platforms + release body
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${REL_TAG}"
           PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
           if [ -z "$PREV" ]; then RANGE="$TAG"; else RANGE="${PREV}..${TAG}"; fi
           win=0; lin=0
@@ -45,6 +60,7 @@ jobs:
       - name: Create/update the release with the platform label
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           body_path: body.md
 
   build:
@@ -59,6 +75,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -79,7 +97,7 @@ jobs:
 
       - name: Package tarball
         run: |
-          VER="${GITHUB_REF_NAME}"
+          VER="${REL_TAG}"
           DIR="hydra-${VER}-linux-${{ matrix.arch }}"
           mkdir -p "$DIR"
           cp hydra "$DIR"/hydra
@@ -94,6 +112,7 @@ jobs:
       - name: Publish to the GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
             hydra-*-linux-*.tar.gz
             hydra-*-linux-*.tar.gz.sha256
@@ -103,6 +122,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -126,7 +147,7 @@ jobs:
       - name: Package zip
         shell: pwsh
         run: |
-          $VER = $env:GITHUB_REF_NAME
+          $VER = $env:REL_TAG
           $DIR = "hydra-$VER-windows-amd64"
           New-Item -ItemType Directory -Force -Path $DIR | Out-Null
           Copy-Item hydra.exe "$DIR/hydra.exe"
@@ -139,6 +160,7 @@ jobs:
       - name: Publish to the GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
             hydra-*-windows-*.zip
             hydra-*-windows-*.zip.sha256
