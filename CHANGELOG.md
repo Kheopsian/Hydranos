@@ -3,6 +3,61 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.44.0 — 2026-08-06
+
+### Changed
+
+- **The four control-plane optimisations are now on by default.** They shipped
+  switched off in 3.43.2 so they could be measured against the running system
+  rather than against a memory of it. On a production instance holding 107k
+  torrents, over 900-second windows with the states interleaved twice, the Go
+  process went from **67.4% of a core to 39.8%** — a 41% reduction — while peak
+  resident memory stayed flat at 2.8GB. The window that carried the
+  optimisations was also carrying *more* traffic than the reference window,
+  3.19 Gbps against 2.69, so the saving is not an artefact of a quieter swarm.
+  Two identical reference windows drifted 3.0% apart, which is the noise this
+  result stands against.
+
+  The four are `ipc_prealloc` (size a large IPC frame in one allocation instead
+  of climbing the append doubling cascade), `list_cache` (share one decoded
+  torrent listing between the schedulers that ask for it), `qbit_snapshot`
+  (build the qBittorrent listing once and share it for two seconds) and
+  `totals_cache` (memoise the cumulative transfer totals for one second).
+  They were measured as a group: the individual contributions are not separated
+  here, and they overlap by construction, since sharing a decoded listing
+  removes frames that preallocation would otherwise have made cheaper.
+
+  Every one of them remains switchable at runtime through `/api/opt/flags`.
+  Turning one off restores the previous code path exactly, which is a faster
+  rollback than a restart — and a cheaper one, since restarting resets the
+  per-torrent upload counters that trackers credit by maximum.
+
+- **`list_cache` now fires at all.** It had measured as doing exactly nothing,
+  which turned out to be a bug rather than a property: its lifetime was a
+  three-second constant, while the three schedulers that would share the
+  snapshot tick at ten, thirty and sixty seconds. Every caller therefore always
+  found the snapshot expired and decoded its own copy of the full listing. The
+  lifetime is now adjustable through `list_cache_ttl_ms` and defaults to nine
+  seconds, just under the fastest of those tickers.
+
+- **The engine got faster too, which was not the intent.** The Rust hoard engine
+  did not change, yet its processor use fell about 17% in the same measurement.
+  Asking for the torrent listing less often means the engine serialises its
+  ~100MB reply less often: the saving lands on both sides of the interprocess
+  channel, not only on the side that was optimised.
+
+### Notes
+
+- **`gogc` stays a knob and keeps the Go default of 100.** Raising it to 200 was
+  measured alongside the rest: it gave back a further 6.6 points of processor
+  time and cost three extra gigabytes of resident memory, peaking at 6.0GB
+  against an 8GiB memory limit. The ZFS cache on the test host was not disturbed
+  (51.5GB in every state, which refutes the concern that a fatter heap would
+  starve it), but the headroom against the memory limit shrinks as the catalogue
+  grows, and exhausting it would trade a small processor win for collector
+  thrashing. It is available for anyone whose machine has memory to spare, and
+  it is not set for you.
+
 ## v3.43.2 — 2026-08-06
 
 ### Added
