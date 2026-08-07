@@ -17,6 +17,13 @@ All notable changes to Hydra are documented here. This project follows
   fwmark, add `HYDRA_CAP_NET_ADMIN=1` and `--cap-add=NET_ADMIN` so `SO_MARK`
   survives the privilege drop.
 
+### Fixed
+
+- **An add into a directory Hydra cannot write is now refused, with the reason.**
+  It used to be accepted: the torrent sat in `downloading` with no error, and
+  only failed if and when a piece arrived. The add now returns
+  `save path "…" is not writable (running as uid …)` instead.
+
 ## v3.46.0 — 2026-08-07
 
 ### Added
