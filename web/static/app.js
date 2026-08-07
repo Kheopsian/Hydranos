@@ -1470,6 +1470,9 @@ function renderHoardTable() {
         return (a.info_hash || "").localeCompare(b.info_hash || "");
     });
 
+    // Keep the filtered set around: only HOARD_RENDER_LIMIT rows are rendered,
+    // so Ctrl+A cannot read the selection universe off the DOM.
+    _hoardFiltered = filtered;
     const visible = filtered.slice(0, HOARD_RENDER_LIMIT);
     const countEl = document.getElementById("hoard-filter-count");
     if (countEl) {
@@ -1505,7 +1508,10 @@ function _renderHoardCounts() {
     document.querySelector(".chip-state[data-state='seeding']").innerHTML = `Seeding <span class="chip-count">${stateCounts["seeding"] || 0}</span>`;
     document.querySelector(".chip-state[data-state='__active__']").innerHTML = `Actively Seeding <span class="chip-count">${nActive}</span>`;
     document.querySelector(".chip-state[data-state='downloading']").innerHTML = `Downloading <span class="chip-count">${stateCounts["downloading"] || 0}</span>`;
-    document.querySelector(".chip-state[data-state='paused']").innerHTML = `Parked <span class="chip-count">${stateCounts["paused"] || 0}</span>`;
+    // Stopped is the user's doing, Queued is a scheduler's. Both are halted,
+    // and telling them apart is the whole point of the two chips.
+    document.querySelector(".chip-state[data-state='stopped']").innerHTML = `Stopped <span class="chip-count">${stateCounts["stopped"] || 0}</span>`;
+    document.querySelector(".chip-state[data-state='queued']").innerHTML = `Queued <span class="chip-count">${stateCounts["queued"] || 0}</span>`;
     document.querySelector(".chip-state[data-state='checking_files']").innerHTML = `Checking <span class="chip-count">${stateCounts["checking_files"] || 0}</span>`;
     document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `Tracker Error <span class="chip-count">${nTrackerErr}</span>`;
     document.querySelector(".chip-state[data-state='__error__']").innerHTML = `Error <span class="chip-count">${nTorrentErr}</span>`;
@@ -1636,6 +1642,48 @@ function closeHoardDetail() {
 
 const _selected = new Map(); // hash → mode
 let _anchorHash = null;      // last click without shift (range start point)
+let _hoardFiltered = [];     // last filtered hoard set (see renderHoardTable)
+
+// Ctrl+A selects everything the current filters match -- not just the rows on
+// screen. With 100k torrents the table renders a capped slice, so selecting
+// "all" off the DOM would silently mean "the first 500", which is exactly the
+// bulk-action trap this avoids.
+function _selectAllFiltered() {
+    if (!_hoardFiltered.length) return;
+    _selected.clear();
+    for (const t of _hoardFiltered) _selected.set(t.info_hash, "hoard");
+    _anchorHash = null;
+    _updateRowHighlights();
+    _flashSelectionCount(_selected.size);
+}
+
+// The highlight only shows on rendered rows, so say out loud how many are
+// actually selected -- otherwise "89k selected" looks like "500 selected".
+function _flashSelectionCount(n) {
+    const el = document.getElementById("hoard-filter-count");
+    if (!el) return;
+    const prev = el.textContent;
+    el.textContent = `${n} selected`;
+    el.style.fontWeight = "bold";
+    clearTimeout(_flashSelectionCount._t);
+    _flashSelectionCount._t = setTimeout(() => {
+        el.style.fontWeight = "";
+        if (el.textContent === `${n} selected`) el.textContent = prev;
+    }, 2500);
+}
+
+document.addEventListener("keydown", e => {
+    if (e.key !== "a" && e.key !== "A") return;
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    // Never steal Ctrl+A from a text field.
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    // Only meaningful while the hoard list is the visible table.
+    const tbody = document.getElementById("hoard-tbody");
+    if (!tbody || !tbody.offsetParent) return;
+    e.preventDefault();
+    _selectAllFiltered();
+});
 
 function handleRowClick(e, hash, mode) {
     if (e.shiftKey && _anchorHash) {
@@ -1884,15 +1932,15 @@ async function _reannounceSelected() {
 // Whether the user paused this torrent: true, false, or null when we cannot
 // tell (only the hoard list is held in memory). The engine is authoritative —
 // this just decides which menu entries are worth offering.
-// What the row should say. "Paused" is the user's own decision; "Queued" is a
+// What the row should say. "Stopped" is the user's own decision; "Queued" is a
 // scheduler holding the torrent back, which is normal and temporary. Keeping
-// them apart is the whole point of the pause intent — same split qBittorrent
+// them apart is the whole point of the intent flag — same split qBittorrent 5
 // makes, so the words already mean what people expect.
 function displayState(t) {
-    if (t.user_paused) {
-        return { label: "paused", cls: "state-paused", title: "Paused by you — survives a restart" };
+    if (t.user_paused || t.state === "stopped") {
+        return { label: "stopped", cls: "state-paused", title: "Stopped by you — survives a restart" };
     }
-    if (t.state === "stopped" || t.state === "queued") {
+    if (t.state === "queued") {
         return { label: "queued", cls: "state-queued", title: "Waiting for a slot" };
     }
     return {
@@ -1904,13 +1952,71 @@ function displayState(t) {
 
 function _isUserPaused(hash) {
     const t = _hoardAllTorrents.find(x => x.info_hash === hash);
-    return t ? !!t.user_paused : null;
+    // The state is the fresher signal: the list snapshot carries it on every
+    // refresh, while user_paused only rides along with a full list fetch.
+    return t ? (!!t.user_paused || t.state === "stopped") : null;
 }
 
-// Pause or resume the selection. This writes the user's intent: it outlives a
+// Reflect a stop/start in the browser's copy right away, so the context menu
+// offers the opposite action on the next right-click instead of waiting for
+// the 30s list refresh to catch up.
+function _markLocallyStopped(hashes, stopped) {
+    const set = new Set(hashes);
+    for (const t of _hoardAllTorrents) {
+        if (!set.has(t.info_hash)) continue;
+        t.user_paused = stopped;
+        t.state = stopped ? "stopped" : "queued";
+    }
+    renderHoardTable();
+    _renderHoardCounts();
+}
+
+// Stop or start the selection. This writes the user's intent: it outlives a
 // restart and no scheduler will undo it.
+//
+// Past a threshold the selection stops travelling as hashes and travels as the
+// filter that produced it -- the daemon already holds the list, so shipping
+// 89k hashes back to it would be a multi-megabyte way of saying "the ones I am
+// looking at". The daemon answers with the count it matched, and we compare it
+// against what the table showed: the filter exists on both sides, so the thing
+// worth catching is the two drifting apart.
+const BULK_FILTER_THRESHOLD = 500;
+
 async function _pauseSelected(paused) {
     _hideCtxMenu();
+    const action = paused ? "stop" : "start";
+
+    // Big selection that IS the filtered set (with at most a few rows
+    // deselected): send the filter, not the hashes.
+    if (_selected.size > BULK_FILTER_THRESHOLD && _hoardFiltered.length) {
+        const excluded = _hoardFiltered
+            .filter(t => !_selected.has(t.info_hash))
+            .map(t => t.info_hash);
+        // Only worth it while the selection really is "the filter minus a few".
+        if (excluded.length * 4 < _selected.size) {
+            if (!confirm(`${action === "stop" ? "Stop" : "Start"} ${_selected.size} torrents?`)) return;
+            try {
+                const r = await fetch("/api/hoard/torrents/bulk", {
+                    method: "POST",
+                    headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
+                    body: JSON.stringify({ action, filter: _currentHoardFilter(), exclude: excluded }),
+                });
+                const j = await r.json();
+                if (j && typeof j.matched === "number" && j.matched !== _selected.size) {
+                    console.warn(`bulk ${action}: server matched ${j.matched}, UI had ${_selected.size}`);
+                    alert(`Heads up: the server matched ${j.matched} torrents, the table showed ${_selected.size}. Applied to ${j.applied}.`);
+                }
+                _markLocallyStopped(
+                    _hoardFiltered.map(t => t.info_hash).filter(h => !excluded.includes(h)),
+                    paused);
+            } catch (err) {
+                console.error(`Failed to ${action} in bulk`, err);
+            }
+            updateHoardStats();
+            return;
+        }
+    }
+
     const byEngine = { hoard: [], race: [] };
     for (const [hash, mode] of _selected.entries()) {
         (byEngine[mode] || byEngine.hoard).push(hash);
@@ -1925,10 +2031,23 @@ async function _pauseSelected(paused) {
                 body: JSON.stringify({ hashes, paused }),
             });
         } catch (err) {
-            console.error(`Failed to ${paused ? "pause" : "resume"} ${engine}`, err);
+            console.error(`Failed to ${action} ${engine}`, err);
         }
     }
+    _markLocallyStopped(byEngine.hoard, paused);
     updateHoardStats();
+}
+
+// The filter the hoard table is currently applying, in the shape the daemon
+// expects. Kept next to renderHoardTable's filtering so the two stay in step.
+function _currentHoardFilter() {
+    return {
+        search: (document.getElementById("hoard-search")?.value || ""),
+        category: _hoardCatFilter || "",
+        tracker: _hoardTrackerFilter || "",
+        tag: _hoardTagFilter || "",
+        state: _hoardStateFilter || "",
+    };
 }
 
 async function _recheckSelected() {

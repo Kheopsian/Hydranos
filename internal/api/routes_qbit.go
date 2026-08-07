@@ -48,6 +48,10 @@ func (s *Server) registerQbitRoutes() {
 	v2.POST("/torrents/delete", s.qbitTorrentsDelete)
 	v2.POST("/torrents/pause", s.qbitTorrentsPause)
 	v2.POST("/torrents/resume", s.qbitTorrentsResume)
+	// qBittorrent 5 renamed these verbs. Both spellings are live: clients
+	// written against 5.x call stop/start, everything older calls pause/resume.
+	v2.POST("/torrents/stop", s.qbitTorrentsPause)
+	v2.POST("/torrents/start", s.qbitTorrentsResume)
 	v2.POST("/torrents/recheck", s.qbitTorrentsRecheck)
 	v2.POST("/torrents/setCategory", s.qbitTorrentsSetCategory)
 
@@ -773,7 +777,7 @@ func (s *Server) qbitCategoriesRemove(c *gin.Context) {
 // hydraStateToQbit maps Hydra's internal state string to qBittorrent state.
 //
 // userPaused separates the two ways a torrent can be sitting still, and the
-// distinction is not cosmetic: to Sonarr, "paused" means a human halted this
+// distinction is not cosmetic: to Sonarr, "stopped" means a human halted this
 // deliberately, "queued" means it is waiting its turn and all is well, and
 // "stalled" means the download is broken — which triggers its dead-download
 // handling. A torrent held back by one of our schedulers is queued, never
@@ -781,9 +785,9 @@ func (s *Server) qbitCategoriesRemove(c *gin.Context) {
 func hydraStateToQbit(state string, progress float64, uploadRate, downloadRate int64, userPaused bool) string {
 	if userPaused {
 		if progress >= 1.0 {
-			return "pausedUP"
+			return "stoppedUP"
 		}
-		return "pausedDL"
+		return "stoppedDL"
 	}
 	switch state {
 	case "downloading":
@@ -798,14 +802,17 @@ func hydraStateToQbit(state string, progress float64, uploadRate, downloadRate i
 		return "stalledUP"
 	case "checking", "checking_files":
 		return "checkingDL"
-	case "paused":
+	case "stopped":
+		// A human stopped this one. qBittorrent 5 calls that stopped; older
+		// clients know it as paused, and both read it as "not my problem".
 		if progress >= 1.0 {
-			return "pausedUP"
+			return "stoppedUP"
 		}
-		return "pausedDL"
-	case "queued", "stopped":
+		return "stoppedDL"
+	case "queued", "paused":
 		// A scheduler is holding this one back. It is not broken and nobody
-		// asked for it to stop, so it is queued.
+		// asked for it to stop, so it is queued. ("paused" only turns up from
+		// an engine snapshot that predates the intent flag being applied.)
 		if progress >= 1.0 {
 			return "queuedUP"
 		}
@@ -949,15 +956,19 @@ func filterStateMatch(qbitState, filterName string) bool {
 			qbitState == "queuedUP" || qbitState == "checkingUP"
 	case "completed":
 		return qbitState == "uploading" || qbitState == "stalledUP" ||
-			qbitState == "pausedUP" || qbitState == "queuedUP" ||
+			qbitState == "pausedUP" || qbitState == "stoppedUP" || qbitState == "queuedUP" ||
 			qbitState == "checkingUP"
-	case "paused":
-		return qbitState == "pausedDL" || qbitState == "pausedUP"
+	case "paused", "stopped":
+		// Same set under both spellings: qBittorrent 5 renamed the filter, and
+		// we still answer the old name for everything written before it.
+		return qbitState == "pausedDL" || qbitState == "pausedUP" ||
+			qbitState == "stoppedDL" || qbitState == "stoppedUP"
 	case "active":
 		return qbitState == "downloading" || qbitState == "uploading"
 	case "inactive":
 		return qbitState == "stalledDL" || qbitState == "stalledUP" ||
-			qbitState == "pausedDL" || qbitState == "pausedUP"
+			qbitState == "pausedDL" || qbitState == "pausedUP" ||
+			qbitState == "stoppedDL" || qbitState == "stoppedUP"
 	case "stalled":
 		return qbitState == "stalledDL" || qbitState == "stalledUP"
 	case "stalled_uploading":
@@ -966,8 +977,9 @@ func filterStateMatch(qbitState, filterName string) bool {
 		return qbitState == "stalledDL"
 	case "errored":
 		return qbitState == "error"
-	case "resumed":
-		return qbitState != "pausedDL" && qbitState != "pausedUP"
+	case "resumed", "running":
+		return qbitState != "pausedDL" && qbitState != "pausedUP" &&
+			qbitState != "stoppedDL" && qbitState != "stoppedUP"
 	default:
 		return true
 	}

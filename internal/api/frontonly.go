@@ -22,19 +22,20 @@ type emptyRaceEngine struct{}
 // NewEmptyRaceEngine returns a no-op RaceEngine for front-only mode.
 func NewEmptyRaceEngine() RaceEngine { return emptyRaceEngine{} }
 
-func (emptyRaceEngine) ClearCategoryLabel(string) int                      { return 0 }
-func (emptyRaceEngine) SetUserPaused(string, bool) error                   { return nil }
-func (emptyRaceEngine) GetAllStatus() []map[string]interface{}             { return nil }
-func (emptyRaceEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
-func (emptyRaceEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
-func (emptyRaceEngine) GetTorrentAvailability(string) map[string]interface{} { return nil }
+func (emptyRaceEngine) ClearCategoryLabel(string) int                              { return 0 }
+func (emptyRaceEngine) SetUserPaused(string, bool) error                           { return nil }
+func (emptyRaceEngine) MatchHashes(engine.TorrentFilter, map[string]bool) []string { return nil }
+func (emptyRaceEngine) GetAllStatus() []map[string]interface{}                     { return nil }
+func (emptyRaceEngine) GetTorrentDetail(string) map[string]interface{}             { return nil }
+func (emptyRaceEngine) GetTorrentFileList(string) []map[string]interface{}         { return nil }
+func (emptyRaceEngine) GetTorrentAvailability(string) map[string]interface{}       { return nil }
 func (emptyRaceEngine) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
 }
 func (emptyRaceEngine) EngineOptFlags() (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
 }
-func (emptyRaceEngine) GetTorrentStatus(string) map[string]interface{}     { return nil }
+func (emptyRaceEngine) GetTorrentStatus(string) map[string]interface{} { return nil }
 func (emptyRaceEngine) AddTorrent(string, string, string, []string, string) (string, error) {
 	return "", errNoLocalEngine
 }
@@ -62,12 +63,12 @@ type emptyHoardEngine struct{}
 // NewEmptyHoardEngine returns a no-op HoardEngine for front-only mode.
 func NewEmptyHoardEngine() HoardEngine { return emptyHoardEngine{} }
 
-func (emptyHoardEngine) GetAllStatus() map[string]interface{}               { return map[string]interface{}{} }
-func (emptyHoardEngine) GetTorrentList() []map[string]interface{}           { return nil }
-func (emptyHoardEngine) GetTorrentListJSON() []json.RawMessage              { return nil }
-func (emptyHoardEngine) GetSessionTotals() (int64, int64)                   { return 0, 0 }
-func (emptyHoardEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
-func (emptyHoardEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
+func (emptyHoardEngine) GetAllStatus() map[string]interface{}                 { return map[string]interface{}{} }
+func (emptyHoardEngine) GetTorrentList() []map[string]interface{}             { return nil }
+func (emptyHoardEngine) GetTorrentListJSON() []json.RawMessage                { return nil }
+func (emptyHoardEngine) GetSessionTotals() (int64, int64)                     { return 0, 0 }
+func (emptyHoardEngine) GetTorrentDetail(string) map[string]interface{}       { return nil }
+func (emptyHoardEngine) GetTorrentFileList(string) []map[string]interface{}   { return nil }
 func (emptyHoardEngine) GetTorrentAvailability(string) map[string]interface{} { return nil }
 func (emptyHoardEngine) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
@@ -81,28 +82,29 @@ func (emptyHoardEngine) AddTorrent(string, string, string) (string, error) {
 func (emptyHoardEngine) AddTorrentSeedMode(string, string, string) (string, error) {
 	return "", errNoLocalEngine
 }
-func (emptyHoardEngine) RemoveTorrent(string, bool) error                { return errNoLocalEngine }
-func (emptyHoardEngine) ReannnounceTorrent(string) bool                  { return false }
-func (emptyHoardEngine) AddTrackerToTorrent(string, string) error        { return errNoLocalEngine }
-func (emptyHoardEngine) SetListenPort(int)                               {}
-func (emptyHoardEngine) HasTorrent(string) bool                          { return false }
-func (emptyHoardEngine) PauseAll() int                                   { return 0 }
-func (emptyHoardEngine) SetUserPaused(string, bool) error                { return nil }
-func (emptyHoardEngine) MarkAllUserPaused(bool) int                      { return 0 }
-func (emptyHoardEngine) ResumeAll() int                                  { return 0 }
-func (emptyHoardEngine) RestartStuckVerifying() int                      { return 0 }
-func (emptyHoardEngine) VerifyDownloading() int                          { return 0 }
-func (emptyHoardEngine) VerifyTorrent(string) error                      { return errNoLocalEngine }
-func (emptyHoardEngine) SetTorrentCategory(string, string, string) error { return errNoLocalEngine }
-func (emptyHoardEngine) SetCategoryLabel(string, string) error           { return errNoLocalEngine }
-func (emptyHoardEngine) ClearCategoryLabel(string) int                   { return 0 }
-func (emptyHoardEngine) GetTags(string) []string                         { return nil }
-func (emptyHoardEngine) GetAllTags() map[string][]string                 { return nil }
-func (emptyHoardEngine) SetTags(string, []string) error                  { return errNoLocalEngine }
-func (emptyHoardEngine) AddTags(string, []string) error                  { return errNoLocalEngine }
-func (emptyHoardEngine) RemoveTags(string, []string) error               { return errNoLocalEngine }
-func (emptyHoardEngine) SetAddedTime(string, time.Time)                  {}
-func (emptyHoardEngine) SetContentFolder(string, *bool)                  {}
+func (emptyHoardEngine) RemoveTorrent(string, bool) error                           { return errNoLocalEngine }
+func (emptyHoardEngine) ReannnounceTorrent(string) bool                             { return false }
+func (emptyHoardEngine) AddTrackerToTorrent(string, string) error                   { return errNoLocalEngine }
+func (emptyHoardEngine) SetListenPort(int)                                          {}
+func (emptyHoardEngine) HasTorrent(string) bool                                     { return false }
+func (emptyHoardEngine) PauseAll() int                                              { return 0 }
+func (emptyHoardEngine) SetUserPaused(string, bool) error                           { return nil }
+func (emptyHoardEngine) MarkAllUserPaused(bool) int                                 { return 0 }
+func (emptyHoardEngine) MatchHashes(engine.TorrentFilter, map[string]bool) []string { return nil }
+func (emptyHoardEngine) ResumeAll() int                                             { return 0 }
+func (emptyHoardEngine) RestartStuckVerifying() int                                 { return 0 }
+func (emptyHoardEngine) VerifyDownloading() int                                     { return 0 }
+func (emptyHoardEngine) VerifyTorrent(string) error                                 { return errNoLocalEngine }
+func (emptyHoardEngine) SetTorrentCategory(string, string, string) error            { return errNoLocalEngine }
+func (emptyHoardEngine) SetCategoryLabel(string, string) error                      { return errNoLocalEngine }
+func (emptyHoardEngine) ClearCategoryLabel(string) int                              { return 0 }
+func (emptyHoardEngine) GetTags(string) []string                                    { return nil }
+func (emptyHoardEngine) GetAllTags() map[string][]string                            { return nil }
+func (emptyHoardEngine) SetTags(string, []string) error                             { return errNoLocalEngine }
+func (emptyHoardEngine) AddTags(string, []string) error                             { return errNoLocalEngine }
+func (emptyHoardEngine) RemoveTags(string, []string) error                          { return errNoLocalEngine }
+func (emptyHoardEngine) SetAddedTime(string, time.Time)                             {}
+func (emptyHoardEngine) SetContentFolder(string, *bool)                             {}
 func (emptyHoardEngine) GetDownloadSlotStatus() engine.DownloadSlotStats {
 	return engine.DownloadSlotStats{}
 }

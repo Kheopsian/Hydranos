@@ -519,6 +519,7 @@ func (s *Server) registerHydraRoutes() {
 			race.POST("/torrents/:info_hash/pause", s.handleRacePause)
 			race.POST("/torrents/:info_hash/resume", s.handleRaceResume)
 			race.POST("/pause", s.handleRacePauseBulk)
+			race.POST("/torrents/bulk", s.handleRaceBulk)
 			race.POST("/listen-port", s.handleRaceSetListenPort)
 		}
 
@@ -531,6 +532,8 @@ func (s *Server) registerHydraRoutes() {
 			hoard.POST("/torrents/:info_hash/pause", s.handleHoardPause)
 			hoard.POST("/torrents/:info_hash/resume", s.handleHoardResume)
 			hoard.POST("/pause", s.handleHoardPauseBulk)
+			// Bulk stop/start driven by the on-screen filter (see routes_bulk.go).
+			hoard.POST("/torrents/bulk", s.handleHoardBulk)
 			hoard.POST("/pause-all", s.handleHoardPauseAll)
 			hoard.POST("/resume-all", s.handleHoardResumeAll)
 			hoard.POST("/listen-port", s.handleHoardSetListenPort)

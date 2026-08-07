@@ -778,6 +778,7 @@ func main() {
 	// first slot decision (else seeds=0 -> parked -> never announced catch-22).
 	hoardEngine.SetBootstrapAnnounce(hoardAnnouncer.BootstrapAnnounce)
 	hoardEngine.SetReAnnounce(hoardAnnouncer.ReAnnounce)
+	hoardEngine.SetStoppedAnnounce(hoardAnnouncer.StoppedAnnounce)
 	// Anti dual-annonce : le hoard n'annonce PAS un infohash que le race tient
 	// (le race est seul annonceur tant qu'il l'a) + offset de continuité au
 	// handoff race->hoard. Le race lui-même n'est pas gaté (toujours annonceur).
@@ -1457,6 +1458,9 @@ func (a *raceAPIAdapter) ClearCategoryLabel(category string) int {
 func (a *raceAPIAdapter) SetUserPaused(ih string, paused bool) error {
 	return a.engine.SetUserPaused(ih, paused)
 }
+func (a *raceAPIAdapter) MatchHashes(f engine.TorrentFilter, exclude map[string]bool) []string {
+	return a.engine.MatchHashes(f, exclude)
+}
 func (a *raceAPIAdapter) GetTorrentDetail(infoHash string) map[string]interface{} {
 	return a.engine.GetTorrentDetail(infoHash)
 }
@@ -1579,6 +1583,10 @@ func (a *hoardAPIAdapter) PauseAll() int { return a.engine.PauseAll() }
 func (a *hoardAPIAdapter) SetUserPaused(ih string, paused bool) error {
 	return a.engine.SetUserPaused(ih, paused)
 }
+func (a *hoardAPIAdapter) MatchHashes(f engine.TorrentFilter, exclude map[string]bool) []string {
+	return a.engine.MatchHashes(f, exclude)
+}
+
 func (a *hoardAPIAdapter) MarkAllUserPaused(paused bool) int {
 	return a.engine.MarkAllUserPaused(paused)
 }
