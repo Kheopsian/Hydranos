@@ -1467,6 +1467,14 @@ func (a *raceAPIAdapter) GetTorrentFileList(infoHash string) []map[string]interf
 func (a *raceAPIAdapter) GetTorrentAvailability(infoHash string) map[string]interface{} {
 	return a.engine.GetTorrentAvailability(infoHash)
 }
+
+func (a *raceAPIAdapter) SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error) {
+	return a.engine.SetEngineOptFlag(name, on, value)
+}
+
+func (a *raceAPIAdapter) EngineOptFlags() (map[string]interface{}, error) {
+	return a.engine.EngineOptFlags()
+}
 func (a *raceAPIAdapter) GetTorrentStatus(infoHash string) map[string]interface{} {
 	return a.GetTorrentDetail(infoHash)
 }
@@ -1537,6 +1545,14 @@ func (a *hoardAPIAdapter) GetTorrentFileList(infoHash string) []map[string]inter
 
 func (a *hoardAPIAdapter) GetTorrentAvailability(infoHash string) map[string]interface{} {
 	return a.engine.GetTorrentAvailability(infoHash)
+}
+
+func (a *hoardAPIAdapter) SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error) {
+	return a.engine.SetEngineOptFlag(name, on, value)
+}
+
+func (a *hoardAPIAdapter) EngineOptFlags() (map[string]interface{}, error) {
+	return a.engine.EngineOptFlags()
 }
 func (a *hoardAPIAdapter) AddTorrentSeedMode(torrentPath, savePath, category string) (string, error) {
 	return a.engine.AddTorrentSeedMode(torrentPath, savePath, category)

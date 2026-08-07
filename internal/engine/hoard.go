@@ -2398,3 +2398,13 @@ func (e *HoardEngine) StopTorrent(infoHash string) error {
 	}
 	return e.client.StopTorrent(infoHash)
 }
+
+// SetEngineOptFlag toggles one engine-side optimisation without a restart.
+func (e *HoardEngine) SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error) {
+	return e.client.SetEngineOptFlag(name, on, value)
+}
+
+// EngineOptFlags reports the engine-side flag state.
+func (e *HoardEngine) EngineOptFlags() (map[string]interface{}, error) {
+	return e.client.EngineOptFlags()
+}

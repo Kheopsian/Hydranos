@@ -31,6 +31,8 @@ const (
 	MethodGetSessionStat       = "get_session_stats"
 	MethodGetFiles             = "get_files"
 	MethodGetAvailability      = "get_availability"
+	MethodSetEngineOptFlag     = "set_opt_flag"
+	MethodEngineOptFlags       = "get_opt_flags"
 	MethodGetTrackers          = "get_trackers"
 	MethodGetDiagnostics       = "get_diagnostics"
 	MethodAddPeers             = "add_peers"
@@ -99,6 +101,14 @@ type AddParams struct {
 }
 
 // InfoHashParams is the params envelope for single-torrent query/lifecycle calls.
+// OptFlagParams carries an engine-side flag toggle. Value is only meaningful
+// for the flags that take a number.
+type OptFlagParams struct {
+	Flag  string `json:"flag"`
+	On    bool   `json:"on"`
+	Value int64  `json:"value"`
+}
+
 type InfoHashParams struct {
 	InfoHash string `json:"info_hash"`
 }
