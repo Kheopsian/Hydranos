@@ -776,12 +776,89 @@ let _detailAddedTime = 0;
 
 function switchDetailTab(tab) {
     _activeDetailTab = tab;
-    document.querySelectorAll(".detail-tab").forEach(btn =>
+    document.querySelectorAll("#torrent-detail .detail-tab").forEach(btn =>
         btn.classList.toggle("active", btn.textContent.toLowerCase() === tab)
     );
     document.getElementById("detail-tab-info").style.display = tab === "info" ? "" : "none";
     document.getElementById("detail-tab-timeline").style.display = tab === "timeline" ? "" : "none";
+    document.getElementById("detail-tab-content").style.display = tab === "content" ? "" : "none";
     if (tab === "timeline" && selectedTorrent) loadTimeline(selectedTorrent);
+    if (tab === "content" && selectedTorrent) {
+        loadTorrentContent(selectedTorrent, "detail-content-body", "detail-content-summary");
+    }
+}
+
+let _activeHoardDetailTab = "info";
+
+function switchHoardDetailTab(tab) {
+    _activeHoardDetailTab = tab;
+    document.querySelectorAll("#hoard-detail-panel .h-detail-tab").forEach(btn =>
+        btn.classList.toggle("active", btn.textContent.toLowerCase() === tab)
+    );
+    document.getElementById("h-detail-tab-info").style.display = tab === "info" ? "" : "none";
+    document.getElementById("h-detail-tab-content").style.display = tab === "content" ? "" : "none";
+    if (tab === "content" && selectedHoardTorrent) {
+        loadTorrentContent(selectedHoardTorrent, "h-detail-content-body", "h-detail-content-summary");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Content tab — what is actually inside the torrent
+// ---------------------------------------------------------------------------
+
+// Guards against a slow response landing after the user selected another
+// torrent: only the newest request is allowed to paint.
+let _contentReq = 0;
+
+async function loadTorrentContent(infoHash, bodyId, summaryId) {
+    const body = document.getElementById(bodyId);
+    const summary = document.getElementById(summaryId);
+    if (!body) return;
+    const req = ++_contentReq;
+    body.innerHTML = `<div class="tc-empty">Loading…</div>`;
+    if (summary) summary.textContent = "";
+    let files, avail;
+    try {
+        const d = await api(`/api/torrents/${infoHash}/files`);
+        files = d.files || [];
+        avail = d.availability || null;
+    } catch (err) {
+        if (req !== _contentReq) return;
+        body.innerHTML = `<div class="tc-empty">Could not read the file list — ${esc(err.message || String(err))}</div>`;
+        return;
+    }
+    if (req !== _contentReq) return;
+    if (files.length === 0) {
+        body.innerHTML = `<div class="tc-empty">The engine reports no files for this torrent.</div>`;
+        return;
+    }
+    const total = files.reduce((a, f) => a + (f.size || 0), 0);
+    const sorted = files.slice().sort((a, b) => (b.size || 0) - (a.size || 0));
+    const rows = sorted.map(f => {
+        const share = total > 0 ? (f.size || 0) * 100 / total : 0;
+        return `<tr>
+            <td class="tc-path">${esc(f.path || "")}</td>
+            <td class="tc-num">${formatBytes(f.size || 0)}</td>
+            <td class="tc-num">${share.toFixed(1)}%</td>
+            <td class="tc-barcell"><div class="tc-bar"><div class="tc-bar-fill" style="width:${share.toFixed(1)}%"></div></div></td>
+        </tr>`;
+    }).join("");
+    if (summary) {
+        let line = `${files.length} file${files.length > 1 ? "s" : ""} · ${formatBytes(total)}`;
+        // Seeding torrents carry no piece map, so there is no availability to
+        // show. Say that instead of printing a misleading zero.
+        if (avail) {
+            line += ` · availability ${avail.min}${avail.max !== avail.min ? `-${avail.max}` : ""}`
+                + ` (avg ${avail.avg.toFixed(2)} over ${avail.num_pieces} pieces)`;
+        } else {
+            line += " · availability n/a (seeding, no piece map)";
+        }
+        summary.textContent = line;
+    }
+    body.innerHTML = `<div class="tc-scroll"><table class="tc-table">
+        <thead><tr><th>Path</th><th class="tc-num">Size</th><th class="tc-num">Share</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +1613,7 @@ async function updateHoardStats() {
 
 async function showHoardDetail(infoHash) {
     selectedHoardTorrent = infoHash;
+    switchHoardDetailTab("info");
     document.getElementById("hoard-detail-panel").style.display = "block";
     if (hoardDetailTimer) clearInterval(hoardDetailTimer);
     await refreshHoardDetail();
@@ -2015,6 +2093,166 @@ async function confirmRemove(deleteFiles) {
 }
 
 // ─── Add torrent ────────────────────────────────────────
+
+// Bencode decoder. Strings stay raw (Uint8Array) so we can decode them as
+// UTF-8 only where they are meant to be text; `pieces` is binary.
+function _bdecode(buf) {
+    let i = 0;
+    const dec = new TextDecoder("utf-8");
+    function readInt(stop) {
+        const j = buf.indexOf(stop, i);
+        if (j < 0) throw new Error("truncated");
+        const n = parseInt(dec.decode(buf.subarray(i, j)), 10);
+        i = j + 1;
+        return n;
+    }
+    function parse() {
+        const c = buf[i];
+        if (c === undefined) throw new Error("truncated");
+        if (c === 0x69) { i++; return readInt(0x65); }            // i<n>e
+        if (c === 0x6c) {                                          // l...e
+            i++;
+            const a = [];
+            while (buf[i] !== 0x65) a.push(parse());
+            i++;
+            return a;
+        }
+        if (c === 0x64) {                                          // d...e
+            i++;
+            const o = {};
+            while (buf[i] !== 0x65) {
+                const k = parse();
+                o[k instanceof Uint8Array ? dec.decode(k) : String(k)] = parse();
+            }
+            i++;
+            return o;
+        }
+        const len = readInt(0x3a);                                 // <len>:<bytes>
+        if (!(len >= 0)) throw new Error("bad string length");
+        const out = buf.subarray(i, i + len);
+        i += len;
+        return out;
+    }
+    return parse();
+}
+
+function _btext(v) {
+    if (v instanceof Uint8Array) { try { return new TextDecoder("utf-8").decode(v); } catch (_) { return ""; } }
+    return v == null ? "" : String(v);
+}
+
+// Pull the human-readable summary out of a raw .torrent buffer.
+function _torrentSummary(bytes) {
+    const t = _bdecode(bytes);
+    const info = t && t.info;
+    if (!info) throw new Error("no info dictionary");
+    const name = _btext(info["name.utf-8"] || info.name);
+    let files;
+    if (Array.isArray(info.files)) {
+        files = info.files.map(f => ({
+            path: (f["path.utf-8"] || f.path || []).map(_btext).join("/"),
+            length: f.length || 0,
+        }));
+    } else {
+        files = [{ path: name, length: info.length || 0 }];
+    }
+    const trackers = [];
+    const addTr = u => { const v = _btext(u); if (v && trackers.indexOf(v) < 0) trackers.push(v); };
+    if (t.announce) addTr(t.announce);
+    if (Array.isArray(t["announce-list"])) t["announce-list"].forEach(tier => (tier || []).forEach(addTr));
+    return {
+        name,
+        files,
+        total: files.reduce((a, f) => a + f.length, 0),
+        trackers,
+        pieceLength: info["piece length"] || 0,
+        pieceCount: info.pieces instanceof Uint8Array ? Math.floor(info.pieces.length / 20) : 0,
+        isPrivate: info.private === 1,
+        comment: _btext(t.comment),
+        createdBy: _btext(t["created by"]),
+    };
+}
+
+const _PREVIEW_MAX_ROWS = 400;
+
+function _previewCardHTML(fileName, sum) {
+    const rows = sum.files.slice(0, _PREVIEW_MAX_ROWS).map(f =>
+        `<div class="tp-file"><span class="tp-file-path">${esc(f.path)}</span><span class="tp-file-size">${formatBytes(f.length)}</span></div>`
+    ).join("");
+    const hidden = sum.files.length - _PREVIEW_MAX_ROWS;
+    const more = hidden > 0 ? `<div class="tp-more">and ${hidden} more file${hidden > 1 ? "s" : ""}</div>` : "";
+    const meta = [
+        `${sum.files.length} file${sum.files.length > 1 ? "s" : ""}`,
+        formatBytes(sum.total),
+        sum.pieceLength ? `${formatBytes(sum.pieceLength)} pieces (${sum.pieceCount})` : "",
+        sum.isPrivate ? "private" : "",
+    ].filter(Boolean).join(" · ");
+    const trackers = sum.trackers.length
+        ? `<div class="tp-trackers">${sum.trackers.slice(0, 8).map(u => esc(u)).join("<br>")}` +
+          (sum.trackers.length > 8 ? `<br>and ${sum.trackers.length - 8} more` : "") + `</div>`
+        : `<div class="tp-trackers">no tracker (DHT only)</div>`;
+    return `<details class="tp-card" open>
+        <summary><span class="tp-name">${esc(sum.name || fileName)}</span><span class="tp-meta">${meta}</span></summary>
+        <div class="tp-files">${rows}${more}</div>
+        ${trackers}
+    </details>`;
+}
+
+function _previewErrorHTML(fileName, msg) {
+    return `<div class="tp-card tp-card-error"><span class="tp-name">${esc(fileName)}</span>` +
+        `<span class="tp-meta">not a readable .torrent — ${esc(msg)}</span></div>`;
+}
+
+function _previewEnabled() {
+    return localStorage.getItem("hydra_add_preview") !== "0";
+}
+
+async function renderTorrentPreview() {
+    const box = document.getElementById("torrent-preview");
+    const input = document.getElementById("torrent-upload");
+    if (!box || !input) return;
+    const col = document.querySelector(".add-preview-col");
+    const files = Array.from(input.files || []);
+    if (!_previewEnabled()) {
+        if (col) col.style.display = "none";
+        box.innerHTML = "";
+        return;
+    }
+    if (col) col.style.display = "";
+    if (files.length === 0) {
+        box.innerHTML = `<div class="tp-empty">Pick one or more .torrent files above to see what is inside them.` +
+            ` They are read in your browser and nothing is sent until you press Add Torrent.</div>`;
+        return;
+    }
+    box.innerHTML = `<div class="tp-head">Reading ${files.length} file${files.length > 1 ? "s" : ""}…</div>`;
+    const cards = [];
+    for (const f of files) {
+        try {
+            const buf = new Uint8Array(await f.arrayBuffer());
+            cards.push(_previewCardHTML(f.name, _torrentSummary(buf)));
+        } catch (err) {
+            cards.push(_previewErrorHTML(f.name, err.message || String(err)));
+        }
+    }
+    // The selection may have changed while we were reading.
+    if (Array.from(input.files || []).length !== files.length) return;
+    const head = files.length > 1 ? `<div class="tp-head">${files.length} torrents selected</div>` : "";
+    box.innerHTML = head + cards.join("");
+}
+
+(function initTorrentPreview() {
+    const input = document.getElementById("torrent-upload");
+    const toggle = document.getElementById("torrent-preview-enabled");
+    if (!input || !toggle) return;
+    toggle.checked = _previewEnabled();
+    toggle.addEventListener("change", () => {
+        localStorage.setItem("hydra_add_preview", toggle.checked ? "1" : "0");
+        renderTorrentPreview();
+    });
+    input.addEventListener("change", renderTorrentPreview);
+    renderTorrentPreview();
+})();
+
 
 let _addMsgTimer = null;
 document.getElementById("add-torrent-form").addEventListener("submit", async (e) => {

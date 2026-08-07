@@ -2486,3 +2486,206 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
    different situations, so two different colours. */
 .state-badge.state-paused{background:rgba(139,148,158,.15);color:var(--text-dim,#8b949e)}
 .state-badge.state-queued{background:rgba(88,166,255,.12);color:var(--accent-blue,#58a6ff)}
+
+/* ---- Add Torrent: .torrent content preview (parsed in the browser) ---- */
+.preview-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-weight: normal;
+}
+
+.preview-toggle input {
+    width: auto;
+    margin: 0;
+}
+
+.add-layout {
+    display: flex;
+    align-items: flex-start;
+    gap: 24px;
+}
+
+#tab-add .add-form-container {
+    flex: 0 0 600px;
+    max-width: 600px;
+}
+
+.add-preview-col {
+    flex: 1 1 0;
+    min-width: 0;
+    position: sticky;
+    top: 16px;
+}
+
+.add-preview-col h2 {
+    margin-bottom: 24px;
+    font-size: 18px;
+}
+
+@media (max-width: 1100px) {
+    .add-layout {
+        flex-direction: column;
+    }
+
+    #tab-add .add-form-container,
+    .add-preview-col {
+        flex: 1 1 auto;
+        width: 100%;
+        max-width: none;
+        position: static;
+    }
+}
+
+.tp-empty {
+    color: var(--text-secondary);
+    font-size: 13px;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 16px;
+}
+
+.torrent-preview .tp-head {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 6px;
+}
+
+.tp-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    background: var(--bg-secondary);
+}
+
+.tp-card summary {
+    cursor: pointer;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.tp-name {
+    font-weight: 600;
+    word-break: break-all;
+}
+
+.tp-meta {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.tp-files {
+    margin: 8px 0 0;
+    max-height: 55vh;
+    overflow-y: auto;
+    font-size: 12px;
+}
+
+.tp-file {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 2px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.tp-file:last-child {
+    border-bottom: none;
+}
+
+.tp-file-path {
+    word-break: break-all;
+}
+
+.tp-file-size {
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.tp-more,
+.tp-trackers {
+    color: var(--text-secondary);
+    font-size: 11px;
+    margin-top: 6px;
+    word-break: break-all;
+}
+
+.tp-card-error {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border-color: #c0392b;
+}
+
+/* ---- Torrent detail: Content tab ---- */
+.h-detail-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 8px 14px;
+}
+
+.h-detail-tab:hover {
+    color: var(--text-primary);
+}
+
+.h-detail-tab.active {
+    color: var(--accent-hoard);
+    border-bottom-color: var(--accent-hoard);
+}
+
+.tc-empty {
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 8px 0;
+}
+
+.tc-scroll {
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.tc-table {
+    width: 100%;
+    font-size: 12px;
+}
+
+.tc-table th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-secondary);
+    z-index: 1;
+}
+
+.tc-path {
+    word-break: break-all;
+}
+
+.tc-num {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.tc-barcell {
+    width: 120px;
+}
+
+.tc-bar {
+    background: var(--border);
+    border-radius: 3px;
+    height: 6px;
+    overflow: hidden;
+    width: 100%;
+}
+
+.tc-bar-fill {
+    background: var(--accent-blue);
+    height: 100%;
+}

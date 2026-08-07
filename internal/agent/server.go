@@ -263,6 +263,13 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		}
 		return reply(c.GetFiles(p.InfoHash))
 
+	case agentwire.MethodGetAvailability:
+		var p agentwire.InfoHashParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		return reply(c.GetAvailability(p.InfoHash))
+
 	case agentwire.MethodGetTrackers:
 		var p agentwire.InfoHashParams
 		if err := unmarshal(&p); err != nil {

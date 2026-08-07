@@ -469,6 +469,7 @@ func (s *Server) registerHydraRoutes() {
 		api.DELETE("/torrents/:info_hash", s.handleRemoveTorrent)
 		api.POST("/torrents/:info_hash/reannounce", s.handleReannounce)
 		api.POST("/torrents/:info_hash/add-tracker", s.handleAddTracker)
+		api.GET("/torrents/:info_hash/files", s.handleTorrentFiles)
 
 		// Per-tracker announce passkey override (hot-swap, no restart)
 		api.GET("/announce/passkeys", s.handleGetPasskeys)
@@ -3080,4 +3081,32 @@ func verLess(a, b [3]int) bool {
 		}
 	}
 	return false
+}
+
+// handleTorrentFiles returns the file list (path + size) of a torrent, looked up
+// in whichever engine holds it. The engines already expose this for the qBit
+// shim; this is the native-API counterpart the WebUI uses for its Content tab.
+func (s *Server) handleTorrentFiles(c *gin.Context) {
+	hash := strings.ToLower(c.Param("info_hash"))
+	var files []map[string]interface{}
+	var avail map[string]interface{}
+	switch {
+	case s.raceEngine != nil && s.raceEngine.HasTorrent(hash):
+		files = s.raceEngine.GetTorrentFileList(hash)
+		avail = s.raceEngine.GetTorrentAvailability(hash)
+	case s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash):
+		files = s.hoardEngine.GetTorrentFileList(hash)
+		avail = s.hoardEngine.GetTorrentAvailability(hash)
+	default:
+		c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
+		return
+	}
+	if files == nil {
+		files = []map[string]interface{}{}
+	}
+	out := gin.H{"files": files}
+	if avail != nil {
+		out["availability"] = avail
+	}
+	c.JSON(http.StatusOK, out)
 }

@@ -203,6 +203,27 @@ impl PiecePicker {
     }
 
     /// How many pieces do we have?
+    /// Swarm availability folded into (min, max, sum): how many copies of each
+    /// piece are reachable right now. The minimum is the number qBittorrent
+    /// shows — under 1.0 some piece is held by nobody we are connected to and
+    /// the torrent cannot be completed until a seeder shows up. Pieces we
+    /// already hold count as one copy: we are one of the holders.
+    pub fn availability_stats(&self) -> (u32, u32, u64) {
+        if self.availability.is_empty() {
+            return (0, 0, 0);
+        }
+        let mut min = u32::MAX;
+        let mut max = 0u32;
+        let mut sum = 0u64;
+        for (i, peers) in self.availability.iter().enumerate() {
+            let a = peers + if self.have[i] { 1 } else { 0 };
+            min = min.min(a);
+            max = max.max(a);
+            sum += a as u64;
+        }
+        (min, max, sum)
+    }
+
     pub fn num_have(&self) -> u32 {
         self.have.iter().filter(|&&h| h).count() as u32
     }

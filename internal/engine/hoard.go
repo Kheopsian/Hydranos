@@ -1307,6 +1307,22 @@ func (e *HoardEngine) GetTorrentFileList(infoHash string) []map[string]interface
 	return out
 }
 
+// GetTorrentAvailability reports how many copies of each piece the swarm holds.
+// Nil when the engine does not know: a seed-mode torrent has no piece map at
+// all, which the caller must present as "unknown", not as zero.
+func (e *HoardEngine) GetTorrentAvailability(infoHash string) map[string]interface{} {
+	a, err := e.client.GetAvailability(infoHash)
+	if err != nil || a == nil || !a.HasPieceMap {
+		return nil
+	}
+	return map[string]interface{}{
+		"min":        a.MinAvailability,
+		"max":        a.MaxAvailability,
+		"avg":        a.AvgAvailability,
+		"num_pieces": a.NumPieces,
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Verify throttle
 // ---------------------------------------------------------------------------

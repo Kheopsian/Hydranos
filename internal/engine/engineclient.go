@@ -37,6 +37,7 @@ type EngineClient interface {
 	GetPeers(infoHash string) ([]ltclient.PeerInfo, error)
 	GetSessionStats() (*ltclient.SessionStats, error)
 	GetFiles(infoHash string) ([]ltclient.FileInfo, error)
+	GetAvailability(infoHash string) (*ltclient.Availability, error)
 	GetTrackers(infoHash string) ([]ltclient.TrackerInfo, error)
 	GetDiagnostics() (*ltclient.DiagnosticStats, error)
 

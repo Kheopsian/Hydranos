@@ -68,6 +68,7 @@ func (c *stubSlotClient) GetStatus(string) (*ltclient.TorrentStatus, error)   { 
 func (c *stubSlotClient) GetPeers(string) ([]ltclient.PeerInfo, error)        { return nil, nil }
 func (c *stubSlotClient) GetSessionStats() (*ltclient.SessionStats, error)    { return nil, nil }
 func (c *stubSlotClient) GetFiles(string) ([]ltclient.FileInfo, error)        { return nil, nil }
+func (c *stubSlotClient) GetAvailability(string) (*ltclient.Availability, error) { return nil, nil }
 func (c *stubSlotClient) GetTrackers(string) ([]ltclient.TrackerInfo, error)  { return nil, nil }
 func (c *stubSlotClient) GetDiagnostics() (*ltclient.DiagnosticStats, error)  { return nil, nil }
 func (c *stubSlotClient) AddPeers(string, []struct {
