@@ -810,8 +810,33 @@ func (s *Server) addTargets(catName string) []string {
 	}
 }
 
+// ensureSavePathWritable fails an add up front when the destination cannot be
+// written. Without it the torrent is accepted, sits in "downloading" with no
+// error, and only fails whenever the first piece happens to land -- which can
+// be never if the swarm is quiet. This is the usual shape of a PUID/PGID
+// mistake: the daemon runs as a user that cannot write the payload directory.
+func ensureSavePathWritable(savePath string) error {
+	if strings.TrimSpace(savePath) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(savePath, 0o755); err != nil {
+		return fmt.Errorf("save path %q cannot be created (running as uid %d): %w", savePath, os.Getuid(), err)
+	}
+	probe, err := os.CreateTemp(savePath, ".hydra-write-probe-*")
+	if err != nil {
+		return fmt.Errorf("save path %q is not writable (running as uid %d): %w", savePath, os.Getuid(), err)
+	}
+	name := probe.Name()
+	probe.Close()
+	os.Remove(name)
+	return nil
+}
+
 // localAdd performs the rich local add for a mode (today's monolith path).
 func (s *Server) localAdd(mode, torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error) {
+	if err := ensureSavePathWritable(savePath); err != nil {
+		return "", err
+	}
 	switch mode {
 	case "race":
 		if s.raceEngine == nil {
