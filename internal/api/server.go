@@ -62,6 +62,7 @@ type RaceEngine interface {
 	GetAllStatus() []map[string]interface{}
 	GetTorrentDetail(infoHash string) map[string]interface{}
 	GetTorrentFileList(infoHash string) []map[string]interface{}
+	GetTorrentAvailability(infoHash string) map[string]interface{}
 	GetTorrentStatus(infoHash string) map[string]interface{}
 	AddTorrent(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error)
 	AddTorrentSeedMode(torrentPath, savePath, category string) (string, error)
@@ -88,6 +89,7 @@ type HoardEngine interface {
 	GetSessionTotals() (int64, int64)
 	GetTorrentDetail(infoHash string) map[string]interface{}
 	GetTorrentFileList(infoHash string) []map[string]interface{}
+	GetTorrentAvailability(infoHash string) map[string]interface{}
 	AddTorrent(torrentPath, savePath, category string) (string, error)
 	AddTorrentSeedMode(torrentPath, savePath, category string) (string, error)
 	RemoveTorrent(infoHash string, deleteFiles bool) error

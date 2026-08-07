@@ -261,6 +261,14 @@ func (c *Client) GetFiles(infoHash string) ([]ltclient.FileInfo, error) {
 	return res, nil
 }
 
+func (c *Client) GetAvailability(infoHash string) (*ltclient.Availability, error) {
+	var res ltclient.Availability
+	if err := c.call(agentwire.MethodGetAvailability, agentwire.InfoHashParams{InfoHash: infoHash}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 func (c *Client) GetTrackers(infoHash string) ([]ltclient.TrackerInfo, error) {
 	var res []ltclient.TrackerInfo
 	if err := c.call(agentwire.MethodGetTrackers, agentwire.InfoHashParams{InfoHash: infoHash}, &res); err != nil {

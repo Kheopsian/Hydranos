@@ -27,6 +27,7 @@ func (emptyRaceEngine) SetUserPaused(string, bool) error                   { ret
 func (emptyRaceEngine) GetAllStatus() []map[string]interface{}             { return nil }
 func (emptyRaceEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
 func (emptyRaceEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
+func (emptyRaceEngine) GetTorrentAvailability(string) map[string]interface{} { return nil }
 func (emptyRaceEngine) GetTorrentStatus(string) map[string]interface{}     { return nil }
 func (emptyRaceEngine) AddTorrent(string, string, string, []string, string) (string, error) {
 	return "", errNoLocalEngine
@@ -61,6 +62,7 @@ func (emptyHoardEngine) GetTorrentListJSON() []json.RawMessage              { re
 func (emptyHoardEngine) GetSessionTotals() (int64, int64)                   { return 0, 0 }
 func (emptyHoardEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
 func (emptyHoardEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
+func (emptyHoardEngine) GetTorrentAvailability(string) map[string]interface{} { return nil }
 func (emptyHoardEngine) AddTorrent(string, string, string) (string, error) {
 	return "", errNoLocalEngine
 }

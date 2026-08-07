@@ -33,6 +33,7 @@ pub fn dispatch(
         "get_session_stats" => get_session_stats(torrent_mgr),
         "get_trackers" => get_trackers(params, torrent_mgr),
         "get_files" => get_files(params, torrent_mgr),
+        "get_availability" => get_availability(params, torrent_mgr),
         "get_diagnostics" => get_diagnostics(torrent_mgr, config),
         "set_listen_port" => set_listen_port(params),
         "set_self_ips" => set_self_ips(params),
@@ -261,6 +262,32 @@ fn get_files(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
         json!({"path": f.path.to_string_lossy(), "size": f.length})
     }).collect();
     json!({"files": files})
+}
+
+/// Piece availability as seen from the swarm. Only download-mode torrents have
+/// a picker: a seed_mode torrent carries no bitfield at all, which is exactly
+/// what keeps 100k torrents cheap, so there is nothing to report for it and we
+/// say so rather than inventing a number.
+fn get_availability(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
+    let ih = match get_info_hash(params) { Ok(ih) => ih, Err(e) => return e };
+    let t = match mgr.get(&ih) {
+        Some(t) => t,
+        None => return json!({"error": "torrent not found"}),
+    };
+    let num_pieces = t.meta.num_pieces();
+    let picker = match t.picker.get() {
+        Some(p) => p,
+        None => return json!({"has_piece_map": false, "num_pieces": num_pieces}),
+    };
+    let (min, max, sum) = picker.lock().unwrap().availability_stats();
+    let avg = if num_pieces > 0 { sum as f64 / num_pieces as f64 } else { 0.0 };
+    json!({
+        "has_piece_map": true,
+        "num_pieces": num_pieces,
+        "min_availability": min,
+        "max_availability": max,
+        "avg_availability": avg,
+    })
 }
 
 fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {

@@ -678,6 +678,21 @@ func (c *Client) GetFiles(infoHash string) ([]FileInfo, error) {
 	return result.Files, nil
 }
 
+// GetAvailability returns swarm piece availability for a torrent.
+func (c *Client) GetAvailability(infoHash string) (*Availability, error) {
+	raw, err := c.call("get_availability", map[string]interface{}{
+		"info_hash": infoHash,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result Availability
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal availability: %w", err)
+	}
+	return &result, nil
+}
+
 // TrackerInfo represents a single tracker entry.
 type TrackerInfo struct {
 	URL       string          `json:"url"`

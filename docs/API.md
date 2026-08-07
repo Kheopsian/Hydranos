@@ -23,6 +23,7 @@ Auth = `X-API-Key`.
 - `DELETE /api/torrents/:info_hash` — **retire des DEUX moteurs** (≠ purge race-only).
 - `POST /api/torrents/:info_hash/reannounce`
 - `POST /api/torrents/:info_hash/add-tracker`
+- `GET /api/torrents/:info_hash/files` — contenu du torrent : `files[]` (`path`, `size`), cherché dans le moteur qui le détient. Ajoute `availability` (`min`, `max`, `avg`, `num_pieces`) **uniquement si le torrent a une piece map**, c.-à-d. en mode download — un torrent seed_mode n'a pas de bitfield (c'est ce qui rend 100k torrents pas chers), donc la clé est absente et l'UI affiche « n/a ».
 
 **État / stats**
 - `GET /api/status` — état global (baseline, hoard{...}, day_uploaded...).
@@ -73,7 +74,7 @@ La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DIS
 
 | Groupe | Routes |
 |---|---|
-| *(top-level)* | `POST /torrents` · `POST /torrents/upload` · `DELETE /torrents/:ih` · `POST /torrents/:ih/reannounce` · `POST /torrents/:ih/add-tracker` · `GET /status` · `GET /events` (SSE) · `GET /public-ip` · `GET /fs/browse` · `GET /health/anomalies` |
+| *(top-level)* | `POST /torrents` · `POST /torrents/upload` · `DELETE /torrents/:ih` · `POST /torrents/:ih/reannounce` · `POST /torrents/:ih/add-tracker` · `GET /torrents/:ih/files` · `GET /status` · `GET /events` (SSE) · `GET /public-ip` · `GET /fs/browse` · `GET /health/anomalies` |
 | announce | `GET/POST /announce/passkeys` · `GET/POST /announce/clients` |
 | categories | `GET /categories` · `GET /categories/orphans` · `POST /categories` · `PUT /categories/:name` · `DELETE /categories/:name` |
 | peers | `GET /peers/top` · `GET /peers/seedboxes` |

@@ -1463,6 +1463,10 @@ func (a *raceAPIAdapter) GetTorrentDetail(infoHash string) map[string]interface{
 func (a *raceAPIAdapter) GetTorrentFileList(infoHash string) []map[string]interface{} {
 	return a.engine.GetTorrentFileList(infoHash)
 }
+
+func (a *raceAPIAdapter) GetTorrentAvailability(infoHash string) map[string]interface{} {
+	return a.engine.GetTorrentAvailability(infoHash)
+}
 func (a *raceAPIAdapter) GetTorrentStatus(infoHash string) map[string]interface{} {
 	return a.GetTorrentDetail(infoHash)
 }
@@ -1529,6 +1533,10 @@ func (a *hoardAPIAdapter) GetTorrentDetail(infoHash string) map[string]interface
 }
 func (a *hoardAPIAdapter) GetTorrentFileList(infoHash string) []map[string]interface{} {
 	return a.engine.GetTorrentFileList(infoHash)
+}
+
+func (a *hoardAPIAdapter) GetTorrentAvailability(infoHash string) map[string]interface{} {
+	return a.engine.GetTorrentAvailability(infoHash)
 }
 func (a *hoardAPIAdapter) AddTorrentSeedMode(torrentPath, savePath, category string) (string, error) {
 	return a.engine.AddTorrentSeedMode(torrentPath, savePath, category)

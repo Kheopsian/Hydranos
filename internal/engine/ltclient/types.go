@@ -114,6 +114,16 @@ type GetFilesResult struct {
 	Files []FileInfo `json:"files"`
 }
 
+// Availability from get_availability. HasPieceMap is false for seed-mode
+// torrents, which carry no bitfield — the other fields are meaningless then.
+type Availability struct {
+	HasPieceMap     bool    `json:"has_piece_map"`
+	NumPieces       int     `json:"num_pieces"`
+	MinAvailability int     `json:"min_availability"`
+	MaxAvailability int     `json:"max_availability"`
+	AvgAvailability float64 `json:"avg_availability"`
+}
+
 // Event pushed from the engine.
 type Event struct {
 	Type string          `json:"event"`

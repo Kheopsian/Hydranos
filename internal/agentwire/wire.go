@@ -30,6 +30,7 @@ const (
 	MethodGetPeers             = "get_peers"
 	MethodGetSessionStat       = "get_session_stats"
 	MethodGetFiles             = "get_files"
+	MethodGetAvailability      = "get_availability"
 	MethodGetTrackers          = "get_trackers"
 	MethodGetDiagnostics       = "get_diagnostics"
 	MethodAddPeers             = "add_peers"
