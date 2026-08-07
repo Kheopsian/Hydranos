@@ -560,6 +560,7 @@ func (s *Server) registerHydraRoutes() {
 		api.POST("/engines", s.handleEnginesPost)
 		api.DELETE("/engines/:id", s.handleEnginesDelete)
 		api.POST("/restart", s.handleRestart)
+		api.GET("/categories/orphans", s.handleCategoriesOrphans)
 		api.POST("/categories", s.handleCategoryCreate)
 		api.PUT("/categories/:name", s.handleCategoryUpdate)
 		api.DELETE("/categories/:name", s.handleCategoryDelete)
@@ -1560,6 +1561,33 @@ func (s *Server) handleCategoriesGet(c *gin.Context) {
 	c.JSON(http.StatusOK, cats)
 }
 
+// handleCategoriesOrphans lists category labels worn by torrents that match no
+// configured category. They are invisible in the categories screen otherwise,
+// which is where the only delete button lives.
+func (s *Server) handleCategoriesOrphans(c *gin.Context) {
+	known := map[string]bool{}
+	for _, cat := range loadCategories(s.config.Daemon.DataDir) {
+		known[cat.Name] = true
+	}
+	out := []gin.H{}
+	st := durable()
+	if st == nil {
+		c.JSON(http.StatusOK, out)
+		return
+	}
+	counts, err := st.CategoryCounts()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	for _, cc := range counts {
+		if !known[cc.Name] {
+			out = append(out, gin.H{"name": cc.Name, "torrents": cc.Count})
+		}
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 func (s *Server) handleCategoryCreate(c *gin.Context) {
 	var cat category
 	if err := c.ShouldBindJSON(&cat); err != nil {
@@ -1648,14 +1676,15 @@ func (s *Server) handleCategoryDelete(c *gin.Context) {
 		newCats = append(newCats, cat)
 	}
 
-	if !found {
-		c.JSON(http.StatusNotFound, gin.H{"error": "category not found"})
-		return
-	}
-
-	if err := saveCategories(s.config.Daemon.DataDir, newCats); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	// A category deleted before labels were cleared durably left torrents
+	// wearing a name that is no longer in the list. Refusing here would strand
+	// those labels forever: this route is the only thing that clears one. So a
+	// missing entry is not the error — a name nothing carries at all is.
+	if found {
+		if err := saveCategories(s.config.Daemon.DataDir, newCats); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	// Deleting a category must not leave torrents pointing at a dangling label:
 	// clear it from every hoard torrent that carried it (no file move), like
@@ -1664,7 +1693,28 @@ func (s *Server) handleCategoryDelete(c *gin.Context) {
 	if s.hoardEngine != nil {
 		cleared = s.hoardEngine.ClearCategoryLabel(name)
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "cleared": cleared})
+	if s.raceEngine != nil {
+		cleared += s.raceEngine.ClearCategoryLabel(name)
+	}
+	// The engines hold the label in memory only. Clearing it there makes the
+	// category disappear from the UI right away, but the store still carries it,
+	// so the next boot reloads every one of those torrents with the deleted
+	// category and the chips come back (issue #7).
+	var clearedStored int64
+	if st := durable(); st != nil {
+		n, err := st.ClearCategory(name)
+		if err != nil {
+			slog.Warn("category deleted but its label survives in the store",
+				"category", name, "error", err)
+		}
+		clearedStored = n
+	}
+	if !found && cleared == 0 && clearedStored == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "category not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "cleared": cleared,
+		"cleared_stored": clearedStored, "was_orphan": !found})
 }
 
 // ===========================================================================

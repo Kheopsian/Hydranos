@@ -1066,3 +1066,33 @@ func (e *RaceEngine) GraduationInfo(infoHash string) (savePath, torrentFilePath,
 	}
 	return info.SavePath, info.TorrentFilePath, info.Name, info.Category, true
 }
+
+// ClearCategoryLabel drops the given category label from every race torrent
+// that carries it, mirroring the hoard engine. Without it, deleting a category
+// left race torrents pointing at a label that no longer exists — the chip stayed
+// in the sidebar, which is built from the torrents' own categories.
+func (e *RaceEngine) ClearCategoryLabel(category string) int {
+	if category == "" {
+		return 0
+	}
+	e.mu.Lock()
+	hits := make([]string, 0)
+	for ih, info := range e.torrents {
+		if info.Category == category {
+			info.Category = ""
+			hits = append(hits, ih)
+		}
+	}
+	e.mu.Unlock()
+	if len(hits) == 0 {
+		return 0
+	}
+	e.cachedStatsMu.Lock()
+	for _, ih := range hits {
+		if st, ok := e.cachedStats[ih]; ok && st != nil {
+			st.Category = ""
+		}
+	}
+	e.cachedStatsMu.Unlock()
+	return len(hits)
+}

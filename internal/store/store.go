@@ -162,6 +162,56 @@ func (s *Store) UpdatePlacement(infoHash, category, savePath string) error {
 	return nil
 }
 
+// ClearCategory drops a category label from every torrent carrying it and
+// reports how many rows changed. Deleting a category clears the label in the
+// engines' memory; the store kept it, so the next boot reloaded those torrents
+// with a category the user had deleted and it came back in the UI (issue #7).
+// One statement rather than a row-per-torrent loop: at 100k+ torrents the
+// difference is a single scan against as many transactions.
+func (s *Store) ClearCategory(category string) (int64, error) {
+	if category == "" {
+		return 0, nil
+	}
+	s.wmux.Lock()
+	defer s.wmux.Unlock()
+	res, err := s.db.Exec(`UPDATE torrents SET category = '' WHERE category = ?`, category)
+	if err != nil {
+		return 0, fmt.Errorf("store clear category %q: %w", category, err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// CategoryCount is a category label as the torrents carry it, with how many
+// wear it. Distinct from the configured category list: a label outlives the
+// category it names.
+type CategoryCount struct {
+	Name  string
+	Count int
+}
+
+// CategoryCounts reports every category label present on a torrent. Used to
+// surface labels that no longer match any configured category — the leftovers
+// of deletions made before the label was cleared durably (issue #7), which the
+// user otherwise has no way to reach.
+func (s *Store) CategoryCounts() ([]CategoryCount, error) {
+	rows, err := s.db.Query(
+		`SELECT category, COUNT(*) FROM torrents WHERE category != '' GROUP BY category`)
+	if err != nil {
+		return nil, fmt.Errorf("store category counts: %w", err)
+	}
+	defer rows.Close()
+	var out []CategoryCount
+	for rows.Next() {
+		var cc CategoryCount
+		if err := rows.Scan(&cc.Name, &cc.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, cc)
+	}
+	return out, rows.Err()
+}
+
 // Delete removes a torrent's identity. Note: this never touches the payload
 // files on disk — remove-torrent-keep-data is simply "don't delete the data".
 func (s *Store) Delete(infoHash string) error {

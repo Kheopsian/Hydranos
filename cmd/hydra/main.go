@@ -1450,6 +1450,10 @@ func (a *raceAPIAdapter) GetAllStatusJSON() []json.RawMessage {
 	return out
 }
 func (a *raceAPIAdapter) GetSessionTotals() (int64, int64) { return a.engine.GetSessionTotals() }
+
+func (a *raceAPIAdapter) ClearCategoryLabel(category string) int {
+	return a.engine.ClearCategoryLabel(category)
+}
 func (a *raceAPIAdapter) SetUserPaused(ih string, paused bool) error {
 	return a.engine.SetUserPaused(ih, paused)
 }

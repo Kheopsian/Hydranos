@@ -35,6 +35,8 @@ Auth = `X-API-Key`.
 - `POST /api/race/torrents/:info_hash/purge?delete_files=` — **retire du SEUL moteur race** (garde le hoard). À préférer au DELETE quand dual-seed.
 
 **Catégories** : `GET/POST /api/categories`, `PUT/DELETE /api/categories/:name`
+  - `GET /api/categories/orphans` -> `[{name, torrents}]` : labels portés par des torrents mais ne correspondant à aucune catégorie configurée (résidus de suppressions antérieures au nettoyage durable du label).
+  - `DELETE /api/categories/:name` -> `{cleared, cleared_stored, was_orphan}` : retire l'entrée de `categories.json`, efface le label dans les DEUX moteurs et dans le store SQLite. Accepte un label orphelin (absent de la liste) ; **404 seulement si aucun torrent ne le porte non plus**.
 **Override passkey (2.7.10+)** : `GET /api/announce/passkeys` ; `POST /api/announce/passkeys` `{"host":"tracker.torr9.net","passkey":"..."}` (vide = clear). Hot, pas de restart, par-tracker.
 **Divers** : `GET /api/public-ip`, `/api/fs/browse`, `/api/peers/top`, `/health`, `/metrics`.
 
@@ -73,7 +75,7 @@ La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DIS
 |---|---|
 | *(top-level)* | `POST /torrents` · `POST /torrents/upload` · `DELETE /torrents/:ih` · `POST /torrents/:ih/reannounce` · `POST /torrents/:ih/add-tracker` · `GET /status` · `GET /events` (SSE) · `GET /public-ip` · `GET /fs/browse` · `GET /health/anomalies` |
 | announce | `GET/POST /announce/passkeys` · `GET/POST /announce/clients` |
-| categories | `GET /categories` · `POST /categories` · `PUT /categories/:name` · `DELETE /categories/:name` |
+| categories | `GET /categories` · `GET /categories/orphans` · `POST /categories` · `PUT /categories/:name` · `DELETE /categories/:name` |
 | peers | `GET /peers/top` · `GET /peers/seedboxes` |
 | stats | `GET/POST /stats/baseline` |
 | config | `GET/POST /config/create-folder` |

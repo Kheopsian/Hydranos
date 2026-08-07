@@ -109,3 +109,46 @@ func TestEmptyRejected(t *testing.T) {
 		t.Fatal("expected error on empty torrent blob")
 	}
 }
+
+// Deleting a category must clear the label everywhere it is stored, across both
+// sessions, and leave every other category alone (issue #7).
+func TestClearCategory(t *testing.T) {
+	s := openTmp(t)
+	blob := []byte("d4:infod...e")
+	for _, r := range []*Record{
+		{InfoHash: "a1", Session: Hoard, Torrent: blob, Category: "films"},
+		{InfoHash: "a2", Session: Race, Torrent: blob, Category: "films"},
+		{InfoHash: "a3", Session: Hoard, Torrent: blob, Category: "series"},
+		{InfoHash: "a4", Session: Hoard, Torrent: blob, Category: ""},
+	} {
+		if err := s.Put(r); err != nil {
+			t.Fatalf("put %s: %v", r.InfoHash, err)
+		}
+	}
+	n, err := s.ClearCategory("films")
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("cleared %d rows, want 2 (both sessions)", n)
+	}
+	for _, ih := range []string{"a1", "a2"} {
+		got, _, _ := s.Get(ih)
+		if got.Category != "" {
+			t.Fatalf("%s still carries %q", ih, got.Category)
+		}
+	}
+	if got, _, _ := s.Get("a3"); got.Category != "series" {
+		t.Fatalf("unrelated category clobbered: %q", got.Category)
+	}
+	// Idempotent, and an empty name is never a wildcard that wipes the column.
+	if n, _ := s.ClearCategory("films"); n != 0 {
+		t.Fatalf("second clear touched %d rows", n)
+	}
+	if n, _ := s.ClearCategory(""); n != 0 {
+		t.Fatalf("empty category cleared %d rows", n)
+	}
+	if got, _, _ := s.Get("a3"); got.Category != "series" {
+		t.Fatal("empty-category call wiped a real label")
+	}
+}

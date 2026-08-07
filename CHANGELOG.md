@@ -3,6 +3,36 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.44.2 — 2026-08-06
+
+### Fixed
+
+- **A deleted category no longer comes back after a restart.** Deleting a
+  category removed it from the category list and cleared its label from the
+  torrents that carried it — in memory only. The label also lives in the store,
+  which is what the daemon reloads from at boot, so every one of those torrents
+  came back wearing a category the user had deleted. It looked like the deletion
+  had been ignored, when in fact it had worked and then been undone by the next
+  boot. The sidebar chips are built from the torrents' own labels rather than
+  from the category list, which is why the ghosts were so visible. The label is
+  now cleared in the store as part of the deletion, in one statement rather than
+  a write per torrent — at a hundred thousand torrents that is a single scan
+  instead of as many transactions. The race engine gained the in-memory clear
+  the hoard engine already had: until now a race torrent kept its label even
+  before a restart.
+
+  Two consequences worth stating. Labels stranded by a deletion made *before*
+  this fix are not cleared by upgrading — they are still on the torrents, and
+  the delete route used to refuse them with a 404 because the category was no
+  longer in the list, which left them unreachable. That route now accepts an
+  orphaned label and clears it; 404 is reserved for a name nothing carries at
+  all. `GET /api/categories/orphans` lists those labels, and the categories
+  screen shows them with a delete button, since that screen holds the only one.
+  They are deliberately kept out of the add-torrent dropdown: a category that no
+  longer exists is not something to assign.
+
+  Closes #7.
+
 ## v3.44.1 — 2026-08-06
 
 ### Fixed
