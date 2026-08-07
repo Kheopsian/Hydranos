@@ -1112,3 +1112,13 @@ func (e *RaceEngine) GetTorrentAvailability(infoHash string) map[string]interfac
 		"num_pieces": a.NumPieces,
 	}
 }
+
+// SetEngineOptFlag toggles one engine-side optimisation without a restart.
+func (e *RaceEngine) SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error) {
+	return e.client.SetEngineOptFlag(name, on, value)
+}
+
+// EngineOptFlags reports the engine-side flag state.
+func (e *RaceEngine) EngineOptFlags() (map[string]interface{}, error) {
+	return e.client.EngineOptFlags()
+}

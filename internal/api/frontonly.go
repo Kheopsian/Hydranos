@@ -28,6 +28,12 @@ func (emptyRaceEngine) GetAllStatus() []map[string]interface{}             { ret
 func (emptyRaceEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
 func (emptyRaceEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
 func (emptyRaceEngine) GetTorrentAvailability(string) map[string]interface{} { return nil }
+func (emptyRaceEngine) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyRaceEngine) EngineOptFlags() (map[string]interface{}, error) {
+	return nil, errNoLocalEngine
+}
 func (emptyRaceEngine) GetTorrentStatus(string) map[string]interface{}     { return nil }
 func (emptyRaceEngine) AddTorrent(string, string, string, []string, string) (string, error) {
 	return "", errNoLocalEngine
@@ -63,6 +69,12 @@ func (emptyHoardEngine) GetSessionTotals() (int64, int64)                   { re
 func (emptyHoardEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }
 func (emptyHoardEngine) GetTorrentFileList(string) []map[string]interface{} { return nil }
 func (emptyHoardEngine) GetTorrentAvailability(string) map[string]interface{} { return nil }
+func (emptyHoardEngine) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyHoardEngine) EngineOptFlags() (map[string]interface{}, error) {
+	return nil, errNoLocalEngine
+}
 func (emptyHoardEngine) AddTorrent(string, string, string) (string, error) {
 	return "", errNoLocalEngine
 }

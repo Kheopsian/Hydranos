@@ -678,6 +678,45 @@ func (c *Client) GetFiles(infoHash string) ([]FileInfo, error) {
 	return result.Files, nil
 }
 
+// SetEngineOptFlag toggles one engine-side optimisation at runtime. Value is
+// only read by the flags that carry a number rather than a boolean.
+func (c *Client) SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error) {
+	raw, err := c.call("set_opt_flag", map[string]interface{}{
+		"flag":  name,
+		"on":    on,
+		"value": value,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Flags map[string]interface{} `json:"flags"`
+		Error string                 `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal set_opt_flag: %w", err)
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("engine: %s", result.Error)
+	}
+	return result.Flags, nil
+}
+
+// EngineOptFlags reports the engine-side flag state.
+func (c *Client) EngineOptFlags() (map[string]interface{}, error) {
+	raw, err := c.call("get_opt_flags", map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Flags map[string]interface{} `json:"flags"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal get_opt_flags: %w", err)
+	}
+	return result.Flags, nil
+}
+
 // GetAvailability returns swarm piece availability for a torrent.
 func (c *Client) GetAvailability(infoHash string) (*Availability, error) {
 	raw, err := c.call("get_availability", map[string]interface{}{

@@ -38,6 +38,8 @@ type EngineClient interface {
 	GetSessionStats() (*ltclient.SessionStats, error)
 	GetFiles(infoHash string) ([]ltclient.FileInfo, error)
 	GetAvailability(infoHash string) (*ltclient.Availability, error)
+	SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error)
+	EngineOptFlags() (map[string]interface{}, error)
 	GetTrackers(infoHash string) ([]ltclient.TrackerInfo, error)
 	GetDiagnostics() (*ltclient.DiagnosticStats, error)
 

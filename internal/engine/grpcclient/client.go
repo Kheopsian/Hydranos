@@ -261,6 +261,22 @@ func (c *Client) GetFiles(infoHash string) ([]ltclient.FileInfo, error) {
 	return res, nil
 }
 
+func (c *Client) SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error) {
+	var res map[string]interface{}
+	if err := c.call(agentwire.MethodSetEngineOptFlag, agentwire.OptFlagParams{Flag: name, On: on, Value: value}, &res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (c *Client) EngineOptFlags() (map[string]interface{}, error) {
+	var res map[string]interface{}
+	if err := c.call(agentwire.MethodEngineOptFlags, nil, &res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 func (c *Client) GetAvailability(infoHash string) (*ltclient.Availability, error) {
 	var res ltclient.Availability
 	if err := c.call(agentwire.MethodGetAvailability, agentwire.InfoHashParams{InfoHash: infoHash}, &res); err != nil {

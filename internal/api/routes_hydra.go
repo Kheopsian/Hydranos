@@ -2511,8 +2511,22 @@ func (s *Server) handleGetOptFlags(c *gin.Context) {
 	for k, v := range OptFlags() {
 		flags[k] = v
 	}
+	// The engines are separate processes with their own flags, so they are
+	// reported per engine rather than folded into the Go-side map.
+	engineFlags := gin.H{}
+	if s.raceEngine != nil {
+		if f, err := s.raceEngine.EngineOptFlags(); err == nil {
+			engineFlags["race"] = f
+		}
+	}
+	if s.hoardEngine != nil {
+		if f, err := s.hoardEngine.EngineOptFlags(); err == nil {
+			engineFlags["hoard"] = f
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"flags":             flags,
+		"engine_flags":      engineFlags,
 		"gogc":              GOGC(),
 		"list_cache_ttl_ms": ltclient.ListCacheTTL() / 1e6,
 	})
@@ -2551,12 +2565,60 @@ func (s *Server) handleSetOptFlag(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "list_cache_ttl_ms": ltclient.ListCacheTTL() / 1e6})
 		return
 	}
+	// Engine-side flags live in the Rust process, so they are forwarded to
+	// both engines. An engine that refuses (an unknown name, or a pool size
+	// change after the pool is built) is an error, not a silent no-op: a
+	// measurement that quietly did not take is worse than one that failed.
+	if isEngineOptFlag(req.Flag) {
+		applied := gin.H{}
+		for name, eng := range s.engineTargets() {
+			f, err := eng.SetEngineOptFlag(req.Flag, req.On, req.Value)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": name + ": " + err.Error()})
+				return
+			}
+			applied[name] = f
+		}
+		if len(applied) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no local engine to set " + req.Flag + " on"})
+			return
+		}
+		slog.Info("engine opt flag set", "flag", req.Flag, "on", req.On, "value", req.Value)
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "engine_flags": applied})
+		return
+	}
 	if !ltclient.SetOptFlag(req.Flag, req.On) && !SetOptFlag(req.Flag, req.On) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown flag: " + req.Flag})
 		return
 	}
 	slog.Info("opt flag set", "flag", req.Flag, "on", req.On)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "flags": ltclient.OptFlags(), "http_flags": OptFlags()})
+}
+
+// isEngineOptFlag reports whether a flag name belongs to the Rust engines
+// rather than to either Go-side registry.
+func isEngineOptFlag(name string) bool {
+	switch name {
+	case "session_pinning", "session_runtimes":
+		return true
+	}
+	return false
+}
+
+// engineTargets returns the local engines an engine-side flag applies to.
+func (s *Server) engineTargets() map[string]interface {
+	SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error)
+} {
+	out := map[string]interface {
+		SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error)
+	}{}
+	if s.raceEngine != nil {
+		out["race"] = s.raceEngine
+	}
+	if s.hoardEngine != nil {
+		out["hoard"] = s.hoardEngine
+	}
+	return out
 }
 
 // handleGetTrackers returns the per-host tracker aggregate joined with the

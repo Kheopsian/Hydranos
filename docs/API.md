@@ -24,6 +24,10 @@ Auth = `X-API-Key`.
 - `POST /api/torrents/:info_hash/reannounce`
 - `POST /api/torrents/:info_hash/add-tracker`
 - `GET /api/torrents/:info_hash/files` — contenu du torrent : `files[]` (`path`, `size`), cherché dans le moteur qui le détient. Ajoute `availability` (`min`, `max`, `avg`, `num_pieces`) **uniquement si le torrent a une piece map**, c.-à-d. en mode download — un torrent seed_mode n'a pas de bitfield (c'est ce qui rend 100k torrents pas chers), donc la clé est absente et l'UI affiche « n/a ».
+- `GET /api/opt/flags` / `POST /api/opt/flags` — flags d'optim à chaud. En plus des flags Go (`ipc_route`, `ipc_frame`, `list_cache`, `ipc_prealloc`, `qbit_snapshot`, `totals_cache`, `gogc`, `list_cache_ttl_ms`), deux flags **moteur** (Rust), appliqués aux DEUX moteurs et rendus sous `engine_flags.{race,hoard}` :
+  - `session_pinning` (bool) — thread-per-core : épingle chaque session de pair sur un runtime mono-thread. ⚠️ **Ne s'applique qu'aux NOUVELLES sessions** : une bascule met des minutes à prendre effet, le temps que les pairs tournent. Blocs d'A/B assez longs pour survivre à ça.
+  - `session_runtimes` (`value`, ≥1) — taille du pool. **Refusé (400) une fois le pool construit** (= après le premier `session_pinning:true`) : démonter des runtimes qui portent des sessions vivantes n'est pas le rôle d'un bouton de mesure. Défaut = `TYPHON_SESSION_RUNTIMES`, sinon 1/cœur.
+
 
 **État / stats**
 - `GET /api/status` — état global (baseline, hoard{...}, day_uploaded...).

@@ -34,6 +34,8 @@ pub fn dispatch(
         "get_trackers" => get_trackers(params, torrent_mgr),
         "get_files" => get_files(params, torrent_mgr),
         "get_availability" => get_availability(params, torrent_mgr),
+        "set_opt_flag" => set_opt_flag(params),
+        "get_opt_flags" => get_opt_flags(),
         "get_diagnostics" => get_diagnostics(torrent_mgr, config),
         "set_listen_port" => set_listen_port(params),
         "set_self_ips" => set_self_ips(params),
@@ -262,6 +264,43 @@ fn get_files(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
         json!({"path": f.path.to_string_lossy(), "size": f.length})
     }).collect();
     json!({"files": files})
+}
+
+/// Engine-side optimisation flags, toggled at runtime by POST /api/opt/flags.
+/// Same rationale as the Go-side registry: each flag gates ONE change so an A/B
+/// ladder can measure it in isolation, and a restart to do that would cost real
+/// tracker credit.
+fn set_opt_flag(params: &Value) -> Value {
+    let name = params.get("flag").and_then(|v| v.as_str()).unwrap_or("");
+    match name {
+        "session_pinning" => {
+            let on = params.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+            crate::peer::set_session_pinning(on);
+            json!({"ok": true, "flags": opt_flags_map()})
+        }
+        "session_runtimes" => {
+            let n = params.get("value").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if n == 0 {
+                return json!({"error": "session_runtimes must be >= 1"});
+            }
+            if !crate::peer::set_session_runtimes(n) {
+                return json!({"error": "runtime pool already built; the size is fixed until restart"});
+            }
+            json!({"ok": true, "flags": opt_flags_map()})
+        }
+        _ => json!({"error": format!("unknown engine flag: {}", name)}),
+    }
+}
+
+fn opt_flags_map() -> Value {
+    json!({
+        "session_pinning": crate::peer::session_pinning(),
+        "session_runtimes": crate::peer::session_runtimes_n(),
+    })
+}
+
+fn get_opt_flags() -> Value {
+    json!({"flags": opt_flags_map()})
 }
 
 /// Piece availability as seen from the swarm. Only download-mode torrents have

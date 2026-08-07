@@ -174,6 +174,98 @@ pub async fn listen(
     Ok(())
 }
 
+/// Thread-per-core for peer sessions, switchable at runtime.
+///
+/// A session pinned to one single-threaded runtime has its socket touched by
+/// exactly one thread, so `lock_sock` is never contended — a perf profile of the
+/// shared multi-threaded runtime showed `__pv_queued_spin_lock_slowpath` at 20%.
+/// A bench measured contention falling from 15.7% to 3% and throughput rising
+/// 6-9%, but that was a bench: whether it holds on a production swarm is exactly
+/// what the flag exists to answer.
+///
+/// It is a hot flag rather than the start-up env var it began as, because
+/// restarting to A/B it is not free: a restart resets the per-torrent upload
+/// counters, and trackers credit upload by MAX per torrent, so every flip would
+/// be paid for in credit. `TYPHON_SESSION_RUNTIMES` still sets the pool size.
+///
+/// Only NEW sessions follow the switch. Sessions already running stay on the
+/// runtime that accepted them — moving a live socket between reactors is not
+/// something a measurement knob should do — so a flip takes effect as peers
+/// churn, over minutes rather than instantly. Blocks must be long enough to
+/// outlast that.
+static SESSION_PINNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SESSION_RT_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SESSION_RTS: std::sync::OnceLock<Vec<tokio::runtime::Handle>> = std::sync::OnceLock::new();
+static SESSION_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn session_pinning() -> bool {
+    SESSION_PINNING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn pinning on or off. The first `true` builds the runtime pool; later
+/// flips only change which spawn path new sessions take.
+pub fn set_session_pinning(on: bool) {
+    SESSION_PINNING.store(on, std::sync::atomic::Ordering::Relaxed);
+    if on {
+        let n = session_runtimes().len();
+        info!("[peer] session pinning ON over {} runtimes", n);
+    } else {
+        info!("[peer] session pinning OFF (new sessions on the shared runtime)");
+    }
+}
+
+/// Pool size for the next build. Refused once the pool exists: tearing down
+/// runtimes that carry live sessions is not worth it, and silently ignoring the
+/// request would make a measurement lie about what it measured.
+pub fn set_session_runtimes(n: usize) -> bool {
+    if SESSION_RTS.get().is_some() {
+        return false;
+    }
+    SESSION_RT_N.store(n, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
+/// How many runtimes the pool has, or would have. Explicit setting wins, then
+/// TYPHON_SESSION_RUNTIMES, then one per core.
+pub fn session_runtimes_n() -> usize {
+    let n = SESSION_RT_N.load(std::sync::atomic::Ordering::Relaxed);
+    if n > 0 {
+        return n;
+    }
+    if let Some(n) = std::env::var("TYPHON_SESSION_RUNTIMES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        return n;
+    }
+    std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1)
+}
+
+fn session_runtimes() -> &'static [tokio::runtime::Handle] {
+    SESSION_RTS.get_or_init(|| {
+        let n = session_runtimes_n();
+        let mut handles = Vec::with_capacity(n);
+        for i in 0..n {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("[peer] session runtime {} failed: {}", i, e);
+                    continue;
+                }
+            };
+            handles.push(rt.handle().clone());
+            let _ = std::thread::Builder::new()
+                .name(format!("session-rt-{}", i))
+                .spawn(move || {
+                    rt.block_on(std::future::pending::<()>());
+                });
+        }
+        info!("[peer] thread-per-core: {} dedicated session runtimes", handles.len());
+        handles
+    })
+}
+
 async fn tcp_accept_loop(
     listener: TcpListener,
     torrent_mgr: Arc<TorrentManager>,
@@ -198,9 +290,36 @@ async fn tcp_accept_loop(
         let tm = torrent_mgr.clone();
         let dm = disk_mgr.clone();
         let u = utp_socket.clone();
-        tokio::spawn(async move {
-            handle_incoming(PeerTransport::Tcp(stream), addr, tm, dm, peer_id, u, listen_port).await;
-        });
+        // OPT thread-per-core: pin the session to ONE runtime so its socket is only
+        // ever touched by a single thread -> lock_sock is never contended (perf showed
+        // __pv_queued_spin_lock_slowpath at 20% with the shared multi-thread runtime).
+        // The tokio TcpStream is bound to the reactor that created it, so it must go
+        // through into_std/from_std to move to another runtime.
+        let rts: &[tokio::runtime::Handle] = if session_pinning() {
+            session_runtimes()
+        } else {
+            &[]
+        };
+        if rts.is_empty() {
+            tokio::spawn(async move {
+                handle_incoming(PeerTransport::Tcp(stream), addr, tm, dm, peer_id, u, listen_port).await;
+            });
+        } else {
+            let idx = SESSION_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % rts.len();
+            match stream.into_std() {
+                Ok(std_s) => {
+                    rts[idx].spawn(async move {
+                        match tokio::net::TcpStream::from_std(std_s) {
+                            Ok(s) => {
+                                handle_incoming(PeerTransport::Tcp(s), addr, tm, dm, peer_id, u, listen_port).await;
+                            }
+                            Err(e) => warn!("[peer] from_std failed: {}", e),
+                        }
+                    });
+                }
+                Err(e) => warn!("[peer] into_std failed: {}", e),
+            }
+        }
     }
 }
 

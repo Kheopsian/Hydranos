@@ -69,6 +69,10 @@ func (c *stubSlotClient) GetPeers(string) ([]ltclient.PeerInfo, error)        { 
 func (c *stubSlotClient) GetSessionStats() (*ltclient.SessionStats, error)    { return nil, nil }
 func (c *stubSlotClient) GetFiles(string) ([]ltclient.FileInfo, error)        { return nil, nil }
 func (c *stubSlotClient) GetAvailability(string) (*ltclient.Availability, error) { return nil, nil }
+func (c *stubSlotClient) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
+	return nil, nil
+}
+func (c *stubSlotClient) EngineOptFlags() (map[string]interface{}, error) { return nil, nil }
 func (c *stubSlotClient) GetTrackers(string) ([]ltclient.TrackerInfo, error)  { return nil, nil }
 func (c *stubSlotClient) GetDiagnostics() (*ltclient.DiagnosticStats, error)  { return nil, nil }
 func (c *stubSlotClient) AddPeers(string, []struct {

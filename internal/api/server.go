@@ -63,6 +63,8 @@ type RaceEngine interface {
 	GetTorrentDetail(infoHash string) map[string]interface{}
 	GetTorrentFileList(infoHash string) []map[string]interface{}
 	GetTorrentAvailability(infoHash string) map[string]interface{}
+	SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error)
+	EngineOptFlags() (map[string]interface{}, error)
 	GetTorrentStatus(infoHash string) map[string]interface{}
 	AddTorrent(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error)
 	AddTorrentSeedMode(torrentPath, savePath, category string) (string, error)
@@ -90,6 +92,8 @@ type HoardEngine interface {
 	GetTorrentDetail(infoHash string) map[string]interface{}
 	GetTorrentFileList(infoHash string) []map[string]interface{}
 	GetTorrentAvailability(infoHash string) map[string]interface{}
+	SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error)
+	EngineOptFlags() (map[string]interface{}, error)
 	AddTorrent(torrentPath, savePath, category string) (string, error)
 	AddTorrentSeedMode(torrentPath, savePath, category string) (string, error)
 	RemoveTorrent(infoHash string, deleteFiles bool) error

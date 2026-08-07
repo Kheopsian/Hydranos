@@ -270,6 +270,16 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		}
 		return reply(c.GetAvailability(p.InfoHash))
 
+	case agentwire.MethodSetEngineOptFlag:
+		var p agentwire.OptFlagParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		return reply(c.SetEngineOptFlag(p.Flag, p.On, p.Value))
+
+	case agentwire.MethodEngineOptFlags:
+		return reply(c.EngineOptFlags())
+
 	case agentwire.MethodGetTrackers:
 		var p agentwire.InfoHashParams
 		if err := unmarshal(&p); err != nil {

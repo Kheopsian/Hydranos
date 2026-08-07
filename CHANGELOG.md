@@ -3,40 +3,26 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.46.0 — 2026-08-07
+
+### Added
+
+- **Thread-per-core session pinning, behind a hot flag, off by default.** Pins
+  each peer session to one single-threaded runtime so its socket is never
+  contended; toggle with `session_pinning` on `POST /api/opt/flags`. Only new
+  sessions follow a flip, so it lands over minutes as peers churn.
+
 ## v3.45.0 — 2026-08-07
 
 ### Added
 
-- **See what is inside a .torrent before you add it.** The Add Torrent screen
-  now reads the files you select and shows their contents next to the form: the
-  torrent name, how many files, the total size, the piece size and count,
-  whether it is private, the tracker list, and every file with its size. It is a
-  preview, not an upload — the parsing happens in your browser, and nothing
-  reaches the daemon until you press Add Torrent. Multiple selected torrents
-  each get their own collapsible block, and a file that does not parse is
-  reported as such instead of silently dropping out of the list. A checkbox
-  turns the whole thing off for anyone who does not want the extra step; the
-  choice is remembered. This covers the uploaded-file path only: a server-side
-  path or a magnet has nothing for the browser to read.
+- **See what is inside a .torrent before adding it.** The Add screen reads the
+  files you pick and lists their contents beside the form, parsed in your
+  browser — nothing is uploaded until you press Add. A checkbox turns it off.
 
-- **A Content tab in the torrent detail panel.** Both the race and the hoard
-  panel now list the torrent's files with their sizes and their share of the
-  total, largest first. The hoard panel had no tabs at all until now and gained
-  the same Info/Content split the race panel already used.
-
-- **Swarm piece availability is finally reported.** The piece picker has always
-  counted how many peers hold each piece, but nothing published it and the
-  qBittorrent shim answered a hardcoded 1.0. The engine now exposes the minimum,
-  maximum and mean across pieces, and the Content tab shows them. The minimum is
-  the number that matters: below one, some piece is held by nobody we are
-  connected to and the torrent cannot be completed until a seeder returns.
-
-  Availability only exists for torrents in download mode. A seed-mode torrent
-  carries no bitfield at all — that is deliberate, and it is a large part of why
-  a hundred thousand torrents stay cheap — so there is nothing to report and the
-  UI says so rather than showing a misleading zero.
-
-- `GET /api/torrents/:info_hash/files` returns both, in one round trip.
+- **A Content tab in the torrent detail panel**, on both race and hoard: every
+  file with its size and share of the total, plus swarm piece availability where
+  it exists. Seeding torrents carry no piece map, so there it reads n/a.
 
 ## v3.44.2 — 2026-08-06
 
