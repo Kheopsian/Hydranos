@@ -22,6 +22,7 @@ type emptyRaceEngine struct{}
 // NewEmptyRaceEngine returns a no-op RaceEngine for front-only mode.
 func NewEmptyRaceEngine() RaceEngine { return emptyRaceEngine{} }
 
+func (emptyRaceEngine) ClearCategoryLabel(string) int                      { return 0 }
 func (emptyRaceEngine) SetUserPaused(string, bool) error                   { return nil }
 func (emptyRaceEngine) GetAllStatus() []map[string]interface{}             { return nil }
 func (emptyRaceEngine) GetTorrentDetail(string) map[string]interface{}     { return nil }

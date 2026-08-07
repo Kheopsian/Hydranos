@@ -2179,6 +2179,26 @@ async function updateCategories() {
             </tr>`).join("");
         }
 
+        // Labels worn by torrents but matching no configured category: the
+        // residue of deletions made before labels were cleared durably. Shown
+        // here because this screen holds the only delete button, and left out
+        // of the dropdown below — you cannot assign a category that is gone.
+        try {
+            const orphans = await api("/api/categories/orphans");
+            if (orphans && orphans.length) {
+                if (!cats || cats.length === 0) tbody.innerHTML = "";
+                tbody.innerHTML += orphans.map(o => `<tr>
+                    <td><strong>${esc(incoCat(o.name))}</strong> <span style="color:var(--text-muted);font-size:11px">orphaned</span></td>
+                    <td><span style="color:var(--text-muted)">\u2014</span></td>
+                    <td class="mono" style="font-size:12px;color:var(--text-muted)">no longer configured, still on ${o.torrents} torrent${o.torrents > 1 ? "s" : ""}</td>
+                    <td><span style="color:var(--text-muted)">\u2014</span></td>
+                    <td><span style="color:var(--text-muted)">\u2014</span></td>
+                    <td><span style="color:var(--text-muted)">\u2014</span></td>
+                    <td><button class="btn-small btn-danger" onclick="deleteCategory('${o.name}')">Delete</button></td>
+                </tr>`).join("");
+            }
+        } catch (e) { console.error("load orphaned categories", e); }
+
         // Update add-torrent dropdown
         const sel = document.getElementById("torrent-category");
         const current = sel.value;

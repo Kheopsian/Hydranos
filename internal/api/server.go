@@ -77,6 +77,7 @@ type RaceEngine interface {
 	AggregateStats() map[string]interface{}
 	GetAllStatusJSON() []json.RawMessage
 	GetSessionTotals() (int64, int64)
+	ClearCategoryLabel(category string) int
 }
 
 // HoardEngine abstracts the hoard (long-term seeding) torrent engine.
