@@ -15,6 +15,11 @@ services:
       - "16171:16171/udp"    # race uTP
       - "16172:16172/tcp"    # hoard engine BT listen
       - "16172:16172/udp"    # hoard uTP
+    # Run as your own user so downloads are not owned by root. Leave both
+    # unset to keep running as root (the historical behaviour).
+    # environment:
+    #   PUID: 1000
+    #   PGID: 1000
     volumes:
       - ./config:/config    # config, resume data, SQLite store (persistent)
       - ./data:/data         # torrent payload data

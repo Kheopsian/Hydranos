@@ -3,6 +3,20 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## Unreleased
+
+### Added
+
+- **PUID/PGID support in the container.** Set `PUID` and `PGID` and Hydra drops
+  privileges at start, so the config, the resume data and the files it writes
+  belong to your user instead of root -- which is what Sonarr, Radarr and
+  friends need to hardlink them. Leaving both unset keeps the previous
+  behaviour: everything runs as root. The config directory is chowned on start
+  (skip it with `HYDRA_SKIP_CHOWN=1`); the payload directory is never touched,
+  its permissions stay yours to manage. If you route through a VPN with an
+  fwmark, add `HYDRA_CAP_NET_ADMIN=1` and `--cap-add=NET_ADMIN` so `SO_MARK`
+  survives the privilege drop.
+
 ## v3.46.0 — 2026-08-07
 
 ### Added
