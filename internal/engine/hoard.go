@@ -114,6 +114,12 @@ type HoardEngine struct {
 	// Wired to HoardAnnouncer.ReAnnounce in main.go.
 	reAnnounce func(infoHash string, totalSize int64)
 
+	// stoppedAnnounce tells the trackers we are leaving, once, when the user
+	// stops a torrent. Without it a stop is silent and the tracker keeps us in
+	// the swarm until our entry goes stale. Wired to
+	// HoardAnnouncer.StoppedAnnounce in main.go.
+	stoppedAnnounce func(infoHash string, totalSize int64)
+
 	// Announce offset (continuité handoff race->hoard) : UL/DL hérités d'un
 	// doublon race purgé. Ajouté UNIQUEMENT au cumulé ANNONCÉ au tracker (pas
 	// aux compteurs globaux : ceux-là sont préservés par AbsorbStats côté race).
@@ -146,6 +152,11 @@ func (e *HoardEngine) SetBootstrapAnnounce(fn func(infoHash string, totalSize in
 // SetReAnnounce wires the one-shot post-move seeder re-announce (see field doc).
 func (e *HoardEngine) SetReAnnounce(fn func(infoHash string, totalSize int64)) {
 	e.reAnnounce = fn
+}
+
+// SetStoppedAnnounce wires the one-shot leaving-the-swarm announce (see field doc).
+func (e *HoardEngine) SetStoppedAnnounce(fn func(infoHash string, totalSize int64)) {
+	e.stoppedAnnounce = fn
 }
 
 // AddAnnounceOffset ajoute un offset UL/DL hérité (handoff d'un doublon race
@@ -361,7 +372,9 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 				// Map typhon status enum → libtorrent state string.
 				switch m.Status {
 				case 0:
-					st.State = "paused"
+					// Halted: the intent flag says whether that was us or a
+					// scheduler.
+					st.State = haltedState(st.UserPaused)
 				case 1:
 					st.State = "checking_files"
 				case 2:
@@ -1210,6 +1223,9 @@ func (e *HoardEngine) refreshStats() {
 			stats.ContentFolder = info.ContentFolder
 			stats.Tags = info.Tags
 			stats.UserPaused = info.UserPaused
+			// The state was derived before the intent was known -- redo it, or
+			// a stopped torrent reads "queued" again after the next refresh.
+			stats.State = DeriveState(stats.State, stats.UserPaused)
 		}
 
 		if stats.Progress >= 1.0 && completedTime.IsZero() && info != nil {

@@ -35,7 +35,13 @@ func (e *HoardEngine) SetUserPaused(infoHash string, paused bool) error {
 		return err
 	}
 	if paused {
-		return e.StopTorrent(infoHash)
+		err := e.StopTorrent(infoHash)
+		// Tell the trackers we are gone. In its own goroutine: a slow or dead
+		// tracker must not hold up the stop, and it is best-effort anyway.
+		if fn := e.stoppedAnnounce; fn != nil {
+			go fn(infoHash, 0)
+		}
+		return err
 	}
 	return e.StartTorrent(infoHash)
 }
@@ -97,6 +103,13 @@ func (e *HoardEngine) markUserPaused(infoHash string, paused bool) error {
 	e.cachedStatsMu.Lock()
 	if st, ok := e.cachedStats[infoHash]; ok {
 		st.UserPaused = paused
+		if paused {
+			st.State = StateStopped
+		} else if st.State == StateStopped {
+			// Back to a scheduler's hands until the next snapshot says
+			// otherwise -- never leave it reading "stopped" after a start.
+			st.State = StateQueued
+		}
 	}
 	e.cachedStatsMu.Unlock()
 	return nil
@@ -110,6 +123,7 @@ func (e *HoardEngine) syncPausedStats(hashes []string) {
 	for _, ih := range hashes {
 		if st, ok := e.cachedStats[ih]; ok {
 			st.UserPaused = true
+			st.State = StateStopped
 		}
 	}
 	e.cachedStatsMu.Unlock()
@@ -143,6 +157,11 @@ func (e *HoardEngine) MarkAllUserPaused(paused bool) int {
 	e.cachedStatsMu.Lock()
 	for _, st := range e.cachedStats {
 		st.UserPaused = paused
+		if paused {
+			st.State = StateStopped
+		} else if st.State == StateStopped {
+			st.State = StateQueued
+		}
 	}
 	e.cachedStatsMu.Unlock()
 	return n
@@ -215,6 +234,13 @@ func (e *RaceEngine) markUserPaused(infoHash string, paused bool) error {
 	e.cachedStatsMu.Lock()
 	if st, ok := e.cachedStats[infoHash]; ok {
 		st.UserPaused = paused
+		if paused {
+			st.State = StateStopped
+		} else if st.State == StateStopped {
+			// Back to a scheduler's hands until the next snapshot says
+			// otherwise -- never leave it reading "stopped" after a start.
+			st.State = StateQueued
+		}
 	}
 	e.cachedStatsMu.Unlock()
 	return nil
@@ -228,6 +254,7 @@ func (e *RaceEngine) syncPausedStats(hashes []string) {
 	for _, ih := range hashes {
 		if st, ok := e.cachedStats[ih]; ok {
 			st.UserPaused = true
+			st.State = StateStopped
 		}
 	}
 	e.cachedStatsMu.Unlock()

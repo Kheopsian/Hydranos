@@ -359,6 +359,51 @@ func (h *HoardAnnouncer) ReAnnounce(infoHash string, totalSize int64) {
 	h.announceOnce(infoHash, totalSize, false, "reannounce")
 }
 
+// StoppedAnnounce tells the trackers we are leaving the swarm, once, right
+// when the user stops the torrent.
+//
+// Without it stopping is silent: we simply go quiet, and the tracker keeps
+// listing us as an active peer until the entry expires on its side. On a
+// private tracker that counts seedtime, "quietly gone" and "still here" are not
+// the same thing.
+//
+// Deliberately best-effort and fire-and-forget: it must not delay the stop, and
+// a tracker that is down is not a reason to refuse to stop a torrent. No peer
+// injection either -- we are leaving, peers are of no use to us.
+func (h *HoardAnnouncer) StoppedAnnounce(infoHash string, totalSize int64) {
+	short := infoHash
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	// Race owns the announce for dual-seeded torrents -- it sends its own.
+	if h.raceHas != nil && h.raceHas(infoHash) {
+		return
+	}
+	status, err := h.client.GetStatus(infoHash)
+	if err != nil {
+		slog.Debug("hoard_announce: stopped GetStatus failed", "info_hash", short, "error", err)
+		return
+	}
+	if totalSize <= 0 {
+		totalSize = status.TotalSize
+	}
+	trackers, err := h.client.GetTrackers(infoHash)
+	if err != nil || len(trackers) == 0 {
+		return
+	}
+	ulOff, dlOff := int64(0), int64(0)
+	if h.offsetFn != nil {
+		ulOff, dlOff = h.offsetFn(infoHash)
+	}
+	left := totalSize - status.TotalDone
+	if left < 0 {
+		left = 0
+	}
+	h.announceAllTiers(infoHash, totalSize, left,
+		status.TotalUpload+ulOff, status.TotalDownload+dlOff, "stopped", trackers)
+	slog.Info("hoard_announce: stopped announce", "info_hash", short)
+}
+
 // announceOnce performs a single "started" announce across all tiers. When
 // forceLeftForPeers is true and the torrent is already complete, left is bumped
 // to 1 so the tracker returns peers (leecher bootstrap); otherwise the real left

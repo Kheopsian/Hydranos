@@ -3,6 +3,22 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.48.0 — 2026-08-07
+
+### Added
+
+- **Stop and start, the way qBittorrent 5 means them.** A torrent you stopped
+  now reads `stopped` and stays that way; one held back by a scheduler reads
+  `queued`. Both have their own filter chip, and the qBit shim answers to
+  `/torrents/stop` and `/torrents/start` (`pause`/`resume` still work) with
+  `stoppedUP`/`stoppedDL`.
+- **Stopping tells the trackers you are leaving.** Hydra now sends an
+  `event=stopped` announce instead of just going quiet, so the tracker stops
+  counting you as an active peer straight away.
+- **Bulk stop/start on a whole filter.** Ctrl+A selects everything the current
+  filters match, not just the rows on screen, and the action travels as the
+  filter rather than as one hash per torrent.
+
 ## v3.47.0 — 2026-08-07
 
 ### Added

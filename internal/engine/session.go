@@ -133,6 +133,11 @@ func ltStatusToTorrentStats(s ltclient.TorrentStatus, category, savePath string,
 		progress = 1.0
 	}
 
+	// The engine says "paused" for anything halted. Without the intent flag
+	// here, assume a scheduler hold; the pause paths below rewrite it to
+	// "stopped" for torrents the user stopped.
+	state := DeriveState(s.State, false)
+
 	var ratio float64
 	if s.TotalDownload > 0 {
 		ratio = float64(s.TotalUpload) / float64(s.TotalDownload)
@@ -157,7 +162,7 @@ func ltStatusToTorrentStats(s ltclient.TorrentStatus, category, savePath string,
 	return TorrentStats{
 		InfoHash:        s.InfoHash,
 		Name:            s.Name,
-		State:           s.State,
+		State:           state,
 		Progress:        progress,
 		UploadRate:      int64(s.UploadRate),
 		DownloadRate:    int64(s.DownloadRate),
