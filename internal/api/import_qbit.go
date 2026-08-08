@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Kheopsian/hydra/internal/store"
 	"github.com/gin-gonic/gin"
 )
 
@@ -207,9 +208,12 @@ func provenanceFile(dataDir string) string { return filepath.Join(dataDir, "prov
 
 func loadProvenance(dataDir string) (provenance, bool) {
 	var p provenance
-	data, err := os.ReadFile(provenanceFile(dataDir))
-	if err != nil {
-		return p, false
+	data := []byte(metaDoc(store.MetaProvenance))
+	if len(data) == 0 {
+		var err error
+		if data, err = os.ReadFile(provenanceFile(dataDir)); err != nil {
+			return p, false
+		}
 	}
 	if json.Unmarshal(data, &p) != nil || p.SourceClient == "" {
 		return p, false
@@ -218,7 +222,13 @@ func loadProvenance(dataDir string) (provenance, bool) {
 }
 
 func saveProvenance(dataDir string, p provenance) error {
-	data, _ := json.MarshalIndent(p, "", "  ")
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	if setMetaDoc(store.MetaProvenance, string(data)) {
+		return nil
+	}
 	tmp := provenanceFile(dataDir) + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err

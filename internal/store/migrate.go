@@ -33,6 +33,21 @@ var migrationsMonolith = []string{
 	    name TEXT PRIMARY KEY
 	);
 	`,
+	// v2: the small documents that were still JSON files next to the database
+	// (categories, import provenance). Kept as documents on purpose: they are
+	// read and written whole, and their shape grows with the features.
+	`
+	CREATE TABLE IF NOT EXISTS meta (
+	    key   TEXT PRIMARY KEY,
+	    value TEXT NOT NULL
+	);
+	`,
+	// v3: the content layout flag, the last thing state.json still carried that
+	// the store did not. NULL-free tri-state: -1 unknown (added before the flag
+	// existed: legacy wrapped layout), 0 no wrapper folder, 1 wrapped.
+	`
+	ALTER TABLE torrents ADD COLUMN content_folder INTEGER NOT NULL DEFAULT -1;
+	`,
 }
 
 // migrationsAgent evolves the per-agent store (store_agent.go). Kept as its own
