@@ -3,6 +3,23 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.49.0 — 2026-08-08
+
+### Added
+
+- **Import from Transmission.** Point Hydra at Transmission's config folder — or
+  upload a zip of it — and it takes the lot: save paths, labels as tags, upload
+  history, add dates, and which torrents were stopped. It reads the folder
+  rather than the RPC, so Transmission does not even have to be running, which
+  is usually how a migration goes. Optionally creates one category per
+  destination folder.
+
+### Fixed
+
+- **Imports keep the state torrents had in the client they came from.** A
+  torrent you had paused in qBittorrent or Transmission arrives stopped instead
+  of quietly starting to seed.
+
 ## v3.48.0 — 2026-08-07
 
 ### Added

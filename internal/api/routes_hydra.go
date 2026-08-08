@@ -501,6 +501,9 @@ func (s *Server) registerHydraRoutes() {
 
 		// qBittorrent migration (onboarding import)
 		api.POST("/import/qbit/preview", s.handleQbitPreview)
+		api.POST("/import/transmission/preview", s.handleTransmissionPreview)
+		api.POST("/import/transmission/upload", s.handleTransmissionUpload)
+		api.POST("/import/transmission/start", s.handleTransmissionStart)
 		api.POST("/import/qbit/start", s.handleQbitStart)
 		api.GET("/import/qbit/events", s.handleQbitEvents)
 		api.GET("/import/qbit/status", s.handleQbitStatus)

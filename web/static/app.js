@@ -265,6 +265,115 @@ function importWizard() {
     document.body.appendChild(ov);
     const close = () => { ov.remove(); _importOpen = false; };
 
+    function stepSource() {
+        box.innerHTML = `<h3>Import an existing library</h3>
+            <p class="modal-desc">Hydra seeds the data already on your disk — completed torrents skip the hash-check, so nothing is re-downloaded.</p>
+            <div style="display:flex;gap:8px;margin:12px 0">
+                <button class="btn-primary" id="src-qbit" style="flex:1">qBittorrent</button>
+                <button class="btn-primary" id="src-tr" style="flex:1">Transmission</button>
+            </div>
+            <div class="modal-actions"><button id="src-skip" class="btn-small">Skip</button></div>`;
+        box.querySelector("#src-skip").onclick = () => { localStorage.setItem("hydra_import_dismissed", "1"); close(); };
+        box.querySelector("#src-qbit").onclick = () => stepCreds();
+        box.querySelector("#src-tr").onclick = () => stepTransmission();
+    }
+
+    // Transmission cannot hand over a .torrent (its RPC only exposes the path),
+    // so the import reads its config folder. Which also means it works when
+    // Transmission is already stopped — usually the case during a migration.
+    function stepTransmission(prefill) {
+        box.innerHTML = `<h3>Import from Transmission</h3>
+            <p class="modal-desc">Hydra reads Transmission's <b>config folder</b> — the one holding <code>torrents/</code> and <code>resume/</code>. Transmission does not need to be running.</p>
+            <input type="text" id="tr-dir" placeholder="/config/transmission or ~/.config/transmission-daemon" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.dir || "")}">
+            <p class="modal-desc" style="margin:6px 0">Not visible from Hydra? Upload a zip of that folder instead:</p>
+            <input type="file" id="tr-zip" accept=".zip" style="width:100%;margin-bottom:8px">
+            <label style="display:block;margin-bottom:4px"><input type="checkbox" id="tr-cats" checked> Create one category per destination folder</label>
+            <label style="display:block"><input type="checkbox" id="tr-labels" checked> Import labels as tags</label>
+            <p class="modal-desc" id="tr-msg" style="min-height:1em"></p>
+            <div class="modal-actions">
+                <button id="tr-back">Back</button>
+                <button class="btn-primary" id="tr-preview">Preview</button>
+            </div>`;
+        box.querySelector("#tr-back").onclick = () => stepSource();
+        const msg = box.querySelector("#tr-msg");
+        box.querySelector("#tr-preview").onclick = async () => {
+            let dir = box.querySelector("#tr-dir").value.trim();
+            const zip = box.querySelector("#tr-zip").files[0];
+            msg.style.color = ""; msg.textContent = zip ? "Uploading…" : "Reading…";
+            try {
+                if (zip) {
+                    const fd = new FormData();
+                    fd.append("file", zip);
+                    const up = await fetch("/api/import/transmission/upload", {
+                        method: "POST", headers: { "X-Api-Key": API_KEY }, body: fd,
+                    });
+                    const ud = await up.json().catch(() => ({}));
+                    if (!up.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = ud.error || "Upload failed"; return; }
+                    dir = ud.dir;
+                } else if (!dir) {
+                    msg.style.color = "var(--accent-red)";
+                    msg.textContent = "Give a folder, or upload a zip of it.";
+                    return;
+                }
+                const req = {
+                    dir,
+                    categories_from_dirs: box.querySelector("#tr-cats").checked,
+                    import_labels: box.querySelector("#tr-labels").checked,
+                };
+                const res = await fetch("/api/import/transmission/preview", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
+                    body: JSON.stringify(req),
+                });
+                const d = await res.json().catch(() => ({}));
+                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d.error || ("Preview failed (" + res.status + ")"); return; }
+                stepTransmissionReview(req, d);
+            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = "Error: " + e.message; }
+        };
+    }
+
+    function stepTransmissionReview(req, d) {
+        const prefixes = d.path_prefixes || [];
+        const rows = prefixes.map(p => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+            <code style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p)}">${esc(p)}</code>
+            <span>→</span>
+            <input type="text" class="tr-map" data-from="${esc(p)}" value="${esc(p)}" style="flex:1">
+        </div>`).join("");
+        const probs = (d.problems || []).length;
+        box.innerHTML = `<h3>Import preview</h3>
+            <p class="modal-desc"><b>${d.total}</b> torrents · <b>${d.completed}</b> complete (seed-mode) · <b>${d.incomplete}</b> partial · <b>${d.stopped}</b> stopped in Transmission · carried upload <b>${formatBytes(d.carried_uploaded_bytes)}</b></p>
+            <p class="modal-desc">Categories to create: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "—"} — all as <b>hoard</b>.</p>
+            ${probs ? `<p class="modal-desc" style="color:var(--accent-red)">${probs} file(s) unreadable — they will be skipped.</p>` : ""}
+            ${d.without_resume ? `<p class="modal-desc">${d.without_resume} torrent(s) have no resume file: no save path, they will be skipped.</p>` : ""}
+            <p class="modal-desc" style="margin-bottom:4px">Path mapping (Transmission path → what Hydra sees):</p>
+            <div style="max-height:150px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || "<i>no paths detected</i>"}</div>
+            <p class="modal-desc" id="tr-msg2" style="min-height:1em"></p>
+            <div class="modal-actions">
+                <button id="tr-back2">Back</button>
+                <button class="btn-primary" id="tr-go">Import ${d.total} torrents</button>
+            </div>`;
+        box.querySelector("#tr-back2").onclick = () => stepTransmission({ dir: req.dir });
+        box.querySelector("#tr-go").onclick = async () => {
+            const path_map = {};
+            box.querySelectorAll(".tr-map").forEach(inp => {
+                const f = inp.dataset.from, t = inp.value.trim();
+                if (t && t !== f) path_map[f] = t;
+            });
+            const msg = box.querySelector("#tr-msg2");
+            msg.style.color = ""; msg.textContent = "Starting…";
+            try {
+                const res = await fetch("/api/import/transmission/start", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
+                    body: JSON.stringify(Object.assign({}, req, { path_map })),
+                });
+                const d2 = await res.json().catch(() => ({}));
+                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d2.error || ("Start failed (" + res.status + ")"); return; }
+                stepProgress();
+            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = "Network error: " + e.message; }
+        };
+    }
+
     function stepCreds(prefill) {
         box.innerHTML = `<h3>Import from qBittorrent</h3>
             <p class="modal-desc">Point Hydra at your qBittorrent WebUI. Hydra seeds the data already on disk (completed torrents skip the hash-check), so nothing is re-downloaded.</p>
@@ -273,10 +382,10 @@ function importWizard() {
             <input type="password" id="qb-pass" placeholder="Password" autocomplete="off" style="width:100%">
             <p class="modal-desc" id="qb-msg" style="min-height:1em"></p>
             <div class="modal-actions">
-                <button id="qb-skip" class="btn-small">Skip</button>
+                <button id="qb-skip" class="btn-small">Back</button>
                 <button class="btn-primary" id="qb-preview">Preview</button>
             </div>`;
-        box.querySelector("#qb-skip").onclick = () => { localStorage.setItem("hydra_import_dismissed", "1"); close(); };
+        box.querySelector("#qb-skip").onclick = () => stepSource();
         const msg = box.querySelector("#qb-msg");
         box.querySelector("#qb-preview").onclick = async () => {
             const creds = {
@@ -353,7 +462,7 @@ function importWizard() {
         const phase = box.querySelector("#qb-phase"), bar = box.querySelector("#qb-bar"),
             stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
             doneBtn = box.querySelector("#qb-done");
-        const labels = { connect: "Connecting to qBittorrent…", categories: "Creating categories…", torrents: "Importing torrents…", done: "Done", error: "Error" };
+        const labels = { connect: "Connecting…", categories: "Creating categories…", torrents: "Importing torrents…", done: "Done", error: "Error" };
         es.onmessage = (ev) => {
             let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
             phase.style.color = ""; phase.textContent = labels[d.phase] || d.phase;
@@ -371,7 +480,7 @@ function importWizard() {
         es.onerror = () => { /* EventSource auto-retries; a finished job's stream 404s and stops */ };
     }
 
-    stepCreds();
+    stepSource();
 }
 window.importFromQbit = importWizard;
 
