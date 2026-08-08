@@ -176,6 +176,7 @@ func (e *HoardEngine) ImportFromStoreSession(st *store.Store, sess store.Session
 		ct := storeCompletedTime(rec.CompletedTime)
 		if name, ok := nameByHash[rec.InfoHash]; ok {
 			fast[rec.InfoHash] = &TorrentInfo{
+				ContentFolder:   rec.ContentFolder,
 				InfoHash:        rec.InfoHash,
 				Name:            name,
 				SavePath:        rec.SavePath,
@@ -201,6 +202,11 @@ func (e *HoardEngine) ImportFromStoreSession(st *store.Store, sess store.Session
 			}
 		}
 		e.RestoreMetadata(rec.InfoHash, rec.Category, rec.SavePath, path, ct)
+		// nil means the row predates the flag: leave the engine on its
+		// legacy layout instead of asserting "no wrapper folder".
+		if rec.ContentFolder != nil {
+			e.SetContentFolder(rec.InfoHash, rec.ContentFolder)
+		}
 		imported++
 	}
 	if len(fast) > 0 {

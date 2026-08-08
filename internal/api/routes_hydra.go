@@ -355,9 +355,12 @@ func categoriesFile(dataDir string) string {
 }
 
 func loadCategories(dataDir string) []category {
-	data, err := os.ReadFile(categoriesFile(dataDir))
-	if err != nil {
-		return []category{}
+	data := []byte(metaDoc(store.MetaCategories))
+	if len(data) == 0 {
+		var err error
+		if data, err = os.ReadFile(categoriesFile(dataDir)); err != nil {
+			return []category{}
+		}
 	}
 	// On-disk format is a map: {"name": {"save_path": "...", "mode": "..."}}
 	var catMap map[string]categoryJSON
@@ -381,6 +384,10 @@ func saveCategories(dataDir string, cats []category) error {
 	if err != nil {
 		return err
 	}
+	if setMetaDoc(store.MetaCategories, string(data)) {
+		return nil
+	}
+	// No store (front-only): keep the file behaviour.
 	tmp := categoriesFile(dataDir) + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err

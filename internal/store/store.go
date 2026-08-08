@@ -43,6 +43,10 @@ type Record struct {
 	CompletedTime   float64
 	TotalUploaded   int64
 	TotalDownloaded int64
+	// ContentFolder says whether the payload sits in its own folder. nil means
+	// "added before the flag existed", which the engine reads as the legacy
+	// wrapped layout -- distinct from an explicit false.
+	ContentFolder *bool
 	// Paused is the user's intent, not the scheduler's: a torrent held back by
 	// the download or disk slot managers is not paused, it is queued. Only a
 	// human (or an API call made on their behalf) sets this, and nothing
@@ -229,7 +233,7 @@ func (s *Store) Get(infoHash string) (r *Record, ok bool, err error) {
 	row := s.db.QueryRow(`
         SELECT info_hash, session, torrent, save_path, category,
                added_time, completed_time, total_uploaded, total_downloaded,
-               paused, tags
+               paused, tags, content_folder
         FROM torrents WHERE info_hash = ?`, infoHash)
 	rec, err := scan(row)
 	if err == sql.ErrNoRows {
@@ -246,7 +250,7 @@ func (s *Store) BySession(sess Session) ([]*Record, error) {
 	rows, err := s.db.Query(`
         SELECT info_hash, session, torrent, save_path, category,
                added_time, completed_time, total_uploaded, total_downloaded,
-               paused, tags
+               paused, tags, content_folder
         FROM torrents WHERE session = ?`, string(sess))
 	if err != nil {
 		return nil, err
@@ -269,14 +273,21 @@ func scan(sc scanner) (*Record, error) {
 	var sess string
 	var paused int
 	var tags string
+	var contentFolder int
 	if err := sc.Scan(&r.InfoHash, &sess, &r.Torrent, &r.SavePath, &r.Category,
 		&r.AddedTime, &r.CompletedTime, &r.TotalUploaded, &r.TotalDownloaded,
-		&paused, &tags); err != nil {
+		&paused, &tags, &contentFolder); err != nil {
 		return nil, err
 	}
 	r.Session = Session(sess)
 	r.Paused = paused != 0
 	r.Tags = decodeTags(tags)
+	// -1 means the row predates the flag: leave it nil so the engine applies
+	// the legacy layout instead of an explicit "no folder".
+	if contentFolder >= 0 {
+		b := contentFolder != 0
+		r.ContentFolder = &b
+	}
 	return &r, nil
 }
 

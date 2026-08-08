@@ -22,17 +22,19 @@ type SidecarReport struct {
 	RegisteredTags int
 	GlobalCounter  bool
 	TrackerRows    int
+	Documents      int
 	Errors         []string
 }
 
 // Empty reports whether there was nothing to migrate.
 func (r SidecarReport) Empty() bool {
-	return r.TaggedTorrents == 0 && r.RegisteredTags == 0 && !r.GlobalCounter && r.TrackerRows == 0
+	return r.TaggedTorrents == 0 && r.RegisteredTags == 0 && !r.GlobalCounter &&
+		r.TrackerRows == 0 && r.Documents == 0
 }
 
 func (r SidecarReport) String() string {
-	return fmt.Sprintf("tagged=%d tags=%d global_counter=%v tracker_rows=%d errors=%d",
-		r.TaggedTorrents, r.RegisteredTags, r.GlobalCounter, r.TrackerRows, len(r.Errors))
+	return fmt.Sprintf("tagged=%d tags=%d global_counter=%v tracker_rows=%d docs=%d errors=%d",
+		r.TaggedTorrents, r.RegisteredTags, r.GlobalCounter, r.TrackerRows, r.Documents, len(r.Errors))
 }
 
 // retire moves a fully-imported sidecar out of the way. It is kept, not
@@ -151,6 +153,34 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 		}
 	} else if !os.IsNotExist(err) {
 		fail("baseline_trackers.json read", err)
+	}
+
+	// --- categories.json / provenance.json: copied in verbatim ------------
+	//
+	// The JSON encoding is unchanged, so this is a byte-for-byte move: the
+	// same document, in a row instead of a file. That also makes a rollback a
+	// copy back, which matters for data the user cannot rebuild.
+	for _, sc := range []struct{ file, key string }{
+		{"categories.json", MetaCategories},
+		{"provenance.json", MetaProvenance},
+	} {
+		path := filepath.Join(dataDir, sc.file)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue // absent is the normal case after the first boot
+		}
+		if len(data) == 0 {
+			continue
+		}
+		if err := s.SetMeta(sc.key, string(data)); err != nil {
+			fail(sc.file, err)
+			continue
+		}
+		if err := retire(path); err != nil {
+			fail(sc.file+" retire", err)
+			continue
+		}
+		rep.Documents++
 	}
 
 	return rep

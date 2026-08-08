@@ -836,79 +836,31 @@ func main() {
 		hN, hE := hoardEngine.ImportFromStoreSession(torStore, store.Hoard, up)
 		slog.Info("boot-from-store: loaded torrents from SQLite store",
 			"race", rN, "race_errors", rE, "hoard", hN, "hoard_errors", hE)
-	}
 
-	// ---- Restore metadata from state.json ----
-	if savedState != nil {
-		hoardCount := hoardEngine.TorrentCount()
-		raceCount := raceEngine.TorrentCount()
-
-		if hoardCount == 0 && len(savedState.HoardActive) > 0 {
-			slog.Info("=== MIGRATION: importing hoard torrents from state.json ===",
-				"count", len(savedState.HoardActive))
-			hoardMetas := make(map[string]*engine.TorrentMeta, len(savedState.HoardActive))
-			for _, meta := range savedState.HoardActive {
-				hoardMetas[meta.TorrentFilePath] = &engine.TorrentMeta{
-					SavePath:        meta.SavePath,
-					TorrentFilePath: meta.TorrentFilePath,
-					Category:        meta.Category,
-					ContentFolder:   meta.ContentFolder,
-				}
-			}
-			hoardEngine.ImportFromState(hoardMetas)
-		} else if hoardCount > 0 {
+		// The content layout flag was the last thing only state.json knew: hand
+		// it over once, then retire the file. From the next boot on the store is
+		// the only source, and nothing rewrites tens of megabytes of JSON on
+		// every save.
+		if savedState != nil {
+			moved := 0
 			for ih, meta := range savedState.HoardActive {
-				ct := time.Unix(int64(meta.CompletedTime), 0)
-				if meta.CompletedTime == 0 {
-					ct = time.Time{}
-				}
-				hoardEngine.RestoreMetadata(ih, meta.Category, meta.SavePath, meta.TorrentFilePath, ct)
-				hoardEngine.SetContentFolder(ih, meta.ContentFolder)
-				// Gap-fill (mirror of the race block): if a torrent lives in
-				// state.json but not in the engine (e.g. present in state.json but
-				// missing from the store), re-add it as long as its .torrent file
-				// still exists. Belt-and-suspenders alongside --boot-from-store.
-				if !hoardEngine.HasTorrent(ih) && meta.TorrentFilePath != "" {
-					if _, serr := os.Stat(meta.TorrentFilePath); serr == nil {
-						if _, aerr := hoardEngine.AddTorrentSeedMode(meta.TorrentFilePath, meta.SavePath, meta.Category); aerr == nil {
-							hoardEngine.RestoreMetadata(ih, meta.Category, meta.SavePath, meta.TorrentFilePath, ct)
-							hoardEngine.SetContentFolder(ih, meta.ContentFolder)
-						}
-					}
-				}
-			}
-		}
-
-		if raceCount == 0 && len(savedState.Race) > 0 {
-			slog.Info("=== MIGRATION: importing race torrents from state.json ===",
-				"count", len(savedState.Race))
-			for _, meta := range savedState.Race {
-				if _, serr := os.Stat(meta.TorrentFilePath); serr != nil {
+				if meta.ContentFolder == nil {
 					continue
 				}
-				_, aerr := raceEngine.AddTorrent(meta.TorrentFilePath, "", meta.SavePath, nil, meta.Category)
-				if aerr != nil {
-					slog.Warn("race: migration error", "torrent", meta.TorrentFilePath, "error", aerr)
+				if err := torStore.SetContentFolder(ih, meta.ContentFolder); err == nil {
+					moved++
 				}
 			}
-		} else if raceCount > 0 {
-			for ih, meta := range savedState.Race {
-				ct := time.Unix(int64(meta.CompletedTime), 0)
-				if meta.CompletedTime == 0 {
-					ct = time.Time{}
-				}
-				raceEngine.RestoreMetadata(ih, meta.Category, meta.SavePath, meta.TorrentFilePath, ct)
-				if !raceEngine.HasTorrent(ih) && meta.TorrentFilePath != "" {
-					if _, serr := os.Stat(meta.TorrentFilePath); serr == nil {
-						if _, aerr := raceEngine.AddTorrent(meta.TorrentFilePath, "", meta.SavePath, nil, meta.Category); aerr == nil {
-							raceEngine.RestoreMetadata(ih, meta.Category, meta.SavePath, meta.TorrentFilePath, ct)
-						}
-					}
-				}
-			}
+			unknown, _ := torStore.ContentFolderUnknown()
+			statePath := filepath.Join(cfg.Daemon.DataDir, "state.json")
+			renamed := os.Rename(statePath, statePath+".migrated") == nil
+			slog.Info("state.json retired — the store is now the only source",
+				"content_folder_moved", moved, "still_unknown", unknown, "renamed", renamed)
 		}
 	}
 
+	// (the state.json metadata overlay lived here — the store carries all of
+	// it now, including the content layout flag)
 	// ---- Restore per-torrent tags. They live on the torrent row now, so they
 	// cannot outlive the torrent; the tags.json overlay is only read on a node
 	// with no store (an upgrading installation had its file imported into the
@@ -1125,9 +1077,7 @@ func saveState(stateMgr *state.Manager, race *engine.RaceEngine, hoard *engine.H
 		}
 	}
 
-	if err := stateMgr.Save(raceState, hoardState); err != nil {
-		slog.Error("Failed to save state", "error", err)
-	}
+	// state.json is not written any more: the store holds all of it.
 
 	// Shadow-sync the SQLite store (best-effort; never affects state.json).
 	if torStore != nil && ready != nil && ready.Load() {
@@ -1148,6 +1098,7 @@ func syncStore(st *store.Store, raceMetas, hoardMetas map[string]*engine.Torrent
 				Category:        m.Category,
 				TorrentFilePath: m.TorrentFilePath,
 				CompletedTime:   float64(timeToUnix(m.CompletedTime)),
+				ContentFolder:   m.ContentFolder,
 			})
 		}
 	}

@@ -3,6 +3,17 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.50.0 — 2026-08-08
+
+### Changed
+
+- **One home for durable state.** The category list, the import provenance and
+  the content-layout flag move into the SQLite store, next to the torrents they
+  describe. The TOML keeps the daemon's configuration. Existing files are
+  imported on first boot and renamed aside, never deleted.
+- **`state.json` is gone.** It was the last thing rewritten in full — tens of
+  megabytes on every save — for data the store already held.
+
 ## v3.49.1 — 2026-08-08
 
 ### Fixed
