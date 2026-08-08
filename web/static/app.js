@@ -4323,7 +4323,7 @@ async function updateSettings() {
             _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div></div>`;
         }
         _tabsHtml += `<button type="button" class="settings-tab" data-domain="__import" onclick="showSettingsPanel('__import')"><span class="sg-title">Import</span></button>`;
-        _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">Import from qBittorrent</h3><p class="sr-desc" style="margin:.4em 0 1em">Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Already-present torrents are skipped, so it is safe to re-run.</p><button class="btn-primary" onclick="importFromQbit()">Import from qBittorrent</button></div></div>`;
+        _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">Import from another client</h3><p class="sr-desc" style="margin:.4em 0 1em">From <b>qBittorrent</b> (via its WebUI) or <b>Transmission</b> (by reading its config folder \u2014 it does not even need to be running). Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Torrents stopped in the old client stay stopped. Already-present torrents are skipped, so it is safe to re-run.</p><button class="btn-primary" onclick="importFromQbit()">Import\u2026</button></div></div>`;
         html += `<div class="settings-tabs" id="settings-tabs">${_tabsHtml}</div><div class="settings-panels" id="settings-panels">${_panelsHtml}</div>`;
         editor.innerHTML = html;
         {

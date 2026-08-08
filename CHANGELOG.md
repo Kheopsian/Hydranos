@@ -3,6 +3,13 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.49.1 — 2026-08-08
+
+### Fixed
+
+- **The import panel in Config no longer says qBittorrent only.** It opened the
+  wizard that offers both clients, but the heading hid Transmission.
+
 ## v3.49.0 — 2026-08-08
 
 ### Added
