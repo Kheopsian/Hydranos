@@ -779,6 +779,7 @@ func main() {
 	hoardEngine.SetBootstrapAnnounce(hoardAnnouncer.BootstrapAnnounce)
 	hoardEngine.SetReAnnounce(hoardAnnouncer.ReAnnounce)
 	hoardEngine.SetStoppedAnnounce(hoardAnnouncer.StoppedAnnounce)
+	hoardAnnouncer.SetUserStoppedGate(hoardEngine.IsUserPaused)
 	// Anti dual-annonce : le hoard n'annonce PAS un infohash que le race tient
 	// (le race est seul annonceur tant qu'il l'a) + offset de continuité au
 	// handoff race->hoard. Le race lui-même n'est pas gaté (toujours annonceur).

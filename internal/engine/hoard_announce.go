@@ -81,6 +81,10 @@ type HoardAnnouncer struct {
 	// moteur race possède (anti dual-annonce ; le race est seul annonceur tant
 	// qu'il tient le torrent). Laissé nil sur l'announcer race lui-même.
 	raceHas func(infoHash string) bool
+
+	// userStopped reports a deliberate user stop, so one-shot announces stay
+	// away from torrents nobody wants in the swarm.
+	userStopped func(infoHash string) bool
 	// offsetFn, si défini, renvoie un offset UL/DL ajouté au cumulé annoncé
 	// (continuité du handoff race->hoard). nil = pas d'offset.
 	offsetFn func(infoHash string) (int64, int64)
@@ -91,6 +95,11 @@ type HoardAnnouncer struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 }
+
+// SetUserStoppedGate wires the check that keeps one-shot announces away from a
+// torrent the user has stopped. Without it an import that lands 3000 stopped
+// torrents would announce every one of them as "started" before the stop lands.
+func (h *HoardAnnouncer) SetUserStoppedGate(fn func(infoHash string) bool) { h.userStopped = fn }
 
 // SetRaceGate active le gating d'annonce : les infohash pour lesquels has(ih)
 // est vrai ne sont PAS annoncés par cet announcer (le moteur race les annonce).
@@ -415,6 +424,10 @@ func (h *HoardAnnouncer) announceOnce(infoHash string, totalSize int64, forceLef
 	}
 	// Race owns the announce for dual-seeded torrents — don't double-announce.
 	if h.raceHas != nil && h.raceHas(infoHash) {
+		return
+	}
+	// The user stopped this one: announcing it would undo the stop.
+	if h.userStopped != nil && h.userStopped(infoHash) {
 		return
 	}
 	status, err := h.client.GetStatus(infoHash)

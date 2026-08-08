@@ -82,17 +82,17 @@ func (q *qbitClient) login(user, pass string) error {
 }
 
 type qbitTorrent struct {
-	Hash       string  `json:"hash"`
-	Name       string  `json:"name"`
-	SavePath   string  `json:"save_path"`
-	ContentPath string `json:"content_path"`
-	Category   string  `json:"category"`
-	Progress   float64 `json:"progress"`
-	State      string  `json:"state"`
-	Size       int64   `json:"size"`
-	Uploaded   int64   `json:"uploaded"`
-	Downloaded int64   `json:"downloaded"`
-	AddedOn    int64   `json:"added_on"`
+	Hash        string  `json:"hash"`
+	Name        string  `json:"name"`
+	SavePath    string  `json:"save_path"`
+	ContentPath string  `json:"content_path"`
+	Category    string  `json:"category"`
+	Progress    float64 `json:"progress"`
+	State       string  `json:"state"`
+	Size        int64   `json:"size"`
+	Uploaded    int64   `json:"uploaded"`
+	Downloaded  int64   `json:"downloaded"`
+	AddedOn     int64   `json:"added_on"`
 }
 
 func (q *qbitClient) torrentsInfo() ([]qbitTorrent, error) {
@@ -150,6 +150,23 @@ func (q *qbitClient) exportTorrent(hash string) ([]byte, error) {
 
 // remapPath rewrites p by the longest matching prefix in pathMap (qBit's on-disk
 // layout -> the path Hydra sees inside its container). No match = unchanged.
+// importedAsStopped decides whether a torrent should land stopped, from the
+// state its previous client reported.
+//
+// Only a deliberate halt carries over. A torrent the OTHER client's scheduler
+// was holding back (queued*) is imported running: that was their queue's
+// decision, not a human's, and importing it as stopped would leave it stopped
+// forever with nobody to undo it. Same for errored torrents -- our engine will
+// form its own opinion.
+func importedAsStopped(state string) bool {
+	switch state {
+	case "pausedUP", "pausedDL", // qBittorrent 4.x
+		"stoppedUP", "stoppedDL": // qBittorrent 5.x
+		return true
+	}
+	return false
+}
+
 func remapPath(p string, pathMap map[string]string) string {
 	best := ""
 	for from := range pathMap {
@@ -549,6 +566,18 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 				// Preserve the original qBit add date instead of "now".
 				if ih != "" && it.t.AddedOn > 0 {
 					s.hoardEngine.SetAddedTime(ih, time.Unix(it.t.AddedOn, 0))
+				}
+				// Carry over a deliberate stop. Done right after the add so the
+				// bootstrap announce (fired in its own goroutine) finds the
+				// intent already set and stays quiet -- otherwise every stopped
+				// torrent would greet the tracker and immediately say goodbye.
+				if ih != "" && importedAsStopped(it.t.State) {
+					if err := s.hoardEngine.SetUserPaused(ih, true); err != nil {
+						slog.Warn("qbit import: could not carry the stopped state",
+							"name", name, "error", err)
+					} else {
+						persistPaused([]string{ih}, true)
+					}
 				}
 				seed := it.seed
 				mu.Lock()
