@@ -100,6 +100,49 @@ impl Drop for DialInflightGuard {
 pub static DIAL_HANDSHAKE_OK: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_HANDSHAKE_FAIL: AtomicU64 = AtomicU64::new(0);
 
+// Outcome breakdown for the two legs of `open()`. It dials plaintext first and
+// only then falls back to MSE, so a peer that *requires* encryption always
+// burns one failed plaintext handshake before the MSE attempt. Without the
+// split, `dial_handshake_fail` lumps "swarm is encryption-only" together with
+// "MSE fallback is broken" — the pair below is what tells them apart.
+pub static DIAL_PLAIN_OK: AtomicU64 = AtomicU64::new(0);
+pub static DIAL_PLAIN_FAIL: AtomicU64 = AtomicU64::new(0);
+pub static DIAL_MSE_ATTEMPTED: AtomicU64 = AtomicU64::new(0);
+pub static DIAL_MSE_OK: AtomicU64 = AtomicU64::new(0);
+pub static DIAL_MSE_FAIL: AtomicU64 = AtomicU64::new(0);
+// Queue accounting: `enqueue_dial` is fire-and-forget into an unbounded
+// channel, so a peer that never reaches a dial worker leaves no trace at all.
+pub static DIAL_ENQUEUED: AtomicU64 = AtomicU64::new(0);
+pub static DIAL_ENQUEUE_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Single-torrent dial trace, armed with `TYPHON_DIAL_TRACE_IH=<40 hex chars>`.
+/// The global counters run at several hundred dials/s, which drowns the ~40
+/// peers of one torrent completely; this narrows the log to one info_hash so a
+/// stuck torrent can be followed decision by decision. Unset = zero overhead
+/// beyond one pointer comparison per dial.
+static DIAL_TRACE_IH: std::sync::OnceLock<Option<[u8; 20]>> = std::sync::OnceLock::new();
+
+pub fn dial_trace_ih() -> &'static Option<[u8; 20]> {
+    DIAL_TRACE_IH.get_or_init(|| {
+        let raw = std::env::var("TYPHON_DIAL_TRACE_IH").ok()?;
+        let hex = raw.trim();
+        if hex.len() != 40 {
+            return None;
+        }
+        let mut out = [0u8; 20];
+        for i in 0..20 {
+            out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        info!("[dialtrace] armed for info_hash {}", hex);
+        Some(out)
+    })
+}
+
+#[inline]
+fn is_traced(info_hash: &[u8; 20]) -> bool {
+    dial_trace_ih().as_ref() == Some(info_hash)
+}
+
 // BT protocol message counters (diagnostic for download/upload flow)
 pub static BT_SENT_INTERESTED: AtomicU64 = AtomicU64::new(0);
 pub static BT_GOT_UNCHOKE: AtomicU64 = AtomicU64::new(0);
@@ -158,8 +201,29 @@ pub static PEX_PEERS_DIALED: AtomicU64 = AtomicU64::new(0);
 static DIAL_TX: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(std::net::SocketAddr, Arc<TorrentState>)>> = std::sync::OnceLock::new();
 
 pub fn enqueue_dial(addr: std::net::SocketAddr, torrent: Arc<TorrentState>) {
-    if let Some(tx) = DIAL_TX.get() {
-        let _ = tx.send((addr, torrent));
+    let traced = is_traced(&torrent.info_hash);
+    match DIAL_TX.get() {
+        Some(tx) => match tx.send((addr, torrent)) {
+            Ok(()) => {
+                DIAL_ENQUEUED.fetch_add(1, AtomicOrdering::Relaxed);
+                if traced {
+                    info!("[dialtrace] {} enqueued", addr);
+                }
+            }
+            Err(_) => {
+                // Consumer task is gone: every future dial is a silent no-op.
+                DIAL_ENQUEUE_DROPPED.fetch_add(1, AtomicOrdering::Relaxed);
+                if traced {
+                    warn!("[dialtrace] {} DROPPED (dial consumer dead)", addr);
+                }
+            }
+        },
+        None => {
+            DIAL_ENQUEUE_DROPPED.fetch_add(1, AtomicOrdering::Relaxed);
+            if traced {
+                warn!("[dialtrace] {} DROPPED (dial queue not initialised)", addr);
+            }
+        }
     }
 }
 
@@ -456,23 +520,37 @@ pub async fn dial_peer(
     use crate::peer::transport::PeerTransport;
     use crate::crypto::stream::CryptoStream;
 
+    let traced = is_traced(&torrent.info_hash);
+    if traced {
+        info!("[dialtrace] {} dial_peer entered", addr);
+    }
+
     // Skip dials to our own public IPs on our own port — tracker can hand us
     // back our VPS egress IP as a "peer" and we'd handshake ourselves through
     // haproxy. Cross-engine (hoard <-> race) dials through the public IP stay
     // allowed because the port differs.
     if is_self_dial(addr, listen_port) {
         DIAL_SKIPPED_SELF.fetch_add(1, AtomicOrdering::Relaxed);
+        if traced {
+            info!("[dialtrace] {} SKIPPED self-dial", addr);
+        }
         return;
     }
     // Skip if we're already connected to this peer on this torrent.
     if torrent.connected_addrs.contains(&addr) {
         DIAL_SKIPPED_CONNECTED.fetch_add(1, AtomicOrdering::Relaxed);
+        if traced {
+            info!("[dialtrace] {} SKIPPED already connected", addr);
+        }
         return;
     }
     // Skip if another dial_peer task is already in flight for (info_hash, addr).
     let inflight_key = (torrent.info_hash, addr);
     if !dial_inflight().insert(inflight_key) {
         DIAL_SKIPPED_INFLIGHT.fetch_add(1, AtomicOrdering::Relaxed);
+        if traced {
+            info!("[dialtrace] {} SKIPPED inflight (stale entry never cleared?)", addr);
+        }
         return;
     }
     let _dial_guard = DialInflightGuard(inflight_key);
@@ -598,6 +676,7 @@ pub async fn dial_peer(
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         source_fwmark: u32,
+        traced: bool,
     ) -> Option<(CryptoStream, bool, bool, [u8; 20], bool)> {
         // 2.7.11: PLAINTEXT-FIRST outbound dial. Most peers only *prefer* MSE
         // (they accept plaintext too), so dialing plain first avoids the RC4
@@ -608,15 +687,42 @@ pub async fn dial_peer(
         let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false);
         // TCP plaintext (preferred)
         if let Some(mut t) = try_tcp(addr, source_fwmark).await {
-            if let Ok(hs) = crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
-                return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
+            match crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
+                Ok(hs) => {
+                    DIAL_PLAIN_OK.fetch_add(1, AtomicOrdering::Relaxed);
+                    if traced {
+                        info!("[dialtrace] {} tcp/plain handshake OK", addr);
+                    }
+                    return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
+                }
+                Err(e) => {
+                    DIAL_PLAIN_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+                    if traced {
+                        info!("[dialtrace] {} tcp/plain handshake FAIL: {}", addr, e);
+                    }
+                }
             }
+        } else if traced {
+            info!("[dialtrace] {} tcp connect FAIL (plain leg)", addr);
         }
         // TCP MSE (fallback for require-encryption peers)
         if !skip_mse {
             if let Some(mut t) = try_tcp(addr, source_fwmark).await {
-                if let Ok((enc, dec, hs)) = crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
-                    return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
+                DIAL_MSE_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
+                match crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
+                    Ok((enc, dec, hs)) => {
+                        DIAL_MSE_OK.fetch_add(1, AtomicOrdering::Relaxed);
+                        if traced {
+                            info!("[dialtrace] {} tcp/MSE handshake OK", addr);
+                        }
+                        return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
+                    }
+                    Err(e) => {
+                        DIAL_MSE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+                        if traced {
+                            info!("[dialtrace] {} tcp/MSE handshake FAIL: {}", addr, e);
+                        }
+                    }
                 }
             }
         }
@@ -639,10 +745,19 @@ pub async fn dial_peer(
         None
     }
 
-    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open(addr, &utp_socket, &torrent.info_hash, &peer_id, source_fwmark).await {
+    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open(addr, &utp_socket, &torrent.info_hash, &peer_id, source_fwmark, traced).await {
         Some(v) => { DIAL_HANDSHAKE_OK.fetch_add(1, AtomicOrdering::Relaxed); v }
-        None => { DIAL_HANDSHAKE_FAIL.fetch_add(1, AtomicOrdering::Relaxed); return; }
+        None => {
+            DIAL_HANDSHAKE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+            if traced {
+                info!("[dialtrace] {} all legs exhausted, no session", addr);
+            }
+            return;
+        }
     };
+    if traced {
+        info!("[dialtrace] {} session starting (encrypted={})", addr, is_encrypted);
+    }
     let framed = Framed::new(cs, BtCodec::new());
     crate::peer::session::run(
         framed,

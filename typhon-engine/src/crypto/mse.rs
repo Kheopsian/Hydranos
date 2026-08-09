@@ -23,7 +23,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::peer::transport::PeerTransport;
 use super::rc4::Rc4;
 
-/// The 768-bit prime from the MSE spec.
+/// The 768-bit MSE/PE prime, the same value libtorrent ships as its dh_prime.
+/// NOT RFC 2409 / Oakley group 1: the two share a long prefix and differ only in
+/// the last 24 hex digits, and *both* are valid 768-bit primes -- so swapping one
+/// for the other passes every sanity check and silently breaks every handshake,
+/// because S simply stops matching the peer's. Verified against live swarms:
+/// with this value Typhon completes MSE with qBittorrent 4.x/5.x and
+/// Transmission 4.x; with the Oakley value, zero handshakes succeed.
 const P_HEX: &str = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A63A36210000000000090563";
 const G: u32 = 2;
 
@@ -116,12 +122,12 @@ pub async fn handshake_outgoing(
 
     // Step 1: Send Ya + PadA (random 0-64 bytes for simplicity)
     let mut pad_a = vec![0u8; 0]; // no padding for now
-    stream.write_all(&ya_bytes).await.map_err(|e| e.to_string())?;
-    stream.write_all(&pad_a).await.map_err(|e| e.to_string())?;
+    stream.write_all(&ya_bytes).await.map_err(|e| format!("step1 write Ya: {}", e))?;
+    stream.write_all(&pad_a).await.map_err(|e| format!("step1 write PadA: {}", e))?;
 
     // Step 2: Read Yb (96 bytes) — may be followed by PadB which we read later
     let mut yb_bytes = [0u8; 96];
-    stream.read_exact(&mut yb_bytes).await.map_err(|e| e.to_string())?;
+    stream.read_exact(&mut yb_bytes).await.map_err(|e| format!("step2 read Yb: {}", e))?;
 
     // Step 3: Compute shared secret — offload modpow to blocking pool.
     let s = {
@@ -135,7 +141,7 @@ pub async fn handshake_outgoing(
 
     // Step 4: Send HASH('req1', S)
     let req1 = sha1_combine(b"req1", &s);
-    stream.write_all(&req1).await.map_err(|e| e.to_string())?;
+    stream.write_all(&req1).await.map_err(|e| format!("step4 write req1: {}", e))?;
 
     // Send HASH('req2', SKEY) XOR HASH('req3', S)
     let req2 = sha1_combine(b"req2", skey);
@@ -144,7 +150,7 @@ pub async fn handshake_outgoing(
     for i in 0..20 {
         req2_xor[i] = req2[i] ^ req3[i];
     }
-    stream.write_all(&req2_xor).await.map_err(|e| e.to_string())?;
+    stream.write_all(&req2_xor).await.map_err(|e| format!("step4 write req2: {}", e))?;
 
     // Create RC4 keys
     // Initiator encrypts with key: SHA1('keyA', S, SKEY)
@@ -165,40 +171,70 @@ pub async fn handshake_outgoing(
     payload.extend_from_slice(&bt_handshake);               // 68 bytes IA
 
     enc.process(&mut payload);
-    stream.write_all(&payload).await.map_err(|e| e.to_string())?;
+    stream.write_all(&payload).await.map_err(|e| format!("step4 write payload: {}", e))?;
 
-    // Step 5: Read encrypted VC + crypto_select + len(padD) + padD
-    // We need to find VC (8 zero bytes after decryption)
-    // Read and decrypt until we find VC
-    let mut vc_buf = [0u8; 8];
-    stream.read_exact(&mut vc_buf).await.map_err(|e| e.to_string())?;
-    dec.process(&mut vc_buf);
-    if vc_buf != VC {
-        return Err("VC mismatch after decryption".into());
+    // Step 5: Resynchronise on ENCRYPT(VC), then read crypto_select + len(padD) + padD.
+    //
+    // B's side of the wire is `Yb | PadB | ENCRYPT(VC || crypto_select || ...)`,
+    // and PadB is 0-512 random PLAINTEXT bytes that step 2 deliberately leaves
+    // unread. A blind 8-byte read therefore lands inside the padding for every
+    // peer that pads at all — which is why this used to fail with "VC mismatch"
+    // against essentially every require-encryption peer, measured 38/38 on a
+    // fully-encrypted swarm. The incoming path already resynchronises the same
+    // way (it slides looking for the req1 hash); only the initiator did not.
+    //
+    // VC is eight zero bytes, so its ciphertext is exactly the first eight bytes
+    // of our decrypt keystream. Derive that pattern from a throwaway key with
+    // the same inputs, then slide a window over the raw stream until it matches.
+    // `dec` is left untouched until the sync point is found, so its keystream
+    // stays aligned with the real ciphertext.
+    const MAX_PAD_B: usize = 512;
+    let expected_vc = {
+        let mut probe = make_rc4_keys(b"keyB", &s, skey);
+        let mut buf = VC;
+        probe.process(&mut buf);
+        buf
+    };
+    let mut window = [0u8; 8];
+    stream.read_exact(&mut window).await.map_err(|e| format!("step5 VC sync init: {}", e))?;
+    let mut slid = 0usize;
+    while window != expected_vc {
+        if slid >= MAX_PAD_B {
+            // Spec caps PadB at 512; past that the peer is not speaking MSE at
+            // us and reading further would hang on a hostile or desynced stream.
+            return Err(format!("VC not found after sliding {} bytes (PadB overrun)", slid));
+        }
+        window.rotate_left(1);
+        stream.read_exact(&mut window[7..8]).await.map_err(|e| format!("step5 VC slide: {}", e))?;
+        slid += 1;
     }
+    // Synced. VC itself consumed eight bytes of keystream — burn them on the
+    // real key so the reads below decrypt at the right offset.
+    let mut vc_consume = VC;
+    dec.process(&mut vc_consume);
 
     // Read crypto_select (4 bytes)
     let mut cs_buf = [0u8; 4];
-    stream.read_exact(&mut cs_buf).await.map_err(|e| e.to_string())?;
+    stream.read_exact(&mut cs_buf).await.map_err(|e| format!("step5 crypto_select: {}", e))?;
     dec.process(&mut cs_buf);
     let crypto_select = u32::from_be_bytes(cs_buf);
 
     // Read len(padD) (2 bytes)
     let mut pad_len_buf = [0u8; 2];
-    stream.read_exact(&mut pad_len_buf).await.map_err(|e| e.to_string())?;
+    stream.read_exact(&mut pad_len_buf).await.map_err(|e| format!("step5 len(padD): {}", e))?;
     dec.process(&mut pad_len_buf);
     let pad_d_len = u16::from_be_bytes(pad_len_buf) as usize;
 
     // Read and discard padD
     if pad_d_len > 0 {
         let mut pad_d = vec![0u8; pad_d_len];
-        stream.read_exact(&mut pad_d).await.map_err(|e| e.to_string())?;
+        stream.read_exact(&mut pad_d).await.map_err(|e| format!("step5 padD: {}", e))?;
         dec.process(&mut pad_d);
     }
 
     // Now read the BT handshake response (should come encrypted)
     let mut hs_buf = [0u8; 68];
-    stream.read_exact(&mut hs_buf).await.map_err(|e| e.to_string())?;
+    stream.read_exact(&mut hs_buf).await.map_err(|e| format!("step6 read BT handshake: {}", e))?;
     if crypto_select & CRYPTO_RC4 != 0 {
         dec.process(&mut hs_buf);
     }
