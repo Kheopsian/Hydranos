@@ -3,6 +3,21 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.52.0 — 2026-08-09
+
+### Fixed
+
+- **Outgoing encrypted connections work again.** The MSE handshake read the
+  peer verification constant without skipping PadB, so it landed in the padding
+  and every handshake to an encryption-only peer failed. Measured on 15 live
+  swarms: 0 of 45 outgoing MSE handshakes succeeded before, 10 of 78 after.
+
+### Added
+
+- **Dial diagnostics.** The plaintext and MSE legs now count separately
+  (`dial_plain_*`, `dial_mse_*`), the dial queue is accounted for, and
+  `TYPHON_DIAL_TRACE_IH` traces a single info_hash through every dial decision.
+
 ## v3.51.0 — 2026-08-09
 
 ### Fixed
