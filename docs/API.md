@@ -50,6 +50,7 @@ Auth = `X-API-Key`.
 ## ⚠️ SHIM qBit `/api/v2/*` — couche de COMPAT (autobrr/cross-seed). À n'utiliser QUE si nécessaire.
 La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DISQUE** sans re-DL (`skip_checking=true` → `AddTorrentSeedMode`). Le natif `verify/recheck` stall sur de la data existante.
 
+- `POST /api/v2/app/setPreferences` — form `json={"listen_port":51413}` (chaîne acceptée aussi, corps JSON brut aussi). **Seul `listen_port` est appliqué** (rebind du moteur race + persisté) ; les autres clés sont acceptées et ignorées comme le fait qBit. 500 si le rebind échoue — le port annoncé est toujours le port réellement bindé.
 - `POST /api/v2/torrents/add` — multipart : `torrents=@file`, `savepath`, `skip_checking=true`, `paused=false`, `category=<cat>`.
   - ⚠️ **ROUTING PAR CATÉGORIE** : le `mode` de la catégorie (`categories.json`) décide race vs hoard. **Catégorie inconnue → défaut RACE** (piège classique). Utiliser une catégorie `mode=hoard` (`movies`, `Calewood`, `caleB`...).
   - ⚠️ **`savepath` = le chemin CONTENU EXACT** (le dossier qui contient le top-level du torrent) = le `save_path` que l'API reporte pour le même torrent côté A. PAS le parent. Pour un single-file-in-folder, c'est le dossier release.
@@ -85,8 +86,8 @@ La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DIS
 | stats | `GET/POST /stats/baseline` |
 | config | `GET/POST /config/create-folder` |
 | port-forward | `GET /port-forward` · `GET /port-forward/assignment` · `POST /port-forward/assignment` |
-| **`/api/race`** | `GET /torrents` · `GET /torrents/:ih` · `GET /choking` · `GET/POST /settings` · `POST /uploader` · `GET /uploaders` · `GET /uploaders/:username` · `GET /timeline/:ih` · `POST /torrents/:ih/purge` |
-| **`/api/hoard`** | `GET /stats` · `GET /torrents` · `GET /torrents/:ih` · `POST /pause-all` · `POST /resume-all` · `POST /restart-stuck` · `POST /verify-downloading` · `POST /torrents/:ih/verify` · `POST /torrents/:ih/category` · `GET/POST/DELETE /download-slots` |
+| **`/api/race`** | `GET /torrents` · `GET /torrents/:ih` · `GET /choking` · `GET/POST /settings` · `POST /uploader` · `GET /uploaders` · `GET /uploaders/:username` · `GET /timeline/:ih` · `POST /torrents/:ih/purge` · `POST /listen-port` |
+| **`/api/hoard`** | `GET /stats` · `GET /torrents` · `GET /torrents/:ih` · `POST /pause-all` · `POST /resume-all` · `POST /restart-stuck` · `POST /verify-downloading` · `POST /torrents/:ih/verify` · `POST /torrents/:ih/category` · `GET/POST/DELETE /download-slots` · `POST /listen-port` |
 | **`/api/hardlinks`** | `GET /summary` · `POST /scan` · `GET /orphans` · `GET /orphans/:ih/files` · `GET/POST /config` · `GET /orphan-media` · `GET /ghosts` · `POST /cleanup` · `POST /relink` · `GET /superseded` |
 | **`/api/drain`** | `GET /status` · `GET /history` · `POST /now` |
 | **`/api/huntarr`** | `GET /status` · `GET /history` · `GET/POST /config` · `GET /library` · `GET /grabs` · `GET /found` · `POST /scan` |
@@ -94,7 +95,7 @@ La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DIS
 | **`/api/benchmark`** | `GET /current` · `GET /range` · `GET /compare` · `GET /race-events` · `GET /race-snapshots/:ih` |
 | **`/api/vpn-speedtest`** | `GET /latest` · `GET /history` · `POST /run` |
 
-**`/api/v2/*` — shim qBit** (compat only, cf section dédiée) : `POST /auth/login` · `POST /auth/logout` · `POST /torrents/add` · `POST /torrents/delete` · `POST /torrents/pause` · `POST /torrents/resume` · `POST /torrents/setCategory` · `GET /torrents/info` · `GET /torrents/categories` · `POST /torrents/createCategory` · `POST /torrents/editCategory` · `POST /torrents/removeCategories`
+**`/api/v2/*` — shim qBit** (compat only, cf section dédiée) : `POST /auth/login` · `POST /auth/logout` · `POST /app/setPreferences` · `POST /torrents/add` · `POST /torrents/delete` · `POST /torrents/pause` · `POST /torrents/resume` · `POST /torrents/setCategory` · `GET /torrents/info` · `GET /torrents/categories` · `POST /torrents/createCategory` · `POST /torrents/editCategory` · `POST /torrents/removeCategories`
 
 ### Download slots (sélecteur hoard) — `enforceDownloadSlots` (`internal/engine/hoard.go`)
 - `active_downloads` = N slots de DL simultané. Le reste des torrents incomplets est **parké** (stop).

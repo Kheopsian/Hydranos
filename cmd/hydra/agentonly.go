@@ -288,22 +288,34 @@ func startListenPortHook(ctx context.Context, port int, token string, lives []*l
 			http.Error(w, "port out of range (1-65535)", http.StatusBadRequest)
 			return
 		}
-		n := 0
+		n, failed := 0, 0
 		for _, le := range lives {
-			var sp interface{ SetListenPort(int) }
+			var sp interface{ SetListenPort(int) error }
 			if le.race != nil {
 				sp = le.race
 			} else if le.hoard != nil {
 				sp = le.hoard
 			}
-			if sp != nil {
-				sp.SetListenPort(req.Port)
-				n++
+			if sp == nil {
+				continue
 			}
+			if err := sp.SetListenPort(req.Port); err != nil {
+				slog.Warn("agent-only: listen-port rebind failed", "port", req.Port, "err", err)
+				failed++
+				continue
+			}
+			n++
 		}
-		slog.Info("agent-only: listen-port hook applied", "port", req.Port, "engines", n)
+		// gluetun retries on a non-2xx, so a total failure must not look like
+		// success — otherwise the node sits on a port the VPN no longer
+		// forwards and nothing ever corrects it.
+		if n == 0 && failed > 0 {
+			http.Error(w, "listen-port rebind failed on every engine", http.StatusInternalServerError)
+			return
+		}
+		slog.Info("agent-only: listen-port hook applied", "port", req.Port, "engines", n, "failed", failed)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","port":%d,"engines":%d}`, req.Port, n)
+		fmt.Fprintf(w, `{"status":"ok","port":%d,"engines":%d,"failed":%d}`, req.Port, n, failed)
 	})
 
 	// HARD-CODED loopback bind: only the port is configurable, never the host,

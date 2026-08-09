@@ -3,6 +3,24 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.51.0 — 2026-08-09
+
+### Fixed
+
+- **The listen port shown is the one the engine is bound to.** The port-forward
+  panel, the Engines table and the qBit shim all read the boot-time config, so
+  a hot rebind left them showing a dead port — and the health check probing it.
+- **A failed rebind no longer answers OK.** The native endpoint, the shim and
+  the gluetun hook all reported success regardless, which left a node on a port
+  nothing forwarded. A port set at runtime is now written back to the TOML, so
+  it survives a restart.
+
+### Added
+
+- **`POST /api/v2/app/setPreferences`** in the qBit shim, the route VPN
+  port-forward scripts expect. `listen_port` is applied; other keys are
+  accepted and ignored, as qBittorrent does.
+
 ## v3.50.0 — 2026-08-08
 
 ### Changed

@@ -2108,8 +2108,21 @@ func (s *Server) handleBaselinePost(c *gin.Context) {
 // ===========================================================================
 
 func (s *Server) handlePortForwardStatus(c *gin.Context) {
+	// The effective port, not the boot-time config: after a hot rebind the
+	// two diverge, and reporting the config value here meant the UI showed a
+	// dead port and the socket health check below probed the wrong one.
 	racePort := s.config.Race.ListenPort
+	if s.raceEngine != nil {
+		if p := s.raceEngine.ListenPort(); p > 0 {
+			racePort = p
+		}
+	}
 	hoardPort := s.config.Hoard.ListenPort
+	if s.hoardEngine != nil {
+		if p := s.hoardEngine.ListenPort(); p > 0 {
+			hoardPort = p
+		}
+	}
 
 	var racePeers, hoardPeers int
 	if s.raceEngine != nil {
@@ -2473,7 +2486,7 @@ func (s *Server) handleGetPasskeys(c *gin.Context) {
 // handleSetPasskey sets (passkey="" clears) the announce passkey for trackers
 // whose URL contains host. Hot — applies on the next announce, no restart.
 // setListenPort hot-swaps an engine peer listen port at runtime (no restart).
-func (s *Server) setListenPort(c *gin.Context, setter interface{ SetListenPort(int) }) {
+func (s *Server) setListenPort(c *gin.Context, role string, setter interface{ SetListenPort(int) error }) {
 	var req struct {
 		Port int `json:"port"`
 	}
@@ -2489,16 +2502,29 @@ func (s *Server) setListenPort(c *gin.Context, setter interface{ SetListenPort(i
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "engine unavailable"})
 		return
 	}
-	setter.SetListenPort(req.Port)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "port": req.Port})
+	// A failed rebind used to still answer 200 ok, so a caller had no way to
+	// tell a live port from a wish.
+	if err := setter.SetListenPort(req.Port); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Persisted after the rebind succeeded — never record a port we failed to
+	// bind. A write failure leaves the port live but forgotten at restart, so
+	// it is reported rather than swallowed.
+	persisted := true
+	if err := s.persistListenPort(role, req.Port); err != nil {
+		slog.Warn("listen port: rebound but not persisted", "role", role, "port", req.Port, "err", err)
+		persisted = false
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "port": req.Port, "persisted": persisted})
 }
 
 func (s *Server) handleHoardSetListenPort(c *gin.Context) {
-	s.setListenPort(c, s.hoardEngine)
+	s.setListenPort(c, "hoard", s.hoardEngine)
 }
 
 func (s *Server) handleRaceSetListenPort(c *gin.Context) {
-	s.setListenPort(c, s.raceEngine)
+	s.setListenPort(c, "race", s.raceEngine)
 }
 
 func (s *Server) handleSetPasskey(c *gin.Context) {
