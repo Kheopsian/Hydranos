@@ -352,6 +352,13 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     macro_rules! put_u { ($k:expr, $v:expr) => { counters.insert($k.to_string(), json!($v)); } }
     put_u!("num_peers_connected", total_peers as u64);
     put_u!("dial_attempted", crate::tracker::DIAL_ATTEMPTED.load(Ordering::Relaxed));
+    put_u!("dial_enqueued", crate::tracker::DIAL_ENQUEUED.load(Ordering::Relaxed));
+    put_u!("dial_enqueue_dropped", crate::tracker::DIAL_ENQUEUE_DROPPED.load(Ordering::Relaxed));
+    put_u!("dial_plain_ok", crate::tracker::DIAL_PLAIN_OK.load(Ordering::Relaxed));
+    put_u!("dial_plain_fail", crate::tracker::DIAL_PLAIN_FAIL.load(Ordering::Relaxed));
+    put_u!("dial_mse_attempted", crate::tracker::DIAL_MSE_ATTEMPTED.load(Ordering::Relaxed));
+    put_u!("dial_mse_ok", crate::tracker::DIAL_MSE_OK.load(Ordering::Relaxed));
+    put_u!("dial_mse_fail", crate::tracker::DIAL_MSE_FAIL.load(Ordering::Relaxed));
     put_u!("dial_tcp_ok", crate::tracker::DIAL_TCP_OK.load(Ordering::Relaxed));
     put_u!("dial_tcp_fail", crate::tracker::DIAL_TCP_FAIL.load(Ordering::Relaxed));
     put_u!("dial_utp_ok", crate::tracker::DIAL_UTP_OK.load(Ordering::Relaxed));
