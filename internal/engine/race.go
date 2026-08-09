@@ -544,6 +544,14 @@ func (e *RaceEngine) RemoveTorrent(infoHash string, deleteFiles bool) error {
 // LivePort exposes the runtime listen-port override atomic (see hoard).
 func (e *RaceEngine) LivePort() *atomic.Int64 { return &e.livePort }
 
+// ListenPort is the port the engine is actually bound to right now (see hoard).
+func (e *RaceEngine) ListenPort() int {
+	if v := e.livePort.Load(); v > 0 {
+		return int(v)
+	}
+	return e.config.ListenPort
+}
+
 // SetListenPort hot-rebinds the engine peer listener + updates the announce
 // port, with no restart. No-op for a remote (non-ltclient) engine client.
 // SetSelfIPs pushes our current public IP(s) to the engine self-dial filter
@@ -558,23 +566,21 @@ func (e *RaceEngine) SetSelfIPs(ips []string) {
 	}
 }
 
-func (e *RaceEngine) SetListenPort(port int) {
+func (e *RaceEngine) SetListenPort(port int) error {
 	if port <= 0 || port > 65535 {
-		slog.Warn("race: SetListenPort out of range", "port", port)
-		return
+		return fmt.Errorf("race: listen port %d out of range (1-65535)", port)
 	}
 	lt, ok := e.client.(*ltclient.Client)
 	if !ok {
-		slog.Warn("race: SetListenPort unsupported on this client", "port", port)
-		return
+		return fmt.Errorf("race: listen-port rebind unsupported on this engine client")
 	}
 	if err := lt.SetListenPort(port); err != nil {
-		slog.Warn("race: engine listen-port rebind failed", "port", port, "err", err)
-		return
+		return fmt.Errorf("race: engine listen-port rebind failed: %w", err)
 	}
 	e.config.ListenPort = port
 	e.livePort.Store(int64(port))
 	slog.Info("race: listen port hot-swapped", "port", port)
+	return nil
 }
 
 func (e *RaceEngine) ApplySettings(settings map[string]interface{}) {

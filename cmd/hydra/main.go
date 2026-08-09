@@ -1457,8 +1457,10 @@ func (a *raceAPIAdapter) ApplySettings(settings map[string]interface{}) map[stri
 	a.engine.ApplySettings(settings)
 	return a.engine.GetSessionSettings()
 }
-func (a *raceAPIAdapter) SetListenPort(port int) {
-	a.engine.SetListenPort(port)
+func (a *raceAPIAdapter) ListenPort() int { return a.engine.ListenPort() }
+
+func (a *raceAPIAdapter) SetListenPort(port int) error {
+	return a.engine.SetListenPort(port)
 }
 func (a *raceAPIAdapter) HasTorrent(infoHash string) bool {
 	return a.engine.GetTorrentDetail(infoHash) != nil
@@ -1524,7 +1526,9 @@ func (a *hoardAPIAdapter) ReannnounceTorrent(infoHash string) bool { return true
 func (a *hoardAPIAdapter) AddTrackerToTorrent(infoHash, url string) error {
 	return a.engine.AddTrackerToTorrent(infoHash, url)
 }
-func (a *hoardAPIAdapter) SetListenPort(port int) { a.engine.SetListenPort(port) }
+func (a *hoardAPIAdapter) ListenPort() int { return a.engine.ListenPort() }
+
+func (a *hoardAPIAdapter) SetListenPort(port int) error { return a.engine.SetListenPort(port) }
 func (a *hoardAPIAdapter) SetAddedTime(infoHash string, t time.Time) {
 	a.engine.SetAddedTime(infoHash, t)
 }

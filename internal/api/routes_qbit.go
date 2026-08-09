@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,6 +36,7 @@ func (s *Server) registerQbitRoutes() {
 	v2.Any("/app/webapiVersion", s.qbitWebapiVersion)
 	v2.Any("/app/buildInfo", s.qbitBuildInfo)
 	v2.Any("/app/preferences", s.qbitPreferences)
+	v2.POST("/app/setPreferences", s.qbitSetPreferences)
 
 	// Transfer
 	v2.Any("/transfer/info", s.qbitTransferInfo)
@@ -105,10 +107,18 @@ func (s *Server) qbitBuildInfo(c *gin.Context) {
 }
 
 func (s *Server) qbitPreferences(c *gin.Context) {
+	// The live port, not the boot config: a port-forward script reads this back
+	// to confirm what it just set.
+	listenPort := s.config.Race.ListenPort
+	if s.raceEngine != nil {
+		if p := s.raceEngine.ListenPort(); p > 0 {
+			listenPort = p
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"save_path":                 "/downloads",
 		"temp_path_enabled":         false,
-		"listen_port":               s.config.Race.ListenPort,
+		"listen_port":               listenPort,
 		"max_connec":                s.config.Race.MaxConnections,
 		"max_uploads_per_torrent":   s.config.Race.MaxUploadsPerTorrent,
 		"dht":                       false,
@@ -125,6 +135,70 @@ func (s *Server) qbitPreferences(c *gin.Context) {
 		"add_trackers_enabled":      false,
 		"alternative_webui_enabled": false,
 	})
+}
+
+// qbitSetPreferences accepts the qBittorrent settings write. It exists for the
+// one preference Hydra can genuinely apply at runtime — listen_port — which is
+// how every VPN port-forward script in the wild pushes a rotated port. Other
+// keys are accepted and ignored, as qBittorrent itself does with preferences a
+// build does not support: a client sending a full settings blob must not get an
+// error over a field we do not model.
+//
+// Body shape follows qBittorrent: a form field `json` holding the changed
+// preferences. A raw JSON body is accepted too, since some clients send that.
+func (s *Server) qbitSetPreferences(c *gin.Context) {
+	var prefs map[string]interface{}
+
+	if raw := c.PostForm("json"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &prefs); err != nil {
+			c.String(http.StatusBadRequest, "invalid json field: %v", err)
+			return
+		}
+	} else if err := c.ShouldBindJSON(&prefs); err != nil {
+		c.String(http.StatusBadRequest, "expected a `json` form field or a JSON body: %v", err)
+		return
+	}
+
+	raw, ok := prefs["listen_port"]
+	if !ok {
+		c.Status(http.StatusOK)
+		return
+	}
+	// JSON numbers decode to float64; a script sending "51413" as a string is
+	// common enough to be worth accepting.
+	var port int
+	switch v := raw.(type) {
+	case float64:
+		port = int(v)
+	case string:
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			c.String(http.StatusBadRequest, "listen_port %q is not a number", v)
+			return
+		}
+		port = n
+	default:
+		c.String(http.StatusBadRequest, "listen_port must be a number")
+		return
+	}
+	if port <= 0 || port > 65535 {
+		c.String(http.StatusBadRequest, "listen_port out of range (1-65535)")
+		return
+	}
+	if s.raceEngine == nil {
+		c.String(http.StatusServiceUnavailable, "engine unavailable")
+		return
+	}
+	// Reported rather than swallowed: a port-forward script that believes a
+	// failed rebind leaves the node unreachable with nothing to correct it.
+	if err := s.raceEngine.SetListenPort(port); err != nil {
+		c.String(http.StatusInternalServerError, "listen_port rebind failed: %v", err)
+		return
+	}
+	if err := s.persistListenPort("race", port); err != nil {
+		slog.Warn("qbit setPreferences: port rebound but not persisted", "port", port, "err", err)
+	}
+	c.Status(http.StatusOK)
 }
 
 // ===========================================================================

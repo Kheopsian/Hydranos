@@ -75,7 +75,8 @@ type RaceEngine interface {
 	GetChokingStats() map[string]interface{}
 	GetSessionSettings() map[string]interface{}
 	ApplySettings(settings map[string]interface{}) map[string]interface{}
-	SetListenPort(port int)
+	SetListenPort(port int) error
+	ListenPort() int
 	HasTorrent(infoHash string) bool
 	SessionGrabbed() int64
 	AggregateStats() map[string]interface{}
@@ -100,7 +101,8 @@ type HoardEngine interface {
 	RemoveTorrent(infoHash string, deleteFiles bool) error
 	ReannnounceTorrent(infoHash string) bool
 	AddTrackerToTorrent(infoHash, url string) error
-	SetListenPort(port int)
+	SetListenPort(port int) error
+	ListenPort() int
 	HasTorrent(infoHash string) bool
 	PauseAll() int
 	ResumeAll() int

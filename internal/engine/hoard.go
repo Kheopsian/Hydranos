@@ -790,6 +790,17 @@ func (e *HoardEngine) AddTrackerToTorrent(infoHash, url string) error {
 // announcer sends the current port to trackers after a hot rebind.
 func (e *HoardEngine) LivePort() *atomic.Int64 { return &e.livePort }
 
+// ListenPort is the port the engine is actually bound to right now: the live
+// override after a hot rebind, else the configured one. Anything reporting the
+// port to a user or a health check wants this, not config.ListenPort — that
+// field is the boot-time value and goes stale the moment a rebind lands.
+func (e *HoardEngine) ListenPort() int {
+	if v := e.livePort.Load(); v > 0 {
+		return int(v)
+	}
+	return e.config.ListenPort
+}
+
 // SetListenPort hot-rebinds the engine peer listener + updates the announce
 // port, with no restart. No-op for a remote (non-ltclient) engine client.
 // SetSelfIPs pushes our current public IP(s) to the engine self-dial filter
@@ -804,23 +815,21 @@ func (e *HoardEngine) SetSelfIPs(ips []string) {
 	}
 }
 
-func (e *HoardEngine) SetListenPort(port int) {
+func (e *HoardEngine) SetListenPort(port int) error {
 	if port <= 0 || port > 65535 {
-		slog.Warn("hoard: SetListenPort out of range", "port", port)
-		return
+		return fmt.Errorf("hoard: listen port %d out of range (1-65535)", port)
 	}
 	lt, ok := e.client.(*ltclient.Client)
 	if !ok {
-		slog.Warn("hoard: SetListenPort unsupported on this client", "port", port)
-		return
+		return fmt.Errorf("hoard: listen-port rebind unsupported on this engine client")
 	}
 	if err := lt.SetListenPort(port); err != nil {
-		slog.Warn("hoard: engine listen-port rebind failed", "port", port, "err", err)
-		return
+		return fmt.Errorf("hoard: engine listen-port rebind failed: %w", err)
 	}
 	e.config.ListenPort = port
 	e.livePort.Store(int64(port))
 	slog.Info("hoard: listen port hot-swapped", "port", port)
+	return nil
 }
 
 // PauseAll stops all torrents in the session.

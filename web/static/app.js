@@ -4754,9 +4754,17 @@ function showEngineForm(){ document.getElementById("engine-form").style.display=
 function hideEngineForm(){ document.getElementById("engine-form").style.display="none"; }
 async function updateEngines(){
     try{
-        const results = await Promise.all([api("/api/agents"), api("/api/engines")]);
+        // port-forward carries the live listen port of the base engines; it is
+        // optional here, so a failure degrades the port cell rather than
+        // blanking the whole table.
+        const results = await Promise.all([
+            api("/api/agents"),
+            api("/api/engines"),
+            api("/api/port-forward").catch(function(){ return null; })
+        ]);
         const agents = results[0] || [];
         const extras = results[1] || [];
+        const pf = results[2];
         const tb = document.getElementById("engines-tbody");
         if(!tb) return;
         const rows = [];
@@ -4764,8 +4772,14 @@ async function updateEngines(){
         const local = agents.find(function(a){ return a.name === "local"; });
         if(local && local.engines){
             local.engines.forEach(function(e){
+                var livePort = 0;
+                if(pf){
+                    if(e.role === "race") livePort = pf.race_port;
+                    else if(e.role === "hoard") livePort = pf.hoard_port;
+                }
+                var portCell = livePort ? String(livePort) : "base";
                 rows.push("<tr><td><strong>" + esc(e.id) + "</strong></td><td>" + esc(e.role) +
-                          "</td><td>base</td><td><span class=\"sr-desc\">built-in</span></td></tr>");
+                          "</td><td>" + esc(portCell) + "</td><td><span class=\"sr-desc\">built-in</span></td></tr>");
             });
         }
         // Extra engines (shards) — deletable.
