@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.54.1 — 2026-08-10
+
+### Fixed
+
+- **A complete torrent that has never run now reports 100%, not 0%.** Seed-mode
+  torrents carry no piece map, so one imported stopped read as empty until it
+  was started. It is also, at last, no longer re-announced by the race seed
+  keepalive while stopped.
+
 ## v3.54.0 — 2026-08-10
 
 ### Added
