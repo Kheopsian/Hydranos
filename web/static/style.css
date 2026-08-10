@@ -2689,3 +2689,20 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     background: var(--accent-blue);
     height: 100%;
 }
+
+
+/* Language picker on the first-run screen. */
+.setup-lang-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--text-dim, #9aa4b2);
+}
+.setup-lang-row select {
+    flex: 0 0 auto;
+    min-width: 150px;
+    padding: 5px 8px;
+}
