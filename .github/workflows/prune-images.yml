@@ -1,0 +1,97 @@
+name: prune-images
+
+# Drops container versions for releases outside the retention window declared in
+# SECURITY.md. The plan is computed here rather than handed to an action that
+# counts versions: a multi-arch image is an index plus one manifest per platform
+# plus an attestation, so counting versions evicts platform manifests out from
+# under indexes that are still tagged.
+#
+# Only versions whose tags are ALL prunable are deleted. Anything reachable from
+# a kept release tag, from latest, or untagged, is left alone; untagged leftovers
+# are handled by the retention workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "How many recent releases keep their images"
+        required: false
+        default: "10"
+        type: string
+      dry_run:
+        description: "Print the plan without deleting"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  plan-and-prune:
+    runs-on: ubuntu-latest
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ github.event.inputs.keep }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          python3 - <<"PY" | tee plan.txt
+          import json, os, subprocess
+          keep_n = int(os.environ.get("KEEP") or 10)
+          owner  = os.environ["OWNER"]
+
+          def page(n):
+              out = subprocess.run(
+                  ["gh", "api",
+                   "/users/%s/packages/container/hydra/versions?per_page=100&page=%d" % (owner, n)],
+                  capture_output=True, text=True, check=True).stdout
+              return json.loads(out)
+
+          versions, n = [], 1
+          while True:                              # paginate by hand: --paginate
+              batch = page(n)                      # concatenates arrays, it does
+              if not batch:                        # not merge them
+                  break
+              versions += batch
+              n += 1
+          print("versions in registry:", len(versions))
+
+          def vkey(t):
+              try:    return [int(x) for x in t.lstrip("v").split(".")]
+              except Exception: return None
+
+          rel_tags = sorted({t for v in versions for t in v["metadata"]["container"]["tags"]
+                             if vkey(t)}, key=vkey)
+          kept = set(rel_tags[-keep_n:])
+          print("release tags:", len(rel_tags), "| kept:", sorted(kept, key=vkey))
+
+          doomed, spared = [], 0
+          for v in versions:
+              tags = v["metadata"]["container"]["tags"]
+              if not tags:
+                  spared += 1                      # untagged: retention job owns these
+                  continue
+              if any(t == "latest" or t in kept for t in tags):
+                  spared += 1
+                  continue
+              doomed.append((v["id"], tags))
+
+          print("to delete:", len(doomed), "| spared:", spared)
+          for i, t in doomed[:15]:
+              print("   ", i, t)
+          if len(doomed) > 15:
+              print("    ... and", len(doomed) - 15, "more")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("ids=%s\n" % ",".join(str(i) for i, _ in doomed))
+              f.write("count=%d\n" % len(doomed))
+          PY
+
+      - name: Delete planned versions
+        if: ${{ github.event.inputs.dry_run != true && steps.plan.outputs.count != 0 }}
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: hydra
+          package-type: container
+          package-version-ids: ${{ steps.plan.outputs.ids }}
