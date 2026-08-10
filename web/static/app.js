@@ -347,6 +347,7 @@ function importWizard() {
             ${d.without_resume ? `<p class="modal-desc">${d.without_resume} torrent(s) have no resume file: no save path, they will be skipped.</p>` : ""}
             <p class="modal-desc" style="margin-bottom:4px">Path mapping (Transmission path → what Hydra sees):</p>
             <div style="max-height:150px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || "<i>no paths detected</i>"}</div>
+            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped"> Import everything stopped — no announce until you start them</label>
             <p class="modal-desc" id="tr-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="tr-back2">Back</button>
@@ -365,7 +366,10 @@ function importWizard() {
                 const res = await fetch("/api/import/transmission/start", {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
-                    body: JSON.stringify(Object.assign({}, req, { path_map })),
+                    body: JSON.stringify(Object.assign({}, req, {
+                        path_map,
+                        start_stopped: box.querySelector("#tr-stopped").checked,
+                    })),
                 });
                 const d2 = await res.json().catch(() => ({}));
                 if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d2.error || ("Start failed (" + res.status + ")"); return; }
@@ -421,6 +425,7 @@ function importWizard() {
             <p class="modal-desc">Categories: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "—"} — all imported as <b>hoard</b>.</p>
             <p class="modal-desc" style="margin-bottom:4px">Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || "<i>no paths detected</i>"}</div>
+            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped"> Import everything stopped — no announce until you start them</label>
             <p class="modal-desc" id="qb-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="qb-back">Back</button>
@@ -439,7 +444,10 @@ function importWizard() {
                 const res = await fetch("/api/import/qbit/start", {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
-                    body: JSON.stringify(Object.assign({}, creds, { path_map })),
+                    body: JSON.stringify(Object.assign({}, creds, {
+                        path_map,
+                        start_stopped: box.querySelector("#qb-stopped").checked,
+                    })),
                 });
                 const d2 = await res.json().catch(() => ({}));
                 if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d2.error || ("Start failed (" + res.status + ")"); return; }
