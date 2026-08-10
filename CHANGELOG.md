@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.54.0 — 2026-08-10
+
+### Added
+
+- **Import everything stopped.** Both import wizards (qBittorrent and
+  Transmission) now offer a checkbox that lands the whole library stopped, so
+  you can try Hydra on a real library without a single announce going out.
+
 ## v3.53.1 — 2026-08-10
 
 ### Fixed
