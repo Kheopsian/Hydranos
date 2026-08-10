@@ -1,0 +1,87 @@
+name: retention
+
+# Keeps prebuilt artifacts for the N most recent releases only, as stated in
+# SECURITY.md. Older releases keep their tag, notes and changelog entry; only
+# their binaries and container images are pruned. Runs after every published
+# release, and can be replayed by hand.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "How many recent releases keep their artifacts"
+        required: false
+        default: "10"
+        type: string
+      dry_run:
+        description: "List what would be pruned without deleting anything"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  KEEP: ${{ github.event.inputs.keep || 10 }}
+  DRY: ${{ github.event.inputs.dry_run || false }}
+
+jobs:
+  prune-release-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune assets outside the retention window
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Most recent first, by publication date - same order the release page shows.
+          gh release list --limit 400 --json tagName,publishedAt \
+            --jq "sort_by(.publishedAt) | reverse | .[].tagName" > all.txt
+          total=$(wc -l < all.txt)
+          tail -n +$((KEEP + 1)) all.txt > prune.txt || true
+          echo "$total releases, keeping $KEEP, pruning $(wc -l < prune.txt)"
+          freed=0
+          while read -r tag; do
+            [ -n "$tag" ] || continue
+            assets=$(gh release view "$tag" --json assets --jq ".assets[].name" || true)
+            [ -n "$assets" ] || continue
+            while read -r asset; do
+              [ -n "$asset" ] || continue
+              if [ "$DRY" = "true" ]; then
+                echo "  would delete $tag / $asset"
+              else
+                gh release delete-asset "$tag" "$asset" --yes
+                echo "  deleted $tag / $asset"
+              fi
+              freed=$((freed + 1))
+            done <<< "$assets"
+          done < prune.txt
+          echo "$freed assets $([ "$DRY" = "true" ] && echo would be || echo were) removed"
+
+  prune-untagged-images:
+    runs-on: ubuntu-latest
+    steps:
+      # Re-pushing a tag leaves the previous image behind as an untagged digest,
+      # still pullable by hash. These are always safe to drop.
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: hydra
+          package-type: container
+          delete-only-untagged-versions: true
+          dry-run: ${{ github.event.inputs.dry_run || false }}
+
+  prune-old-images:
+    needs: prune-untagged-images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: hydra
+          package-type: container
+          min-versions-to-keep: ${{ github.event.inputs.keep || 10 }}
+          ignore-versions: "^(latest|main)$"
+          dry-run: ${{ github.event.inputs.dry_run || false }}
