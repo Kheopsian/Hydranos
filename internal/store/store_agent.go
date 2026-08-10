@@ -53,13 +53,13 @@ CREATE TABLE IF NOT EXISTS torrents (
 
 // OpenAgent opens (creating if needed) a per-agent store at path.
 func OpenAgent(path string) (*AgentStore, error) {
-	dsn := "file:" + path +
-		"?_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(5000)"
+	dsn, netFS := dsnFor(path, "")
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open agent store: %w", err)
+	}
+	if netFS {
+		db.SetMaxOpenConns(1)
 	}
 	if _, err := db.Exec(schemaAgent); err != nil {
 		db.Close()

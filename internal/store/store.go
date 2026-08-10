@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/Kheopsian/hydra/internal/sqlitex"
 	_ "modernc.org/sqlite"
 )
 
@@ -76,17 +77,30 @@ CREATE TABLE IF NOT EXISTS torrents (
 CREATE INDEX IF NOT EXISTS idx_torrents_session ON torrents(session);
 `
 
+// dsnFor is sqlitex.DSN under a local name, kept so both stores in this package
+// read the same at their call sites.
+func dsnFor(path, extra string) (dsn string, netFS bool) { return sqlitex.DSN(path, extra) }
+
 // Open opens (creating if needed) the store at path. WAL + a busy timeout are
 // set on every pooled connection via the DSN so readers never block the writer.
+//
+// On a network filesystem WAL is not an option: it needs a shared-memory index
+// file (-shm) that no SMB/NFS server can back, which is the "database is
+// locked" a CIFS data_dir hits on the very first schema write. There we fall
+// back to a rollback journal held under an exclusive lock — SQLite then takes
+// its lock once at open and keeps it, instead of relying on the byte-range
+// locking a share emulates badly or not at all. Hydra is the sole owner of this
+// file, so giving up concurrent access costs us nothing.
 func Open(path string) (*Store, error) {
-	dsn := "file:" + path +
-		"?_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(5000)" +
-		"&_pragma=foreign_keys(ON)"
+	dsn, netFS := dsnFor(path, "&_pragma=foreign_keys(ON)")
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
+	}
+	if netFS {
+		// EXCLUSIVE locking is per-connection: a second pooled connection would
+		// find the file locked by the first and fail. One connection, always.
+		db.SetMaxOpenConns(1)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()

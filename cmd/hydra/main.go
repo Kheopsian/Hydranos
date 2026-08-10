@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -33,6 +34,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/drain"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
+	"github.com/Kheopsian/hydra/internal/fsinfo"
 	"github.com/Kheopsian/hydra/internal/health"
 	"github.com/Kheopsian/hydra/internal/logs"
 	"github.com/Kheopsian/hydra/internal/metrics"
@@ -53,8 +55,21 @@ var version = version_pkg.Version
 // (any non-empty value) to use a TCP loopback endpoint instead — required
 // on Windows/macOS, which have no Unix domain socket in this IPC path, and
 // handy for testing the TCP transport on Linux.
+// A unix socket is a kernel object, not a file a share can host, so a data_dir
+// on CIFS/NFS cannot hold one at all — bind fails and the engine never starts.
+// The sockets are runtime state anyway, not data: put them in a local runtime
+// directory instead, keyed by data_dir so two instances never collide.
 func engineSocketPath(dataDir, name string, tcpPort int) string {
 	if defaultEngineTCP || os.Getenv("HYDRA_ENGINE_TCP") != "" {
+		return fmt.Sprintf("tcp://127.0.0.1:%d", tcpPort)
+	}
+	if net, _ := fsinfo.IsNetwork(dataDir); net {
+		sum := sha1.Sum([]byte(dataDir))
+		dir := filepath.Join(os.TempDir(), "hydra-"+hex.EncodeToString(sum[:4]))
+		if err := os.MkdirAll(dir, 0700); err == nil {
+			return filepath.Join(dir, name+".sock")
+		}
+		// No local scratch either — TCP loopback is the last resort.
 		return fmt.Sprintf("tcp://127.0.0.1:%d", tcpPort)
 	}
 	return filepath.Join(dataDir, name+".sock")
@@ -101,7 +116,7 @@ func resolveConfigPath(def string, explicit bool) string {
 		slog.Warn("no config found and could not write a default; using compiled default path", "target", target, "err", err)
 		return def
 	}
-	slog.Info("no config found — wrote a fresh default", "path", target)
+	slog.Info("no config found, wrote a fresh default", "path", target)
 	return target
 }
 
@@ -285,40 +300,16 @@ func main() {
 			slog.Error("failed to generate API key", "err", e)
 		}
 	}
-	// Mot de passe admin auto-genere au 1er demarrage UNIQUEMENT si vide, sur le
-	// modele de l'api_key : hash bcrypt persiste dans [auth] password_hash, et le
-	// plaintext logge UNE fois (au boot suivant password_hash != "" -> pas de
-	// regeneration). Sans ca une install fraiche (password_hash="") ne peut pas se
-	// connecter a l'UI (/api/login renvoie 503 "auth not configured").
-	// Captured for the startup banner + admin-credentials.txt (never logged).
-	var bootUser, bootPass string
-	var bootNewPass bool
-	if cfg.Auth.PasswordHash == "" {
-		pb := make([]byte, 9)
-		if _, e := rand.Read(pb); e == nil {
-			pw := hex.EncodeToString(pb) // 18 chars hex, copy-paste safe
-			if h, eh := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost); eh == nil {
-				cfg.Auth.PasswordHash = string(h)
-				if data, e2 := os.ReadFile(*configPath); e2 == nil {
-					if doc, e3 := config.SetTOMLValue(string(data), "auth", "password_hash", fmt.Sprintf("%q", string(h))); e3 == nil {
-						if e4 := os.WriteFile(*configPath, []byte(doc), 0644); e4 == nil {
-							bootUser, bootPass, bootNewPass = cfg.Auth.Username, pw, true
-							slog.Info("generated a temporary admin password (shown in the console banner + admin-credentials.txt)")
-						} else {
-							bootUser, bootPass, bootNewPass = cfg.Auth.Username, pw, true
-							slog.Warn("generated admin password not persisted (ephemeral this run)", "err", e4)
-						}
-					} else {
-						bootUser, bootPass, bootNewPass = cfg.Auth.Username, pw, true
-						slog.Warn("generated admin password not persisted (no password_hash line?)", "err", e3)
-					}
-				}
-			} else {
-				slog.Error("failed to hash generated admin password", "err", eh)
-			}
-		} else {
-			slog.Error("failed to generate admin password", "err", e)
-		}
+	// No admin password is generated here on purpose. Hydra used to mint one at
+	// this point and only report it ~700 lines later, after the engines were up
+	// — so any boot that failed in between (a data_dir the engines could not
+	// use, most often) left password_hash set in the config and the plaintext
+	// nowhere: the account was consumed and the install unreachable. An empty
+	// password_hash now means "first run", and the UI asks a human to pick one.
+	// Nothing is generated, so nothing can be lost.
+	firstRun := cfg.Auth.PasswordHash == ""
+	if firstRun {
+		slog.Info("first run: no admin password set, open the web UI to create one")
 	}
 	// ---- Resolve the engines this node runs (Option A). A legacy default.toml
 	// with [race]/[hoard] yields exactly those two; [[engine]] blocks override.
@@ -340,6 +331,19 @@ func main() {
 			base = filepath.Dir(exe)
 		}
 		cfg.Daemon.DataDir = filepath.Join(base, cfg.Daemon.DataDir)
+	}
+
+	// data_dir on a share is a supported-but-degraded setup, not a crash: the
+	// store drops to a rollback journal under an exclusive lock and the engine
+	// sockets move to local scratch. Say so once, loudly — the risk is real and
+	// it is the user's to accept. Torrent data on a share needs none of this:
+	// the engine only ever does positional reads and writes there.
+	if net, kind := fsinfo.IsNetwork(cfg.Daemon.DataDir); net {
+		api.SetStorageWarning(string(kind))
+		slog.Warn("data_dir is on network storage: running in degraded mode",
+			"path", cfg.Daemon.DataDir, "filesystem", string(kind))
+		slog.Warn("  the database cannot use WAL here; a dropped share mid-write can corrupt it. KEEP BACKUPS")
+		slog.Warn("  for full speed and safety, point data_dir at local disk; your downloads can stay on the share")
 	}
 
 	engineCfgs, engErr := cfg.ResolveEngines()
@@ -412,7 +416,7 @@ func main() {
 		// controller / agent mode: no monolith shadow store (agents own their
 		// per-agent DBs; a shadow hydra.db here would be a parasitic dangling file).
 	} else if ts, terr := store.Open(filepath.Join(cfg.Daemon.DataDir, "hydra.db")); terr != nil {
-		slog.Error("store: open failed — shadow persistence disabled", "error", terr)
+		slog.Error("store: open failed, shadow persistence disabled", "error", terr)
 	} else {
 		torStore = ts
 		defer torStore.Close()
@@ -423,7 +427,7 @@ func main() {
 		api.SetStore(torStore)
 		if rep := store.MigrateSidecars(cfg.Daemon.DataDir, torStore); !rep.Empty() || len(rep.Errors) > 0 {
 			if len(rep.Errors) > 0 {
-				slog.Error("store: sidecar import had errors — originals kept in place",
+				slog.Error("store: sidecar import had errors, originals kept in place",
 					"report", rep.String(), "errors", rep.Errors)
 			} else {
 				slog.Info("store: imported JSON sidecars (originals renamed .migrated)", "report", rep.String())
@@ -510,7 +514,7 @@ func main() {
 	// in-process engines already own SetEventHandler on these live clients.
 	if *agentAddr != "" {
 		if *agentToken == "" {
-			slog.Warn("HydraAgent served WITHOUT a token (--agent-token) — do not expose off-LAN")
+			slog.Warn("HydraAgent served WITHOUT a token (--agent-token): do not expose off-LAN")
 		}
 		agentSrv := agent.NewServer(map[string]engine.EngineClient{
 			agentwire.EngineRace:  raceProc.Client(),
@@ -867,7 +871,7 @@ func main() {
 			unknown, _ := torStore.ContentFolderUnknown()
 			statePath := filepath.Join(cfg.Daemon.DataDir, "state.json")
 			renamed := os.Rename(statePath, statePath+".migrated") == nil
-			slog.Info("state.json retired — the store is now the only source",
+			slog.Info("state.json retired, the store is now the only source",
 				"content_folder_moved", moved, "still_unknown", unknown, "renamed", renamed)
 		}
 	} else {
@@ -1029,13 +1033,10 @@ func main() {
 
 	api.SetStartupReady(true)
 	slog.Info("============================================================")
-	slog.Info("  All systems GO — Typhon engine")
+	slog.Info("  All systems GO (Typhon engine)")
 	slog.Info("============================================================")
 
-	if bootNewPass {
-		logs.WriteAdminCredentials(*configPath, bootUser, bootPass)
-	}
-	logs.PrintReady(cfg.Daemon.APIHost, cfg.Daemon.APIPort, cfg.Auth.Username, bootPass, bootNewPass)
+	logs.PrintReady(cfg.Daemon.APIHost, cfg.Daemon.APIPort, firstRun)
 
 	_ = notifier
 	_ = metricsCollector

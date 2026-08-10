@@ -75,7 +75,7 @@ func (e *HoardEngine) ImportFromStore(st *store.AgentStore, uploadsDir string) (
 			nameByHash[res.Torrents[i].InfoHash] = res.Torrents[i].Name
 		}
 	} else if lerr != nil {
-		slog.Warn("hoard: store import — ListTorrents failed, falling back to per-torrent add", "error", lerr)
+		slog.Warn("hoard: store import, ListTorrents failed, falling back to per-torrent add", "error", lerr)
 	}
 	slog.Info("hoard: importing from store", "total", total, "engine_has", len(nameByHash))
 
@@ -168,7 +168,7 @@ func (e *HoardEngine) ImportFromStoreSession(st *store.Store, sess store.Session
 			nameByHash[res.Torrents[i].InfoHash] = res.Torrents[i].Name
 		}
 	} else if lerr != nil {
-		slog.Warn("hoard: store-session import — ListTorrents failed, per-torrent fallback", "error", lerr)
+		slog.Warn("hoard: store-session import, ListTorrents failed, per-torrent fallback", "error", lerr)
 	}
 	slog.Info("hoard: importing from store (session)", "total", total, "engine_has", len(nameByHash))
 

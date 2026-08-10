@@ -20,7 +20,7 @@
             <div class="startup-counter">
                 <span id="startup-restored">0</span>
                 <span class="startup-sep">/</span>
-                <span id="startup-total">—</span>
+                <span id="startup-total">-</span>
                 <span class="startup-unit">torrents</span>
             </div>
         </div>
@@ -102,12 +102,12 @@
                     <h3>All-time upload <span class="tag" id="ov-milestone-tag">&#9670; 2 PiB milestone</span></h3>
                     <div class="card-body">
                         <div class="milestone">
-                            <div class="num" id="ov-milestone-num">&mdash;</div>
+                            <div class="num" id="ov-milestone-num">-</div>
                             <div class="side">
-                                <div class="cap">ratio <b id="ov-ratio">&mdash;</b> &nbsp;&middot;&nbsp; <b id="ov-dl-total">&mdash;</b> downloaded &nbsp;&middot;&nbsp; <b id="ov-torrents-total">&mdash;</b> torrents seeding</div>
+                                <div class="cap">ratio <b id="ov-ratio">-</b> &nbsp;&middot;&nbsp; <b id="ov-dl-total">-</b> downloaded &nbsp;&middot;&nbsp; <b id="ov-torrents-total">-</b> torrents seeding</div>
                                 <div class="track"><div class="fill" id="ov-milestone-fill"></div></div>
-                                <div class="prowl"><span id="ov-milestone-cur">&mdash;</span><span class="goal" id="ov-milestone-goal">&#9670; 2.00 PiB</span></div>
-                                <div class="prowl"><span id="ov-milestone-togo">&mdash;</span><span></span></div>
+                                <div class="prowl"><span id="ov-milestone-cur">-</span><span class="goal" id="ov-milestone-goal">&#9670; 2.00 PiB</span></div>
+                                <div class="prowl"><span id="ov-milestone-togo">-</span><span></span></div>
                             </div>
                         </div>
                         <div class="accel" id="ov-accel">
@@ -174,12 +174,12 @@
                 <span>Current UL: <strong id="race-current-ul">0 B/s</strong></span>
                 <span>Ratio: <strong id="race-session-ratio">0.00</strong></span>
                 <span>Grabbed: <strong id="race-session-grabbed">0</strong></span>
-                <span>Avg Share: <strong id="race-avg-share">—</strong></span>
+                <span>Avg Share: <strong id="race-avg-share">-</strong></span>
             </div>
             <div class="rp2" id="race-policy">
                 <div class="rp2-row">
                     <div class="rp2-gauge"><div class="rp2-fill" id="rp-fill"></div><div class="rp2-mark low" id="rp-mark-low"></div><div class="rp2-mark" id="rp-mark-high"></div></div>
-                    <div class="rp2-disk"><b id="rp-disk-pct">—</b> used · <span id="rp-disk-free">—</span> free</div>
+                    <div class="rp2-disk"><b id="rp-disk-pct">-</b> used · <span id="rp-disk-free">-</span> free</div>
                     <div class="rp2-spacer"></div>
                     <button class="rp2-btn ghost" id="rp-apply" style="display:none" onclick="_rpRestart()">Apply &amp; restart</button>
                     <button class="rp2-btn" id="rp-drain-now" onclick="_rpDrainNow(this)">Drain now</button>
@@ -188,7 +188,7 @@
                 <div class="rp2-row rp2-drain-result" id="rp-drain-result" style="display:none"></div>
                 <div class="rp2-row rp2-warn" id="rp-warn" style="display:none"></div>
                 <div class="rp2-row">
-                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSaveEnabled(this.checked)"><span class="rp2-sl"></span></label>Emergency drain<span class="rp2-info">i<span class="rp2-tip">Every <b>check</b>s Hydra looks at the /race disk. Above the <b>start</b> mark it deletes the <b>oldest</b> torrents (never younger than the floor) until usage drops to <b>down&nbsp;to</b>. The data is erased &mdash; this is the safety valve, not graduation.</span></span></div>
+                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSaveEnabled(this.checked)"><span class="rp2-sl"></span></label>Emergency drain<span class="rp2-info">i<span class="rp2-tip">Every <b>check</b>s Hydra looks at the /race disk. Above the <b>start</b> mark it deletes the <b>oldest</b> torrents (never younger than the floor) until usage drops to <b>down&nbsp;to</b>. The data is erased - this is the safety valve, not graduation.</span></span></div>
                     <div class="rp2-body" id="rp-body-drain">
                         <div class="rp2-f">start <input type="number" id="rp-high" min="1" max="100" onchange="_rpSave('high_watermark_pct', parseInt(this.value))">%</div>
                         <div class="rp2-f">down to <input type="number" id="rp-low" min="1" max="100" onchange="_rpSave('low_watermark_pct', parseInt(this.value))">%</div>
@@ -197,7 +197,7 @@
                     </div>
                 </div>
                 <div class="rp2-row">
-                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-ar-enabled" onchange="_rpSaveAR(this.checked)"><span class="rp2-sl"></span></label>Handle old races<span class="rp2-info">i<span class="rp2-tip">Independent of disk pressure. A race matching the age/ratio rule (<b>AND</b>/<b>OR</b>) is handled by the chosen <b>action</b>. A threshold of <b>0</b> is no constraint on that axis, not "off" &mdash; the toggle is the on/off, so <b>0</b> and <b>0</b> match everything past the <b>keep</b> floor. Actions: <b>Delete</b> erases it, or <b>Move&nbsp;&rarr;&nbsp;hoard</b> graduates it &mdash; copied to its linked hoard category's storage, kept seeding, removed from the race disk. No category link &rarr; skipped, never deleted.</span></span></div>
+                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-ar-enabled" onchange="_rpSaveAR(this.checked)"><span class="rp2-sl"></span></label>Handle old races<span class="rp2-info">i<span class="rp2-tip">Independent of disk pressure. A race matching the age/ratio rule (<b>AND</b>/<b>OR</b>) is handled by the chosen <b>action</b>. A threshold of <b>0</b> is no constraint on that axis, not "off" - the toggle is the on/off, so <b>0</b> and <b>0</b> match everything past the <b>keep</b> floor. Actions: <b>Delete</b> erases it, or <b>Move&nbsp;&rarr;&nbsp;hoard</b> graduates it - copied to its linked hoard category's storage, kept seeding, removed from the race disk. No category link &rarr; skipped, never deleted.</span></span></div>
                     <div class="rp2-body" id="rp-body-ar">
                         <div class="rp2-f">older <input type="number" id="rp-maxage" min="0" onchange="_rpSave('max_age_hours', parseInt(this.value)||0)">h</div>
                         <div class="rp2-f rp2-seg"><button type="button" id="rp-mode-and" class="on" onclick="_rpSetMode('and')">AND</button><button type="button" id="rp-mode-or" onclick="_rpSetMode('or')">OR</button></div>
@@ -353,7 +353,7 @@
 
                     <!-- Peer snapshot table -->
                     <div class="card" style="margin-bottom:10px">
-                        <h3 class="card-title-sm">Peers at <span id="tl-peer-time">—</span></h3>
+                        <h3 class="card-title-sm">Peers at <span id="tl-peer-time">-</span></h3>
                         <table class="detail-table" id="tl-peer-table">
                             <thead>
                                 <tr>
@@ -548,14 +548,14 @@
                         </div>
                         <div class="form-group" id="cat-graduate-wrap" style="grid-column:1/-1;display:none">
                             <label>Graduate to (hoard category)</label>
-                            <select id="cat-graduate-to"><option value="">&mdash; none (no graduation) &mdash;</option></select>
+                            <select id="cat-graduate-to"><option value="">- none (no graduation) -</option></select>
                             <div class="sr-desc">Race only. When a torrent in this category graduates, it moves to this hoard category&#39;s storage and label.</div>
                         </div>
                         <div class="form-group" style="grid-column:1/-1">
                             <label>Strategy</label>
                             <select id="cat-strategy">
-                                <option value="all">all — fan-out to every placement agent (multi-home)</option>
-                                <option value="least_torrents">least_torrents — pick the agent with fewest torrents</option>
+                                <option value="all">all, fan-out to every placement agent (multi-home)</option>
+                                <option value="least_torrents">least_torrents, pick the agent with fewest torrents</option>
                             </select>
                         </div>
                         <div class="form-group" style="grid-column:1/-1">
@@ -648,7 +648,7 @@
             <table id="engines-table"><thead><tr><th>ID</th><th>Role</th><th>Port</th><th>Actions</th></tr></thead>
                 <tbody id="engines-tbody"><tr><td colspan="4" class="empty">No extra engines</td></tr></tbody></table>
             <div id="restart-banner" style="display:none;margin-top:8px;padding:8px;background:#3a2a00;border-radius:4px">
-                Config changed — restart to apply. <button class="btn-small" onclick="restartHydra()">Restart now</button>
+                Config changed, restart to apply. <button class="btn-small" onclick="restartHydra()">Restart now</button>
             </div>
         </section>
 
@@ -860,7 +860,7 @@
                     </div>
                 </div>
                 <div class="bm-chart-container">
-                    <div class="bm-chart-title">Upload / Download (Mbps) — last 7 days</div>
+                    <div class="bm-chart-title">Upload / Download (Mbps), last 7 days</div>
                     <div class="bm-chart-wrap"><canvas id="chart-vpn"></canvas></div>
                 </div>
             </div>
@@ -949,7 +949,7 @@
                     </div>
 
                     <details class="add-advanced" style="margin-bottom:16px">
-                        <summary style="cursor:pointer;color:var(--text-secondary)">Advanced — override mode &amp; save path</summary>
+                        <summary style="cursor:pointer;color:var(--text-secondary)">Advanced, override mode &amp; save path</summary>
                         <div class="form-group" style="margin-top:12px">
                             <label>Mode</label>
                             <div class="mode-selector">
@@ -960,7 +960,7 @@
 
                         <div class="form-group">
                             <label for="save-path">Save Path</label>
-                            <input type="text" id="save-path" placeholder="Auto-filled from category — or set a path">
+                            <input type="text" id="save-path" placeholder="Auto-filled from category, or set a path">
                         </div>
                     </details>
 
@@ -1055,6 +1055,6 @@
         <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
     </div>
 
-    <script src="/static/app.js?v=1.3.57"></script>
+    <script src="/static/app.js?v=1.3.58"></script>
 </body>
 </html>

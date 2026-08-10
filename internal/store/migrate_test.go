@@ -333,7 +333,7 @@ func TestMigrateSidecars(t *testing.T) {
 			t.Fatalf("%s should have been renamed aside", n)
 		}
 		if _, err := os.Stat(filepath.Join(dir, n+".migrated")); err != nil {
-			t.Fatalf("%s.migrated missing — the original numbers must be recoverable", n)
+			t.Fatalf("%s.migrated missing, the original numbers must be recoverable", n)
 		}
 	}
 

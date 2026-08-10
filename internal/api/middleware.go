@@ -13,8 +13,10 @@ func (s *Server) apiKeyAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		expectedKey := s.config.Daemon.APIKey
 
-		// Skip auth if using the default key (dev mode)
-		if expectedKey == "change-me-in-production" {
+		// Skip auth if using the default key (dev mode). Not while the instance
+		// still has no admin account: an unconfigured install carrying a legacy
+		// placeholder key would otherwise serve its whole API to anyone.
+		if expectedKey == "change-me-in-production" && s.config.Auth.PasswordHash != "" {
 			c.Next()
 			return
 		}
