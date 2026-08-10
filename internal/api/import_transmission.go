@@ -25,6 +25,9 @@ type transmissionReq struct {
 	PathMap            map[string]string `json:"path_map"`
 	CategoriesFromDirs bool              `json:"categories_from_dirs"`
 	ImportLabels       bool              `json:"import_labels"`
+	// StartStopped imports everything stopped, whatever Transmission said, so
+	// a trial run announces nothing until the user starts the torrents.
+	StartStopped bool `json:"start_stopped"`
 }
 
 // categoryFromDest turns a destination folder into a category name: the last
@@ -338,7 +341,7 @@ func (s *Server) runTransmissionImport(job *importJob, req transmissionReq) {
 		}
 		// A torrent paused in Transmission stays stopped here. Set right after
 		// the add so the bootstrap announce finds the intent and stays quiet.
-		if t.Resume.Paused {
+		if req.StartStopped || t.Resume.Paused {
 			if err := s.hoardEngine.SetUserPaused(ih, true); err == nil {
 				persistPaused([]string{ih}, true)
 			}
