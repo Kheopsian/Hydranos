@@ -997,7 +997,7 @@ func (e *RaceEngine) checkTrackerHealth() {
 		trackerURL := ""
 		if trks, terr := e.client.GetTrackers(ih); terr == nil {
 			for _, t := range trks {
-				if strings.HasPrefix(t.URL, "http://") || strings.HasPrefix(t.URL, "https://") {
+				if isSupportedTrackerScheme(t.URL) {
 					trackerURL = t.URL
 					break
 				}

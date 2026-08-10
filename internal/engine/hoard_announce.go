@@ -481,8 +481,8 @@ func (h *HoardAnnouncer) announceAllTiers(infoHash string, totalSize, left, uplo
 	for _, tier := range tiers {
 		anyOK := false
 		for _, url := range tier {
-			if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-				continue // skip UDP for now (Hydra never used UDP trackers)
+			if !isSupportedTrackerScheme(url) {
+				continue
 			}
 			peers, intervalSec, seeds, leechers, errMsg, ok := h.announceFromAllBindings(url, infoHash, uploaded, downloaded, left, event)
 			if !ok {
