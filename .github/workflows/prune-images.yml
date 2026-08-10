@@ -89,7 +89,7 @@ jobs:
           PY
 
       - name: Delete planned versions
-        if: ${{ github.event.inputs.dry_run != true && steps.plan.outputs.count != 0 }}
+        if: ${{ !inputs.dry_run && steps.plan.outputs.count != 0 }}
         uses: actions/delete-package-versions@v5
         with:
           package-name: hydra
