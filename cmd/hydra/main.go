@@ -401,6 +401,13 @@ func main() {
 	// tick never runs the heavy first import inline.
 	var torStore *store.Store
 	var storeReady atomic.Bool
+	// The second half of the same gate. The API server is already serving by the
+	// time the boot-from-store import runs, and a saveState it triggers syncs the
+	// engine's view over the store wholesale. Until the import has handed the
+	// engines what the store knows, that view is the resume data's -- no
+	// category, no save path -- and syncing it blanks the rows the category
+	// backfill has just repaired. Nothing syncs until the import is done.
+	var storeImported atomic.Bool
 	if *frontOnly || *agentOnly {
 		// controller / agent mode: no monolith shadow store (agents own their
 		// per-agent DBs; a shadow hydra.db here would be a parasitic dangling file).
@@ -622,7 +629,7 @@ func main() {
 	apiServer.SetArrCleanup(arrCleanup)
 	apiServer.SetBenchDB(&benchAPIAdapter{db: benchDB})
 	apiServer.SetSaveStateCallback(func() {
-		saveState(stateMgr, raceEngine, hoardEngine, torStore, &storeReady)
+		saveState(stateMgr, raceEngine, hoardEngine, torStore, &storeReady, &storeImported)
 	})
 
 	// ---- Health invariant scanner ----
@@ -841,6 +848,7 @@ func main() {
 		hN, hE := hoardEngine.ImportFromStoreSession(torStore, store.Hoard, up)
 		slog.Info("boot-from-store: loaded torrents from SQLite store",
 			"race", rN, "race_errors", rE, "hoard", hN, "hoard_errors", hE)
+		storeImported.Store(true)
 
 		// The content layout flag was the last thing only state.json knew: hand
 		// it over once, then retire the file. From the next boot on the store is
@@ -862,6 +870,9 @@ func main() {
 			slog.Info("state.json retired — the store is now the only source",
 				"content_folder_moved", moved, "still_unknown", unknown, "renamed", renamed)
 		}
+	} else {
+		// No import to wait on: the engines are as loaded as they are going to get.
+		storeImported.Store(true)
 	}
 
 	// (the state.json metadata overlay lived here — the store carries all of
@@ -996,7 +1007,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				saveState(stateMgr, raceEngine, hoardEngine, torStore, &storeReady)
+				saveState(stateMgr, raceEngine, hoardEngine, torStore, &storeReady, &storeImported)
 			}
 		}
 	}()
@@ -1035,7 +1046,7 @@ func main() {
 	cancel()
 
 	slog.Info("Saving state...")
-	saveState(stateMgr, raceEngine, hoardEngine, torStore, &storeReady)
+	saveState(stateMgr, raceEngine, hoardEngine, torStore, &storeReady, &storeImported)
 
 	benchDB.Close()
 
@@ -1103,7 +1114,7 @@ func backfillCategories(dataDir string, savedState *state.State, torStore *store
 // State persistence
 // ---------------------------------------------------------------------------
 
-func saveState(stateMgr *state.Manager, race *engine.RaceEngine, hoard *engine.HoardEngine, torStore *store.Store, ready *atomic.Bool) {
+func saveState(stateMgr *state.Manager, race *engine.RaceEngine, hoard *engine.HoardEngine, torStore *store.Store, ready, imported *atomic.Bool) {
 	raceMetas := race.GetTorrentMetas()
 	hoardMetas := hoard.GetTorrentMetas()
 
@@ -1132,7 +1143,10 @@ func saveState(stateMgr *state.Manager, race *engine.RaceEngine, hoard *engine.H
 	// state.json is not written any more: the store holds all of it.
 
 	// Shadow-sync the SQLite store (best-effort; never affects state.json).
-	if torStore != nil && ready != nil && ready.Load() {
+	// Both gates: the store has to be past its initial backfill, and the engines
+	// past the boot import that hands them what the store knows. Syncing before
+	// either one writes an incomplete view over a complete row.
+	if torStore != nil && ready != nil && ready.Load() && imported != nil && imported.Load() {
 		syncStore(torStore, raceMetas, hoardMetas)
 	}
 }
