@@ -126,9 +126,16 @@ func (e *HoardEngine) ImportFromStore(st *store.AgentStore, uploadsDir string) (
 	if len(fast) > 0 {
 		e.mu.Lock()
 		for ih, info := range fast {
-			if _, exists := e.torrents[ih]; !exists {
-				e.torrents[ih] = info
+			if existing, exists := e.torrents[ih]; exists {
+				// The engine rebuilt this torrent from its own resume data,
+				// which carries no category and no save path -- those live in
+				// the store now. Dropping the store record here was what made a
+				// restored category disappear again: the next sync writes the
+				// engine's view back over the store, blanking what it holds.
+				adoptStoreMetadata(existing, info)
+				continue
 			}
+			e.torrents[ih] = info
 		}
 		e.mu.Unlock()
 	}
@@ -212,14 +219,46 @@ func (e *HoardEngine) ImportFromStoreSession(st *store.Store, sess store.Session
 	if len(fast) > 0 {
 		e.mu.Lock()
 		for ih, info := range fast {
-			if _, exists := e.torrents[ih]; !exists {
-				e.torrents[ih] = info
+			if existing, exists := e.torrents[ih]; exists {
+				// The engine rebuilt this torrent from its own resume data,
+				// which carries no category and no save path -- those live in
+				// the store now. Dropping the store record here was what made a
+				// restored category disappear again: the next sync writes the
+				// engine's view back over the store, blanking what it holds.
+				adoptStoreMetadata(existing, info)
+				continue
 			}
+			e.torrents[ih] = info
 		}
 		e.mu.Unlock()
 	}
 	slog.Info("hoard: store-session import complete", "imported", imported, "errors", errors, "fast", len(fast), "real_adds", realAdds)
 	return
+}
+
+// adoptStoreMetadata copies the durable, store-owned fields onto an entry the
+// engine had already rebuilt from resume data.
+//
+// A field the store does not carry is left alone: the store fills gaps, it
+// never blanks what the engine knows. That matters while a database is still
+// catching up -- an empty category in the store is not yet a statement that the
+// torrent has none, only that the store was never told.
+func adoptStoreMetadata(dst, src *TorrentInfo) {
+	if src.Category != "" {
+		dst.Category = src.Category
+	}
+	if src.SavePath != "" {
+		dst.SavePath = src.SavePath
+	}
+	if src.TorrentFilePath != "" {
+		dst.TorrentFilePath = src.TorrentFilePath
+	}
+	if !src.CompletedTime.IsZero() {
+		dst.CompletedTime = src.CompletedTime
+	}
+	if src.ContentFolder != nil {
+		dst.ContentFolder = src.ContentFolder
+	}
 }
 
 // ImportFromStoreSession reloads the monolith's race engine from the store.

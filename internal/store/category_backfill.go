@@ -17,7 +17,17 @@ import (
 // It must run exactly once. An empty category is a legitimate choice, so a
 // repair keyed on emptiness alone would undo a user's deliberate clearing on
 // every boot that followed.
-const MetaCategoryBackfill = "category_backfill_v1"
+//
+// v2, not v1: the v3.52.1 repair wrote the categories back and then watched
+// them vanish within the same boot. The engine had already rebuilt its torrents
+// from resume data, which carries no category, and the store import dropped the
+// store's record for every torrent it found there -- so the next sync wrote
+// that blank view straight back over the repair. v1's marker was left behind
+// claiming a repair that no longer exists on disk, so the fixed build needs a
+// key of its own to be allowed to run again. Anyone who cleared a category by
+// hand between the two gets it back once; there was no boot in between where
+// the store held their choice anyway.
+const MetaCategoryBackfill = "category_backfill_v2"
 
 // BackfillCategories restores the categories the v3.50.0 store migration
 // dropped, then records that it has done so. It reports ran=false and touches
