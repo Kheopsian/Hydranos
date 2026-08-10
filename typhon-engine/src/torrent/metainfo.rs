@@ -124,6 +124,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         trackers,
         private,
         multi_file,
+        info_dict_len: info_raw.len() as u32,
     })
 }
 
@@ -137,6 +138,14 @@ fn sha1_hash(data: &[u8]) -> InfoHash {
 }
 
 /// Extract the raw bencoded info dict from the torrent data.
+/// Read a .torrent from disk and return just its raw info dict bytes, for
+/// serving BEP 9. Deliberately re-read rather than cached: this runs only when
+/// a peer asks, which is rare next to the cost of holding every dict in memory.
+pub fn info_dict_from_file(path: &str) -> Result<Vec<u8>, String> {
+    let data = std::fs::read(path).map_err(|e| format!("read {}: {}", path, e))?;
+    find_info_raw(&data)
+}
+
 fn find_info_raw(data: &[u8]) -> Result<Vec<u8>, String> {
     // Find "4:infod" pattern and extract until matching end
     let needle = b"4:info";

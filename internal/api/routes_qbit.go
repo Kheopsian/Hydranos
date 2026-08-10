@@ -287,6 +287,11 @@ func (s *Server) qbitTorrentsInfo(c *gin.Context) {
 	allTorrents := qbitSnapshot(func() []map[string]interface{} {
 		// Non-nil: an empty listing must marshal as [], never null.
 		out := make([]map[string]interface{}, 0)
+		// Magnets whose metadata has not landed yet: qBit calls this metaDL,
+		// and clients poll for it rather than treating the grab as lost.
+		for _, p := range PendingMagnets() {
+			out = append(out, p.QbitRow())
+		}
 		if s.raceEngine != nil {
 			for _, t := range s.raceEngine.GetAllStatus() {
 				out = append(out, hydraToQbitTorrent(t, "race"))

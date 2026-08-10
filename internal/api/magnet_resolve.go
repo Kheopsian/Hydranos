@@ -204,3 +204,66 @@ func (s *Server) addResolvedMagnet(link *magnet.Link, hexInfo string, trackers [
 	}
 	return nil
 }
+
+// Row returns the pending magnet as a UI list row. Everything a torrent would
+// report is zero because nothing is known yet -- not the name, not the size,
+// not the file list. That is the point of showing it: the user sees the magnet
+// was accepted and is working, instead of an empty list after a grab.
+func (p PendingMagnet) Row() map[string]interface{} {
+	name := p.Name
+	if name == "" {
+		// No `dn` in the magnet: the info hash is all we can honestly show.
+		name = p.InfoHash
+	}
+	state := "resolving"
+	if p.State == "failed" {
+		state = "error"
+	}
+	return map[string]interface{}{
+		"info_hash": p.InfoHash, "name": name, "state": state, "progress": 0.0,
+		"total_size": 0, "total_upload": 0, "total_download": 0,
+		"upload_rate": 0, "download_rate": 0,
+		"num_peers": 0, "num_seeds": 0, "swarm_seeds": 0, "swarm_leechers": 0,
+		"save_path": "", "added_time": p.Started.Unix(), "completed_time": 0,
+		"ratio": 0.0, "tracker_error": p.State == "failed", "tracker_error_msg": p.Error,
+		"torrent_error": p.State == "failed", "torrent_error_msg": p.Error,
+		"injected_peers": 0, "injection_hit": false, "uploader": "",
+		"category": "", "agent": p.Target, "resolving_magnet": true,
+	}
+}
+
+// QbitRow returns the pending magnet in the shape the qBit shim serves.
+// qBittorrent reports a magnet without metadata as metaDL, and the *arr stack
+// and cross-seed already understand that state.
+func (p PendingMagnet) QbitRow() map[string]interface{} {
+	name := p.Name
+	if name == "" {
+		name = p.InfoHash
+	}
+	state := "metaDL"
+	if p.State == "failed" {
+		state = "error"
+	}
+	return map[string]interface{}{
+		"hash": p.InfoHash, "name": name, "state": state, "progress": 0.0,
+		"size": 0, "total_size": 0, "dlspeed": 0, "upspeed": 0,
+		"num_seeds": 0, "num_leechs": 0, "num_complete": 0, "num_incomplete": 0,
+		"ratio": 0.0, "eta": 8640000, "added_on": p.Started.Unix(), "completion_on": 0,
+		"category": "", "tags": "", "save_path": "", "content_path": "",
+		"downloaded": 0, "uploaded": 0, "amount_left": 0, "completed": 0,
+		"seen_complete": 0, "priority": 0, "seq_dl": false, "f_l_piece_prio": false,
+		"auto_tmm": false, "super_seeding": false, "force_start": false,
+		"magnet_uri": "", "time_active": 0, "tracker": "", "availability": 0.0,
+	}
+}
+
+// pendingMagnetsFor returns the magnets still resolving for one engine mode.
+func pendingMagnetsFor(mode string) []PendingMagnet {
+	out := []PendingMagnet{}
+	for _, p := range PendingMagnets() {
+		if p.Mode == mode {
+			out = append(out, p)
+		}
+	}
+	return out
+}

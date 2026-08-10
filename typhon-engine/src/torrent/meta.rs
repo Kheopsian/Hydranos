@@ -42,6 +42,12 @@ pub struct TorrentMeta {
     /// False for old-style single-file torrents (just the `length` key);
     /// there the on-disk path is simply `name` at save_path root.
     pub multi_file: bool,
+    /// Size in bytes of the raw info dict this torrent was parsed from.
+    /// Advertised as BEP 9 `metadata_size` so peers know they can fetch the
+    /// dict from us. Only the length is kept: the bytes themselves are re-read
+    /// from the .torrent on demand, because holding them for every torrent
+    /// would cost far more RAM than serving them is worth.
+    pub info_dict_len: u32,
 }
 
 impl TorrentMeta {
