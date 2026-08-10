@@ -17,6 +17,8 @@ pub fn dispatch(
     match method {
         "ping" => json!({"pong": true}),
         "add_torrent" => add_torrent(params, torrent_mgr),
+        "fetch_metadata" => fetch_metadata(params, config),
+        "get_metadata" => get_metadata(params),
         "remove_torrent" => remove_torrent(params, torrent_mgr),
         "start_torrent" => start_torrent(params, torrent_mgr),
         "stop_torrent" => stop_torrent(params, torrent_mgr),
@@ -66,6 +68,50 @@ fn add_torrent(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
             json!({"info_hash": hex_encode(&ih), "name": name})
         }
         Err(e) => json!({"error": e}),
+    }
+}
+
+/// Kick off magnet resolution. Returns immediately: resolution is a background
+/// job, polled through `get_metadata`.
+fn fetch_metadata(params: &Value, config: &EngineConfig) -> Value {
+    let ih = match get_info_hash(params) {
+        Ok(ih) => ih,
+        Err(e) => return e,
+    };
+    let trackers: Vec<String> = params
+        .get("trackers")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let peers: Vec<std::net::SocketAddr> = params
+        .get("peers")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).filter_map(|s| s.parse().ok()).collect())
+        .unwrap_or_default();
+    let binding_id = params.get("binding_id").and_then(|v| v.as_u64()).map(|n| n as u32);
+
+    let started = crate::magnet::start(ih, trackers, peers, config, binding_id);
+    json!({"info_hash": hex_encode(&ih), "started": started})
+}
+
+/// Poll a resolution. `state` is one of resolving / done / failed; on done the
+/// raw info dict comes back hex-encoded (there is no base64 in the tree).
+fn get_metadata(params: &Value) -> Value {
+    let ih = match get_info_hash(params) {
+        Ok(ih) => ih,
+        Err(e) => return e,
+    };
+    match crate::magnet::state_of(&ih) {
+        None => json!({"state": "unknown"}),
+        Some(crate::magnet::JobState::Resolving) => json!({"state": "resolving"}),
+        Some(crate::magnet::JobState::Failed(e)) => json!({"state": "failed", "error": e}),
+        Some(crate::magnet::JobState::Done(dict)) => {
+            let encoded = crate::magnet::hex(&dict);
+            // The caller has it now; holding megabytes per resolved magnet
+            // would be a slow leak at our torrent counts.
+            crate::magnet::forget(&ih);
+            json!({"state": "done", "info": encoded})
+        }
     }
 }
 

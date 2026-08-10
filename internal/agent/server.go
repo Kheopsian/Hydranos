@@ -322,6 +322,18 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		}
 		return reply(nil, c.RemoveTorrent(p.InfoHash, p.KeepData))
 
+	case agentwire.MethodFetchMetadata:
+		var p agentwire.FetchMetadataParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		return reply(c.FetchMetadata(p.InfoHash, p.Trackers, p.Peers, p.BindingID))
+	case agentwire.MethodGetMetadata:
+		var p agentwire.GetMetadataParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		return reply(c.GetMetadata(p.InfoHash))
 	case agentwire.MethodAddPeers:
 		var p agentwire.AddPeersParams
 		if err := unmarshal(&p); err != nil {

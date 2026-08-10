@@ -2017,3 +2017,15 @@ func (g *graduator) Graduate(infoHash string) (bool, error) {
 	slog.Info("graduate: race->hoard", "name", name, "category", rc.GraduateTo, "dest", hc.SavePath)
 	return true, nil
 }
+func (a *raceAPIAdapter) FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error) {
+	return a.engine.FetchMetadata(infoHash, trackers, peers, bindingID)
+}
+func (a *raceAPIAdapter) GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error) {
+	return a.engine.GetMetadata(infoHash)
+}
+func (a *hoardAPIAdapter) FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error) {
+	return a.engine.FetchMetadata(infoHash, trackers, peers, bindingID)
+}
+func (a *hoardAPIAdapter) GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error) {
+	return a.engine.GetMetadata(infoHash)
+}

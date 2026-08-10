@@ -1128,3 +1128,21 @@ func (e *RaceEngine) SetEngineOptFlag(name string, on bool, value int64) (map[st
 func (e *RaceEngine) EngineOptFlags() (map[string]interface{}, error) {
 	return e.client.EngineOptFlags()
 }
+
+// FetchMetadata forwards a magnet resolution request to the engine client.
+// Resolution runs wherever the client points, so on a remote agent it happens
+// on the agent's own network.
+func (e *RaceEngine) FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error) {
+	if e.client == nil {
+		return nil, fmt.Errorf("race: engine client not available")
+	}
+	return e.client.FetchMetadata(infoHash, trackers, peers, bindingID)
+}
+
+// GetMetadata polls a resolution started by FetchMetadata.
+func (e *RaceEngine) GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error) {
+	if e.client == nil {
+		return nil, fmt.Errorf("race: engine client not available")
+	}
+	return e.client.GetMetadata(infoHash)
+}

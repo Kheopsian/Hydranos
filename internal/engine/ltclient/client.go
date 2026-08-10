@@ -452,6 +452,43 @@ func (c *Client) AddTorrentWithOptions(torrentPath, savePath string, stopped, se
 	return &result, nil
 }
 
+// FetchMetadata asks the engine to start resolving a magnet. It returns as soon
+// as the job is queued -- resolution takes seconds to minutes, so the engine
+// runs it in the background and we poll GetMetadata.
+func (c *Client) FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*FetchMetadataResult, error) {
+	raw, err := c.call("fetch_metadata", FetchMetadataParams{
+		InfoHash:  infoHash,
+		Trackers:  trackers,
+		Peers:     peers,
+		BindingID: bindingID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result FetchMetadataResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal fetch_metadata: %w", err)
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("ltclient: %s", result.Error)
+	}
+	return &result, nil
+}
+
+// GetMetadata polls a resolution job. On "done" the engine hands over the raw
+// info dict and forgets the job, so a successful poll only ever fires once.
+func (c *Client) GetMetadata(infoHash string) (*GetMetadataResult, error) {
+	raw, err := c.call("get_metadata", map[string]string{"info_hash": infoHash})
+	if err != nil {
+		return nil, err
+	}
+	var result GetMetadataResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ltclient: unmarshal get_metadata: %w", err)
+	}
+	return &result, nil
+}
+
 // RemoveTorrent removes a torrent. If keepData is true, files are kept.
 func (c *Client) RemoveTorrent(infoHash string, keepData bool) error {
 	_, err := c.call("remove_torrent", map[string]interface{}{

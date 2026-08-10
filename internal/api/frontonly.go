@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 	"time"
 
 	"github.com/Kheopsian/hydra/internal/engine"
@@ -134,4 +135,16 @@ func (s *Server) defaultAgent() string {
 		return s.remoteAgents[0].name
 	}
 	return "local" // no agents: local stub add returns a clear error
+}
+func (emptyRaceEngine) FetchMetadata(string, []string, []string, *uint32) (*ltclient.FetchMetadataResult, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyRaceEngine) GetMetadata(string) (*ltclient.GetMetadataResult, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyHoardEngine) FetchMetadata(string, []string, []string, *uint32) (*ltclient.FetchMetadataResult, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyHoardEngine) GetMetadata(string) (*ltclient.GetMetadataResult, error) {
+	return nil, errNoLocalEngine
 }

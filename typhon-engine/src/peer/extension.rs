@@ -1,4 +1,5 @@
-//! BEP 10 extension protocol handshake + BEP 11 PEX (Peer Exchange).
+//! BEP 10 extension protocol handshake + BEP 11 PEX (Peer Exchange)
+//! + BEP 9 ut_metadata (fetching an info dict from the swarm).
 //!
 //! On extension handshake: peer sends `extended_id=0` with bencoded dict
 //! containing `m: {ut_pex: <their_id>, ...}` (their_id is the ID we MUST use to send them
@@ -12,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 use std::collections::BTreeMap;
 
-use super::bencode::{Bencode, decode};
+use super::bencode::{Bencode, decode, decode_prefix};
 
 /// Reserved bits handshake byte for LTEP (BEP 10): reserved[5] |= 0x10.
 pub const RESERVED_LTEP: u8 = 0x10;
@@ -20,10 +21,30 @@ pub const RESERVED_LTEP: u8 = 0x10;
 /// Our advertised extended message id for ut_pex.
 pub const OUR_UT_PEX_ID: u8 = 1;
 
+/// Our advertised extended message id for ut_metadata (BEP 9).
+pub const OUR_UT_METADATA_ID: u8 = 2;
+
+/// BEP 9 splits the info dict into fixed 16 KiB blocks; only the last is short.
+pub const METADATA_BLOCK: usize = 16384;
+
+/// BEP 9 msg_type values.
+pub const METADATA_REQUEST: i64 = 0;
+pub const METADATA_DATA: i64 = 1;
+pub const METADATA_REJECT: i64 = 2;
+
+/// How many 16 KiB blocks an info dict of `size` bytes is split into.
+pub fn metadata_block_count(size: usize) -> u32 {
+    ((size + METADATA_BLOCK - 1) / METADATA_BLOCK) as u32
+}
+
 /// Per-connection extension state.
 pub struct PeerExt {
     /// Their extended message id for ut_pex (extracted from their handshake.m.ut_pex).
     pub ut_pex_id: Option<u8>,
+    /// Their extended message id for ut_metadata, if they carry BEP 9.
+    pub ut_metadata_id: Option<u8>,
+    /// Info dict size they advertised, if any.
+    pub metadata_size: Option<usize>,
     /// Last time we sent a PEX message to this peer.
     pub last_pex_sent: Option<Instant>,
     /// Peers we have already advertised to this peer (so we can compute added/dropped deltas).
@@ -32,18 +53,32 @@ pub struct PeerExt {
 
 impl PeerExt {
     pub fn new() -> Self {
-        Self { ut_pex_id: None, last_pex_sent: None, sent_peers: HashSet::new() }
+        Self {
+            ut_pex_id: None,
+            ut_metadata_id: None,
+            metadata_size: None,
+            last_pex_sent: None,
+            sent_peers: HashSet::new(),
+        }
     }
 }
 
 /// Build the BEP 10 extension handshake payload (without the leading extended_id=0 byte).
 /// Caller prepends 0x00 (extended_id 0 = extension handshake) before sending.
-pub fn build_extension_handshake(listen_port: u16) -> Vec<u8> {
+/// `metadata_size` is the size of our info dict when we hold it (so peers know
+/// they can fetch it from us). Pass `None` while resolving a magnet: we still
+/// advertise ut_metadata, because the id we publish here is the one peers must
+/// use to send data *back* to us.
+pub fn build_extension_handshake(listen_port: u16, metadata_size: Option<usize>) -> Vec<u8> {
     let mut m = BTreeMap::new();
     m.insert(b"ut_pex".to_vec(), Bencode::Int(OUR_UT_PEX_ID as i64));
+    m.insert(b"ut_metadata".to_vec(), Bencode::Int(OUR_UT_METADATA_ID as i64));
 
     let mut root = BTreeMap::new();
     root.insert(b"m".to_vec(), Bencode::Dict(m));
+    if let Some(size) = metadata_size {
+        root.insert(b"metadata_size".to_vec(), Bencode::Int(size as i64));
+    }
     root.insert(b"p".to_vec(), Bencode::Int(listen_port as i64));
     root.insert(b"v".to_vec(), Bencode::Bytes(b"typhon 0.2".to_vec()));
     root.insert(b"reqq".to_vec(), Bencode::Int(250));
@@ -53,15 +88,89 @@ pub fn build_extension_handshake(listen_port: u16) -> Vec<u8> {
 
 /// Parse a peer's extension handshake. Returns their ut_pex extended id if present.
 pub fn parse_extension_handshake(payload: &[u8]) -> Option<u8> {
+    parse_extension_handshake_full(payload)?.ut_pex_id
+}
+
+/// What a peer advertised in its BEP 10 handshake.
+pub struct ExtHandshake {
+    pub ut_pex_id: Option<u8>,
+    pub ut_metadata_id: Option<u8>,
+    /// Total size of their info dict, from the top-level `metadata_size` key.
+    pub metadata_size: Option<usize>,
+}
+
+/// Parse a peer's extension handshake. Absent or zero ids mean "not offered":
+/// 0 is how a peer disables an extension it advertised earlier.
+pub fn parse_extension_handshake_full(payload: &[u8]) -> Option<ExtHandshake> {
     let bv = decode(payload).ok()?;
     let m = bv.dict_get(b"m")?.as_dict()?;
-    let id = m.get(&b"ut_pex"[..])?.as_int()?;
-    if (1..=255).contains(&id) {
-        Some(id as u8)
-    } else {
-        // 0 means peer disabled the extension after a previous handshake.
-        None
+    let id_of = |key: &[u8]| -> Option<u8> {
+        let id = m.get(key)?.as_int()?;
+        if (1..=255).contains(&id) { Some(id as u8) } else { None }
+    };
+    let metadata_size = bv
+        .dict_get(b"metadata_size")
+        .and_then(|v| v.as_int())
+        .filter(|n| *n > 0)
+        .map(|n| n as usize);
+    Some(ExtHandshake {
+        ut_pex_id: id_of(b"ut_pex"),
+        ut_metadata_id: id_of(b"ut_metadata"),
+        metadata_size,
+    })
+}
+
+/// A decoded BEP 9 ut_metadata message.
+pub struct MetadataMsg {
+    pub msg_type: i64,
+    pub piece: u32,
+    /// Info dict size, carried on `data` messages.
+    pub total_size: Option<usize>,
+    /// Offset in the payload where the raw block starts (`data` messages only).
+    pub data_offset: usize,
+}
+
+/// Parse a ut_metadata message: a bencoded dict, then (for `data`) raw bytes.
+pub fn parse_metadata_message(payload: &[u8]) -> Option<MetadataMsg> {
+    let (bv, consumed) = decode_prefix(payload).ok()?;
+    let msg_type = bv.dict_get(b"msg_type")?.as_int()?;
+    let piece = bv.dict_get(b"piece")?.as_int()?;
+    if piece < 0 || piece > u32::MAX as i64 {
+        return None;
     }
+    let total_size = bv
+        .dict_get(b"total_size")
+        .and_then(|v| v.as_int())
+        .filter(|n| *n > 0)
+        .map(|n| n as usize);
+    Some(MetadataMsg { msg_type, piece: piece as u32, total_size, data_offset: consumed })
+}
+
+/// Build a BEP 9 request for one block of the info dict.
+pub fn build_metadata_request(piece: u32) -> Vec<u8> {
+    let mut d = BTreeMap::new();
+    d.insert(b"msg_type".to_vec(), Bencode::Int(METADATA_REQUEST));
+    d.insert(b"piece".to_vec(), Bencode::Int(piece as i64));
+    Bencode::Dict(d).to_vec()
+}
+
+/// Build a BEP 9 reject ("I can't serve that block").
+pub fn build_metadata_reject(piece: u32) -> Vec<u8> {
+    let mut d = BTreeMap::new();
+    d.insert(b"msg_type".to_vec(), Bencode::Int(METADATA_REJECT));
+    d.insert(b"piece".to_vec(), Bencode::Int(piece as i64));
+    Bencode::Dict(d).to_vec()
+}
+
+/// Build a BEP 9 data message: the dict, then the raw block appended after it.
+pub fn build_metadata_data(piece: u32, total_size: usize, block: &[u8]) -> Vec<u8> {
+    let mut d = BTreeMap::new();
+    d.insert(b"msg_type".to_vec(), Bencode::Int(METADATA_DATA));
+    d.insert(b"piece".to_vec(), Bencode::Int(piece as i64));
+    d.insert(b"total_size".to_vec(), Bencode::Int(total_size as i64));
+    let mut out = Bencode::Dict(d).to_vec();
+    out.extend_from_slice(block);
+    out
 }
 
 /// Parse a BEP 11 PEX message payload. Returns the IPv4 peers in `added`.

@@ -43,7 +43,25 @@ const (
 	MethodGetAnnounceOverrides = "get_announce_overrides" // node-level: read passkey + client-spoof maps
 	MethodSetAnnounceOverride  = "set_announce_override"  // node-level: set/clear one announce override
 	MethodTrackerSnapshot      = "tracker_snapshot"       // node-level: per-host announce aggregate
+	MethodFetchMetadata        = "fetch_metadata"         // magnet: start resolving an info dict from the swarm
+	MethodGetMetadata          = "get_metadata"           // magnet: poll a resolution started by fetch_metadata
 )
+
+// FetchMetadataParams starts a magnet resolution on the agent's own engine.
+type FetchMetadataParams struct {
+	InfoHash string   `json:"info_hash"`
+	Trackers []string `json:"trackers,omitempty"`
+	Peers    []string `json:"peers,omitempty"`
+	// BindingID picks which network binding (and so which tunnel) the
+	// resolution dials out on. Nil means the engine's first binding -- never
+	// the default route, which would expose the node's real address.
+	BindingID *uint32 `json:"binding_id,omitempty"`
+}
+
+// GetMetadataParams polls a resolution.
+type GetMetadataParams struct {
+	InfoHash string `json:"info_hash"`
+}
 
 // EngineDescriptor identifies one engine an agent hosts (Option A: a node
 // hosts an arbitrary set of engines addressed by id, each with a role).

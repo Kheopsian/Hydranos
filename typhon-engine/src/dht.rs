@@ -38,6 +38,12 @@ pub async fn start() {
     }
 }
 
+/// Handle to the running DHT node, if it bootstrapped. Magnet resolution needs
+/// peers for an info hash that has no TorrentState behind it yet.
+pub fn handle() -> Option<Dht> {
+    DHT.get().cloned()
+}
+
 /// Register a torrent with the DHT. Skips `private` torrents (BEP 27).
 /// Spawns a task that streams peers and enqueues them for dialing.
 pub fn track_torrent(torrent: Arc<TorrentState>) {

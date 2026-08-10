@@ -23,6 +23,11 @@ type EngineClient interface {
 	// Torrent lifecycle
 	AddTorrent(torrentPath, savePath string, stopped bool) (*ltclient.AddTorrentResult, error)
 	AddTorrentWithOptions(torrentPath, savePath string, stopped, seedMode bool) (*ltclient.AddTorrentResult, error)
+	// FetchMetadata starts resolving a magnet's info dict from the swarm and
+	// returns immediately; GetMetadata polls it. Resolution runs wherever the
+	// engine lives, so a remote agent resolves on its own network.
+	FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error)
+	GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error)
 	RemoveTorrent(infoHash string, keepData bool) error
 	StartTorrent(infoHash string) error
 	StopTorrent(infoHash string) error

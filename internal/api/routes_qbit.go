@@ -619,23 +619,14 @@ func (s *Server) qbitTorrentsAdd(c *gin.Context) {
 				continue
 			}
 
-			switch mode {
-			case "race":
-				if s.raceEngine != nil {
-					_, err := s.raceEngine.AddTorrent("", magnetURI, savePath, nil, category)
-					if err != nil {
-						c.String(http.StatusInternalServerError, "Fails.")
-						return
-					}
-				}
-			case "hoard":
-				if s.hoardEngine != nil {
-					_, err := s.hoardEngine.AddTorrent("", savePath, category)
-					if err != nil {
-						c.String(http.StatusInternalServerError, "Fails.")
-						return
-					}
-				}
+			// Resolve through the shared magnet path rather than poking an
+			// engine directly: it returns as soon as the job starts (an *arr
+			// grab must not block on a swarm), and hoard gets magnets too --
+			// the old hoard branch dropped the URI on the floor and added
+			// nothing.
+			if _, err := s.startMagnetResolve("local", mode, magnetURI, savePath, category, nil, nil); err != nil {
+				c.String(http.StatusInternalServerError, "Fails.")
+				return
 			}
 		}
 	}

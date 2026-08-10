@@ -76,7 +76,7 @@ pub async fn run(
 
     // BEP 10 extension handshake (skip on private trackers — BEP 27).
     let mut peer_ext = if lt_ext && !torrent.meta.private && listen_port != 0 {
-        let payload = Bytes::from(extension::build_extension_handshake(listen_port));
+        let payload = Bytes::from(extension::build_extension_handshake(listen_port, None));
         framed.send(Message::Extended { ext_id: 0, payload }).await.ok();
         Some(PeerExt::new())
     } else {
