@@ -188,17 +188,28 @@ function promptFirstRunSetup(networkStorage) {
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
-        <h3>Welcome to Hydra</h3>
-        <p class="modal-desc" id="setup-msg">Create your admin account to get started.</p>
+        <h3>${t("Welcome to Hydra")}</h3>
+        <label class="setup-lang-row">${t("Language")}
+            <select id="setup-lang">${I18N.languages.map(l =>
+                `<option value="${l.code}"${l.code === I18N.current() ? " selected" : ""}>${l.label}</option>`
+            ).join("")}</select>
+        </label>
+        <p class="modal-desc" id="setup-msg">${t("Create your admin account to get started.")}</p>
         ${warn}
-        <input type="text" id="setup-user" placeholder="Username" autocomplete="username" value="admin" style="width:100%;margin-bottom:8px">
-        <input type="password" id="setup-pass" placeholder="Password (min 8 characters)" autocomplete="new-password" style="width:100%;margin-bottom:8px">
-        <input type="password" id="setup-pass2" placeholder="Confirm password" autocomplete="new-password" style="width:100%">
+        <input type="text" id="setup-user" placeholder="${t("Username")}" autocomplete="username" value="admin" style="width:100%;margin-bottom:8px">
+        <input type="password" id="setup-pass" placeholder="${t("Password (min 8 characters)")}" autocomplete="new-password" style="width:100%;margin-bottom:8px">
+        <input type="password" id="setup-pass2" placeholder="${t("Confirm password")}" autocomplete="new-password" style="width:100%">
         <div class="modal-actions">
-            <button class="btn-primary" id="setup-go">Create account</button>
+            <button class="btn-primary" id="setup-go">${t("Create account")}</button>
         </div>
     </div>`;
     document.body.appendChild(ov);
+    // Reloading is the honest way to switch: re-translating an already
+    // translated DOM cannot work, the English key is gone by then.
+    const langSel = ov.querySelector("#setup-lang");
+    if (langSel) langSel.addEventListener("change", () => {
+        I18N.setLang(langSel.value).then(() => location.reload());
+    });
     const user = ov.querySelector("#setup-user");
     const pass = ov.querySelector("#setup-pass");
     const pass2 = ov.querySelector("#setup-pass2");
@@ -206,8 +217,8 @@ function promptFirstRunSetup(networkStorage) {
     pass.focus();
     const fail = (t) => { msg.textContent = t; msg.style.color = "var(--accent-red)"; };
     const go = async () => {
-        if (pass.value.length < 8) return fail("Password too short (min 8 characters).");
-        if (pass.value !== pass2.value) return fail("The two passwords do not match.");
+        if (pass.value.length < 8) return fail(t("Password too short (min 8 characters)."));
+        if (pass.value !== pass2.value) return fail(t("The two passwords do not match."));
         try {
             const res = await fetch("/api/setup", {
                 method: "POST",
@@ -619,6 +630,10 @@ window.addEventListener("DOMContentLoaded", () => {
 // utilisateur regarde. Masquable, et la version masquee est retenue par kind :
 // changer de type de montage le reaffiche.
 window.addEventListener("DOMContentLoaded", async () => {
+    // Pick the language and translate the static markup before anything else
+    // paints. Everything in the DOM at this point came from index.html.
+    try { await I18N.load(I18N.detect()); I18N.translateDOM(document.body); } catch (e) {}
+
     let kind = "";
     try {
         kind = ((await (await fetch("/api/setup")).json()) || {}).network_storage || "";
