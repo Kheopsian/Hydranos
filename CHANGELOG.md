@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.53.0 — 2026-08-10
+
+### Added
+
+- **Magnet links work, on race, hoard and remote agents.** A magnet carries no
+  metadata, so there was nothing to place: race refused them outright and hoard
+  silently dropped the URI and added nothing. The info dict is now fetched from
+  the swarm first (BEP 9 ut_metadata) and turned into a real .torrent, which
+  then takes the existing add path — so placement, save_path rules and qBit
+  shim behaviour are unchanged. The add returns immediately rather than
+  blocking on the swarm, and the torrent shows as resolving (metaDL to qBit
+  clients) until its metadata lands. Resolution runs on whichever node will
+  hold the data, so a remote agent resolves over its own network, and always
+  leaves through a configured binding rather than the default route.
+
+- **Hydra serves metadata as well as asking for it.** Peers resolving a magnet
+  can now fetch the info dict from us. The raw dicts are not held in memory;
+  the .torrent is re-read from disk on the rare occasion a peer asks.
+
+### Note
+
+- Magnet trackers are HTTP(S) only for now: Typhon has no UDP tracker client,
+  so udp:// entries in a magnet are skipped and the DHT covers those swarms.
+
 ## v3.52.2 — 2026-08-10
 
 ### Fixed
