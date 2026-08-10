@@ -3,6 +3,17 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.52.2 — 2026-08-10
+
+### Fixed
+
+- **The restored categories now survive the first save.** The v3.52.1 repair
+  wrote them back and lost them minutes later: the boot import dropped the
+  store's record for every torrent the engine had already rebuilt from resume
+  data, which carries no category, and the next sync wrote that blank view over
+  the repair. The import now hands those fields to the engine, no sync runs
+  before it finishes, and the repair is allowed one more pass.
+
 ## v3.52.1 — 2026-08-10
 
 ### Fixed
