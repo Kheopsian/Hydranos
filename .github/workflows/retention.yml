@@ -67,21 +67,12 @@ jobs:
     steps:
       # Re-pushing a tag leaves the previous image behind as an untagged digest,
       # still pullable by hash. These are always safe to drop.
-      - uses: actions/delete-package-versions@v5
+      # This action has NO dry-run input: passing one is silently ignored and it
+      # deletes for real. The `if` below is the only working guard.
+      - name: Drop untagged digests left behind by re-pushed tags
+        if: ${{ github.event.inputs.dry_run != true }}
+        uses: actions/delete-package-versions@v5
         with:
           package-name: hydra
           package-type: container
           delete-only-untagged-versions: true
-          dry-run: ${{ github.event.inputs.dry_run || false }}
-
-  prune-old-images:
-    needs: prune-untagged-images
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/delete-package-versions@v5
-        with:
-          package-name: hydra
-          package-type: container
-          min-versions-to-keep: ${{ github.event.inputs.keep || 10 }}
-          ignore-versions: "^(latest|main)$"
-          dry-run: ${{ github.event.inputs.dry_run || false }}
