@@ -22,7 +22,8 @@ process and the Rust engine, so old artifacts add up quickly while nobody
 runs them. Anything older than the retention window is still reproducible
 from source: check out the tag and build it.
 
-Pruning runs from `.github/workflows/retention.yml` after every release.
+Pruning runs after every release: `.github/workflows/retention.yml` for the
+archives, `.github/workflows/prune-images.yml` for the container images.
 
 ## Reporting a Vulnerability
 
