@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.53.1 — 2026-08-10
+
+### Fixed
+
+- **A magnet placed on a remote agent now resolves through the right tunnel.**
+  The resolution was handed to whichever engine came first on the agent, so a
+  hoard placement had its metadata fetched by the agent's race engine. Each
+  engine dials out through its own binding, so the lookup — and the address
+  peers saw — left by the wrong route.
+
 ## v3.53.0 — 2026-08-10
 
 ### Added
