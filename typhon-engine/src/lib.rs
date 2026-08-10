@@ -10,3 +10,4 @@ pub mod disk;
 pub mod tracker;
 pub mod crypto;
 pub mod dht;
+pub mod magnet;

@@ -504,6 +504,206 @@ pub fn client_from_peer_id(pid: &[u8; 20]) -> String {
     }
 }
 
+use tokio::net::{TcpSocket, TcpStream};
+use crate::peer::transport::PeerTransport;
+use crate::crypto::stream::CryptoStream;
+
+// Try TCP first, fall back to uTP if it fails (NAT-bound peers).
+async fn try_tcp(
+    addr: std::net::SocketAddr,
+    source_fwmark: u32,
+) -> Option<PeerTransport> {
+    use crate::peer::SOCKS5_OUTBOUND;
+    #[cfg(unix)]
+    use std::os::unix::io::AsRawFd;
+    // 3s — on a reachable LAN/WAN peer, TCP connect succeeds in ≤300ms.
+    let connect_fut = async move {
+        // Route v6 outbound via SOCKS5 if configured (avoids leaking Free IP).
+        // SOCKS5 client doesn't expose fwmark here; the multi-binding case
+        // (Proton WG) doesn't use SOCKS5 and falls through to direct.
+        {
+            if let Some((host, port, auth)) = SOCKS5_OUTBOUND.get() {
+                let target = (addr.ip().to_string(), addr.port());
+                let stream_res = match auth {
+                    Some((u, pw)) => tokio_socks::tcp::Socks5Stream::connect_with_password(
+                        (host.as_str(), *port), target, u, pw,
+                    ).await,
+                    None => tokio_socks::tcp::Socks5Stream::connect(
+                        (host.as_str(), *port), target,
+                    ).await,
+                };
+                return stream_res.ok().map(|s| s.into_inner());
+            }
+        }
+        // Multi-tunnel path: set SO_MARK on the socket so the kernel's
+        // `ip rule fwmark X lookup tableX` policy steers outbound through
+        // the right WG interface. Source IP becomes 10.2.0.2 automatically
+        // (the only address bound on every wg-hy* iface, per Proton's
+        // shared-Address scheme).
+        #[cfg(unix)]
+        if source_fwmark != 0 {
+            let socket = if addr.is_ipv4() {
+                TcpSocket::new_v4().ok()?
+            } else {
+                TcpSocket::new_v6().ok()?
+            };
+            let mark_val: libc::c_int = source_fwmark as libc::c_int;
+            let rc = unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_MARK,
+                    &mark_val as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if rc != 0 {
+                return None;
+            }
+            return socket.connect(addr).await.ok();
+        }
+        TcpStream::connect(addr).await.ok()
+    };
+    match tokio::time::timeout(Duration::from_secs(3), connect_fut).await {
+        Ok(Some(s)) => {
+            s.set_nodelay(true).ok();
+            DIAL_TCP_OK.fetch_add(1, AtomicOrdering::Relaxed);
+            Some(PeerTransport::Tcp(s))
+        }
+        _ => {
+            DIAL_TCP_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+            None
+        }
+    }
+}
+async fn try_utp(addr: std::net::SocketAddr, sock: &Arc<UtpSocketUdp>) -> Option<PeerTransport> {
+    if !utp_inflight().insert(addr) {
+        DIAL_UTP_SKIPPED_INFLIGHT.fetch_add(1, AtomicOrdering::Relaxed);
+        return None;
+    }
+    let _guard = UtpInflightGuard(addr);
+    match tokio::time::timeout(Duration::from_secs(15), sock.connect(addr)).await {
+        Ok(Ok(s)) => {
+            DIAL_UTP_OK.fetch_add(1, AtomicOrdering::Relaxed);
+            Some(PeerTransport::Utp(s))
+        }
+        Ok(Err(e)) => {
+            DIAL_UTP_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+            DIAL_UTP_FAIL_ERROR.fetch_add(1, AtomicOrdering::Relaxed);
+            let es = format!("{}", e);
+            if es.contains("too many active connections") {
+                DIAL_UTP_ERR_TOO_MANY.fetch_add(1, AtomicOrdering::Relaxed);
+            } else if es.contains("error sending SYN") {
+                DIAL_UTP_ERR_SEND_SYN.fetch_add(1, AtomicOrdering::Relaxed);
+                // Sample: warn first 20 unique errors to see actual io error
+                static COUNT: AtomicU64 = AtomicU64::new(0);
+                if COUNT.fetch_add(1, AtomicOrdering::Relaxed) < 20 {
+                    warn!("[utp] ErrorSendingSyn to {}: {}", addr, e);
+                }
+            } else if es.contains("dispatcher dead") {
+                DIAL_UTP_ERR_DISPATCHER.fetch_add(1, AtomicOrdering::Relaxed);
+            } else {
+                DIAL_UTP_ERR_OTHER.fetch_add(1, AtomicOrdering::Relaxed);
+                static COUNT: AtomicU64 = AtomicU64::new(0);
+                if COUNT.fetch_add(1, AtomicOrdering::Relaxed) < 20 {
+                    warn!("[utp] other error to {}: {}", addr, e);
+                }
+            }
+            None
+        }
+        Err(_) => {
+            DIAL_UTP_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+            DIAL_UTP_FAIL_TIMEOUT.fetch_add(1, AtomicOrdering::Relaxed);
+            None
+        }
+    }
+}
+
+// Try the (transport, handshake-pair) combos in order: TCP-plain, TCP-MSE, uTP-plain, uTP-MSE.
+/// Open a peer connection and complete the BitTorrent handshake, returning the
+/// framed-ready stream plus what the handshake told us.
+///
+/// Shared by `dial_peer` (which then runs a full session) and magnet metadata
+/// resolution (which only wants the extension handshake). It deliberately takes
+/// an info hash rather than a TorrentState: resolving a magnet has no torrent
+/// and no disk yet.
+// Each combo returns the full handshake result so the session gets the remote peer_id.
+pub(crate) async fn open_peer(
+    addr: std::net::SocketAddr,
+    utp_socket: &Option<Arc<UtpSocketUdp>>,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    source_fwmark: u32,
+    traced: bool,
+) -> Option<(CryptoStream, bool, bool, [u8; 20], bool)> {
+    // 2.7.11: PLAINTEXT-FIRST outbound dial. Most peers only *prefer* MSE
+    // (they accept plaintext too), so dialing plain first avoids the RC4
+    // per-byte cost — measured single-conn: plain 619 MB/s vs MSE 280 MB/s.
+    // MSE is kept as a FALLBACK for the minority that *require* encryption,
+    // so connectivity is never lost. TYPHON_NO_MSE=1 also skips the MSE
+    // fallback (pure-plaintext bench).
+    let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false);
+    // TCP plaintext (preferred)
+    if let Some(mut t) = try_tcp(addr, source_fwmark).await {
+        match crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
+            Ok(hs) => {
+                DIAL_PLAIN_OK.fetch_add(1, AtomicOrdering::Relaxed);
+                if traced {
+                    info!("[dialtrace] {} tcp/plain handshake OK", addr);
+                }
+                return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
+            }
+            Err(e) => {
+                DIAL_PLAIN_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+                if traced {
+                    info!("[dialtrace] {} tcp/plain handshake FAIL: {}", addr, e);
+                }
+            }
+        }
+    } else if traced {
+        info!("[dialtrace] {} tcp connect FAIL (plain leg)", addr);
+    }
+    // TCP MSE (fallback for require-encryption peers)
+    if !skip_mse {
+        if let Some(mut t) = try_tcp(addr, source_fwmark).await {
+            DIAL_MSE_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
+            match crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
+                Ok((enc, dec, hs)) => {
+                    DIAL_MSE_OK.fetch_add(1, AtomicOrdering::Relaxed);
+                    if traced {
+                        info!("[dialtrace] {} tcp/MSE handshake OK", addr);
+                    }
+                    return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
+                }
+                Err(e) => {
+                    DIAL_MSE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+                    if traced {
+                        info!("[dialtrace] {} tcp/MSE handshake FAIL: {}", addr, e);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(sock) = utp_socket.as_ref() {
+        // uTP plaintext (preferred)
+        if let Some(mut t) = try_utp(addr, sock).await {
+            if let Ok(hs) = crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
+                return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
+            }
+        }
+        // uTP MSE (fallback)
+        if !skip_mse {
+            if let Some(mut t) = try_utp(addr, sock).await {
+                if let Ok((enc, dec, hs)) = crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
+                    return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
+                }
+            }
+        }
+    }
+    None
+}
+
+
 pub async fn dial_peer(
     addr: std::net::SocketAddr,
     torrent: Arc<TorrentState>,
@@ -513,12 +713,8 @@ pub async fn dial_peer(
     listen_port: u16,
     source_fwmark: u32,
 ) {
-    use tokio::net::TcpStream;
-    use tokio::net::TcpSocket;
     use tokio_util::codec::Framed;
     use crate::wire::codec::BtCodec;
-    use crate::peer::transport::PeerTransport;
-    use crate::crypto::stream::CryptoStream;
 
     let traced = is_traced(&torrent.info_hash);
     if traced {
@@ -557,195 +753,7 @@ pub async fn dial_peer(
 
     DIAL_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
 
-    // Try TCP first, fall back to uTP if it fails (NAT-bound peers).
-    async fn try_tcp(
-        addr: std::net::SocketAddr,
-        source_fwmark: u32,
-    ) -> Option<PeerTransport> {
-        use crate::peer::SOCKS5_OUTBOUND;
-        #[cfg(unix)]
-        use std::os::unix::io::AsRawFd;
-        // 3s — on a reachable LAN/WAN peer, TCP connect succeeds in ≤300ms.
-        let connect_fut = async move {
-            // Route v6 outbound via SOCKS5 if configured (avoids leaking Free IP).
-            // SOCKS5 client doesn't expose fwmark here; the multi-binding case
-            // (Proton WG) doesn't use SOCKS5 and falls through to direct.
-            {
-                if let Some((host, port, auth)) = SOCKS5_OUTBOUND.get() {
-                    let target = (addr.ip().to_string(), addr.port());
-                    let stream_res = match auth {
-                        Some((u, pw)) => tokio_socks::tcp::Socks5Stream::connect_with_password(
-                            (host.as_str(), *port), target, u, pw,
-                        ).await,
-                        None => tokio_socks::tcp::Socks5Stream::connect(
-                            (host.as_str(), *port), target,
-                        ).await,
-                    };
-                    return stream_res.ok().map(|s| s.into_inner());
-                }
-            }
-            // Multi-tunnel path: set SO_MARK on the socket so the kernel's
-            // `ip rule fwmark X lookup tableX` policy steers outbound through
-            // the right WG interface. Source IP becomes 10.2.0.2 automatically
-            // (the only address bound on every wg-hy* iface, per Proton's
-            // shared-Address scheme).
-            #[cfg(unix)]
-            if source_fwmark != 0 {
-                let socket = if addr.is_ipv4() {
-                    TcpSocket::new_v4().ok()?
-                } else {
-                    TcpSocket::new_v6().ok()?
-                };
-                let mark_val: libc::c_int = source_fwmark as libc::c_int;
-                let rc = unsafe {
-                    libc::setsockopt(
-                        socket.as_raw_fd(),
-                        libc::SOL_SOCKET,
-                        libc::SO_MARK,
-                        &mark_val as *const _ as *const libc::c_void,
-                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    )
-                };
-                if rc != 0 {
-                    return None;
-                }
-                return socket.connect(addr).await.ok();
-            }
-            TcpStream::connect(addr).await.ok()
-        };
-        match tokio::time::timeout(Duration::from_secs(3), connect_fut).await {
-            Ok(Some(s)) => {
-                s.set_nodelay(true).ok();
-                DIAL_TCP_OK.fetch_add(1, AtomicOrdering::Relaxed);
-                Some(PeerTransport::Tcp(s))
-            }
-            _ => {
-                DIAL_TCP_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
-                None
-            }
-        }
-    }
-    async fn try_utp(addr: std::net::SocketAddr, sock: &Arc<UtpSocketUdp>) -> Option<PeerTransport> {
-        if !utp_inflight().insert(addr) {
-            DIAL_UTP_SKIPPED_INFLIGHT.fetch_add(1, AtomicOrdering::Relaxed);
-            return None;
-        }
-        let _guard = UtpInflightGuard(addr);
-        match tokio::time::timeout(Duration::from_secs(15), sock.connect(addr)).await {
-            Ok(Ok(s)) => {
-                DIAL_UTP_OK.fetch_add(1, AtomicOrdering::Relaxed);
-                Some(PeerTransport::Utp(s))
-            }
-            Ok(Err(e)) => {
-                DIAL_UTP_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
-                DIAL_UTP_FAIL_ERROR.fetch_add(1, AtomicOrdering::Relaxed);
-                let es = format!("{}", e);
-                if es.contains("too many active connections") {
-                    DIAL_UTP_ERR_TOO_MANY.fetch_add(1, AtomicOrdering::Relaxed);
-                } else if es.contains("error sending SYN") {
-                    DIAL_UTP_ERR_SEND_SYN.fetch_add(1, AtomicOrdering::Relaxed);
-                    // Sample: warn first 20 unique errors to see actual io error
-                    static COUNT: AtomicU64 = AtomicU64::new(0);
-                    if COUNT.fetch_add(1, AtomicOrdering::Relaxed) < 20 {
-                        warn!("[utp] ErrorSendingSyn to {}: {}", addr, e);
-                    }
-                } else if es.contains("dispatcher dead") {
-                    DIAL_UTP_ERR_DISPATCHER.fetch_add(1, AtomicOrdering::Relaxed);
-                } else {
-                    DIAL_UTP_ERR_OTHER.fetch_add(1, AtomicOrdering::Relaxed);
-                    static COUNT: AtomicU64 = AtomicU64::new(0);
-                    if COUNT.fetch_add(1, AtomicOrdering::Relaxed) < 20 {
-                        warn!("[utp] other error to {}: {}", addr, e);
-                    }
-                }
-                None
-            }
-            Err(_) => {
-                DIAL_UTP_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
-                DIAL_UTP_FAIL_TIMEOUT.fetch_add(1, AtomicOrdering::Relaxed);
-                None
-            }
-        }
-    }
-
-    // Try the (transport, handshake-pair) combos in order: TCP-MSE, TCP-plain, uTP-MSE, uTP-plain.
-    // Each combo returns the full handshake result so the session gets the remote peer_id.
-    async fn open(
-        addr: std::net::SocketAddr,
-        utp_socket: &Option<Arc<UtpSocketUdp>>,
-        info_hash: &[u8; 20],
-        peer_id: &[u8; 20],
-        source_fwmark: u32,
-        traced: bool,
-    ) -> Option<(CryptoStream, bool, bool, [u8; 20], bool)> {
-        // 2.7.11: PLAINTEXT-FIRST outbound dial. Most peers only *prefer* MSE
-        // (they accept plaintext too), so dialing plain first avoids the RC4
-        // per-byte cost — measured single-conn: plain 619 MB/s vs MSE 280 MB/s.
-        // MSE is kept as a FALLBACK for the minority that *require* encryption,
-        // so connectivity is never lost. TYPHON_NO_MSE=1 also skips the MSE
-        // fallback (pure-plaintext bench).
-        let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false);
-        // TCP plaintext (preferred)
-        if let Some(mut t) = try_tcp(addr, source_fwmark).await {
-            match crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
-                Ok(hs) => {
-                    DIAL_PLAIN_OK.fetch_add(1, AtomicOrdering::Relaxed);
-                    if traced {
-                        info!("[dialtrace] {} tcp/plain handshake OK", addr);
-                    }
-                    return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
-                }
-                Err(e) => {
-                    DIAL_PLAIN_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
-                    if traced {
-                        info!("[dialtrace] {} tcp/plain handshake FAIL: {}", addr, e);
-                    }
-                }
-            }
-        } else if traced {
-            info!("[dialtrace] {} tcp connect FAIL (plain leg)", addr);
-        }
-        // TCP MSE (fallback for require-encryption peers)
-        if !skip_mse {
-            if let Some(mut t) = try_tcp(addr, source_fwmark).await {
-                DIAL_MSE_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
-                match crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
-                    Ok((enc, dec, hs)) => {
-                        DIAL_MSE_OK.fetch_add(1, AtomicOrdering::Relaxed);
-                        if traced {
-                            info!("[dialtrace] {} tcp/MSE handshake OK", addr);
-                        }
-                        return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
-                    }
-                    Err(e) => {
-                        DIAL_MSE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
-                        if traced {
-                            info!("[dialtrace] {} tcp/MSE handshake FAIL: {}", addr, e);
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(sock) = utp_socket.as_ref() {
-            // uTP plaintext (preferred)
-            if let Some(mut t) = try_utp(addr, sock).await {
-                if let Ok(hs) = crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
-                    return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
-                }
-            }
-            // uTP MSE (fallback)
-            if !skip_mse {
-                if let Some(mut t) = try_utp(addr, sock).await {
-                    if let Ok((enc, dec, hs)) = crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
-                        return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open(addr, &utp_socket, &torrent.info_hash, &peer_id, source_fwmark, traced).await {
+    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(addr, &utp_socket, &torrent.info_hash, &peer_id, source_fwmark, traced).await {
         Some(v) => { DIAL_HANDSHAKE_OK.fetch_add(1, AtomicOrdering::Relaxed); v }
         None => {
             DIAL_HANDSHAKE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);

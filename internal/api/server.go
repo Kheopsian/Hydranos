@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 	"html/template"
 	"io/fs"
 	"log/slog"
@@ -68,6 +69,8 @@ type RaceEngine interface {
 	EngineOptFlags() (map[string]interface{}, error)
 	GetTorrentStatus(infoHash string) map[string]interface{}
 	AddTorrent(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error)
+	FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error)
+	GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error)
 	AddTorrentSeedMode(torrentPath, savePath, category string) (string, error)
 	RemoveTorrent(infoHash string, deleteFiles bool) error
 	ReannnounceTorrent(infoHash string) bool
@@ -97,6 +100,8 @@ type HoardEngine interface {
 	SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error)
 	EngineOptFlags() (map[string]interface{}, error)
 	AddTorrent(torrentPath, savePath, category string) (string, error)
+	FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error)
+	GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error)
 	AddTorrentSeedMode(torrentPath, savePath, category string) (string, error)
 	RemoveTorrent(infoHash string, deleteFiles bool) error
 	ReannnounceTorrent(infoHash string) bool

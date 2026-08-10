@@ -61,6 +61,16 @@ pub fn decode(input: &[u8]) -> Result<Bencode, &'static str> {
     Ok(v)
 }
 
+/// Decode one value from the front of `input` and report how many bytes it
+/// occupied. BEP 9 needs this: a ut_metadata message is a bencoded dict
+/// immediately followed by the raw block, with nothing marking where the dict
+/// ends -- the decoder's own end position is the only boundary.
+pub fn decode_prefix(input: &[u8]) -> Result<(Bencode, usize), &'static str> {
+    let mut pos = 0;
+    let v = decode_one(input, &mut pos)?;
+    Ok((v, pos))
+}
+
 fn decode_one(input: &[u8], pos: &mut usize) -> Result<Bencode, &'static str> {
     if *pos >= input.len() { return Err("eof"); }
     match input[*pos] {

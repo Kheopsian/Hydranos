@@ -869,6 +869,13 @@ func (s *Server) localAdd(mode, torrentPath, magnetURI, savePath string, tracker
 // routeAdd dispatches one add to a single target agent (local rich engine, or a
 // remote agent's rich AddRouted). Remote requires a .torrent path (no magnet).
 func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, category string, trackers []string, cat *category) (string, error) {
+	// A magnet has no metadata yet, so there is nothing to place: resolve it
+	// first, then come back through here with a real .torrent. This is the only
+	// magnet-aware branch in the add path -- race, hoard and remote agents all
+	// keep taking the same road they already took.
+	if torrentPath == "" && magnetURI != "" {
+		return s.startMagnetResolve(target, mode, magnetURI, savePath, category, trackers, cat)
+	}
 	if target == "local" {
 		return s.localAdd(mode, torrentPath, magnetURI, savePath, trackers, category)
 	}

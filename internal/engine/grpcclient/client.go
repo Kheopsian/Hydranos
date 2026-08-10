@@ -312,6 +312,27 @@ func (c *Client) AddPeers(infoHash string, peers []struct {
 	return c.call(agentwire.MethodAddPeers, agentwire.AddPeersParams{InfoHash: infoHash, Peers: wp}, nil)
 }
 
+// FetchMetadata asks the agent's engine to start resolving a magnet. The agent
+// resolves on its own network, which is the point: it is the node that will
+// hold the data and that has the tracker/VPN path.
+func (c *Client) FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error) {
+	p := agentwire.FetchMetadataParams{InfoHash: infoHash, Trackers: trackers, Peers: peers, BindingID: bindingID}
+	var out ltclient.FetchMetadataResult
+	if err := c.call(agentwire.MethodFetchMetadata, p, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetMetadata polls a resolution running on the agent.
+func (c *Client) GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error) {
+	var out ltclient.GetMetadataResult
+	if err := c.call(agentwire.MethodGetMetadata, agentwire.GetMetadataParams{InfoHash: infoHash}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ActionRouted runs a rich per-torrent operation on the remote agent's own
 // engine (announce/drain/stats stay agent-side).
 func (c *Client) ActionRouted(mode, action, infoHash string, deleteFiles bool, category, savePath string) error {

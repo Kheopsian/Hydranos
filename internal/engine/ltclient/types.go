@@ -34,6 +34,33 @@ type AddTorrentResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// FetchMetadataParams starts a magnet resolution job in the engine.
+type FetchMetadataParams struct {
+	InfoHash string   `json:"info_hash"`
+	Trackers []string `json:"trackers,omitempty"`
+	Peers    []string `json:"peers,omitempty"`
+	// BindingID picks the network binding (and therefore the fwmark/tunnel)
+	// the resolution dials out on. Nil means the engine's first binding.
+	BindingID *uint32 `json:"binding_id,omitempty"`
+}
+
+// FetchMetadataResult from fetch_metadata. Started is false when a job for this
+// info hash was already running.
+type FetchMetadataResult struct {
+	InfoHash string `json:"info_hash"`
+	Started  bool   `json:"started"`
+	Error    string `json:"error,omitempty"`
+}
+
+// GetMetadataResult polls a resolution job. State is one of
+// "resolving", "done", "failed" or "unknown"; Info carries the hex-encoded raw
+// info dict on "done".
+type GetMetadataResult struct {
+	State string `json:"state"`
+	Info  string `json:"info,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
 // TorrentStatus from get_status or list_torrents.
 type TorrentStatus struct {
 	InfoHash        string  `json:"info_hash"`
