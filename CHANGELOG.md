@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.52.1 — 2026-08-10
+
+### Fixed
+
+- **Categories lost on upgrade are restored.** v3.50.0 retired `state.json`
+  without moving the categories into the store, so every torrent added before
+  that release came up uncategorised. They are read back from the
+  `state.json.migrated` the upgrade left behind, once, on the next start.
+
 ## v3.52.0 — 2026-08-09
 
 ### Fixed
