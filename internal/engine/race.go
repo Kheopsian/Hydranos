@@ -976,6 +976,12 @@ func (e *RaceEngine) checkTrackerHealth() {
 		if !s.IsFinished {
 			continue
 		}
+		// A stopped torrent stays quiet. The hoard announcer has always filtered
+		// these out; this loop never did, and only got away with it because a
+		// seed-mode torrent used to report is_finished=false until it ran.
+		if s.IsPaused {
+			continue
+		}
 		ih := s.InfoHash
 		e.mu.RLock()
 		_, tracked := e.torrents[ih]

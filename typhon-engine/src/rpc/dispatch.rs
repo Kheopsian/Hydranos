@@ -514,7 +514,11 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         let p = if total > 0 { n as f64 / total as f64 } else { 0.0 };
         (n, p)
     } else {
-        (0, 0.0)
+        // No picker = added in seed_mode = its data is trusted whole (that is
+        // what makes 100k seeders cheap). Stopped before it ever ran it still
+        // holds the files, so report it complete instead of a bogus 0 % —
+        // start_torrent draws the same conclusion from the same fact.
+        (t.meta.num_pieces(), 1.0)
     };
     // Approximate — over-reports by ≤1 piece_length when the last (short)
     // piece is among the have set but we can't tell cheaply. Good enough
