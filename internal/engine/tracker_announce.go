@@ -49,6 +49,7 @@ type trackerAnnouncer struct {
 	userAgent       string
 	bindingID       int
 	livePort        *atomic.Int64 // runtime port override (nil/0 = use static port)
+	fwmark          int           // SO_MARK for this binding's egress; also used by the udp:// path
 }
 
 // newTrackerAnnouncerForBinding builds an announcer wired to a specific
@@ -139,6 +140,7 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		publicIP:        b.PublicIP,
 		userAgent:       version.UserAgent(),
 		bindingID:       b.ID,
+		fwmark:          int(b.Fwmark),
 	}
 }
 
@@ -500,6 +502,14 @@ func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, down
 	u, err := url.Parse(trackerURL)
 	if err != nil {
 		return nil, fmt.Errorf("tracker announce: bad URL: %w", err)
+	}
+
+	// udp:// speaks a binary protocol on datagrams, not HTTP. It returns the
+	// same result shape so nothing downstream has to care which one answered.
+	// The passkey and client-spoof rewrites above are HTTP-shaped (URL path and
+	// User-Agent) and simply do not apply on the wire here.
+	if u.Scheme == "udp" {
+		return ta.udpAnnounce(u, infoHash, uploaded, downloaded, left, event)
 	}
 
 	// info_hash must be URL-encoded raw bytes (20 bytes from hex).

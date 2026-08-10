@@ -51,30 +51,40 @@ func (c *stubSlotClient) StopTorrent(infoHash string) error {
 }
 
 // Unused by the slot manager.
-func (c *stubSlotClient) Ping() error                            { return nil }
-func (c *stubSlotClient) Close() error                           { return nil }
-func (c *stubSlotClient) SetEventHandler(func(ltclient.Event))   {}
-func (c *stubSlotClient) SubscribeEvents() error                 { return nil }
-func (c *stubSlotClient) RemoveTorrent(string, bool) error       { return nil }
-func (c *stubSlotClient) SetSavePath(string, string) error       { return nil }
-func (c *stubSlotClient) VerifyTorrent(string) error             { return nil }
+func (c *stubSlotClient) Ping() error                          { return nil }
+func (c *stubSlotClient) Close() error                         { return nil }
+func (c *stubSlotClient) SetEventHandler(func(ltclient.Event)) {}
+func (c *stubSlotClient) SubscribeEvents() error               { return nil }
+func (c *stubSlotClient) RemoveTorrent(string, bool) error     { return nil }
+func (c *stubSlotClient) SetSavePath(string, string) error     { return nil }
+func (c *stubSlotClient) VerifyTorrent(string) error           { return nil }
 func (c *stubSlotClient) AddTorrent(string, string, bool) (*ltclient.AddTorrentResult, error) {
 	return nil, nil
 }
 func (c *stubSlotClient) AddTorrentWithOptions(string, string, bool, bool) (*ltclient.AddTorrentResult, error) {
 	return nil, nil
 }
-func (c *stubSlotClient) GetStatus(string) (*ltclient.TorrentStatus, error)   { return nil, nil }
-func (c *stubSlotClient) GetPeers(string) ([]ltclient.PeerInfo, error)        { return nil, nil }
-func (c *stubSlotClient) GetSessionStats() (*ltclient.SessionStats, error)    { return nil, nil }
-func (c *stubSlotClient) GetFiles(string) ([]ltclient.FileInfo, error)        { return nil, nil }
+func (c *stubSlotClient) GetStatus(string) (*ltclient.TorrentStatus, error)      { return nil, nil }
+func (c *stubSlotClient) GetPeers(string) ([]ltclient.PeerInfo, error)           { return nil, nil }
+func (c *stubSlotClient) GetSessionStats() (*ltclient.SessionStats, error)       { return nil, nil }
+func (c *stubSlotClient) GetFiles(string) ([]ltclient.FileInfo, error)           { return nil, nil }
 func (c *stubSlotClient) GetAvailability(string) (*ltclient.Availability, error) { return nil, nil }
 func (c *stubSlotClient) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
 	return nil, nil
 }
-func (c *stubSlotClient) EngineOptFlags() (map[string]interface{}, error) { return nil, nil }
-func (c *stubSlotClient) GetTrackers(string) ([]ltclient.TrackerInfo, error)  { return nil, nil }
-func (c *stubSlotClient) GetDiagnostics() (*ltclient.DiagnosticStats, error)  { return nil, nil }
+func (c *stubSlotClient) EngineOptFlags() (map[string]interface{}, error)    { return nil, nil }
+func (c *stubSlotClient) GetTrackers(string) ([]ltclient.TrackerInfo, error) { return nil, nil }
+func (c *stubSlotClient) GetDiagnostics() (*ltclient.DiagnosticStats, error) { return nil, nil }
+
+// Added to EngineClient by the magnet work; the slot tests do not resolve
+// metadata, they only need the stub to satisfy the interface. Without these the
+// whole package's tests stopped compiling, so none of them ran.
+func (c *stubSlotClient) FetchMetadata(string, []string, []string, *uint32) (*ltclient.FetchMetadataResult, error) {
+	return nil, nil
+}
+func (c *stubSlotClient) GetMetadata(string) (*ltclient.GetMetadataResult, error) {
+	return nil, nil
+}
 func (c *stubSlotClient) AddPeers(string, []struct {
 	IP   string
 	Port int
