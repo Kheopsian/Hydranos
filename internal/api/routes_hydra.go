@@ -1239,6 +1239,11 @@ func (s *Server) handleStatus(c *gin.Context) {
 
 func (s *Server) handleRaceTorrents(c *gin.Context) {
 	out := []interface{}{}
+	// Magnets still resolving have no torrent in any engine yet, so they would
+	// otherwise be invisible between the add and the metadata arriving.
+	for _, p := range pendingMagnetsFor("race") {
+		out = append(out, p.Row())
+	}
 	if s.raceEngine != nil {
 		for _, row := range s.raceEngine.GetAllStatus() {
 			row["agent"] = "local"
@@ -1348,6 +1353,9 @@ func (s *Server) handleHoardStats(c *gin.Context) {
 
 func (s *Server) handleHoardTorrents(c *gin.Context) {
 	out := []interface{}{}
+	for _, p := range pendingMagnetsFor("hoard") {
+		out = append(out, p.Row())
+	}
 	if s.hoardEngine != nil {
 		for _, t := range s.hoardEngine.GetTorrentList() {
 			out = append(out, t)

@@ -30,6 +30,31 @@ use crate::peer::message::Message;
 use crate::torrent::meta::{PeerGuard, PeerStats, TorrentState, TorrentStatus};
 use crate::wire::codec::BtCodec;
 
+/// Build the BEP 9 reply for one requested block, or a reject if we cannot
+/// serve it. Reading the .torrent per request is fine: requests are rare, and
+/// the alternative is keeping every info dict resident forever.
+fn serve_metadata_block(torrent: &Arc<TorrentState>, piece: u32) -> Vec<u8> {
+    let total = torrent.meta.info_dict_len as usize;
+    if total == 0 {
+        return extension::build_metadata_reject(piece);
+    }
+    let dict = match crate::torrent::metainfo::info_dict_from_file(&torrent.torrent_file_path) {
+        Ok(d) => d,
+        Err(_) => return extension::build_metadata_reject(piece),
+    };
+    // The file on disk must still be the torrent we advertised; if it changed
+    // underneath us, serving a mismatched slice would corrupt the peer's dict.
+    if dict.len() != total {
+        return extension::build_metadata_reject(piece);
+    }
+    let offset = piece as usize * extension::METADATA_BLOCK;
+    if offset >= total {
+        return extension::build_metadata_reject(piece);
+    }
+    let end = (offset + extension::METADATA_BLOCK).min(total);
+    extension::build_metadata_data(piece, total, &dict[offset..end])
+}
+
 pub async fn run(
     mut framed: Framed<CryptoStream, BtCodec>,
     addr: SocketAddr,
@@ -76,7 +101,13 @@ pub async fn run(
 
     // BEP 10 extension handshake (skip on private trackers — BEP 27).
     let mut peer_ext = if lt_ext && !torrent.meta.private && listen_port != 0 {
-        let payload = Bytes::from(extension::build_extension_handshake(listen_port, None));
+        // Advertise the info dict size so peers know they can fetch it from us.
+        let meta_size = if torrent.meta.info_dict_len > 0 {
+            Some(torrent.meta.info_dict_len as usize)
+        } else {
+            None
+        };
+        let payload = Bytes::from(extension::build_extension_handshake(listen_port, meta_size));
         framed.send(Message::Extended { ext_id: 0, payload }).await.ok();
         Some(PeerExt::new())
     } else {
@@ -273,6 +304,24 @@ pub async fn run(
                                 if ext_id == 0 {
                                     if let Some(ext) = peer_ext.as_mut() {
                                         ext.ut_pex_id = extension::parse_extension_handshake(&payload);
+                                    }
+                                } else if ext_id == extension::OUR_UT_METADATA_ID {
+                                    // BEP 9 request from a peer resolving a
+                                    // magnet. Re-read the .torrent rather than
+                                    // hold the dict in memory; on any problem
+                                    // reply reject, which is a valid answer and
+                                    // lets the peer move on to someone else.
+                                    if let Some(m) = extension::parse_metadata_message(&payload) {
+                                        if m.msg_type == extension::METADATA_REQUEST {
+                                            let reply = serve_metadata_block(&torrent, m.piece);
+                                            framed
+                                                .send(Message::Extended {
+                                                    ext_id: extension::OUR_UT_METADATA_ID,
+                                                    payload: Bytes::from(reply),
+                                                })
+                                                .await
+                                                .ok();
+                                        }
                                     }
                                 } else if ext_id == OUR_UT_PEX_ID {
                                     let new_peers = extension::parse_pex(&payload);
