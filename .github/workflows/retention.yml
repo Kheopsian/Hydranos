@@ -38,9 +38,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Most recent first, by publication date - same order the release page shows.
-          gh release list --limit 400 --json tagName,publishedAt \
-            --jq "sort_by(.publishedAt) | reverse | .[].tagName" > all.txt
+          # Newest first by SEMANTIC VERSION, not by date. Rebuilding an old tag
+          # republishes its release and bumps publishedAt, which would push
+          # ancient versions into the retention window and evict current ones.
+          gh release list --limit 400 --json tagName --jq ".[].tagName" \
+            | sort -V -r > all.txt
           total=$(wc -l < all.txt)
           tail -n +$((KEEP + 1)) all.txt > prune.txt || true
           echo "$total releases, keeping $KEEP, pruning $(wc -l < prune.txt)"
