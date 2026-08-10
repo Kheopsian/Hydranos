@@ -3,6 +3,28 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.56.0 — 2026-08-10
+
+### Added
+
+- **UDP trackers work.** Announces to `udp://` trackers (BEP 15) were skipped
+  outright, so a torrent whose trackers are all UDP had only the DHT to find a
+  swarm on. Both announcers now speak it: connect, announce, and a peer list in
+  either address family. Connection ids are cached per tracker rather than
+  renegotiated for every torrent, which at 100k torrents over a handful of
+  trackers is the difference between a normal client and a flood.
+- **A UDP announce refuses to run outside your proxy.** SOCKS5 carries TCP; a
+  datagram cannot be relayed through it without UDP ASSOCIATE, which Hydra does
+  not implement. Rather than quietly send the announce direct, and with it your
+  real address, an announce is skipped while `TYPHON_ANNOUNCE_PROXY` is set.
+
+### Fixed
+
+- **The engine package's tests compile again.** They had not since v3.53.0: the
+  magnet work added a method to the client interface without updating a test
+  stub, so the whole package was skipped, including the download-slot tests that
+  guard against churn regressions seen in production.
+
 ## v3.55.0 — 2026-08-10
 
 ### Added
