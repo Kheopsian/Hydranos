@@ -282,18 +282,13 @@ func parseEngineLevel(line string) string {
 	return "INFO"
 }
 
-// ---- credentials + startup banner ------------------------------------------
-
-// WriteAdminCredentials writes the generated admin login to a 0600 file next to
-// the config. The password is intentionally NEVER sent to the hub/mirror.
-func WriteAdminCredentials(configPath, user, pass string) string {
-	p := filepath.Join(filepath.Dir(configPath), "admin-credentials.txt")
-	content := fmt.Sprintf("Hydra admin credentials (generated at first run)\nusername: %s\npassword: %s\n\nChange it via the UI or: hydra hash-password <newpass>\n", user, pass)
-	if err := os.WriteFile(p, []byte(content), 0600); err != nil {
-		return ""
-	}
-	return p
-}
+// ---- startup banner ---------------------------------------------------------
+//
+// There is deliberately no admin-credentials.txt any more. It wrote a plaintext
+// admin password next to the config, where it lived forever; and being written
+// at the very end of boot, it was missing in exactly the case that needed it —
+// a boot that failed after the password had been generated. Hydra no longer
+// generates a password at all: the UI asks for one on first run.
 
 const hydraArt = `
                           ..
@@ -512,9 +507,10 @@ func PrintHeader(version string) {
 	fmt.Fprintf(os.Stdout, "%s\n\n", centered(line, w))
 }
 
-// PrintReady prints the "started" summary + (first run only) the credentials,
-// centered to the same width as the logo so it reads as one coherent block.
-func PrintReady(host string, port int, user, pass string, isNew bool) {
+// PrintReady prints the "started" summary, centered to the same width as the
+// logo so it reads as one coherent block. On first run it points at the UI
+// rather than handing out a password: there is no password yet to hand out.
+func PrintReady(host string, port int, firstRun bool) {
 	_, w := bannerLayout()
 	var b strings.Builder
 	bar := "  " + strings.Repeat("-", w) + "\n"
@@ -523,12 +519,10 @@ func PrintReady(host string, port int, user, pass string, isNew bool) {
 	b.WriteString(centered(fmt.Sprintf("Engines started       API  %s", url), w) + "\n")
 	b.WriteString(bar)
 	b.WriteString("\n")
-	if isNew {
+	if firstRun {
 		lines := []string{
-			"LOGIN  (first run - change it)",
-			"user     : " + user,
-			"password : " + pass,
-			"saved in : admin-credentials.txt",
+			"FIRST RUN - no admin account yet",
+			"open " + url + " to create one",
 		}
 		bw := 0
 		for _, l := range lines {

@@ -80,7 +80,7 @@ func migrate(db *sql.DB, migrations []string) error {
 	if version > len(migrations) {
 		// The file was written by a newer Hydra. Refuse rather than run against
 		// a shape we do not know: downgrading should be a deliberate act.
-		return fmt.Errorf("database schema is version %d but this build only knows %d — "+
+		return fmt.Errorf("database schema is version %d but this build only knows %d, "+
 			"it was written by a newer Hydra; upgrade back or restore a backup",
 			version, len(migrations))
 	}

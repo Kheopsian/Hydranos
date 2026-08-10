@@ -24,7 +24,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 	}
 	a := s.config.Auth
 	if a.PasswordHash == "" {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth not configured — set [auth] password_hash (run: hydra hash-password <pw>)"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no admin account yet, complete first-run setup", "needs_setup": true})
 		return
 	}
 	if req.Username != a.Username ||

@@ -286,7 +286,7 @@ func (s *Scanner) Scan() *Report {
 			outageHosts[host] = true
 			rep.add(Anomaly{
 				Type: InvTrackerOutage, Engine: "both", Name: host, Severity: SevWarn,
-				Detail: fmt.Sprintf("%d/%d torrents on %s erroring — external tracker outage (not alerted)",
+				Detail: fmt.Sprintf("%d/%d torrents on %s erroring: external tracker outage (not alerted)",
 					trackerErr[host], total, host),
 			})
 		}
@@ -311,7 +311,7 @@ func (s *Scanner) Scan() *Report {
 			rep.add(Anomaly{
 				Type: InvDualSeed, Engine: "both", InfoHash: ih, Name: name,
 				Severity: SevWarn,
-				Detail:   "infohash held by both hoard and race — UL credited as MAX not sum (2.7.0)",
+				Detail:   "infohash held by both hoard and race: UL credited as MAX not sum (2.7.0)",
 			})
 		}
 	}

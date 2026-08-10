@@ -411,7 +411,7 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 
 	// Activate push stream (no-op on non-typhon engines).
 	if err := e.client.SubscribeEvents(); err != nil {
-		slog.Warn("hoard: subscribe_events failed — falling back on polling only", "error", err)
+		slog.Warn("hoard: subscribe_events failed, falling back on polling only", "error", err)
 	} else {
 		slog.Info("hoard: subscribed to push event stream (stats_snapshot / lifecycle)")
 	}
@@ -1376,7 +1376,7 @@ func (e *HoardEngine) verifyThrottle() {
 		case <-ticker.C:
 			remaining := e.manageVerifyBatches()
 			if remaining == 0 {
-				slog.Info("hoard: verify throttle — all verified, exiting")
+				slog.Info("hoard: verify throttle, all verified, exiting")
 				return
 			}
 		}
@@ -1396,7 +1396,7 @@ func (e *HoardEngine) stopAllVerifying() {
 		}
 	}
 	if count > 0 {
-		slog.Info("hoard: verify throttle — stopped all verifiers", "count", count)
+		slog.Info("hoard: verify throttle, stopped all verifiers", "count", count)
 	}
 }
 
@@ -1430,7 +1430,7 @@ func (e *HoardEngine) manageVerifyBatches() int {
 	slots := maxConcurrentVerify - activeVerify
 	if slots <= 0 || len(parked) == 0 {
 		if len(parked) > 0 {
-			slog.Info("hoard: verify throttle — waiting", "active", activeVerify, "parked", len(parked))
+			slog.Info("hoard: verify throttle, waiting", "active", activeVerify, "parked", len(parked))
 		}
 		return len(parked)
 	}
@@ -1438,7 +1438,7 @@ func (e *HoardEngine) manageVerifyBatches() int {
 		slots = len(parked)
 	}
 
-	slog.Info("hoard: verify throttle — starting batch", "starting", slots, "active", activeVerify, "remaining", len(parked)-slots)
+	slog.Info("hoard: verify throttle, starting batch", "starting", slots, "active", activeVerify, "remaining", len(parked)-slots)
 	for i := 0; i < slots; i++ {
 		e.autoStart(parked[i])
 	}
@@ -1458,7 +1458,7 @@ func (e *HoardEngine) RestartStuckVerifying() int {
 		}
 	}
 	if count > 0 {
-		slog.Info("hoard: restart-stuck — stopped verifying", "count", count)
+		slog.Info("hoard: restart-stuck, stopped verifying", "count", count)
 	}
 	return count
 }

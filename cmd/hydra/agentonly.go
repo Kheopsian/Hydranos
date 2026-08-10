@@ -187,7 +187,7 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 
 	// ---- HydraAgent gRPC (owns events) ----
 	if token == "" {
-		slog.Warn("agent-only served WITHOUT a token (--agent-token) — do not expose off-LAN")
+		slog.Warn("agent-only served WITHOUT a token (--agent-token): do not expose off-LAN")
 	}
 	engines := make(map[string]engine.EngineClient, len(lives))
 	for _, le := range lives {
@@ -329,7 +329,7 @@ func startListenPortHook(ctx context.Context, port int, token string, lives []*l
 	go func() {
 		slog.Info("agent-only: listen-port hook serving (loopback only)", "addr", addr)
 		if token == "" {
-			slog.Warn("agent-only: listen-port hook has NO token — loopback-only, but set --agent-token for defense-in-depth")
+			slog.Warn("agent-only: listen-port hook has NO token: loopback-only, but set --agent-token for defense-in-depth")
 		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("agent-only: listen-port hook exited", "error", err)

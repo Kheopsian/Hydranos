@@ -119,7 +119,7 @@ func (s *Server) handleRestart(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "restarting": true})
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		slog.Info("restart requested via API — exiting for container restart")
+		slog.Info("restart requested via API, exiting for container restart")
 		os.Exit(0)
 	}()
 }

@@ -15,7 +15,7 @@ import (
 // every read returns empty, and a local add is refused with a clear message
 // (route via a category whose placement targets a remote agent instead).
 
-var errNoLocalEngine = errors.New("front-only node: no local engine — route via a category placement targeting a remote agent")
+var errNoLocalEngine = errors.New("front-only node: no local engine; route via a category placement targeting a remote agent")
 
 // emptyRaceEngine satisfies RaceEngine with empty/no-op behavior.
 type emptyRaceEngine struct{}

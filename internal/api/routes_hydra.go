@@ -466,6 +466,10 @@ func (s *Server) registerHydraRoutes() {
 	s.router.GET("/api/startup", s.handleStartup)
 	s.router.GET("/", s.handleIndex)
 	s.router.POST("/api/login", s.handleLogin) // public: verifie creds -> renvoie l API key
+	// First-run setup: readable always (the browser asks before showing a login
+	// box), writable only while no admin account exists. See setup.go.
+	s.router.GET("/api/setup", s.handleSetupStatus)
+	s.router.POST("/api/setup", s.handleSetupPassword)
 
 	// Authenticated API routes
 	api := s.router.Group("/api", s.apiKeyAuth())
@@ -925,7 +929,7 @@ func (s *Server) raceDiskFull() (bool, string) {
 	}
 	s.raceDrain.DrainNow()
 	if bad, pct, free := over(); bad {
-		return true, fmt.Sprintf("race NVMe full: %.0f%% used, %.1f GB free — add rejected (drain could not free enough)", pct, float64(free)/1e9)
+		return true, fmt.Sprintf("race NVMe full: %.0f%% used, %.1f GB free, add rejected (drain could not free enough)", pct, float64(free)/1e9)
 	}
 	return false, ""
 }

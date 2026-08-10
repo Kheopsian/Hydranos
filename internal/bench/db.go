@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Kheopsian/hydra/internal/sqlitex"
 	_ "modernc.org/sqlite"
 )
 
@@ -182,9 +183,14 @@ func (b *BenchDB) Open() error {
 		return err
 	}
 
-	db, err := sql.Open("sqlite", b.path)
+	dsn, netFS := sqlitex.DSN(b.path, "")
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return err
+	}
+	if netFS {
+		// The exclusive-lock fallback tolerates exactly one connection.
+		db.SetMaxOpenConns(1)
 	}
 
 	if _, err := db.Exec(benchDDL); err != nil {
@@ -236,7 +242,13 @@ func (b *BenchDB) Open() error {
 
 	// Dedicated read-only connection for heavy aggregate reads (records),
 	// so a multi-second full scan never blocks writes or other endpoints.
-	if ro, roErr := sql.Open("sqlite", "file:"+b.path+"?mode=ro"); roErr == nil {
+	// Not on a share: the write connection holds an exclusive lock there (the
+	// only way SQLite works over SMB/NFS at all), so a second reader would be
+	// refused. Records fall back to the write connection, which is correct if
+	// slower — and a bench database on a share is already the slow path.
+	if netFS {
+		slog.Info("bench_db: network storage: single connection, no separate reader")
+	} else if ro, roErr := sql.Open("sqlite", "file:"+b.path+"?mode=ro"); roErr == nil {
 		ro.Exec("PRAGMA busy_timeout=5000")
 		ro.SetMaxOpenConns(2)
 		b.roConn = ro

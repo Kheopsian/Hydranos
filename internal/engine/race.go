@@ -524,7 +524,7 @@ func (e *RaceEngine) RemoveTorrent(infoHash string, deleteFiles bool) error {
 			"residual_entries_in_save_path", residualCount,
 		)
 		if lstatErr != nil {
-			slog.Warn("race: delete skipped — path absent côté Go (Typhon a peut-être tout fait, ou path mismatch save_path/name)",
+			slog.Warn("race: delete skipped, path absent côté Go (Typhon a peut-être tout fait, ou path mismatch save_path/name)",
 				"info_hash", infoHash, "real_path", realPath, "lstat_err", lstatErr)
 		}
 	}

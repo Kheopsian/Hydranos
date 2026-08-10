@@ -21,7 +21,7 @@ async function fetchPortForward() {
             // Find stale sockets
             const stale = [...(d.race_sockets || []), ...(d.hoard_sockets || [])].filter(s => s.stale);
             for (const s of stale) {
-                warnings.push(`⚠ ${s.ip}:${s.port} — stale socket (bound ${s.bound_interface}, interface recreated)`);
+                warnings.push(`⚠ ${s.ip}:${s.port}, stale socket (bound ${s.bound_interface}, interface recreated)`);
             }
         } else if (!d.all_connectable) {
             cls = d.race_connectable || d.hoard_connectable ? "warn" : "error";
@@ -31,8 +31,8 @@ async function fetchPortForward() {
 
         // Build tooltip
         let lines = [
-            `Race :${d.race_port} — ${d.race_peers} peers ${d.race_connectable ? "" : "✗"}`,
-            `Hoard :${d.hoard_port} — ${d.hoard_peers} peers ${d.hoard_connectable ? "" : "✗"}`,
+            `Race :${d.race_port}, ${d.race_peers} peers ${d.race_connectable ? "" : "✗"}`,
+            `Hoard :${d.hoard_port}, ${d.hoard_peers} peers ${d.hoard_connectable ? "" : "✗"}`,
             `IP: ${d.public_ip}`,
         ];
         if (warnings.length) lines = [...warnings, "", ...lines];
@@ -149,7 +149,7 @@ function _interfacesCardHTML(list) {
     </div>`;
 }
 
-// Throughput in bits/s (network convention, decimal) — Option 2: VOLUMES in iB, RATES in Gbps.
+// Throughput in bits/s (network convention, decimal), Option 2: VOLUMES in iB, RATES in Gbps.
 function formatGbps(bytesPerSec) {
     const bits = (bytesPerSec || 0) * 8;
     if (bits >= 1e9) return (bits / 1e9).toFixed(2) + " Gbps";
@@ -173,10 +173,69 @@ function formatUptime(seconds) {
     return `${m}m`;
 }
 
+let _setupOpen = false;
+// Ecran de premier lancement : aucun compte admin n existe encore, l humain
+// choisit son mot de passe. Hydra n en genere plus aucun -> rien a perdre si le
+// demarrage echoue en route. POST /api/setup renvoie l API key comme /api/login.
+function promptFirstRunSetup(networkStorage) {
+    if (_setupOpen) return;
+    _setupOpen = true;
+    const warn = networkStorage ? `<p class="modal-desc" style="color:var(--accent-orange)">
+        Config on network storage detected (${esc(networkStorage)}). Hydra can handle this,
+        but the database cannot use its safest journal mode there: if the share drops
+        mid-write it can be corrupted. Keep backups of your data_dir, or move data_dir
+        to a local disk (your downloads can stay on the share).</p>` : "";
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `<div class="modal-box">
+        <h3>Welcome to Hydra</h3>
+        <p class="modal-desc" id="setup-msg">Create your admin account to get started.</p>
+        ${warn}
+        <input type="text" id="setup-user" placeholder="Username" autocomplete="username" value="admin" style="width:100%;margin-bottom:8px">
+        <input type="password" id="setup-pass" placeholder="Password (min 8 characters)" autocomplete="new-password" style="width:100%;margin-bottom:8px">
+        <input type="password" id="setup-pass2" placeholder="Confirm password" autocomplete="new-password" style="width:100%">
+        <div class="modal-actions">
+            <button class="btn-primary" id="setup-go">Create account</button>
+        </div>
+    </div>`;
+    document.body.appendChild(ov);
+    const user = ov.querySelector("#setup-user");
+    const pass = ov.querySelector("#setup-pass");
+    const pass2 = ov.querySelector("#setup-pass2");
+    const msg = ov.querySelector("#setup-msg");
+    pass.focus();
+    const fail = (t) => { msg.textContent = t; msg.style.color = "var(--accent-red)"; };
+    const go = async () => {
+        if (pass.value.length < 8) return fail("Password too short (min 8 characters).");
+        if (pass.value !== pass2.value) return fail("The two passwords do not match.");
+        try {
+            const res = await fetch("/api/setup", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: user.value, password: pass.value }),
+            });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok) return fail(d.error || ("Setup failed (" + res.status + ")"));
+            localStorage.setItem("hydra_api_key", d.api_key);
+            location.reload();
+        } catch (err) {
+            fail("Network error: " + err.message);
+        }
+    };
+    ov.querySelector("#setup-go").addEventListener("click", go);
+    [user, pass, pass2].forEach(el => el.addEventListener("keydown", e => { if (e.key === "Enter") go(); }));
+}
+
 let _loginOpen = false;
 // Modale de login user/mot de passe. POST /api/login -> renvoie l API key,
 // stockee en localStorage (la WebUI l utilise ensuite pour X-Api-Key).
-function promptLogin(reason) {
+// Une install neuve n a pas encore de compte -> on bascule sur l ecran de setup.
+async function promptLogin(reason) {
+    if (_loginOpen || _setupOpen) return;
+    try {
+        const st = await (await fetch("/api/setup")).json();
+        if (st && st.needs_setup) return promptFirstRunSetup(st.network_storage);
+    } catch (_) { /* pas joignable: on retombe sur le login normal */ }
     if (_loginOpen) return;
     _loginOpen = true;
     const ov = document.createElement("div");
@@ -267,7 +326,7 @@ function importWizard() {
 
     function stepSource() {
         box.innerHTML = `<h3>Import an existing library</h3>
-            <p class="modal-desc">Hydra seeds the data already on your disk — completed torrents skip the hash-check, so nothing is re-downloaded.</p>
+            <p class="modal-desc">Hydra seeds the data already on your disk, completed torrents skip the hash-check, so nothing is re-downloaded.</p>
             <div style="display:flex;gap:8px;margin:12px 0">
                 <button class="btn-primary" id="src-qbit" style="flex:1">qBittorrent</button>
                 <button class="btn-primary" id="src-tr" style="flex:1">Transmission</button>
@@ -280,10 +339,10 @@ function importWizard() {
 
     // Transmission cannot hand over a .torrent (its RPC only exposes the path),
     // so the import reads its config folder. Which also means it works when
-    // Transmission is already stopped — usually the case during a migration.
+    // Transmission is already stopped, usually the case during a migration.
     function stepTransmission(prefill) {
         box.innerHTML = `<h3>Import from Transmission</h3>
-            <p class="modal-desc">Hydra reads Transmission's <b>config folder</b> — the one holding <code>torrents/</code> and <code>resume/</code>. Transmission does not need to be running.</p>
+            <p class="modal-desc">Hydra reads Transmission's <b>config folder</b>, the one holding <code>torrents/</code> and <code>resume/</code>. Transmission does not need to be running.</p>
             <input type="text" id="tr-dir" placeholder="/config/transmission or ~/.config/transmission-daemon" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.dir || "")}">
             <p class="modal-desc" style="margin:6px 0">Not visible from Hydra? Upload a zip of that folder instead:</p>
             <input type="file" id="tr-zip" accept=".zip" style="width:100%;margin-bottom:8px">
@@ -342,12 +401,12 @@ function importWizard() {
         const probs = (d.problems || []).length;
         box.innerHTML = `<h3>Import preview</h3>
             <p class="modal-desc"><b>${d.total}</b> torrents · <b>${d.completed}</b> complete (seed-mode) · <b>${d.incomplete}</b> partial · <b>${d.stopped}</b> stopped in Transmission · carried upload <b>${formatBytes(d.carried_uploaded_bytes)}</b></p>
-            <p class="modal-desc">Categories to create: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "—"} — all as <b>hoard</b>.</p>
-            ${probs ? `<p class="modal-desc" style="color:var(--accent-red)">${probs} file(s) unreadable — they will be skipped.</p>` : ""}
+            <p class="modal-desc">Categories to create: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "-"}, all as <b>hoard</b>.</p>
+            ${probs ? `<p class="modal-desc" style="color:var(--accent-red)">${probs} file(s) unreadable, they will be skipped.</p>` : ""}
             ${d.without_resume ? `<p class="modal-desc">${d.without_resume} torrent(s) have no resume file: no save path, they will be skipped.</p>` : ""}
             <p class="modal-desc" style="margin-bottom:4px">Path mapping (Transmission path → what Hydra sees):</p>
             <div style="max-height:150px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || "<i>no paths detected</i>"}</div>
-            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped"> Import everything stopped — no announce until you start them</label>
+            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped"> Import everything stopped, no announce until you start them</label>
             <p class="modal-desc" id="tr-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="tr-back2">Back</button>
@@ -422,10 +481,10 @@ function importWizard() {
         </div>`).join("");
         box.innerHTML = `<h3>Import preview</h3>
             <p class="modal-desc"><b>${d.total}</b> torrents · <b>${d.completed}</b> complete (seed-mode) · <b>${d.incomplete}</b> partial (verify + resume) · carried upload <b>${formatBytes(d.carried_uploaded_bytes)}</b></p>
-            <p class="modal-desc">Categories: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "—"} — all imported as <b>hoard</b>.</p>
+            <p class="modal-desc">Categories: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "-"}, all imported as <b>hoard</b>.</p>
             <p class="modal-desc" style="margin-bottom:4px">Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || "<i>no paths detected</i>"}</div>
-            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped"> Import everything stopped — no announce until you start them</label>
+            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped"> Import everything stopped, no announce until you start them</label>
             <p class="modal-desc" id="qb-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="qb-back">Back</button>
@@ -554,6 +613,35 @@ window.addEventListener("DOMContentLoaded", () => {
     });
 });
 
+// Bandeau "data_dir sur stockage reseau". Le warning existe aussi au demarrage
+// dans les logs, mais un log defile et personne ne le relit : la consequence
+// (base corrompue par une coupure du partage) merite d etre visible la ou l
+// utilisateur regarde. Masquable, et la version masquee est retenue par kind :
+// changer de type de montage le reaffiche.
+window.addEventListener("DOMContentLoaded", async () => {
+    let kind = "";
+    try {
+        kind = ((await (await fetch("/api/setup")).json()) || {}).network_storage || "";
+    } catch (_) { return; }
+    if (!kind || localStorage.getItem("hydra_netfs_ack") === kind) return;
+    const bar = document.createElement("div");
+    bar.style.cssText = "padding:10px 14px;background:var(--accent-orange,#c87f0a);color:#fff;" +
+        "font-size:13px;display:flex;gap:12px;align-items:center;justify-content:center";
+    bar.innerHTML = `<span>Config on network storage detected (${esc(kind)}). Hydra can handle this,
+        but the database cannot use its safest journal mode there: a share that drops mid-write
+        can corrupt it. <b>Keep backups of your data_dir</b>, or move data_dir to a local disk
+        (your downloads can stay on the share).</span>`;
+    const btn = document.createElement("button");
+    btn.textContent = "Got it";
+    btn.className = "btn-secondary";
+    // The bar is a flex row: without this the button is a shrinkable flex item
+    // and the text wraps it onto two lines.
+    btn.style.cssText = "flex:0 0 auto;white-space:nowrap";
+    btn.addEventListener("click", () => { localStorage.setItem("hydra_netfs_ack", kind); bar.remove(); });
+    bar.appendChild(btn);
+    document.body.prepend(bar);
+});
+
 // ─── Mode selector ──────────────────────────────────────
 
 document.querySelectorAll(".mode-btn").forEach(btn => {
@@ -587,7 +675,7 @@ async function checkHealth() {
 
 // _renderStatus applies a /api/status payload to the DOM. Called both by
 // the legacy fetch path (updateOverview, used on tab change) and by the SSE
-// status_snapshot handler. Pure render — does no I/O.
+// status_snapshot handler. Pure render, does no I/O.
 function _renderStatus(data) {
         // Race stats
         if (data.race) {
@@ -625,7 +713,7 @@ function _renderStatus(data) {
             if (ovt) ovt.textContent = ((data.hoard.total_torrents || 0) + (data.race?.torrents || 0)).toLocaleString();
         }
 
-        // Day totals — UL/DL accumulated since midnight Europe/Paris (auto reset)
+        // Day totals, UL/DL accumulated since midnight Europe/Paris (auto reset)
         const dayUl = data.day_uploaded || 0;
         const dayDl = data.day_downloaded || 0;
         document.getElementById("day-upload").textContent = formatBytes(dayUl);
@@ -644,7 +732,7 @@ function _renderStatus(data) {
             const ovr = document.getElementById("ov-ratio"); if (ovr) ovr.textContent = rStr;
             const ovdl = document.getElementById("ov-dl-total"); if (ovdl) ovdl.textContent = formatBytes(globalDl);
 
-            // Compteur milestone PiB DYNAMIQUE (prochain jalon entier) — 1 PiB = 2^50 octets
+            // Compteur milestone PiB DYNAMIQUE (prochain jalon entier), 1 PiB = 2^50 octets
             const PiB = 1125899906842624;
             const pib = globalUl / PiB;
             const goal = Math.floor(pib) + 1;        // prochain jalon
@@ -693,7 +781,7 @@ function _renderStatus(data) {
             const ia = document.getElementById("intel-avg-score"); if (ia) ia.textContent = (data.peer_intel.avg_score || 0).toFixed(3);
         }
 
-        // Uptime — moved here from /metrics fetch (now sourced from status payload).
+        // Uptime, moved here from /metrics fetch (now sourced from status payload).
         if (typeof data.uptime === "number") {
             const upEl = document.getElementById("uptime-value");
             if (upEl) upEl.textContent = formatUptime(data.uptime);
@@ -744,7 +832,7 @@ async function updateRecords(force) {
                     '</span><span class="via">libtorrent (C++) &middot; qBittorrent</span><span class="dur">pre-Hydra</span></div>');
             } else {
                 const hot = (i === d.milestones.length - 1) ? " hot" : "";
-                const dur = m.since_prev || "&mdash;";
+                const dur = m.since_prev || "-";
                 rows.push('<div class="ar' + hot + '"><span class="when">' + label(m.pib) +
                     '</span><span class="via">Typhon (Rust) &middot; Hydra &middot; ' + m.date +
                     '</span><span class="dur">' + dur + '</span></div>');
@@ -853,7 +941,7 @@ async function updateRaceTorrents() {
             const avgShare = completed.reduce((sum, t) => sum + t.ratio / (t.swarm_seeds - 1), 0) / completed.length;
             document.getElementById("race-avg-share").textContent = (avgShare * 100).toFixed(1) + "%";
         } else {
-            document.getElementById("race-avg-share").textContent = "—";
+            document.getElementById("race-avg-share").textContent = "-";
         }
     } catch (e) {
         console.error("Failed to update race torrents:", e);
@@ -920,7 +1008,7 @@ function switchHoardDetailTab(tab) {
 }
 
 // ---------------------------------------------------------------------------
-// Content tab — what is actually inside the torrent
+// Content tab, what is actually inside the torrent
 // ---------------------------------------------------------------------------
 
 // Guards against a slow response landing after the user selected another
@@ -941,7 +1029,7 @@ async function loadTorrentContent(infoHash, bodyId, summaryId) {
         avail = d.availability || null;
     } catch (err) {
         if (req !== _contentReq) return;
-        body.innerHTML = `<div class="tc-empty">Could not read the file list — ${esc(err.message || String(err))}</div>`;
+        body.innerHTML = `<div class="tc-empty">Could not read the file list, ${esc(err.message || String(err))}</div>`;
         return;
     }
     if (req !== _contentReq) return;
@@ -1010,7 +1098,7 @@ async function loadTimeline(infoHash) {
         const t0 = addedEv ? addedEv.ts : (snapshots.length > 0 ? snapshots[0].ts : 0);
 
         // Each render is isolated: a failure in one (e.g. Chart.js unavailable)
-        // must not swallow the rest — notably the peers list and event log.
+        // must not swallow the rest, notably the peers list and event log.
         const safe = (fn, label) => { try { fn(); } catch (e) { console.error("timeline render failed:", label, e); } };
 
         safe(() => renderTimelineResult(events, snapshots, t0), "result");
@@ -1019,7 +1107,7 @@ async function loadTimeline(infoHash) {
             safe(() => renderProgressChart(snapshots, events, t0), "progress-chart");
             safe(() => renderPeerSpeedChart(snapshots, t0), "peer-chart");
         } else {
-            console.warn("Chart.js unavailable — skipping timeline graphs");
+            console.warn("Chart.js unavailable, skipping timeline graphs");
         }
         safe(() => renderTimelineEvents(events, t0), "events");
 
@@ -1040,7 +1128,7 @@ function renderTimelineResult(events, snapshots, t0) {
 
     const dlTime = completedEv.download_time || (completedEv.ts - t0);
 
-    // Find competitors — exclude initial seeders (already at 100% in first snapshot)
+    // Find competitors, exclude initial seeders (already at 100% in first snapshot)
     const initialSeeders = new Set();
     const seenAsLeecher = new Set();  // peers we saw with progress < 1.0
     let firstSnapParsed = false;
@@ -1049,7 +1137,7 @@ function renderTimelineResult(events, snapshots, t0) {
         try {
             const peers = JSON.parse(snap.peers_json);
             if (!firstSnapParsed) {
-                // First snapshot with peers — mark initial seeders
+                // First snapshot with peers, mark initial seeders
                 for (const p of peers) {
                     if (p.progress >= 1.0) initialSeeders.add(p.ip);
                 }
@@ -1200,7 +1288,7 @@ function renderProgressChart(snapshots, events, t0) {
                     callbacks: {
                         label: function(ctx) {
                             if (ctx.dataset.yAxisID === "y1") return `DL: ${formatBytes(ctx.raw)}/s`;
-                            return `${ctx.dataset.label}: ${ctx.raw !== null ? ctx.raw.toFixed(1) + "%" : "—"}`;
+                            return `${ctx.dataset.label}: ${ctx.raw !== null ? ctx.raw.toFixed(1) + "%" : "-"}`;
                         }
                     }
                 },
@@ -1341,7 +1429,7 @@ function renderTimelineEvents(events, t0) {
 }
 
 function formatDate(ts) {
-    if (!ts || ts <= 0) return "—";
+    if (!ts || ts <= 0) return "-";
     const d = new Date(ts * 1000);
     return d.toLocaleDateString() + " " + d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
 }
@@ -1493,7 +1581,7 @@ async function _showTagPicker(ev) {
         const on = cur.has(t);
         return `<div class="ctx-item" onclick="_toggleTagSelected('${jsT}', ${on ? "false" : "true"})">${on ? "✓ " : " "}${esch(t)}</div>`;
     }).join("");
-    const label = `Edit tags — ${hoardOnly.length} torrent${hoardOnly.length > 1 ? "s" : ""}`;
+    const label = `Edit tags, ${hoardOnly.length} torrent${hoardOnly.length > 1 ? "s" : ""}`;
     document.getElementById("ctx-menu").innerHTML =
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
@@ -1612,7 +1700,7 @@ function renderHoardTable() {
 }
 
 // Recompute state/cat chip counts. Called only when the torrent list mutates
-// (30s backstop fetch, torrent_added/removed) — not on each stats snapshot.
+// (30s backstop fetch, torrent_added/removed), not on each stats snapshot.
 function _renderHoardCounts() {
     if (!_hoardAllTorrents) return;
     const stateCounts = {};
@@ -1710,14 +1798,14 @@ function _renderHoardStatsHeader(data) {
 
 // Called on tab activation, hash change, or page load. Live updates flow
 // through SSE (status_snapshot + hoard_stats_snapshot + stats_snapshot) so
-// the periodic poll does NOT call this anymore — it would duplicate the SSE
+// the periodic poll does NOT call this anymore, it would duplicate the SSE
 // stream over HTTP, which was the original bug we set out to kill.
 //
 // Two responsibilities:
 //   1. Fire an immediate /api/hoard/stats fetch only if SSE hasn't painted
 //      the header yet (cold tab activation).
 //   2. Refresh the static-ish torrent list (/api/hoard/torrents) at most
-//      every HOARD_FETCH_INTERVAL — backstop for name / category / scrape.
+//      every HOARD_FETCH_INTERVAL, backstop for name / category / scrape.
 async function updateHoardStats() {
     try {
         // The hoard torrent list is now hydrated + kept live entirely over SSE
@@ -1942,7 +2030,7 @@ async function _showCategoryPicker(ev, move) {
     const items = cats.map(c => {
         const safeName = esc(c.name);
         const safePath = esc(c.save_path || "");
-        // category name is embedded as a JS string literal — escape quotes.
+        // category name is embedded as a JS string literal, escape quotes.
         const jsName = String(c.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
         return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\', ${move ? "true" : "false"})" title="${safePath}">${safeName}</div>`;
     }).join("");
@@ -2051,11 +2139,11 @@ async function _reannounceSelected() {
 // this just decides which menu entries are worth offering.
 // What the row should say. "Stopped" is the user's own decision; "Queued" is a
 // scheduler holding the torrent back, which is normal and temporary. Keeping
-// them apart is the whole point of the intent flag — same split qBittorrent 5
+// them apart is the whole point of the intent flag, same split qBittorrent 5
 // makes, so the words already mean what people expect.
 function displayState(t) {
     if (t.user_paused || t.state === "stopped") {
-        return { label: "stopped", cls: "state-paused", title: "Stopped by you — survives a restart" };
+        return { label: "stopped", cls: "state-paused", title: "Stopped by you, survives a restart" };
     }
     if (t.state === "queued") {
         return { label: "queued", cls: "state-queued", title: "Waiting for a slot" };
@@ -2436,7 +2524,7 @@ function _previewCardHTML(fileName, sum) {
 
 function _previewErrorHTML(fileName, msg) {
     return `<div class="tp-card tp-card-error"><span class="tp-name">${esc(fileName)}</span>` +
-        `<span class="tp-meta">not a readable .torrent — ${esc(msg)}</span></div>`;
+        `<span class="tp-meta">not a readable .torrent, ${esc(msg)}</span></div>`;
 }
 
 function _previewEnabled() {
@@ -2532,7 +2620,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                 // Bulk upload
                 let ok = 0, fail = 0, errors = [];
                 for (let i = 0; i < files.length; i++) {
-                    resultEl.textContent = `Upload ${i + 1}/${files.length} — ${files[i].name}`;
+                    resultEl.textContent = `Upload ${i + 1}/${files.length}, ${files[i].name}`;
                     resultEl.className = "result-msg";
                     resultEl.style.display = "block";
                     try {
@@ -2656,7 +2744,7 @@ async function updateCategories() {
         // Labels worn by torrents but matching no configured category: the
         // residue of deletions made before labels were cleared durably. Shown
         // here because this screen holds the only delete button, and left out
-        // of the dropdown below — you cannot assign a category that is gone.
+        // of the dropdown below, you cannot assign a category that is gone.
         try {
             const orphans = await api("/api/categories/orphans");
             if (orphans && orphans.length) {
@@ -2676,7 +2764,7 @@ async function updateCategories() {
         // Update add-torrent dropdown
         const sel = document.getElementById("torrent-category");
         const current = sel.value;
-        sel.innerHTML = '<option value="">— none —</option>' +
+        sel.innerHTML = '<option value="">- none -</option>' +
             cats.map(cat => `<option value="${cat.name}"${cat.name === current ? " selected" : ""}>${esc(incoCat(cat.name))}</option>`).join("");
     } catch (e) {
         console.error("Failed to update categories:", e);
@@ -2788,7 +2876,7 @@ function _renderFsDropdown(browsedPath, dirs, fragment) {
         : dirs;
 
     const items = filtered.length === 0
-        ? '<div class="fs-dir-item fs-empty">— no folders —</div>'
+        ? '<div class="fs-dir-item fs-empty">- no folders -</div>'
         : filtered.map(d => {
             const full = browsedPath === "/" ? "/" + d : browsedPath + "/" + d;
             return `<div class="fs-dir-item" data-path="${full.replace(/"/g, "&quot;")}">📁 ${d}</div>`;
@@ -2976,7 +3064,7 @@ const BM_META = {
     arc_ghost_hits_per_sec:  { label: "ARC Ghost Hits/s",     fmt: v => v.toFixed(1),         hb: null  },
 };
 
-// Crosshair plugin — vertical line on hover
+// Crosshair plugin, vertical line on hover
 const crosshairPlugin = {
     id: "crosshair",
     afterDraw(chart) {
@@ -3008,7 +3096,7 @@ function _bmLabel(ts) {
 }
 
 // Dedicated label for the VPN speedtest chart: always day-format (the chart
-// covers 7 days at hourly cadence — hour-format makes the X axis unreadable).
+// covers 7 days at hourly cadence, hour-format makes the X axis unreadable).
 function _vpnDayLabel(ts) {
     return new Date(ts * 1000).toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "2-digit" });
 }
@@ -3271,7 +3359,7 @@ function _initBmCharts() {
                                 const ts = _vpnHistoryRef[items[0]?.dataIndex]?.ts;
                                 return ts ? new Date(ts * 1000).toLocaleString() : "";
                             },
-                            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y?.toFixed(1) ?? "—"} Mbps`,
+                            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y?.toFixed(1) ?? "-"} Mbps`,
                         },
                     },
                 },
@@ -3336,7 +3424,7 @@ async function updateBenchmark() {
         // Charts
         _updateDualChart(_bmCharts.upload, history, "race_upload_rate", "hoard_upload_rate");
 
-        // Total uploaded — 20 stacked bars, each = sum of volume in bucket
+        // Total uploaded, 20 stacked bars, each = sum of volume in bucket
         {
             const N = 20;
             if (history.length >= 2) {
@@ -3376,7 +3464,7 @@ async function updateBenchmark() {
             c.data.datasets[3].data = history.map(p => p.hoard_peers ?? 0);
             c.update("none");
         }
-        // Race Events — 20 stacked bars (added, completed, first_upload)
+        // Race Events, 20 stacked bars (added, completed, first_upload)
         {
             const N = 20;
             if (history.length >= 2) {
@@ -3413,7 +3501,7 @@ async function updateBenchmark() {
         _updateChart(_bmCharts.iowait, history, "iowait_pct");
         _updateChart(_bmCharts.arcMiss, history, "arc_miss_per_sec");
 
-        // VPN speedtest — 7-day window, axis in days
+        // VPN speedtest, 7-day window, axis in days
         const [vpnLatest, vpnHistory] = await Promise.all([
             api("/api/vpn-speedtest/latest").catch(() => null),
             api("/api/vpn-speedtest/history?hours=168").catch(() => []),
@@ -3507,7 +3595,7 @@ async function runCompare() {
         }
 
         document.getElementById("cmp-counts").textContent =
-            `P1: ${data.p1_count} samples — P2: ${data.p2_count} samples`;
+            `P1: ${data.p1_count} samples, P2: ${data.p2_count} samples`;
 
         const tbody = document.getElementById("cmp-tbody");
         tbody.innerHTML = Object.entries(data.metrics).map(([col, v]) => {
@@ -3630,7 +3718,7 @@ function _rpUpdateUnbounded() {
     const w = document.getElementById("rp-warn");
     if (!w) return;
     if (_rpUnboundedDelete()) {
-        w.textContent = "Both thresholds are 0, so every race torrent past the keep floor matches — and the action is Delete. Their data will be erased.";
+        w.textContent = "Both thresholds are 0, so every race torrent past the keep floor matches, and the action is Delete. Their data will be erased.";
         w.style.display = "";
     } else {
         w.style.display = "none";
@@ -3693,14 +3781,14 @@ async function _rpDrainNow(btn) {
     loadRacePolicy();
 }
 // Turn a /api/drain/now response into one line. A drain that legitimately did
-// nothing must still say so — reporting nothing is what made the button look
+// nothing must still say so, reporting nothing is what made the button look
 // dead even when it had run.
 function _rpDrainMsg(r) {
     if (!r || typeof r !== "object") return "Nothing to do.";
     if (r.status === "no_match") {
         if (r.no_category_link)
-            return `${r.no_category_link} torrent(s) matched but their category has no hoard category linked — nothing moved.`;
-        if (r.failed) return `${r.failed} torrent(s) matched but failed — see the logs.`;
+            return `${r.no_category_link} torrent(s) matched but their category has no hoard category linked, nothing moved.`;
+        if (r.failed) return `${r.failed} torrent(s) matched but failed, see the logs.`;
         return "Nothing matched the thresholds.";
     }
     if (r.status === "no_drain_needed") return "Nothing to do: disk is below the start mark.";
@@ -3747,7 +3835,7 @@ async function updateUptime() {
 
 // Single-flighted: skips if a previous tick is still in-flight (avoids
 // stacking under bad wifi / slow API). Status + hoard stats now flow through
-// SSE (status_snapshot, hoard_stats_snapshot) — this loop only handles the
+// SSE (status_snapshot, hoard_stats_snapshot), this loop only handles the
 // per-tab heavy fetches and /health.
 let _polling = false;
 async function poll() {
@@ -3968,7 +4056,7 @@ function _scheduleHoardRender() {
     });
 }
 
-// Suspend SSE while tab is hidden — EventSource is not throttled by browser
+// Suspend SSE while tab is hidden, EventSource is not throttled by browser
 // background policies, and rendering ~13k-torrent tables once a second under
 // throttled GC was leaking GBs of allocations and eventually OOM-killing the
 // renderer (blank tab on return, refresh wedged, only new tab recovers).
@@ -4024,11 +4112,11 @@ function incoCat(c) {
 }
 function incoIP(ip) {
     if (!_incognito || !ip) return ip;
-    // TEST-NET-3 (203.0.113.0/24) — reserved for docs/examples, clearly fake.
+    // TEST-NET-3 (203.0.113.0/24), reserved for docs/examples, clearly fake.
     return "203.0.113." + (_incoHash(ip) % 254 + 1);
 }
 function incoPath(p) {
-    // Save paths can leak real folders/usernames — replace with a plausible
+    // Save paths can leak real folders/usernames, replace with a plausible
     // but fake path, distinct per real path.
     if (!_incognito || !p) return p;
     return "/downloads/" + _INCO_CATS[_incoHash(p) % _INCO_CATS.length].toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -4457,12 +4545,12 @@ async function saveSettings() {
         const base = `${r.changed} setting(s) written to default.toml.`;
         banner.className = "result-msg success";
         if (tier === "hot") {
-            banner.innerHTML = `${base} Applied live — no restart needed` +
+            banner.innerHTML = `${base} Applied live, no restart needed` +
                 (hotApplied.length ? ` (${hotApplied.join(", ")})` : "") + ".";
         } else {
             const what = (tier === "full")
-                ? "Daemon/auth settings changed — a full restart is required."
-                : "Engine settings changed — restart the torrent engines to apply.";
+                ? "Daemon/auth settings changed, a full restart is required."
+                : "Engine settings changed, restart the torrent engines to apply.";
             banner.innerHTML = `${base} ${what} ` +
                 `<button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">Apply &amp; restart</button>`;
             if (_kc) banner.innerHTML += ' <span style="color:var(--text-secondary)">(API key updated for this browser)</span>';
@@ -4613,11 +4701,11 @@ async function updateTrackers() {
                 : '<span class="mode-tag mode-race">error</span>';
             const spoof = r.spoofed
                 ? `<span class="mode-tag mode-hoard">${esc(r.peer_id_prefix || "spoof")}</span>`
-                : '<span class="sr-desc">—</span>';
+                : '<span class="sr-desc">-</span>';
             const passkey = r.passkey_set
                 ? '<span class="mode-tag mode-hoard">set</span>'
-                : '<span class="sr-desc">—</span>';
-            const err = r.last_error ? esc(r.last_error) : "—";
+                : '<span class="sr-desc">-</span>';
+            const err = r.last_error ? esc(r.last_error) : "-";
             return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}')">Edit</button></td></tr>`;
         }).join("");
         if (_thtml === _trackersSig) return;
@@ -4776,7 +4864,7 @@ async function updateEngines(){
         const tb = document.getElementById("engines-tbody");
         if(!tb) return;
         const rows = [];
-        // Base engines (the built-in local race/hoard) — shown but not deletable.
+        // Base engines (the built-in local race/hoard), shown but not deletable.
         const local = agents.find(function(a){ return a.name === "local"; });
         if(local && local.engines){
             local.engines.forEach(function(e){
@@ -4790,7 +4878,7 @@ async function updateEngines(){
                           "</td><td>" + esc(portCell) + "</td><td><span class=\"sr-desc\">built-in</span></td></tr>");
             });
         }
-        // Extra engines (shards) — deletable.
+        // Extra engines (shards), deletable.
         extras.forEach(function(e){
             rows.push("<tr><td><strong>" + esc(e.id) + "</strong></td><td>" + esc(e.role) + "</td><td>" + e.listen_port +
                       "</td><td><button class=\"btn-small btn-danger\" onclick=\"deleteEngine('" + esc(e.id) + "')\">Delete</button></td></tr>");
@@ -4898,7 +4986,7 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
     const total = piecesHave.length;
     const have = piecesHave.filter(p => p === 1).length;
     const missing = total - have;
-    if (info) info.textContent = `(${have}/${total} — ${missing} missing)`;
+    if (info) info.textContent = `(${have}/${total}, ${missing} missing)`;
 
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -4951,31 +5039,31 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
 const TABLE_COLS = {
     "hoard-table": [
         { id: "name", label: "Name", sort: "name", render: t => `<td title="${t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
-        { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>` },
+        { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
         { id: "state", label: "State", sort: "state", render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${d.title}">${d.label}</span></td>`; } },
         { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
-        { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "—"}</td>` },
-        { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "—"}</td>` },
+        { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
+        { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate ?? 0)}</td>` },
         { id: "upload_rate", label: "Up", sort: "upload_rate", render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
         { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
-        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "—")}</td>` },
+        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "-")}</td>` },
         { id: "category", label: "Category", sort: "category", render: t => `<td>${esc(incoCat(t.category))}</td>` },
-        { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "—"}</td>` },
+        { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "-"}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
         { id: "agent", label: "Agent", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
     ],
     "race-table": [
         { id: "name", label: "Name", sort: "name", render: t => `<td title="${t.info_hash}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
-        { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "—"}</td>` },
+        { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
         { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
-        { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "—"}</td>` },
-        { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "—"}</td>` },
+        { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
+        { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate)}</td>` },
         { id: "upload_rate", label: "Up", sort: "upload_rate", render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
         { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
-        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "—")}</td>` },
+        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "-")}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
         { id: "agent", label: "Agent", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
@@ -5130,7 +5218,7 @@ async function checkForUpdate() {
     const el = document.getElementById("update-badge");
     if (!el) return;
     // Server caches the GitHub lookup 6h, so polling it every health tick is
-    // pointless — throttle the client to once per 30 min.
+    // pointless, throttle the client to once per 30 min.
     if (_lastUpdateCheck && Date.now() - _lastUpdateCheck < 1800000) return;
     _lastUpdateCheck = Date.now();
     try {
@@ -5235,6 +5323,6 @@ function exportLogs() {
 function updateIssueLink() {
     const a = document.getElementById("logs-issue");
     if (!a) return;
-    const body = "**Describe the issue**\n\n\n**Version:** (see the startup banner)\n\n**Logs** (paste from the Logs tab — check for your public IP before posting):\n```\n\n```\n";
+    const body = "**Describe the issue**\n\n\n**Version:** (see the startup banner)\n\n**Logs** (paste from the Logs tab, check for your public IP before posting):\n```\n\n```\n";
     a.href = "https://github.com/Kheopsian/Hydra/issues/new?title=" + encodeURIComponent("[bug] ") + "&body=" + encodeURIComponent(body);
 }
