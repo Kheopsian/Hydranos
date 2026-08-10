@@ -3,6 +3,34 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.55.0 — 2026-08-10
+
+### Added
+
+- **You pick your own admin password on first run.** A fresh install no longer
+  invents one: it opens a setup screen and asks. Hydra used to generate a
+  password early in boot and only report it at the very end, so a start that
+  failed in between left the account taken and the password nowhere, with no
+  way in short of `hydra reset-password`. Nothing is generated now, so nothing
+  can be lost. Setup answers only while no account exists, and only from
+  localhost or a private network. `admin-credentials.txt` is gone with it: a
+  plaintext password next to the config, written too late to help.
+- **Config on network storage is detected and supported.** Pointing `data_dir`
+  at a CIFS/SMB, NFS, 9p, AFS or CephFS mount used to fail at boot with
+  `database is locked`, because SQLite's write-ahead log needs a shared memory
+  file no share can provide, and because the engines' sockets cannot exist on
+  one at all. The store now falls back to a rollback journal held under an
+  exclusive lock, the sockets move to local scratch, and a warning says so on
+  startup and in the web UI. Read the warning: without the write-ahead log, a
+  share that drops mid-write can corrupt the database, so keep backups or keep
+  `data_dir` on a local disk. Your downloads can live on the share either way.
+
+### Fixed
+
+- **Torrent data on a share was never the problem.** It only ever needed
+  positional reads and writes, which every network filesystem does; it was
+  `data_dir` that could not move. The two are now separate concerns.
+
 ## v3.54.1 — 2026-08-10
 
 ### Fixed
