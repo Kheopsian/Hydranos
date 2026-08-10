@@ -96,7 +96,15 @@ func (s *Server) metadataSourceFor(target, mode string) (metadataSource, error) 
 		if ra == nil {
 			return nil, fmt.Errorf("unknown agent %q", target)
 		}
-		return ra.anyClient(), nil
+		// Resolve on the engine that will actually hold the torrent, not on
+		// whichever one happens to be first. Each engine dials out through its
+		// own binding, so asking the wrong one sends the resolution -- and the
+		// address peers see -- out of the wrong tunnel.
+		engines := ra.byRole(mode)
+		if len(engines) == 0 {
+			return nil, fmt.Errorf("agent %q hosts no %s engine", target, mode)
+		}
+		return engines[0].client, nil
 	}
 	switch mode {
 	case "race":
