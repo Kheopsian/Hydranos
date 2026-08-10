@@ -41,7 +41,7 @@ jobs:
       # inputs keeps the declared boolean type; github.event.inputs would hand back
       # a string, and comparing a string to a boolean is always true.
       - name: Prune
-        if: ${{ github.event_name == release || !inputs.dry_run }}
+        if: ${{ github.event_name == 'release' || !inputs.dry_run }}
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
           OWNER: ${{ github.repository_owner }}
