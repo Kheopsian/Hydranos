@@ -831,6 +831,11 @@ func main() {
 	// silent torrent loss). The state.json block below still runs as a metadata
 	// overlay / gap-fill. Flag defaults off -> monolith behaviour unchanged.
 	if *bootFromStore && torStore != nil {
+		// Repair before the import, not after: the engines take their category
+		// from the store row as they load, so a backfill that ran later would
+		// need a second restart to show up.
+		backfillCategories(cfg.Daemon.DataDir, savedState, torStore)
+
 		up := filepath.Join(cfg.Daemon.DataDir, "uploads")
 		rN, rE := raceEngine.ImportFromStoreSession(torStore, store.Race, up)
 		hN, hE := hoardEngine.ImportFromStoreSession(torStore, store.Hoard, up)
@@ -1045,6 +1050,53 @@ func main() {
 	hoardProc.Stop()
 
 	slog.Info("Hydra stopped")
+}
+
+// backfillCategories repairs the categories the v3.50.0 store migration
+// dropped, once per database.
+//
+// That release retired state.json but handed the store only the content-layout
+// flag. The category column had never been filled for torrents added before the
+// move -- the boot-time overlay removed in the same commit had been re-applying
+// it from JSON every start -- so those torrents came up uncategorised.
+//
+// The source is whichever copy of the state the installation still has: the
+// live state.json on an upgrade that has not been retired yet, and the
+// state.json.migrated left behind on one that has. With neither there is
+// nothing to repair and nothing is recorded, so an installation whose file is
+// briefly unreadable gets another chance on the next boot.
+func backfillCategories(dataDir string, savedState *state.State, torStore *store.Store) {
+	cats := savedState.Categories()
+	source := "state.json"
+	if len(cats) == 0 {
+		source = "state.json.migrated"
+		retired := filepath.Join(dataDir, "state.json.migrated")
+		loaded, err := state.CategoriesFrom(retired)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Warn("category backfill: cannot read retired state, will retry next boot",
+					"path", retired, "error", err)
+			}
+			return
+		}
+		cats = loaded
+	}
+	if len(cats) == 0 {
+		return
+	}
+
+	updated, ran, err := torStore.BackfillCategories(cats)
+	switch {
+	case err != nil:
+		slog.Error("category backfill failed", "error", err)
+	case !ran:
+		// Already repaired: the user owns their categories from here on.
+	case updated > 0:
+		slog.Info("category backfill: restored categories dropped by the v3.50.0 store migration",
+			"torrents", updated, "source", source)
+	default:
+		slog.Info("category backfill: nothing to repair", "source", source)
+	}
 }
 
 // ---------------------------------------------------------------------------
