@@ -17,8 +17,10 @@ Thumbs.db
 redeploy-*.log
 
 # Manual backups / working-tree junk
-*.bak
-*.bak.*
+*.bak*
+*.orig
+*~
+*.swp
 *.broken*
 *.prev
 *.prev.*
