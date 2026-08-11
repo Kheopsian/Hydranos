@@ -802,6 +802,14 @@ func main() {
 	// single-binding for the FOU/wstunnel path.
 	hoardAnnounceBindings := engine.DefaultSingleBinding(hoardCfg.ListenPort, hoardCfg.EnableIPv6)
 	raceAnnounceBindings := engine.DefaultSingleBinding(raceCfg.ListenPort, raceCfg.EnableIPv6)
+
+	// With IPv6 off, announces are pinned to IPv4. On a host that has no IPv4
+	// that pin has nowhere to go, and the honest place to say so is here, once,
+	// rather than in every announce error that follows.
+	if (!hoardCfg.EnableIPv6 || !raceCfg.EnableIPv6) && !engine.HostHasIPv4() {
+		slog.Warn("announces are pinned to IPv4 because enable_ipv6 is off, but this host has no IPv4 address")
+		slog.Warn("  set enable_ipv6 = true under [race] and [hoard] if this host is IPv6-only")
+	}
 	hoardAnnouncer := engine.NewHoardAnnouncer(hoardProc.Client(), hoardAnnounceBindings)
 	hoardAnnouncer.OnObservation = hoardEngine.ObserveAnnounce
 	hoardAnnouncer.SetLivePort(hoardEngine.LivePort())
