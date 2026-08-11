@@ -33,6 +33,7 @@ func (s *Server) handleSetupStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"needs_setup":     s.config.Auth.PasswordHash == "",
 		"network_storage": storageWarningKind(),
+		"store_repair":    RepairNeeded(),
 	})
 }
 

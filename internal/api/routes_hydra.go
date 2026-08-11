@@ -456,6 +456,16 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) registerHydraRoutes() {
+	if RepairNeeded() {
+		// Store-repair mode. Note what is deliberately NOT done below: baseline
+		// persistence is never initialised. That is the code deciding whether
+		// the store or the JSON files are authoritative, and letting it pick
+		// the files while the store is unreachable is exactly how the lifetime
+		// carry-overs get rewritten from an empty memory. See storerepair.go.
+		s.registerRepairRoutes()
+		return
+	}
+
 	// Initialize baseline persistence
 	initBaselinePersistence(s.config.Daemon.DataDir)
 	initTrackerBaseline(s.config.Daemon.DataDir)
