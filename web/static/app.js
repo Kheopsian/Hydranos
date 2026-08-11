@@ -758,7 +758,7 @@ function _renderStatus(data) {
             const goalEl = document.getElementById("ov-milestone-goal") || document.querySelector(".milestone .goal");
             if (goalEl) goalEl.innerHTML = "\u25C6 " + goal.toFixed(2) + " PiB";
             const tagEl = document.getElementById("ov-milestone-tag") || document.querySelector(".card.wide h3 .tag");
-            if (tagEl) tagEl.innerHTML = "\u25C6 " + goal + " PiB milestone";
+            if (tagEl) tagEl.innerHTML = "\u25C6 " + t("{n} PiB milestone", { n: goal });
             const fillEl = document.getElementById("ov-milestone-fill");
             if (fillEl) fillEl.style.width = Math.min(100, (pib - (goal - 1)) * 100).toFixed(1) + "%";
             const togoEl = document.getElementById("ov-milestone-togo");

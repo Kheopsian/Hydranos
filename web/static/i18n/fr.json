@@ -12,8 +12,8 @@
  "- none (no graduation) -": "- aucune (pas de passage) -",
  "1 torrent selected": "1 torrent sélectionné",
  "10 months": "10 mois",
- "1st pebibyte": "1er pebioctet",
- "2nd pebibyte": "2e pebioctet",
+ "1st pebibyte": "1er PiB",
+ "2nd pebibyte": "2e PiB",
  "8 chars, e.g. -qB5220-": "8 caractères, ex. -qB5220-",
  "A / B comparison": "Comparaison A / B",
  "AND": "ET",
@@ -364,7 +364,8 @@
  "torrents": "torrents",
  "torrents seeding": "torrents en partage",
  "used ·": "utilisé ·",
- "{n} TiB to go": "{n} Tio restants",
+ "{n} PiB milestone": "objectif {n} PiB",
+ "{n} TiB to go": "{n} TiB restants",
  "Δ avg": "Δ moy",
  "▶ Run now": "▶ Lancer maintenant"
 }
