@@ -23,18 +23,24 @@ type SidecarReport struct {
 	GlobalCounter  bool
 	TrackerRows    int
 	Documents      int
-	Errors         []string
+	// Superseded names the sidecars found but refused: a file that came back
+	// after the store already held its value. Reported rather than silently
+	// dropped, because it is the fingerprint of a run that could not open the
+	// store, and the user should hear that it happened.
+	Superseded []string
+	Errors     []string
 }
 
 // Empty reports whether there was nothing to migrate.
 func (r SidecarReport) Empty() bool {
 	return r.TaggedTorrents == 0 && r.RegisteredTags == 0 && !r.GlobalCounter &&
-		r.TrackerRows == 0 && r.Documents == 0
+		r.TrackerRows == 0 && r.Documents == 0 && len(r.Superseded) == 0
 }
 
 func (r SidecarReport) String() string {
-	return fmt.Sprintf("tagged=%d tags=%d global_counter=%v tracker_rows=%d docs=%d errors=%d",
-		r.TaggedTorrents, r.RegisteredTags, r.GlobalCounter, r.TrackerRows, r.Documents, len(r.Errors))
+	return fmt.Sprintf("tagged=%d tags=%d global_counter=%v tracker_rows=%d docs=%d superseded=%d errors=%d",
+		r.TaggedTorrents, r.RegisteredTags, r.GlobalCounter, r.TrackerRows, r.Documents,
+		len(r.Superseded), len(r.Errors))
 }
 
 // retire moves a fully-imported sidecar out of the way. It is kept, not
@@ -44,10 +50,34 @@ func retire(path string) error {
 	return os.Rename(path, path+".migrated")
 }
 
+// MetaSidecarsImported records that the one-shot sidecar import has run here.
+//
+// It is what tells a recreated sidecar from an original. Every sidecar is
+// renamed aside once imported, so finding one again means something wrote it
+// afterwards -- and the only thing that does is a boot that could not open the
+// store and fell back to the files, keeping them from an empty in-memory state.
+// Importing that over a store holding the real numbers is how a lifetime upload
+// counter becomes a file of zeroes, and how a category list becomes whatever
+// the one screen someone opened while degraded happened to save.
+const MetaSidecarsImported = "sidecars_imported_v1"
+
+// supersede sets a sidecar aside instead of importing it. Kept, not deleted:
+// it is still the only copy of whatever the degraded run recorded, and its
+// owner may want to read it even though we will not trust it.
+func supersede(path string) error { return os.Rename(path, path+".superseded") }
+
 // MigrateSidecars imports tags.json, tags_registry.json, baseline.json and
 // baseline_trackers.json into the store, then renames each one aside. Absent
-// files are not an error — that is the normal case for a fresh install and for
+// files are not an error -- that is the normal case for a fresh install and for
 // every boot after the first one.
+//
+// A sidecar is imported only when the store has nothing of its own to lose:
+// either this is the first import here, or that particular value is still
+// empty. Anything else is set aside unread. The import is an overwrite, not a
+// merge, so the alternative to that rule is letting the least trustworthy copy
+// win -- which is exactly what happened to installs that ran a version whose
+// store would not open, wrote their carry-overs from an empty memory, and then
+// upgraded into a build that could open it again.
 //
 // (qbit_baseline.json is deliberately not handled: no code has read or written
 // it for several versions, so it is a leftover, not state.)
@@ -57,24 +87,44 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 		rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %v", what, err))
 	}
 
+	done, _ := s.GetMeta(MetaSidecarsImported)
+	replay := done != ""
+
+	// skip decides whether this sidecar must not be imported, and sets it aside
+	// when so. storeHasIt lets a first-ever import still protect a store that
+	// already holds the value, for installs that migrated before this marker
+	// existed.
+	skip := func(name, path string, storeHasIt bool) bool {
+		if !replay && !storeHasIt {
+			return false
+		}
+		rep.Superseded = append(rep.Superseded, name)
+		if err := supersede(path); err != nil {
+			fail(name+" supersede", err)
+		}
+		return true
+	}
+
 	// --- tags.json: info_hash -> []tag ------------------------------------
 	tagsPath := filepath.Join(dataDir, "tags.json")
 	if data, err := os.ReadFile(tagsPath); err == nil {
-		var m map[string][]string
-		if err := json.Unmarshal(data, &m); err != nil {
-			fail("tags.json parse", err)
-		} else {
-			for ih, tags := range m {
-				if len(tags) == 0 {
-					delete(m, ih) // nothing to carry over
+		if !skip("tags.json", tagsPath, false) {
+			var m map[string][]string
+			if err := json.Unmarshal(data, &m); err != nil {
+				fail("tags.json parse", err)
+			} else {
+				for ih, tags := range m {
+					if len(tags) == 0 {
+						delete(m, ih) // nothing to carry over
+					}
 				}
-			}
-			n, err := s.SetTagsBulk(m)
-			rep.TaggedTorrents = n
-			if err != nil {
-				fail("tags.json import", err)
-			} else if err := retire(tagsPath); err != nil {
-				fail("tags.json retire", err)
+				n, err := s.SetTagsBulk(m)
+				rep.TaggedTorrents = n
+				if err != nil {
+					fail("tags.json import", err)
+				} else if err := retire(tagsPath); err != nil {
+					fail("tags.json retire", err)
+				}
 			}
 		}
 	} else if !os.IsNotExist(err) {
@@ -84,16 +134,18 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 	// --- tags_registry.json: []name ---------------------------------------
 	regPath := filepath.Join(dataDir, "tags_registry.json")
 	if data, err := os.ReadFile(regPath); err == nil {
-		var names []string
-		if err := json.Unmarshal(data, &names); err != nil {
-			fail("tags_registry.json parse", err)
-		} else {
-			if err := s.AddTagNames(names); err != nil {
-				fail("tags_registry.json import", err)
+		if !skip("tags_registry.json", regPath, false) {
+			var names []string
+			if err := json.Unmarshal(data, &names); err != nil {
+				fail("tags_registry.json parse", err)
 			} else {
-				rep.RegisteredTags = len(names)
-				if err := retire(regPath); err != nil {
-					fail("tags_registry.json retire", err)
+				if err := s.AddTagNames(names); err != nil {
+					fail("tags_registry.json import", err)
+				} else {
+					rep.RegisteredTags = len(names)
+					if err := retire(regPath); err != nil {
+						fail("tags_registry.json retire", err)
+					}
 				}
 			}
 		}
@@ -104,19 +156,22 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 	// --- baseline.json: the global lifetime carry-over ---------------------
 	blPath := filepath.Join(dataDir, "baseline.json")
 	if data, err := os.ReadFile(blPath); err == nil {
-		var bl struct {
-			TotalUploaded   int64 `json:"total_uploaded"`
-			TotalDownloaded int64 `json:"total_downloaded"`
-		}
-		if err := json.Unmarshal(data, &bl); err != nil {
-			fail("baseline.json parse", err)
-		} else {
-			if err := s.CounterSet(CounterGlobal, bl.TotalUploaded, bl.TotalDownloaded); err != nil {
-				fail("baseline.json import", err)
+		ul, dl, _ := s.CounterGet(CounterGlobal)
+		if !skip("baseline.json", blPath, ul > 0 || dl > 0) {
+			var bl struct {
+				TotalUploaded   int64 `json:"total_uploaded"`
+				TotalDownloaded int64 `json:"total_downloaded"`
+			}
+			if err := json.Unmarshal(data, &bl); err != nil {
+				fail("baseline.json parse", err)
 			} else {
-				rep.GlobalCounter = true
-				if err := retire(blPath); err != nil {
-					fail("baseline.json retire", err)
+				if err := s.CounterSet(CounterGlobal, bl.TotalUploaded, bl.TotalDownloaded); err != nil {
+					fail("baseline.json import", err)
+				} else {
+					rep.GlobalCounter = true
+					if err := retire(blPath); err != nil {
+						fail("baseline.json retire", err)
+					}
 				}
 			}
 		}
@@ -127,27 +182,29 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 	// --- baseline_trackers.json: per (engine, tracker) carry-over ----------
 	tbPath := filepath.Join(dataDir, "baseline_trackers.json")
 	if data, err := os.ReadFile(tbPath); err == nil {
-		var entries []struct {
-			Engine  string `json:"engine"`
-			Tracker string `json:"tracker"`
-			UL      int64  `json:"ul"`
-			DL      int64  `json:"dl"`
-		}
-		if err := json.Unmarshal(data, &entries); err != nil {
-			fail("baseline_trackers.json parse", err)
-		} else {
-			ok := true
-			for _, e := range entries {
-				if err := s.CounterSet(TrackerCounterKey(e.Engine, e.Tracker), e.UL, e.DL); err != nil {
-					fail("baseline_trackers.json import", err)
-					ok = false
-					break
-				}
-				rep.TrackerRows++
+		if !skip("baseline_trackers.json", tbPath, storeHasTrackerCounter(s)) {
+			var entries []struct {
+				Engine  string `json:"engine"`
+				Tracker string `json:"tracker"`
+				UL      int64  `json:"ul"`
+				DL      int64  `json:"dl"`
 			}
-			if ok {
-				if err := retire(tbPath); err != nil {
-					fail("baseline_trackers.json retire", err)
+			if err := json.Unmarshal(data, &entries); err != nil {
+				fail("baseline_trackers.json parse", err)
+			} else {
+				ok := true
+				for _, e := range entries {
+					if err := s.CounterSet(TrackerCounterKey(e.Engine, e.Tracker), e.UL, e.DL); err != nil {
+						fail("baseline_trackers.json import", err)
+						ok = false
+						break
+					}
+					rep.TrackerRows++
+				}
+				if ok {
+					if err := retire(tbPath); err != nil {
+						fail("baseline_trackers.json retire", err)
+					}
 				}
 			}
 		}
@@ -172,6 +229,10 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 		if len(data) == 0 {
 			continue
 		}
+		held, _ := s.GetMeta(sc.key)
+		if skip(sc.file, path, held != "") {
+			continue
+		}
 		if err := s.SetMeta(sc.key, string(data)); err != nil {
 			fail(sc.file, err)
 			continue
@@ -183,7 +244,34 @@ func MigrateSidecars(dataDir string, s *Store) SidecarReport {
 		rep.Documents++
 	}
 
+	// Record the import last, so an interrupted run is retried rather than
+	// locked out of carrying anything over.
+	if !replay && len(rep.Errors) == 0 {
+		if err := s.SetMeta(MetaSidecarsImported, "1"); err != nil {
+			fail("record sidecar import", err)
+		}
+	}
+
 	return rep
+}
+
+// storeHasTrackerCounter reports whether any per-tracker carry-over is already
+// recorded, which makes an incoming baseline_trackers.json a replay rather than
+// a migration.
+func storeHasTrackerCounter(s *Store) bool {
+	all, err := s.CountersAll()
+	if err != nil {
+		return false
+	}
+	for k, v := range all {
+		if k == CounterGlobal {
+			continue
+		}
+		if v[0] > 0 || v[1] > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ReplaceAllTags makes the stored tags exactly match m, in one transaction:
