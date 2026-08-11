@@ -404,6 +404,7 @@ func main() {
 	// storeReady gates sync until the initial backfill completes so a saveState
 	// tick never runs the heavy first import inline.
 	var torStore *store.Store
+	var storeRepair *api.RepairState
 	var storeReady atomic.Bool
 	// The second half of the same gate. The API server is already serving by the
 	// time the boot-from-store import runs, and a saveState it triggers syncs the
@@ -415,6 +416,13 @@ func main() {
 	if *frontOnly || *agentOnly {
 		// controller / agent mode: no monolith shadow store (agents own their
 		// per-agent DBs; a shadow hydra.db here would be a parasitic dangling file).
+	} else if storeRepair = storeRepairDiagnosis(cfg.Daemon.DataDir); storeRepair.Needed {
+		// The databases cannot be opened from where data_dir now points. Open
+		// nothing, migrate no sidecars, start no engine: every path below here
+		// assumes a store, and the one that carries on without one rewrites the
+		// JSON carry-overs from an empty memory. See storerepair.go.
+		api.SetRepairState(storeRepair)
+		logStoreRepairNeeded(storeRepair)
 	} else if ts, terr := store.Open(filepath.Join(cfg.Daemon.DataDir, "hydra.db")); terr != nil {
 		slog.Error("store: open failed, shadow persistence disabled", "error", terr)
 	} else {
@@ -431,6 +439,15 @@ func main() {
 					"report", rep.String(), "errors", rep.Errors)
 			} else {
 				slog.Info("store: imported JSON sidecars (originals renamed .migrated)", "report", rep.String())
+			}
+			if len(rep.Superseded) > 0 {
+				// These came back after the store already held their values, so
+				// something wrote them without a store to write to. Say it out
+				// loud: on the installs this guard was written for, importing
+				// them is what erased the lifetime counters.
+				slog.Warn("store: ignored JSON sidecars that reappeared after the store already held their values",
+					"files", fmt.Sprint(rep.Superseded))
+				slog.Warn("  they were written by a boot that could not open the store, and are kept as .superseded")
 			}
 		}
 		go func() {
@@ -455,6 +472,10 @@ func main() {
 	}
 	if *agentOnly {
 		runAgentOnly(ctx, cfg, *agentAddr, *agentToken, *agentTLSCert, *agentTLSKey, *listenPortHook)
+		return
+	}
+	if storeRepair != nil && storeRepair.Needed {
+		runStoreRepair(ctx, cfg)
 		return
 	}
 

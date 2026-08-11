@@ -22,17 +22,27 @@ import "github.com/Kheopsian/hydra/internal/fsinfo"
 // corrupt it.
 func DSN(path, extra string) (dsn string, networkFS bool) {
 	if net, _ := fsinfo.IsNetwork(path); net {
-		// synchronous(FULL): with no WAL there is no log to replay, and the
-		// link itself can drop mid-write, so durability is bought per commit.
-		return "file:" + path +
-			"?nolock=1" +
-			"&_pragma=journal_mode(DELETE)" +
-			"&_pragma=locking_mode(EXCLUSIVE)" +
-			"&_pragma=synchronous(FULL)" +
-			"&_pragma=busy_timeout(15000)" + extra, true
+		return NetworkDSN(path, extra), true
 	}
 	return "file:" + path +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
 		"&_pragma=busy_timeout(5000)" + extra, false
+}
+
+// NetworkDSN is the share connection string on its own, so code that has to
+// reason about that mode without living on a share can ask for it by name. The
+// repair path needs exactly this: it must prove a converted database opens the
+// way a share will open it, and asking DSN would hand it the local WAL string
+// and undo the conversion it just made.
+//
+// synchronous(FULL): with no WAL there is no log to replay, and the link itself
+// can drop mid-write, so durability is bought per commit.
+func NetworkDSN(path, extra string) string {
+	return "file:" + path +
+		"?nolock=1" +
+		"&_pragma=journal_mode(DELETE)" +
+		"&_pragma=locking_mode(EXCLUSIVE)" +
+		"&_pragma=synchronous(FULL)" +
+		"&_pragma=busy_timeout(15000)" + extra
 }

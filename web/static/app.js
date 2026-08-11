@@ -631,15 +631,128 @@ window.addEventListener("DOMContentLoaded", () => {
 // (base corrompue par une coupure du partage) merite d etre visible la ou l
 // utilisateur regarde. Masquable, et la version masquee est retenue par kind :
 // changer de type de montage le reaffiche.
+// Set once the daemon says it is waiting to be repaired. The startup poller
+// reads it: there is no state to restore and never will be until the database
+// is converted, so the boot overlay must stop pretending otherwise.
+let STORE_REPAIR_MODE = false;
+
+// Blocking screen for a daemon that cannot open its database.
+//
+// This is not a warning the user can dismiss: until the database is converted
+// there is nothing running behind the interface. The one action offered copies
+// each file aside before touching it, because the alternative to a recoverable
+// problem should never be an unrecoverable one.
+async function showStoreRepairModal() {
+    let st = {};
+    try { st = (await (await fetch("/api/store/repair")).json()) || {}; } catch (_) {}
+    const targets = st.targets || [];
+    const hot = targets.filter(x => x.hot_wal);
+
+    STORE_REPAIR_MODE = true;
+    // The boot overlay polls for a startup that is never coming, and covers the
+    // whole viewport while it does. Take it out before saying anything.
+    const boot = document.getElementById("startup-overlay");
+    if (boot) boot.remove();
+
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `<div class="modal-box">
+        <h3>${t("Hydra cannot open its database")}</h3>
+        <p class="modal-desc">${t("Your data_dir now points at {kind} storage. The database was created on a local disk, so it uses a write-ahead log, and a network share cannot host one.", { kind: esc(st.filesystem || "network") })}</p>
+        <p class="modal-desc">${t("Nothing has been lost. Hydra has deliberately not started its engines: carrying on without the database is what would destroy your lifetime upload counters.")}</p>
+        <p class="modal-desc">${t("Affected: {list}", { list: esc(targets.map(x => x.name).join(", ") || "-") })}</p>
+        ${hot.length ? `<p class="modal-desc" style="color:var(--accent-orange)">${t("{list} still holds changes that were never written back. Start Hydra once on the machine it came from, stop it cleanly, then move it here.", { list: esc(hot.map(x => x.name).join(", ")) })}</p>` : ""}
+        <p class="modal-desc">${t("Hydra can convert the database to the journal a share can host. Every file is copied to a .bak alongside it first, so the originals stay recoverable whatever happens.")}</p>
+        <p class="modal-desc" id="repair-msg" style="min-height:1em"></p>
+        <div class="modal-actions">
+            <button class="btn-primary" id="repair-go">${t("Back up and convert")}</button>
+        </div>
+    </div>`;
+    document.body.appendChild(ov);
+
+    const msg = ov.querySelector("#repair-msg");
+    let btn = ov.querySelector("#repair-go");
+
+    // Second half of the flow: the databases are converted, but this process
+    // registered its routes at boot and has no engines behind them. Only a
+    // restart finishes the job, so that is the only thing left to offer.
+    const offerRestart = (results) => {
+        msg.style.color = "var(--accent-green, #3a9)";
+        msg.innerHTML = (results || []).map(r =>
+            t("{name}: converted. Backup kept at {backup}", { name: esc(r.name), backup: esc(r.backup || "-") })
+        ).join("<br>") + "<br>" + t("Restart Hydra to finish.");
+        const fresh = btn.cloneNode(true); // drops the convert handler
+        fresh.textContent = t("Restart Hydra");
+        fresh.disabled = false;
+        btn.replaceWith(fresh);
+        btn = fresh;
+        btn.addEventListener("click", async () => {
+            btn.disabled = true;
+            try { await fetch("/api/settings/restart", { method: "POST", headers: { "X-Api-Key": API_KEY } }); } catch (_) {}
+            msg.textContent = t("Hydra is stopping. Under Docker or systemd it comes back on its own; if you started it by hand, start it again.");
+            setTimeout(() => location.reload(), 8000);
+        });
+    };
+
+    // Reloading after a successful conversion lands here. Offering to convert
+    // again would be wrong twice over: the work is done, and the reason the
+    // interface still will not load is the pending restart, not the database.
+    if (st.ran && st.repaired) {
+        offerRestart(st.results);
+        return;
+    }
+
+    btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        msg.style.color = "";
+        msg.textContent = t("Backing up, then converting. Do not stop Hydra.");
+        let res, body = {};
+        try {
+            res = await fetch("/api/store/repair", { method: "POST", headers: { "X-Api-Key": API_KEY } });
+            body = (await res.json()) || {};
+        } catch (e) {
+            msg.style.color = "var(--accent-red)";
+            msg.textContent = t("The daemon did not answer: {err}", { err: String(e) });
+            btn.disabled = false;
+            return;
+        }
+        if (res.status === 401) {
+            // Step aside rather than stacking a second full-screen overlay on
+            // the first: both carry the same z-index, so which one takes the
+            // clicks is a matter of DOM order, and a login box you cannot type
+            // into is worse than no login box. Signing in ends in a reload,
+            // which brings this screen straight back, key in hand.
+            ov.remove();
+            promptLogin(t("Signing in lets Hydra repair the database."));
+            return;
+        }
+        const results = body.results || [];
+        const failed = results.filter(r => r.error);
+        if (!body.repaired || failed.length) {
+            msg.style.color = "var(--accent-red)";
+            msg.innerHTML = failed.map(r => t("{name}: {err}", { name: esc(r.name), err: esc(r.error) })).join("<br>")
+                || t("The conversion did not complete.");
+            btn.disabled = false;
+            return;
+        }
+        offerRestart(results);
+    });
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
     // Pick the language and translate the static markup before anything else
     // paints. Everything in the DOM at this point came from index.html.
     try { await I18N.load(I18N.detect()); I18N.translateDOM(document.body); } catch (e) {}
 
-    let kind = "";
+    let setup = null;
     try {
-        kind = ((await (await fetch("/api/setup")).json()) || {}).network_storage || "";
+        setup = (await (await fetch("/api/setup")).json()) || {};
     } catch (_) { return; }
+    // The daemon came up unable to open its database. Nothing else in the UI
+    // has anything to show: there are no engines behind it. Explain, offer the
+    // repair, and go no further.
+    if (setup.store_repair) return showStoreRepairModal();
+    const kind = setup.network_storage || "";
     if (!kind || localStorage.getItem("hydra_netfs_ack") === kind) return;
     const bar = document.createElement("div");
     bar.style.cssText = "padding:10px 14px;background:var(--accent-orange,#c87f0a);color:#fff;" +
@@ -2734,17 +2847,29 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
 // ─── Categories ─────────────────────────────────────────
 
 let _editingCategory = null;
+// Markup of the rows currently in the categories table. The table is rebuilt on
+// a timer, so without this every refresh replaced identical HTML and the screen
+// flickered for nothing.
+let _lastCategoryRows = null;
 
 async function updateCategories() {
     try {
-        const cats = await api("/api/categories");
+        // One paint, not two. Categories and the labels wearing no category are
+        // separate calls, and painting the first before the second arrived made
+        // the table visibly rebuild itself: rows appeared, then the whole body
+        // was replaced a round trip later. Fetch both, render once -- and only
+        // touch the DOM when the markup actually changed, because this runs on
+        // a timer against a screen that is static almost all of the time.
+        const [cats, orphans] = await Promise.all([
+            api("/api/categories"),
+            api("/api/categories/orphans").catch(e => {
+                console.error("load orphaned categories", e);
+                return [];
+            }),
+        ]);
         const tbody = document.getElementById("categories-tbody");
 
-        // Update table
-        if (!cats || cats.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="empty">No categories</td></tr>';
-        } else {
-            tbody.innerHTML = cats.map(cat => `<tr>
+        const catRows = (cats || []).map(cat => `<tr>
                 <td><strong>${esc(incoCat(cat.name))}</strong></td>
                 <td><span class="mode-tag mode-${cat.mode}">${cat.mode}</span></td>
                 <td class="mono" style="font-size:12px">${esc(incoPath(cat.save_path))}</td>
@@ -2756,27 +2881,32 @@ async function updateCategories() {
                     <button class="btn-small btn-danger" onclick="deleteCategory('${cat.name}')">Delete</button>
                 </td>
             </tr>`).join("");
-        }
 
         // Labels worn by torrents but matching no configured category: the
-        // residue of deletions made before labels were cleared durably. Shown
-        // here because this screen holds the only delete button, and left out
-        // of the dropdown below, you cannot assign a category that is gone.
-        try {
-            const orphans = await api("/api/categories/orphans");
-            if (orphans && orphans.length) {
-                if (!cats || cats.length === 0) tbody.innerHTML = "";
-                tbody.innerHTML += orphans.map(o => `<tr>
+        // residue of deletions made before labels were cleared durably, and of
+        // upgrades that lost the definitions while the torrents kept the names.
+        // Shown here because this screen holds the only actions on them, and
+        // left out of the dropdown below, since you cannot assign one that is
+        // gone.
+        const orphanRows = (orphans || []).map(o => `<tr>
                     <td><strong>${esc(incoCat(o.name))}</strong> <span style="color:var(--text-muted);font-size:11px">orphaned</span></td>
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td class="mono" style="font-size:12px;color:var(--text-muted)">no longer configured, still on ${o.torrents} torrent${o.torrents > 1 ? "s" : ""}</td>
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
-                    <td><button class="btn-small btn-danger" onclick="deleteCategory('${o.name}')">Delete</button></td>
+                    <td>
+                        <button class="btn-small" onclick="adoptCategory('${o.name}', ${o.torrents})">${t("Adopt")}</button>
+                        <button class="btn-small btn-danger" onclick="deleteCategory('${o.name}')">Delete</button>
+                    </td>
                 </tr>`).join("");
-            }
-        } catch (e) { console.error("load orphaned categories", e); }
+
+        const html = (catRows + orphanRows) ||
+            '<tr><td colspan="7" class="empty">No categories</td></tr>';
+        if (html !== _lastCategoryRows) {
+            tbody.innerHTML = html;
+            _lastCategoryRows = html;
+        }
 
         // Update add-torrent dropdown
         const sel = document.getElementById("torrent-category");
@@ -2981,6 +3111,29 @@ window.addEventListener("scroll", () => {
 
 function editCategory(name) {
     showCategoryForm(name);
+}
+
+// Adopt an orphaned label by defining the category it refers to.
+//
+// A torrent points at its category by name, so this needs no new endpoint and
+// no write to the torrents: the moment a category called the same thing exists,
+// every torrent already labelled with it belongs to it again. This matters
+// because the only action previously offered on an orphan was Delete, which
+// strips the label off all of them -- the opposite of what someone whose
+// categories went missing in an upgrade wants.
+async function adoptCategory(name, count) {
+    await showCategoryForm(); // no argument: create mode, so saveCategory POSTs
+    const el = document.getElementById("cat-name");
+    if (el) el.value = name;
+    const res = document.getElementById("cat-result");
+    if (res) {
+        res.textContent = t("Give it a save path to adopt it: the {n} torrent(s) already labelled {label} will join it.",
+            { n: count, label: name });
+        res.className = "result-msg";
+        res.style.display = "block";
+    }
+    const sp = document.getElementById("cat-save-path");
+    if (sp) sp.focus(); // the name is settled; the save path is what is missing
 }
 
 async function saveCategory() {
@@ -3903,6 +4056,10 @@ function _startNormalPolling() {
 }
 
 async function _checkStartup() {
+    // In store-repair mode there are no engines behind the API and /api/startup
+    // is not registered at all. Retrying it forever would spin, and the overlay
+    // it drives would sit on top of the explanation the user needs.
+    if (STORE_REPAIR_MODE) return;
     const overlay = document.getElementById("startup-overlay");
     try {
         const r = await fetch("/api/startup", { headers: { "X-Api-Key": API_KEY } });
