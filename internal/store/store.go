@@ -206,6 +206,13 @@ func (s *Store) ClearCategory(category string) (int64, error) {
 type CategoryCount struct {
 	Name  string
 	Count int
+	// Session is the engine most of these torrents are actually in, and
+	// SavePath the directory most of them sit under. They exist so that
+	// re-creating a category for an orphaned label can start from what the
+	// torrents wearing it are really doing: adopting one with a form's own
+	// defaults silently moves every one of them to the other engine.
+	Session  Session
+	SavePath string
 }
 
 // CategoryCounts reports every category label present on a torrent. Used to
@@ -213,21 +220,64 @@ type CategoryCount struct {
 // of deletions made before the label was cleared durably (issue #7), which the
 // user otherwise has no way to reach.
 func (s *Store) CategoryCounts() ([]CategoryCount, error) {
+	// Grouped by the three things at once, then reduced in Go: picking the
+	// commonest session and save path per category in SQL costs a correlated
+	// subquery each, and the row count here is the number of distinct
+	// (category, session, path) triples, which is tiny.
 	rows, err := s.db.Query(
-		`SELECT category, COUNT(*) FROM torrents WHERE category != '' GROUP BY category`)
+		`SELECT category, session, save_path, COUNT(*)
+		   FROM torrents WHERE category != ''
+		  GROUP BY category, session, save_path`)
 	if err != nil {
 		return nil, fmt.Errorf("store category counts: %w", err)
 	}
 	defer rows.Close()
-	var out []CategoryCount
+
+	type winner struct {
+		count int
+		value string
+	}
+	totals := map[string]int{}
+	bestSession := map[string]winner{}
+	bestPath := map[string]winner{}
+	order := []string{}
+
 	for rows.Next() {
-		var cc CategoryCount
-		if err := rows.Scan(&cc.Name, &cc.Count); err != nil {
+		var name, sess, path string
+		var n int
+		if err := rows.Scan(&name, &sess, &path, &n); err != nil {
 			return nil, err
 		}
-		out = append(out, cc)
+		if _, seen := totals[name]; !seen {
+			order = append(order, name)
+		}
+		totals[name] += n
+		if w := bestSession[name]; n > w.count {
+			bestSession[name] = winner{n, sess}
+		}
+		// An empty save path tells the caller nothing, so it never wins the
+		// vote: a category proposed with no directory is worse than one
+		// proposed with the directory of a minority of its torrents.
+		if path != "" {
+			if w := bestPath[name]; n > w.count {
+				bestPath[name] = winner{n, path}
+			}
+		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]CategoryCount, 0, len(order))
+	for _, name := range order {
+		out = append(out, CategoryCount{
+			Name:     name,
+			Count:    totals[name],
+			Session:  Session(bestSession[name].value),
+			SavePath: bestPath[name].value,
+		})
+	}
+	return out, nil
 }
 
 // Delete removes a torrent's identity. Note: this never touches the payload
