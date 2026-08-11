@@ -3,6 +3,20 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.59.1 - 2026-08-11
+
+### Fixed
+
+- **The interface language could only be picked once, on the first-run screen.**
+  After the admin account was created there was no way back to it: the choice
+  lived in the browser and nothing in the UI exposed it, so anyone who clicked
+  past that screen, or who joined an install someone else had set up, was stuck
+  with whatever the browser had asked for. Configuration now carries a
+  **Language** card next to Display units, listing the same languages. Picking
+  one reloads the page, which is the honest way to do it: a DOM that has already
+  been translated cannot be translated again, the English keys it was built from
+  are gone by then.
+
 ## v3.59.0 - 2026-08-11
 
 ### Added
