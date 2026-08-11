@@ -920,9 +920,14 @@ func main() {
 	// Keep the engine self-dial filter fresh: push our observed public IP to
 	// both engines so we never waste a connect dialing ourselves, even when the
 	// ISP lease changes (correctness is still guaranteed by the peer_id check).
+	// Detect our v6 the same way as our v4, but only if an engine actually
+	// listens on IPv6: otherwise the address is of no use to the filter and the
+	// lookup would be pure cost. One flag for both engines is enough — the
+	// filter only ever drops dials to ourselves.
+	selfIPsIncludeV6 := hoardCfg.EnableIPv6 || raceCfg.EnableIPv6
 	go func() {
 		push := func() {
-			ips := api.PublicIPs()
+			ips := api.PublicIPs(selfIPsIncludeV6)
 			if len(ips) == 0 {
 				return
 			}
