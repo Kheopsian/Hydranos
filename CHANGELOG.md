@@ -3,6 +3,21 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.58.1 — 2026-08-11
+
+### Fixed
+
+- **The engine could dial itself over IPv6.** Turning IPv6 on in production
+  opened 8348 connections whose local address was also the remote one: the
+  engine calling itself on a Docker bridge address. The self-dial filter only
+  ever held our detected *public* addresses, which is all IPv4 ever needed,
+  since a machine's own addresses are RFC1918 there and no peer list can hand
+  one back. Under IPv6 every address on the host is globally routable, the
+  wildcard listener accepts on all of them, and a box running Docker carries one
+  per bridge. The filter now also holds the host's own IPv6 addresses, loopback
+  and link-local aside, refreshed on the same two-minute push. Installs without
+  IPv6 push exactly what they pushed before.
+
 ## v3.58.0 — 2026-08-11
 
 ### Added
@@ -15,12 +30,6 @@ All notable changes to Hydra are documented here. This project follows
   one rather than replacing it, so v4 peers keep their v4 addresses everywhere
   in the UI, the dedup and the stats. Enable it only where IPv6 actually works:
   announcing an address nobody can reach costs connections.
-- **Every local IPv6 address is in the self-dial filter, not just the public
-  one.** IPv4 never needed this: local addresses are RFC1918, never routable and
-  never handed back by a peer list. Every IPv6 address on a host is globally
-  routable, so a swarm can return one of ours and we connect to ourselves. A
-  production run with IPv6 on measured 8348 such connections in minutes, all to
-  a Docker bridge address the filter had never been told about.
 - **Our own IPv6 is detected, not configured.** With the setting on, the public
   v6 address is looked up the same way the v4 one already was, and pushed to the
   engine self-dial filter alongside it. Without it a tracker handing our own v6
