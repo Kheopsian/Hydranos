@@ -3,6 +3,24 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.58.2 - 2026-08-11
+
+### Fixed
+
+- **An install that already had a database stopped opening it.** The filesystem
+  probe that decides whether `data_dir` needs the network fallback was asked
+  about `data_dir/hydra.db` rather than about `data_dir` itself. Where that file
+  already existed the probe resolved to the file, then tried to create its test
+  socket inside it, which cannot work; it read the resulting `ENOTDIR` as a
+  share refusing a socket and put a perfectly local install onto the network
+  fallback. That fallback's connection string carries `nolock=1`, and `nolock`
+  cannot open a database in WAL mode, so the store failed to open on every boot
+  with `SQLITE_CANTOPEN` and Hydra carried on without it: no categories, no
+  lifetime counters, and the JSON sidecars rewritten from an empty in-memory
+  state. A fresh install has no database file yet, so the walk-up landed on the
+  directory and everything worked, which is why only upgrades were affected.
+  The probe now asks the directory that would actually hold the socket.
+
 ## v3.58.1 — 2026-08-11
 
 ### Fixed
