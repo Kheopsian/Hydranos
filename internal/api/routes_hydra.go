@@ -2307,12 +2307,22 @@ func getPublicIPv6() string {
 	return cachedPublicIPv6
 }
 
-// PublicIPs returns our current public IPv4 (non-empty) for pushing to the
-// engine self-dial filter. v4 only: inbound is v4 and the v6 lookup can stall.
-func PublicIPs() []string {
+// PublicIPs returns our current public addresses for pushing to the engine
+// self-dial filter. IPv4 always; IPv6 only when an engine listens on it, since
+// that is the only case where a tracker can hand our own v6 back to us as a
+// peer. Left off, no v6 lookup happens at all, so nothing changes and the
+// stall the v6 endpoint used to cause cannot come back.
+func PublicIPs(includeV6 bool) []string {
 	var out []string
 	if v4 := getPublicIP(); v4 != "" {
 		out = append(out, v4)
+	}
+	if includeV6 {
+		// Best-effort: a failed lookup returns "" and we simply push v4, rather
+		// than blanking a filter that was already correct.
+		if v6 := getPublicIPv6(); v6 != "" {
+			out = append(out, v6)
+		}
 	}
 	return out
 }

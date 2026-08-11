@@ -15,6 +15,10 @@ All notable changes to Hydra are documented here. This project follows
   one rather than replacing it, so v4 peers keep their v4 addresses everywhere
   in the UI, the dedup and the stats. Enable it only where IPv6 actually works:
   announcing an address nobody can reach costs connections.
+- **Our own IPv6 is detected, not configured.** With the setting on, the public
+  v6 address is looked up the same way the v4 one already was, and pushed to the
+  engine self-dial filter alongside it. Without it a tracker handing our own v6
+  back to us would have us dialling ourselves. Off, no v6 lookup is made at all.
 
 ### Fixed
 
