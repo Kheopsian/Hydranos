@@ -1650,7 +1650,15 @@ func (s *Server) handleCategoriesOrphans(c *gin.Context) {
 	}
 	for _, cc := range counts {
 		if !known[cc.Name] {
-			out = append(out, gin.H{"name": cc.Name, "torrents": cc.Count})
+			// mode and save_path are what these torrents are already doing, so
+			// adopting the label can propose them instead of the form's
+			// defaults, which would move every one of them to the other engine.
+			out = append(out, gin.H{
+				"name":      cc.Name,
+				"torrents":  cc.Count,
+				"mode":      string(cc.Session),
+				"save_path": cc.SavePath,
+			})
 		}
 	}
 	c.JSON(http.StatusOK, out)

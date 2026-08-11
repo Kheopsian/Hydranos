@@ -2851,6 +2851,9 @@ let _editingCategory = null;
 // a timer, so without this every refresh replaced identical HTML and the screen
 // flickered for nothing.
 let _lastCategoryRows = null;
+// What each orphaned label's torrents are actually doing, in render order, so
+// adoption can start from that rather than from the form's defaults.
+let _orphanInfo = [];
 
 async function updateCategories() {
     try {
@@ -2888,7 +2891,10 @@ async function updateCategories() {
         // Shown here because this screen holds the only actions on them, and
         // left out of the dropdown below, since you cannot assign one that is
         // gone.
-        const orphanRows = (orphans || []).map(o => `<tr>
+        // Indexed, not inlined: a save path may hold a quote, and passing it
+        // through an onclick attribute would break the handler.
+        _orphanInfo = orphans || [];
+        const orphanRows = (orphans || []).map((o, i) => `<tr>
                     <td><strong>${esc(incoCat(o.name))}</strong> <span style="color:var(--text-muted);font-size:11px">orphaned</span></td>
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td class="mono" style="font-size:12px;color:var(--text-muted)">no longer configured, still on ${o.torrents} torrent${o.torrents > 1 ? "s" : ""}</td>
@@ -2896,7 +2902,7 @@ async function updateCategories() {
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td>
-                        <button class="btn-small" onclick="adoptCategory('${o.name}', ${o.torrents})">${t("Adopt")}</button>
+                        <button class="btn-small" onclick="adoptCategory(${i})">${t("Adopt")}</button>
                         <button class="btn-small btn-danger" onclick="deleteCategory('${o.name}')">Delete</button>
                     </td>
                 </tr>`).join("");
@@ -3121,19 +3127,34 @@ function editCategory(name) {
 // because the only action previously offered on an orphan was Delete, which
 // strips the label off all of them -- the opposite of what someone whose
 // categories went missing in an upgrade wants.
-async function adoptCategory(name, count) {
+async function adoptCategory(idx) {
+    const o = _orphanInfo[idx];
+    if (!o) return;
     await showCategoryForm(); // no argument: create mode, so saveCategory POSTs
+
     const el = document.getElementById("cat-name");
-    if (el) el.value = name;
+    if (el) el.value = o.name;
+
+    // Start from what the torrents already do. The form opens on race with an
+    // empty path, and accepting that for a hoard set moves every torrent
+    // wearing the label to the other engine -- a silent reclassification that
+    // only shows up later, when something downstream trips over it.
+    const mode = document.getElementById("cat-mode");
+    if (mode && o.mode) {
+        mode.value = o.mode;
+        if (typeof _catModeChanged === "function") _catModeChanged();
+    }
+    const sp = document.getElementById("cat-save-path");
+    if (sp && o.save_path) sp.value = o.save_path;
+
     const res = document.getElementById("cat-result");
     if (res) {
-        res.textContent = t("Give it a save path to adopt it: the {n} torrent(s) already labelled {label} will join it.",
-            { n: count, label: name });
+        res.textContent = t("Filled in from the {n} torrent(s) already labelled {label}: they run in {mode}, mostly under {path}. Check it, then save to adopt them.",
+            { n: o.torrents, label: o.name, mode: o.mode || "?", path: o.save_path || "?" });
         res.className = "result-msg";
         res.style.display = "block";
     }
-    const sp = document.getElementById("cat-save-path");
-    if (sp) sp.focus(); // the name is settled; the save path is what is missing
+    if (sp) sp.focus();
 }
 
 async function saveCategory() {
