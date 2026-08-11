@@ -2700,9 +2700,18 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     margin: 0 0 12px;
     font-size: 13px;
     color: var(--text-dim, #9aa4b2);
+    max-width: 100%;
 }
 .setup-lang-row select {
-    flex: 0 0 auto;
-    min-width: 150px;
+    /* min-width:0 is the point: without it a flex child refuses to shrink below
+       the width of its widest option, and long labels push it out of the box. */
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 60%;
     padding: 5px 8px;
+    box-sizing: border-box;
+}
+@media (max-width: 420px) {
+    .setup-lang-row { flex-direction: column; align-items: stretch; gap: 4px; }
+    .setup-lang-row select { max-width: 100%; }
 }
