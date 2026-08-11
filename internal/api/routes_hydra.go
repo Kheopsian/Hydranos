@@ -2323,6 +2323,66 @@ func PublicIPs(includeV6 bool) []string {
 		if v6 := getPublicIPv6(); v6 != "" {
 			out = append(out, v6)
 		}
+		// And every v6 address this host holds, not just the public one. In
+		// IPv4 that would be pointless: local addresses are RFC1918, never
+		// routable and never handed out as peers. In IPv6 they are all globally
+		// routable, so a peer list can return one of ours and we dial ourselves.
+		// Measured in production before this guard: 8348 self-connections, all
+		// to a Docker bridge address the filter had never heard of.
+		out = append(out, localIPv6s()...)
+	}
+	return dedupeStrings(out)
+}
+
+// localIPv6s lists this host's own IPv6 addresses, loopback and link-local
+// excluded (neither can reach us from a swarm). ULAs are kept: dialling
+// ourselves is useless whatever the scope.
+func localIPv6s() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ifc := range ifaces {
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if ip := ipn.IP; isSelfCandidateIPv6(ip) {
+				out = append(out, ip.String())
+			}
+		}
+	}
+	return out
+}
+
+// isSelfCandidateIPv6 reports whether an address of ours could plausibly come
+// back to us inside a peer list. Split out from the interface walk so it can be
+// tested without depending on the host's NICs.
+func isSelfCandidateIPv6(ip net.IP) bool {
+	if ip == nil || ip.To4() != nil {
+		return false // v4 is handled by the public-IP lookup
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	return ip.IsGlobalUnicast()
+}
+
+func dedupeStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0]
+	for _, s := range in {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
 	}
 	return out
 }
