@@ -286,6 +286,7 @@
  "all-time": "depuis toujours",
  "bearer, optional": "bearer, facultatif",
  "check": "vérifier",
+ "downloaded": "téléchargés",
  "floor. Actions:": "plancher. Actions :",
  "free": "libre",
  "keep": "garder",
@@ -305,6 +306,7 @@
  "torrents": "torrents",
  "torrents seeding": "torrents en partage",
  "used ·": "utilise ·",
+ "{n} TiB to go": "{n} Tio restants",
  "Δ avg": "Δ moy",
  "▶ Run now": "▶ Lancer maintenant"
 }

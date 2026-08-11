@@ -764,7 +764,7 @@ function _renderStatus(data) {
             const togoEl = document.getElementById("ov-milestone-togo");
             if (togoEl) {
                 const togoTiB = (goal - pib) * 1024;
-                togoEl.textContent = togoTiB.toFixed(1) + " TiB to go";
+                togoEl.textContent = t("{n} TiB to go", { n: togoTiB.toFixed(1) });
             }
         }
 
