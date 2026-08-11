@@ -3064,7 +3064,7 @@ const BM_META = {
     race_download_rate:      { label: "Download Race",        fmt: formatSpeed,               hb: true  },
     race_peers:              { label: "Peers Race",           fmt: v => v.toFixed(0),         hb: true  },
     race_torrents:           { label: "Torrents Race",        fmt: v => v.toFixed(0),         hb: null  },
-    race_uploading:          { label: "Upload actif Race",   fmt: v => v.toFixed(0),         hb: true  },
+    race_uploading:          { label: "Active Upload Race",   fmt: v => v.toFixed(0),         hb: true  },
     hoard_upload_rate:       { label: "Upload Hoard",         fmt: formatSpeed,               hb: true  },
     hoard_peers:             { label: "Peers Hoard",          fmt: v => v.toFixed(0),         hb: true  },
     hoard_active:            { label: "Actifs Hoard",         fmt: v => v.toFixed(0),         hb: true  },
@@ -4395,8 +4395,8 @@ async function updateSettings() {
 
         const order = SETTINGS_DOMAINS.concat([_SETTINGS_FALLBACK]);
         let html = _unitsCardHTML() + _interfacesCardHTML(_detectedIfaces) + `<div class="settings-toolbar">
-            <input type="text" id="settings-search" class="settings-search" placeholder="Search a setting\u2026" oninput="filterSettings()">
-            <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> Show advanced settings</label>
+            <input type="text" id="settings-search" class="settings-search" placeholder="${t("Search a setting\u2026")}" oninput="filterSettings()">
+            <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> ${t("Show advanced settings")}</label>
             <span id="settings-search-count" class="settings-search-count"></span>
         </div>`;
 
@@ -4418,9 +4418,9 @@ async function updateSettings() {
                     const search = (path + " " + k).toLowerCase();
                     const _adv = _SETTINGS_COMMON.has(path + "::" + k) ? "" : ' data-adv="1"';
                     const _def = _SETTINGS_DEFAULT[path + "::" + k];
-                    const _dtxt = _SETTINGS_DESC[k] || "";
+                    const _dtxt = t(_SETTINGS_DESC[k] || "");
                     const _descHtml = (_dtxt || _def !== undefined)
-                        ? `<span class="sr-desc">${esc(_dtxt)}${_def !== undefined ? ` <span class="sr-default">default: ${esc(String(_def))}</span>` : ""}</span>`
+                        ? `<span class="sr-desc">${esc(_dtxt)}${_def !== undefined ? ` <span class="sr-default">${t("default:")} ${esc(String(_def))}</span>` : ""}</span>`
                         : "";
                     rows += `<div class="settings-row" data-search="${esc(search)}"${_adv}>
                         <div class="sr-label"><span class="sr-key">${esc(k)}</span>${_descHtml}<span class="sr-path">${esc(path)}</span></div>
@@ -4430,11 +4430,11 @@ async function updateSettings() {
                 }
                 body += `<div class="settings-section"><div class="settings-section-title">[${esc(path)}]</div>${rows}</div>`;
             }
-            _tabsHtml += `<button type="button" class="settings-tab" data-domain="${dom.id}" onclick="showSettingsPanel('${dom.id}')"><span class="sg-title">${esc(dom.label)}</span> <span class="sg-count">${count}</span></button>`;
+            _tabsHtml += `<button type="button" class="settings-tab" data-domain="${dom.id}" onclick="showSettingsPanel('${dom.id}')"><span class="sg-title">${esc(t(dom.label))}</span> <span class="sg-count">${count}</span></button>`;
             _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div></div>`;
         }
-        _tabsHtml += `<button type="button" class="settings-tab" data-domain="__import" onclick="showSettingsPanel('__import')"><span class="sg-title">Import</span></button>`;
-        _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">${t("Import from another client")}</h3><p class="sr-desc" style="margin:.4em 0 1em">From <b>qBittorrent</b> (via its WebUI) or <b>Transmission</b> (by reading its config folder \u2014 it does not even need to be running). Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Torrents stopped in the old client stay stopped. Already-present torrents are skipped, so it is safe to re-run.</p><button class="btn-primary" onclick="importFromQbit()">${t("Import\u2026")}</button></div></div>`;
+        _tabsHtml += `<button type="button" class="settings-tab" data-domain="__import" onclick="showSettingsPanel('__import')"><span class="sg-title">${t("Import")}</span></button>`;
+        _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">${t("Import from another client")}</h3><p class="sr-desc" style="margin:.4em 0 1em">${t("From <b>qBittorrent</b> (via its WebUI) or <b>Transmission</b> (by reading its config folder \u2014 it does not even need to be running). Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Torrents stopped in the old client stay stopped. Already-present torrents are skipped, so it is safe to re-run.")}</p><button class="btn-primary" onclick="importFromQbit()">${t("Import\u2026")}</button></div></div>`;
         html += `<div class="settings-tabs" id="settings-tabs">${_tabsHtml}</div><div class="settings-panels" id="settings-panels">${_panelsHtml}</div>`;
         editor.innerHTML = html;
         {
