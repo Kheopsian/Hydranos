@@ -3,6 +3,23 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.58.5 - 2026-08-11
+
+### Fixed
+
+- **`enable_ipv6 = false` did not stop the announce going out over IPv6.** The
+  setting governed the peer listener, the tracker's `peers6` list and the
+  self-dial filter, but not the announce, which is the only part a tracker
+  sees. Go's dialer prefers IPv6 wherever the host has it, so a tracker
+  registered a v6 address for someone who had asked for none. The announce is
+  now pinned to IPv4 when the setting is off. A configured SOCKS proxy is left
+  alone, since the egress family is then the proxy's; a host with no IPv4 says
+  so once at boot rather than failing every announce separately.
+- **`enable_ipv6` never appeared in an upgraded config.** It was missing from
+  the settings written into existing `default.toml` files, so an install made
+  before 3.58.0 had no line to find or change: the setting was off, and
+  invisible.
+
 ## v3.58.4 - 2026-08-11
 
 ### Fixed
