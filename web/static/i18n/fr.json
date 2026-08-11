@@ -239,6 +239,8 @@
   "Initializing…": "Initialisation…",
   "Kind": "Type",
   "Language": "Langue",
+  "Interface language": "Langue de l'interface",
+  "Language of the WebUI. Stored in this browser, so each browser can differ. Changing it reloads the page.": "Langue de l'interface web. Enregistrée dans ce navigateur, donc chaque navigateur peut différer. La changer recharge la page.",
   "Last 24 h": "24 dernières heures",
   "Last 5 min": "5 dernières minutes",
   "Last error": "Dernière erreur",

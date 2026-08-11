@@ -122,6 +122,27 @@ function formatSpeed(bytesPerSec) {
     return _unitSpeed() === "bits" ? formatGbps(bytesPerSec) : formatBytes(bytesPerSec) + "/s";
 }
 
+// Switching language reloads the page on purpose: re-translating a DOM that is
+// already translated cannot work, since the English key it was built from is
+// gone by then. Same reasoning as the first-run picker.
+function setUiLang(code) {
+    I18N.setLang(code).then(() => location.reload());
+}
+
+function _languageCardHTML() {
+    const cur = I18N.current();
+    const opts = I18N.languages.map(l =>
+        `<option value="${l.code}"${l.code === cur ? " selected" : ""}>${l.label}</option>`
+    ).join("");
+    return `<div class="settings-section" style="margin-bottom:18px">
+        <div class="settings-section-title">${t("Language")}</div>
+        <div class="settings-row">
+            <div class="sr-label"><span class="sr-key">${t("Interface language")}</span><span class="sr-desc">${t("Language of the WebUI. Stored in this browser, so each browser can differ. Changing it reloads the page.")}</span></div>
+            <div class="sr-field"><select class="sr-input" onchange="setUiLang(this.value)">${opts}</select></div>
+        </div>
+    </div>`;
+}
+
 function _unitsCardHTML() {
     const sz = _unitSize(), sp = _unitSpeed();
     const opt = (v, cur, label) => `<option value="${v}"${v === cur ? " selected" : ""}>${label}</option>`;
@@ -4582,7 +4603,7 @@ async function updateSettings() {
         }
 
         const order = SETTINGS_DOMAINS.concat([_SETTINGS_FALLBACK]);
-        let html = _unitsCardHTML() + _interfacesCardHTML(_detectedIfaces) + `<div class="settings-toolbar">
+        let html = _languageCardHTML() + _unitsCardHTML() + _interfacesCardHTML(_detectedIfaces) + `<div class="settings-toolbar">
             <input type="text" id="settings-search" class="settings-search" placeholder="${t("Search a setting\u2026")}" oninput="filterSettings()">
             <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> ${t("Show advanced settings")}</label>
             <span id="settings-search-count" class="settings-search-count"></span>
