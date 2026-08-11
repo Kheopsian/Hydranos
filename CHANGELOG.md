@@ -3,7 +3,25 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
-## v3.58.5 - 2026-08-11
+## v3.59.0 - 2026-08-11
+
+### Added
+
+- **`announce_rate_limit`: cap how fast announces leave, in announces per
+  second.** A large library announces in waves — the scheduler wakes every
+  torrent whose deadline has passed and sends them all at once. Behind a VPN
+  that wave is a burst of new outbound flows through a single tunnel, and some
+  providers (Proton among them) throttle or drop its tail, which shows up as
+  tracker failures for no visible reason. The new per-session setting puts a
+  token bucket in front of every announce, so the same announces go out spread
+  over time instead of in a burst. It covers both `http://` and `udp://`
+  trackers. `0` (the default) keeps the previous unlimited behaviour, and
+  fractional rates are allowed (`0.5` = one announce every two seconds). Size it
+  above your library divided by the announce interval: 16k torrents at a
+  30-minute interval need roughly 9 per second to keep up, so a limit of 20
+  smooths the burst with room to spare. When the configured rate cannot sustain
+  the volume, Hydra says so in the log once a minute rather than silently
+  falling behind.
 
 ### Fixed
 
