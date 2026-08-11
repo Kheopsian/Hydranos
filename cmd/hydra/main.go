@@ -800,8 +800,8 @@ func main() {
 	// tunnel-derived bindings (one per WG tunnel, distinct peer_id, source
 	// IP, public IP for tracker). Otherwise fall back to the legacy
 	// single-binding for the FOU/wstunnel path.
-	hoardAnnounceBindings := engine.DefaultSingleBinding(hoardCfg.ListenPort, hoardCfg.EnableIPv6)
-	raceAnnounceBindings := engine.DefaultSingleBinding(raceCfg.ListenPort, raceCfg.EnableIPv6)
+	hoardAnnounceBindings := engine.DefaultSingleBinding(hoardCfg.ListenPort, hoardCfg.EnableIPv6, "hoard", hoardCfg.AnnounceRateLimit)
+	raceAnnounceBindings := engine.DefaultSingleBinding(raceCfg.ListenPort, raceCfg.EnableIPv6, "race", raceCfg.AnnounceRateLimit)
 
 	// With IPv6 off, announces are pinned to IPv4. On a host that has no IPv4
 	// that pin has nowhere to go, and the honest place to say so is here, once,

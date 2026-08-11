@@ -4382,6 +4382,7 @@ const _SETTINGS_DESC = {
     active_downloads: "Max torrents actively downloading at once.",
     file_pool_size: "Max file handles kept open by the disk cache.",
     upload_rate_limit: "Upload speed cap in bytes/s (0 = unlimited).",
+    announce_rate_limit: "Cap on outbound tracker announces for this session, in announces per second. 0 = unlimited. Use it when a VPN or a firewall drops the burst a large library sends at once: the same announces then go out spread over time. Fractional values allowed (0.5 = one announce every 2 seconds).",
     // [race.custom_choking]
     tick_interval_seconds: "How often the custom choker re-evaluates peers (seconds).",
     strategy: "Custom choking strategy name.",

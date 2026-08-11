@@ -966,7 +966,7 @@ func (e *RaceEngine) checkTrackerHealth() {
 	if v := e.livePort.Load(); v > 0 {
 		racePort = int(v)
 	}
-	announcer := newTrackerAnnouncer(racePort)
+	announcer := newTrackerAnnouncer(racePort, e.config.AnnounceRateLimit)
 	done := 0
 	for _, s := range res.Torrents {
 		if done >= raceSeedReannouncePerTick {

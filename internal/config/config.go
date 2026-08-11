@@ -44,6 +44,15 @@ type SessionConfig struct {
 	MaxConnections        int      `toml:"max_connections"`
 	MaxUploadsPerTorrent  int      `toml:"max_uploads_per_torrent"`
 
+	// AnnounceRateLimit caps outbound tracker announces for this session, in
+	// announces per second. 0 = unlimited (the historical behaviour). A large
+	// hoard announces in waves; behind a VPN that wave is a burst of new flows
+	// through one tunnel, and some providers (Proton) throttle or drop its
+	// tail, which surfaces as tracker failures. Smoothing the same volume over
+	// time fixes that. Fractional values are allowed (0.5 = one announce every
+	// two seconds).
+	AnnounceRateLimit float64 `toml:"announce_rate_limit"`
+
 	PeerTimeout       int `toml:"peer_timeout"`
 	InactivityTimeout int `toml:"inactivity_timeout"`
 
@@ -284,9 +293,11 @@ var migrationKeys = []struct{ section, key, value string }{
 	{"race", "bind_interface", `""`},
 	{"race", "enable_ipv6", `false`},
 	{"race", "listen_interfaces", `""`},
+	{"race", "announce_rate_limit", `0.0`},
 	{"hoard", "bind_interface", `""`},
 	{"hoard", "enable_ipv6", `false`},
 	{"hoard", "listen_interfaces", `""`},
+	{"hoard", "announce_rate_limit", `0.0`},
 	{"race_drain", "max_age_hours", `0`},
 	{"race_drain", "min_ratio", `0.0`},
 	{"race_drain", "age_ratio_mode", `"and"`},
