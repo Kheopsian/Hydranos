@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.58.4 - 2026-08-11
+
+### Fixed
+
+- **Adopting an orphaned category proposed the wrong engine.** The form opened
+  on race with an empty save path, so adopting a label whose torrents all live
+  in hoard moved every one of them to the other engine, with nothing on screen
+  to say so. The orphan listing now reports the engine most of a label's
+  torrents are actually in and the directory most of them sit under, and the
+  form starts from those. It proposes rather than imposes, since a majority can
+  be unrepresentative; an empty save path never wins that vote, so the real
+  directory of a minority beats a blank one.
+
 ## v3.58.3 - 2026-08-11
 
 ### Added
