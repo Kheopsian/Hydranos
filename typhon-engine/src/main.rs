@@ -109,6 +109,13 @@ async fn main() {
         );
     }
 
+    // IPv6: opt-in. Gates the extra [::] listener (added in resolved_bindings)
+    // and the v6 peer sources, so that off is byte-for-byte the old behaviour.
+    if config.enable_ipv6 {
+        info!("[engine] IPv6 enabled: listening on [::]:{} and accepting PEX added6", config.listen_port);
+    }
+    peer::extension::set_enable_ipv6(config.enable_ipv6);
+
     // Flamegraph 2026-04-19 showed console-subscriber's task/resource stats
     // scanning (HashMap::retain + DroppedAt) dominates CPU (~50%+ of samples).
     // Gate it behind a feature so prod builds skip the overhead entirely.

@@ -147,7 +147,7 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 				os.Exit(1)
 			}
 		}
-		ann := engine.NewHoardAnnouncer(le.proc.Client(), engine.DefaultSingleBinding(le.cfg.ListenPort))
+		ann := engine.NewHoardAnnouncer(le.proc.Client(), engine.DefaultSingleBinding(le.cfg.ListenPort, le.cfg.EnableIPv6))
 		if le.hoard != nil {
 			ann.OnObservation = le.hoard.ObserveAnnounce
 			le.hoard.SetBootstrapAnnounce(ann.BootstrapAnnounce)

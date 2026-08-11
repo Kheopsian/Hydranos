@@ -50,6 +50,7 @@ type trackerAnnouncer struct {
 	bindingID       int
 	livePort        *atomic.Int64 // runtime port override (nil/0 = use static port)
 	fwmark          int           // SO_MARK for this binding's egress; also used by the udp:// path
+	enableIPv6      bool          // take the tracker's BEP-7 `peers6` list
 }
 
 // newTrackerAnnouncerForBinding builds an announcer wired to a specific
@@ -141,6 +142,7 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		userAgent:       version.UserAgent(),
 		bindingID:       b.ID,
 		fwmark:          int(b.Fwmark),
+		enableIPv6:      b.EnableIPv6,
 	}
 }
 
@@ -614,7 +616,7 @@ func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, down
 		return nil, fmt.Errorf("tracker announce: read body: %w", err)
 	}
 
-	return parseTrackerResponse(body)
+	return parseTrackerResponse(body, ta.enableIPv6)
 }
 
 // hexToURLEncoded converts a hex info_hash to percent-encoded binary form.
@@ -633,8 +635,9 @@ func hexToURLEncoded(hexHash string) (string, error) {
 	return sb.String(), nil
 }
 
-// parseTrackerResponse parses a bencoded tracker response.
-func parseTrackerResponse(data []byte) (*TrackerAnnounceResult, error) {
+// parseTrackerResponse parses a bencoded tracker response. `acceptV6` gates
+// the BEP-7 `peers6` field: off, the response is read exactly as before.
+func parseTrackerResponse(data []byte, acceptV6 bool) (*TrackerAnnounceResult, error) {
 	dict, err := bdecodeDict(data)
 	if err != nil {
 		return nil, fmt.Errorf("tracker response: %w", err)
@@ -684,6 +687,35 @@ func parseTrackerResponse(data []byte) (*TrackerAnnounceResult, error) {
 				if port > 0 {
 					result.Peers = append(result.Peers, TrackerPeer{IP: ip, Port: port})
 				}
+			}
+		}
+	}
+
+	// Compact IPv6 peer list (BEP 7, 18 bytes per peer: 16 IP + 2 port).
+	// Trackers send it alongside `peers`, never instead of it, so this only
+	// ever adds to what we already had.
+	if acceptV6 {
+		if raw, ok := dict["peers6"]; ok {
+			var data []byte
+			switch v := raw.(type) {
+			case string:
+				data = []byte(v)
+			case []byte:
+				data = v
+			}
+			for i := 0; i+18 <= len(data); i += 18 {
+				port := int(data[i+16])<<8 + int(data[i+17])
+				if port == 0 {
+					continue
+				}
+				ip := net.IP(data[i : i+16])
+				// A v4-mapped entry is a v4 peer in disguise; unwrap it so it
+				// reads like every other v4 address downstream.
+				if v4 := ip.To4(); v4 != nil {
+					result.Peers = append(result.Peers, TrackerPeer{IP: v4.String(), Port: port})
+					continue
+				}
+				result.Peers = append(result.Peers, TrackerPeer{IP: ip.String(), Port: port})
 			}
 		}
 	}

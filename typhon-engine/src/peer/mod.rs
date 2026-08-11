@@ -122,6 +122,39 @@ pub async fn listen(
             } else {
                 TcpSocket::new_v6()?
             };
+            // IPV6_V6ONLY for the `enable_ipv6` listener: it sits beside the v4
+            // one, so it must not also swallow v4. A dual-stack wildcard would
+            // hand us v4 peers as `::ffff:a.b.c.d` and every address compared
+            // downstream (dedup, allowlists, stats) would stop matching. Must
+            // be set before bind(). Explicitly configured bindings are left
+            // alone, their behaviour does not change.
+            //
+            // Unix only: Linux decides this from net.ipv6.bindv6only, which is
+            // 0 (dual-stack) on every mainstream distro. Windows already
+            // defaults the option on, so there is nothing to set there.
+            #[cfg(unix)]
+            if b.only_v6 {
+                use std::os::fd::AsRawFd;
+                let on: libc::c_int = 1;
+                let rc = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::IPPROTO_IPV6,
+                        libc::IPV6_V6ONLY,
+                        &on as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                };
+                if rc != 0 {
+                    // Refuse to bind rather than quietly take over v4 too.
+                    warn!(
+                        "[peer] IPV6_V6ONLY failed on {} ({}), skipping the IPv6 listener",
+                        b.addr,
+                        std::io::Error::last_os_error()
+                    );
+                    continue;
+                }
+            }
             socket.set_reuseaddr(true)?;
             socket.bind(b.addr)?;
             let listener = socket.listen(4096)?;

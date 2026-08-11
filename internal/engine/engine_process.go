@@ -125,6 +125,11 @@ type EngineConfig struct {
 	// announces. Dial queue (PEX/DHT outbound) stays wired up.
 	DisableInternalAnnounce bool `json:"disable_internal_announce,omitempty"`
 
+	// Listen on [::] beside the v4 listener and accept PEX added6.
+	// Mirrors SessionConfig.EnableIPv6. Omitted when off, so an engine that
+	// never asked for IPv6 receives the exact config it received before.
+	EnableIPv6 bool `json:"enable_ipv6,omitempty"`
+
 	// Per-tunnel network bindings forwarded to Typhon. Empty = legacy mode
 	// (Typhon falls back to ListenInterfaces / ListenPort / PeerFingerprint).
 	// Populated when the multi-tunnel WG infra is wired up — each entry
@@ -196,6 +201,7 @@ func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		DataDir:                  dataDir,
 		ResumeDir:                dataDir + "/resume",
 		ListenPort:               cfg.ListenPort,
+		EnableIPv6:               cfg.EnableIPv6,
 		ListenPortProxyV2:        cfg.ListenPortProxyV2,
 		ListenAddrProxyV2:        cfg.ListenAddrProxyV2,
 		ProxyV2TrustedSources:    cfg.ProxyV2TrustedSources,
@@ -296,6 +302,7 @@ func BuildRaceConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		DataDir:                  dataDir,
 		ResumeDir:                dataDir + "/resume",
 		ListenPort:               cfg.ListenPort,
+		EnableIPv6:               cfg.EnableIPv6,
 		ListenPortProxyV2:        cfg.ListenPortProxyV2,
 		ListenAddrProxyV2:        cfg.ListenAddrProxyV2,
 		ProxyV2TrustedSources:    cfg.ProxyV2TrustedSources,

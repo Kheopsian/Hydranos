@@ -3,6 +3,27 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.58.0 — 2026-08-11
+
+### Added
+
+- **IPv6, off by default, per engine.** `enable_ipv6` under `[race]` and
+  `[hoard]` makes an engine listen for peers over IPv6 and accept the IPv6
+  peers trackers and PEX hand out. Left off, nothing changes: the engine binds
+  v4 only, exactly as before, and a tracker that volunteers `peers6` still gets
+  its v6 list dropped. Turned on, a v6-only listener is added *beside* the v4
+  one rather than replacing it, so v4 peers keep their v4 addresses everywhere
+  in the UI, the dedup and the stats. Enable it only where IPv6 actually works:
+  announcing an address nobody can reach costs connections.
+
+### Fixed
+
+- **IPv6 peers handed to the engine were silently dropped.** `add_peers` built
+  its socket address as `"{ip}:{port}"`, which is only ever valid for v4: a bare
+  v6 literal came out as `2001:db8::1:6881`, failed to parse, and the peer was
+  skipped without a word. The address is now parsed on its own and paired with
+  the port. This also unblocks the v6 peers the DHT already returns.
+
 ## v3.57.0 — 2026-08-11
 
 ### Added

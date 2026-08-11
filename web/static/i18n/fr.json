@@ -57,6 +57,7 @@
   "All sources": "Toutes les sources",
   "All time": "Depuis toujours",
   "All-time upload": "Envoi total",
+  "Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX offer. Off = IPv4 only. Only enable it if this host has working IPv6, otherwise you announce an address nobody can reach.": "Écouter aussi les pairs en IPv6, et accepter les pairs IPv6 proposés par les trackers et le PEX. Désactivé = IPv4 seulement. À n'activer que si cet hôte a un IPv6 fonctionnel, sinon vous annoncez une adresse que personne ne peut joindre.",
   "Anonymize names, categories & IPs for screenshots": "Anonymiser noms, catégories et IP pour les captures",
   "Applied live, no restart needed": "Appliqué à chaud, pas de redémarrage nécessaire",
   "Apply & restart": "Appliquer et redémarrer",

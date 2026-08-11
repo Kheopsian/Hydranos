@@ -607,8 +607,12 @@ fn add_peers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
             Some(p) if p > 0 && p <= u16::MAX as u64 => p as u16,
             _ => continue,
         };
-        let addr: std::net::SocketAddr = match format!("{}:{}", ip, port).parse() {
-            Ok(a) => a,
+        // Parse the IP on its own, then pair it with the port. Going through
+        // "{ip}:{port}" works only for v4: a bare v6 literal would come out as
+        // `2001:db8::1:6881`, which is not a socket address, so every v6 peer
+        // the orchestrator handed us was dropped here without a word.
+        let addr: std::net::SocketAddr = match ip.parse::<std::net::IpAddr>() {
+            Ok(parsed) => std::net::SocketAddr::new(parsed, port),
             Err(_) => continue,
         };
         // Skip self-IPs (own VPS / styx netns / tunnel egress) — same filter

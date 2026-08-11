@@ -18,6 +18,11 @@ import (
 type Binding struct {
 	// ID is a stable index used in logs and metrics. 0 = primary binding.
 	ID int
+	// EnableIPv6 lets this binding take the IPv6 peers a tracker returns in
+	// the BEP-7 `peers6` field. Off by default, mirroring the engine setting:
+	// without a v6 listener those peers are of no use to us, and dialling
+	// them would advertise a return path we cannot serve.
+	EnableIPv6 bool
 	// PeerID is the 20-byte BitTorrent peer_id used in tracker announces and
 	// peer handshakes. Each binding announces with a distinct peer_id so
 	// trackers see N separate clients in the swarm.
@@ -54,8 +59,9 @@ type Binding struct {
 // listen port. PeerID is generated from the version's fingerprint (random
 // suffix). Fwmark=0 (kernel default route). Used by main.go before the
 // multi-tunnel setup is wired up so existing single-tunnel deployments
-// behave unchanged.
-func DefaultSingleBinding(listenPort int) []Binding {
+// behave unchanged. `enableIPv6` comes from the engine's own setting, so the
+// announcer only takes v6 peers for an engine that actually listens on v6.
+func DefaultSingleBinding(listenPort int, enableIPv6 bool) []Binding {
 	return []Binding{{
 		ID:         0,
 		PeerID:     generatePeerID(version.PeerFingerprint()),
@@ -63,6 +69,7 @@ func DefaultSingleBinding(listenPort int) []Binding {
 		ListenPort: listenPort,
 		PublicIP:   "",
 		Fwmark:     0,
+		EnableIPv6: enableIPv6,
 	}}
 }
 

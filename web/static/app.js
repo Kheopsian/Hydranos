@@ -4187,6 +4187,7 @@ const _SETTINGS_DESC = {
     // session (race/hoard)
     listen_port: "TCP/UDP port this session listens on for incoming peers.",
     listen_interfaces: "Comma-separated ip:port bind list (multi-homing).",
+    enable_ipv6: "Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX offer. Off = IPv4 only. Only enable it if this host has working IPv6, otherwise you announce an address nobody can reach.",
     listen_port_proxy_v2: "Extra listener expecting HAProxy PROXY-protocol v2 (real peer IP). 0 = off.",
     listen_addr_proxy_v2: "Explicit bind address for the PROXY-v2 listener. Empty = [::] wildcard.",
     proxy_v2_trusted_sources: "Source IPs allowed to send PROXY-v2 headers.",
@@ -4241,9 +4242,9 @@ const _SETTINGS_COMMON = new Set([
     "daemon::api_host", "daemon::api_port", "daemon::api_key", "daemon::create_torrent_folder",
     "auth::username", "auth::password_hash",
     // Connection + Speed + Queueing, per engine (race & hoard)
-    "race::listen_port", "race::bind_interface", "race::max_connections", "race::max_uploads_per_torrent",
+    "race::listen_port", "race::bind_interface", "race::enable_ipv6", "race::max_connections", "race::max_uploads_per_torrent",
     "race::upload_rate_limit", "race::active_downloads", "race::active_seeds", "race::active_limit",
-    "hoard::listen_port", "hoard::bind_interface", "hoard::max_connections", "hoard::max_uploads_per_torrent",
+    "hoard::listen_port", "hoard::bind_interface", "hoard::enable_ipv6", "hoard::max_connections", "hoard::max_uploads_per_torrent",
     "hoard::upload_rate_limit", "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit",
     // Common toggles
     "vpn_speedtest::enabled", "race_drain::enabled",

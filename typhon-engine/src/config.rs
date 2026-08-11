@@ -104,6 +104,14 @@ pub struct EngineConfig {
     /// orchestrator owns announces (canonical post-multi-binding migration).
     #[serde(default)]
     pub disable_internal_announce: bool,
+    /// Listen for incoming peers over IPv6 as well, on the same port. Off by
+    /// default: the engine binds v4 only, exactly as it always has. On, a
+    /// second v6-only listener is added beside the v4 one (see
+    /// `ResolvedBinding::only_v6` for why it is not a dual-stack socket), and
+    /// the v6 peer sources are enabled (PEX `added6`; the Go orchestrator
+    /// reads the tracker `peers6` field).
+    #[serde(default)]
+    pub enable_ipv6: bool,
     /// Per-tunnel network bindings. Empty = legacy single-binding derived
     /// from `listen_port`/`listen_interfaces`/`peer_fingerprint`. Non-empty
     /// = each binding owns one TCP listener and one source-bound dial path
@@ -155,11 +163,38 @@ impl EngineConfig {
         }
     }
 
+    /// Bindings as configured, plus the `[::]` listener when `enable_ipv6` is
+    /// on. The v6 listener is added rather than substituted: the v4 one keeps
+    /// every v4 peer, so no address changes shape (see `only_v6`). If a v6
+    /// binding was configured by hand we add nothing, the operator already
+    /// said what they wanted.
+    pub fn resolved_bindings(&self) -> Vec<ResolvedBinding> {
+        let mut out = self.configured_bindings();
+        if !self.enable_ipv6 || out.iter().any(|b| b.addr.is_ipv6()) {
+            return out;
+        }
+        let port = out.first().map(|b| b.addr.port()).unwrap_or(self.listen_port);
+        let advertised = out.first().map(|b| b.advertised_port).unwrap_or(port);
+        let addr = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
+        let next_id = out.iter().map(|b| b.id).max().map(|m| m + 1).unwrap_or(0);
+        out.push(ResolvedBinding {
+            id: next_id,
+            addr,
+            // Same peer_id as the v4 listener: one engine, one identity. The
+            // CSV multi-interface path already shares it the same way.
+            peer_id: out.first().map(|b| b.peer_id).unwrap_or_else(|| self.peer_id()),
+            fwmark: out.first().map(|b| b.fwmark).unwrap_or(0),
+            advertised_port: advertised,
+            only_v6: true,
+        });
+        out
+    }
+
     /// Resolve the configured bindings to a concrete list of (SocketAddr, peer_id)
     /// pairs ready for `peer::listen()`. Non-empty `self.bindings` is the source
     /// of truth; otherwise we synthesize one binding per `listen_interfaces` entry
     /// (legacy CSV path) sharing the global `peer_fingerprint`-derived peer_id.
-    pub fn resolved_bindings(&self) -> Vec<ResolvedBinding> {
+    fn configured_bindings(&self) -> Vec<ResolvedBinding> {
         // New path: explicit bindings.
         if !self.bindings.is_empty() {
             let mut out = Vec::with_capacity(self.bindings.len());
@@ -188,6 +223,7 @@ impl EngineConfig {
                     peer_id: pid,
                     fwmark: b.fwmark,
                     advertised_port: advertised,
+                    only_v6: false,
                 });
             }
             return out;
@@ -198,7 +234,7 @@ impl EngineConfig {
         if self.listen_interfaces.is_empty() {
             if let Ok(addr) = format!("0.0.0.0:{}", self.listen_port).parse::<std::net::SocketAddr>() {
                 let port = addr.port();
-                out.push(ResolvedBinding { id: 0, addr, peer_id: global_pid, fwmark: 0, advertised_port: port });
+                out.push(ResolvedBinding { id: 0, addr, peer_id: global_pid, fwmark: 0, advertised_port: port, only_v6: false });
             }
         } else {
             for (i, part) in self.listen_interfaces.split(',').enumerate() {
@@ -206,7 +242,7 @@ impl EngineConfig {
                 if s.is_empty() { continue; }
                 if let Ok(addr) = s.parse::<std::net::SocketAddr>() {
                     let port = addr.port();
-                    out.push(ResolvedBinding { id: i as u32, addr, peer_id: global_pid, fwmark: 0, advertised_port: port });
+                    out.push(ResolvedBinding { id: i as u32, addr, peer_id: global_pid, fwmark: 0, advertised_port: port, only_v6: false });
                 }
             }
         }
@@ -227,4 +263,11 @@ pub struct ResolvedBinding {
     pub peer_id: [u8; 20],
     pub fwmark: u32,
     pub advertised_port: u16,
+    /// Set IPV6_V6ONLY on the listener. True only for the `[::]` listener we
+    /// add for `enable_ipv6`, which sits *beside* the v4 one. Without it the
+    /// wildcard v6 socket also accepts v4, and every v4 peer would then show
+    /// up as `::ffff:a.b.c.d` — silently breaking every address comparison
+    /// downstream (dedup, allowlists, stats). Bindings configured explicitly
+    /// keep the previous dual-stack behaviour.
+    pub only_v6: bool,
 }
