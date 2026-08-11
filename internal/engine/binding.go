@@ -48,6 +48,13 @@ type Binding struct {
 	// Empty = omit the param and let the tracker observe the source IP itself
 	// (correct behavior for the legacy single-binding setup).
 	PublicIP string
+	// AnnounceScope names the engine this binding announces for ("hoard",
+	// "race"). Together with ID it keys the shared announce rate limiter, so
+	// every announcer of one engine+binding draws from the same bucket.
+	AnnounceScope string
+	// AnnounceRateLimit caps outbound announces on this binding, in announces
+	// per second. 0 = unlimited. Mirrors the engine's announce_rate_limit.
+	AnnounceRateLimit float64
 	// Fwmark is the netfilter mark applied to outbound sockets bound to
 	// this binding so the kernel routes them through the right WG tunnel
 	// (matched by `ip rule fwmark X lookup tableX`). 0 = no fwmark
@@ -61,15 +68,19 @@ type Binding struct {
 // multi-tunnel setup is wired up so existing single-tunnel deployments
 // behave unchanged. `enableIPv6` comes from the engine's own setting, so the
 // announcer only takes v6 peers for an engine that actually listens on v6.
-func DefaultSingleBinding(listenPort int, enableIPv6 bool) []Binding {
+// `scope` + `announceRateLimit` carry the engine's announce_rate_limit; 0 keeps
+// announces unthrottled.
+func DefaultSingleBinding(listenPort int, enableIPv6 bool, scope string, announceRateLimit float64) []Binding {
 	return []Binding{{
-		ID:         0,
-		PeerID:     generatePeerID(version.PeerFingerprint()),
-		ListenAddr: "",
-		ListenPort: listenPort,
-		PublicIP:   "",
-		Fwmark:     0,
-		EnableIPv6: enableIPv6,
+		ID:                0,
+		PeerID:            generatePeerID(version.PeerFingerprint()),
+		ListenAddr:        "",
+		ListenPort:        listenPort,
+		PublicIP:          "",
+		Fwmark:            0,
+		EnableIPv6:        enableIPv6,
+		AnnounceScope:     scope,
+		AnnounceRateLimit: announceRateLimit,
 	}}
 }
 

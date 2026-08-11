@@ -51,6 +51,9 @@ type trackerAnnouncer struct {
 	livePort        *atomic.Int64 // runtime port override (nil/0 = use static port)
 	fwmark          int           // SO_MARK for this binding's egress; also used by the udp:// path
 	enableIPv6      bool          // take the tracker's BEP-7 `peers6` list
+	// limiter throttles outbound announces (announce_rate_limit). Shared per
+	// engine+binding, nil when the setting is 0 (unlimited).
+	limiter *announceLimiter
 }
 
 // newTrackerAnnouncerForBinding builds an announcer wired to a specific
@@ -193,6 +196,7 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		bindingID:       b.ID,
 		fwmark:          int(b.Fwmark),
 		enableIPv6:      b.EnableIPv6,
+		limiter:         announceLimiterFor(b.AnnounceScope+"#"+strconv.Itoa(b.ID), b.AnnounceRateLimit),
 	}
 }
 
@@ -510,8 +514,13 @@ func loadSecondaryAnnounceProxy() *url.URL {
 // newTrackerAnnouncer is a thin shim retained for callers that still pass a
 // bare port (race aggressive announce). Equivalent to a single-binding setup
 // with no source-IP override.
-func newTrackerAnnouncer(port int) *trackerAnnouncer {
-	return newTrackerAnnouncerForBinding(Binding{ID: 0, ListenPort: port})
+func newTrackerAnnouncer(port int, announceRateLimit float64) *trackerAnnouncer {
+	return newTrackerAnnouncerForBinding(Binding{
+		ID:                0,
+		ListenPort:        port,
+		AnnounceScope:     "race",
+		AnnounceRateLimit: announceRateLimit,
+	})
 }
 
 // generateQBitPeerID generates a peer_id matching qBittorrent 4.6.1 format.
@@ -532,6 +541,11 @@ func generateQBitPeerID() string {
 // private trackers credit our upload — historically these were hardcoded to 0,
 // which froze tracker-side stats despite real transfer.
 func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, downloaded, left int64, event string) (*TrackerAnnounceResult, error) {
+	// Gate every announce, http:// and udp:// alike, on the engine's
+	// announce_rate_limit before a single byte leaves. No-op when unset.
+	if err := ta.limiter.wait(context.Background()); err != nil {
+		return nil, err
+	}
 	// Optional passkey override (env TYPHON_ANNOUNCE_PASSKEY) — rewrite the
 	// /announce/<passkey> segment so this instance can announce under another
 	// account without re-fetching every .torrent. Dormant unless the env is set.
@@ -625,7 +639,14 @@ func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, down
 		}
 		secondaryClient := ta.secondaryClient
 		userAgent := ta.userAgent
+		limiter := ta.limiter
 		go func() {
+			// The secondary is a second request on the wire, so it draws its
+			// own token. Fire-and-forget already, so waiting costs nothing.
+			if err := limiter.wait(context.Background()); err != nil {
+				slog.Warn("tracker_announce secondary: rate limited", "error", err)
+				return
+			}
 			req, err := http.NewRequest("GET", secURL, nil)
 			if err != nil {
 				slog.Warn("tracker_announce secondary: build req failed", "error", err)
@@ -923,7 +944,7 @@ func (e *RaceEngine) raceAnnounceLoop(infoHash, trackerURL string, totalSize int
 		return
 	}
 
-	announcer := newTrackerAnnouncer(e.config.ListenPort)
+	announcer := newTrackerAnnouncer(e.config.ListenPort, e.config.AnnounceRateLimit)
 
 	slog.Info("race: starting announce loop",
 		"info_hash", infoHash[:minStr(len(infoHash), 8)],
