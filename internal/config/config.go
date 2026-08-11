@@ -24,6 +24,11 @@ type SessionConfig struct {
 	ListenPort       int    `toml:"listen_port"`
 	ListenInterfaces string `toml:"listen_interfaces"`
 	BindInterface    string `toml:"bind_interface"` // interface NAME (e.g. "wg0"); resolved to its IP at engine start
+	// Listen for peers over IPv6 too, and take the v6 peers trackers and PEX
+	// offer. Off by default: v4 only, which is what every install has run so
+	// far. Enabling it adds a v6-only listener beside the v4 one rather than
+	// replacing it, so v4 peers keep their v4 addresses everywhere.
+	EnableIPv6 bool `toml:"enable_ipv6"`
 	// Optional second TCP listener expecting HAProxy PROXY protocol v2 (real
 	// peer IP in header). Used by the v6 bypass path: peer → VPS haproxy →
 	// the router rdr → the seedbox host [::]:listen_port_proxy_v2. 0 = disabled.

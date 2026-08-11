@@ -18,6 +18,10 @@ listen_port = 16171
 #   listen_interfaces = "10.0.0.2:PORT" # by IP (advanced; comma-separated for multi-home)
 bind_interface = ""
 listen_interfaces = ""
+# Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX
+# offer. Off = IPv4 only, which is the long-standing behaviour. Only turn it on
+# if this host really has working IPv6 connectivity.
+enable_ipv6 = false
 max_connections = 4000
 max_uploads_per_torrent = 100
 peer_timeout = 30
@@ -42,6 +46,10 @@ listen_port = 16172
 #   listen_interfaces = "10.0.0.2:PORT" # by IP (advanced; comma-separated for multi-home)
 bind_interface = ""
 listen_interfaces = ""
+# Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX
+# offer. Off = IPv4 only, which is the long-standing behaviour. Only turn it on
+# if this host really has working IPv6 connectivity.
+enable_ipv6 = false
 max_connections = 12000
 max_uploads_per_torrent = -1
 peer_timeout = 20

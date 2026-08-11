@@ -243,6 +243,7 @@ fn pick_binding_for_dial(
             peer_id: [0u8; 20],
             fwmark: 0,
             advertised_port: 0,
+            only_v6: false,
         };
     }
     if bindings.len() == 1 {

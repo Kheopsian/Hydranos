@@ -9,7 +9,8 @@
 //! `{added: <compact 6-byte peers>, added.f: <flag bytes>, dropped: <compact peers>}`.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use std::collections::BTreeMap;
 
@@ -173,15 +174,48 @@ pub fn build_metadata_data(piece: u32, total_size: usize, block: &[u8]) -> Vec<u
     out
 }
 
-/// Parse a BEP 11 PEX message payload. Returns the IPv4 peers in `added`.
-/// Ignores `added6` (IPv6) and `dropped` for now.
+/// Whether to take the IPv6 peers a PEX message offers. Off unless the engine
+/// was started with `enable_ipv6`: without a v6 listener, dialling them would
+/// mean advertising a return path we cannot serve.
+static ENABLE_IPV6: AtomicBool = AtomicBool::new(false);
+
+pub fn set_enable_ipv6(on: bool) {
+    ENABLE_IPV6.store(on, Ordering::Relaxed);
+}
+
+/// Parse a BEP 11 PEX message payload. Returns the peers in `added`, plus
+/// those in `added6` when IPv6 is enabled. `dropped` is still ignored.
 pub fn parse_pex(payload: &[u8]) -> Vec<SocketAddr> {
     let bv = match decode(payload) { Ok(v) => v, Err(_) => return Vec::new() };
-    let added = match bv.dict_get(b"added").and_then(|v| v.as_bytes()) {
-        Some(b) => b,
-        None => return Vec::new(),
+    let mut out = match bv.dict_get(b"added").and_then(|v| v.as_bytes()) {
+        Some(b) => parse_compact_v4(b),
+        None => Vec::new(),
     };
-    parse_compact_v4(added)
+    if ENABLE_IPV6.load(Ordering::Relaxed) {
+        if let Some(b) = bv.dict_get(b"added6").and_then(|v| v.as_bytes()) {
+            out.extend(parse_compact_v6(b));
+        }
+    }
+    out
+}
+
+/// Decode compact peer list (IPv6: 18 bytes per entry, BEP 7).
+fn parse_compact_v6(buf: &[u8]) -> Vec<SocketAddr> {
+    let mut out = Vec::with_capacity(buf.len() / 18);
+    for chunk in buf.chunks_exact(18) {
+        let mut octets = [0u8; 16];
+        octets.copy_from_slice(&chunk[..16]);
+        let port = u16::from_be_bytes([chunk[16], chunk[17]]);
+        if port == 0 { continue; }
+        let ip = Ipv6Addr::from(octets);
+        // A v4-mapped entry is a v4 peer wearing a v6 hat: unwrap it so it
+        // matches everywhere else we compare addresses.
+        match ip.to_ipv4_mapped() {
+            Some(v4) => out.push(SocketAddr::new(IpAddr::V4(v4), port)),
+            None => out.push(SocketAddr::new(IpAddr::V6(ip), port)),
+        }
+    }
+    out
 }
 
 /// Decode compact peer list (IPv4: 6 bytes per entry).
