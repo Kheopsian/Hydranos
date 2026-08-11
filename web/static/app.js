@@ -126,25 +126,25 @@ function _unitsCardHTML() {
     const sz = _unitSize(), sp = _unitSpeed();
     const opt = (v, cur, label) => `<option value="${v}"${v === cur ? " selected" : ""}>${label}</option>`;
     return `<div class="settings-section" style="margin-bottom:18px">
-        <div class="settings-section-title">Display units</div>
+        <div class="settings-section-title">${t("Display units")}</div>
         <div class="settings-row">
-            <div class="sr-label"><span class="sr-key">Sizes</span><span class="sr-desc">Binary (MiB, \u00d71024) or decimal (MB, \u00d71000).</span></div>
-            <div class="sr-field"><select class="sr-input" onchange="setUnitPref('size', this.value)">${opt("binary", sz, "Binary \u2014 KiB / MiB / GiB")}${opt("decimal", sz, "Decimal \u2014 KB / MB / GB")}</select></div>
+            <div class="sr-label"><span class="sr-key">${t("Sizes")}</span><span class="sr-desc">${t("Binary (MiB, \u00d71024) or decimal (MB, \u00d71000).")}</span></div>
+            <div class="sr-field"><select class="sr-input" onchange="setUnitPref('size', this.value)">${opt("binary", sz, t("Binary \u2014 KiB / MiB / GiB"))}${opt("decimal", sz, t("Decimal \u2014 KB / MB / GB"))}</select></div>
         </div>
         <div class="settings-row">
-            <div class="sr-label"><span class="sr-key">Speeds</span><span class="sr-desc">Bytes per second (MiB/s) or bits per second (Mbps).</span></div>
-            <div class="sr-field"><select class="sr-input" onchange="setUnitPref('speed', this.value)">${opt("bytes", sp, "Bytes/s \u2014 KiB/s, MiB/s")}${opt("bits", sp, "Bits/s \u2014 Mbps, Gbps")}</select></div>
+            <div class="sr-label"><span class="sr-key">${t("Speeds")}</span><span class="sr-desc">${t("Bytes per second (MiB/s) or bits per second (Mbps).")}</span></div>
+            <div class="sr-field"><select class="sr-input" onchange="setUnitPref('speed', this.value)">${opt("bytes", sp, t("Bytes/s \u2014 KiB/s, MiB/s"))}${opt("bits", sp, t("Bits/s \u2014 Mbps, Gbps"))}</select></div>
         </div>
     </div>`;
 }
 
 function _interfacesCardHTML(list) {
     const rows = (list && list.length)
-        ? list.map((i) => `<div class="settings-row"><div class="sr-label"><span class="sr-key">${esc(i.name)}</span><span class="sr-desc">${i.up ? "up" : "down"}</span></div><div class="sr-field"><code class="sr-readonly">${esc(i.ip)}</code></div></div>`).join("")
-        : `<div class="settings-row"><div class="sr-desc">No non-loopback interfaces detected.</div></div>`;
+        ? list.map((i) => `<div class="settings-row"><div class="sr-label"><span class="sr-key">${esc(i.name)}</span><span class="sr-desc">${i.up ? t("up") : t("down")}</span></div><div class="sr-field"><code class="sr-readonly">${esc(i.ip)}</code></div></div>`).join("")
+        : `<div class="settings-row"><div class="sr-desc">${t("No non-loopback interfaces detected.")}</div></div>`;
     return `<div class="settings-section" style="margin-bottom:18px">
-        <div class="settings-section-title">Network interfaces</div>
-        <div class="sr-desc" style="padding:0 0 8px">Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.</div>
+        <div class="settings-section-title">${t("Network interfaces")}</div>
+        <div class="sr-desc" style="padding:0 0 8px">${t("Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.")}</div>
         ${rows}
     </div>`;
 }
