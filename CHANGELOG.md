@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.57.0 — 2026-08-11
+
+### Added
+
+- **The interface speaks other languages.** A language selector sits on the
+  first-run screen, and the choice survives a reload. French is complete across
+  the whole UI; German, Spanish, Italian, Dutch and Portuguese cover onboarding
+  and navigation. Translating is editing one JSON file, no Go and no JavaScript
+  required. The key *is* the English text, so English can never regress: a
+  missing entry renders the key, which is already the right English, and a
+  partial translation is a valid state rather than a broken screen.
+
+### Fixed
+
+- **The upload chart follows your speed unit again.** On the Benchmark tab it
+  had its formatter hard-coded to the *size* unit, so it printed KiB/s whatever
+  you had chosen, while every other rate in the UI honoured the setting. It now
+  reads the speed unit like the rest, in bytes/s or bits/s.
+- **Three French strings no longer leak into the English UI.** The bulk-add
+  result line and three chart labels had been written in French and shipped
+  that way to everyone. They are English again, and translated properly.
+- **The per-tracker chart label reads correctly.** It said `Chart tracker`,
+  which parses as neither the chart nor the tracker. It is `Tracker chart`.
+
 ## v3.56.0 — 2026-08-10
 
 ### Added
