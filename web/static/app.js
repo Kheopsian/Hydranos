@@ -21,7 +21,7 @@ async function fetchPortForward() {
             // Find stale sockets
             const stale = [...(d.race_sockets || []), ...(d.hoard_sockets || [])].filter(s => s.stale);
             for (const s of stale) {
-                warnings.push(`⚠ ${s.ip}:${s.port}, stale socket (bound ${s.bound_interface}, interface recreated)`);
+                warnings.push("⚠ " + t("{addr}, stale socket (bound {iface}, interface recreated)", { addr: s.ip + ":" + s.port, iface: s.bound_interface }));
             }
         } else if (!d.all_connectable) {
             cls = d.race_connectable || d.hoard_connectable ? "warn" : "error";
@@ -31,8 +31,8 @@ async function fetchPortForward() {
 
         // Build tooltip
         let lines = [
-            `Race :${d.race_port}, ${d.race_peers} peers ${d.race_connectable ? "" : "✗"}`,
-            `Hoard :${d.hoard_port}, ${d.hoard_peers} peers ${d.hoard_connectable ? "" : "✗"}`,
+            t("Race :{port}, {n} peers", { port: d.race_port, n: d.race_peers }) + (d.race_connectable ? "" : " ✗"),
+            t("Hoard :{port}, {n} peers", { port: d.hoard_port, n: d.hoard_peers }) + (d.hoard_connectable ? "" : " ✗"),
             `IP: ${d.public_ip}`,
         ];
         if (warnings.length) lines = [...warnings, "", ...lines];
@@ -82,7 +82,7 @@ async function fetchPublicIp(force) {
             if (el) el.classList.remove("tunnel-leak");
             const _leakRow = el && el.querySelector(".tunnel-leak-row");
             if (_leakRow) _leakRow.remove();
-            if (dot) { dot.style.background = ""; dot.title = "Exit IP: " + d.ip + (d.ip_v6 ? " / " + d.ip_v6 : ""); }
+            if (dot) { dot.style.background = ""; dot.title = t("Exit IP: {ip}", { ip: d.ip + (d.ip_v6 ? " / " + d.ip_v6 : "") }); }
             const exitEl = document.getElementById("proxy-exit-ip");
             if (exitEl) exitEl.textContent = incoExitIP(d.ip_v6 || d.ip);
         }
@@ -226,11 +226,11 @@ function promptFirstRunSetup(networkStorage) {
                 body: JSON.stringify({ username: user.value, password: pass.value }),
             });
             const d = await res.json().catch(() => ({}));
-            if (!res.ok) return fail(d.error || ("Setup failed (" + res.status + ")"));
+            if (!res.ok) return fail(d.error || t("Setup failed ({status})", { status: res.status }));
             localStorage.setItem("hydra_api_key", d.api_key);
             location.reload();
         } catch (err) {
-            fail("Network error: " + err.message);
+            fail(t("Network error: {msg}", { msg: err.message }));
         }
     };
     ov.querySelector("#setup-go").addEventListener("click", go);
@@ -274,7 +274,7 @@ async function promptLogin(reason) {
             });
             const d = await res.json().catch(() => ({}));
             if (!res.ok) {
-                msg.textContent = d.error || ("Login failed (" + res.status + ")");
+                msg.textContent = d.error || t("Login failed ({status})", { status: res.status });
                 msg.style.color = "var(--accent-red)";
                 return;
             }
@@ -378,11 +378,11 @@ function importWizard() {
                         method: "POST", headers: { "X-Api-Key": API_KEY }, body: fd,
                     });
                     const ud = await up.json().catch(() => ({}));
-                    if (!up.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = ud.error || "Upload failed"; return; }
+                    if (!up.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = ud.error || t("Upload failed"); return; }
                     dir = ud.dir;
                 } else if (!dir) {
                     msg.style.color = "var(--accent-red)";
-                    msg.textContent = "Give a folder, or upload a zip of it.";
+                    msg.textContent = t("Give a folder, or upload a zip of it.");
                     return;
                 }
                 const req = {
@@ -396,9 +396,9 @@ function importWizard() {
                     body: JSON.stringify(req),
                 });
                 const d = await res.json().catch(() => ({}));
-                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d.error || ("Preview failed (" + res.status + ")"); return; }
+                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d.error || t("Preview failed ({status})", { status: res.status }); return; }
                 stepTransmissionReview(req, d);
-            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = "Error: " + e.message; }
+            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = t("Error: {msg}", { msg: e.message }); }
         };
     }
 
@@ -410,14 +410,14 @@ function importWizard() {
             <input type="text" class="tr-map" data-from="${esc(p)}" value="${esc(p)}" style="flex:1">
         </div>`).join("");
         const probs = (d.problems || []).length;
-        box.innerHTML = `<h3>Import preview</h3>
-            <p class="modal-desc"><b>${d.total}</b> torrents · <b>${d.completed}</b> complete (seed-mode) · <b>${d.incomplete}</b> partial · <b>${d.stopped}</b> stopped in Transmission · carried upload <b>${formatBytes(d.carried_uploaded_bytes)}</b></p>
-            <p class="modal-desc">Categories to create: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "-"}, all as <b>hoard</b>.</p>
-            ${probs ? `<p class="modal-desc" style="color:var(--accent-red)">${probs} file(s) unreadable, they will be skipped.</p>` : ""}
-            ${d.without_resume ? `<p class="modal-desc">${d.without_resume} torrent(s) have no resume file: no save path, they will be skipped.</p>` : ""}
-            <p class="modal-desc" style="margin-bottom:4px">Path mapping (Transmission path → what Hydra sees):</p>
-            <div style="max-height:150px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || "<i>no paths detected</i>"}</div>
-            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped"> Import everything stopped, no announce until you start them</label>
+        box.innerHTML = `<h3>${t("Import preview")}</h3>
+            <p class="modal-desc">${t("<b>{total}</b> torrents · <b>{complete}</b> complete (seed-mode) · <b>{partial}</b> partial · <b>{stopped}</b> stopped in Transmission · carried upload <b>{carried}</b>", { total: d.total, complete: d.completed, partial: d.incomplete, stopped: d.stopped, carried: formatBytes(d.carried_uploaded_bytes) })}</p>
+            <p class="modal-desc">${t("Categories to create: {list}, all as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
+            ${probs ? `<p class="modal-desc" style="color:var(--accent-red)">${t("{n} file(s) unreadable, they will be skipped.", { n: probs })}</p>` : ""}
+            ${d.without_resume ? `<p class="modal-desc">${t("{n} torrent(s) have no resume file: no save path, they will be skipped.", { n: d.without_resume })}</p>` : ""}
+            <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (Transmission path → what Hydra sees):")}</p>
+            <div style="max-height:150px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
+            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped"> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="tr-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="tr-back2">Back</button>
@@ -431,7 +431,7 @@ function importWizard() {
                 if (t && t !== f) path_map[f] = t;
             });
             const msg = box.querySelector("#tr-msg2");
-            msg.style.color = ""; msg.textContent = "Starting…";
+            msg.style.color = ""; msg.textContent = t("Starting…");
             try {
                 const res = await fetch("/api/import/transmission/start", {
                     method: "POST",
@@ -442,9 +442,9 @@ function importWizard() {
                     })),
                 });
                 const d2 = await res.json().catch(() => ({}));
-                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d2.error || ("Start failed (" + res.status + ")"); return; }
+                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d2.error || t("Start failed ({status})", { status: res.status }); return; }
                 stepProgress();
-            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = "Network error: " + e.message; }
+            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = t("Network error: {msg}", { msg: e.message }); }
         };
     }
 
@@ -476,9 +476,9 @@ function importWizard() {
                     body: JSON.stringify(creds),
                 });
                 const d = await res.json().catch(() => ({}));
-                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d.error || ("Preview failed (" + res.status + ")"); return; }
+                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d.error || t("Preview failed ({status})", { status: res.status }); return; }
                 stepReview(creds, d);
-            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = "Network error: " + e.message; }
+            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = t("Network error: {msg}", { msg: e.message }); }
         };
         box.querySelector("#qb-pass").addEventListener("keydown", e => { if (e.key === "Enter") box.querySelector("#qb-preview").click(); });
     }
@@ -490,16 +490,16 @@ function importWizard() {
             <span>→</span>
             <input type="text" class="qb-map" data-from="${esc(p)}" value="${esc(p)}" style="flex:1">
         </div>`).join("");
-        box.innerHTML = `<h3>Import preview</h3>
-            <p class="modal-desc"><b>${d.total}</b> torrents · <b>${d.completed}</b> complete (seed-mode) · <b>${d.incomplete}</b> partial (verify + resume) · carried upload <b>${formatBytes(d.carried_uploaded_bytes)}</b></p>
-            <p class="modal-desc">Categories: ${(d.categories || []).map(c => esc(c.name)).join(", ") || "-"}, all imported as <b>hoard</b>.</p>
-            <p class="modal-desc" style="margin-bottom:4px">Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:</p>
-            <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || "<i>no paths detected</i>"}</div>
-            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped"> Import everything stopped, no announce until you start them</label>
+        box.innerHTML = `<h3>${t("Import preview")}</h3>
+            <p class="modal-desc">${t("<b>{total}</b> torrents · <b>{complete}</b> complete (seed-mode) · <b>{partial}</b> partial (verify + resume) · carried upload <b>{carried}</b>", { total: d.total, complete: d.completed, partial: d.incomplete, carried: formatBytes(d.carried_uploaded_bytes) })}</p>
+            <p class="modal-desc">${t("Categories: {list}, all imported as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
+            <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:")}</p>
+            <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
+            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped"> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="qb-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
-                <button id="qb-back">Back</button>
-                <button class="btn-primary" id="qb-go">Import ${d.total} torrents</button>
+                <button id="qb-back">${t("Back")}</button>
+                <button class="btn-primary" id="qb-go">${t("Import {n} torrents", { n: d.total })}</button>
             </div>`;
         box.querySelector("#qb-back").onclick = () => stepCreds({ url: creds.url, user: creds.username });
         box.querySelector("#qb-go").onclick = async () => {
@@ -509,7 +509,7 @@ function importWizard() {
                 if (t && t !== f) path_map[f] = t;
             });
             const msg = box.querySelector("#qb-msg2");
-            msg.style.color = ""; msg.textContent = "Starting…";
+            msg.style.color = ""; msg.textContent = t("Starting…");
             try {
                 const res = await fetch("/api/import/qbit/start", {
                     method: "POST",
@@ -520,37 +520,39 @@ function importWizard() {
                     })),
                 });
                 const d2 = await res.json().catch(() => ({}));
-                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d2.error || ("Start failed (" + res.status + ")"); return; }
+                if (!res.ok) { msg.style.color = "var(--accent-red)"; msg.textContent = d2.error || t("Start failed ({status})", { status: res.status }); return; }
                 stepProgress();
-            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = "Network error: " + e.message; }
+            } catch (e) { msg.style.color = "var(--accent-red)"; msg.textContent = t("Network error: {msg}", { msg: e.message }); }
         };
     }
 
     function stepProgress() {
-        box.innerHTML = `<h3>Importing…</h3>
-            <p class="modal-desc" id="qb-phase">Connecting…</p>
+        box.innerHTML = `<h3>${t("Importing…")}</h3>
+            <p class="modal-desc" id="qb-phase">${t("Connecting…")}</p>
             <div style="background:var(--border);border-radius:4px;height:10px;overflow:hidden;margin:8px 0">
                 <div id="qb-bar" style="height:100%;width:0;background:var(--accent-hoard);transition:width .2s"></div>
             </div>
             <p class="modal-desc" id="qb-stats"></p>
             <p class="modal-desc" id="qb-cur" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7"></p>
-            <div class="modal-actions"><button class="btn-primary" id="qb-done" style="display:none">Close &amp; reload</button></div>`;
+            <div class="modal-actions"><button class="btn-primary" id="qb-done" style="display:none">${t("Close &amp; reload")}</button></div>`;
         const q = API_KEY ? ("?apikey=" + encodeURIComponent(API_KEY)) : "";
         const es = new EventSource("/api/import/qbit/events" + q);
         const phase = box.querySelector("#qb-phase"), bar = box.querySelector("#qb-bar"),
             stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
             doneBtn = box.querySelector("#qb-done");
-        const labels = { connect: "Connecting…", categories: "Creating categories…", torrents: "Importing torrents…", done: "Done", error: "Error" };
+        const labels = { connect: t("Connecting…"), categories: t("Creating categories…"), torrents: t("Importing torrents…"), done: t("Done"), error: t("Error") };
         es.onmessage = (ev) => {
             let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
             phase.style.color = ""; phase.textContent = labels[d.phase] || d.phase;
             if (d.total > 0) bar.style.width = Math.round(100 * d.done / d.total) + "%";
-            stats.textContent = `${d.done}/${d.total} · ${d.seeded} seeding · ${d.downloading} resuming · ${d.failed} failed${d.skipped ? " \u00b7 " + d.skipped + " skipped" : ""}`;
-            cur.textContent = d.current ? ("last: " + d.current) : "";
-            if (d.phase === "error") { phase.style.color = "var(--accent-red)"; phase.textContent = "Error: " + (d.error || "unknown"); }
+            stats.textContent = t("{done}/{total} · {seeding} seeding · {resuming} resuming · {failed} failed", {
+                done: d.done, total: d.total, seeding: d.seeded, resuming: d.downloading, failed: d.failed })
+                + (d.skipped ? " · " + t("{n} skipped", { n: d.skipped }) : "");
+            cur.textContent = d.current ? t("last: {name}", { name: d.current }) : "";
+            if (d.phase === "error") { phase.style.color = "var(--accent-red)"; phase.textContent = t("Error: {msg}", { msg: d.error || t("unknown") }); }
             if (d.finished) {
                 es.close();
-                if (d.phase !== "error") { bar.style.width = "100%"; phase.textContent = "Import complete"; }
+                if (d.phase !== "error") { bar.style.width = "100%"; phase.textContent = t("Import complete"); }
                 doneBtn.style.display = "";
                 doneBtn.onclick = () => location.reload();
             }
@@ -575,7 +577,7 @@ async function api(endpoint, options = {}) {
     const headers = { "X-Api-Key": API_KEY, ...options.headers };
     const res = await fetch(endpoint, { ...options, headers });
     if (res.status === 401) {
-        promptLogin("Session invalid \u2014 please sign in again.");
+        promptLogin(t("Session invalid, please sign in again."));
         throw new Error("API error: 401");
     }
     if (!res.ok) throw new Error(`API error: ${res.status}`);
@@ -642,12 +644,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     const bar = document.createElement("div");
     bar.style.cssText = "padding:10px 14px;background:var(--accent-orange,#c87f0a);color:#fff;" +
         "font-size:13px;display:flex;gap:12px;align-items:center;justify-content:center";
-    bar.innerHTML = `<span>Config on network storage detected (${esc(kind)}). Hydra can handle this,
-        but the database cannot use its safest journal mode there: a share that drops mid-write
-        can corrupt it. <b>Keep backups of your data_dir</b>, or move data_dir to a local disk
-        (your downloads can stay on the share).</span>`;
+    bar.innerHTML = "<span>" + t("Config on network storage detected ({kind}). Hydra can handle this, but the database cannot use its safest journal mode there: a share that drops mid-write can corrupt it. <b>Keep backups of your data_dir</b>, or move data_dir to a local disk (your downloads can stay on the share).", { kind: esc(kind) }) + "</span>";
     const btn = document.createElement("button");
-    btn.textContent = "Got it";
+    btn.textContent = t("Got it");
     btn.className = "btn-secondary";
     // The bar is a flex row: without this the button is a shrinkable flex item
     // and the text wraps it onto two lines.
@@ -803,7 +802,7 @@ function _renderStatus(data) {
         }
 
         document.getElementById("last-update").textContent =
-            "Last update: " + new Date().toLocaleTimeString();
+            t("Last update: {time}", { time: new Date().toLocaleTimeString() });
 }
 
 
@@ -835,11 +834,11 @@ async function updateRecords(force) {
     const ac = document.getElementById("ov-accel") || document.querySelector(".accel");
     if (ac && Array.isArray(d.milestones)) {
         const ord = ["1st","2nd","3rd","4th","5th","6th","7th","8th","9th","10th"];
-        const label = n => (ord[n - 1] || (n + "th")) + " pebibyte";
+        const label = n => t("{ord} pebibyte", { ord: ord[n - 1] || (n + "th") });
         const rows = [];
         if (_provenance && _provenance.present) {
             const since = _provenance.source_date ? new Date(_provenance.source_date * 1000).toLocaleDateString("en-US", { year: "numeric", month: "short" }) : "";
-            rows.push('<div class="lead">same counter &middot; carried over from ' + esc(_provenance.source_client || "a previous client") + (since ? (' &middot; since ' + since) : '') + '</div>');
+            rows.push('<div class="lead">' + t("same counter · carried over from {client}", { client: esc(_provenance.source_client || t("a previous client")) }) + (since ? (' · ' + t("since {date}", { date: since })) : '') + '</div>');
         }
         d.milestones.forEach((m, i) => {
             if (!m.observed) {
@@ -1064,19 +1063,20 @@ async function loadTorrentContent(infoHash, bodyId, summaryId) {
         </tr>`;
     }).join("");
     if (summary) {
-        let line = `${files.length} file${files.length > 1 ? "s" : ""} · ${formatBytes(total)}`;
+        let line = tp(files.length, "{n} file", "{n} files") + " · " + formatBytes(total);
         // Seeding torrents carry no piece map, so there is no availability to
         // show. Say that instead of printing a misleading zero.
         if (avail) {
-            line += ` · availability ${avail.min}${avail.max !== avail.min ? `-${avail.max}` : ""}`
-                + ` (avg ${avail.avg.toFixed(2)} over ${avail.num_pieces} pieces)`;
+            line += " · " + t("availability {range} (avg {avg} over {pieces} pieces)", {
+                range: avail.min + (avail.max !== avail.min ? "-" + avail.max : ""),
+                avg: avail.avg.toFixed(2), pieces: avail.num_pieces });
         } else {
-            line += " · availability n/a (seeding, no piece map)";
+            line += " · " + t("availability n/a (seeding, no piece map)");
         }
         summary.textContent = line;
     }
     body.innerHTML = `<div class="tc-scroll"><table class="tc-table">
-        <thead><tr><th>Path</th><th class="tc-num">Size</th><th class="tc-num">Share</th><th></th></tr></thead>
+        <thead><tr><th>${t("Path")}</th><th class="tc-num">${t("Size")}</th><th class="tc-num">${t("Share")}</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>`;
 }
@@ -1193,11 +1193,11 @@ function renderTimelineResult(events, snapshots, t0) {
     el.style.display = "flex";
     el.innerHTML = `
         <div>
-            <div class="tl-pos" style="color:${won ? '#3fb950' : '#f85149'}">${position}${position===1?'st':position===2?'nd':position===3?'rd':'th'} <span>/ ${total}</span></div>
+            <div class="tl-pos" style="color:${won ? '#3fb950' : '#f85149'}">${position===1?t("{n}st",{n:position}):position===2?t("{n}nd",{n:position}):position===3?t("{n}rd",{n:position}):t("{n}th",{n:position})} <span>/ ${total}</span></div>
         </div>
         <div class="tl-detail">
-            ${!won ? `<div style="color:#f85149;font-weight:600">Lost by ${formatDuration(dlTime - winnerTime)}</div>` : '<div style="color:#3fb950;font-weight:600">Winner!</div>'}
-            ${!won && winnerTime > 0 ? `<div style="color:var(--text-muted)">Winner ${(dlTime/winnerTime).toFixed(1)}× faster</div>` : ''}
+            ${!won ? `<div style="color:#f85149;font-weight:600">${t("Lost by {delta}", { delta: formatDuration(dlTime - winnerTime) })}</div>` : `<div style="color:#3fb950;font-weight:600">${t("Winner!")}</div>`}
+            ${!won && winnerTime > 0 ? `<div style="color:var(--text-muted)">${t("Winner {factor}× faster", { factor: (dlTime/winnerTime).toFixed(1) })}</div>` : ''}
         </div>`;
 }
 
@@ -1215,12 +1215,12 @@ function renderTimelineMeta(events, snapshots, t0) {
 
     el.style.display = "grid";
     el.innerHTML = `
-        <div class="tl-meta-item"><div class="tl-meta-label">Size</div><div class="tl-meta-val">${formatBytes(size)}</div></div>
-        <div class="tl-meta-item"><div class="tl-meta-label">Duration</div><div class="tl-meta-val">${formatDuration(dlTime)}</div></div>
-        <div class="tl-meta-item"><div class="tl-meta-label">Avg DL</div><div class="tl-meta-val">${formatBytes(avgDL)}/s</div></div>
-        <div class="tl-meta-item"><div class="tl-meta-label">Peak DL</div><div class="tl-meta-val good">${formatBytes(peakDL)}/s</div></div>
-        <div class="tl-meta-item"><div class="tl-meta-label">Ratio</div><div class="tl-meta-val">${finalRatio.toFixed(2)}</div></div>
-        <div class="tl-meta-item"><div class="tl-meta-label">Peers max</div><div class="tl-meta-val">${Math.max(...snapshots.map(s => s.peers || 0))}</div></div>`;
+        <div class="tl-meta-item"><div class="tl-meta-label">${t("Size")}</div><div class="tl-meta-val">${formatBytes(size)}</div></div>
+        <div class="tl-meta-item"><div class="tl-meta-label">${t("Duration")}</div><div class="tl-meta-val">${formatDuration(dlTime)}</div></div>
+        <div class="tl-meta-item"><div class="tl-meta-label">${t("Avg DL")}</div><div class="tl-meta-val">${formatBytes(avgDL)}/s</div></div>
+        <div class="tl-meta-item"><div class="tl-meta-label">${t("Peak DL")}</div><div class="tl-meta-val good">${formatBytes(peakDL)}/s</div></div>
+        <div class="tl-meta-item"><div class="tl-meta-label">${t("Ratio")}</div><div class="tl-meta-val">${finalRatio.toFixed(2)}</div></div>
+        <div class="tl-meta-item"><div class="tl-meta-label">${t("Peers max")}</div><div class="tl-meta-val">${Math.max(...snapshots.map(s => s.peers || 0))}</div></div>`;
 }
 
 function renderProgressChart(snapshots, events, t0) {
@@ -1267,7 +1267,7 @@ function renderProgressChart(snapshots, events, t0) {
             borderWidth: 2, fill: false, tension: 0.2, pointRadius: 0, yAxisID: "y",
         },
         {
-            label: "DL Rate", data: ourDLRate,
+            label: t("DL Rate"), data: ourDLRate,
             borderColor: "#3fb950", backgroundColor: "rgba(63,185,80,0.08)",
             borderWidth: 1, fill: true, tension: 0.2, pointRadius: 0, yAxisID: "y1",
         },
@@ -1433,7 +1433,7 @@ function renderTimelineEvents(events, t0) {
         const icon = iconMap[ev.event] || "?";
         let detail = `${ev.peers}p ${ev.swarm_seeds}s/${ev.swarm_leechers}l`;
         if (ev.event === "completed" && ev.download_time > 0) detail = `${formatDuration(ev.download_time)}`;
-        if (ev.event === "uploader_injected") detail = `${ev.uploader} (${ev.injected_peers} peers)`;
+        if (ev.event === "uploader_injected") detail = ev.uploader + " " + t("({n} peers)", { n: ev.injected_peers });
         if (ev.event === "announce") detail = `${ev.swarm_seeds}s/${ev.swarm_leechers}l`;
         return `<div class="tl-ev-row${isHl ? " hl" : ""}">
             <span class="tl-ev-t">${tPlus}</span>
@@ -1596,13 +1596,13 @@ async function _showTagPicker(ev) {
         const on = cur.has(t);
         return `<div class="ctx-item" onclick="_toggleTagSelected('${jsT}', ${on ? "false" : "true"})">${on ? "✓ " : " "}${esch(t)}</div>`;
     }).join("");
-    const label = `Edit tags, ${hoardOnly.length} torrent${hoardOnly.length > 1 ? "s" : ""}`;
+    const label = tp(hoardOnly.length, "Edit tags, {n} torrent", "Edit tags, {n} torrents");
     document.getElementById("ctx-menu").innerHTML =
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
         `<div class="ctx-item" onclick="_restoreCtxActionsView()">&lsaquo; Retour</div>` +
         `<div class="ctx-separator"></div>` +
-        `<div style="padding:6px 10px"><input type="text" id="ctx-new-tag" placeholder="new tag + Enter" style="width:100%" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();_addNewTagSelected();}"></div>` +
+        `<div style="padding:6px 10px"><input type="text" id="ctx-new-tag" placeholder="${t("new tag + Enter")}" style="width:100%" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();_addNewTagSelected();}"></div>` +
         `<div class="ctx-separator"></div>` +
         `<div class="ctx-scroll">${rows || '<div class="ctx-item" style="opacity:.6">No tags yet</div>'}</div>`;
     _clampCtxMenuToViewport();
@@ -1697,7 +1697,7 @@ function renderHoardTable() {
     const countEl = document.getElementById("hoard-filter-count");
     if (countEl) {
         if (filtered.length > HOARD_RENDER_LIMIT)
-            countEl.textContent = `${HOARD_RENDER_LIMIT} / ${filtered.length} (${_hoardAllTorrents.length} total)`;
+            countEl.textContent = t("{shown} / {matched} ({total} total)", { shown: HOARD_RENDER_LIMIT, matched: filtered.length, total: _hoardAllTorrents.length });
         else
             countEl.textContent = `${filtered.length} / ${_hoardAllTorrents.length}`;
     }
@@ -1796,19 +1796,21 @@ function _renderHoardStatsHeader(data) {
         document.getElementById("hoard-bar-with-peers").style.width = (data.torrents_with_peers / total * 100).toFixed(1) + "%";
         const announced = data.torrents_announced ?? data.total_torrents;
         const annPct = data.total_torrents ? Math.round(announced / data.total_torrents * 100) : 100;
-        const annText = annPct >= 100 ? "all announced" : `${announced}/${data.total_torrents} announced (${annPct}%)`;
+        const annText = annPct >= 100 ? t("all announced") : t("{done}/{total} announced ({pct}%)", { done: announced, total: data.total_torrents, pct: annPct });
 
         // Peer efficiency: connected peers vs available swarm leechers
         const swarm = data.swarm_leechers || 0;
         const peers = data.unseeded_peers ?? data.active_peers ?? 0;
-        let peerText = `${peers} peers`;
+        let peerText = t("{n} peers", { n: peers });
         if (swarm > 0) {
             const peerPct = (peers / swarm * 100).toFixed(1);
-            peerText = `${peers}/${formatCount(swarm)} peers (${peerPct}%)`;
+            peerText = t("{n}/{swarm} peers ({pct}%)", { n: peers, swarm: formatCount(swarm), pct: peerPct });
         }
 
     document.getElementById("hoard-summary-text").textContent =
-        `${data.total_torrents} torrents \u2014 ${data.torrents_uploading} uploading, ${data.torrents_with_peers} with peers, ${peerText} \u2014 ${annText}`;
+        t("{total} torrents: {up} uploading, {withPeers} with peers, {peers}. {announced}", {
+            total: data.total_torrents, up: data.torrents_uploading,
+            withPeers: data.torrents_with_peers, peers: peerText, announced: annText });
 }
 
 // Called on tab activation, hash change, or page load. Live updates flow
@@ -1883,7 +1885,7 @@ function _flashSelectionCount(n) {
     const el = document.getElementById("hoard-filter-count");
     if (!el) return;
     const prev = el.textContent;
-    el.textContent = `${n} selected`;
+    el.textContent = t("{n} selected", { n: n });
     el.style.fontWeight = "bold";
     clearTimeout(_flashSelectionCount._t);
     _flashSelectionCount._t = setTimeout(() => {
@@ -1960,7 +1962,7 @@ function _showCtxMenu(x, y) {
     const menu = document.getElementById("ctx-menu");
     const count = _selected.size;
     document.getElementById("ctx-label").textContent =
-        count > 1 ? `${count} torrents selected` : "1 torrent selected";
+        tp(count, "{n} torrent selected", "{n} torrents selected");
     // "Change category" only applies to hoard torrents. Hide the item if
     // the current selection has no hoard rows.
     const anyHoard = [..._selected.entries()].some(([, m]) => m === "hoard");
@@ -2049,8 +2051,8 @@ async function _showCategoryPicker(ev, move) {
         const jsName = String(c.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
         return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\', ${move ? "true" : "false"})" title="${safePath}">${safeName}</div>`;
     }).join("");
-    const verb = move ? "Move to category" : "Set category (no move)";
-    const label = `${verb} \u2014 ${hoardOnly.length} torrent${hoardOnly.length > 1 ? "s" : ""}`;
+    const verb = move ? t("Move to category") : t("Set category (no move)");
+    const label = verb + ": " + tp(hoardOnly.length, "{n} torrent", "{n} torrents");
     document.getElementById("ctx-menu").innerHTML =
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
@@ -2090,7 +2092,7 @@ async function _changeCategorySelected(catName, move) {
         }
     }
     if (errors.length > 0) {
-        alert(`Category changed to "${catName}": ${okCount} OK, ${errors.length} failure(s).\n\n${errors.join("\n")}`);
+        alert(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: okCount, failed: errors.length }) + "\n\n" + errors.join("\n"));
     }
     // Optimistic: reflect the new category in the held rows immediately, so it
     // shows without waiting for the next full refresh.
@@ -2158,15 +2160,15 @@ async function _reannounceSelected() {
 // makes, so the words already mean what people expect.
 function displayState(t) {
     if (t.user_paused || t.state === "stopped") {
-        return { label: "stopped", cls: "state-paused", title: "Stopped by you, survives a restart" };
+        return { label: window.t("stopped"), cls: "state-paused", title: window.t("Stopped by you, survives a restart") };
     }
     if (t.state === "queued") {
-        return { label: "queued", cls: "state-queued", title: "Waiting for a slot" };
+        return { label: window.t("queued"), cls: "state-queued", title: window.t("Waiting for a slot") };
     }
     return {
-        label: t.state,
+        label: window.t(t.state),
         cls: t.state === "seeding" ? "state-active" : "state-checking",
-        title: t.state,
+        title: window.t(t.state),
     };
 }
 
@@ -2214,7 +2216,7 @@ async function _pauseSelected(paused) {
             .map(t => t.info_hash);
         // Only worth it while the selection really is "the filter minus a few".
         if (excluded.length * 4 < _selected.size) {
-            if (!confirm(`${action === "stop" ? "Stop" : "Start"} ${_selected.size} torrents?`)) return;
+            if (!confirm(action === "stop" ? t("Stop {n} torrents?", { n: _selected.size }) : t("Start {n} torrents?", { n: _selected.size }))) return;
             try {
                 const r = await fetch("/api/hoard/torrents/bulk", {
                     method: "POST",
@@ -2224,7 +2226,7 @@ async function _pauseSelected(paused) {
                 const j = await r.json();
                 if (j && typeof j.matched === "number" && j.matched !== _selected.size) {
                     console.warn(`bulk ${action}: server matched ${j.matched}, UI had ${_selected.size}`);
-                    alert(`Heads up: the server matched ${j.matched} torrents, the table showed ${_selected.size}. Applied to ${j.applied}.`);
+                    alert(t("Heads up: the server matched {matched} torrents, the table showed {shown}. Applied to {applied}.", { matched: j.matched, shown: _selected.size, applied: j.applied }));
                 }
                 _markLocallyStopped(
                     _hoardFiltered.map(t => t.info_hash).filter(h => !excluded.includes(h)),
@@ -2389,9 +2391,9 @@ function buildSeedboxBadge(p) {
     const sessionsOk = p.num_sessions > 10;
 
     const checks = [
-        `${speedOk ? "" : "✗"} Avg speed > 10 MB/s (${formatSpeed(p.avg_speed)})`,
-        `${reliabilityOk ? "" : "✗"} Reliability > 80% (${(p.reliability * 100).toFixed(0)}%)`,
-        `${sessionsOk ? "" : "✗"} Sessions > 10 (${p.num_sessions})`,
+        (speedOk ? "" : "✗ ") + t("Avg speed > 10 MB/s ({v})", { v: formatSpeed(p.avg_speed) }),
+        (reliabilityOk ? "" : "✗ ") + t("Reliability > 80% ({v}%)", { v: (p.reliability * 100).toFixed(0) }),
+        (sessionsOk ? "" : "✗ ") + t("Sessions > 10 ({v})", { v: p.num_sessions }),
     ].join("\n");
 
     if (p.is_seedbox) {
@@ -2427,7 +2429,7 @@ async function confirmRemove(deleteFiles) {
         updateRaceTorrents();
         updateOverview();
     } catch (e) {
-        alert("Failed to remove: " + e.message);
+        alert(t("Failed to remove: {msg}", { msg: e.message }));
     }
 }
 
@@ -2484,7 +2486,7 @@ function _btext(v) {
 function _torrentSummary(bytes) {
     const t = _bdecode(bytes);
     const info = t && t.info;
-    if (!info) throw new Error("no info dictionary");
+    if (!info) throw new Error(window.t("no info dictionary"));
     const name = _btext(info["name.utf-8"] || info.name);
     let files;
     if (Array.isArray(info.files)) {
@@ -2519,17 +2521,17 @@ function _previewCardHTML(fileName, sum) {
         `<div class="tp-file"><span class="tp-file-path">${esc(f.path)}</span><span class="tp-file-size">${formatBytes(f.length)}</span></div>`
     ).join("");
     const hidden = sum.files.length - _PREVIEW_MAX_ROWS;
-    const more = hidden > 0 ? `<div class="tp-more">and ${hidden} more file${hidden > 1 ? "s" : ""}</div>` : "";
+    const more = hidden > 0 ? `<div class="tp-more">${tp(hidden, "and {n} more file", "and {n} more files")}</div>` : "";
     const meta = [
-        `${sum.files.length} file${sum.files.length > 1 ? "s" : ""}`,
+        tp(sum.files.length, "{n} file", "{n} files"),
         formatBytes(sum.total),
-        sum.pieceLength ? `${formatBytes(sum.pieceLength)} pieces (${sum.pieceCount})` : "",
-        sum.isPrivate ? "private" : "",
+        sum.pieceLength ? t("{size} pieces ({n})", { size: formatBytes(sum.pieceLength), n: sum.pieceCount }) : "",
+        sum.isPrivate ? t("private") : "",
     ].filter(Boolean).join(" · ");
     const trackers = sum.trackers.length
         ? `<div class="tp-trackers">${sum.trackers.slice(0, 8).map(u => esc(u)).join("<br>")}` +
-          (sum.trackers.length > 8 ? `<br>and ${sum.trackers.length - 8} more` : "") + `</div>`
-        : `<div class="tp-trackers">no tracker (DHT only)</div>`;
+          (sum.trackers.length > 8 ? "<br>" + t("and {n} more", { n: sum.trackers.length - 8 }) : "") + `</div>`
+        : `<div class="tp-trackers">${t("no tracker (DHT only)")}</div>`;
     return `<details class="tp-card" open>
         <summary><span class="tp-name">${esc(sum.name || fileName)}</span><span class="tp-meta">${meta}</span></summary>
         <div class="tp-files">${rows}${more}</div>
@@ -2539,7 +2541,7 @@ function _previewCardHTML(fileName, sum) {
 
 function _previewErrorHTML(fileName, msg) {
     return `<div class="tp-card tp-card-error"><span class="tp-name">${esc(fileName)}</span>` +
-        `<span class="tp-meta">not a readable .torrent, ${esc(msg)}</span></div>`;
+        `<span class="tp-meta">${t("not a readable .torrent, {err}", { err: esc(msg) })}</span></div>`;
 }
 
 function _previewEnabled() {
@@ -2604,7 +2606,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
 
     btn.disabled = true;
     if (!btn.dataset.label) btn.dataset.label = btn.textContent;
-    btn.textContent = "Adding\u2026";
+    btn.textContent = t("Adding…");
     resultEl.className = "result-msg";
     resultEl.style.display = "none";
 
@@ -2635,7 +2637,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                 // Bulk upload
                 let ok = 0, fail = 0, errors = [];
                 for (let i = 0; i < files.length; i++) {
-                    resultEl.textContent = `Upload ${i + 1}/${files.length}, ${files[i].name}`;
+                    resultEl.textContent = t("Upload {i}/{total}, {name}", { i: i + 1, total: files.length, name: files[i].name });
                     resultEl.className = "result-msg";
                     resultEl.style.display = "block";
                     try {
@@ -2656,10 +2658,10 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                     }
                 }
                 if (fail === 0) {
-                    resultEl.textContent = `${ok} torrent${ok > 1 ? "s" : ""} added`;
+                    resultEl.textContent = tp(ok, "{n} torrent added", "{n} torrents added");
                     resultEl.className = "result-msg success";
                 } else {
-                    resultEl.innerHTML = `${ok} OK, ${fail} erreur${fail > 1 ? "s" : ""} :<br>` +
+                    resultEl.innerHTML = t("{ok} OK, {failed} failed:", { ok: ok, failed: fail }) + "<br>" +
                         errors.map(e => `<small>${e}</small>`).join("<br>");
                     resultEl.className = "result-msg " + (ok > 0 ? "" : "error");
                 }
@@ -2667,7 +2669,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                 clearTimeout(_addMsgTimer);
                 if (fail === 0) _addMsgTimer = setTimeout(() => { resultEl.style.display = "none"; }, 6000);
                 fileInput.value = "";
-                btn.textContent = btn.dataset.label || "Add Torrent";
+                btn.textContent = btn.dataset.label || t("Add Torrent");
                 btn.disabled = false;
                 updateOverview(); updateRaceTorrents(); updateHoardStats();
                 return;
@@ -2688,7 +2690,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
             } else if (magnetUri && mode === "race") {
                 body.magnet_uri = magnetUri;
             } else {
-                throw new Error("Provide a torrent path, magnet URI, or upload a file");
+                throw new Error(t("Provide a torrent path, magnet URI, or upload a file"));
             }
 
             result = await api("/api/torrents", {
@@ -2708,7 +2710,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
         clearTimeout(_addMsgTimer);
         _addMsgTimer = setTimeout(() => { resultEl.style.display = "none"; }, 6000);
         btn.textContent = "Added";
-        setTimeout(() => { btn.textContent = btn.dataset.label || "Add Torrent"; }, 1500);
+        setTimeout(() => { btn.textContent = btn.dataset.label || t("Add Torrent"); }, 1500);
 
         // Reset form
         document.getElementById("torrent-path").value = "";
@@ -2720,10 +2722,10 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
         updateRaceTorrents();
         updateHoardStats();
     } catch (err) {
-        resultEl.textContent = "Error: " + err.message;
+        resultEl.textContent = t("Error: {msg}", { msg: err.message });
         resultEl.className = "result-msg error";
         resultEl.style.display = "";
-        btn.textContent = btn.dataset.label || "Add Torrent";
+        btn.textContent = btn.dataset.label || t("Add Torrent");
     } finally {
         btn.disabled = false;
     }
@@ -2988,7 +2990,7 @@ async function saveCategory() {
     const resultEl = document.getElementById("cat-result");
 
     if (!name || !save_path) {
-        resultEl.textContent = "Name and save path are required";
+        resultEl.textContent = t("Name and save path are required");
         resultEl.className = "result-msg error";
         resultEl.style.display = "block";
         return;
@@ -3020,19 +3022,19 @@ async function saveCategory() {
         hideCategoryForm();
         await updateCategories();
     } catch (e) {
-        resultEl.textContent = "Error: " + e.message;
+        resultEl.textContent = t("Error: {msg}", { msg: e.message });
         resultEl.className = "result-msg error";
         resultEl.style.display = "block";
     }
 }
 
 async function deleteCategory(name) {
-    if (!confirm(`Delete category "${name}"?`)) return;
+    if (!confirm(t("Delete category \"{name}\"?", { name: name }))) return;
     try {
         await api(`/api/categories/${encodeURIComponent(name)}`, { method: "DELETE" });
         await updateCategories();
     } catch (e) {
-        alert("Error: " + e.message);
+        alert(t("Error: {msg}", { msg: e.message }));
     }
 }
 
@@ -3067,9 +3069,9 @@ const BM_META = {
     race_uploading:          { label: "Active Upload Race",   fmt: v => v.toFixed(0),         hb: true  },
     hoard_upload_rate:       { label: "Upload Hoard",         fmt: formatSpeed,               hb: true  },
     hoard_peers:             { label: "Peers Hoard",          fmt: v => v.toFixed(0),         hb: true  },
-    hoard_active:            { label: "Actifs Hoard",         fmt: v => v.toFixed(0),         hb: true  },
-    hoard_with_peers:        { label: "Avec Peers Hoard",     fmt: v => v.toFixed(0),         hb: true  },
-    hoard_uploading:         { label: "Upload actif Hoard",   fmt: v => v.toFixed(0),         hb: true  },
+    hoard_active:            { label: "Active Hoard",         fmt: v => v.toFixed(0),         hb: true  },
+    hoard_with_peers:        { label: "With Peers Hoard",     fmt: v => v.toFixed(0),         hb: true  },
+    hoard_uploading:         { label: "Active Upload Hoard",  fmt: v => v.toFixed(0),         hb: true  },
     iowait_pct:              { label: "IOWait %",             fmt: v => v.toFixed(2) + "%",   hb: false },
     arc_size_bytes:          { label: "ARC Size",             fmt: formatBytes,               hb: null  },
     arc_hit_rate_pct:        { label: "ARC Hit Rate",         fmt: v => v.toFixed(3) + "%",   hb: true  },
@@ -3232,7 +3234,9 @@ function _updateDualChart(chart, history, key1, key2) {
 function _initBmCharts() {
     Chart.defaults.color = "#7a90a8";
     _bmCharts = {
-        upload:    _mkDualChart("chart-upload", "Race", "#f0883e", "Hoard", "#3fb950", v => formatBytes(v) + "/s"),
+        // Debit, donc formatSpeed : il suit le reglage Vitesses (octets/s ou bits/s).
+        // formatBytes ne connait que le reglage Tailles et rendait toujours des KiB/s.
+        upload:    _mkDualChart("chart-upload", "Race", "#f0883e", "Hoard", "#3fb950", formatSpeed),
         totalUploaded: new Chart(document.getElementById("chart-total-uploaded"), {
             type: "bar",
             data: {
@@ -3279,10 +3283,10 @@ function _initBmCharts() {
             data: {
                 labels: [],
                 datasets: [
-                    { label: "Race UL", data: [], borderColor: "#f0883e", backgroundColor: "#f0883e18", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
-                    { label: "Hoard UL", data: [], borderColor: "#3fb950", backgroundColor: "#3fb95018", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
-                    { label: "Race Peers", data: [], borderColor: "#bc8cff", backgroundColor: "#bc8cff18", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
-                    { label: "Hoard Peers", data: [], borderColor: "#58a6ff", backgroundColor: "#58a6ff18", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
+                    { label: t("Race UL"), data: [], borderColor: "#f0883e", backgroundColor: "#f0883e18", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
+                    { label: t("Hoard UL"), data: [], borderColor: "#3fb950", backgroundColor: "#3fb95018", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
+                    { label: t("Race Peers"), data: [], borderColor: "#bc8cff", backgroundColor: "#bc8cff18", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
+                    { label: t("Hoard Peers"), data: [], borderColor: "#58a6ff", backgroundColor: "#58a6ff18", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
                 ],
             },
             plugins: [crosshairPlugin],
@@ -3433,8 +3437,11 @@ async function updateBenchmark() {
         // Range hint
         document.getElementById("bm-range-hint").textContent =
             history.length > 0
-                ? `${history.length} points · ${new Date(history[0].ts * 1000).toLocaleString()} → ${new Date(history[history.length-1].ts * 1000).toLocaleString()}`
-                : "No data for this range";
+                ? t("{n} points · {from} → {to}", {
+                    n: history.length,
+                    from: new Date(history[0].ts * 1000).toLocaleString(),
+                    to: new Date(history[history.length-1].ts * 1000).toLocaleString() })
+                : t("No data for this range");
 
         // Charts
         _updateDualChart(_bmCharts.upload, history, "race_upload_rate", "hoard_upload_rate");
@@ -3556,7 +3563,7 @@ async function updateBenchmark() {
 async function runVpnSpeedtest() {
     const btn = document.getElementById("vpn-run-btn");
     btn.disabled = true;
-    btn.textContent = "⏳ Running…";
+    btn.textContent = "⏳ " + t("Running…");
     try {
         const result = await api("/api/vpn-speedtest/run", { method: "POST" });
         document.getElementById("vpn-ul").textContent = (result.ul_mbps ?? 0).toFixed(1) + " Mbps";
@@ -3568,7 +3575,7 @@ async function runVpnSpeedtest() {
         console.error("VPN speedtest error:", e);
     } finally {
         btn.disabled = false;
-        btn.textContent = "▶ Run now";
+        btn.textContent = "▶ " + t("Run now");
     }
 }
 
@@ -3585,7 +3592,7 @@ async function runCompare() {
     resEl.style.display = "none";
 
     if (!startVal || !midVal || !endVal) {
-        errEl.textContent = "Fill in all three dates.";
+        errEl.textContent = t("Fill in all three dates.");
         errEl.style.display = "block";
         return;
     }
@@ -3595,7 +3602,7 @@ async function runCompare() {
     const end   = new Date(endVal).getTime() / 1000;
 
     if (start >= mid || mid >= end) {
-        errEl.textContent = "Dates must be in order: start < middle < end.";
+        errEl.textContent = t("Dates must be in order: start < middle < end.");
         errEl.style.display = "block";
         return;
     }
@@ -3604,13 +3611,13 @@ async function runCompare() {
         const data = await api(`/api/benchmark/compare?start=${start}&mid=${mid}&end=${end}`);
 
         if (!data.metrics) {
-            errEl.textContent = "No data for this range.";
+            errEl.textContent = t("No data for this range.");
             errEl.style.display = "block";
             return;
         }
 
         document.getElementById("cmp-counts").textContent =
-            `P1: ${data.p1_count} samples, P2: ${data.p2_count} samples`;
+            t("P1: {p1} samples, P2: {p2} samples", { p1: data.p1_count, p2: data.p2_count });
 
         const tbody = document.getElementById("cmp-tbody");
         tbody.innerHTML = Object.entries(data.metrics).map(([col, v]) => {
@@ -3623,7 +3630,7 @@ async function runCompare() {
             const arrow = improved === null ? "" : improved ? " ▲" : " ▼";
             const sign  = delta > 0 ? "+" : "";
             return `<tr>
-                <td class="cmp-col-label">${meta.label}</td>
+                <td class="cmp-col-label">${t(meta.label)}</td>
                 <td>${meta.fmt(v.p1.avg)}</td>
                 <td class="cmp-secondary">${meta.fmt(v.p1.max)}</td>
                 <td>${meta.fmt(v.p2.avg)}</td>
@@ -3634,7 +3641,7 @@ async function runCompare() {
 
         resEl.style.display = "block";
     } catch (e) {
-        errEl.textContent = "Error: " + e.message;
+        errEl.textContent = t("Error: {msg}", { msg: e.message });
         errEl.style.display = "block";
     }
 }
@@ -3715,7 +3722,7 @@ function _rpUpdateDrainBtn() {
     const ar = document.getElementById("rp-ar-enabled");
     const any = (en && en.checked) || (ar && ar.checked);
     b.disabled = !any;
-    b.title = any ? "" : "Enable a policy first";
+    b.title = any ? "" : t("Enable a policy first");
     _rpUpdateUnbounded();
 }
 // An unconstrained policy (both thresholds 0) whose action is Delete erases
@@ -3733,7 +3740,7 @@ function _rpUpdateUnbounded() {
     const w = document.getElementById("rp-warn");
     if (!w) return;
     if (_rpUnboundedDelete()) {
-        w.textContent = "Both thresholds are 0, so every race torrent past the keep floor matches, and the action is Delete. Their data will be erased.";
+        w.textContent = t("Both thresholds are 0, so every race torrent past the keep floor matches, and the action is Delete. Their data will be erased.");
         w.style.display = "";
     } else {
         w.style.display = "none";
@@ -3770,25 +3777,25 @@ async function _rpSave(key, value) {
         await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }) });
         document.getElementById("rp-apply").style.display = "";
-    } catch (e) { alert("Save failed: " + e.message); }
+    } catch (e) { alert(t("Save failed: {msg}", { msg: e.message })); }
     // Thresholds decide whether the age/ratio policy can fire at all, so the
     // Drain now button has to be re-evaluated after any field edit too.
     _rpUpdateDrainBtn();
 }
 async function _rpRestart() {
-    if (!confirm("Restart Hydra now to apply the race drain settings?")) return;
+    if (!confirm(t("Restart Hydra now to apply the race drain settings?"))) return;
     try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
 }
 async function _rpDrainNow(btn) {
     if (_rpUnboundedDelete() &&
-        !confirm("Both thresholds are 0, so this deletes EVERY race torrent older than the keep floor, data included.\n\nRun it?")) return;
-    btn.disabled = true; const t = btn.textContent; btn.textContent = "Draining…";
+        !confirm(t("Both thresholds are 0, so this deletes EVERY race torrent older than the keep floor, data included.") + "\n\n" + t("Run it?"))) return;
+    btn.disabled = true; const t = btn.textContent; btn.textContent = window.t("Draining…");
     let msg;
     try {
         const r = await api("/api/drain/now", { method: "POST" });
         msg = _rpDrainMsg(r);
     } catch (e) {
-        msg = "Failed: " + (e && e.message ? e.message : "unknown error");
+        msg = window.t("Failed: {msg}", { msg: e && e.message ? e.message : window.t("unknown error") });
     }
     btn.disabled = false; btn.textContent = t;
     _rpUpdateDrainBtn();
@@ -3799,19 +3806,20 @@ async function _rpDrainNow(btn) {
 // nothing must still say so, reporting nothing is what made the button look
 // dead even when it had run.
 function _rpDrainMsg(r) {
-    if (!r || typeof r !== "object") return "Nothing to do.";
+    if (!r || typeof r !== "object") return t("Nothing to do.");
     if (r.status === "no_match") {
         if (r.no_category_link)
-            return `${r.no_category_link} torrent(s) matched but their category has no hoard category linked, nothing moved.`;
-        if (r.failed) return `${r.failed} torrent(s) matched but failed, see the logs.`;
-        return "Nothing matched the thresholds.";
+            return t("{n} torrent(s) matched but their category has no hoard category linked, nothing moved.", { n: r.no_category_link });
+        if (r.failed) return t("{n} torrent(s) matched but failed, see the logs.", { n: r.failed });
+        return t("Nothing matched the thresholds.");
     }
-    if (r.status === "no_drain_needed") return "Nothing to do: disk is below the start mark.";
+    if (r.status === "no_drain_needed") return t("Nothing to do: disk is below the start mark.");
     const n = r.removed_count || 0;
-    if (!n) return "Nothing to do.";
-    const verb = r.action === "hoard" ? "graduated" : "removed";
-    let s = `${n} torrent(s) ${verb}, ${formatBytes(r.freed || 0)}.`;
-    if (r.no_category_link) s += ` ${r.no_category_link} skipped (no linked category).`;
+    if (!n) return t("Nothing to do.");
+    let s = r.action === "hoard"
+        ? t("{n} torrent(s) graduated, {size}.", { n: n, size: formatBytes(r.freed || 0) })
+        : t("{n} torrent(s) removed, {size}.", { n: n, size: formatBytes(r.freed || 0) });
+    if (r.no_category_link) s += " " + t("{n} skipped (no linked category).", { n: r.no_category_link });
     return s;
 }
 function _rpDrainResult(msg) {
@@ -3902,7 +3910,7 @@ async function _checkStartup() {
         const d = await r.json();
 
         if (d.total > 0) {
-            document.getElementById("startup-phase").textContent = "Restoring state…";
+            document.getElementById("startup-phase").textContent = t("Restoring state…");
             document.getElementById("startup-restored").textContent = d.restored.toLocaleString();
             document.getElementById("startup-total").textContent = d.total.toLocaleString();
             const pct = Math.min(100, Math.round((d.restored / d.total) * 100));
@@ -4152,7 +4160,7 @@ window.addEventListener("load", function () {
     if (b) {
         b.classList.toggle("active", _incognito);
         b.style.color = _incognito ? "var(--accent-purple)" : "#ffffff";
-        b.title = (_incognito ? "Incognito ON \u2014 " : "") + "Anonymize names, categories & IPs for screenshots";
+        b.title = (_incognito ? t("Incognito ON") + ". " : "") + t("Anonymize names, categories & IPs for screenshots");
     }
 });
 
@@ -4357,7 +4365,7 @@ async function changePassword() {
     const pw = el.value;
     if (pw.length < 6) {
         res.className = "result-msg error";
-        res.textContent = "Password too short (min 6).";
+        res.textContent = t("Password too short (min 6).");
         return;
     }
     try {
@@ -4367,11 +4375,11 @@ async function changePassword() {
             body: JSON.stringify({ password: pw }),
         });
         res.className = "result-msg success";
-        res.textContent = "Password changed.";
+        res.textContent = t("Password changed.");
         el.value = "";
     } catch (e) {
         res.className = "result-msg error";
-        res.textContent = "Error: " + e.message;
+        res.textContent = t("Error: {msg}", { msg: e.message });
     }
 }
 
@@ -4445,7 +4453,7 @@ async function updateSettings() {
         const banner = document.getElementById("settings-restart-banner");
         if (banner) banner.style.display = "none";
     } catch (e) {
-        editor.textContent = "Error: " + e.message;
+        editor.textContent = t("Error: {msg}", { msg: e.message });
     }
 }
 
@@ -4519,7 +4527,7 @@ async function saveSettings() {
     banner.style.display = "block";
     if (!changes.length) {
         banner.className = "result-msg info";
-        banner.textContent = "No changes.";
+        banner.textContent = t("No changes.");
         return;
     }
     try {
@@ -4553,44 +4561,44 @@ async function saveSettings() {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ port: Number(ch.value) }),
                     });
-                    hotApplied.push(`${ch.section} listen port`);
+                    hotApplied.push(t("{engine} listen port", { engine: ch.section }));
                 } catch (e) { if (tier === "hot") tier = "engine"; } // fall back to restart
             }
         }
-        const base = `${r.changed} setting(s) written to default.toml.`;
+        const base = t("{n} setting(s) written to default.toml.", { n: r.changed });
         banner.className = "result-msg success";
         if (tier === "hot") {
-            banner.innerHTML = `${base} Applied live, no restart needed` +
+            banner.innerHTML = base + " " + t("Applied live, no restart needed") +
                 (hotApplied.length ? ` (${hotApplied.join(", ")})` : "") + ".";
         } else {
             const what = (tier === "full")
-                ? "Daemon/auth settings changed, a full restart is required."
-                : "Engine settings changed, restart the torrent engines to apply.";
+                ? t("Daemon/auth settings changed, a full restart is required.")
+                : t("Engine settings changed, restart the torrent engines to apply.");
             banner.innerHTML = `${base} ${what} ` +
-                `<button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">Apply &amp; restart</button>`;
-            if (_kc) banner.innerHTML += ' <span style="color:var(--text-secondary)">(API key updated for this browser)</span>';
+                `<button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`;
+            if (_kc) banner.innerHTML += ' <span style="color:var(--text-secondary)">' + t("(API key updated for this browser)") + '</span>';
         }
     } catch (e) {
         banner.className = "result-msg error";
-        banner.textContent = "Error: " + e.message;
+        banner.textContent = t("Error: {msg}", { msg: e.message });
     }
 }
 
 async function restartDaemon() {
-    if (!confirm("Restart the Hydra daemon now? (running torrents resume on boot)")) return;
+    if (!confirm(t("Restart the Hydra daemon now? (running torrents resume on boot)"))) return;
     const banner = document.getElementById("settings-restart-banner");
     try {
         await api("/api/settings/restart", { method: "POST" });
         banner.className = "result-msg info";
-        banner.textContent = "Restarting… the page will reload in a few seconds.";
+        banner.textContent = t("Restarting… the page will reload in a few seconds.");
         setTimeout(() => location.reload(), 7000);
     } catch (e) {
         banner.className = "result-msg error";
-        banner.textContent = "Error: " + e.message;
+        banner.textContent = t("Error: {msg}", { msg: e.message });
     }
 }
 
-if (!API_KEY) promptLogin("Sign in to Hydra.");
+if (!API_KEY) promptLogin(t("Sign in to Hydra."));
 if (API_KEY) maybeOfferImport();
 
 
@@ -4602,17 +4610,17 @@ async function updateAgents() {
         const agents = await api("/api/agents");
         const tbody = document.getElementById("agents-tbody");
         if (!agents || !agents.length) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty">No agents</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="empty">' + t("No agents") + '</td></tr>';
             return;
         }
         tbody.innerHTML = agents.map(a => {
             const dot = a.online
-                ? '<span class="mode-tag mode-hoard">online</span>'
-                : '<span class="mode-tag mode-race">offline</span>';
+                ? '<span class="mode-tag mode-hoard">' + t("online") + '</span>'
+                : '<span class="mode-tag mode-race">' + t("offline") + '</span>';
             const actions = a.kind === "local"
-                ? '<span class="sr-desc">built-in</span>'
-                : `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">Edit</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">Delete</button>`;
-            const ifTip = (a.interfaces||[]).map(i=>i.name+": "+incoIP(i.ip)+(i.up?"":" (down)")).join("\n");
+                ? '<span class="sr-desc">' + t("built-in") + '</span>'
+                : `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">${t("Edit")}</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">${t("Delete")}</button>`;
+            const ifTip = (a.interfaces||[]).map(i=>i.name+": "+incoIP(i.ip)+(i.up?"":" " + t("(down)"))).join("\n");
             return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono" style="font-size:12px" title="${esc(ifTip)}">${esc(incoExitIP(a.exit_ip) || "\u2014")}</td><td>${dot}</td><td>${actions}</td></tr>`;
         }).join("");
     } catch (e) { console.error("Failed to update agents:", e); }
@@ -4645,16 +4653,16 @@ function _agResult(msg, ok) {
 }
 async function testAgent() {
     const p = _agentPayload();
-    if (!p.addr) { _agResult("Address required", false); return; }
+    if (!p.addr) { _agResult(t("Address required"), false); return; }
     try {
         const res = await api("/api/agents/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
-        if (res.online) _agResult(" reachable", true);
-        else _agResult("\u2717 unreachable: " + (res.error || ""), false);
-    } catch (e) { _agResult("Error: " + e.message, false); }
+        if (res.online) _agResult(t("✓ reachable"), true);
+        else _agResult(t("✗ unreachable: {err}", { err: res.error || "" }), false);
+    } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 async function saveAgent() {
     const p = _agentPayload();
-    if (!p.name || !p.addr) { _agResult("Name and address required", false); return; }
+    if (!p.name || !p.addr) { _agResult(t("Name and address required"), false); return; }
     try {
         if (_editingAgent) {
             await api(`/api/agents/${encodeURIComponent(_editingAgent)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
@@ -4663,12 +4671,12 @@ async function saveAgent() {
         }
         hideAgentForm();
         await updateAgents();
-    } catch (e) { _agResult("Error: " + e.message, false); }
+    } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 async function deleteAgent(name) {
-    if (!confirm(`Delete agent "${name}"?`)) return;
+    if (!confirm(t("Delete agent \"{name}\"?", { name: name }))) return;
     try { await api(`/api/agents/${encodeURIComponent(name)}`, { method: "DELETE" }); await updateAgents(); }
-    catch (e) { alert("Error: " + e.message); }
+    catch (e) { alert(t("Error: {msg}", { msg: e.message })); }
 }
 
 // Soft-delete safety: an accidentally removed agent stays here for one-click
@@ -4679,13 +4687,13 @@ async function updateRemovedAgents() {
     try {
         const rm = await api("/api/agents/removed");
         if (!rm || !rm.length) { box.innerHTML = ""; return; }
-        box.innerHTML = '<div class="sr-desc" style="margin-top:12px">Recently removed \u2014 restore in one click</div>' +
-            rm.map(a => `<div class="cat-agent-row"><span class="cat-agent-lbl"><strong>${esc(a.name)}</strong></span><span class="mono" style="font-size:12px">${esc(a.addr || "")}</span> <button class="btn-small" onclick="restoreAgent('${esc(a.name)}')">Restore</button></div>`).join("");
+        box.innerHTML = '<div class="sr-desc" style="margin-top:12px">' + t("Recently removed, restore in one click") + '</div>' +
+            rm.map(a => `<div class="cat-agent-row"><span class="cat-agent-lbl"><strong>${esc(a.name)}</strong></span><span class="mono" style="font-size:12px">${esc(a.addr || "")}</span> <button class="btn-small" onclick="restoreAgent('${esc(a.name)}')">${t("Restore")}</button></div>`).join("");
     } catch (e) { box.innerHTML = ""; }
 }
 async function restoreAgent(name) {
     try { await api(`/api/agents/restore/${encodeURIComponent(name)}`, { method: "POST" }); await updateAgents(); }
-    catch (e) { alert("Error: " + e.message); }
+    catch (e) { alert(t("Error: {msg}", { msg: e.message })); }
 }
 
 
@@ -4811,7 +4819,7 @@ function _renderTrackerStatsChart(rows) {
     const hoardSeries = tsSet.map(t => hoardMap[t] ?? null);
     const raceSeries = tsSet.map(t => raceMap[t] ?? null);
     if (!_trkStatsChart) {
-        _trkStatsChart = _mkDualChart("trkstats-chart", "hoard ↑", "#2ea043", "race ↑", "#d29922", formatSpeed);
+        _trkStatsChart = _mkDualChart("trkstats-chart", t("hoard ↑"), "#2ea043", t("race ↑"), "#d29922", formatSpeed);
         _trkStatsChart.options.plugins.legend.display = true;
     }
     _trkStatsChart.data.labels = labels;
@@ -4838,25 +4846,25 @@ function _trkResult(msg, ok) {
 function _trkHost() { return document.getElementById("trk-host").value.trim(); }
 async function saveTracker() {
     const host = _trkHost();
-    if (!host) { _trkResult("Host required", false); return; }
+    if (!host) { _trkResult(t("Host required"), false); return; }
     try {
         await api("/api/announce/clients", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, peer_id_prefix: document.getElementById("trk-pid").value.trim(), user_agent: document.getElementById("trk-ua").value.trim() }) });
         const pk = document.getElementById("trk-passkey").value.trim();
         if (pk) await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: pk }) });
         hideTrackerForm(); await updateTrackers();
-    } catch (e) { _trkResult("Error: " + e.message, false); }
+    } catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 async function clearTrackerSpoof() {
     const host = _trkHost();
-    if (!host) { _trkResult("Host required", false); return; }
+    if (!host) { _trkResult(t("Host required"), false); return; }
     try { await api("/api/announce/clients", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, peer_id_prefix: "" }) }); hideTrackerForm(); await updateTrackers(); }
-    catch (e) { _trkResult("Error: " + e.message, false); }
+    catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 async function clearTrackerPasskey() {
     const host = _trkHost();
-    if (!host) { _trkResult("Host required", false); return; }
+    if (!host) { _trkResult(t("Host required"), false); return; }
     try { await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: "" }) }); hideTrackerForm(); await updateTrackers(); }
-    catch (e) { _trkResult("Error: " + e.message, false); }
+    catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 
 // --- Local engines (shards) ---
@@ -4898,34 +4906,34 @@ async function updateEngines(){
             rows.push("<tr><td><strong>" + esc(e.id) + "</strong></td><td>" + esc(e.role) + "</td><td>" + e.listen_port +
                       "</td><td><button class=\"btn-small btn-danger\" onclick=\"deleteEngine('" + esc(e.id) + "')\">Delete</button></td></tr>");
         });
-        tb.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4" class="empty">No engines</td></tr>';
+        tb.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4" class="empty">' + t("No engines") + '</td></tr>';
     }catch(err){ console.error("updateEngines", err); }
 }
 async function addEngine(){
     const id = document.getElementById("eng-id").value.trim();
     const role = document.getElementById("eng-role").value;
     const port = parseInt(document.getElementById("eng-port").value) || 0;
-    if(!id){ alert("id required"); return; }
+    if(!id){ alert(t("id required")); return; }
     try{
         await api("/api/engines", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({id:id, role:role, listen_port:port})});
         hideEngineForm();
         document.getElementById("eng-id").value="";
         document.getElementById("restart-banner").style.display="block";
         updateEngines();
-    }catch(err){ alert("add engine failed: " + err); }
+    }catch(err){ alert(t("Add engine failed: {err}", { err: err })); }
 }
 async function deleteEngine(id){
-    if(!confirm("Delete engine " + id + "? Its torrents stop seeding after restart.")) return;
+    if(!confirm(t("Delete engine {id}? Its torrents stop seeding after restart.", { id: id }))) return;
     try{
         await api("/api/engines/" + encodeURIComponent(id), {method:"DELETE"});
         document.getElementById("restart-banner").style.display="block";
         updateEngines();
-    }catch(err){ alert("delete failed: " + err); }
+    }catch(err){ alert(t("Delete failed: {err}", { err: err })); }
 }
 async function restartHydra(){
-    if(!confirm("Restart Hydra to apply engine changes? (~40s)")) return;
+    if(!confirm(t("Restart Hydra to apply engine changes? (~40s)"))) return;
     try{ await api("/api/restart", {method:"POST"}); }catch(err){}
-    alert("Restarting \u2014 reconnect in ~40s.");
+    alert(t("Restarting, reconnect in ~40s."));
 }
 
 
@@ -5001,7 +5009,7 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
     const total = piecesHave.length;
     const have = piecesHave.filter(p => p === 1).length;
     const missing = total - have;
-    if (info) info.textContent = `(${have}/${total}, ${missing} missing)`;
+    if (info) info.textContent = t("({have}/{total}, {missing} missing)", { have: have, total: total, missing: missing });
 
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -5115,7 +5123,7 @@ function renderTableHeader(tableId, sortCol, sortAsc) {
     thead.innerHTML = "<tr>" + _visibleCols(tableId).map(c => {
         const sortable = c.sort ? ` data-col="${c.sort}" onclick="${fn}(this)"` : "";
         const cls = (c.sort && c.sort === sortCol) ? (sortAsc ? " sort-asc" : " sort-desc") : "";
-        return `<th class="col-drag${cls}" draggable="true" data-colid="${c.id}"${sortable}>${esc(c.label)}</th>`;
+        return `<th class="col-drag${cls}" draggable="true" data-colid="${c.id}"${sortable}>${esc(t(c.label))}</th>`;
     }).join("") + "</tr>";
     _wireHeaderDnD(tableId);
     // Re-attach the column-width resizers (the innerHTML rebuild dropped them).
@@ -5156,11 +5164,11 @@ function showColumnMenu(ev, tableId) {
     const menu = document.createElement("div");
     menu.className = "col-menu ctx-menu";
     menu.style.display = "block"; menu.style.position = "fixed"; menu.style.zIndex = "9999";
-    menu.innerHTML = `<div class="ctx-label">Columns</div><div class="ctx-separator"></div><div class="ctx-scroll">` +
+    menu.innerHTML = `<div class="ctx-label">${t("Columns")}</div><div class="ctx-separator"></div><div class="ctx-scroll">` +
         cfg.order.map(id => {
             const col = byId[id]; if (!col) return "";
             const on = !hidden.has(id);
-            return `<div class="ctx-item" onclick="toggleColumn('${tableId}','${id}',this)"><span class="col-chk">${on ? "✓" : ""}</span>${esc(col.label)}</div>`;
+            return `<div class="ctx-item" onclick="toggleColumn('${tableId}','${id}',this)"><span class="col-chk">${on ? "✓" : ""}</span>${esc(t(col.label))}</div>`;
         }).join("") + `</div>`;
     document.body.appendChild(menu);
     menu.style.left = Math.min(ev.clientX, window.innerWidth - 240) + "px";
@@ -5225,7 +5233,7 @@ async function loadChangelog() {
         if (!res.ok) throw new Error("HTTP " + res.status);
         el.innerHTML = _renderMarkdown(await res.text());
         el.dataset.loaded = "1";
-    } catch (e) { el.textContent = "Failed to load changelog: " + e.message; }
+    } catch (e) { el.textContent = t("Failed to load changelog: {msg}", { msg: e.message }); }
 }
 
 let _lastUpdateCheck = 0;
@@ -5239,7 +5247,7 @@ async function checkForUpdate() {
     try {
         const d = await api("/api/update-check");
         if (d && d.enabled && d.update_available) {
-            el.innerHTML = ` <a href="${d.url || '#'}" target="_blank" rel="noopener" class="update-badge" title="A newer version (${esc(d.latest)}) is available">update ${esc(d.latest)}</a>`;
+            el.innerHTML = ` <a href="${d.url || '#'}" target="_blank" rel="noopener" class="update-badge" title="${t("A newer version ({v}) is available", { v: esc(d.latest) })}">${t("update {v}", { v: esc(d.latest) })}</a>`;
         } else {
             el.innerHTML = "";
         }
@@ -5268,7 +5276,7 @@ function renderLogs() {
     const el = document.getElementById("logs-body");
     if (!el) return;
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
-    el.textContent = logsEntries.length ? logsEntries.map(fmtLogLine).join("\n") : "(no matching entries)";
+    el.textContent = logsEntries.length ? logsEntries.map(fmtLogLine).join("\n") : t("(no matching entries)");
     if (atBottom) el.scrollTop = el.scrollHeight;
     updateIssueLink();
 }
@@ -5299,7 +5307,7 @@ async function loadLogs() {
         renderLogs();
     } catch (e) {
         const el = document.getElementById("logs-body");
-        if (el) el.textContent = "Failed to load logs: " + e.message;
+        if (el) el.textContent = t("Failed to load logs: {msg}", { msg: e.message });
     }
 }
 function onLogsFilterChange() {
