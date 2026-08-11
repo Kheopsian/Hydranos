@@ -3,6 +3,43 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.58.3 - 2026-08-11
+
+### Added
+
+- **A database that moved to a share can be converted from the interface.** A
+  database created on local disk is journalled with WAL, which a share cannot
+  host: the fallback opens with `nolock`, and SQLite refuses `nolock` on a WAL
+  file outright. Pointing `data_dir` at a share therefore left an install that
+  would not start, for a reason nothing on screen explained. Hydra now checks
+  before it opens, and when that is what happened it comes up in repair mode:
+  no store, no sidecar migration and no engines, since a daemon that runs on
+  without its store rewrites its carry-over files from an empty memory. The
+  interface explains it and offers one button, which copies each database to a
+  `.bak`, converts it, verifies it opens the way a share will, and asks for a
+  restart.
+
+### Fixed
+
+- **A JSON sidecar that came back could overwrite the store.** The one-shot
+  import of the carry-over files was unconditional, and it overwrites rather
+  than merges. Every sidecar is renamed aside once imported, so finding one
+  again means a boot that could not open the store wrote it from an in-memory
+  state that had never been loaded. Upgrading out of that state then imported
+  those files over the real numbers: a lifetime upload counter became a file of
+  zeroes, and a category list became whatever single screen its owner had
+  opened while degraded. A sidecar is now imported only when the store has
+  nothing of its own to lose; anything else is set aside unread as
+  `.superseded` and reported at boot.
+- **A category label with no category can be adopted, not just deleted.** When
+  a definition goes missing the torrents keep the name, and the only action
+  offered on the leftover was Delete, which strips the label off every one of
+  them. Adopting it defines a category with that name, and since a torrent
+  points at its category by name, every torrent already wearing it joins.
+- **The categories table stopped flickering.** It was painted twice per
+  refresh, once before the orphan list arrived and once after, and rebuilt in
+  full every second even when nothing had changed.
+
 ## v3.58.2 - 2026-08-11
 
 ### Fixed
