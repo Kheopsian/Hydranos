@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Stage 1: Typhon engine builder — the BitTorrent engine.
 FROM rust:1-bookworm AS typhon-builder
 
@@ -15,7 +16,8 @@ FROM golang:1.25-bookworm AS go-builder
 
 WORKDIR /build
 COPY . .
-RUN CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /hydra ./cmd/hydra
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /hydra ./cmd/hydra
 
 # Stage 3: Runtime.
 FROM debian:bookworm-slim
