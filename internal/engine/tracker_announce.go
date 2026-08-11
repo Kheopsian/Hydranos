@@ -60,16 +60,66 @@ type trackerAnnouncer struct {
 // Source-bind via LocalAddr is no longer used — multi-tunnel Proton has all
 // bindings share Address=10.2.0.2 so src-IP can't disambiguate. Fwmark
 // + `ip rule fwmark X lookup tableX` does the steering instead.
+// ipv4Network narrows a dial network to its IPv4 form. Anything it does not
+// recognise is passed through untouched rather than guessed at.
+func ipv4Network(network string) string {
+	switch network {
+	case "tcp", "tcp6":
+		return "tcp4"
+	case "udp", "udp6":
+		return "udp4"
+	}
+	return network
+}
+
+// HostHasIPv4 reports whether this host holds a usable IPv4 address, ignoring
+// loopback. Callers use it to say at boot that an announce pinned to IPv4 has
+// nowhere to go, rather than letting every announce fail on its own later.
+func HostHasIPv4() bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true // cannot tell: do not raise a false alarm
+	}
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok || ipn.IP.IsLoopback() {
+			continue
+		}
+		if ipn.IP.To4() != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	dialer := &net.Dialer{
 		Timeout:   5 * time.Second,
 		KeepAlive: -1,
 	}
 	applyFwmark(dialer, int(b.Fwmark))
+
+	// enable_ipv6 governed the listener, the tracker's peers6 list and the
+	// self-dial filter, but never this: a plain "tcp" dial follows RFC 6724 and
+	// prefers IPv6 wherever the host has it, so the announce left over v6 and
+	// the tracker recorded a v6 address for someone whose setting says IPv4
+	// only. Pin the family instead of hoping the host has no v6.
+	//
+	// A configured SOCKS proxy is deliberately left alone below: the egress
+	// family is then the proxy's, and forcing v4 to reach it would break a
+	// proxy that is only reachable over v6.
+	dial := dialer.DialContext
+	if !b.EnableIPv6 {
+		base := dialer
+		dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return base.DialContext(ctx, ipv4Network(network), addr)
+		}
+	}
+
 	transport := &http.Transport{
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 		DisableKeepAlives: true,
-		DialContext:       dialer.DialContext,
+		DialContext:       dial,
 	}
 	// If a SOCKS5 outbound proxy is configured (TYPHON_ANNOUNCE_PROXY env),
 	// route every announce through it. The base dialer above is reused to

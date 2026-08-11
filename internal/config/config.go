@@ -282,8 +282,10 @@ func DefaultConfig() *HydraConfig {
 // OSS cleanup. Append future keys here.
 var migrationKeys = []struct{ section, key, value string }{
 	{"race", "bind_interface", `""`},
+	{"race", "enable_ipv6", `false`},
 	{"race", "listen_interfaces", `""`},
 	{"hoard", "bind_interface", `""`},
+	{"hoard", "enable_ipv6", `false`},
 	{"hoard", "listen_interfaces", `""`},
 	{"race_drain", "max_age_hours", `0`},
 	{"race_drain", "min_ratio", `0.0`},
