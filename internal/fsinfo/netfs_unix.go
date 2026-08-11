@@ -45,6 +45,15 @@ func detect(path string) Kind {
 	if k, ok := netMagic[int64(st.Type)]; ok {
 		return k
 	}
+	// The probe needs a directory to put its socket in, and callers ask about
+	// files as often as directories -- store.Open asks about data_dir/hydra.db.
+	// On an install that already has that file, nearestExisting returns the
+	// file itself, and joining a socket name onto a file gives ENOTDIR. That is
+	// not a share refusing a socket, it is us probing the wrong thing, so ask
+	// the directory that would actually hold the socket.
+	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		p = filepath.Dir(p)
+	}
 	if !canBindUnixSocket(p) {
 		return "remote/limited filesystem"
 	}
