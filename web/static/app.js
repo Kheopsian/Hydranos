@@ -352,24 +352,24 @@ function importWizard() {
     // so the import reads its config folder. Which also means it works when
     // Transmission is already stopped, usually the case during a migration.
     function stepTransmission(prefill) {
-        box.innerHTML = `<h3>Import from Transmission</h3>
-            <p class="modal-desc">Hydra reads Transmission's <b>config folder</b>, the one holding <code>torrents/</code> and <code>resume/</code>. Transmission does not need to be running.</p>
+        box.innerHTML = `<h3>${t("Import from Transmission")}</h3>
+            <p class="modal-desc">${t("Hydra reads Transmission's <b>config folder</b>, the one holding <code>torrents/</code> and <code>resume/</code>. Transmission does not need to be running.")}</p>
             <input type="text" id="tr-dir" placeholder="/config/transmission or ~/.config/transmission-daemon" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.dir || "")}">
-            <p class="modal-desc" style="margin:6px 0">Not visible from Hydra? Upload a zip of that folder instead:</p>
+            <p class="modal-desc" style="margin:6px 0">${t("Not visible from Hydra? Upload a zip of that folder instead:")}</p>
             <input type="file" id="tr-zip" accept=".zip" style="width:100%;margin-bottom:8px">
-            <label style="display:block;margin-bottom:4px"><input type="checkbox" id="tr-cats" checked> Create one category per destination folder</label>
-            <label style="display:block"><input type="checkbox" id="tr-labels" checked> Import labels as tags</label>
+            <label style="display:block;margin-bottom:4px"><input type="checkbox" id="tr-cats" checked> ${t("Create one category per destination folder")}</label>
+            <label style="display:block"><input type="checkbox" id="tr-labels" checked> ${t("Import labels as tags")}</label>
             <p class="modal-desc" id="tr-msg" style="min-height:1em"></p>
             <div class="modal-actions">
-                <button id="tr-back">Back</button>
-                <button class="btn-primary" id="tr-preview">Preview</button>
+                <button id="tr-back">${t("Back")}</button>
+                <button class="btn-primary" id="tr-preview">${t("Preview")}</button>
             </div>`;
         box.querySelector("#tr-back").onclick = () => stepSource();
         const msg = box.querySelector("#tr-msg");
         box.querySelector("#tr-preview").onclick = async () => {
             let dir = box.querySelector("#tr-dir").value.trim();
             const zip = box.querySelector("#tr-zip").files[0];
-            msg.style.color = ""; msg.textContent = zip ? "Uploading…" : "Reading…";
+            msg.style.color = ""; msg.textContent = zip ? t("Uploading…") : t("Reading…");
             try {
                 if (zip) {
                     const fd = new FormData();
@@ -449,15 +449,15 @@ function importWizard() {
     }
 
     function stepCreds(prefill) {
-        box.innerHTML = `<h3>Import from qBittorrent</h3>
-            <p class="modal-desc">Point Hydra at your qBittorrent WebUI. Hydra seeds the data already on disk (completed torrents skip the hash-check), so nothing is re-downloaded.</p>
+        box.innerHTML = `<h3>${t("Import from qBittorrent")}</h3>
+            <p class="modal-desc">${t("Point Hydra at your qBittorrent WebUI. Hydra seeds the data already on disk (completed torrents skip the hash-check), so nothing is re-downloaded.")}</p>
             <input type="text" id="qb-url" placeholder="http://qbittorrent:8080" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.url || "")}">
-            <input type="text" id="qb-user" placeholder="Username" autocomplete="off" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.user || "admin")}">
-            <input type="password" id="qb-pass" placeholder="Password" autocomplete="off" style="width:100%">
+            <input type="text" id="qb-user" placeholder="${t("Username")}" autocomplete="off" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.user || "admin")}">
+            <input type="password" id="qb-pass" placeholder="${t("Password")}" autocomplete="off" style="width:100%">
             <p class="modal-desc" id="qb-msg" style="min-height:1em"></p>
             <div class="modal-actions">
-                <button id="qb-skip" class="btn-small">Back</button>
-                <button class="btn-primary" id="qb-preview">Preview</button>
+                <button id="qb-skip" class="btn-small">${t("Back")}</button>
+                <button class="btn-primary" id="qb-preview">${t("Preview")}</button>
             </div>`;
         box.querySelector("#qb-skip").onclick = () => stepSource();
         const msg = box.querySelector("#qb-msg");
@@ -467,8 +467,8 @@ function importWizard() {
                 username: box.querySelector("#qb-user").value,
                 password: box.querySelector("#qb-pass").value,
             };
-            if (!creds.url) { msg.textContent = "Enter the qBittorrent URL."; return; }
-            msg.style.color = ""; msg.textContent = "Connecting…";
+            if (!creds.url) { msg.textContent = t("Enter the qBittorrent URL."); return; }
+            msg.style.color = ""; msg.textContent = t("Connecting…");
             try {
                 const res = await fetch("/api/import/qbit/preview", {
                     method: "POST",
@@ -4434,7 +4434,7 @@ async function updateSettings() {
             _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div></div>`;
         }
         _tabsHtml += `<button type="button" class="settings-tab" data-domain="__import" onclick="showSettingsPanel('__import')"><span class="sg-title">Import</span></button>`;
-        _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">Import from another client</h3><p class="sr-desc" style="margin:.4em 0 1em">From <b>qBittorrent</b> (via its WebUI) or <b>Transmission</b> (by reading its config folder \u2014 it does not even need to be running). Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Torrents stopped in the old client stay stopped. Already-present torrents are skipped, so it is safe to re-run.</p><button class="btn-primary" onclick="importFromQbit()">Import\u2026</button></div></div>`;
+        _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">${t("Import from another client")}</h3><p class="sr-desc" style="margin:.4em 0 1em">From <b>qBittorrent</b> (via its WebUI) or <b>Transmission</b> (by reading its config folder \u2014 it does not even need to be running). Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Torrents stopped in the old client stay stopped. Already-present torrents are skipped, so it is safe to re-run.</p><button class="btn-primary" onclick="importFromQbit()">${t("Import\u2026")}</button></div></div>`;
         html += `<div class="settings-tabs" id="settings-tabs">${_tabsHtml}</div><div class="settings-panels" id="settings-panels">${_panelsHtml}</div>`;
         editor.innerHTML = html;
         {
