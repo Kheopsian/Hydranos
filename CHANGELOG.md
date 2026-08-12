@@ -3,6 +3,25 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.60.2 - 2026-08-12
+
+### Fixed
+
+- **The Changelog tab showed raw `**` markers and spilled text out of its
+  bullets.** The renderer worked one line at a time, so a bullet written across
+  several lines ended at the first newline: the rest became a loose paragraph
+  outside the list, and emphasis opened at the end of one line never found its
+  closing marker on the next, leaving the asterisks on screen. Lines are now
+  folded into their block before any formatting is applied, which is what a
+  soft-wrapped paragraph or list item actually is. A blank line between two
+  bullets no longer splits them into two separate lists either, and backslash
+  escapes such as `\*` render as the character rather than the escape.
+
+### Changed
+
+- **The changelog is no longer confined to a narrow column**, going from 820px
+  to 1200px so long-form entries use the space the page already has.
+
 ## v3.60.1 - 2026-08-12
 
 ### Fixed
