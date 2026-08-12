@@ -202,6 +202,11 @@ type Server struct {
 	// save_path survives a crash before the periodic 5-min save.
 	saveStateFn func()
 
+	// startupPauseRelease lifts the startup pause on every engine and returns
+	// the scopes it actually released. Wired by main.go, which owns the engine
+	// clients needed to resume their dial queues. Nil = nothing to release.
+	startupPauseRelease func() []string
+
 	// remoteAgents are dialed HydraAgents for multi-home category placement.
 	// The built-in "local" agent is s.raceEngine/s.hoardEngine, not listed here.
 	remoteAgents []*remoteAgent
@@ -415,6 +420,11 @@ func (s *Server) SetStateManager(sm *state.Manager) {
 // category move) so the change survives a crash before the next tick.
 func (s *Server) SetSaveStateCallback(fn func()) {
 	s.saveStateFn = fn
+}
+
+// SetStartupPauseRelease injects the callback that lifts the startup pause.
+func (s *Server) SetStartupPauseRelease(fn func() []string) {
+	s.startupPauseRelease = fn
 }
 
 // SetRaceDrain injects the RaceDrain service.

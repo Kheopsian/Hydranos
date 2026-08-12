@@ -69,9 +69,10 @@ type EngineConfig struct {
 	Socks5OutboundPass    string   `json:"socks5_outbound_pass,omitempty"`
 
 	// Connection limits
-	MaxConnections           int `json:"max_connections"`
-	MaxConnectionsPerTorrent int `json:"max_connections_per_torrent"`
-	MaxUploadsPerTorrent     int `json:"max_uploads_per_torrent"`
+	MaxConnections           int     `json:"max_connections"`
+	MaxConnectionsPerTorrent int     `json:"max_connections_per_torrent"`
+	MaxDialsPerSec           float64 `json:"max_dials_per_sec"`
+	MaxUploadsPerTorrent     int     `json:"max_uploads_per_torrent"`
 
 	// Choking
 	UnchokeSlots         int    `json:"unchoke_slots"`
@@ -191,9 +192,14 @@ func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 	if cfg.UploadRateLimit > 0 {
 		ulLimit = cfg.UploadRateLimit
 	}
+	// 0 = unlimited. Until now max_connections was parsed, echoed by the
+	// engine's get_config, and enforced nowhere, so no existing value was ever
+	// chosen against real behaviour -- substituting an invented default here
+	// would silently impose a ceiling that never applied before. Unset stays
+	// unlimited; a user who wants a ceiling sets one.
 	maxConn := cfg.MaxConnections
-	if maxConn <= 0 {
-		maxConn = 8000
+	if maxConn < 0 {
+		maxConn = 0
 	}
 	unchokeSlots := 50
 
@@ -211,6 +217,7 @@ func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		Socks5OutboundPass:       cfg.Socks5OutboundPass,
 		MaxConnections:           maxConn,
 		MaxConnectionsPerTorrent: 50,
+		MaxDialsPerSec:           cfg.MaxDialsPerSec,
 		MaxUploadsPerTorrent:     cfg.MaxUploadsPerTorrent, // -1 = unlimited
 
 		// Choking
@@ -292,9 +299,10 @@ func BuildRaceConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 	if cfg.UploadRateLimit > 0 {
 		ulLimit = cfg.UploadRateLimit
 	}
+	// 0 = unlimited, same reasoning as BuildHoardConfig.
 	maxConn := cfg.MaxConnections
-	if maxConn <= 0 {
-		maxConn = 4000
+	if maxConn < 0 {
+		maxConn = 0
 	}
 	unchokeSlots := -1
 
@@ -312,6 +320,7 @@ func BuildRaceConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		Socks5OutboundPass:       cfg.Socks5OutboundPass,
 		MaxConnections:           maxConn,
 		MaxConnectionsPerTorrent: 1000,
+		MaxDialsPerSec:           cfg.MaxDialsPerSec,
 		MaxUploadsPerTorrent:     valOrDefault(cfg.MaxUploadsPerTorrent, 100),
 
 		// Choking

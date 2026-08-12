@@ -184,6 +184,14 @@ func (s *hoardScheduler) worker() {
 // reconcile synchronise l'ensemble planifié avec la liste live des torrents.
 // Remplace scanAndStart : ajoute les nouveaux (staggerés), retire les partis.
 func (s *hoardScheduler) reconcile() {
+	// Pause de démarrage : ne rien planifier tant que le verrou tient. Le gate
+	// dans announce() arrête déjà le trafic, mais sans ce court-circuit on
+	// remplit quand même le heap et chaque torrent échu part en annonce pour
+	// se faire refuser -- à 100k torrents, beaucoup de travail dont le seul
+	// produit est un écran d'erreurs tracker décrivant un état voulu.
+	if s.h.startupHeld() {
+		return
+	}
 	res, err := s.h.client.ListTorrents()
 	if err != nil {
 		slog.Debug("hoard_announce sched: ListTorrents failed", "error", err)

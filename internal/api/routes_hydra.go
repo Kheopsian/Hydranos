@@ -492,6 +492,10 @@ func (s *Server) registerHydraRoutes() {
 		api.POST("/torrents/:info_hash/add-tracker", s.handleAddTracker)
 		api.GET("/torrents/:info_hash/files", s.handleTorrentFiles)
 
+		// Startup pause: process-level hold on outbound traffic (start_paused)
+		api.GET("/startup-pause", s.handleGetStartupPause)
+		api.POST("/startup-pause/release", s.handleReleaseStartupPause)
+
 		// Per-tracker announce passkey override (hot-swap, no restart)
 		api.GET("/announce/passkeys", s.handleGetPasskeys)
 		api.POST("/announce/passkeys", s.handleSetPasskey)

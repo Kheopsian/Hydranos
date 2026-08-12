@@ -803,6 +803,53 @@ func main() {
 	hoardAnnounceBindings := engine.DefaultSingleBinding(hoardCfg.ListenPort, hoardCfg.EnableIPv6, "hoard", hoardCfg.AnnounceRateLimit)
 	raceAnnounceBindings := engine.DefaultSingleBinding(raceCfg.ListenPort, raceCfg.EnableIPv6, "race", raceCfg.AnnounceRateLimit)
 
+	// Startup pause, armed before any announcer starts so nothing escapes in
+	// the gap. Both halves matter: holding the gate stops announces leaving
+	// from here, and set_dials_paused stops the engine dialing peers it
+	// already knows (resume data, PEX, DHT). Either alone still lets a wave
+	// of outbound flows through.
+	for _, sp := range []struct {
+		scope  string
+		paused bool
+		client engine.EngineClient
+	}{
+		{"hoard", hoardCfg.StartPaused, hoardProc.Client()},
+		{"race", raceCfg.StartPaused, raceProc.Client()},
+	} {
+		if !sp.paused {
+			continue
+		}
+		engine.HoldStartupPause(sp.scope)
+		if err := engine.SetEngineDialsPaused(sp.client, true); err != nil {
+			// The announce half is already held, so this is a partial hold,
+			// not an open door -- say which half failed rather than implying
+			// the pause is off entirely.
+			slog.Error("startup pause: engine refused to hold its dial queue; announces are still held",
+				"engine", sp.scope, "error", err)
+		}
+	}
+	// Releasing is the mirror image, and lives here because this is where the
+	// engine clients are. Dials are resumed before the announce gate lifts:
+	// the other order would let an announce return peers the engine is still
+	// refusing to dial, and they would be dropped rather than queued.
+	apiServer.SetStartupPauseRelease(func() []string {
+		for scope, client := range map[string]engine.EngineClient{
+			"hoard": hoardProc.Client(), "race": raceProc.Client(),
+		} {
+			if err := engine.SetEngineDialsPaused(client, false); err != nil {
+				slog.Error("startup pause: engine refused to resume its dial queue",
+					"engine", scope, "error", err)
+			}
+		}
+		released := []string{}
+		for _, scope := range []string{"hoard", "race"} {
+			if engine.ReleaseStartupPause(scope) {
+				released = append(released, scope)
+			}
+		}
+		return released
+	})
+
 	// With IPv6 off, announces are pinned to IPv4. On a host that has no IPv4
 	// that pin has nowhere to go, and the honest place to say so is here, once,
 	// rather than in every announce error that follows.

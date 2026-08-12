@@ -652,6 +652,17 @@ func (c *Client) AddPeers(infoHash string, peers []struct {
 	return err
 }
 
+// SetDialsPaused holds or releases the engine's outbound dial queue. Used by
+// the startup pause: the Go side stops announcing, this stops the engine from
+// dialing anything it already knows about (PEX, DHT, peers from earlier
+// announces), so between the two nothing outbound leaves the process.
+func (c *Client) SetDialsPaused(paused bool) error {
+	_, err := c.call("set_dials_paused", map[string]interface{}{
+		"paused": paused,
+	})
+	return err
+}
+
 // SetUploadLimit sets the session upload rate limit in bytes/s (0 = unlimited).
 func (c *Client) SetUploadLimit(limitBytes int) error {
 	_, err := c.call("set_upload_limit", map[string]interface{}{

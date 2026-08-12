@@ -54,6 +54,9 @@ type trackerAnnouncer struct {
 	// limiter throttles outbound announces (announce_rate_limit). Shared per
 	// engine+binding, nil when the setting is 0 (unlimited).
 	limiter *announceLimiter
+	// gate holds every announce while the engine is in its startup pause.
+	// Shared per engine scope, never nil (an unheld gate is a no-op).
+	gate *startupGate
 }
 
 // newTrackerAnnouncerForBinding builds an announcer wired to a specific
@@ -197,6 +200,7 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		fwmark:          int(b.Fwmark),
 		enableIPv6:      b.EnableIPv6,
 		limiter:         announceLimiterFor(b.AnnounceScope+"#"+strconv.Itoa(b.ID), b.AnnounceRateLimit),
+		gate:            startupGateFor(b.AnnounceScope),
 	}
 }
 
@@ -541,6 +545,11 @@ func generateQBitPeerID() string {
 // private trackers credit our upload — historically these were hardcoded to 0,
 // which froze tracker-side stats despite real transfer.
 func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, downloaded, left int64, event string) (*TrackerAnnounceResult, error) {
+	// Startup pause first: while held, nothing leaves at all, and there is no
+	// point queueing on the rate limiter for something we will not send.
+	if ta.gate.blocked() {
+		return nil, ErrStartupPaused
+	}
 	// Gate every announce, http:// and udp:// alike, on the engine's
 	// announce_rate_limit before a single byte leaves. No-op when unset.
 	if err := ta.limiter.wait(context.Background()); err != nil {

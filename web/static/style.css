@@ -2715,3 +2715,36 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     .setup-lang-row { flex-direction: column; align-items: stretch; gap: 4px; }
     .setup-lang-row select { max-width: 100%; }
 }
+
+/* Startup pause banner. Deliberately loud and undismissable: while the hold
+   is on, Hydra announces nothing and dials nothing, which is indistinguishable
+   from a broken install unless the reason is on screen. */
+#startup-pause-banner {
+    background: rgba(227, 179, 65, 0.1);
+    border-bottom: 1px solid var(--accent-yellow);
+    padding: 10px 20px;
+}
+
+.startup-pause-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+}
+
+#startup-pause-banner strong {
+    color: var(--accent-yellow);
+    font-size: 14px;
+}
+
+.startup-pause-text {
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin-top: 2px;
+}
+
+@media (max-width: 700px) {
+    .startup-pause-inner { flex-direction: column; align-items: stretch; }
+}
