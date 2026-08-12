@@ -318,6 +318,24 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 				if st.ContentFolder == nil {
 					st.ContentFolder = addedCF
 				}
+				// A seed-mode add is complete by definition: cross-seed
+				// hardlinked the payload before injecting, so the pieces map 1:1
+				// to bytes already on disk. Report it 100%/seeding NOW. Otherwise
+				// Progress stays 0 until the 60s refreshStats tick (the 1Hz
+				// stats_snapshot carries State but not Progress), and a client
+				// polling in that window — cross-seed does, on every inject —
+				// sees a torrent that is "seeding" yet 0% done and waits ~30-60s
+				// per torrent before moving on. The stats_snapshot handler below
+				// revokes this within ~1s if Typhon reports the payload did not
+				// validate.
+				if data.SeedMode {
+					if st.Progress == 0 {
+						st.Progress = 1.0
+					}
+					if st.TotalDone == 0 {
+						st.TotalDone = data.TotalSize
+					}
+				}
 				e.cachedStatsMu.Unlock()
 			}
 		case "torrent_removed":
@@ -369,7 +387,13 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 				st.TotalUpload = m.TotalUploaded
 				st.TotalDownload = m.TotalDownloaded
 				st.NumPeers = m.PeersConnected
-				// Map typhon status enum → libtorrent state string.
+				// Map typhon status enum → libtorrent state string. The mini
+				// snapshot carries no Progress field; a seeding torrent is
+				// complete by definition, so report it 100% here at 1Hz rather
+				// than waiting for the 60s refreshStats — this lets a seed-mode
+				// add (whose torrent_added handler already set 100%) stay 100%
+				// and surface as finished to a client polling after the add.
+				// Downloading fractions stay owned by refreshStats.
 				switch m.Status {
 				case 0:
 					// Halted: the intent flag says whether that was us or a
@@ -381,6 +405,7 @@ func (e *HoardEngine) Start(ctx context.Context) error {
 					st.State = "downloading"
 				case 3:
 					st.State = "seeding"
+					st.Progress = 1.0
 				}
 				if st.TotalSize > 0 && st.TotalDone > 0 {
 					st.Ratio = float64(st.TotalUpload) / float64(st.TotalDone)
