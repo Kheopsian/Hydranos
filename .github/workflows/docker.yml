@@ -7,35 +7,116 @@ on:
 permissions:
   contents: read
   packages: write
+
+env:
+  IMAGE: ghcr.io/kheopsian/hydra
+
 jobs:
-  build-push:
-    runs-on: ubuntu-latest
+  # One job per architecture, on a native runner for that architecture.
+  #
+  # The alternative -- a single job listing both platforms and emulating arm64
+  # through QEMU -- would work, but the image is mostly a Rust release build:
+  # under emulation that turns a few minutes into a wait long enough that
+  # nobody runs the workflow on purpose. release.yml already builds its arm64
+  # binaries on ubuntu-24.04-arm, so the toolchain is known to work there.
+  #
+  # Each job pushes an untagged image and reports only its digest; the merge
+  # job below is what publishes the tags, as a manifest list pointing at both.
+  build:
+    strategy:
+      # Run both to completion: when arm64 is what broke, seeing amd64 go green
+      # in the same run is half the diagnosis.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+
       - name: Free up runner disk (large Rust + debug-symbol build)
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/.ghcup /usr/share/swift
           sudo docker image prune -af || true
           df -h /
+
       - uses: docker/setup-buildx-action@v3
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # No tags here on purpose: two jobs pushing the same tag would race,
+          # and the loser's architecture would vanish from the registry.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Scoped per architecture: a shared cache key would have each job
+          # restoring the other's layers and rebuilding them anyway.
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          # The digest is the whole payload; the file name carries it and the
+          # file itself stays empty.
+          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publishes the tags as a manifest list. Needs every build job: a tag that
+  # sometimes carries arm64 and sometimes does not is worse than a failed run,
+  # because it fails on the user's machine instead of here.
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/kheopsian/hydra
+          images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha,format=short
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
