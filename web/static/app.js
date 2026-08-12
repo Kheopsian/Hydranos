@@ -5409,19 +5409,45 @@ function _renderMarkdown(md) {
     const inline = t => esc(t)
         .replace(/`([^`]+)`/g, "<code>$1</code>")
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+        .replace(/\\([\\`*_[\]()#+\-.!])/g, "$1");
+
+    // Fold soft-wrapped lines into their block BEFORE formatting anything. A
+    // paragraph or a list item written across several lines is one block, and
+    // rendering line by line broke both halves of that: the continuation lines
+    // escaped their <li> and became loose paragraphs, and emphasis opened at the
+    // end of one line never found its closing ** on the next, so the markers
+    // showed up as literal text. Any changelog wrapped at 80 columns hit this.
+    const blocks = [];
+    for (const raw of md.split("\n")) {
+        const line = raw.replace(/\s+$/, "").trim();
+        if (line === "") { blocks.push({ type: "blank" }); continue; }
+        if (/^#{1,6} /.test(line)) { blocks.push({ type: "head", text: line }); continue; }
+        if (/^---+$/.test(line)) { blocks.push({ type: "hr" }); continue; }
+        if (/^[-*] /.test(line)) { blocks.push({ type: "li", text: line.slice(2) }); continue; }
+        const prev = blocks[blocks.length - 1];
+        if (prev && (prev.type === "li" || prev.type === "p")) { prev.text += " " + line; continue; }
+        blocks.push({ type: "p", text: line });
+    }
+
     const out = [];
     let inList = false;
     const closeList = () => { if (inList) { out.push("</ul>"); inList = false; } };
-    for (const raw of md.split("\n")) {
-        const line = raw.replace(/\s+$/, "");
-        if (/^### /.test(line)) { closeList(); out.push("<h3>" + inline(line.slice(4)) + "</h3>"); }
-        else if (/^## /.test(line)) { closeList(); out.push("<h2>" + inline(line.slice(3)) + "</h2>"); }
-        else if (/^# /.test(line)) { closeList(); out.push("<h1>" + inline(line.slice(2)) + "</h1>"); }
-        else if (/^---+$/.test(line)) { closeList(); out.push("<hr>"); }
-        else if (/^[-*] /.test(line)) { if (!inList) { out.push("<ul>"); inList = true; } out.push("<li>" + inline(line.slice(2)) + "</li>"); }
-        else if (line.trim() === "") { closeList(); }
-        else { closeList(); out.push("<p>" + inline(line) + "</p>"); }
+    for (const b of blocks) {
+        if (b.type === "li") {
+            if (!inList) { out.push("<ul>"); inList = true; }
+            out.push("<li>" + inline(b.text) + "</li>");
+            continue;
+        }
+        // A blank line between two bullets is a loose list, not two lists —
+        // only a heading, rule or paragraph actually ends one.
+        if (b.type === "blank") { continue; }
+        closeList();
+        if (b.type === "head") {
+            const lvl = b.text.match(/^#+/)[0].length;
+            out.push("<h" + lvl + ">" + inline(b.text.slice(lvl + 1)) + "</h" + lvl + ">");
+        } else if (b.type === "hr") { out.push("<hr>"); }
+        else if (b.type === "p") { out.push("<p>" + inline(b.text) + "</p>"); }
     }
     closeList();
     return out.join("\n");
