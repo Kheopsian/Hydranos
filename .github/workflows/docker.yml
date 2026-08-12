@@ -71,7 +71,13 @@ jobs:
           mkdir -p /tmp/digests
           # The digest is the whole payload; the file name carries it and the
           # file itself stays empty.
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          #
+          # Strip the "sha256:" prefix: upload-artifact rejects a colon in a
+          # file name, so keeping it fails the job after the image has already
+          # been pushed. The merge step re-adds the prefix when it rebuilds the
+          # reference, which is why it expects the bare hex here.
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
 
       - uses: actions/upload-artifact@v4
         with:
