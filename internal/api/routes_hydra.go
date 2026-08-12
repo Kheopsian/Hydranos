@@ -38,12 +38,13 @@ var (
 	baselineDownloaded int64
 	baselineFile       string
 
-	// sessionOffset captures Rain BoltDB cumulative totals at boot time,
-	// so we can compute session = current_rain - offset.
-	sessionOffsetUL int64
-	sessionOffsetDL int64
-
-	// Per-engine offsets for accurate session stats in /api/status.
+	// Per-engine offsets for accurate session stats in /api/status. These are
+	// the ONLY session offsets: they are decremented when a torrent is removed
+	// (see absorbTorrentStats), which is what keeps the session delta honest.
+	// A separate combined offset used to live here; it was never decremented on
+	// removal, so getSessionDelta() bled bytes on every remove and drifted ~5x
+	// low against reality within hours. It is gone: getSessionDelta() now sums
+	// the two per-engine deltas instead of maintaining a third counter.
 	sessionOffsetRaceUL  int64
 	sessionOffsetRaceDL  int64
 	sessionOffsetHoardUL int64
@@ -238,17 +239,16 @@ func getRainTotalsUncached() (ul, dl int64) {
 }
 
 // getSessionDelta returns UL/DL transferred since boot.
+//
+// It is the sum of the two per-engine deltas on purpose. Those are the only
+// offsets that get decremented when a torrent is removed, so they survive the
+// churn; a separate combined offset does not, and silently loses every removed
+// torrent's bytes for good. Keeping one lineage also means /api/status can no
+// longer contradict itself (day_uploaded is built from the same two deltas).
 func getSessionDelta() (ul, dl int64) {
-	rawUL, rawDL := getRainTotals()
-	ul = rawUL - atomic.LoadInt64(&sessionOffsetUL)
-	dl = rawDL - atomic.LoadInt64(&sessionOffsetDL)
-	if ul < 0 {
-		ul = 0
-	}
-	if dl < 0 {
-		dl = 0
-	}
-	return
+	raceUL, raceDL := GetRaceSessionDelta()
+	hoardUL, hoardDL := GetHoardSessionDelta()
+	return raceUL + hoardUL, raceDL + hoardDL
 }
 
 // getGlobalTotals returns all-time UL/DL (baseline + Rain Bolt).

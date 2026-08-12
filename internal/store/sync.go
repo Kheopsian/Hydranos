@@ -16,6 +16,13 @@ type SyncItem struct {
 	Paused          bool     // the user's pause intent, carried from the engine
 	Tags            []string // carried for the same reason as Paused
 	ContentFolder   *bool    // nil = added before the flag existed (legacy layout)
+
+	// Lifetime counters as the engine currently reports them. Written with
+	// MAX() semantics, never blindly: an engine that is still loading reports 0
+	// for a torrent it has not reached yet, and an absolute write would erase
+	// its history for good on the next sync tick.
+	TotalUploaded   int64
+	TotalDownloaded int64
 }
 
 // SyncResult reports what a reconcile did.
@@ -91,14 +98,18 @@ func (s *Store) SyncAll(items []SyncItem) (SyncResult, error) {
 	defer tx.Rollback()
 
 	ins, err := tx.Prepare(`
-        INSERT INTO torrents (info_hash, session, torrent, save_path, category, completed_time, paused, tags, content_folder)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        INSERT INTO torrents (info_hash, session, torrent, save_path, category, completed_time, paused, tags, content_folder, total_uploaded, total_downloaded)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return res, err
 	}
 	defer ins.Close()
+	// MAX() on the counters, not assignment: the engine reports 0 for a torrent
+	// it has not loaded yet, and these columns are meant to be monotone.
 	upd, err := tx.Prepare(`
-        UPDATE torrents SET session=?, save_path=?, category=?, completed_time=?, paused=?, tags=?, content_folder=? WHERE info_hash=?`)
+        UPDATE torrents SET session=?, save_path=?, category=?, completed_time=?, paused=?, tags=?, content_folder=?,
+                            total_uploaded=MAX(total_uploaded, ?), total_downloaded=MAX(total_downloaded, ?)
+        WHERE info_hash=?`)
 	if err != nil {
 		return res, err
 	}
@@ -111,7 +122,7 @@ func (s *Store) SyncAll(items []SyncItem) (SyncResult, error) {
 
 	for ih, it := range desired {
 		if _, ok := existing[ih]; ok {
-			if _, err := upd.Exec(string(it.Session), it.SavePath, it.Category, it.CompletedTime, boolToInt(it.Paused), encodeTags(it.Tags), contentFolderInt(it.ContentFolder), ih); err != nil {
+			if _, err := upd.Exec(string(it.Session), it.SavePath, it.Category, it.CompletedTime, boolToInt(it.Paused), encodeTags(it.Tags), contentFolderInt(it.ContentFolder), it.TotalUploaded, it.TotalDownloaded, ih); err != nil {
 				return res, fmt.Errorf("sync: update %s: %w", ih, err)
 			}
 			res.Updated++
@@ -122,7 +133,7 @@ func (s *Store) SyncAll(items []SyncItem) (SyncResult, error) {
 			res.Missing++
 			continue
 		}
-		if _, err := ins.Exec(ih, string(it.Session), blob, it.SavePath, it.Category, it.CompletedTime, boolToInt(it.Paused), encodeTags(it.Tags), contentFolderInt(it.ContentFolder)); err != nil {
+		if _, err := ins.Exec(ih, string(it.Session), blob, it.SavePath, it.Category, it.CompletedTime, boolToInt(it.Paused), encodeTags(it.Tags), contentFolderInt(it.ContentFolder), it.TotalUploaded, it.TotalDownloaded); err != nil {
 			return res, fmt.Errorf("sync: insert %s: %w", ih, err)
 		}
 		res.Inserted++

@@ -78,3 +78,32 @@ func (e *HoardEngine) TrackerHostFor(infoHash string) string {
 	}
 	return ""
 }
+
+// AllTotals returns every torrent's lifetime {UL, DL} keyed by info hash, folded
+// under a single read lock like AggregateByTracker — no full-list copy, so it
+// stays cheap at 100k+ torrents. Feeds the periodic store sync, which is what
+// gives the per-torrent counters somewhere durable to live.
+func (e *RaceEngine) AllTotals() map[string][2]int64 {
+	e.cachedStatsMu.RLock()
+	defer e.cachedStatsMu.RUnlock()
+	out := make(map[string][2]int64, len(e.cachedTorrentList))
+	for i := range e.cachedTorrentList {
+		s := &e.cachedTorrentList[i]
+		out[s.InfoHash] = [2]int64{s.TotalUpload, s.TotalDownload}
+	}
+	return out
+}
+
+// AllTotals mirrors the race engine's, over the hoard engine's cached stats.
+func (e *HoardEngine) AllTotals() map[string][2]int64 {
+	e.cachedStatsMu.RLock()
+	defer e.cachedStatsMu.RUnlock()
+	out := make(map[string][2]int64, len(e.cachedStats))
+	for ih, s := range e.cachedStats {
+		if s == nil {
+			continue
+		}
+		out[ih] = [2]int64{s.TotalUpload, s.TotalDownload}
+	}
+	return out
+}

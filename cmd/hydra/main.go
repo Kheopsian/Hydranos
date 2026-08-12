@@ -862,6 +862,14 @@ func main() {
 
 	go func() {
 		hoardEngine.WaitStaggerDone()
+		// KNOWN ISSUE: this still captures too early. Measured 2026-08-12, the
+		// offset lands at 0 even though the torrents are already loaded — the
+		// engines' cached stats have not been refreshed yet, so GetSessionTotals()
+		// has nothing to report. Seconds later those lifetime totals appear and
+		// get booked as traffic from this session. Gating on the store import is
+		// NOT the fix (tried: capture already happens after it). The offset has
+		// to wait for the stats cache to reflect the loaded set. Telemetry only
+		// — announces read the engine's per-torrent counters, not this.
 		apiServer.CaptureSessionOffset()
 	}()
 
@@ -1182,16 +1190,19 @@ func saveState(stateMgr *state.Manager, race *engine.RaceEngine, hoard *engine.H
 	// past the boot import that hands them what the store knows. Syncing before
 	// either one writes an incomplete view over a complete row.
 	if torStore != nil && ready != nil && ready.Load() && imported != nil && imported.Load() {
-		syncStore(torStore, raceMetas, hoardMetas)
+		syncStore(torStore, raceMetas, hoardMetas, race.AllTotals(), hoard.AllTotals())
 	}
 }
 
-func syncStore(st *store.Store, raceMetas, hoardMetas map[string]*engine.TorrentMeta) {
+func syncStore(st *store.Store, raceMetas, hoardMetas map[string]*engine.TorrentMeta, raceTotals, hoardTotals map[string][2]int64) {
 	items := make([]store.SyncItem, 0, len(raceMetas)+len(hoardMetas))
-	add := func(sess store.Session, metas map[string]*engine.TorrentMeta) {
+	add := func(sess store.Session, metas map[string]*engine.TorrentMeta, totals map[string][2]int64) {
 		for ih, m := range metas {
+			t := totals[ih] // zero value when the engine has not reported it yet; MAX() in the store keeps history
 			items = append(items, store.SyncItem{
 				InfoHash:        ih,
+				TotalUploaded:   t[0],
+				TotalDownloaded: t[1],
 				Session:         sess,
 				Paused:          m.UserPaused,
 				Tags:            m.Tags,
@@ -1203,8 +1214,8 @@ func syncStore(st *store.Store, raceMetas, hoardMetas map[string]*engine.Torrent
 			})
 		}
 	}
-	add(store.Race, raceMetas)
-	add(store.Hoard, hoardMetas)
+	add(store.Race, raceMetas, raceTotals)
+	add(store.Hoard, hoardMetas, hoardTotals)
 	if r, err := st.SyncAll(items); err != nil {
 		slog.Warn("store: sync failed", "error", err)
 	} else if r.Inserted+r.Deleted+r.Missing+r.Conflicts > 0 {
