@@ -3,6 +3,56 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.60.1 - 2026-08-12
+
+### Fixed
+
+- **`session_uploaded` lost bytes on every torrent you removed, and never got
+  them back.** The session delta is `current total - offset captured at boot`,
+  and the total is a sum over the torrents an engine currently holds — so
+  removing one makes it drop. The per-engine offsets are decremented to match,
+  which keeps their delta honest; a third, combined offset was not, so it drifted
+  further from reality with every removal. On a library that churns, the damage
+  is not subtle: measured at **2.35 TiB reported against 11.82 TiB actually
+  sent**, a factor of five, inside a single afternoon. `/api/status` was
+  contradicting itself as a result — `day_uploaded`, built from the per-engine
+  deltas, showed five times what `session_uploaded` did for the same window.
+  `getSessionDelta()` now sums the two per-engine deltas rather than keeping a
+  counter of its own, and the combined offset is gone. The qBittorrent shim
+  serves this number too, so anything reading session stats through it (\*arr,
+  cross-seed, autobrr) was seeing the same shortfall.
+
+- **Per-torrent `total_uploaded` / `total_downloaded` were always zero in the
+  store.** The periodic sync writes every other column of a torrent's row and
+  simply never wrote these two, so they sat at 0 for every torrent, forever —
+  the intended writer (`UpdateStats`) had no callers at all. They are now filled
+  from the engines on the same five-minute cycle, which already rewrites each
+  row, so this costs no extra writes. They are written with `MAX()` rather than
+  assignment: an engine still loading reports 0 for a torrent it has not reached
+  yet, and an absolute write would erase that torrent's history on the next tick.
+
+### Known issues
+
+- **Session stats still start out counting bytes sent before this boot.** The
+  offset that makes a session delta mean "since this process started" is
+  captured while the engines' stats cache is still empty, so it lands at zero;
+  seconds later the loaded torrents' lifetime totals show up and are booked as
+  traffic from the current session. Gating the capture on the store import does
+  not fix it — the capture already happens after the import. It needs to wait
+  for the stats cache to reflect the loaded set. Telemetry only: announces read
+  the engine's per-torrent counters, so tracker credit is unaffected.
+
+## v3.60.0 - 2026-08-12
+
+### Fixed
+
+- **A torrent added in seed mode showed 0% for up to a minute.** Adding data you
+  already hold is meant to be instant, but progress only caught up on the next
+  60-second refresh, which reads as a stall. The `torrent_added` handler now
+  reports `progress = 1.0` straight away for a seed-mode add, and the 1 Hz stats
+  snapshot derives the same conclusion from the engine's own state instead of
+  waiting for the slow path.
+
 ## v3.59.1 - 2026-08-11
 
 ### Fixed

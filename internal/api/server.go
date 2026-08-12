@@ -375,18 +375,20 @@ func (s *Server) SetEngines(race RaceEngine, hoard HoardEngine) {
 	})
 }
 
-// CaptureSessionOffset snapshots the current Rain BoltDB cumulative totals.
-// Must be called AFTER both engines have finished loading torrents from BoltDB.
+// CaptureSessionOffset snapshots each engine's cumulative totals at boot, so
+// the session delta counts only what moved since. Must be called AFTER both
+// engines have finished loading their torrents, or the offset lands too low and
+// the session delta is inflated by everything they load afterwards.
+//
+// Only per-engine offsets exist: they are the ones absorbTorrentStats knows how
+// to decrement on removal. Do not reintroduce a combined one.
 func (s *Server) CaptureSessionOffset() {
 	if sessionTotalFunc == nil {
 		slog.Warn("baseline: cannot capture offset, sessionTotalFunc not set")
 		return
 	}
 	ul, dl := sessionTotalFunc()
-	atomic.StoreInt64(&sessionOffsetUL, ul)
-	atomic.StoreInt64(&sessionOffsetDL, dl)
 
-	// Per-engine offsets for accurate session stats in /api/status.
 	if raceTotalFunc != nil {
 		rUL, rDL := raceTotalFunc()
 		atomic.StoreInt64(&sessionOffsetRaceUL, rUL)
