@@ -53,6 +53,26 @@ type SessionConfig struct {
 	// two seconds).
 	AnnounceRateLimit float64 `toml:"announce_rate_limit"`
 
+	// MaxDialsPerSec caps new outbound peer connections for this session, in
+	// dials per second. 0 = unlimited (the historical behaviour).
+	//
+	// AnnounceRateLimit alone is not enough: an announce asks for numwant=200
+	// peers and the engine dials every one it gets back, so 20 announces/s can
+	// still mean thousands of new flows a second through one VPN tunnel. This
+	// is the equivalent of qBittorrent's connections-per-second knob, and it
+	// is the one that bounds what a tunnel actually sees.
+	MaxDialsPerSec float64 `toml:"max_dials_per_sec"`
+
+	// StartPaused holds this session's outbound traffic at startup: no
+	// announces leave and no peers are dialed until the pause is released
+	// from the UI or the API. Intended for large libraries behind a VPN,
+	// where the boot-time wave is the thing that knocks the tunnel over and
+	// the user needs a moment to adjust limits before it happens.
+	//
+	// This is a process-level hold, never per-torrent paused state: releasing
+	// it must not resume torrents the user paused deliberately.
+	StartPaused bool `toml:"start_paused"`
+
 	PeerTimeout       int `toml:"peer_timeout"`
 	InactivityTimeout int `toml:"inactivity_timeout"`
 
@@ -294,10 +314,14 @@ var migrationKeys = []struct{ section, key, value string }{
 	{"race", "enable_ipv6", `false`},
 	{"race", "listen_interfaces", `""`},
 	{"race", "announce_rate_limit", `0.0`},
+	{"race", "max_dials_per_sec", `0.0`},
+	{"race", "start_paused", `false`},
 	{"hoard", "bind_interface", `""`},
 	{"hoard", "enable_ipv6", `false`},
 	{"hoard", "listen_interfaces", `""`},
 	{"hoard", "announce_rate_limit", `0.0`},
+	{"hoard", "max_dials_per_sec", `0.0`},
+	{"hoard", "start_paused", `false`},
 	{"race_drain", "max_age_hours", `0`},
 	{"race_drain", "min_ratio", `0.0`},
 	{"race_drain", "age_ratio_mode", `"and"`},

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use serde_json::{json, Value};
+use tracing::info;
 
 use crate::config::EngineConfig;
 use crate::disk::DiskManager;
@@ -41,6 +42,7 @@ pub fn dispatch(
         "get_diagnostics" => get_diagnostics(torrent_mgr, config),
         "set_listen_port" => set_listen_port(params),
         "set_self_ips" => set_self_ips(params),
+        "set_dials_paused" => set_dials_paused(params),
         _ => json!({"error": format!("unknown method: {}", method)}),
     }
 }
@@ -476,8 +478,20 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
         "settings": {
             "max_uploads_per_torrent": config.max_uploads_per_torrent,
             "max_connections": config.max_connections,
+            "max_dials_per_sec": config.max_dials_per_sec,
             "peer_timeout": config.peer_timeout,
             "engine": "typhon",
+        },
+        // Live view of the dial governor: what the ceiling is, how close we
+        // are to it, and how much work each control is shedding. `skipped_*`
+        // climbing is the signal that a limit is set too tight.
+        "dial_governor": {
+            "live_connections": crate::tracker::dial_limiter::LIVE_CONNS.load(std::sync::atomic::Ordering::Relaxed),
+            "max_connections": crate::tracker::dial_limiter::max_connections(),
+            "dials_paused": crate::tracker::dial_limiter::dials_paused(),
+            "skipped_conn_cap": crate::tracker::dial_limiter::DIAL_SKIPPED_CONN_CAP.load(std::sync::atomic::Ordering::Relaxed),
+            "skipped_paused": crate::tracker::dial_limiter::DIAL_SKIPPED_PAUSED.load(std::sync::atomic::Ordering::Relaxed),
+            "delayed": crate::tracker::dial_limiter::DIAL_DELAYED.load(std::sync::atomic::Ordering::Relaxed),
         },
         "counters": Value::Object(counters),
     })
@@ -624,6 +638,22 @@ fn add_peers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
         added += 1;
     }
     json!({"added": added})
+}
+
+/// Hold or release the startup pause. While held, the dial-queue consumer
+/// drops every outbound dial instead of opening it, so a freshly started
+/// engine creates no outbound flows until the user says so -- the point being
+/// to let a VPN user finish configuring before 20k torrents worth of peers hit
+/// the tunnel. Deliberately process-level: it never touches per-torrent paused
+/// state, so releasing it cannot resurrect torrents the user paused by hand.
+fn set_dials_paused(params: &Value) -> Value {
+    let paused = match params.get("paused").and_then(|v| v.as_bool()) {
+        Some(p) => p,
+        None => return json!({"error": "missing or invalid 'paused' boolean"}),
+    };
+    crate::tracker::dial_limiter::set_dials_paused(paused);
+    info!("[peer] outbound dials {}", if paused { "PAUSED (startup pause held)" } else { "resumed" });
+    json!({"ok": true, "paused": paused})
 }
 
 /// Hot-rebind the engine's TCP peer listener to a new port without a restart.

@@ -1,3 +1,4 @@
+pub mod dial_limiter;
 pub mod http;
 
 use std::sync::Arc;
@@ -280,6 +281,7 @@ pub fn start_announce_loop(
     bindings: Vec<crate::config::ResolvedBinding>,
     utp_socket: Option<Arc<UtpSocketUdp>>,
     disable_announce: bool,
+    max_dials_per_sec: f64,
 ) {
     if bindings.is_empty() {
         warn!("[tracker] start_announce_loop called with no bindings — dials will use kernel default");
@@ -294,8 +296,35 @@ pub fn start_announce_loop(
         let disk_c = disk_mgr.clone();
         let utp_c = utp_socket.clone();
         let bindings_c = bindings.clone();
+        // This loop is the single chokepoint every outbound dial goes through
+        // -- tracker peers, PEX, DHT and the orchestrator's `add_peers` all
+        // arrive here -- which is why the pacing, the connection ceiling and
+        // the startup pause all live at this one spot rather than at each
+        // discovery source. The pacer is owned by the task: no other caller,
+        // so no locking.
+        let mut pacer = dial_limiter::DialPacer::new(max_dials_per_sec);
+        if pacer.is_some() {
+            info!("[peer] outbound dial rate limit active: {}/s", max_dials_per_sec);
+        }
         tokio::spawn(async move {
             while let Some((addr, t)) = dial_rx.recv().await {
+                // Startup pause: drop rather than queue. The peer is not lost
+                // -- the next announce hands it back -- whereas queueing a
+                // paused hoard's worth of peers would grow without bound and
+                // then release the very burst the pause exists to prevent.
+                if dial_limiter::dials_paused() {
+                    dial_limiter::DIAL_SKIPPED_PAUSED.fetch_add(1, AtomicOrdering::Relaxed);
+                    continue;
+                }
+                // Ceiling on live connections. Checked before pacing so a
+                // saturated engine sheds work instead of accumulating delay.
+                if dial_limiter::conn_cap_reached() {
+                    dial_limiter::DIAL_SKIPPED_CONN_CAP.fetch_add(1, AtomicOrdering::Relaxed);
+                    continue;
+                }
+                if let Some(p) = pacer.as_mut() {
+                    p.acquire().await;
+                }
                 let d = disk_c.clone();
                 let u = utp_c.clone();
                 let b = pick_binding_for_dial(&bindings_c, addr);

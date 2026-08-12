@@ -3,6 +3,62 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.61.0 - 2026-08-12
+
+### Added
+
+- **`max_dials_per_sec`, a limit on new outbound peer connections** (per engine,
+  under `[race]` and `[hoard]`, in dials per second, `0` = unlimited and the
+  default). This is the setting that VPN users behind Proton and similar
+  providers actually need. `announce_rate_limit`, added in v3.59.0, capped how
+  often Hydra announced but not what each announce produced: one announce asks
+  a tracker for 200 peers and every peer that comes back was dialed at once, so
+  even 20 announces a second could open thousands of new flows through a single
+  tunnel and knock it over. qBittorrent's equivalent knob is connections per
+  second rather than announces per second, and this is ours. As a starting
+  point, a few hundred dials a second is generous for most links; if a tunnel
+  still drops, halve it. The engine's `get_config` now reports a
+  `dial_governor` block (live connections, refusals, delays) so a limit set too
+  tight is visible rather than guessed at.
+
+- **`start_paused`, holding an engine's outbound traffic at startup** (per
+  engine, default `false`). With it set, no announces and no peer dials leave
+  Hydra until you press **Start now** in the banner at the top of the page, or
+  call `POST /api/startup-pause/release`. It exists because the boot-time wave
+  of a large library is exactly what knocks a tunnel over, and until now there
+  was no way to reach the settings before it left.
+
+  This hold is process-level and writes nothing: torrents you paused yourself
+  stay paused, and releasing the hold does not resume them.
+
+- **Official arm64 container images.** `ghcr.io/kheopsian/hydra` is now a
+  multi-architecture image covering `linux/amd64` and `linux/arm64`, so a Pi,
+  an Ampere box or an Apple-silicon Docker host pulls the right one with no
+  change to the pull command or the compose file. Linux arm64 *binaries* have
+  shipped for a while; only the container was amd64-only.
+
+  Both architectures build in parallel on native runners rather than one of
+  them through emulation, and the tags are published as a manifest list once
+  both succeed — a tag never carries one architecture and not the other.
+
+### Fixed
+
+- **`max_connections` was doing nothing at all.** The key was parsed and
+  reported back by the engine, but no code ever enforced it, so any value you
+  set was silently ignored. It is now a real ceiling: at the limit Hydra stops
+  dialing new peers. Inbound peers still count towards the total, and so do
+  shut dialing down, but they are never turned away — refusing someone who
+  wants to leech from you would trade upload against a number. The live count
+  can therefore sit above the ceiling; what it will not do is get there by
+  Hydra's own dialing.
+
+  **Check your value before upgrading.** Because the setting never had an
+  effect, existing values were never chosen against real behaviour, and a
+  number that looks reasonable may sit well below what your instance actually
+  runs. It is now enforced as written. When the key is absent Hydra no longer
+  substitutes a default of its own: unset means unlimited, which is what every
+  install has effectively been running until now.
+
 ## v3.60.2 - 2026-08-12
 
 ### Fixed

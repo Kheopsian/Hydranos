@@ -5576,3 +5576,57 @@ function updateIssueLink() {
     const body = "**Describe the issue**\n\n\n**Version:** (see the startup banner)\n\n**Logs** (paste from the Logs tab, check for your public IP before posting):\n```\n\n```\n";
     a.href = "https://github.com/Kheopsian/Hydra/issues/new?title=" + encodeURIComponent("[bug] ") + "&body=" + encodeURIComponent(body);
 }
+
+// ─── Startup pause ──────────────────────────────────────
+//
+// While `start_paused` holds an engine, Hydra sends no announces and dials no
+// peers. That is indistinguishable from a broken daemon from the outside, so
+// the banner is permanent and undismissable for as long as the hold lasts.
+// The hold is process-level: releasing it does not touch any torrent's own
+// paused state, so torrents the user paused by hand stay paused.
+
+let _startupPauseTimer = null;
+
+async function refreshStartupPause() {
+    const el = document.getElementById("startup-pause-banner");
+    if (!el) return;
+    let st;
+    try {
+        st = await api("/api/startup-pause");
+    } catch (_) {
+        // Daemon unreachable: leave whatever is on screen rather than implying
+        // the hold was lifted.
+        return;
+    }
+    if (!st || !st.holding) {
+        el.style.display = "none";
+        if (_startupPauseTimer) { clearInterval(_startupPauseTimer); _startupPauseTimer = null; }
+        return;
+    }
+    const engines = (st.held || []).join(", ");
+    // textContent, so no esc(): escaping here would put the entities on screen.
+    document.getElementById("startup-pause-title").textContent =
+        window.t("Startup pause: {engines} not announcing", { engines });
+    document.getElementById("startup-pause-text").textContent =
+        window.t("No announces or peer connections are leaving Hydra. Adjust your rate limits now if you need to, then start. Torrents you paused yourself stay paused.");
+    el.style.display = "block";
+    // Another browser tab, or the API, can release it: keep checking so this
+    // banner cannot outlive the hold it describes.
+    if (!_startupPauseTimer) _startupPauseTimer = setInterval(refreshStartupPause, 10000);
+}
+
+async function releaseStartupPause() {
+    const btn = document.getElementById("startup-pause-release");
+    if (btn) { btn.disabled = true; btn.textContent = window.t("Starting…"); }
+    try {
+        await api("/api/startup-pause/release", { method: "POST" });
+    } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = window.t("Start now"); }
+        alert(window.t("Error: {msg}", { msg: e.message }));
+        return;
+    }
+    await refreshStartupPause();
+    if (btn) { btn.disabled = false; btn.textContent = window.t("Start now"); }
+}
+
+window.addEventListener("DOMContentLoaded", refreshStartupPause);

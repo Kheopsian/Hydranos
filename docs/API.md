@@ -42,6 +42,8 @@ Auth = `X-API-Key`.
 **Catégories** : `GET/POST /api/categories`, `PUT/DELETE /api/categories/:name`
   - `GET /api/categories/orphans` -> `[{name, torrents}]` : labels portés par des torrents mais ne correspondant à aucune catégorie configurée (résidus de suppressions antérieures au nettoyage durable du label).
   - `DELETE /api/categories/:name` -> `{cleared, cleared_stored, was_orphan}` : retire l'entrée de `categories.json`, efface le label dans les DEUX moteurs et dans le store SQLite. Accepte un label orphelin (absent de la liste) ; **404 seulement si aucun torrent ne le porte non plus**.
+**Pause de démarrage (3.61.0+)** : `GET /api/startup-pause` -> `{held:["hoard"], holding:true}` ; `POST /api/startup-pause/release` -> `{status:"ok", released:[...], holding:false}`. Verrou **niveau process** armé par `start_paused` (par moteur) : tant qu'il tient, aucune annonce ni aucun dial ne sort. **N'écrit rien** — l'intention `paused` par torrent est intacte, la relâche ne réveille pas un torrent mis en pause à la main. Relâche globale (pas de granularité par moteur) et **idempotente** : relâcher à vide = 200 avec `released:[]`.
+
 **Override passkey (2.7.10+)** : `GET /api/announce/passkeys` ; `POST /api/announce/passkeys` `{"host":"tracker.torr9.net","passkey":"..."}` (vide = clear). Hot, pas de restart, par-tracker.
 **Divers** : `GET /api/public-ip`, `/api/fs/browse`, `/api/peers/top`, `/health`, `/metrics`.
 
@@ -81,6 +83,7 @@ La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DIS
 |---|---|
 | *(top-level)* | `POST /torrents` · `POST /torrents/upload` · `DELETE /torrents/:ih` · `POST /torrents/:ih/reannounce` · `POST /torrents/:ih/add-tracker` · `GET /torrents/:ih/files` · `GET /status` · `GET /events` (SSE) · `GET /public-ip` · `GET /fs/browse` · `GET /health/anomalies` |
 | announce | `GET/POST /announce/passkeys` · `GET/POST /announce/clients` |
+| startup-pause | `GET /startup-pause` · `POST /startup-pause/release` |
 | categories | `GET /categories` · `GET /categories/orphans` · `POST /categories` · `PUT /categories/:name` · `DELETE /categories/:name` |
 | peers | `GET /peers/top` · `GET /peers/seedboxes` |
 | stats | `GET/POST /stats/baseline` |

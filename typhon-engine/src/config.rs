@@ -83,6 +83,13 @@ pub struct EngineConfig {
     pub socks5_outbound_pass: String,
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Cap on new outbound peer dials, in dials per second. 0 = unlimited
+    /// (the historical behaviour). One announce asks for 200 peers and every
+    /// one of them is dialed at once, so limiting announces alone still lets
+    /// thousands of new flows a second through a VPN tunnel; this is the knob
+    /// that actually bounds them. See `tracker::dial_limiter`.
+    #[serde(default)]
+    pub max_dials_per_sec: f64,
     #[serde(default = "default_max_uploads_per_torrent")]
     pub max_uploads_per_torrent: i32,
     #[serde(default = "default_peer_timeout")]

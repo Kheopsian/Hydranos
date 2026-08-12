@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydra - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.2.13">
+    <link rel="stylesheet" href="/static/style.css?v=1.2.14">
     <script src="/static/chart.umd.min.js"></script>
 </head>
 <body>
@@ -77,6 +77,20 @@
             <div class="health-dot" id="health-dot" title="Checking..."></div>
         </div>
     </header>
+
+    <!-- Startup pause. Sits above the tabs, on every tab, for as long as the
+         hold lasts: an engine that announces nothing and dials nothing looks
+         exactly like a broken one, so this must not be dismissible or tucked
+         inside a settings page. -->
+    <div id="startup-pause-banner" style="display:none">
+        <div class="startup-pause-inner">
+            <div>
+                <strong id="startup-pause-title">Startup pause</strong>
+                <div id="startup-pause-text" class="startup-pause-text"></div>
+            </div>
+            <button class="btn-small btn-accent" id="startup-pause-release" onclick="releaseStartupPause()">Start now</button>
+        </div>
+    </div>
 
     <nav>
         <button class="tab active" data-tab="overview">Overview</button>
@@ -1056,6 +1070,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.3.61"></script>
+    <script src="/static/app.js?v=1.3.62"></script>
 </body>
 </html>

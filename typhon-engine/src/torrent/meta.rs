@@ -174,6 +174,10 @@ impl PeerGuard {
         let addr = stats.addr;
         torrent.peer_stats.insert(addr, stats);
         torrent.peers_connected.fetch_add(1, Ordering::Relaxed);
+        // Process-wide live connection count backing `max_connections`.
+        // Maintained here rather than at the dial site so inbound sessions are
+        // counted too, and so the decrement is RAII-guaranteed below.
+        crate::tracker::dial_limiter::LIVE_CONNS.fetch_add(1, Ordering::Relaxed);
         // Connected-addr dedup: tracker/DHT both check `connected_addrs`
         // before dialing a peer to avoid spawning N parallel sockets to
         // the same address. This insert is the missing half — without it
@@ -202,6 +206,7 @@ impl Drop for PeerGuard {
     fn drop(&mut self) {
         self.torrent.peer_stats.remove(&self.addr);
         self.torrent.peers_connected.fetch_sub(1, Ordering::Relaxed);
+        crate::tracker::dial_limiter::LIVE_CONNS.fetch_sub(1, Ordering::Relaxed);
         self.torrent.connected_addrs.remove(&self.addr);
         if self.was_interested.load(Ordering::Relaxed) {
             self.torrent.peers_interested.fetch_sub(1, Ordering::Relaxed);

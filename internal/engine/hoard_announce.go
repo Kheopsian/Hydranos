@@ -183,6 +183,16 @@ func (h *HoardAnnouncer) orchestratorLoop() {
 	}
 }
 
+// startupHeld reports whether this announcer's engine is in its startup pause.
+// Every announcer here shares one engine scope, so the first one answers for
+// all of them.
+func (h *HoardAnnouncer) startupHeld() bool {
+	if len(h.announcers) == 0 {
+		return false
+	}
+	return h.announcers[0].gate.blocked()
+}
+
 // scanAndStart enumerates active torrents and starts an announce loop for
 // each one not already covered. Capped at hoardMaxNewPerCycle to avoid a
 // thundering herd on the tracker at first boot (~13k torrents).
