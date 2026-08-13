@@ -3,6 +3,37 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.61.2 - 2026-08-13
+
+### Fixed
+
+- **The engines never saved their resume data on shutdown.** Every stop, on
+  every install since the Typhon engine landed, ended with both engines killed
+  after ignoring the shutdown signal for ten seconds apiece — twenty seconds of
+  waiting, and nothing written. What survived was whatever the five-minute
+  periodic save had last put on disk, so a restart re-hashed pieces that were
+  already complete and a torrent that had just finished could come back at 0%.
+
+  The engine now handles SIGTERM and SIGINT and flushes before it exits. A
+  clean stop is also much faster: twenty seconds of dead waiting becomes well
+  under one.
+
+### Added
+
+- **`HYDRA_STOP_TIMEOUT`** sets how long each engine gets to flush before it is
+  killed (default `10s`; accepts `45s`, `2m`, or a bare number of seconds). The
+  default suits an ordinary instance — a full resume sweep runs at roughly
+  36 000 torrents per second on an SSD. Raise it if you hold several hundred
+  thousand torrents, and raise your supervisor's stop timeout with it: the two
+  engines are stopped one after the other, so the container needs more than
+  twice one engine's share.
+
+- **A shutdown budget in the shipped deployment files.** `docker-compose.yml`
+  now sets `stop_grace_period: 30s` and the systemd unit `TimeoutStopSec=30`.
+  Docker's own default is to kill a container ten seconds after SIGTERM, which
+  is not enough for both engines. If you run Hydra from your own compose file
+  or `docker run`, add the same budget — see the README and the wiki.
+
 ## v3.61.1 - 2026-08-12
 
 ### Fixed
