@@ -332,6 +332,11 @@ func (s *Server) runTransmissionImport(job *importJob, req transmissionReq) {
 				earliest = t.Resume.AddedDate
 			}
 		}
+		// Same for the completion date, else every imported seed reads as
+		// "finished at import time".
+		if t.Resume.DoneDate > 0 {
+			s.hoardEngine.SetCompletedTime(ih, time.Unix(t.Resume.DoneDate, 0))
+		}
 		// Transmission labels are multi-valued and carry no path, so they are
 		// our tags -- not our categories, which own a save path.
 		if req.ImportLabels && len(t.Resume.Labels) > 0 {

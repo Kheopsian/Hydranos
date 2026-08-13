@@ -1691,6 +1691,9 @@ func (a *hoardAPIAdapter) SetListenPort(port int) error { return a.engine.SetLis
 func (a *hoardAPIAdapter) SetAddedTime(infoHash string, t time.Time) {
 	a.engine.SetAddedTime(infoHash, t)
 }
+func (a *hoardAPIAdapter) SetCompletedTime(infoHash string, t time.Time) {
+	a.engine.SetCompletedTime(infoHash, t)
+}
 func (a *hoardAPIAdapter) HasTorrent(infoHash string) bool {
 	return a.engine.GetTorrentDetail(infoHash) != nil
 }
