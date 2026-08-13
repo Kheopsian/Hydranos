@@ -66,6 +66,9 @@ jobs:
   build:
     needs: meta
     strategy:
+      # One architecture failing must not cancel the other: a fail-fast matrix
+      # turned a broken arm64 build into a release with no Linux tarball at all.
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -91,8 +94,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # musl-tools installs the compiler as plain "musl-gcc", but cc-rs and
+      # cargo look for one named after the target triple. On x86_64 the two
+      # happen to coincide; on aarch64 they do not, so the C parts (jemalloc,
+      # ring, aws-lc) found no compiler and the build died with exit 101.
+      # On a native runner musl-gcc IS the target compiler, so a symlink under
+      # the expected name is all that is missing.
       - name: Install the musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
+          triple_cc="$(echo '${{ matrix.target }}' | sed 's/-unknown-/-/')-gcc"
+          if ! command -v "$triple_cc" >/dev/null; then
+            sudo ln -s "$(command -v musl-gcc)" "/usr/local/bin/$triple_cc"
+          fi
+          "$triple_cc" --version | head -1
 
       - name: Set up Go
         uses: actions/setup-go@v5
