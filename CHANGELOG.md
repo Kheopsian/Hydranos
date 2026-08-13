@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.61.1 - 2026-08-12
+
+### Fixed
+
+- **v3.61.0 shipped without container images.** The new multi-architecture
+  build pushed both images correctly and then failed handing their digests to
+  the step that publishes the tags, so no image was published at all — neither
+  arm64 nor amd64. Nothing was wrong with the images themselves, and v3.61.0's
+  binaries and tarballs were unaffected.
+
+  If you pull the container, use v3.61.1: it is v3.61.0 plus this fix. If you
+  installed from a tarball, v3.61.0 is already what this release contains.
+
 ## v3.61.0 - 2026-08-12
 
 ### Added
