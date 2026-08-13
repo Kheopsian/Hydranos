@@ -126,6 +126,7 @@ type HoardEngine interface {
 	AddTags(infoHash string, tags []string) error
 	RemoveTags(infoHash string, tags []string) error
 	SetAddedTime(infoHash string, t time.Time)
+	SetCompletedTime(infoHash string, t time.Time)
 	SetContentFolder(infoHash string, cf *bool)
 	// Download slot manager runtime control.
 	GetDownloadSlotStatus() engine.DownloadSlotStats

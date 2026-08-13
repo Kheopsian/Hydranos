@@ -107,6 +107,7 @@ func (emptyHoardEngine) SetTags(string, []string) error                         
 func (emptyHoardEngine) AddTags(string, []string) error                             { return errNoLocalEngine }
 func (emptyHoardEngine) RemoveTags(string, []string) error                          { return errNoLocalEngine }
 func (emptyHoardEngine) SetAddedTime(string, time.Time)                             {}
+func (emptyHoardEngine) SetCompletedTime(string, time.Time)                         {}
 func (emptyHoardEngine) SetContentFolder(string, *bool)                             {}
 func (emptyHoardEngine) GetDownloadSlotStatus() engine.DownloadSlotStats {
 	return engine.DownloadSlotStats{}

@@ -2199,6 +2199,24 @@ func (e *HoardEngine) SetAddedTime(infoHash string, t time.Time) {
 	e.cachedStatsMu.Unlock()
 }
 
+// SetCompletedTime overrides a torrent's recorded completion date (both the
+// canonical TorrentInfo and the stats cache). Used by the qBittorrent and
+// Transmission imports so a torrent that finished months ago does not read as
+// "completed at import time". Every other writer of CompletedTime only fills a
+// zero value, so a value set here right after the add survives.
+func (e *HoardEngine) SetCompletedTime(infoHash string, t time.Time) {
+	e.mu.Lock()
+	if info, ok := e.torrents[infoHash]; ok {
+		info.CompletedTime = t
+	}
+	e.mu.Unlock()
+	e.cachedStatsMu.Lock()
+	if st, ok := e.cachedStats[infoHash]; ok {
+		st.CompletedTime = t.Unix()
+	}
+	e.cachedStatsMu.Unlock()
+}
+
 // SetTorrentCategory — move a torrent between categories at runtime.
 //
 // Stops the torrent, renames its data directory to the target category's

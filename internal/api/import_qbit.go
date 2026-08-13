@@ -94,6 +94,9 @@ type qbitTorrent struct {
 	Uploaded    int64   `json:"uploaded"`
 	Downloaded  int64   `json:"downloaded"`
 	AddedOn     int64   `json:"added_on"`
+	// 0 when the torrent never finished; qBittorrent also reports -1 for
+	// "not completed" on some builds, so treat anything <= 0 as unknown.
+	CompletionOn int64 `json:"completion_on"`
 }
 
 func (q *qbitClient) torrentsInfo() ([]qbitTorrent, error) {
@@ -581,6 +584,11 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 				// Preserve the original qBit add date instead of "now".
 				if ih != "" && it.t.AddedOn > 0 {
 					s.hoardEngine.SetAddedTime(ih, time.Unix(it.t.AddedOn, 0))
+				}
+				// Same for the completion date: without it every imported seed
+				// reads as "finished just now" and any seed-time rule misfires.
+				if ih != "" && it.t.CompletionOn > 0 {
+					s.hoardEngine.SetCompletedTime(ih, time.Unix(it.t.CompletionOn, 0))
 				}
 				// Carry over a deliberate stop. Done right after the add so the
 				// bootstrap announce (fired in its own goroutine) finds the

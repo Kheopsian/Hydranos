@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.61.3 - 2026-08-13
+
+### Fixed
+
+- **The qBittorrent and Transmission imports lost the completion date.** The
+  original add date was carried over, but every imported torrent recorded as
+  having finished at the moment of the import, so seeding-time rules and the
+  "completed on" column read wrong for the whole library.
+
 ## v3.61.2 - 2026-08-13
 
 ### Fixed
