@@ -83,42 +83,37 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
       # The engine is built against musl so the tarball is a static binary.
       # Built against the runner's glibc it inherited that glibc's symbol
       # versions (2.34 on ubuntu-24.04) and a dynamic libssl, which made the
       # "bare metal" release unusable on exactly the hosts that want it --
       # seedboxes, which run older distributions. The Go binary was already
       # static via CGO_ENABLED=0; this brings the engine in line.
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      # musl-tools installs the compiler as plain "musl-gcc", but cc-rs and
-      # cargo look for one named after the target triple. On x86_64 the two
-      # happen to coincide; on aarch64 they do not, so the C parts (jemalloc,
-      # ring, aws-lc) found no compiler and the build died with exit 101.
-      # On a native runner musl-gcc IS the target compiler, so a symlink under
-      # the expected name is all that is missing.
-      - name: Install the musl toolchain
-        run: |
-          sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
-          triple_cc="$(echo '${{ matrix.target }}' | sed 's/-unknown-/-/')-gcc"
-          if ! command -v "$triple_cc" >/dev/null; then
-            sudo ln -s "$(command -v musl-gcc)" "/usr/local/bin/$triple_cc"
-          fi
-          "$triple_cc" --version | head -1
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-
+      #
+      # It builds inside Alpine rather than on the runner because Ubuntu's
+      # musl-tools is only a spec wrapper around the glibc gcc: jemalloc's
+      # configure rejects it on aarch64 ("Don't have atomics implemented on
+      # this platform") and the arm64 job died with exit 101. Alpine IS musl,
+      # so the C dependencies -- jemalloc, ring, aws-lc -- build as they would
+      # natively, and the image is multi-arch so each runner uses its own
+      # architecture with no emulation.
       - name: Build Typhon engine
-        working-directory: typhon-engine
-        env:
-          RUSTFLAGS: "--cfg tokio_unstable"
-        run: cargo build --release --target ${{ matrix.target }} --bin typhon-engine
+        run: |
+          docker run --rm \
+            -v "$PWD":/src -w /src/typhon-engine \
+            -e RUSTFLAGS="--cfg tokio_unstable" \
+            rust:alpine sh -c '
+              set -e
+              apk add --no-cache build-base musl-dev cmake perl
+              cargo build --release --target ${{ matrix.target }} --bin typhon-engine
+            '
+          # The container writes as root; later steps read as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" typhon-engine/target
 
       - name: Check the engine really is static
         working-directory: typhon-engine
