@@ -26,9 +26,15 @@ type transmissionReq struct {
 	CategoriesFromDirs bool              `json:"categories_from_dirs"`
 	ImportLabels       bool              `json:"import_labels"`
 	// StartStopped imports everything stopped, whatever Transmission said, so
-	// a trial run announces nothing until the user starts the torrents.
-	StartStopped bool `json:"start_stopped"`
+	// a trial run announces nothing until the user starts the torrents. Omitted
+	// means true, same as the qBit import: land quiet, let the user check the
+	// paths, then start.
+	StartStopped *bool `json:"start_stopped"`
 }
+
+// startStopped reports whether the import should land everything paused.
+// A missing field means yes.
+func (r transmissionReq) startStopped() bool { return r.StartStopped == nil || *r.StartStopped }
 
 // categoryFromDest turns a destination folder into a category name: the last
 // path element, which is what people actually organise by. Empty for a bare
@@ -346,7 +352,7 @@ func (s *Server) runTransmissionImport(job *importJob, req transmissionReq) {
 		}
 		// A torrent paused in Transmission stays stopped here. Set right after
 		// the add so the bootstrap announce finds the intent and stays quiet.
-		if req.StartStopped || t.Resume.Paused {
+		if req.startStopped() || t.Resume.Paused {
 			if err := s.hoardEngine.SetUserPaused(ih, true); err == nil {
 				persistPaused([]string{ih}, true)
 			}

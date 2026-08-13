@@ -342,9 +342,15 @@ type qbitCreds struct {
 	// StartStopped imports the whole library stopped, whatever the other
 	// client said. For trying Hydra out on a real library without a single
 	// announce leaving the box: nothing talks to a tracker until the user
-	// starts the torrents.
-	StartStopped bool `json:"start_stopped"`
+	// starts the torrents. Omitted means true: an import is a migration, and a
+	// migration that starts announcing before the user has checked the paths is
+	// the one mistake that cannot be taken back.
+	StartStopped *bool `json:"start_stopped"`
 }
+
+// startStopped reports whether the import should land everything paused.
+// A missing field means yes.
+func (q qbitCreds) startStopped() bool { return q.StartStopped == nil || *q.StartStopped }
 
 // handleQbitPreview is a dry-run: it connects to qBittorrent and reports what
 // WOULD be imported (counts, categories, path prefixes, a sample). No writes.
@@ -594,7 +600,7 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 				// bootstrap announce (fired in its own goroutine) finds the
 				// intent already set and stays quiet -- otherwise every stopped
 				// torrent would greet the tracker and immediately say goodbye.
-				if ih != "" && (req.StartStopped || importedAsStopped(it.t.State)) {
+				if ih != "" && (req.startStopped() || importedAsStopped(it.t.State)) {
 					if err := s.hoardEngine.SetUserPaused(ih, true); err != nil {
 						slog.Warn("qbit import: could not carry the stopped state",
 							"name", name, "error", err)
