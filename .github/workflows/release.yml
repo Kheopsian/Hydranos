@@ -70,16 +70,29 @@ jobs:
         include:
           - runner: ubuntu-latest
             arch: amd64
+            target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             arch: arm64
+            target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
+      # The engine is built against musl so the tarball is a static binary.
+      # Built against the runner's glibc it inherited that glibc's symbol
+      # versions (2.34 on ubuntu-24.04) and a dynamic libssl, which made the
+      # "bare metal" release unusable on exactly the hosts that want it --
+      # seedboxes, which run older distributions. The Go binary was already
+      # static via CGO_ENABLED=0; this brings the engine in line.
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install the musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -90,7 +103,21 @@ jobs:
         working-directory: typhon-engine
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
-        run: cargo build --release --bin typhon-engine
+        run: cargo build --release --target ${{ matrix.target }} --bin typhon-engine
+
+      - name: Check the engine really is static
+        working-directory: typhon-engine
+        run: |
+          BIN="target/${{ matrix.target }}/release/typhon-engine"
+          file "$BIN"
+          # A static build resolves no shared objects, so ldd prints no "=>"
+          # lines. Matching on that rather than on ldd's wording, which differs
+          # between "statically linked" and "not a dynamic executable".
+          if ldd "$BIN" 2>&1 | grep -q "=>"; then
+            echo "::error::the engine links shared libraries; the tarball would not run on older hosts"
+            ldd "$BIN" || true
+            exit 1
+          fi
 
       - name: Build hydra
         run: CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o hydra ./cmd/hydra
@@ -101,7 +128,7 @@ jobs:
           DIR="hydra-${VER}-linux-${{ matrix.arch }}"
           mkdir -p "$DIR"
           cp hydra "$DIR"/hydra
-          cp typhon-engine/target/release/typhon-engine "$DIR"/hydra-engine
+          cp typhon-engine/target/${{ matrix.target }}/release/typhon-engine "$DIR"/hydra-engine
           cp configs/default.toml "$DIR"/default.toml.example
           cp packaging/hydra.service "$DIR"/hydra.service
           cp packaging/install.sh "$DIR"/install.sh

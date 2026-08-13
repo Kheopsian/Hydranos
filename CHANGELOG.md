@@ -3,6 +3,31 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.61.4 - 2026-08-13
+
+### Fixed
+
+- **The release tarballs would not run on an older distribution.** The engine
+  was built against the runner's glibc and against OpenSSL as a shared library,
+  so it demanded `libssl.so.3` and glibc 2.34 — while the hosts that most want a
+  bare-metal install, seedboxes, commonly run Debian 11 (glibc 2.31, OpenSSL
+  1.1). The failure was immediate and opaque:
+
+      hydra-engine: error while loading shared libraries: libssl.so.3:
+      cannot open shared object file: No such file or directory
+
+  The engine is now built against musl and links nothing at all, matching the
+  Go binary which was already static. Verified running on Debian 11, Debian 10
+  (glibc 2.28) and Alpine, which has no glibc. Container users were never
+  affected and nothing changes for them.
+
+  Release builds now fail if the engine links any shared library, so this
+  cannot come back unnoticed.
+
+  The tarball is a little larger as a result. If you hit this, download the
+  v3.61.4 tarball and replace both binaries; your config and data are
+  untouched.
+
 ## v3.61.3 - 2026-08-13
 
 ### Fixed
