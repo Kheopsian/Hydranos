@@ -62,6 +62,28 @@ box sustains.
 
 ---
 
+## Give Hydra time to stop
+
+On SIGTERM Hydra saves its store and then asks each engine to flush its resume
+data. Docker kills a container ten seconds after SIGTERM by default, which is
+not enough to get through both engines: the flush is cut short and the next
+start re-checks pieces that were already complete.
+
+The bundled [`docker-compose.yml`](docker-compose.yml) sets
+`stop_grace_period: 30s` for you. If you run Hydra with a plain `docker run`,
+pass the same budget yourself:
+
+```bash
+docker run --stop-timeout 30 ...      # and: docker stop -t 30 hydra
+```
+
+Each engine gets ten seconds of that budget, and the two are stopped one after
+the other. If you hold several hundred thousand torrents the sweep takes
+longer -- raise `HYDRA_STOP_TIMEOUT` (e.g. `45s`) and keep the supervisor's
+grace period above twice that.
+
+---
+
 ## Documentation
 
 Install steps, architecture, every networking mode and the edge cases live in

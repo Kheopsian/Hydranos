@@ -354,11 +354,66 @@ async fn main() {
         }
     });
 
-    // Start RPC server (blocks)
+    // Start RPC server (blocks until it dies or a shutdown signal arrives).
+    //
+    // rpc::serve is an endless accept loop, so before this select the line
+    // below it was unreachable: the default disposition of SIGTERM/SIGINT
+    // killed the process where it stood and the resume data on disk was
+    // whatever the five-minute periodic save had last written. A restart then
+    // re-hashed pieces that were already complete, and a torrent that had just
+    // finished could come back at 0%.
     let socket_path = config.socket_path.clone();
-    rpc::serve(&socket_path, torrent_mgr.clone(), disk_mgr, config).await;
+    let serve = rpc::serve(&socket_path, torrent_mgr.clone(), disk_mgr, config);
+    tokio::pin!(serve);
+    tokio::select! {
+        _ = &mut serve => info!("[engine] RPC server exited"),
+        sig = shutdown_signal() => info!("[engine] {} received, flushing resume data", sig),
+    }
 
-    // Save on shutdown
+    // Save on shutdown. Hydra allows a bounded budget for this (10s per engine
+    // by default, HYDRA_STOP_TIMEOUT) and kills the process when it runs out,
+    // so a partial sweep is still better than none: every torrent written
+    // before the kill is one the next start does not have to re-check.
     torrent_mgr.save_all_resume();
     info!("[engine] resume data saved");
+}
+
+/// Resolve once either termination signal is received, naming the one that
+/// arrived. Hydra stops its engines with SIGINT; a bare-metal or systemd setup
+/// sends SIGTERM, and a terminal sends SIGINT, so both have to be honoured.
+#[cfg(unix)]
+async fn shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    // A handler that cannot be installed must not swallow the shutdown: leave
+    // that branch pending forever so the other one still fires.
+    let mut term = signal(SignalKind::terminate())
+        .map_err(|e| error!("SIGTERM handler setup failed: {}", e))
+        .ok();
+    let mut int = signal(SignalKind::interrupt())
+        .map_err(|e| error!("SIGINT handler setup failed: {}", e))
+        .ok();
+
+    async fn recv(s: &mut Option<tokio::signal::unix::Signal>) {
+        match s {
+            Some(sig) => {
+                sig.recv().await;
+            }
+            None => std::future::pending().await,
+        }
+    }
+
+    tokio::select! {
+        _ = recv(&mut term) => "SIGTERM",
+        _ = recv(&mut int) => "SIGINT",
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> &'static str {
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        error!("ctrl-c handler setup failed: {}", e);
+        std::future::pending::<()>().await;
+    }
+    "ctrl-c"
 }

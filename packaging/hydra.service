@@ -13,6 +13,12 @@ Environment=HYDRA_ENGINE_BIN=/opt/hydra/hydra-engine
 ExecStart=/opt/hydra/hydra --config /etc/hydra/default.toml
 Restart=on-failure
 RestartSec=5
+# On SIGTERM Hydra saves its store, then flushes each engine's resume data in
+# turn (10s apiece by default, HYDRA_STOP_TIMEOUT). systemd's default stop
+# timeout would cut that short and leave the resume data stale, so the next
+# start re-checks pieces that were already complete. Raise both together if you
+# hold several hundred thousand torrents.
+TimeoutStopSec=30
 # One Unix socket per torrent at scale -> raise the fd limit.
 LimitNOFILE=1048576
 

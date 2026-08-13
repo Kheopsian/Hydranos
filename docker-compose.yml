@@ -7,6 +7,13 @@ services:
     image: ghcr.io/kheopsian/hydra:latest
     container_name: hydra
     restart: unless-stopped
+    # Shutdown budget. On SIGTERM Hydra saves its store, then stops the two
+    # engines one after the other, each with its own timeout (10s by default,
+    # HYDRA_STOP_TIMEOUT below). Docker's own default is 10s for the whole
+    # container, which is not enough: it would SIGKILL mid-flush and leave the
+    # resume data stale, so a restart re-checks pieces that were already done.
+    # Keep this above 2 x HYDRA_STOP_TIMEOUT.
+    stop_grace_period: 30s
     ulimits:
       nofile: { soft: 1048576, hard: 1048576 }
     ports:
@@ -20,6 +27,10 @@ services:
     # environment:
     #   PUID: 1000
     #   PGID: 1000
+    #   # Per-engine shutdown budget. The default 10s fits an ordinary
+    #   # instance; raise it (and stop_grace_period above with it) if you hold
+    #   # several hundred thousand torrents, where the resume sweep is longer.
+    #   HYDRA_STOP_TIMEOUT: 10s
     volumes:
       - ./config:/config    # config, resume data, SQLite store (persistent)
       - ./data:/data         # torrent payload data

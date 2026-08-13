@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 
 	"github.com/Kheopsian/hydra/internal/logs"
 	"strings"
@@ -533,18 +534,54 @@ func (ep *EngineProcess) Client() EngineClient {
 	return ep.client
 }
 
+// defaultStopTimeout is how long an engine process gets to flush its resume
+// data before it is killed. Ten seconds covers an ordinary instance: a full
+// resume sweep measured ~36k torrents/s on an SSD, so anything under a few
+// hundred thousand torrents finishes well inside it.
+const defaultStopTimeout = 10 * time.Second
+
+// StopTimeout returns the per-engine shutdown budget, overridable with
+// HYDRA_STOP_TIMEOUT (a Go duration, e.g. "45s", or a bare number of seconds).
+//
+// Two engines are stopped one after the other, so the supervisor has to allow
+// at least twice this on top of the Go-side state save -- see the
+// stop_grace_period note in docker-compose.yml. An unparsable or non-positive
+// value falls back to the default rather than leaving the engine unbounded.
+func StopTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("HYDRA_STOP_TIMEOUT"))
+	if raw == "" {
+		return defaultStopTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		// A bare number is the natural thing to write; read it as seconds.
+		if n, convErr := strconv.Atoi(raw); convErr == nil {
+			d, err = time.Duration(n)*time.Second, nil
+		}
+	}
+	if err != nil || d <= 0 {
+		slog.Warn("ignoring invalid HYDRA_STOP_TIMEOUT, using the default",
+			"value", raw, "default", defaultStopTimeout)
+		return defaultStopTimeout
+	}
+	return d
+}
+
 // Stop gracefully shuts down the engine process.
 func (ep *EngineProcess) Stop() error {
 	if ep.client != nil {
 		ep.client.Close()
 	}
 	if ep.cmd != nil && ep.cmd.Process != nil {
+		timeout := StopTimeout()
 		ep.cmd.Process.Signal(os.Interrupt)
 		done := make(chan error, 1)
 		go func() { done <- ep.cmd.Wait() }()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(timeout):
+			slog.Warn("engine did not exit in time, killing it -- resume data may be stale",
+				"engine", ep.engine, "timeout", timeout)
 			ep.cmd.Process.Kill()
 		}
 	}
