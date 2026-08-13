@@ -35,7 +35,13 @@ systemctl enable --now hydra
 
 echo
 echo "Hydra installed and started. UI: http://<this-host>:8199"
-echo "Admin password (printed once on first boot):"
-echo "  journalctl -u hydra | grep -i password"
+echo
+echo "Create the admin account by opening the UI. For safety that first-run"
+echo "screen only answers callers on the same machine or a private network, so"
+echo "an instance exposed to the internet cannot be claimed by a stranger."
+echo "On a remote host (a seedbox), set the password here instead:"
+echo "  $PREFIX/hydra reset-password '<newpassword>' $CFG/default.toml"
+echo "  systemctl restart hydra"
+echo
 echo "Manage: systemctl {status,restart,stop} hydra   |   logs: journalctl -u hydra -f"
 echo "Upgrade: unpack a newer tarball and re-run ./install.sh"

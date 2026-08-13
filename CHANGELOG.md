@@ -3,6 +3,28 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.61.5 - 2026-08-13
+
+### Fixed
+
+- **`reset-password` now accepts `--config <path>`**, the form everyone tries
+  first because it is how the daemon takes it. It used to store the literal
+  string as the filename and fail with `open --config: no such file or
+  directory`. The positional path still works.
+
+- **A subcommand placed after other arguments says so instead of starting the
+  daemon.** `hydra --config … reset-password …` used to boot the server and sit
+  there, which reads as a hang rather than as a mistake.
+
+- **The bare-metal instructions were wrong.** `install.sh` and the wiki told you
+  to find the admin password with `journalctl -u hydra | grep -i password`, but
+  no password has been generated since v3.55.0 replaced it with a first-run
+  screen. On a remote host that screen is refused — it only answers a private
+  network, so an instance exposed to the internet cannot be claimed by a
+  stranger — which left a seedbox user with no documented way in. The installer
+  and the wiki now point at `reset-password`, and the wiki has a section for
+  installing without root.
+
 ## v3.61.4 - 2026-08-13
 
 ### Fixed

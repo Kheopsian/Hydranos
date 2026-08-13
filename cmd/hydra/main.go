@@ -120,7 +120,61 @@ func resolveConfigPath(def string, explicit bool) string {
 	return target
 }
 
+// subcommands are the one-shot maintenance commands. Each must be the first
+// argument: everything after it belongs to it, and the daemon never starts.
+var subcommands = []string{"hash-password", "reset-password"}
+
+// misplacedSubcommand returns a subcommand found anywhere but first, so we can
+// say so instead of silently starting the daemon. `hydra --config x
+// reset-password y` used to boot the server and sit there, which reads as a
+// hang rather than as a mistake, and cost a user a long evening.
+func misplacedSubcommand(args []string) string {
+	for _, a := range args {
+		for _, sub := range subcommands {
+			if a == sub {
+				return sub
+			}
+		}
+	}
+	return ""
+}
+
+// configPathFromArgs picks the config path out of a subcommand's arguments.
+// The path is positional, but `--config <path>` and `--config=<path>` are
+// accepted too: that is how the daemon takes it, so it is what everyone tries
+// first. Passing it that way used to store the literal string "--config" as
+// the filename and fail with "open --config: no such file or directory".
+func configPathFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--config" || a == "-config":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		case strings.HasPrefix(a, "--config="):
+			return strings.TrimPrefix(a, "--config=")
+		case strings.HasPrefix(a, "-config="):
+			return strings.TrimPrefix(a, "-config=")
+		case !strings.HasPrefix(a, "-"):
+			return a
+		}
+	}
+	return ""
+}
+
 func main() {
+	// A subcommand that is not first is a mistake, not a request to serve.
+	if len(os.Args) > 2 {
+		if sub := misplacedSubcommand(os.Args[2:]); sub != "" {
+			fmt.Fprintf(os.Stderr,
+				"%s must be the first argument: hydra %s ...\n"+
+					"(seen after other arguments; refusing to start the daemon instead)\n",
+				sub, sub)
+			os.Exit(2)
+		}
+	}
+
 	// `hydra hash-password <pw>` : imprime un hash bcrypt a coller dans [auth]
 	// password_hash (bootstrap du login, aucune connexion requise).
 	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
@@ -145,13 +199,16 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: hydra reset-password <newpassword> [config-path]")
+			fmt.Fprintln(os.Stderr, "       hydra reset-password <newpassword> --config <config-path>")
 			os.Exit(2)
 		}
-		cfgPath := "/config/default.toml"
-		if len(os.Args) >= 4 {
-			cfgPath = os.Args[3]
-		} else if d := os.Getenv("HYDRA_CONFIG_DIR"); d != "" {
-			cfgPath = filepath.Join(d, "default.toml")
+		cfgPath := configPathFromArgs(os.Args[3:])
+		if cfgPath == "" {
+			if d := os.Getenv("HYDRA_CONFIG_DIR"); d != "" {
+				cfgPath = filepath.Join(d, "default.toml")
+			} else {
+				cfgPath = "/config/default.toml"
+			}
 		}
 		h, err := bcrypt.GenerateFromPassword([]byte(os.Args[2]), bcrypt.DefaultCost)
 		if err != nil {
