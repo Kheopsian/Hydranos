@@ -32,7 +32,10 @@ num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"
 librqbit-utp = "0.7"
-librqbit-dht = "5"
+# sha1-ring, not the default sha1-crypto-hash: the latter pulls OpenSSL in as a
+# shared library, which made the release tarball unusable on any host whose
+# libssl is older than the build runner's. ring compiles in.
+librqbit-dht = { version = "5", default-features = false, features = ["sha1-ring"] }
 parking_lot = "0.12"
 
 # jemalloc (heap profiling of the Linux leak) and nix are Unix-only; the
