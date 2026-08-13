@@ -3,6 +3,25 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.62.0 - 2026-08-13
+
+### Changed
+
+- **Imports now land everything stopped by default.** The option existed since
+  v3.54.0 but was off, so a migration started announcing before you had a chance
+  to check the paths. Uncheck the box to get the old behaviour. Callers of
+  `/api/import/{qbit,transmission}/start` that omit `start_stopped` are affected
+  too: omitted now means stopped.
+
+### Fixed
+
+- **The import wizard's exit button no longer says "Skip" when opened from
+  Settings**, where it cancels rather than skips. It also stopped silently
+  dismissing the first-run import prompt when used that way.
+
+- **The progress dialog stops saying "Importing..." once the import is done**,
+  which contradicted the "Import complete" line right under it.
+
 ## v3.61.5 - 2026-08-13
 
 ### Fixed

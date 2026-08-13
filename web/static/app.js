@@ -343,8 +343,13 @@ function promptApiKey(reason) {
 // ── qBittorrent import wizard ─────────────────────────────────────────────
 // Onboarding: connect to a running qBittorrent WebUI and seed its library into
 // Hydra (hoard). 3 steps: credentials → preview → live progress (SSE).
+// Opened two ways, and the exit button is not the same thing in each: from the
+// first-run prompt it is "Skip", which also means "stop asking me"; from
+// Settings the user went looking for the wizard, so it is a plain "Cancel" that
+// must not silently dismiss the onboarding.
 let _importOpen = false;
-function importWizard() {
+function importWizard(opts) {
+    const fromSettings = !!(opts && opts.fromSettings);
     if (_importOpen) return;
     _importOpen = true;
     const ov = document.createElement("div");
@@ -363,8 +368,11 @@ function importWizard() {
                 <button class="btn-primary" id="src-qbit" style="flex:1">qBittorrent</button>
                 <button class="btn-primary" id="src-tr" style="flex:1">Transmission</button>
             </div>
-            <div class="modal-actions"><button id="src-skip" class="btn-small">Skip</button></div>`;
-        box.querySelector("#src-skip").onclick = () => { localStorage.setItem("hydra_import_dismissed", "1"); close(); };
+            <div class="modal-actions"><button id="src-skip" class="btn-small">${fromSettings ? t("Cancel") : t("Skip")}</button></div>`;
+        box.querySelector("#src-skip").onclick = () => {
+            if (!fromSettings) localStorage.setItem("hydra_import_dismissed", "1");
+            close();
+        };
         box.querySelector("#src-qbit").onclick = () => stepCreds();
         box.querySelector("#src-tr").onclick = () => stepTransmission();
     }
@@ -438,7 +446,7 @@ function importWizard() {
             ${d.without_resume ? `<p class="modal-desc">${t("{n} torrent(s) have no resume file: no save path, they will be skipped.", { n: d.without_resume })}</p>` : ""}
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (Transmission path → what Hydra sees):")}</p>
             <div style="max-height:150px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
-            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped"> ${t("Import everything stopped, no announce until you start them")}</label>
+            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="tr-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="tr-back2">Back</button>
@@ -516,7 +524,7 @@ function importWizard() {
             <p class="modal-desc">${t("Categories: {list}, all imported as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:")}</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
-            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped"> ${t("Import everything stopped, no announce until you start them")}</label>
+            <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="qb-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="qb-back">${t("Back")}</button>
@@ -548,7 +556,7 @@ function importWizard() {
     }
 
     function stepProgress() {
-        box.innerHTML = `<h3>${t("Importing…")}</h3>
+        box.innerHTML = `<h3 id="qb-title">${t("Importing…")}</h3>
             <p class="modal-desc" id="qb-phase">${t("Connecting…")}</p>
             <div style="background:var(--border);border-radius:4px;height:10px;overflow:hidden;margin:8px 0">
                 <div id="qb-bar" style="height:100%;width:0;background:var(--accent-hoard);transition:width .2s"></div>
@@ -558,7 +566,8 @@ function importWizard() {
             <div class="modal-actions"><button class="btn-primary" id="qb-done" style="display:none">${t("Close &amp; reload")}</button></div>`;
         const q = API_KEY ? ("?apikey=" + encodeURIComponent(API_KEY)) : "";
         const es = new EventSource("/api/import/qbit/events" + q);
-        const phase = box.querySelector("#qb-phase"), bar = box.querySelector("#qb-bar"),
+        const title = box.querySelector("#qb-title"),
+            phase = box.querySelector("#qb-phase"), bar = box.querySelector("#qb-bar"),
             stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
             doneBtn = box.querySelector("#qb-done");
         const labels = { connect: t("Connecting…"), categories: t("Creating categories…"), torrents: t("Importing torrents…"), done: t("Done"), error: t("Error") };
@@ -573,7 +582,15 @@ function importWizard() {
             if (d.phase === "error") { phase.style.color = "var(--accent-red)"; phase.textContent = t("Error: {msg}", { msg: d.error || t("unknown") }); }
             if (d.finished) {
                 es.close();
-                if (d.phase !== "error") { bar.style.width = "100%"; phase.textContent = t("Import complete"); }
+                // The heading has to stop saying "Importing…" too, or it sits
+                // there contradicting the line right under it.
+                if (d.phase === "error") {
+                    title.textContent = t("Import failed");
+                } else {
+                    bar.style.width = "100%";
+                    title.textContent = t("Import complete");
+                    phase.textContent = labels.done; // not the title again
+                }
                 doneBtn.style.display = "";
                 doneBtn.onclick = () => location.reload();
             }
@@ -583,7 +600,7 @@ function importWizard() {
 
     stepSource();
 }
-window.importFromQbit = importWizard;
+window.importFromQbit = () => importWizard({ fromSettings: true });
 
 // Offer the import once on a fresh instance (no recorded provenance yet).
 function maybeOfferImport() {

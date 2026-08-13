@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -99,5 +100,38 @@ func TestProvenanceRoundTrip(t *testing.T) {
 	got, ok := loadProvenance(dir)
 	if !ok || got != p {
 		t.Fatalf("roundtrip mismatch: %+v ok=%v", got, ok)
+	}
+}
+
+// TestStartStoppedDefault pins the default: an import with no "start_stopped"
+// field lands everything paused. Callers that want the old behaviour have to
+// ask for it explicitly with false.
+func TestStartStoppedDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"omitted", `{"url":"http://x"}`, true},
+		{"explicit true", `{"url":"http://x","start_stopped":true}`, true},
+		{"explicit false", `{"url":"http://x","start_stopped":false}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var q qbitCreds
+			if err := json.Unmarshal([]byte(tc.body), &q); err != nil {
+				t.Fatalf("unmarshal qbit: %v", err)
+			}
+			if got := q.startStopped(); got != tc.want {
+				t.Errorf("qbit startStopped() = %v, want %v", got, tc.want)
+			}
+			var r transmissionReq
+			if err := json.Unmarshal([]byte(tc.body), &r); err != nil {
+				t.Fatalf("unmarshal transmission: %v", err)
+			}
+			if got := r.startStopped(); got != tc.want {
+				t.Errorf("transmission startStopped() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

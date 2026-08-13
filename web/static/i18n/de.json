@@ -53,5 +53,7 @@
  "Uploaded": "Hochgeladen",
  "Uptime": "Laufzeit",
  "Username": "Benutzername",
- "Welcome to Hydra": "Willkommen bei Hydra"
+ "Welcome to Hydra": "Willkommen bei Hydra",
+ "Skip": "Uberspringen",
+ "Import failed": "Import fehlgeschlagen"
 }

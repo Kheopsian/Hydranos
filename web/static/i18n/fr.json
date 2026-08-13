@@ -598,5 +598,7 @@
   "Δ avg": "Δ moy",
   "▶ Run now": "▶ Lancer maintenant",
   "✓ reachable": "✓ joignable",
-  "✗ unreachable: {err}": "✗ injoignable : {err}"
+  "✗ unreachable: {err}": "✗ injoignable : {err}",
+  "Skip": "Passer",
+  "Import failed": "Import échoué"
 }
