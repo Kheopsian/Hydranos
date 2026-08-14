@@ -1600,6 +1600,16 @@ func (s *Server) handleHoardPin(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "torrent not in hoard: " + hash})
 		return
 	}
+	// A pin buys a download slot and nothing else, so it is meaningless on a
+	// torrent that has finished. Refuse rather than accept-then-reap: the slot
+	// manager drops such pins on its next tick, and a pin that silently
+	// vanished a few seconds later would just look broken.
+	if st := s.hoardEngine.GetTorrentDetail(hash); st != nil {
+		if prog, ok := st["progress"].(float64); ok && prog >= 1.0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "torrent is complete: a pin only grants a download slot"})
+			return
+		}
+	}
 	s.hoardEngine.PinTorrent(hash)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "info_hash": hash, "pinned": true})
 }

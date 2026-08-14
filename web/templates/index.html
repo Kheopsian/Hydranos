@@ -423,6 +423,7 @@
                 <button class="chip chip-state" data-state="seeding" onclick="setHoardStateFilter(this, 'seeding')">Seeding</button>
                 <button class="chip chip-state chip-active-seed" data-state="__active__" onclick="setHoardStateFilter(this, '__active__')">Actively Seeding</button>
                 <button class="chip chip-state" data-state="downloading" onclick="setHoardStateFilter(this, 'downloading')">Downloading</button>
+                <button class="chip chip-state" data-state="__pinned__" onclick="setHoardStateFilter(this, '__pinned__')">Forced</button>
                 <button class="chip chip-state" data-state="stopped" onclick="setHoardStateFilter(this, 'stopped')">Stopped</button>
                 <button class="chip chip-state" data-state="queued" onclick="setHoardStateFilter(this, 'queued')">Queued</button>
                 <button class="chip chip-state" data-state="checking_files" onclick="setHoardStateFilter(this, 'checking_files')">Checking</button>
@@ -1058,6 +1059,8 @@
         <div class="ctx-separator"></div>
         <div class="ctx-item" id="ctx-pause" onclick="_pauseSelected(true)">Stop</div>
         <div class="ctx-item" id="ctx-resume" onclick="_pauseSelected(false)">Start</div>
+        <div class="ctx-item" id="ctx-pin" onclick="_pinSelected(true)">Force download</div>
+        <div class="ctx-item" id="ctx-unpin" onclick="_pinSelected(false)">Stop forcing</div>
         <div class="ctx-separator"></div>
         <div class="ctx-item" onclick="_reannounceSelected()">Reannounce</div>
         <div class="ctx-item" id="ctx-recheck" onclick="_recheckSelected()">Recheck</div>

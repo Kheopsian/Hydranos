@@ -303,3 +303,50 @@ func (s *AgentStore) DeleteTagNames(names []string) error {
 
 // TagNames returns every known tag name.
 func (s *AgentStore) TagNames() ([]string, error) { return tagNames(s.db) }
+
+// setPinned records (or clears) the manual "force download" pin for one
+// torrent. Mirrors setPaused: the row is created by the sync tick, so a pin set
+// in the window between an add and the next sync would update nothing. That is
+// reported rather than swallowed, because a pin that silently failed to persist
+// looks fine until the next restart.
+func setPinned(db *sql.DB, mux *sync.Mutex, infoHash string, pinned bool) error {
+	mux.Lock()
+	defer mux.Unlock()
+	res, err := db.Exec(`UPDATE torrents SET pinned = ? WHERE info_hash = ?`, boolToInt(pinned), infoHash)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		return fmt.Errorf("no torrent row for %s yet", infoHash)
+	}
+	return nil
+}
+
+// pinnedList returns every pinned info_hash, to seed the engine at boot.
+func pinnedList(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT info_hash FROM torrents WHERE pinned = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var ih string
+		if err := rows.Scan(&ih); err != nil {
+			return nil, err
+		}
+		out = append(out, ih)
+	}
+	return out, rows.Err()
+}
+
+// SetPinned records (or clears) the pin for one torrent.
+func (s *Store) SetPinned(infoHash string, pinned bool) error {
+	return setPinned(s.db, &s.wmux, infoHash, pinned)
+}
+
+// PinnedList returns the info_hashes of every pinned torrent.
+func (s *Store) PinnedList() ([]string, error) {
+	return pinnedList(s.db)
+}

@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.64.0 - 2026-08-14
+
+### Added
+- **Force download, from the torrent list.** Right-click a hoard torrent and pick *Force download*: it holds a download slot from then on, ahead of the seed-rank quota and exempt from the activity cooldown. The engine has been able to do this for a while, but the only way to ask was a hand-written API call. A matching *Forced* filter chip sits next to *Downloading*.
+- **Filter counts now follow the filtering.** Each group of chips is counted with the other groups applied but never its own, so picking a category makes every tracker report what it holds *inside* that category, while the tracker list stays whole and switchable. Previously every chip showed its total against the entire hoard no matter what was selected, and the numbers only refreshed when the list itself changed.
+
+### Changed
+- **Pins moved from a JSON file to the database.** They were kept in `hoard_pinned.json` beside the engine; they are now a `pinned` column on the torrent row, next to `paused`. The row dies with the torrent, so a pin can no longer outlive what it points at - the old file had accumulated 140 pins on torrents removed long ago. Nothing is carried over from it: a pin only claims a download slot, so a pin on a finished torrent meant nothing worth keeping.
+- **A pin now ends when it stops meaning anything.** The slot manager drops any pin whose torrent is no longer incomplete, whether it finished or was removed, and pinning a torrent that has already completed is refused outright rather than accepted and quietly reaped moments later.
+
 ## v3.63.0 - 2026-08-13
 
 ### Added
