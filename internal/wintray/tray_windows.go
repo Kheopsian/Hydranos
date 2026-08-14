@@ -39,6 +39,13 @@ type Config struct {
 	IconPNG []byte       // any size; scaled to the small-icon metric
 	Stats   func() Stats // polled every tick for the tooltip; may be nil
 	OnQuit  func()       // called once when the user picks Quit; may be nil
+	// OnUpdate is called when the user picks "Check for updates". It only
+	// starts the updater; it does not stop Hydra. The updater decides whether
+	// there is anything to do, asks, downloads and verifies first, and closes
+	// this window itself when it is finally ready to replace the files. That
+	// ordering is the point: checking for an update you turn out not to want
+	// must not leave Hydra stopped. May be nil.
+	OnUpdate func()
 }
 
 const (
@@ -46,8 +53,9 @@ const (
 	timerID         = 1
 	tooltipEveryMS  = 2000
 
-	idOpen = 1001
-	idQuit = 1002
+	idOpen   = 1001
+	idQuit   = 1002
+	idUpdate = 1003
 )
 
 var (
@@ -328,6 +336,12 @@ func (t *Tray) wndProc(hwnd windows.HWND, message uint32, wParam, lParam uintptr
 		switch uint32(wParam) & 0xFFFF {
 		case idOpen:
 			t.openUI()
+		case idUpdate:
+			// Started, not awaited: the updater runs on its own and will post
+			// WM_CLOSE here when it needs Hydra gone.
+			if t.cfg.OnUpdate != nil {
+				go t.cfg.OnUpdate()
+			}
 		case idQuit:
 			procPostMessageW.Call(uintptr(t.hwnd), wmClose, 0, 0)
 		}
@@ -366,6 +380,8 @@ func (t *Tray) showMenu() {
 	appendItem(menu, mfString|mfGrayed, 0, rates)
 	appendItem(menu, mfSeparator, 0, "")
 	appendItem(menu, mfString, idOpen, "Open Hydra")
+	appendItem(menu, mfSeparator, 0, "")
+	appendItem(menu, mfString, idUpdate, "Check for updates")
 	appendItem(menu, mfSeparator, 0, "")
 	appendItem(menu, mfString, idQuit, "Quit Hydra")
 
