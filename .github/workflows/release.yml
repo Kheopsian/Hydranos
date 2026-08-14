@@ -185,6 +185,15 @@ jobs:
         # the notification area otherwise.
         run: go build -mod=vendor -ldflags="-s -w -H windowsgui" -o hydra.exe ./cmd/hydra
 
+      - name: Build the updater
+        env:
+          CGO_ENABLED: "0"
+        # Separate binary on purpose: Windows locks a running image, so
+        # hydra.exe cannot overwrite itself. Also GUI-subsystem -- it talks to
+        # the user through message boxes, and a console window flashing up
+        # would undo what -H windowsgui buys us.
+        run: go build -mod=vendor -ldflags="-s -w -H windowsgui" -o hydra-update.exe ./cmd/hydra-update
+
       - name: Package zip
         shell: pwsh
         run: |
@@ -193,6 +202,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $DIR | Out-Null
           Copy-Item hydra.exe "$DIR/hydra.exe"
           Copy-Item typhon-engine/target/release/typhon-engine.exe "$DIR/hydra-engine.exe"
+          Copy-Item hydra-update.exe "$DIR/hydra-update.exe"
           Copy-Item packaging/README-windows.md "$DIR/README.md"
           Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"
           $hash = (Get-FileHash "$DIR.zip" -Algorithm SHA256).Hash.ToLower()

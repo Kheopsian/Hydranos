@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.65.0 - 2026-08-14
+
+### Added
+- **Hydra updates itself on Windows.** Right-click the tray icon and pick *Check for updates*: it compares against the newest published release, asks before doing anything, then downloads the archive, verifies it against the SHA-256 published beside it, replaces the two executables and starts Hydra again. Settings and data are never part of the archive, so an in-place update is the one route that cannot lose them - unzipping a release into a fresh folder is what leaves people wondering where their torrents went.
+- The archive now carries a third file, `hydra-update.exe`. It is a separate program because Windows locks a running executable, so Hydra cannot overwrite itself: the updater is handed Hydra's process id and waits for it to exit before touching a single file. Hydra stops through the tray's own Quit path, the only one on Windows that flushes resume data, so an update costs no re-check.
+
+### Changed
+- Nothing is replaced unless the whole download succeeded and matched its checksum, and if any executable fails to land the previous ones are put back. A half-applied update, a new front end against an old engine, is the outcome worth the most effort to avoid. If the updater cannot start at all, Hydra says so and keeps running rather than stopping for an update that never began.
+
 ## v3.64.0 - 2026-08-14
 
 ### Added

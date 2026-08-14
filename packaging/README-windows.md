@@ -4,10 +4,12 @@ Native Windows build. This archive contains:
 
 - `hydra.exe` — the app (web UI + API). **This is the only one you run.**
 - `hydra-engine.exe` — the BitTorrent engine, started automatically by `hydra.exe`.
+- `hydra-update.exe` — the updater. You do not run this one directly;
+  Hydra starts it for you from the tray.
 
 ## Run
 
-1. Unzip both files into a folder you can write to, e.g. `C:\Hydra` (keep them
+1. Unzip all three into a folder you can write to, e.g. `C:\Hydra` (keep them
    **together** — the app looks for the engine next to itself).
 2. Double-click **`hydra.exe`**.
 
@@ -32,6 +34,7 @@ edit the `default.toml` it created and restart.
 | Hover | Version, current download / upload rate, torrent count |
 | Double-click | Opens the web UI |
 | Right-click → **Open Hydra** | Same |
+| Right-click → **Check for updates** | Fetches the newest release and restarts Hydra |
 | Right-click → **Quit Hydra** | **Stops Hydra cleanly** |
 
 **Use "Quit Hydra" to stop it.** That is the path that saves resume data for
@@ -49,6 +52,29 @@ shortcut, a scheduler, debugging), start it with `--console`.
 
 Either way every line is also written to **`hydra.log`**, next to the config,
 and shown in the UI's **Logs** tab.
+
+## Updating
+
+Right-click the tray icon and pick **Check for updates**.
+
+Hydra checks what the latest published release is and, if there is a newer one,
+asks before doing anything. If you say yes it downloads the archive, checks it
+against the SHA-256 published beside it, stops Hydra cleanly, replaces
+`hydra.exe` and `hydra-engine.exe`, and starts Hydra again.
+
+Your settings and data are never touched. `default.toml`, `data\` and
+`hydra.log` sit beside the executables and are not part of the archive, so
+updating in place is the one route that cannot lose them - unzipping a new
+release into a *different* folder is what leaves people wondering where their
+torrents went.
+
+Hydra has to stop for its files to be replaced, because Windows locks a running
+program's own file. That is why the updater is a separate `hydra-update.exe`:
+it waits for Hydra to exit before touching anything. If the download or the
+checksum fails, nothing is replaced and Hydra is not stopped.
+
+You can also update by hand: quit Hydra from the tray, unzip the new release
+over the old files, and start it again.
 
 ## Start on boot / run as a service
 
