@@ -445,6 +445,7 @@ func StartEngineProcess(engineCfg EngineConfig, socketPath string) (*EngineProce
 	cmd := exec.Command(engineBinaryPath(),
 		"--config", configPath,
 		"--socket", socketPath)
+	hideChildWindow(cmd)
 	// Capture engine stdout/stderr into the log hub (tagged engine:race|hoard)
 	// instead of dumping raw onto the console. os.Pipe read ends are scanned;
 	// on pipe-creation failure we fall back to inheriting the parent streams.

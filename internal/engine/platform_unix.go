@@ -5,6 +5,7 @@ package engine
 import (
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -81,3 +82,6 @@ func procStat(pid int) (bool, int64) {
 	}
 	return true, 0
 }
+
+// hideChildWindow is a no-op off Windows: there are no console windows to hide.
+func hideChildWindow(cmd *exec.Cmd) {}
