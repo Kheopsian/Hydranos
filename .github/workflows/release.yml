@@ -179,7 +179,11 @@ jobs:
       - name: Build hydra
         env:
           CGO_ENABLED: "0"
-        run: go build -mod=vendor -ldflags="-s -w" -o hydra.exe ./cmd/hydra
+        # -H windowsgui: link as a GUI-subsystem binary so a double-click
+        # does not leave a cmd.exe window on the desktop. The app attaches to
+        # the parent console when started from a terminal, and puts an icon in
+        # the notification area otherwise.
+        run: go build -mod=vendor -ldflags="-s -w -H windowsgui" -o hydra.exe ./cmd/hydra
 
       - name: Package zip
         shell: pwsh

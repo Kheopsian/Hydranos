@@ -3,6 +3,37 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.63.0 - 2026-08-13
+
+### Added
+
+- **Hydra now lives in the Windows notification area.** Hovering the icon shows
+  the current download and upload rate and the torrent count; double-clicking
+  opens the web UI; the right-click menu opens it or quits Hydra.
+
+- **No more cmd.exe window on Windows.** Double-clicking `hydra.exe` starts it
+  in the background, with the tray icon as its visible presence. Started from a
+  terminal it attaches to that terminal and prints as before, so nothing is
+  hidden from anyone who asked to see it; `--console` forces a console for the
+  cases in between (a shortcut, a scheduler, debugging). Every line still goes
+  to `hydra.log` and to the UI Logs tab either way.
+
+  The two arrived together on purpose: with no console there is no Ctrl+C, and
+  Windows never delivers SIGTERM, so removing the window on its own would have
+  left no clean way to stop Hydra -- and the clean stop is what flushes resume
+  data (v3.61.2). **"Quit Hydra" in the tray menu is that path.**
+
+### Fixed
+
+- **The engine subprocess no longer opens a console window of its own** on
+  Windows (`CREATE_NO_WINDOW`), which it would have done as soon as the app
+  itself stopped having one to lend it.
+
+- **The Windows README no longer tells you to copy a password out of the
+  console.** No password has been generated since v3.55.0 -- you create the
+  admin account in the browser on first run. Same stale instruction as the one
+  fixed for `install.sh` and the wiki in v3.61.5, missed on Windows.
+
 ## v3.62.0 - 2026-08-13
 
 ### Changed

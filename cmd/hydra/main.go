@@ -1184,12 +1184,41 @@ func main() {
 
 	logs.PrintReady(cfg.Daemon.APIHost, cfg.Daemon.APIPort, firstRun)
 
+	// Windows: the notification-area icon is the app's only visible presence
+	// and its only clean stop (no console => no Ctrl+C, and SIGTERM is never
+	// delivered). Elsewhere this is a no-op returning a nil channel, which the
+	// select below then ignores.
+	trayQuit, trayStop := startTray(
+		fmt.Sprintf("http://%s:%d", cfg.Daemon.APIHost, cfg.Daemon.APIPort),
+		version,
+		func() (up, down float64, torrents int) {
+			if raceEngine != nil {
+				st := raceEngine.GetAllStatus()
+				up += toFloat(st["upload_rate"])
+				down += toFloat(st["download_rate"])
+				torrents += int(toFloat(st["torrents"]))
+			}
+			if hoardEngine != nil {
+				st := hoardEngine.GetAllStatus()
+				up += toFloat(st["upload_rate"])
+				down += toFloat(st["download_rate"])
+				torrents += int(toFloat(st["torrents"]))
+			}
+			return up, down, torrents
+		},
+	)
+	defer trayStop()
+
 	_ = notifier
 	_ = metricsCollector
 	_ = system.Collect
 
-	sig := <-sigCh
-	slog.Info("Received signal, shutting down", "signal", sig)
+	select {
+	case sig := <-sigCh:
+		slog.Info("Received signal, shutting down", "signal", sig)
+	case <-trayQuit:
+		slog.Info("Quit from the notification-area menu, shutting down")
+	}
 	cancel()
 
 	slog.Info("Saving state...")

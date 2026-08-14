@@ -5,8 +5,10 @@ package engine
 import (
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 )
@@ -56,4 +58,16 @@ func procStat(pid int) (bool, int64) {
 	}
 	const stillActive = 259 // STILL_ACTIVE
 	return code == stillActive, 0
+}
+
+// hideChildWindow keeps the engine subprocess from opening a console window of
+// its own. hydra.exe is a GUI-subsystem binary, so it usually has no console
+// to lend the child -- and a console app started without one gets a brand new
+// window, which is exactly the cmd.exe box we set out to remove.
+func hideChildWindow(cmd *exec.Cmd) {
+	const createNoWindow = 0x08000000
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= createNoWindow
 }
