@@ -68,6 +68,10 @@ type HoardEngine struct {
 	// <dataDir>/hoard_pinned.json so pins survive restarts/redeploys.
 	pinnedMu sync.RWMutex
 	pinned   map[string]bool
+	// persistPin is injected by main.go and writes a pin change through to
+	// the durable store. The engine keeps the map because IsPinned is read
+	// on every slot tick; the store is the record of truth across restarts.
+	persistPin func(infoHash string, pinned bool)
 
 	// Runtime override for active_downloads.
 	dlSlotsOverride   int
@@ -207,7 +211,6 @@ func NewHoardEngine(cfg *config.SessionConfig, dataDir string) *HoardEngine {
 		rawEvents:       NewEventHub(128),
 		pinned:          make(map[string]bool),
 	}
-	e.loadPinned()
 	return e
 }
 
@@ -1587,7 +1590,7 @@ func (e *HoardEngine) PinTorrent(infoHash string) {
 	}
 	e.pinned[infoHash] = true
 	e.pinnedMu.Unlock()
-	e.savePinned()
+	e.persistPinChange(infoHash, true)
 	// Drop any progress/cooldown state so the next enforce tick can hand it a
 	// slot immediately instead of waiting out a backoff from before the pin.
 	e.slotProgressMu.Lock()
@@ -1609,7 +1612,7 @@ func (e *HoardEngine) UnpinTorrent(infoHash string) {
 	}
 	delete(e.pinned, infoHash)
 	e.pinnedMu.Unlock()
-	e.savePinned()
+	e.persistPinChange(infoHash, false)
 	short := infoHash
 	if len(short) > 8 {
 		short = short[:8]
@@ -1635,47 +1638,58 @@ func (e *HoardEngine) PinnedList() []string {
 	return out
 }
 
-func (e *HoardEngine) pinnedPath() string {
-	return filepath.Join(e.dataDir, "hoard_pinned.json")
+// SetPinPersister installs the write-through hook. Called once at wiring time.
+func (e *HoardEngine) SetPinPersister(fn func(infoHash string, pinned bool)) {
+	e.persistPin = fn
 }
 
-// loadPinned restores pins from disk (best-effort; called at construction).
-func (e *HoardEngine) loadPinned() {
-	data, err := os.ReadFile(e.pinnedPath())
-	if err != nil {
-		return
-	}
-	var list []string
-	if err := json.Unmarshal(data, &list); err != nil {
-		slog.Warn("hoard: hoard_pinned.json parse failed", "err", err)
-		return
-	}
+// SetPins seeds the in-memory set from the store at boot.
+func (e *HoardEngine) SetPins(list []string) {
+	e.pinnedMu.Lock()
+	e.pinned = make(map[string]bool, len(list))
 	for _, ih := range list {
 		e.pinned[ih] = true
 	}
-	if len(list) > 0 {
-		slog.Info("hoard: restored pinned torrents", "count", len(list))
+	n := len(e.pinned)
+	e.pinnedMu.Unlock()
+	if n > 0 {
+		slog.Info("hoard: pins restored", "count", n)
 	}
 }
 
-// savePinned writes pins to disk atomically (best-effort).
-func (e *HoardEngine) savePinned() {
+func (e *HoardEngine) persistPinChange(infoHash string, pinned bool) {
+	if e.persistPin != nil {
+		e.persistPin(infoHash, pinned)
+	}
+}
+
+// reapStalePins drops pins that no longer mean anything. A pin only buys a
+// download slot, so it is dead weight the moment a torrent stops being
+// incomplete -- whether it finished or was removed outright. `incomplete` is
+// the authoritative set the slot manager just built from a live ListTorrents,
+// so one rule covers both cases, and it self-heals: pins orphaned by past
+// removals disappear on the next tick instead of accumulating forever.
+//
+// Guarded on a non-empty listing: an empty result means the session has not
+// loaded yet, and reaping against it would drop every pin at boot.
+func (e *HoardEngine) reapStalePins(incomplete map[string]int, listed int) {
+	if listed == 0 {
+		return
+	}
+	var stale []string
 	e.pinnedMu.RLock()
-	list := make([]string, 0, len(e.pinned))
 	for ih := range e.pinned {
-		list = append(list, ih)
+		if _, ok := incomplete[ih]; !ok {
+			stale = append(stale, ih)
+		}
 	}
 	e.pinnedMu.RUnlock()
-	data, err := json.Marshal(list)
-	if err != nil {
-		return
+	for _, ih := range stale {
+		e.UnpinTorrent(ih)
 	}
-	tmp := e.pinnedPath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		slog.Warn("hoard: hoard_pinned.json write failed", "err", err)
-		return
+	if len(stale) > 0 {
+		slog.Info("hoard: stale pins reaped", "count", len(stale))
 	}
-	_ = os.Rename(tmp, e.pinnedPath())
 }
 
 func (e *HoardEngine) GetDownloadSlotStatus() DownloadSlotStats {
@@ -1760,6 +1774,10 @@ func (e *HoardEngine) enforceDownloadSlots() {
 			actives = append(actives, s.InfoHash)
 		}
 	}
+
+	// A pin is only a claim on a download slot: once a torrent is no longer
+	// incomplete (finished, or removed) the pin is inert, so drop it here.
+	e.reapStalePins(byHash, len(result.Torrents))
 
 	// Phase 1: Progress check for active torrents.
 	//

@@ -778,6 +778,7 @@ async function showStoreRepairModal() {
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
+    _refreshHoardPins();
     // Pick the language and translate the static markup before anything else
     // paints. Everything in the DOM at this point came from index.html.
     try { await I18N.load(I18N.detect()); I18N.translateDOM(document.body); } catch (e) {}
@@ -1711,24 +1712,28 @@ function setHoardStateFilter(el, value) {
     _hoardStateFilter = value;
     document.querySelectorAll(".chip-state").forEach(c => c.classList.toggle("active", c === el));
     renderHoardTable();
+    _renderHoardCounts();
 }
 
 function setHoardCatFilter(el, value) {
     _hoardCatFilter = _hoardCatFilter === value ? "" : value;
     document.querySelectorAll(".chip-cat").forEach(c => c.classList.toggle("active", c.dataset.cat === _hoardCatFilter && _hoardCatFilter !== ""));
     renderHoardTable();
+    _renderHoardCounts();
 }
 
 function setHoardTrackerFilter(el, value) {
     _hoardTrackerFilter = _hoardTrackerFilter === value ? "" : value;
     document.querySelectorAll(".chip-tracker").forEach(c => c.classList.toggle("active", c.dataset.tracker === _hoardTrackerFilter && _hoardTrackerFilter !== ""));
     renderHoardTable();
+    _renderHoardCounts();
 }
 
 function setHoardTagFilter(el, value) {
     _hoardTagFilter = _hoardTagFilter === value ? "" : value;
     document.querySelectorAll(".chip-tag").forEach(c => c.classList.toggle("active", c.dataset.tag === _hoardTagFilter && _hoardTagFilter !== ""));
     renderHoardTable();
+    _renderHoardCounts();
 }
 
 // --- Tags context-menu editor (hoard-only, multi-select) ---
@@ -1814,17 +1819,7 @@ function renderHoardTable() {
     const catFilter = _hoardCatFilter;
     const stateFilter = _hoardStateFilter;
 
-    let filtered = _hoardAllTorrents;
-    if (search) filtered = filtered.filter(t => (t.name || t.info_hash).toLowerCase().includes(search));
-    if (catFilter === "__none__") filtered = filtered.filter(t => !(t.category));
-    else if (catFilter) filtered = filtered.filter(t => (t.category || "") === catFilter);
-    if (_hoardTrackerFilter) filtered = filtered.filter(t => (t.tracker_host || "") === _hoardTrackerFilter);
-    if (_hoardTagFilter === "__none__") filtered = filtered.filter(t => !(t.tags && t.tags.length));
-    else if (_hoardTagFilter) filtered = filtered.filter(t => (t.tags || []).includes(_hoardTagFilter));
-    if (stateFilter === "__active__") filtered = filtered.filter(t => t.state === "seeding" && t.upload_rate > 0);
-    else if (stateFilter === "__tracker_err__") filtered = filtered.filter(t => t.tracker_error);
-    else if (stateFilter === "__error__") filtered = filtered.filter(t => t.torrent_error);
-    else if (stateFilter) filtered = filtered.filter(t => t.state === stateFilter);
+    let filtered = _hoardAllTorrents.filter(t => _hoardMatches(t, search, null));
 
     // Tri
     const col = _hoardSortCol;
@@ -1869,16 +1864,27 @@ function renderHoardTable() {
 // (30s backstop fetch, torrent_added/removed), not on each stats snapshot.
 function _renderHoardCounts() {
     if (!_hoardAllTorrents) return;
+    // Faceted: every group is counted with the OTHER groups applied, never its
+    // own. Selecting a category makes each tracker report what it holds inside
+    // that category, while the tracker list itself stays whole and switchable.
+    const search = (document.getElementById("hoard-search")?.value || "").toLowerCase();
+    const forState = _hoardAllTorrents.filter(t => _hoardMatches(t, search, "state"));
+    const forCat = _hoardAllTorrents.filter(t => _hoardMatches(t, search, "cat"));
+    const forTrk = _hoardAllTorrents.filter(t => _hoardMatches(t, search, "tracker"));
+    const forTag = _hoardAllTorrents.filter(t => _hoardMatches(t, search, "tag"));
+
     const stateCounts = {};
-    _hoardAllTorrents.forEach(t => { stateCounts[t.state] = (stateCounts[t.state] || 0) + 1; });
-    const nAll = _hoardAllTorrents.length;
-    const nActive = _hoardAllTorrents.filter(t => t.state === "seeding" && t.upload_rate > 0).length;
-    const nTrackerErr = _hoardAllTorrents.filter(t => t.tracker_error).length;
-    const nTorrentErr = _hoardAllTorrents.filter(t => t.torrent_error).length;
+    forState.forEach(t => { stateCounts[t.state] = (stateCounts[t.state] || 0) + 1; });
+    const nAll = forState.length;
+    const nActive = forState.filter(t => t.state === "seeding" && t.upload_rate > 0).length;
+    const nTrackerErr = forState.filter(t => t.tracker_error).length;
+    const nTorrentErr = forState.filter(t => t.torrent_error).length;
+    const nPinned = forState.filter(t => _hoardPinned.has(t.info_hash)).length;
     document.querySelector(".chip-state[data-state='']").innerHTML = `All <span class="chip-count">${nAll}</span>`;
     document.querySelector(".chip-state[data-state='seeding']").innerHTML = `Seeding <span class="chip-count">${stateCounts["seeding"] || 0}</span>`;
     document.querySelector(".chip-state[data-state='__active__']").innerHTML = `Actively Seeding <span class="chip-count">${nActive}</span>`;
     document.querySelector(".chip-state[data-state='downloading']").innerHTML = `Downloading <span class="chip-count">${stateCounts["downloading"] || 0}</span>`;
+    document.querySelector(".chip-state[data-state='__pinned__']").innerHTML = `Forced <span class="chip-count">${nPinned}</span>`;
     // Stopped is the user's doing, Queued is a scheduler's. Both are halted,
     // and telling them apart is the whole point of the two chips.
     document.querySelector(".chip-state[data-state='stopped']").innerHTML = `Stopped <span class="chip-count">${stateCounts["stopped"] || 0}</span>`;
@@ -1888,12 +1894,12 @@ function _renderHoardCounts() {
     document.querySelector(".chip-state[data-state='__error__']").innerHTML = `Error <span class="chip-count">${nTorrentErr}</span>`;
 
     const catCounts = {};
-    _hoardAllTorrents.forEach(t => {
+    forCat.forEach(t => {
         const c = t.category || "";
         if (c) catCounts[c] = (catCounts[c] || 0) + 1;
     });
     const cats = Object.keys(catCounts).sort();
-    const nUncat = _hoardAllTorrents.filter(t => !(t.category)).length;
+    const nUncat = forCat.filter(t => !(t.category)).length;
     const container = document.getElementById("hoard-cat-chips");
     if (container) {
         let html = cats.map(c =>
@@ -1908,7 +1914,7 @@ function _renderHoardCounts() {
     }
 
     const trkCounts = {};
-    _hoardAllTorrents.forEach(t => { const h = t.tracker_host || ""; if (h) trkCounts[h] = (trkCounts[h] || 0) + 1; });
+    forTrk.forEach(t => { const h = t.tracker_host || ""; if (h) trkCounts[h] = (trkCounts[h] || 0) + 1; });
     const trks = Object.keys(trkCounts).sort();
     const trkContainer = document.getElementById("hoard-tracker-chips");
     if (trkContainer) {
@@ -1918,9 +1924,9 @@ function _renderHoardCounts() {
     }
 
     const tagCounts = {};
-    _hoardAllTorrents.forEach(t => { (t.tags || []).forEach(tg => { tagCounts[tg] = (tagCounts[tg] || 0) + 1; }); });
+    forTag.forEach(t => { (t.tags || []).forEach(tg => { tagCounts[tg] = (tagCounts[tg] || 0) + 1; }); });
     const tagNames = Object.keys(tagCounts).sort();
-    const nUntagged = _hoardAllTorrents.filter(t => !(t.tags && t.tags.length)).length;
+    const nUntagged = forTag.filter(t => !(t.tags && t.tags.length)).length;
     const tagContainer = document.getElementById("hoard-tag-chips");
     if (tagContainer) {
         let html = tagNames.map(tg =>
@@ -2016,6 +2022,72 @@ function closeHoardDetail() {
 const _selected = new Map(); // hash → mode
 let _anchorHash = null;      // last click without shift (range start point)
 let _hoardFiltered = [];     // last filtered hoard set (see renderHoardTable)
+
+// Pinned ("force download") hashes. Held client-side rather than carried on
+// every row: the list streams over SSE at six figures of torrents, and pins are
+// a few hundred at most, so a per-row boolean would cost the hot path far more
+// than this set costs to fetch.
+let _hoardPinned = new Set();
+
+async function _refreshHoardPins() {
+    try {
+        const r = await api("/api/hoard/pinned");
+        _hoardPinned = new Set((r && r.pinned) || []);
+    } catch (e) {
+        console.warn("Failed to load pins", e);
+    }
+}
+
+// One definition of what each filter group means, shared by the table and the
+// chip counts so the two can never drift. `skip` names a group to ignore, which
+// is what makes the counts faceted: a group must not shrink its own numbers, or
+// picking one tracker would zero every other tracker and trap you there.
+function _hoardMatches(t, search, skip) {
+    if (skip !== "search" && search && !(t.name || t.info_hash).toLowerCase().includes(search)) return false;
+    if (skip !== "cat") {
+        if (_hoardCatFilter === "__none__") { if (t.category) return false; }
+        else if (_hoardCatFilter && (t.category || "") !== _hoardCatFilter) return false;
+    }
+    if (skip !== "tracker" && _hoardTrackerFilter && (t.tracker_host || "") !== _hoardTrackerFilter) return false;
+    if (skip !== "tag") {
+        if (_hoardTagFilter === "__none__") { if (t.tags && t.tags.length) return false; }
+        else if (_hoardTagFilter && !(t.tags || []).includes(_hoardTagFilter)) return false;
+    }
+    if (skip !== "state") {
+        const s = _hoardStateFilter;
+        if (s === "__active__") { if (!(t.state === "seeding" && t.upload_rate > 0)) return false; }
+        else if (s === "__tracker_err__") { if (!t.tracker_error) return false; }
+        else if (s === "__error__") { if (!t.torrent_error) return false; }
+        else if (s === "__pinned__") { if (!_hoardPinned.has(t.info_hash)) return false; }
+        else if (s && t.state !== s) return false;
+    }
+    return true;
+}
+
+// Pin or unpin the selection. Hoard-only, and the API refuses a complete
+// torrent (409) since a pin only buys a download slot.
+async function _pinSelected(on) {
+    _hideCtxMenu();
+    const entries = [..._selected.entries()];
+    for (const [hash, mode] of entries) {
+        if (mode !== "hoard") continue;
+        try {
+            const res = await fetch(`/api/hoard/torrents/${hash}/${on ? "pin" : "unpin"}`, {
+                method: "POST",
+                headers: { "X-Api-Key": API_KEY },
+            });
+            if (res.ok) {
+                if (on) _hoardPinned.add(hash); else _hoardPinned.delete(hash);
+            } else if (res.status === 409) {
+                console.warn("Cannot force a complete torrent", hash);
+            }
+        } catch (err) {
+            console.error("Failed to pin", hash, err);
+        }
+    }
+    renderHoardTable();
+    _renderHoardCounts();
+}
 
 // Ctrl+A selects everything the current filters match -- not just the rows on
 // screen. With 100k torrents the table renders a capped slice, so selecting
@@ -2123,6 +2195,17 @@ function _showCtxMenu(x, y) {
     if (rcItem) rcItem.style.display = anyHoard ? "" : "none";
     const tgItem = document.getElementById("ctx-edit-tags");
     if (tgItem) tgItem.style.display = anyHoard ? "" : "none";
+    // Force download applies to incomplete hoard torrents only: a pin buys a
+    // download slot, so it says nothing about one that has finished.
+    const hoardSel = [..._selected.entries()].filter(([, m]) => m === "hoard").map(([h]) => h);
+    const incomplete = hoardSel.filter(h => {
+        const row = _hoardAllTorrents.find(x => x.info_hash === h);
+        return row && (row.progress || 0) < 1;
+    });
+    const pinItem = document.getElementById("ctx-pin");
+    const unpinItem = document.getElementById("ctx-unpin");
+    if (pinItem) pinItem.style.display = incomplete.some(h => !_hoardPinned.has(h)) ? "" : "none";
+    if (unpinItem) unpinItem.style.display = hoardSel.some(h => _hoardPinned.has(h)) ? "" : "none";
     // Offer whichever of Pause/Resume the selection can actually act on. A
     // mixed selection gets both.
     const intents = [..._selected.keys()].map(_isUserPaused);
@@ -4236,7 +4319,7 @@ function setupHoardSSE() {
                 }
                 _hoardAllTorrents = Array.from(_hydMap.values());
                 _hydMap = null;
-                try { _renderHoardCounts(); } catch (_) {}
+                _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
                 _scheduleHoardRender();
             }
             return;
@@ -4244,7 +4327,7 @@ function setupHoardSSE() {
         if (type === "torrent_added" && data.info_hash) {
             if (_hoardAllTorrents && !_hoardAllTorrents.some(t => t.info_hash === data.info_hash)) {
                 _hoardAllTorrents.unshift(data); // newest first; dynamic fields fill via stats_snapshot
-                try { _renderHoardCounts(); } catch (_) {}
+                _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
                 _scheduleHoardRender();
             }
             return;

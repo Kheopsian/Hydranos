@@ -48,6 +48,14 @@ var migrationsMonolith = []string{
 	`
 	ALTER TABLE torrents ADD COLUMN content_folder INTEGER NOT NULL DEFAULT -1;
 	`,
+	// v4: the manual "force download" pin. Durable per-torrent user state, so
+	// it belongs on the torrent row next to `paused` rather than in a table of
+	// its own -- and the row dying with the torrent is what makes an orphaned
+	// pin impossible. Not mirrored into migrationsAgent: a pin only means
+	// anything to the hoard slot manager, which an agent store never runs.
+	`
+	ALTER TABLE torrents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+	`,
 }
 
 // migrationsAgent evolves the per-agent store (store_agent.go). Kept as its own

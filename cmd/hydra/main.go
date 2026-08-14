@@ -582,6 +582,30 @@ func main() {
 	raceEngine.SetClient(raceProc.Client())
 
 	hoardEngine := engine.NewHoardEngine(hoardCfg, hoardDataDir)
+
+	// Pins live in the durable store rather than beside the engine: the engine
+	// keeps them in memory (IsPinned is read on every slot tick) and writes
+	// through here. Nothing is carried over from the old hoard_pinned.json --
+	// a pin only claims a download slot, so a pin on a torrent that is no
+	// longer incomplete says nothing worth keeping.
+	if torStore != nil {
+		if pins, err := torStore.PinnedList(); err != nil {
+			slog.Warn("hoard: pin load failed", "error", err)
+		} else {
+			hoardEngine.SetPins(pins)
+		}
+		hoardEngine.SetPinPersister(func(infoHash string, pinned bool) {
+			var err error
+			if pinned {
+				err = torStore.SetPinned(infoHash, true)
+			} else {
+				err = torStore.SetPinned(infoHash, false)
+			}
+			if err != nil {
+				slog.Warn("hoard: pin persist failed", "info_hash", infoHash, "pinned", pinned, "error", err)
+			}
+		})
+	}
 	hoardEngine.CreateTorrentFolder = cfg.Daemon.CreateTorrentFolder
 	hoardEngine.SetClient(hoardProc.Client())
 
