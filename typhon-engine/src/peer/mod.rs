@@ -232,6 +232,16 @@ static SESSION_RT_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 static SESSION_RTS: std::sync::OnceLock<Vec<tokio::runtime::Handle>> = std::sync::OnceLock::new();
 static SESSION_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Refuse MSE outright, in both directions, and drop the encrypted sessions
+/// already running. An encrypted peer cannot use the zero-copy sendfile serve
+/// path (`serve_zerocopy` requires plaintext), so it pays RC4 per byte plus a
+/// heap copy on every write. This gates that cost so an A/B ladder can price
+/// it against the upload we lose from peers that require encryption.
+///
+/// Off by default: refusing MSE turns away real peers, which is a trade to
+/// measure, not a default to assume.
+static BLOCK_MSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn session_pinning() -> bool {
     SESSION_PINNING.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -245,6 +255,23 @@ pub fn set_session_pinning(on: bool) {
         info!("[peer] session pinning ON over {} runtimes", n);
     } else {
         info!("[peer] session pinning OFF (new sessions on the shared runtime)");
+    }
+}
+
+pub fn block_mse() -> bool {
+    BLOCK_MSE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Flip the MSE block. Unlike session pinning this reaches live sessions too:
+/// the encrypted peers are precisely the long-lived ones, so gating only new
+/// handshakes would leave them running for hours and a measurement block would
+/// never reach a clean state. Live sessions notice on their next loop turn.
+pub fn set_block_mse(on: bool) {
+    BLOCK_MSE.store(on, std::sync::atomic::Ordering::Relaxed);
+    if on {
+        info!("[peer] MSE BLOCKED (inbound refused, outbound fallback skipped, encrypted sessions draining)");
+    } else {
+        info!("[peer] MSE allowed again");
     }
 }
 
@@ -539,6 +566,10 @@ async fn handle_incoming(
         (CryptoStream::plain(stream), torrent, fast_ext, ext_proto, remote_pid, false)
     } else {
         // MSE handshake — first byte is part of DH public key
+        if block_mse() {
+            crate::tracker::MSE_INBOUND_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
         let mut ya_rest = [0u8; 95];
         if stream.read_exact(&mut ya_rest).await.is_err() {
             warn!("[peer] {} MSE: failed to read Ya", addr);

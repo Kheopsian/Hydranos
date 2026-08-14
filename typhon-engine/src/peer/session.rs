@@ -132,6 +132,14 @@ pub async fn run(
     let mut local_choking_gen: u32 = stats.choking_gen.load(Ordering::Relaxed);
 
     loop {
+        // A flag that gated only NEW handshakes would leave the long-lived
+        // encrypted sessions in place for hours — they are exactly the
+        // persistent peers — so a measurement block would never reach a clean
+        // state. Drop them here instead, on the next turn of their own loop.
+        if is_encrypted && crate::peer::block_mse() {
+            crate::tracker::MSE_SESSIONS_DROPPED.fetch_add(1, Ordering::Relaxed);
+            break;
+        }
         // Flush any pending Choke/Unchoke produced by the choking engine.
         let cur_gen = stats.choking_gen.load(Ordering::Relaxed);
         if cur_gen != local_choking_gen {

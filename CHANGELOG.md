@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.66.0 - 2026-08-15
+
+### Added
+- **`block_mse`, a hot flag that turns encrypted peer connections away.** An encrypted peer cannot use the zero-copy serve path, so it costs RC4 on every byte plus a heap copy per write. The flag refuses MSE in both directions and closes the encrypted sessions already running, since those are the long-lived ones and leaving them in place would hide the effect for hours. Off by default: refusing MSE turns away real peers, which is a trade to measure rather than a default to assume.
+- Engine diagnostics gained `mse_inbound_refused`, `mse_outbound_skipped` and `mse_sessions_dropped` so a flip can be confirmed rather than presumed.
+
 ## v3.65.0 - 2026-08-14
 
 ### Added
