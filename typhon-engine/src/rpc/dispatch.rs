@@ -326,6 +326,11 @@ fn set_opt_flag(params: &Value) -> Value {
             crate::peer::set_session_pinning(on);
             json!({"ok": true, "flags": opt_flags_map()})
         }
+        "block_mse" => {
+            let on = params.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+            crate::peer::set_block_mse(on);
+            json!({"ok": true, "flags": opt_flags_map()})
+        }
         "session_runtimes" => {
             let n = params.get("value").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             if n == 0 {
@@ -343,6 +348,7 @@ fn set_opt_flag(params: &Value) -> Value {
 fn opt_flags_map() -> Value {
     json!({
         "session_pinning": crate::peer::session_pinning(),
+        "block_mse": crate::peer::block_mse(),
         "session_runtimes": crate::peer::session_runtimes_n(),
     })
 }
@@ -407,6 +413,9 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     put_u!("dial_mse_attempted", crate::tracker::DIAL_MSE_ATTEMPTED.load(Ordering::Relaxed));
     put_u!("dial_mse_ok", crate::tracker::DIAL_MSE_OK.load(Ordering::Relaxed));
     put_u!("dial_mse_fail", crate::tracker::DIAL_MSE_FAIL.load(Ordering::Relaxed));
+    put_u!("mse_inbound_refused", crate::tracker::MSE_INBOUND_REFUSED.load(Ordering::Relaxed));
+    put_u!("mse_outbound_skipped", crate::tracker::MSE_OUTBOUND_SKIPPED.load(Ordering::Relaxed));
+    put_u!("mse_sessions_dropped", crate::tracker::MSE_SESSIONS_DROPPED.load(Ordering::Relaxed));
     put_u!("dial_tcp_ok", crate::tracker::DIAL_TCP_OK.load(Ordering::Relaxed));
     put_u!("dial_tcp_fail", crate::tracker::DIAL_TCP_FAIL.load(Ordering::Relaxed));
     put_u!("dial_utp_ok", crate::tracker::DIAL_UTP_OK.load(Ordering::Relaxed));

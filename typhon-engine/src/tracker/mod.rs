@@ -111,6 +111,11 @@ pub static DIAL_PLAIN_FAIL: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_MSE_ATTEMPTED: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_MSE_OK: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_MSE_FAIL: AtomicU64 = AtomicU64::new(0);
+/// block_mse instrumentation: inbound MSE handshakes refused, outbound MSE
+/// fallbacks skipped, and live encrypted sessions closed by a flag flip.
+pub static MSE_INBOUND_REFUSED: AtomicU64 = AtomicU64::new(0);
+pub static MSE_OUTBOUND_SKIPPED: AtomicU64 = AtomicU64::new(0);
+pub static MSE_SESSIONS_DROPPED: AtomicU64 = AtomicU64::new(0);
 // Queue accounting: `enqueue_dial` is fire-and-forget into an unbounded
 // channel, so a peer that never reaches a dial worker leaves no trace at all.
 pub static DIAL_ENQUEUED: AtomicU64 = AtomicU64::new(0);
@@ -672,7 +677,8 @@ pub(crate) async fn open_peer(
     // MSE is kept as a FALLBACK for the minority that *require* encryption,
     // so connectivity is never lost. TYPHON_NO_MSE=1 also skips the MSE
     // fallback (pure-plaintext bench).
-    let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false);
+    let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false)
+        || crate::peer::block_mse();
     // TCP plaintext (preferred)
     if let Some(mut t) = try_tcp(addr, source_fwmark).await {
         match crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
@@ -694,6 +700,9 @@ pub(crate) async fn open_peer(
         info!("[dialtrace] {} tcp connect FAIL (plain leg)", addr);
     }
     // TCP MSE (fallback for require-encryption peers)
+    if skip_mse {
+        MSE_OUTBOUND_SKIPPED.fetch_add(1, AtomicOrdering::Relaxed);
+    }
     if !skip_mse {
         if let Some(mut t) = try_tcp(addr, source_fwmark).await {
             DIAL_MSE_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
