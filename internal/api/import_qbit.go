@@ -242,14 +242,18 @@ func saveProvenance(dataDir string, p provenance) error {
 // ---- import job ------------------------------------------------------------
 
 type importSnapshot struct {
-	JobID       string   `json:"job_id"`
-	Phase       string   `json:"phase"` // connect|categories|torrents|done|error
-	Total       int      `json:"total"`
-	Done        int      `json:"done"`
-	Seeded      int      `json:"seeded"`
-	Downloading int      `json:"downloading"`
-	Failed      int      `json:"failed"`
-	Skipped     int      `json:"skipped"`
+	JobID       string `json:"job_id"`
+	Phase       string `json:"phase"` // connect|categories|torrents|done|error
+	Total       int    `json:"total"`
+	Done        int    `json:"done"`
+	Seeded      int    `json:"seeded"`
+	Downloading int    `json:"downloading"`
+	Failed      int    `json:"failed"`
+	Skipped     int    `json:"skipped"`
+	// DataMissing counts torrents whose payload was not found where the path
+	// mapping says it should be. Silence here used to read as success: the
+	// import completed, every torrent restarted from zero, and nothing said so.
+	DataMissing int      `json:"data_missing"`
 	Current     string   `json:"current"`
 	Error       string   `json:"error,omitempty"`
 	Errors      []string `json:"errors,omitempty"`
@@ -339,6 +343,10 @@ type qbitCreds struct {
 	Username string            `json:"username"`
 	Password string            `json:"password"`
 	PathMap  map[string]string `json:"path_map"`
+	// Force skips the reachable-payload guard. Set it when re-downloading
+	// really is the intent.
+	Force bool `json:"force"`
+
 	// StartStopped imports the whole library stopped, whatever the other
 	// client said. For trying Hydra out on a real library without a single
 	// announce leaving the box: nothing talks to a tracker until the user
@@ -409,10 +417,30 @@ func (s *Server) handleQbitPreview(c *gin.Context) {
 	}
 	sort.Strings(prefixList)
 
+	// Probe a sample for reachable payload under the mapping the caller sent.
+	// A wrong volume bind is invisible otherwise: the import reports success
+	// while every torrent silently restarts from zero.
+	checked, found := 0, 0
+	for _, t := range ts {
+		if checked >= 50 {
+			break
+		}
+		cp := remapPath(t.ContentPath, req.PathMap)
+		if cp == "" {
+			continue
+		}
+		checked++
+		if _, err := os.Stat(cp); err == nil {
+			found++
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"total":                  len(ts),
 		"completed":              completed,
 		"incomplete":             len(ts) - completed,
+		"data_checked":           checked,
+		"data_found":             found,
 		"carried_uploaded_bytes": carried,
 		"categories":             catList,
 		"path_prefixes":          prefixList,
@@ -470,6 +498,37 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 	if s.hoardEngine == nil {
 		fail("hoard engine not available")
 		return
+	}
+
+	// Reachable-payload guard. A wrong volume bind or path mapping is invisible
+	// otherwise: the import runs to completion and reports success while every
+	// torrent silently restarts from zero, and the complete ones announce us as
+	// seeders holding nothing. Sample before writing anything.
+	if !req.Force {
+		checked, found := 0, 0
+		example := ""
+		for _, t := range ts {
+			if checked >= 50 {
+				break
+			}
+			cp := remapPath(t.ContentPath, req.PathMap)
+			if cp == "" {
+				continue
+			}
+			checked++
+			if _, statErr := os.Stat(cp); statErr == nil {
+				found++
+			} else if example == "" {
+				example = fmt.Sprintf("%s -> %s", t.ContentPath, cp)
+			}
+		}
+		if checked > 0 && found == 0 {
+			fail(fmt.Sprintf("no data found for any of the %d torrents sampled (%s). Check the volume "+
+				"mount and the path mapping: as it stands every torrent would restart from zero. "+
+				"Send force=true if re-downloading really is the intent.", checked, example))
+			return
+		}
+		slog.Info("qbit import: payload probe", "sampled", checked, "found", found)
 	}
 
 	// 1. Pre-create every needed category as HOARD mode BEFORE any add, so no
@@ -549,27 +608,36 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 				sp := remapPath(it.t.SavePath, req.PathMap)
 				var ih string
 				var addErr error
-				if it.seed {
+				// Is the payload actually where the mapping says? A seed-mode add
+				// on absent data is worse than a slow one: it announces us as a
+				// seeder holding nothing, so every peer request fails. When the
+				// data is missing we add normally instead -- a recheck can then
+				// pick it up if it ever appears -- and we count the miss.
+				var cpStat os.FileInfo
+				cp := remapPath(it.t.ContentPath, req.PathMap)
+				if cp != "" {
+					if fi, statErr := os.Stat(cp); statErr == nil {
+						cpStat = fi
+					}
+				}
+				if cpStat == nil {
+					job.update(func(sn *importSnapshot) { sn.DataMissing++ })
+				}
+				if it.seed && cpStat != nil {
 					// Replicate qBit exact on-disk layout from content_path: stat tells multi
 					// (a dir) from single (the file); derive the content dir + whether the
 					// torrent has its own subfolder so shim/move behave correctly.
 					resolvedSave := sp
-					var cf *bool
-					if cp := remapPath(it.t.ContentPath, req.PathMap); cp != "" {
-						if fi, statErr := os.Stat(cp); statErr == nil {
-							v := true
-							if fi.IsDir() {
-								resolvedSave = cp
-							} else {
-								resolvedSave = filepath.Dir(cp)
-								v = filepath.Dir(cp) != sp
-							}
-							cf = &v
-						}
+					v := true
+					if cpStat.IsDir() {
+						resolvedSave = cp
+					} else {
+						resolvedSave = filepath.Dir(cp)
+						v = filepath.Dir(cp) != sp
 					}
 					ih, addErr = s.hoardEngine.AddTorrentSeedMode(it.tmp, resolvedSave, cn)
-					if addErr == nil && cf != nil {
-						s.hoardEngine.SetContentFolder(ih, cf)
+					if addErr == nil {
+						s.hoardEngine.SetContentFolder(ih, &v)
 					}
 				} else {
 					ih, addErr = s.hoardEngine.AddTorrent(it.tmp, sp, cn)

@@ -642,6 +642,21 @@ input, select, textarea {
     appearance: none;
 }
 
+/* Checkboxes and radios are not text fields. The rule above sets width:100%
+   and appearance:none, which renders a checkbox as a full-width empty box with
+   no tick: the control stops looking like a control, and a checked default is
+   invisible. Scoped exceptions already existed (.logs-controls,
+   .settings-adv-toggle, .hl-toggle); this makes the exception global so a plain
+   checkbox is correct anywhere, including the import wizard. */
+input[type="checkbox"], input[type="radio"] {
+    width: auto;
+    padding: 0;
+    margin: 0 6px 0 0;
+    -webkit-appearance: auto;
+    appearance: auto;
+    vertical-align: middle;
+}
+
 input:focus, select:focus, textarea:focus {
     border-color: var(--accent-hoard);
 }
