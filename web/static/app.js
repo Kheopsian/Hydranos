@@ -518,21 +518,62 @@ function importWizard(opts) {
             <code style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p)}">${esc(p)}</code>
             <span>→</span>
             <input type="text" class="qb-map" data-from="${esc(p)}" value="${esc(p)}" style="flex:1">
+            <span class="qb-map-st" style="flex:0 0 1.4em;text-align:center;font-weight:700"></span>
         </div>`).join("");
         box.innerHTML = `<h3>${t("Import preview")}</h3>
             <p class="modal-desc">${t("<b>{total}</b> torrents · <b>{complete}</b> complete (seed-mode) · <b>{partial}</b> partial (verify + resume) · carried upload <b>{carried}</b>", { total: d.total, complete: d.completed, partial: d.incomplete, carried: formatBytes(d.carried_uploaded_bytes) })}</p>
             <p class="modal-desc">${t("Categories: {list}, all imported as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:")}</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
-            ${d.data_checked ? `<p class="modal-desc" style="margin-bottom:8px${d.data_found === 0 ? ";color:var(--accent-red);font-weight:600" : ""}">${d.data_found === 0
-                ? t("No data found for any of the {checked} torrents sampled. Nothing is reachable at these paths, so every torrent would restart from zero. Fix the mapping above.", { checked: d.data_checked })
-                : t("Data found for {found} of {checked} torrents sampled.", { found: d.data_found, checked: d.data_checked })}</p>` : ""}
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+                <p class="modal-desc" id="qb-data" style="margin:0;flex:1${d.data_checked && d.data_found === 0 ? ";color:var(--accent-red);font-weight:600" : ""}">${!d.data_checked ? "" : (d.data_found === 0
+                    ? t("No data found for any of the {checked} torrents sampled. Nothing is reachable at these paths, so every torrent would restart from zero. Fix the mapping above.", { checked: d.data_checked })
+                    : t("Data found for {found} of {checked} torrents sampled.", { found: d.data_found, checked: d.data_checked }))}</p>
+                <button id="qb-check" style="flex:0 0 auto;width:auto">${t("Re-check paths")}</button>
+            </div>
             <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="qb-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="qb-back">${t("Back")}</button>
                 <button class="btn-primary" id="qb-go">${t("Import {n} torrents", { n: d.total })}</button>
             </div>`;
+        box.querySelector("#qb-check").onclick = async () => {
+            // Checks the mapped folders only, not every payload: this runs while
+            // the user is still editing, and it must stay instant on a library
+            // the preview took a while to list.
+            const inputs = Array.from(box.querySelectorAll(".qb-map"));
+            const info = box.querySelector("#qb-data");
+            info.style.color = ""; info.style.fontWeight = "";
+            info.textContent = t("Checking…");
+            try {
+                const res = await fetch("/api/import/check-paths", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
+                    body: JSON.stringify({ paths: inputs.map(i => i.value.trim()) }),
+                });
+                const r = await res.json().catch(() => ({}));
+                const results = r.results || [];
+                let good = 0;
+                inputs.forEach((inp, i) => {
+                    const st = inp.parentElement.querySelector(".qb-map-st");
+                    const found = !!(results[i] && results[i].exists);
+                    if (found) good++;
+                    st.textContent = found ? "\u2713" : "\u2717";
+                    st.style.color = found ? "var(--accent-green)" : "var(--accent-red)";
+                });
+                const bad = inputs.length - good;
+                if (bad === 0) {
+                    info.style.color = "var(--accent-green)";
+                    info.textContent = t("All {n} mapped folders are reachable by Hydra.", { n: good });
+                } else {
+                    info.style.color = "var(--accent-red)"; info.style.fontWeight = "600";
+                    info.textContent = t("{bad} of {n} mapped folders are not reachable by Hydra. Those torrents would restart from zero.", { bad: bad, n: inputs.length });
+                }
+            } catch (e) {
+                info.style.color = "var(--accent-red)";
+                info.textContent = t("Network error: {msg}", { msg: e.message });
+            }
+        };
         box.querySelector("#qb-back").onclick = () => stepCreds({ url: creds.url, user: creds.username });
         box.querySelector("#qb-go").onclick = async () => {
             const path_map = {};

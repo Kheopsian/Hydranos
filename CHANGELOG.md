@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.68.0 - 2026-08-15
+
+### Added
+- **A Re-check paths button in the import wizard.** The reachability figure was computed once, against the mapping Hydra guessed, so correcting a mapping left the warning stale until you pressed Import and found out. The button re-tests the folders you have typed and marks each row, and it only stats those folders rather than re-listing the library, so it stays instant however large the library is.
+
 ## v3.67.0 - 2026-08-15
 
 ### Fixed

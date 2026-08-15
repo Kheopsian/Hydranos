@@ -448,6 +448,36 @@ func (s *Server) handleQbitPreview(c *gin.Context) {
 	})
 }
 
+// handleImportCheckPaths stats paths as Hydra sees them. The import wizard
+// calls it when the user edits a mapping: re-running the whole preview would
+// re-list the qBittorrent library, minutes of it on a large one, while the
+// question at that moment is only whether Hydra can reach the folders.
+//
+// Reachable is not the same as populated: a folder can exist and hold none of
+// the payload. The authoritative probe stays at import start.
+func (s *Server) handleImportCheckPaths(c *gin.Context) {
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]gin.H, 0, len(req.Paths))
+	for i, p := range req.Paths {
+		if i >= 64 {
+			break
+		}
+		e := gin.H{"path": p, "exists": false, "is_dir": false}
+		if fi, statErr := os.Stat(p); statErr == nil {
+			e["exists"] = true
+			e["is_dir"] = fi.IsDir()
+		}
+		out = append(out, e)
+	}
+	c.JSON(http.StatusOK, gin.H{"results": out})
+}
+
 // handleQbitStart kicks off the import in the background and returns a job id.
 func (s *Server) handleQbitStart(c *gin.Context) {
 	var req qbitCreds
