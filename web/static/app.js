@@ -524,6 +524,9 @@ function importWizard(opts) {
             <p class="modal-desc">${t("Categories: {list}, all imported as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:")}</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
+            ${d.data_checked ? `<p class="modal-desc" style="margin-bottom:8px${d.data_found === 0 ? ";color:var(--accent-red);font-weight:600" : ""}">${d.data_found === 0
+                ? t("No data found for any of the {checked} torrents sampled. Nothing is reachable at these paths, so every torrent would restart from zero. Fix the mapping above.", { checked: d.data_checked })
+                : t("Data found for {found} of {checked} torrents sampled.", { found: d.data_found, checked: d.data_checked })}</p>` : ""}
             <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="qb-msg2" style="min-height:1em"></p>
             <div class="modal-actions">

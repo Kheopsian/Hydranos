@@ -64,7 +64,7 @@ fn add_torrent(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
             // Data already on disk at save_path (re-add / cross-seed / a
             // download resumed elsewhere)? Hash-check it instead of blindly
             // re-downloading over it. seed_mode (skip_checking) stays trust-fast.
-            if !seed_mode && !stopped && mgr.first_file_exists(&ih) {
+            if !seed_mode && !stopped && mgr.any_file_exists(&ih) {
                 let _ = mgr.recheck(&ih);
             }
             json!({"info_hash": hex_encode(&ih), "name": name})

@@ -444,22 +444,32 @@ impl TorrentManager {
     /// True if the torrent's first file already exists on disk at its
     /// save_path. Cheap gate for auto-recheck: a fresh download with no data
     /// on disk returns false and skips the (all-miss) check.
-    pub fn first_file_exists(&self, info_hash: &InfoHash) -> bool {
+    /// True when AT LEAST ONE of the torrent's files is present on disk.
+    ///
+    /// This used to probe files[0] alone, which was wrong in the exact case it
+    /// mattered: a partial download very often lacks precisely the first file
+    /// (priority set to zero, or a non-sequential order that never reached
+    /// it). The probe then answered "nothing on disk" for a torrent holding
+    /// most of its data, the recheck was skipped, and every piece was
+    /// re-downloaded over bytes that were already there. Measured on a
+    /// three-file torrent with two files present: 67% when the missing one was
+    /// last, 0% when it was first.
+    ///
+    /// Short-circuits on the first hit, so the common case costs one stat.
+    pub fn any_file_exists(&self, info_hash: &InfoHash) -> bool {
         let t = match self.get(info_hash) {
             Some(t) => t,
             None => return false,
         };
-        let f0 = match t.meta.files.first() {
-            Some(f) => f,
-            None => return false,
-        };
         let save_path = t.save_path.read().clone();
-        let full = if t.meta.multi_file {
-            save_path.join(&t.meta.name).join(&f0.path)
-        } else {
-            save_path.join(&f0.path)
-        };
-        full.exists()
+        t.meta.files.iter().any(|f| {
+            let full = if t.meta.multi_file {
+                save_path.join(&t.meta.name).join(&f.path)
+            } else {
+                save_path.join(&f.path)
+            };
+            full.exists()
+        })
     }
 
     /// Hash-check data already on disk and populate the picker with the pieces

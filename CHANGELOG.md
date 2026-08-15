@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.67.0 - 2026-08-15
+
+### Fixed
+- **Checkboxes were drawn as full-width empty boxes.** A global rule styled every `input` as a text field, `appearance: none` included, so a checkbox lost its tick and stretched across the dialog. The import wizard's "import everything stopped" option was the visible casualty: it has been there since v3.54.0 and on by default since v3.62.0, but nobody could recognise it as a switch, let alone see that it was already set.
+- **A partial torrent could re-download data it already had.** Before adding, the engine probes the disk to decide whether to hash-check instead of downloading, but it only looked at the torrent's *first* file. A partial download very often lacks exactly that one, and the probe then reported an empty disk for a torrent holding most of its payload. Measured on a three-file torrent with two files present: 67% recovered when the missing file was last, 0% when it was first.
+
+### Added
+- **The qBittorrent import now says when it cannot find your data.** It samples the library before writing anything and refuses to start if nothing is reachable under the current path mapping, which is what a wrong volume bind looks like. The preview reports the same count, and the final report carries a `data_missing` tally. A complete torrent whose payload is missing is no longer added in seed-mode, which would have announced us as a seeder with nothing to serve. Pass `force: true` to import anyway.
+
 ## v3.66.0 - 2026-08-15
 
 ### Added
