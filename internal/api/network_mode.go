@@ -500,30 +500,38 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		add("peer_egress", "Address peers see", "ok", peerIP)
 	}
 
-	// 3. The host's own address, with nothing in the way. Not a verdict on its
-	// own — it is the reference the two above are compared against.
+	// 3. Where the daemon's other requests go. NOT "the host's own address":
+	// inside a VPN or proxy namespace this leaves by the tunnel like everything
+	// else, so it cannot serve as an outside reference. Informational only.
 	hostIP := getPublicIP()
 	if hostIP == "" {
-		add("host_ip", "This host's own address", "warn", "could not be determined")
+		add("host_ip", "Address the daemon's own requests use", "warn", "could not be determined")
 	} else {
-		add("host_ip", "This host's own address", "ok", hostIP)
+		add("host_ip", "Address the daemon's own requests use", "ok", hostIP)
 	}
 
-	// 4. The comparison that matters. In every relayed mode, a tracker seeing
-	// the host's own address means the relay is decorative.
-	if mode == netModeSocks5 || mode == netModeProxyV2 || mode == netModeVPN {
+	// 4. The comparison that actually catches the defect: do the two paths
+	// agree? The reported leak was peers relayed and announces direct, which
+	// shows up here as two different addresses. Comparing against the daemon's
+	// own address instead would call a working VPN a leak, since inside the
+	// tunnel every path shares one address, and that is correct rather than
+	// suspicious.
+	if mode != netModeDirect {
 		for name, ip := range announceIPs {
 			switch {
-			case hostIP != "" && ip == hostIP:
-				add("leak_"+name, "Announces are relayed ("+name+")", "fail",
-					"the tracker records "+ip+", this host's own address. The relay carries the traffic but not the identity")
-			case peerErr == nil && ip != peerIP:
-				add("leak_"+name, "Announces are relayed ("+name+")", "warn",
-					"trackers see "+ip+" but peers see "+peerIP+". Peers will be told to reach an address you do not announce")
+			case peerErr != nil:
+				add("paths_"+name, "Announce path ("+name+")", "warn",
+					"trackers see "+ip+", but the peer path could not be measured, so the two cannot be compared")
+			case ip != peerIP:
+				add("paths_"+name, "Announce path ("+name+")", "fail",
+					"trackers see "+ip+" while peers are dialled from "+peerIP+". The address that identifies you is the one the tracker records")
 			default:
-				add("leak_"+name, "Announces are relayed ("+name+")", "ok", "trackers see "+ip+", not this host's address")
+				add("paths_"+name, "Announce path ("+name+")", "ok",
+					"announces and peer connections both leave from "+ip)
 			}
 		}
+		add("scope", "Scope of this check", "warn",
+			"measured from inside this daemon's own network namespace: it can tell the announce path from the peer path, but an address that exists outside both is invisible to it")
 	}
 
 	for _, w := range modeWarnings(mode, netModeFields{

@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.74.4 - 2026-08-16
+
+### Fixed
+- **The connectivity check called a working VPN a leak.** It compared the announce address against the daemon's own address, but inside a tunnel every path shares one address, which is correct rather than suspicious. It now compares the announce path against the peer path, which is what actually catches a relay that carries the traffic without the identity, and it states plainly that a check run from inside a tunnel cannot see an address that exists outside it.
+
 ## v3.74.3 - 2026-08-16
 
 ### Added
