@@ -232,3 +232,26 @@ func TestSocks5ModeSaysItIsNotReachable(t *testing.T) {
 		t.Errorf("relay mode wrongly warns it is unreachable: %q", relay)
 	}
 }
+
+// TestVPNModeFlagsANonTunnelInterface — the picker lists every interface on the
+// host, so the ordinary one is often the first that looks plausible. Bound to
+// it, peer connections leave outside the tunnel or go nowhere.
+func TestVPNModeFlagsANonTunnelInterface(t *testing.T) {
+	f := netModeFields{RaceListenPort: 16171, HoardListenPort: 16172, BindInterface: "eth0"}
+	joined := strings.Join(modeWarnings(netModeVPN, f, nil), " ")
+	if !strings.Contains(joined, "eth0") || !strings.Contains(joined, "does not look like a VPN tunnel") {
+		t.Errorf("eth0 accepted silently in VPN mode: %q", joined)
+	}
+	for _, name := range []string{"tun1", "wg0", "tap0", "tailscale0", "ppp0"} {
+		f.BindInterface = name
+		if got := strings.Join(modeWarnings(netModeVPN, f, nil), " "); strings.Contains(got, "does not look like") {
+			t.Errorf("%s wrongly flagged: %q", name, got)
+		}
+	}
+	// Advisory only: a name we do not recognise must still be saveable, since
+	// the set of VPN clients is open-ended.
+	f.BindInterface = "eth0"
+	if err := validateNetMode(netModeVPN, f); err != nil && strings.Contains(err.Error(), "tunnel") {
+		t.Errorf("the naming heuristic blocks a save: %v", err)
+	}
+}

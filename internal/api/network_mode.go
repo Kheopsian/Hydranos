@@ -129,6 +129,20 @@ func detectNetMode(race, hoard map[string]interface{}) string {
 	return netModeDirect
 }
 
+// looksLikeTunnel is a naming heuristic, deliberately advisory: the set of VPN
+// clients is open-ended, so a wrong guess must not block a working setup. It
+// exists because the interface picker lists every interface on the host and the
+// ordinary one is often the first that looks plausible.
+func looksLikeTunnel(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	for _, p := range []string{"tun", "tap", "wg", "ppp", "vpn", "utun", "tailscale", "proton", "nordlynx", "ipsec"} {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func maskProxyURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.User == nil {
@@ -170,6 +184,9 @@ func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 	}
 	if proxied {
 		w = append(w, "UDP trackers are skipped in this mode: SOCKS5 carries TCP only, and a direct datagram would hand the tracker the address you are hiding.")
+	}
+	if mode == netModeVPN && f.BindInterface != "" && !looksLikeTunnel(f.BindInterface) {
+		w = append(w, "\""+f.BindInterface+"\" does not look like a VPN tunnel (those are usually named tun0, wg0 or similar). Peer connections bound to an ordinary interface leave outside the tunnel, or do not leave at all.")
 	}
 	if mode == netModeProxyV2 && len(f.ProxyV2Trusted) == 0 {
 		w = append(w, "No trusted source for the PROXY-v2 listener: anyone who reaches that port could forge any peer address. List your relay's address.")
@@ -495,7 +512,14 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		tomlStr(hoard, "socks5_outbound_user"), tomlStr(hoard, "socks5_outbound_pass"),
 		tomlStr(hoard, "bind_interface"), echo)
 	if peerErr != nil {
-		add("peer_egress", "Address peers see", "fail", peerErr.Error())
+		detail := peerErr.Error()
+		if bi := tomlStr(hoard, "bind_interface"); bi != "" {
+			detail += ". Peer connections are bound to \"" + bi + "\""
+			if !looksLikeTunnel(bi) {
+				detail += ", which does not look like a VPN tunnel: that is the usual reason they go nowhere"
+			}
+		}
+		add("peer_egress", "Address peers see", "fail", detail)
 	} else {
 		add("peer_egress", "Address peers see", "ok", peerIP)
 	}
@@ -562,18 +586,27 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 			tomlStr(e.sec, "socks5_outbound_host"), tomlInt(e.sec, "socks5_outbound_port"),
 			tomlStr(e.sec, "socks5_outbound_user"), tomlStr(e.sec, "socks5_outbound_pass"),
 			tomlStr(e.sec, "bind_interface"))
-		outside := tomlStr(e.sec, "socks5_outbound_host") != ""
+		// Only a probe leaving through a proxy reaches us the way a stranger
+		// would. Through a tunnel it turns around at the VPN provider, and on a
+		// direct setup at your own router, and neither is obliged to loop it
+		// back. Success proves reachability in all three; failure only proves
+		// it in the first.
+		viaProxy := tomlStr(e.sec, "socks5_outbound_host") != ""
+		turnaround := "your own router"
+		if mode == netModeVPN {
+			turnaround = "your VPN provider"
+		}
 		switch {
-		case err == nil && outside:
-			add("inbound_"+e.name, label, "ok", target+" accepted a connection made from outside your network")
+		case err == nil && viaProxy:
+			add("inbound_"+e.name, label, "ok", target+" accepted a connection coming from outside your network")
 		case err == nil:
-			add("inbound_"+e.name, label, "warn", target+" accepted a connection, but it was made from inside your own network. A router that loops such connections back answers the same way whether or not a stranger could get through")
+			add("inbound_"+e.name, label, "ok", target+" accepted the connection, so the port is open")
 		case mode == netModeSocks5:
 			add("inbound_"+e.name, label, "fail", target+" refused the connection, as expected: a plain SOCKS5 proxy forwards outgoing connections only, so nobody can reach you")
-		case outside:
-			add("inbound_"+e.name, label, "fail", target+" refused a connection made from outside: peers cannot reach you. Check the port forward and the firewall. ("+err.Error()+")")
+		case viaProxy:
+			add("inbound_"+e.name, label, "fail", target+" refused a connection coming from outside: peers cannot reach you. Check the port forward and the firewall. ("+err.Error()+")")
 		default:
-			add("inbound_"+e.name, label, "warn", target+" refused a connection made from inside your own network, which many routers do even when the port is open to outsiders. Inconclusive. ("+err.Error()+")")
+			add("inbound_"+e.name, label, "warn", target+" refused the connection, but the probe had to turn around at "+turnaround+", which is not obliged to send it back to you. Inconclusive rather than closed. ("+err.Error()+")")
 		}
 	}
 
