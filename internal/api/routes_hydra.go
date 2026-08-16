@@ -509,6 +509,9 @@ func (s *Server) registerHydraRoutes() {
 		api.GET("/announce/secondary-stats", s.handleGetSecondaryStats)
 		api.POST("/announce/secondary-stats", s.handleSetSecondaryStats)
 
+		api.GET("/announce/ip-modes", s.handleGetAnnounceIPModes)
+		api.POST("/announce/ip-modes", s.handleSetAnnounceIPMode)
+
 		// Per-host tracker aggregate (announce health + override state)
 		api.GET("/trackers", s.handleGetTrackers)
 
@@ -2785,7 +2788,10 @@ func (s *Server) handleSetOptFlag(c *gin.Context) {
 // rather than to either Go-side registry.
 func isEngineOptFlag(name string) bool {
 	switch name {
-	case "session_pinning", "session_runtimes":
+	// block_mse was reachable only by talking to the engine socket directly:
+	// the engine exposes it in its flag map, so it read back fine, but this
+	// gate rejected any attempt to set it through the API.
+	case "session_pinning", "session_runtimes", "block_mse", "mse_prefer_plaintext":
 		return true
 	}
 	return false
@@ -2906,6 +2912,36 @@ func (s *Server) handleSetSecondaryStats(c *gin.Context) {
 	engine.SetSecondaryStatsOverride(req.Host, req.Mode)
 	persisted := persistedFlag(s.persistSecondaryStats(req.Host, req.Mode), "secondary_stats", req.Host)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "secondary_stats": engine.GetSecondaryStatsOverrides(), "persisted": persisted})
+}
+
+// handleGetAnnounceIPModes lists the per-tracker announce address families.
+func (s *Server) handleGetAnnounceIPModes(c *gin.Context) {
+	c.JSON(http.StatusOK, engine.GetAnnounceIPModes())
+}
+
+// handleSetAnnounceIPMode pins the announce address family for trackers whose
+// URL contains host. mode: "v4", "v6", or "auto"/"" to clear. Hot — applies on
+// the next announce. An unknown mode is rejected rather than silently ignored,
+// which would leave the tracker on the default it was meant to move off.
+func (s *Server) handleSetAnnounceIPMode(c *gin.Context) {
+	var req struct {
+		Host string `json:"host"`
+		Mode string `json:"mode"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.Host) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
+		return
+	}
+	if !engine.SetAnnounceIPMode(req.Host, req.Mode) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "mode must be one of: v4, v6, auto"})
+		return
+	}
+	persisted := persistedFlag(s.persistAnnounceIPMode(req.Host), "ip_mode", req.Host)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "ip_modes": engine.GetAnnounceIPModes(), "persisted": persisted})
 }
 
 // ---------------------------------------------------------------------------
@@ -3052,6 +3088,22 @@ func (s *Server) persistSecondaryStats(host, mode string) error {
 		}
 		return config.SetTOMLTable(doc, "announce_secondary_stats",
 			[][2]string{{key, strconv.Quote(m)}})
+	})
+}
+
+// persistAnnounceIPMode mirrors a hot announce family into [announce_ip_modes].
+// It reads the canonical mode back from the engine rather than re-parsing the
+// request, so the aliases the API accepts are spelled one way on disk. "auto"
+// is the default, so it is stored as an absence rather than a value.
+func (s *Server) persistAnnounceIPMode(host string) error {
+	mode := engine.GetAnnounceIPModes()[strings.TrimSpace(host)]
+	return s.editConfigFile(func(doc string) (string, error) {
+		key := config.QuoteTOMLKey(host)
+		if mode == "" {
+			return config.PruneEmptyTable(config.DeleteTOMLKey(doc, "announce_ip_modes", key), "announce_ip_modes"), nil
+		}
+		return config.SetTOMLTable(doc, "announce_ip_modes",
+			[][2]string{{key, strconv.Quote(mode)}})
 	})
 }
 

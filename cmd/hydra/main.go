@@ -578,6 +578,7 @@ func main() {
 	}
 	engine.InitClientOverrides(clientSpoofs)
 	engine.InitSecondaryStatsOverrides(cfg.AnnounceSecondaryStats)
+	engine.InitAnnounceIPModes(cfg.AnnounceIPModes)
 	raceEngine := engine.NewRaceEngine(raceCfg, chokingEngine, nil, raceDataDir)
 	raceEngine.SetClient(raceProc.Client())
 

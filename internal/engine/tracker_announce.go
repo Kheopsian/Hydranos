@@ -78,6 +78,18 @@ func ipv4Network(network string) string {
 	return network
 }
 
+// ipv6Network narrows a dial network to its IPv6 form. Mirror of ipv4Network:
+// anything it does not recognise is passed through untouched.
+func ipv6Network(network string) string {
+	switch network {
+	case "tcp", "tcp4":
+		return "tcp6"
+	case "udp", "udp4":
+		return "udp6"
+	}
+	return network
+}
+
 // HostHasIPv4 reports whether this host holds a usable IPv4 address, ignoring
 // loopback. Callers use it to say at boot that an announce pinned to IPv4 has
 // nowhere to go, rather than letting every announce fail on its own later.
@@ -114,12 +126,23 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	// A configured SOCKS proxy is deliberately left alone below: the egress
 	// family is then the proxy's, and forcing v4 to reach it would break a
 	// proxy that is only reachable over v6.
-	dial := dialer.DialContext
-	if !b.EnableIPv6 {
-		base := dialer
-		dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	// A per-tracker override wins over the binding-wide setting: a host may be
+	// dual-stack everywhere and still need one tracker pinned to v4, because
+	// trackers that record only the announce SOURCE ip then hold an address
+	// v4-only peers cannot dial. addr here is the tracker host:port, so the
+	// family is decided per request rather than per client.
+	base := dialer
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		switch announceIPModeFor(addr) {
+		case AnnounceIPModeV4:
+			return base.DialContext(ctx, ipv4Network(network), addr)
+		case AnnounceIPModeV6:
+			return base.DialContext(ctx, ipv6Network(network), addr)
+		}
+		if !b.EnableIPv6 {
 			return base.DialContext(ctx, ipv4Network(network), addr)
 		}
+		return base.DialContext(ctx, network, addr)
 	}
 
 	transport := &http.Transport{
@@ -425,6 +448,108 @@ func secondaryStatsModeFor(trackerURL string) string {
 		}
 	}
 	return "clone"
+}
+
+// Per-tracker announce address family (host-substring -> mode). A dual-stack
+// host dialling plain "tcp" follows RFC 6724 and prefers IPv6, so every
+// announce leaves over v6 and a tracker that records only the announce SOURCE
+// ip ends up holding a v6 address for us. IPv4-only peers then get a peer entry
+// they cannot dial, and we seed to nobody without a single error anywhere.
+//
+//	"auto" (default) — follow the binding's enable_ipv6 / the kernel's choice.
+//	"v4"             — pin announces to this tracker to IPv4.
+//	"v6"             — pin announces to this tracker to IPv6.
+//
+// Seeded from config [announce_ip_modes], hot via POST /api/announce/ip-modes.
+// Ignored when a SOCKS announce proxy is configured: the egress family is then
+// the proxy's, and forcing one here would break a proxy that is reachable over
+// the other family only.
+const (
+	AnnounceIPModeAuto = "auto"
+	AnnounceIPModeV4   = "v4"
+	AnnounceIPModeV6   = "v6"
+)
+
+var (
+	announceIPModeMu sync.RWMutex
+	announceIPModes  = map[string]string{}
+)
+
+// normalizeAnnounceIPMode maps user input onto a known mode, "" if unknown.
+// Accepts the obvious aliases so the API is not a spelling test.
+func normalizeAnnounceIPMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "v4", "ipv4", "4", "inet", "inet4":
+		return AnnounceIPModeV4
+	case "v6", "ipv6", "6", "inet6":
+		return AnnounceIPModeV6
+	case "", "auto", "any", "default":
+		return AnnounceIPModeAuto
+	}
+	return ""
+}
+
+// InitAnnounceIPModes seeds the family map from config at boot.
+func InitAnnounceIPModes(fromConfig map[string]string) {
+	announceIPModeMu.Lock()
+	defer announceIPModeMu.Unlock()
+	for host, mode := range fromConfig {
+		h := strings.TrimSpace(host)
+		m := normalizeAnnounceIPMode(mode)
+		if h != "" && (m == AnnounceIPModeV4 || m == AnnounceIPModeV6) {
+			announceIPModes[h] = m
+		}
+	}
+	if len(announceIPModes) > 0 {
+		slog.Info("tracker_announce: announce ip-family overrides active", "trackers", len(announceIPModes))
+	}
+}
+
+// SetAnnounceIPMode pins (or with "auto"/"" releases) the announce address
+// family for trackers whose URL contains host. Applies to the next announce.
+// Reports whether the mode was understood, so the API can reject a typo rather
+// than silently leaving the tracker on auto.
+func SetAnnounceIPMode(host, mode string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	m := normalizeAnnounceIPMode(mode)
+	if m == "" {
+		return false
+	}
+	announceIPModeMu.Lock()
+	defer announceIPModeMu.Unlock()
+	if m == AnnounceIPModeAuto {
+		delete(announceIPModes, host)
+		return true
+	}
+	announceIPModes[host] = m
+	return true
+}
+
+// GetAnnounceIPModes returns a copy of the current family map.
+func GetAnnounceIPModes() map[string]string {
+	announceIPModeMu.RLock()
+	defer announceIPModeMu.RUnlock()
+	out := make(map[string]string, len(announceIPModes))
+	for k, v := range announceIPModes {
+		out[k] = v
+	}
+	return out
+}
+
+// announceIPModeFor returns the pinned family for a tracker URL or a dial
+// target ("auto" if no override host substring matches).
+func announceIPModeFor(trackerURL string) string {
+	announceIPModeMu.RLock()
+	defer announceIPModeMu.RUnlock()
+	for host, m := range announceIPModes {
+		if strings.Contains(trackerURL, host) {
+			return m
+		}
+	}
+	return AnnounceIPModeAuto
 }
 
 // applyPasskeyOverride rewrites the /announce/<passkey> path segment for any
