@@ -2869,6 +2869,7 @@ func (s *Server) handleGetTrackers(c *gin.Context) {
 		PeerIDPrefix string   `json:"peer_id_prefix,omitempty"`
 		UserAgent    string   `json:"user_agent,omitempty"`
 		PasskeySet   bool     `json:"passkey_set"`
+		IPMode       string   `json:"ip_mode"`
 		Sources      []string `json:"sources"`
 	}
 	rows := make([]trackerRow, 0, len(merged))
@@ -2880,6 +2881,7 @@ func (s *Server) handleGetTrackers(c *gin.Context) {
 			row.UserAgent = sp.UserAgent
 		}
 		row.PasskeySet = engine.PasskeyOverrideForHost(host)
+		row.IPMode = engine.AnnounceIPModeForHost(host)
 		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool {
