@@ -5808,7 +5808,7 @@ const NET_MODES = [
     { id: "vpn", label: "VPN",
       blurb: "A VPN client already runs on this host or container. Peer sockets are pinned to its interface." },
     { id: "socks5", label: "SOCKS5 proxy",
-      blurb: "Outgoing connections go through a SOCKS5 proxy: peer dials and tracker announces both." },
+      blurb: "Outgoing connections go through a SOCKS5 proxy: peer dials and tracker announces both. Nobody can connect to you from outside." },
     { id: "proxy_v2", label: "SOCKS5 + PROXY-v2 relay",
       blurb: "As above, plus a relay that forwards incoming peers with their real address in a PROXY-v2 header." },
 ];

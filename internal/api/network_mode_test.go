@@ -213,3 +213,22 @@ func TestMaskProxyURLKeepsTheHostAndHidesThePassword(t *testing.T) {
 		t.Errorf("masked too much: %q", got)
 	}
 }
+
+// TestSocks5ModeSaysItIsNotReachable — a plain SOCKS5 proxy forwards outgoing
+// connections only. Presenting that mode as a finished setup hides the fact
+// that the announced address answers nobody.
+func TestSocks5ModeSaysItIsNotReachable(t *testing.T) {
+	joined := strings.ToLower(strings.Join(modeWarnings(netModeSocks5, socksFields(), nil), " "))
+	if !strings.Contains(joined, "outgoing") || !strings.Contains(joined, "reach you") {
+		t.Errorf("socks5 mode does not warn about inbound: %q", joined)
+	}
+	// The relay mode exists precisely to fix it, so it must NOT carry the same
+	// warning or the two modes become indistinguishable.
+	f := socksFields()
+	f.RaceProxyV2Port, f.HoardProxyV2Port = 16271, 16272
+	f.ProxyV2Trusted = []string{"203.0.113.7"}
+	relay := strings.ToLower(strings.Join(modeWarnings(netModeProxyV2, f, nil), " "))
+	if strings.Contains(relay, "nobody can reach you") {
+		t.Errorf("relay mode wrongly warns it is unreachable: %q", relay)
+	}
+}

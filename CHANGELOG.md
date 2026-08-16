@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.74.2 - 2026-08-16
+
+### Fixed
+- **The SOCKS5 mode no longer presents itself as a complete setup.** A plain SOCKS5 proxy carries outgoing connections only, so the address announced through it answers nobody and only self-initiated peer connections work. The mode card, the warnings and the connectivity check all say so now, and the check reports inbound reachability as failed rather than untested.
+
 ## v3.74.1 - 2026-08-16
 
 ### Changed
