@@ -43,6 +43,14 @@ type TrackerAnnounceResult struct {
 type trackerAnnouncer struct {
 	httpClient      *http.Client
 	secondaryClient *http.Client // optional, fire-and-forget via TYPHON_ANNOUNCE_V6_PROXY (v4 egress path)
+	// clientV4/clientV6 are the same transport pinned to one address family.
+	// A tracker that records only the announce source address holds whichever
+	// family we happened to leave by, so a dual-stack host has to announce on
+	// both to be reachable by both — this is what libtorrent does, one peer_id
+	// with two addresses. Nil when an announce proxy is configured (the egress
+	// family is then the proxy's) or when the host lacks that family.
+	clientV4 *http.Client
+	clientV6 *http.Client
 	peerID          string
 	port            int
 	publicIP        string
@@ -104,6 +112,29 @@ func HostHasIPv4() bool {
 			continue
 		}
 		if ipn.IP.To4() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// HostHasIPv6 reports whether this host holds a globally routable IPv6 address.
+// Link-local and loopback do not count: a tracker cannot be reached from them,
+// so treating them as v6 connectivity would make every companion announce fail.
+func HostHasIPv6() bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false // cannot tell: do not fire announces that will fail
+	}
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if ipn.IP.To4() != nil {
+			continue
+		}
+		if ipn.IP.IsGlobalUnicast() && !ipn.IP.IsLinkLocalUnicast() {
 			return true
 		}
 	}
@@ -173,6 +204,31 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 			return dialSOCKS5h(ctx, baseDialer, socksAddr, socksUser, socksPass, host, uint16(portN))
 		}
 	}
+	// Family-pinned clients for the dual-family announce. Only built on a direct
+	// egress: behind a SOCKS proxy the tracker sees the proxy's address, so
+	// pinning the local family changes nothing and would only break a proxy
+	// reachable over one family. Skipped for a family this host does not have,
+	// so we never fire an announce that cannot connect.
+	var clientV4, clientV6 *http.Client
+	if loadAnnounceProxy() == nil {
+		pinned := func(narrow func(string) string) *http.Client {
+			base := dialer
+			return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+				TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+				DisableKeepAlives: true,
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return base.DialContext(ctx, narrow(network), addr)
+				},
+			}}
+		}
+		if HostHasIPv4() {
+			clientV4 = pinned(ipv4Network)
+		}
+		if HostHasIPv6() {
+			clientV6 = pinned(ipv6Network)
+		}
+	}
+
 	// Optional secondary client routed through TYPHON_ANNOUNCE_V6_PROXY.
 	// Used to fire a parallel announce so the tracker registers us via a
 	// different egress path (typically v4 SNAT, when primary egresses v6).
@@ -215,6 +271,8 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	return &trackerAnnouncer{
 		httpClient:      &http.Client{Timeout: 10 * time.Second, Transport: transport},
 		secondaryClient: secondaryClient,
+		clientV4:        clientV4,
+		clientV6:        clientV6,
 		peerID:          peerID,
 		port:            port,
 		publicIP:        b.PublicIP,
@@ -456,9 +514,16 @@ func secondaryStatsModeFor(trackerURL string) string {
 // ip ends up holding a v6 address for us. IPv4-only peers then get a peer entry
 // they cannot dial, and we seed to nobody without a single error anywhere.
 //
-//	"auto" (default) — follow the binding's enable_ipv6 / the kernel's choice.
-//	"v4"             — pin announces to this tracker to IPv4.
-//	"v6"             — pin announces to this tracker to IPv6.
+//	"auto" (default) — announce once per address family this host has, with the
+//	                   same peer_id, so the tracker holds one peer reachable at
+//	                   both addresses. This is what libtorrent does. On a
+//	                   single-stack host it is a single announce, as before.
+//	"v4"             — pin announces to this tracker to IPv4 only.
+//	"v6"             — pin announces to this tracker to IPv6 only.
+//
+// Pin a family only for a tracker that mishandles the pair (counts the two
+// addresses as two peers, or caps peers per account); "auto" is otherwise the
+// reachable answer.
 //
 // Seeded from config [announce_ip_modes], hot via POST /api/announce/ip-modes.
 // Ignored when a SOCKS announce proxy is configured: the egress family is then
@@ -537,6 +602,47 @@ func GetAnnounceIPModes() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// A tracker with no address in the companion family (no AAAA record, a
+// filtered path, a v6 route that blackholes) would otherwise cost one dead
+// connection per torrent per announce cycle. At six figures of torrents that
+// is a flood of dials and of log lines for a fact that does not change by the
+// minute, so remember it per (host, family) and stop trying for a while.
+var (
+	familyDeadMu sync.Mutex
+	familyDead   = map[string]time.Time{}
+)
+
+const familyDeadFor = 30 * time.Minute
+
+func familyIsDead(key string) bool {
+	familyDeadMu.Lock()
+	defer familyDeadMu.Unlock()
+	until, ok := familyDead[key]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(familyDead, key)
+		return false
+	}
+	return true
+}
+
+func markFamilyDead(key string) {
+	familyDeadMu.Lock()
+	defer familyDeadMu.Unlock()
+	if _, seen := familyDead[key]; !seen {
+		slog.Info("tracker_announce: companion announce family unreachable, pausing it", "target", key, "for", familyDeadFor)
+	}
+	familyDead[key] = time.Now().Add(familyDeadFor)
+}
+
+func markFamilyAlive(key string) {
+	familyDeadMu.Lock()
+	defer familyDeadMu.Unlock()
+	delete(familyDead, key)
 }
 
 // announceIPModeFor returns the pinned family for a tracker URL or a dial
@@ -800,13 +906,64 @@ func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, down
 		}()
 	}
 
+	// Dual-family announce. A tracker that records only the announce source
+	// address holds whichever family we left by, so announcing once makes us
+	// unreachable for peers on the other one — silently, since nothing fails.
+	// libtorrent answers this by announcing from every listen socket with the
+	// SAME peer_id: one peer, two addresses. Match that, because being compared
+	// against qBittorrent is the point.
+	//
+	// "auto" therefore means both families, not "let the kernel pick one". The
+	// v4/v6 modes stay available and pin the family in the dialer instead.
+	primary := ta.httpClient
+	var companion *http.Client
+	var companionKey string
+	if announceIPModeFor(trackerURL) == AnnounceIPModeAuto && ta.clientV4 != nil && ta.clientV6 != nil {
+		// Pick the primary deterministically rather than inheriting RFC 6724's
+		// choice: the caller parses the primary's peer list, and we want to know
+		// which family produced it.
+		primary = ta.clientV4
+		companion = ta.clientV6
+		if u, err := url.Parse(trackerURL); err == nil {
+			companionKey = u.Host + "|v6"
+		}
+	}
+	if companion != nil && secondaryStatsModeFor(trackerURL) != "off" && !familyIsDead(companionKey) {
+		companionClient, companionURL, key := companion, announceURL, companionKey
+		ua, limiter := userAgent, ta.limiter
+		go func() {
+			// A second request on the wire draws its own token. Fire-and-forget
+			// already, so waiting costs nothing.
+			if err := limiter.wait(context.Background()); err != nil {
+				return
+			}
+			req, err := http.NewRequest("GET", companionURL, nil)
+			if err != nil {
+				return
+			}
+			req.Header.Set("User-Agent", ua)
+			resp, err := companionClient.Do(req)
+			if err != nil {
+				markFamilyDead(key)
+				return
+			}
+			defer resp.Body.Close()
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+			if resp.StatusCode != 200 {
+				markFamilyDead(key)
+				return
+			}
+			markFamilyAlive(key)
+		}()
+	}
+
 	req, err := http.NewRequest("GET", announceURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("tracker announce: %w", err)
 	}
 	req.Header.Set("User-Agent", userAgent)
 
-	resp, err := ta.httpClient.Do(req)
+	resp, err := primary.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("tracker announce: %w", err)
 	}
