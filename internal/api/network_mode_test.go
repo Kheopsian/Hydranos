@@ -1,0 +1,215 @@
+package api
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/Kheopsian/hydra/internal/config"
+)
+
+const netSample = `[daemon]
+api_port = 8199
+
+[race]
+listen_port = 16171
+enable_ipv6 = false
+
+[hoard]
+listen_port = 16172
+enable_ipv6 = false
+`
+
+// apply runs one mode through the same path the handler uses, and hands back
+// the reparsed config — testing the keys in isolation would miss the part that
+// actually matters, which is what survives in the file.
+func apply(t *testing.T, doc, mode string, f netModeFields) (map[string]interface{}, string) {
+	t.Helper()
+	out := doc
+	var err error
+	for _, e := range []struct {
+		section     string
+		listenPort  int
+		proxyV2Port int
+	}{
+		{"race", f.RaceListenPort, f.RaceProxyV2Port},
+		{"hoard", f.HoardListenPort, f.HoardProxyV2Port},
+	} {
+		out, err = config.SetTOMLTable(out, e.section, netModeKeys(mode, f, e.listenPort, e.proxyV2Port))
+		if err != nil {
+			t.Fatalf("SetTOMLTable(%s): %v", e.section, err)
+		}
+	}
+	if err := config.ValidateTyped([]byte(out)); err != nil {
+		t.Fatalf("mode %s produced a config the daemon would refuse: %v", mode, err)
+	}
+	m, err := config.ParseTOMLMap([]byte(out))
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	return m, out
+}
+
+func socksFields() netModeFields {
+	return netModeFields{
+		RaceListenPort: 16171, HoardListenPort: 16172,
+		Socks5Host: "10.0.0.1", Socks5Port: 1080,
+		Socks5User: "hydra", Socks5Pass: "p@ss word",
+	}
+}
+
+// TestSocks5ModeWiresBothPaths is the reason this tab exists: the operator
+// enters one proxy and BOTH the peer dials and the announces must follow it.
+// Setting only the first is the leak that started all this.
+func TestSocks5ModeWiresBothPaths(t *testing.T) {
+	m, _ := apply(t, netSample, netModeSocks5, socksFields())
+	for _, sec := range []string{"race", "hoard"} {
+		s := sectionOf(m, sec)
+		if got := tomlStr(s, "socks5_outbound_host"); got != "10.0.0.1" {
+			t.Errorf("[%s] socks5_outbound_host = %q", sec, got)
+		}
+		ap := tomlStr(s, "announce_proxy")
+		if !strings.HasPrefix(ap, "socks5h://") || !strings.Contains(ap, "10.0.0.1:1080") {
+			t.Errorf("[%s] announce_proxy = %q, want the same proxy", sec, ap)
+		}
+		// The password has a space and an @: unescaped, the URL would either be
+		// refused or parsed with the wrong host.
+		if !strings.Contains(ap, "p%40ss%20word") {
+			t.Errorf("[%s] announce_proxy credentials not escaped: %q", sec, ap)
+		}
+	}
+	if detectNetMode(sectionOf(m, "race"), sectionOf(m, "hoard")) != netModeSocks5 {
+		t.Error("mode not detected back as socks5")
+	}
+}
+
+// TestSwitchingModeClearsTheOldOne — the half-abandoned setup is the failure
+// this tab is meant to make impossible.
+func TestSwitchingModeClearsTheOldOne(t *testing.T) {
+	f := socksFields()
+	f.RaceProxyV2Port, f.HoardProxyV2Port = 16271, 16272
+	f.ProxyV2Trusted = []string{"203.0.113.7"}
+	_, doc := apply(t, netSample, netModeProxyV2, f)
+
+	m, _ := apply(t, doc, netModeDirect, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172})
+	for _, sec := range []string{"race", "hoard"} {
+		s := sectionOf(m, sec)
+		for _, k := range []string{"socks5_outbound_host", "socks5_outbound_user", "socks5_outbound_pass", "announce_proxy", "bind_interface"} {
+			if v := tomlStr(s, k); v != "" {
+				t.Errorf("[%s] %s = %q after switching to direct, want cleared", sec, k, v)
+			}
+		}
+		if v := tomlInt(s, "socks5_outbound_port"); v != 0 {
+			t.Errorf("[%s] socks5_outbound_port = %d, want 0", sec, v)
+		}
+		if v := tomlInt(s, "listen_port_proxy_v2"); v != 0 {
+			t.Errorf("[%s] listen_port_proxy_v2 = %d, want 0", sec, v)
+		}
+		if v := tomlStrList(s, "proxy_v2_trusted_sources"); len(v) != 0 {
+			t.Errorf("[%s] proxy_v2_trusted_sources = %v, want empty", sec, v)
+		}
+	}
+	if got := detectNetMode(sectionOf(m, "race"), sectionOf(m, "hoard")); got != netModeDirect {
+		t.Errorf("mode = %q after clearing, want direct", got)
+	}
+}
+
+func TestModeDetection(t *testing.T) {
+	cases := []struct {
+		name string
+		mode string
+		f    netModeFields
+	}{
+		{"direct", netModeDirect, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172}},
+		{"socks5", netModeSocks5, socksFields()},
+	}
+	for _, tc := range cases {
+		m, _ := apply(t, netSample, tc.mode, tc.f)
+		if got := detectNetMode(sectionOf(m, "race"), sectionOf(m, "hoard")); got != tc.mode {
+			t.Errorf("%s: detected %q", tc.name, got)
+		}
+	}
+	// proxy_v2 outranks socks5: both sets of keys are present in that mode, and
+	// the more specific one has to win or the tab would show the wrong form.
+	f := socksFields()
+	f.RaceProxyV2Port, f.HoardProxyV2Port = 16271, 16272
+	f.ProxyV2Trusted = []string{"203.0.113.7"}
+	m, _ := apply(t, netSample, netModeProxyV2, f)
+	if got := detectNetMode(sectionOf(m, "race"), sectionOf(m, "hoard")); got != netModeProxyV2 {
+		t.Errorf("proxy_v2 detected as %q", got)
+	}
+}
+
+func TestValidateRefusesBrokenSetups(t *testing.T) {
+	base := socksFields()
+	samePort := base
+	samePort.HoardListenPort = samePort.RaceListenPort
+
+	noHost := base
+	noHost.Socks5Host = ""
+
+	halfAuth := base
+	halfAuth.Socks5Pass = ""
+
+	pv2NoTrust := base
+	pv2NoTrust.RaceProxyV2Port = 16271
+
+	pv2ClashingPort := base
+	pv2ClashingPort.RaceProxyV2Port = 16172 // = the hoard listen port
+	pv2ClashingPort.ProxyV2Trusted = []string{"203.0.113.7"}
+
+	pv2BadSource := base
+	pv2BadSource.RaceProxyV2Port = 16271
+	pv2BadSource.ProxyV2Trusted = []string{"not-an-address"}
+
+	for _, tc := range []struct {
+		name string
+		mode string
+		f    netModeFields
+	}{
+		{"both engines on one port", netModeSocks5, samePort},
+		{"proxy mode without a host", netModeSocks5, noHost},
+		{"username without password", netModeSocks5, halfAuth},
+		{"proxy-v2 with no trusted source", netModeProxyV2, pv2NoTrust},
+		{"proxy-v2 port already a listen port", netModeProxyV2, pv2ClashingPort},
+		{"proxy-v2 trusted source is not an address", netModeProxyV2, pv2BadSource},
+		{"vpn without an interface", netModeVPN, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172}},
+		{"unknown mode", "tunnelvision", base},
+	} {
+		if err := validateNetMode(tc.mode, tc.f); err == nil {
+			t.Errorf("%s: accepted, want refused", tc.name)
+		}
+	}
+
+	if err := validateNetMode(netModeDirect, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172}); err != nil {
+		t.Errorf("plain direct setup refused: %v", err)
+	}
+	if err := validateNetMode(netModeSocks5, base); err != nil {
+		t.Errorf("valid socks5 setup refused: %v", err)
+	}
+}
+
+func TestWarningsSayWhatTheModeCosts(t *testing.T) {
+	w := modeWarnings(netModeSocks5, socksFields(), nil)
+	if len(w) == 0 || !strings.Contains(strings.ToLower(strings.Join(w, " ")), "udp") {
+		t.Errorf("no UDP-tracker warning in proxied mode: %v", w)
+	}
+	if got := modeWarnings(netModeDirect, netModeFields{}, nil); len(got) != 0 {
+		t.Errorf("direct mode warns about %v, want nothing", got)
+	}
+	// An env var that overrides the page must be surfaced, not silently obeyed.
+	env := []envOverride{{Name: "TYPHON_ANNOUNCE_PROXY", Value: "socks5h://x:***@10.0.0.1:1080"}}
+	got := modeWarnings(netModeDirect, netModeFields{}, env)
+	if len(got) != 1 || !strings.Contains(got[0], "TYPHON_ANNOUNCE_PROXY") {
+		t.Errorf("env override not reported in direct mode: %v", got)
+	}
+}
+
+func TestMaskProxyURLKeepsTheHostAndHidesThePassword(t *testing.T) {
+	got := maskProxyURL("socks5h://hydra:s3cret@10.0.0.1:1080")
+	if strings.Contains(got, "s3cret") {
+		t.Errorf("password leaked in %q", got)
+	}
+	if !strings.Contains(got, "10.0.0.1:1080") || !strings.Contains(got, "hydra") {
+		t.Errorf("masked too much: %q", got)
+	}
+}

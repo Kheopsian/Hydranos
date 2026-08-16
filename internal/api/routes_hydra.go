@@ -659,6 +659,11 @@ func (s *Server) registerHydraRoutes() {
 		// Port forward
 		api.GET("/port-forward", s.handlePortForwardStatus)
 		api.GET("/network/interfaces", s.handleNetworkInterfaces)
+		// Network mode: the guided, mutually-exclusive view of the connectivity
+		// settings, plus the live measurement of where our traffic actually exits.
+		api.GET("/network/mode", s.handleNetworkModeGet)
+		api.POST("/network/mode", s.handleNetworkModePost)
+		api.POST("/network/check", s.handleNetworkCheck)
 
 		// System
 		api.GET("/public-ip", s.handlePublicIP)

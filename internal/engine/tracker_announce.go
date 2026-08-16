@@ -304,7 +304,7 @@ func announceProxyForBinding(b Binding) *url.URL {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "socks5" && u.Scheme != "socks5h") {
 		slog.Warn("tracker_announce: announce_proxy ignored (parse failure or unsupported scheme) "+
-			"— announces go DIRECT and the tracker will record this host's own address",
+			"announces go DIRECT and the tracker will record this host's own address",
 			"engine", b.AnnounceScope, "binding", b.ID, "error", err)
 		return nil
 	}

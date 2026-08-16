@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.74.0 - 2026-08-16
+
+### Added
+- **A Network tab in the settings, with the connectivity setups as four choices.** Direct, VPN, SOCKS5 proxy, or SOCKS5 plus a PROXY-v2 relay. Only the chosen mode's fields are shown, and saving clears the keys of the other three, so a half-finished attempt from last week cannot survive as something that looks deliberate. The proxy is entered once and wired to both peer connections and tracker announces, which is the pair that used to come apart silently.
+- **A "check what actually happens" button.** It measures the address a tracker sees, through the announce path itself, next to the address peers see and this host's own address. When a relay carries the traffic but not the identity, the three no longer agree and the report says so. Setups that cannot work are refused at save time with the reason in words, and environment variables that override the page are listed instead of applying behind it.
+
 ## v3.73.0 - 2026-08-16
 
 ### Added

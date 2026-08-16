@@ -4758,7 +4758,12 @@ async function updateSettings() {
         const _activeDomSaved = localStorage.getItem("hydra_settings_tab");
         let _tabsHtml = "";
         let _panelsHtml = "";
-        let _firstDom = null;
+        // First tab on purpose: the connectivity keys are the ones a newcomer
+        // has to get right, and the flat list below cannot show that they are
+        // alternatives rather than twenty independent knobs.
+        let _firstDom = "__network";
+        _tabsHtml += `<button type="button" class="settings-tab" data-domain="__network" onclick="showSettingsPanel('__network')"><span class="sg-title">${t("Network")}</span></button>`;
+        _panelsHtml += netModePanelHTML();
         for (const dom of order) {
             const sections = buckets[dom.id];
             if (!sections || !sections.length) continue;
@@ -4793,9 +4798,10 @@ async function updateSettings() {
         html += `<div class="settings-tabs" id="settings-tabs">${_tabsHtml}</div><div class="settings-panels" id="settings-panels">${_panelsHtml}</div>`;
         editor.innerHTML = html;
         {
-            const _active = (_activeDomSaved && buckets[_activeDomSaved] && buckets[_activeDomSaved].length) ? _activeDomSaved : _firstDom;
+            const _active = (_activeDomSaved === "__network" || (_activeDomSaved && buckets[_activeDomSaved] && buckets[_activeDomSaved].length)) ? _activeDomSaved : _firstDom;
             if (_active) showSettingsPanel(_active);
         }
+        netModeInit();
         filterSettings();
         const banner = document.getElementById("settings-restart-banner");
         if (banner) banner.style.display = "none";
@@ -5789,3 +5795,200 @@ async function releaseStartupPause() {
 }
 
 window.addEventListener("DOMContentLoaded", refreshStartupPause);
+
+// ---- Network mode tab ------------------------------------------------------
+// The flat settings list cannot say the one thing that matters about these
+// keys: the setups are mutually exclusive. Nobody runs a VPN and a SOCKS5
+// relay at once, but the config file holds the keys of both, so an abandoned
+// attempt looks exactly like a deliberate setup. Here you pick one, you see
+// only its fields, and saving clears the others.
+const NET_MODES = [
+    { id: "direct", label: "Direct",
+      blurb: "No tunnel, no proxy. Peers and trackers see this host's own address." },
+    { id: "vpn", label: "VPN",
+      blurb: "A VPN client already runs on this host or container. Peer sockets are pinned to its interface." },
+    { id: "socks5", label: "SOCKS5 proxy",
+      blurb: "Outgoing connections go through a SOCKS5 proxy: peer dials and tracker announces both." },
+    { id: "proxy_v2", label: "SOCKS5 + PROXY-v2 relay",
+      blurb: "As above, plus a relay that forwards incoming peers with their real address in a PROXY-v2 header." },
+];
+
+let _netState = null;
+
+function _netField(id, label, type, value, hint, extra) {
+    const attrs = extra || "";
+    const v = value === undefined || value === null ? "" : String(value);
+    return `<div class="settings-row">
+        <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
+        <div class="sr-field"><input type="${type}" id="${id}" value="${esc(v)}" ${attrs}></div>
+    </div>`;
+}
+
+function _netCheckbox(id, label, checked, hint) {
+    return `<div class="settings-row">
+        <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
+        <div class="sr-field"><label class="toggle"><input type="checkbox" id="${id}" ${checked ? "checked" : ""}><span class="toggle-track"></span></label></div>
+    </div>`;
+}
+
+function _netPortsHTML(f) {
+    return _netField("net-race-port", "Race listen port", "number", f.race_listen_port, "Port the race engine accepts peers on.")
+         + _netField("net-hoard-port", "Hoard listen port", "number", f.hoard_listen_port, "Port the hoard engine accepts peers on. It has to differ from the race one.")
+         + _netCheckbox("net-ipv6", "Listen over IPv6 too", f.enable_ipv6, "Only if this host really has working IPv6. Announcing an address nobody can reach costs you peers.");
+}
+
+function _netSocksHTML(f) {
+    return `<div class="settings-section"><div class="settings-section-title">${t("SOCKS5 proxy")}</div>
+        <p class="sr-desc" style="margin:.2em 0 .8em">${t("Entered once, used for both peer connections and tracker announces. Keeping those two apart is how a relay ends up hiding your traffic while the tracker still records your own address.")}</p>
+        ${_netField("net-socks-host", "Proxy host", "text", f.socks5_host, "IP or hostname of the SOCKS5 server.")}
+        ${_netField("net-socks-port", "Proxy port", "number", f.socks5_port || "", "")}
+        ${_netField("net-socks-user", "Username", "text", f.socks5_user, "Leave both credentials empty for an open proxy.")}
+        ${_netField("net-socks-pass", "Password", "password", f.socks5_pass, "")}
+    </div>`;
+}
+
+function netModePanelHTML() {
+    return `<div class="settings-panel" data-domain="__network">
+        <div id="net-mode-body"><p class="sr-desc">${t("Loading…")}</p></div>
+    </div>`;
+}
+
+async function netModeInit() {
+    const body = document.getElementById("net-mode-body");
+    if (!body) return;
+    try {
+        _netState = await api("/api/network/mode");
+    } catch (e) {
+        body.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+        return;
+    }
+    netModeRender();
+}
+
+function netModeSelect(mode) {
+    if (!_netState) return;
+    _netState.fields = netModeCollect() || _netState.fields;
+    _netState.mode = mode;
+    netModeRender();
+}
+
+function netModeRender() {
+    const body = document.getElementById("net-mode-body");
+    if (!body || !_netState) return;
+    const f = _netState.fields || {};
+    const mode = _netState.mode;
+
+    let cards = "";
+    for (const m of NET_MODES) {
+        cards += `<button type="button" class="net-mode-card${m.id === mode ? " active" : ""}" onclick="netModeSelect('${m.id}')">
+            <span class="nm-title">${esc(t(m.label))}</span>
+            <span class="nm-blurb">${esc(t(m.blurb))}</span>
+        </button>`;
+    }
+
+    let fields = "";
+    if (mode === "vpn") {
+        const list = (_detectedIfaces || []).map(i => `<option value="${esc(i.name || i)}">`).join("");
+        fields += `<div class="settings-section"><div class="settings-section-title">${t("Tunnel")}</div>
+            ${_netField("net-bind-iface", "VPN interface name", "text", f.bind_interface, "The interface the VPN client creates, for example wg0 or tun0. Peer sockets are bound to it, so they cannot leave outside the tunnel.", `list="net-iface-list"`)}
+            <datalist id="net-iface-list">${list}</datalist>
+            <p class="sr-desc">${t("Set the listen port below to the port your VPN provider forwards to you, otherwise nobody can connect to you.")}</p>
+        </div>`;
+    }
+    if (mode === "socks5" || mode === "proxy_v2") fields += _netSocksHTML(f);
+    if (mode === "proxy_v2") {
+        fields += `<div class="settings-section"><div class="settings-section-title">${t("Incoming relay")}</div>
+            <p class="sr-desc" style="margin:.2em 0 .8em">${t("Your relay forwards peers to these ports with a PROXY-v2 header, so the real peer address survives the hop.")}</p>
+            ${_netField("net-race-pv2", "Race PROXY-v2 port", "number", f.race_proxy_v2_port || "", "0 to leave this engine without a PROXY-v2 listener.")}
+            ${_netField("net-hoard-pv2", "Hoard PROXY-v2 port", "number", f.hoard_proxy_v2_port || "", "")}
+            ${_netField("net-pv2-addr", "Bind address", "text", f.proxy_v2_listen_addr, "Empty means every address.")}
+            ${_netField("net-pv2-trusted", "Trusted sources", "text", (f.proxy_v2_trusted_sources || []).join(", "), "Addresses allowed to send PROXY-v2 headers, comma separated. Required: with none, whoever reaches that port can claim to be any peer.")}
+        </div>`;
+    }
+    fields += `<div class="settings-section"><div class="settings-section-title">${t("Ports")}</div>${_netPortsHTML(f)}</div>`;
+
+    let warn = "";
+    for (const w of (_netState.warnings || [])) warn += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
+
+    let env = "";
+    if ((_netState.env_overrides || []).length) {
+        let rows = "";
+        for (const e of _netState.env_overrides) {
+            rows += `<div class="settings-row"><div class="sr-label"><span class="sr-key">${esc(e.name)}</span><span class="sr-desc">${esc(t(e.effect))}</span></div><div class="sr-field"><code>${esc(e.value)}</code></div></div>`;
+        }
+        env = `<div class="settings-section"><div class="settings-section-title">${t("Set in the environment")}</div>
+            <p class="sr-desc" style="margin:.2em 0 .8em">${t("These come from the container or service environment, not from this page, and they take precedence over it.")}</p>${rows}</div>`;
+    }
+
+    body.innerHTML = `<div class="net-mode-cards">${cards}</div>
+        ${warn}
+        ${fields}
+        ${env}
+        <div style="margin:1em 0;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-primary" onclick="netModeSave()">${t("Save this mode")}</button>
+            <button class="btn-small" onclick="netModeCheck()">${t("Check what actually happens")}</button>
+        </div>
+        <div id="net-mode-result"></div>`;
+}
+
+function netModeCollect() {
+    const num = id => { const el = document.getElementById(id); return el ? Number(el.value || 0) : 0; };
+    const str = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
+    const bool = id => { const el = document.getElementById(id); return el ? !!el.checked : false; };
+    if (!document.getElementById("net-race-port")) return null;
+    const prev = (_netState && _netState.fields) || {};
+    return {
+        race_listen_port: num("net-race-port"),
+        hoard_listen_port: num("net-hoard-port"),
+        enable_ipv6: bool("net-ipv6"),
+        bind_interface: document.getElementById("net-bind-iface") ? str("net-bind-iface") : (prev.bind_interface || ""),
+        socks5_host: document.getElementById("net-socks-host") ? str("net-socks-host") : (prev.socks5_host || ""),
+        socks5_port: document.getElementById("net-socks-port") ? num("net-socks-port") : (prev.socks5_port || 0),
+        socks5_user: document.getElementById("net-socks-user") ? str("net-socks-user") : (prev.socks5_user || ""),
+        socks5_pass: document.getElementById("net-socks-pass") ? str("net-socks-pass") : (prev.socks5_pass || ""),
+        race_proxy_v2_port: document.getElementById("net-race-pv2") ? num("net-race-pv2") : (prev.race_proxy_v2_port || 0),
+        hoard_proxy_v2_port: document.getElementById("net-hoard-pv2") ? num("net-hoard-pv2") : (prev.hoard_proxy_v2_port || 0),
+        proxy_v2_listen_addr: document.getElementById("net-pv2-addr") ? str("net-pv2-addr") : (prev.proxy_v2_listen_addr || ""),
+        proxy_v2_trusted_sources: document.getElementById("net-pv2-trusted")
+            ? str("net-pv2-trusted").split(",").map(s => s.trim()).filter(Boolean)
+            : (prev.proxy_v2_trusted_sources || []),
+    };
+}
+
+async function netModeSave() {
+    const out = document.getElementById("net-mode-result");
+    const fields = netModeCollect();
+    if (!fields) return;
+    _netState.fields = fields;
+    try {
+        const r = await api("/api/network/mode", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: _netState.mode, fields }),
+        });
+        let extra = "";
+        for (const w of (r.warnings || [])) extra += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
+        out.innerHTML = `<div class="result-msg success">${t("Saved. The engines need a restart to pick it up.")}
+            <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button></div>${extra}`;
+    } catch (e) {
+        out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+    }
+}
+
+async function netModeCheck() {
+    const out = document.getElementById("net-mode-result");
+    out.innerHTML = `<div class="result-msg info">${t("Measuring… this asks an outside echo service where our traffic comes from.")}</div>`;
+    try {
+        const r = await api("/api/network/check", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        let rows = "";
+        for (const res of (r.results || [])) {
+            const cls = res.status === "ok" ? "net-ok" : (res.status === "fail" ? "net-fail" : "net-warn");
+            rows += `<div class="settings-row"><div class="sr-label"><span class="sr-key ${cls}">${esc(t(res.label))}</span></div>
+                <div class="sr-field"><span class="${cls}">${esc(t(res.detail))}</span></div></div>`;
+        }
+        out.innerHTML = `<div class="settings-section"><div class="settings-section-title">${t("What actually happens")}</div>${rows}</div>`;
+    } catch (e) {
+        out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+    }
+}
