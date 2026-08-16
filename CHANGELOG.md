@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.71.1 - 2026-08-16
+
+### Fixed
+- **The announce IP selector could not be used.** It sat in a table row that carries a torrent count and a last-announce time, so the row is rewritten on every poll and the open dropdown was torn out mid-click. The family now moves to the Edit form beside the client spoof and the passkey, and the row shows it read-only.
+
 ## v3.71.0 - 2026-08-16
 
 ### Added
