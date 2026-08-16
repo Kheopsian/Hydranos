@@ -97,8 +97,8 @@ func (ta *trackerAnnouncer) udpAnnounce(u *url.URL, infoHash string, uploaded, d
 	// address to the tracker precisely when the operator asked for the opposite,
 	// so refuse instead. Same rule as the magnet resolver: never silently
 	// bypass the tunnel.
-	if loadAnnounceProxy() != nil {
-		return nil, fmt.Errorf("udp tracker skipped: TYPHON_ANNOUNCE_PROXY is set and UDP cannot be proxied")
+	if ta.proxied {
+		return nil, fmt.Errorf("udp tracker skipped: an announce proxy is configured and UDP cannot be proxied")
 	}
 
 	ih, err := hex.DecodeString(infoHash)

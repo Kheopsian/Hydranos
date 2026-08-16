@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.73.0 - 2026-08-16
+
+### Added
+- **`announce_proxy`, so tracker announces can be relayed too.** `socks5_outbound_*` only ever covered peer connections; announces were issued by a different code path that read one environment variable and nothing else. A relay configured entirely in the config file therefore hid the peer traffic while the tracker still recorded the host's own address. Set `announce_proxy = "socks5h://user:pass@host:port"` under `[race]`/`[hoard]` to send them through the proxy as well. UDP trackers are skipped while it is set, because SOCKS5 carries TCP only.
+- **`announce_ip`** fills the BEP-7 `ip=` announce parameter. Empty (the default) omits it and lets the tracker observe the source address, which stays the right answer for nearly every setup.
+
+### Fixed
+- **A proxied peer setup no longer leaks its address in silence.** When a session dials peers through a SOCKS5 proxy but has no announce proxy, startup now says so plainly instead of leaving the operator with a setup that looks correct from every angle they can check.
+
 ## v3.72.0 - 2026-08-16
 
 ### Added

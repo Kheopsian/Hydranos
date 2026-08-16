@@ -59,6 +59,9 @@ type trackerAnnouncer struct {
 	bindingID       int
 	livePort        *atomic.Int64 // runtime port override (nil/0 = use static port)
 	fwmark          int           // SO_MARK for this binding's egress; also used by the udp:// path
+	// proxied reports that announces leave through a SOCKS5 proxy. The udp://
+	// path reads it to refuse rather than fall back to a direct datagram.
+	proxied bool
 	enableIPv6      bool          // take the tracker's BEP-7 `peers6` list
 	// limiter throttles outbound announces (announce_rate_limit). Shared per
 	// engine+binding, nil when the setting is 0 (unlimited).
@@ -188,7 +191,8 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	// behind a fwmark-routed tunnel — though typical setup is the proxy at
 	// a globally-reachable v6 addr that the kernel routes via the default
 	// table, in which case Fwmark=0 and no marking happens).
-	if pu := loadAnnounceProxy(); pu != nil {
+	announceProxy := announceProxyForBinding(b)
+	if pu := announceProxy; pu != nil {
 		socksAddr := pu.Host
 		socksUser := pu.User.Username()
 		socksPass, _ := pu.User.Password()
@@ -211,7 +215,7 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	// reachable over one family. Skipped for a family this host does not have,
 	// so we never fire an announce that cannot connect.
 	var clientV4, clientV6 *http.Client
-	if loadAnnounceProxy() == nil {
+	if announceProxy == nil {
 		pinned := func(narrow func(string) string) *http.Client {
 			base := dialer
 			return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
@@ -280,10 +284,33 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		userAgent:       version.UserAgent(),
 		bindingID:       b.ID,
 		fwmark:          int(b.Fwmark),
+		proxied:         announceProxy != nil,
 		enableIPv6:      b.EnableIPv6,
 		limiter:         announceLimiterFor(b.AnnounceScope+"#"+strconv.Itoa(b.ID), b.AnnounceRateLimit),
 		gate:            startupGateFor(b.AnnounceScope),
 	}
+}
+
+// announceProxyForBinding resolves the SOCKS5 proxy this binding's announces go
+// through: the per-session announce_proxy first, else the process-wide env.
+// Returns nil for a direct announce. A malformed value is refused rather than
+// guessed at — but it cannot silently become a direct announce without saying
+// so, since that is exactly the leak the setting exists to prevent.
+func announceProxyForBinding(b Binding) *url.URL {
+	raw := strings.TrimSpace(b.AnnounceProxy)
+	if raw == "" {
+		return loadAnnounceProxy()
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "socks5" && u.Scheme != "socks5h") {
+		slog.Warn("tracker_announce: announce_proxy ignored (parse failure or unsupported scheme) "+
+			"— announces go DIRECT and the tracker will record this host's own address",
+			"engine", b.AnnounceScope, "binding", b.ID, "error", err)
+		return nil
+	}
+	slog.Info("tracker_announce: announces routed through the session's SOCKS5 proxy",
+		"engine", b.AnnounceScope, "binding", b.ID, "host", u.Host, "auth", u.User.Username() != "")
+	return u
 }
 
 // announceProxyOnce caches the parsed TYPHON_ANNOUNCE_PROXY env at startup.

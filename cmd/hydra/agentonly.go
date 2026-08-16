@@ -147,7 +147,9 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 				os.Exit(1)
 			}
 		}
-		ann := engine.NewHoardAnnouncer(le.proc.Client(), engine.DefaultSingleBinding(le.cfg.ListenPort, le.cfg.EnableIPv6, "hoard", le.cfg.AnnounceRateLimit))
+		ann := engine.NewHoardAnnouncer(le.proc.Client(), engine.ApplyAnnounceEgress(
+			engine.DefaultSingleBinding(le.cfg.ListenPort, le.cfg.EnableIPv6, "hoard", le.cfg.AnnounceRateLimit),
+			le.cfg.AnnounceProxy, le.cfg.AnnounceIP, le.cfg.Socks5OutboundHost, "hoard"))
 		if le.hoard != nil {
 			ann.OnObservation = le.hoard.ObserveAnnounce
 			le.hoard.SetBootstrapAnnounce(ann.BootstrapAnnounce)
