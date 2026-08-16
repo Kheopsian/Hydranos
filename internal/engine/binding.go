@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"log/slog"
 	"math/rand"
+	"os"
+	"strings"
 
 	"github.com/Kheopsian/hydra/internal/version"
 )
@@ -55,6 +58,10 @@ type Binding struct {
 	// AnnounceRateLimit caps outbound announces on this binding, in announces
 	// per second. 0 = unlimited. Mirrors the engine's announce_rate_limit.
 	AnnounceRateLimit float64
+	// AnnounceProxy is the SOCKS5 URL every announce on this binding is sent
+	// through ("socks5h://user:pass@host:port"). Empty falls back to the
+	// process-wide TYPHON_ANNOUNCE_PROXY env, then to a direct announce.
+	AnnounceProxy string
 	// Fwmark is the netfilter mark applied to outbound sockets bound to
 	// this binding so the kernel routes them through the right WG tunnel
 	// (matched by `ip rule fwmark X lookup tableX`). 0 = no fwmark
@@ -82,6 +89,34 @@ func DefaultSingleBinding(listenPort int, enableIPv6 bool, scope string, announc
 		AnnounceScope:     scope,
 		AnnounceRateLimit: announceRateLimit,
 	}}
+}
+
+// ApplyAnnounceEgress stamps a session's announce-egress settings onto every
+// one of its bindings, and shouts when they contradict the peer-dial settings.
+//
+// The warning is the point of this function as much as the wiring is. The two
+// proxies are independent by design — one for peer dials in the engine, one for
+// announces here — and an operator who configures only the first gets a working
+// relay whose transport is hidden while the tracker still records the host's own
+// address. Nothing fails, nothing is logged, and the setup looks correct from
+// every angle they can check. So say it out loud at startup instead.
+func ApplyAnnounceEgress(bs []Binding, announceProxy, announceIP, socks5OutboundHost, scope string) []Binding {
+	proxy := strings.TrimSpace(announceProxy)
+	ip := strings.TrimSpace(announceIP)
+	for i := range bs {
+		bs[i].AnnounceProxy = proxy
+		if ip != "" {
+			bs[i].PublicIP = ip
+		}
+	}
+	if proxy == "" && strings.TrimSpace(os.Getenv("TYPHON_ANNOUNCE_PROXY")) == "" &&
+		strings.TrimSpace(socks5OutboundHost) != "" {
+		slog.Warn("announce egress: peer dials go through the SOCKS5 proxy but announces do NOT, "+
+			"so the tracker records this host's own address. Set announce_proxy in this session's "+
+			"config to send them through the proxy too.",
+			"engine", scope, "socks5_outbound_host", socks5OutboundHost)
+	}
+	return bs
 }
 
 // generatePeerID builds a 20-byte BEP-20 peer_id: 8-byte prefix

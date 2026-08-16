@@ -882,8 +882,12 @@ func main() {
 	// tunnel-derived bindings (one per WG tunnel, distinct peer_id, source
 	// IP, public IP for tracker). Otherwise fall back to the legacy
 	// single-binding for the FOU/wstunnel path.
-	hoardAnnounceBindings := engine.DefaultSingleBinding(hoardCfg.ListenPort, hoardCfg.EnableIPv6, "hoard", hoardCfg.AnnounceRateLimit)
-	raceAnnounceBindings := engine.DefaultSingleBinding(raceCfg.ListenPort, raceCfg.EnableIPv6, "race", raceCfg.AnnounceRateLimit)
+	hoardAnnounceBindings := engine.ApplyAnnounceEgress(
+		engine.DefaultSingleBinding(hoardCfg.ListenPort, hoardCfg.EnableIPv6, "hoard", hoardCfg.AnnounceRateLimit),
+		hoardCfg.AnnounceProxy, hoardCfg.AnnounceIP, hoardCfg.Socks5OutboundHost, "hoard")
+	raceAnnounceBindings := engine.ApplyAnnounceEgress(
+		engine.DefaultSingleBinding(raceCfg.ListenPort, raceCfg.EnableIPv6, "race", raceCfg.AnnounceRateLimit),
+		raceCfg.AnnounceProxy, raceCfg.AnnounceIP, raceCfg.Socks5OutboundHost, "race")
 
 	// Startup pause, armed before any announcer starts so nothing escapes in
 	// the gap. Both halves matter: holding the gate stops announces leaving

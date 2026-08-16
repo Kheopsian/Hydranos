@@ -27,6 +27,17 @@ max_uploads_per_torrent = 100
 peer_timeout = 30
 inactivity_timeout = 20
 
+# --- Advanced: send this session's tracker announces through a SOCKS5 proxy --
+# socks5_outbound_* (if you set it) only covers PEER connections. Announces are
+# separate: without the key below they leave directly and the tracker records
+# this host's own address, however well the peer traffic is relayed.
+# UDP trackers are skipped while this is set (SOCKS5 carries TCP only).
+# announce_proxy = "socks5h://user:pass@10.0.0.1:1080"
+#
+# Address advertised in the BEP-7 `ip=` announce parameter. Empty = omit it and
+# let the tracker observe the source address (right for almost every setup).
+# announce_ip = ""
+
 
 [race.custom_choking]
 enabled = true
@@ -58,6 +69,17 @@ inactivity_timeout = 20
 active_seeds = -1
 active_limit = -1
 active_downloads = 10
+
+# --- Advanced: send this session's tracker announces through a SOCKS5 proxy --
+# socks5_outbound_* (if you set it) only covers PEER connections. Announces are
+# separate: without the key below they leave directly and the tracker records
+# this host's own address, however well the peer traffic is relayed.
+# UDP trackers are skipped while this is set (SOCKS5 carries TCP only).
+# announce_proxy = "socks5h://user:pass@10.0.0.1:1080"
+#
+# Address advertised in the BEP-7 `ip=` announce parameter. Empty = omit it and
+# let the tracker observe the source address (right for almost every setup).
+# announce_ip = ""
 
 # ─────────────────────────────────────────────
 # VPN SPEEDTEST

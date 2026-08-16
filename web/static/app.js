@@ -4538,6 +4538,8 @@ const _SETTINGS_DESC = {
     socks5_outbound_port: "SOCKS5 proxy port for outbound peer connections.",
     socks5_outbound_user: "SOCKS5 username (if authenticated).",
     socks5_outbound_pass: "SOCKS5 password (if authenticated).",
+    announce_proxy: "SOCKS5 proxy for this session's TRACKER ANNOUNCES (socks5h://user:pass@host:port). Separate from socks5_outbound_*, which only covers peer connections: without this, announces leave directly and the tracker records this host's own address. UDP trackers are skipped while it is set.",
+    announce_ip: "Address advertised in the BEP-7 ip= announce parameter. Empty = omit it and let the tracker observe the source address (correct for almost every setup).",
     max_connections: "Global cap on simultaneous peer connections for this session.",
     max_uploads_per_torrent: "Max simultaneous upload slots per torrent (-1 = unlimited).",
     peer_timeout: "Seconds of inactivity before disconnecting a peer.",

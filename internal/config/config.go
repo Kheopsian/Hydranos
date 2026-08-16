@@ -41,6 +41,25 @@ type SessionConfig struct {
 	Socks5OutboundPort    int      `toml:"socks5_outbound_port"`
 	Socks5OutboundUser    string   `toml:"socks5_outbound_user"`
 	Socks5OutboundPass    string   `toml:"socks5_outbound_pass"`
+	// AnnounceProxy routes this session's tracker announces through a SOCKS5
+	// proxy ("socks5h://user:pass@host:port"). Empty falls back to the legacy
+	// TYPHON_ANNOUNCE_PROXY env, and failing that the announce goes direct.
+	//
+	// Deliberately separate from socks5_outbound_* above, which only covers
+	// PEER dials inside the engine: announces are issued by the Go side and
+	// never consulted that setting. A relay setup that set only the
+	// socks5_outbound_* keys therefore kept announcing from the host's own
+	// address, and the tracker recorded it — the leak this key closes.
+	// Note that UDP trackers are skipped while it is set: SOCKS5 carries TCP
+	// only, and falling back to a direct datagram would leak the address the
+	// operator asked us to hide.
+	AnnounceProxy string `toml:"announce_proxy"`
+	// AnnounceIP is the address advertised to trackers in the BEP-7 `ip=`
+	// parameter. Empty (the default) omits the parameter entirely and lets the
+	// tracker observe the announce's source address, which is correct whenever
+	// the announce already leaves by the path peers should reach us on. Set it
+	// when the two differ and the tracker honours the parameter — many do not.
+	AnnounceIP string `toml:"announce_ip"`
 	MaxConnections        int      `toml:"max_connections"`
 	MaxUploadsPerTorrent  int      `toml:"max_uploads_per_torrent"`
 
