@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.75.0 - 2026-08-16
+
+### Added
+- **The connectivity check now tests inbound reachability.** It opens a TCP connection to the exact address and port a tracker hands out for you, leaving by the route peer connections use. Behind a proxy or a tunnel that connection really does arrive from outside, so the answer is firm; on a direct setup it goes out and back over the same WAN address, which tests the router's loopback rather than the outside world, and the report says so instead of giving a verdict it cannot support.
+
 ## v3.74.4 - 2026-08-16
 
 ### Fixed

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -97,6 +98,42 @@ func PeerEgressIP(ctx context.Context, socksHost string, socksPort int, socksUse
 		return "", fmt.Errorf("echo service answered HTTP %d", resp.StatusCode)
 	}
 	return readEchoIP(resp.Body)
+}
+
+// InboundReachable opens a TCP connection to the address a tracker publishes
+// for us, from the same route peer dials leave by. That route is the whole
+// point: through a proxy or a tunnel the connection genuinely arrives from
+// outside, which is what a peer would do.
+//
+// ⚠ On a direct setup the connection leaves and returns through the same WAN
+// address, so it tests the router's hairpin behaviour rather than outside
+// access: it can succeed where a stranger would fail, and fail where one would
+// succeed. The caller says which of the two cases it is instead of reporting a
+// bare verdict.
+func InboundReachable(ctx context.Context, host string, port int, socksHost string, socksPort int, socksUser, socksPass, bindInterface string) error {
+	if strings.TrimSpace(host) == "" || port <= 0 {
+		return fmt.Errorf("no address to test")
+	}
+	dialer := &net.Dialer{Timeout: 6 * time.Second}
+	if strings.TrimSpace(socksHost) == "" && strings.TrimSpace(bindInterface) != "" {
+		ip, err := resolveInterfaceIP(bindInterface)
+		if err != nil {
+			return fmt.Errorf("bind_interface %q: %w", bindInterface, err)
+		}
+		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(ip)}
+	}
+	var conn net.Conn
+	var err error
+	if h := strings.TrimSpace(socksHost); h != "" {
+		conn, err = dialSOCKS5h(ctx, dialer, net.JoinHostPort(h, strconv.Itoa(socksPort)),
+			socksUser, socksPass, host, uint16(port))
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	}
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // readEchoIP takes the first line of an echo response and insists it parses as

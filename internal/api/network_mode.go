@@ -542,15 +542,39 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		add("note", "Worth knowing", "warn", w)
 	}
 
-	// Inbound: one case is decided by the mode itself, the rest needs someone
-	// outside to knock on the port, which this daemon cannot arrange for itself.
-	// Said out loud rather than implied by its absence.
-	if mode == netModeSocks5 {
-		add("inbound", "Inbound reachability", "fail",
-			"nobody can reach you: a plain SOCKS5 proxy forwards outgoing connections only, so the address you announce answers no one")
-	} else {
-		add("inbound", "Inbound reachability", "warn",
-			"not tested: checking that peers can reach your port requires a host outside your network to try it")
+	// Inbound: knock on the very address and port a tracker hands out for us,
+	// leaving by the peer route. Through a proxy or tunnel that connection
+	// genuinely comes from outside. On a direct setup it goes out and back over
+	// the same WAN address, which tests the router's hairpin rather than the
+	// outside world, so the verdict says which of the two was measured.
+	for _, e := range []struct {
+		name string
+		sec  map[string]interface{}
+	}{{"race", race}, {"hoard", hoard}} {
+		ip, port := announceIPs[e.name], tomlInt(e.sec, "listen_port")
+		label := "Inbound reachability (" + e.name + ")"
+		if ip == "" || port == 0 {
+			add("inbound_"+e.name, label, "warn", "not tested: the announced address could not be measured")
+			continue
+		}
+		target := net.JoinHostPort(ip, strconv.Itoa(port))
+		err := engine.InboundReachable(ctx, ip, port,
+			tomlStr(e.sec, "socks5_outbound_host"), tomlInt(e.sec, "socks5_outbound_port"),
+			tomlStr(e.sec, "socks5_outbound_user"), tomlStr(e.sec, "socks5_outbound_pass"),
+			tomlStr(e.sec, "bind_interface"))
+		outside := tomlStr(e.sec, "socks5_outbound_host") != ""
+		switch {
+		case err == nil && outside:
+			add("inbound_"+e.name, label, "ok", target+" accepted a connection made from outside your network")
+		case err == nil:
+			add("inbound_"+e.name, label, "warn", target+" accepted a connection, but it was made from inside your own network. A router that loops such connections back answers the same way whether or not a stranger could get through")
+		case mode == netModeSocks5:
+			add("inbound_"+e.name, label, "fail", target+" refused the connection, as expected: a plain SOCKS5 proxy forwards outgoing connections only, so nobody can reach you")
+		case outside:
+			add("inbound_"+e.name, label, "fail", target+" refused a connection made from outside: peers cannot reach you. Check the port forward and the firewall. ("+err.Error()+")")
+		default:
+			add("inbound_"+e.name, label, "warn", target+" refused a connection made from inside your own network, which many routers do even when the port is open to outsiders. Inconclusive. ("+err.Error()+")")
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"mode": mode, "results": results})
