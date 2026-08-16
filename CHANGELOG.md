@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.75.1 - 2026-08-16
+
+### Fixed
+- **The VPN mode now says when the interface picked is not a tunnel.** Picking an ordinary interface such as eth0 sends peer connections outside the tunnel, or nowhere at all, and the check reports that as the likely cause instead of a bare dial error.
+- **The inbound test no longer claims a probe came from inside the local network when it left through a tunnel.** A refusal is now only reported as closed when the probe genuinely reached us from outside, through a proxy; through a tunnel or on a direct setup it turns around at the provider or the router, so the result is inconclusive rather than negative.
+
 ## v3.75.0 - 2026-08-16
 
 ### Added
