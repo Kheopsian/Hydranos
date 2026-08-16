@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.72.0 - 2026-08-16
+
+### Added
+- **A "none" mode to stop announcing to one tracker.** Set it from the Trackers tab, or as `"none"` under `[announce_ip_modes]`. The tracker is skipped silently rather than recorded as failing, so switching one off does not leave a permanent error in the list, and no rate-limit token is spent on a request that is never sent.
+
 ## v3.71.1 - 2026-08-16
 
 ### Fixed

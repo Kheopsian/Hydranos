@@ -2939,7 +2939,7 @@ func (s *Server) handleSetAnnounceIPMode(c *gin.Context) {
 		return
 	}
 	if !engine.SetAnnounceIPMode(req.Host, req.Mode) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "mode must be one of: v4, v6, auto"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "mode must be one of: auto, v4, v6, none"})
 		return
 	}
 	persisted := persistedFlag(s.persistAnnounceIPMode(req.Host), "ip_mode", req.Host)
