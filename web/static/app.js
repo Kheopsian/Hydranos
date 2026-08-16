@@ -5074,14 +5074,15 @@ async function updateTrackers() {
                 ? '<span class="mode-tag mode-hoard">set</span>'
                 : '<span class="sr-desc">-</span>';
             const err = r.last_error ? esc(r.last_error) : "-";
-            // auto announces on every family this host has (one peer, two
-            // addresses, as libtorrent does). Pin v4/v6 only for a tracker that
-            // miscounts the pair or caps peers per account.
+            // Read-only here on purpose: this row carries a torrent count and a
+            // last-announce time, so it is rewritten on every poll. A control
+            // living in it would be torn out from under the pointer mid-click.
+            // The family is set from the Edit form, like the spoof and passkey.
             const cur = r.ip_mode || "auto";
-            const ipmode = `<select class="btn-small" onchange="setTrackerIPMode('${esc(r.host)}',this.value)">` +
-                ["auto", "v4", "v6"].map(m => `<option value="${m}"${m === cur ? " selected" : ""}>${m}</option>`).join("") +
-                `</select>`;
-            return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}')">Edit</button></td></tr>`;
+            const ipmode = cur !== "auto"
+                ? `<span class="mode-tag mode-hoard">${esc(cur)}</span>`
+                : '<span class="sr-desc">auto</span>';
+            return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}')">Edit</button></td></tr>`;
         }).join("");
         if (_thtml === _trackersSig) return;
         _trackersSig = _thtml;
@@ -5180,17 +5181,18 @@ function _renderTrackerStatsChart(rows) {
     _trkStatsChart.update();
 }
 
-function showTrackerForm(host = "", pid = "", ua = "") {
+function showTrackerForm(host = "", pid = "", ua = "", ipmode = "auto") {
     document.getElementById("trk-host").value = host;
     document.getElementById("trk-preset").value = "";
     document.getElementById("trk-pid").value = pid;
     document.getElementById("trk-ua").value = ua;
     document.getElementById("trk-passkey").value = "";
+    document.getElementById("trk-ipmode").value = ipmode || "auto";
     document.getElementById("trk-result").style.display = "none";
     document.getElementById("trk-form").style.display = "block";
 }
 function hideTrackerForm() { document.getElementById("trk-form").style.display = "none"; }
-function editTracker(host, pid, ua) { showTrackerForm(host, pid, ua); }
+function editTracker(host, pid, ua, ipmode) { showTrackerForm(host, pid, ua, ipmode); }
 function _trkResult(msg, ok) {
     const r = document.getElementById("trk-result");
     r.textContent = msg; r.className = "result-msg " + (ok ? "success" : "error"); r.style.display = "block";
@@ -5203,27 +5205,11 @@ async function saveTracker() {
         await api("/api/announce/clients", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, peer_id_prefix: document.getElementById("trk-pid").value.trim(), user_agent: document.getElementById("trk-ua").value.trim() }) });
         const pk = document.getElementById("trk-passkey").value.trim();
         if (pk) await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: pk }) });
+        await api("/api/announce/ip-modes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, mode: document.getElementById("trk-ipmode").value }) });
+        _trackersSig = "";
         hideTrackerForm(); await updateTrackers();
     } catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
 }
-// setTrackerIPMode pins the announce address family for one tracker. Hot: it
-// applies on that tracker's next announce, no restart and no redeploy.
-async function setTrackerIPMode(host, mode) {
-    try {
-        await api("/api/announce/ip-modes", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ host: host, mode: mode }),
-        });
-    } catch (e) {
-        console.error("Failed to set announce IP mode:", e);
-    }
-    // Re-read rather than trust the select: the server is what decides, and a
-    // rejected mode should snap the control back instead of lying.
-    _trackersSig = "";
-    await updateTrackers();
-}
-
 async function clearTrackerSpoof() {
     const host = _trkHost();
     if (!host) { _trkResult(t("Host required"), false); return; }

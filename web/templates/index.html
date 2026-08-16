@@ -702,6 +702,14 @@
                             <label>Passkey <span class="sr-desc">leave blank = unchanged</span></label>
                             <input type="text" id="trk-passkey" placeholder="(unchanged)" autocomplete="off">
                         </div>
+                        <div class="form-group">
+                            <label>Announce IP <span class="sr-desc">auto = every family this host has</span></label>
+                            <select id="trk-ipmode">
+                                <option value="auto">auto</option>
+                                <option value="v4">v4 only</option>
+                                <option value="v6">v6 only</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="cat-form-actions">
                         <button class="btn-primary" onclick="saveTracker()">Save</button>
