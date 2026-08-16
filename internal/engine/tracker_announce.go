@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"github.com/Kheopsian/hydra/internal/version"
 	"io"
@@ -529,11 +530,19 @@ func secondaryStatsModeFor(trackerURL string) string {
 // Ignored when a SOCKS announce proxy is configured: the egress family is then
 // the proxy's, and forcing one here would break a proxy that is reachable over
 // the other family only.
+//	"none"           — do not announce to this tracker at all. Not an error
+//	                   state: the tracker is skipped silently, so it stops
+//	                   appearing as a failure the way a dead tracker would.
 const (
 	AnnounceIPModeAuto = "auto"
 	AnnounceIPModeV4   = "v4"
 	AnnounceIPModeV6   = "v6"
+	AnnounceIPModeNone = "none"
 )
+
+// ErrAnnounceBlocked is returned instead of announcing when a tracker is set
+// to "none". Deliberate silence, not a failure.
+var ErrAnnounceBlocked = errors.New("tracker announce: blocked by per-tracker setting")
 
 var (
 	announceIPModeMu sync.RWMutex
@@ -548,6 +557,8 @@ func normalizeAnnounceIPMode(mode string) string {
 		return AnnounceIPModeV4
 	case "v6", "ipv6", "6", "inet6":
 		return AnnounceIPModeV6
+	case "none", "off", "block", "blocked", "disabled":
+		return AnnounceIPModeNone
 	case "", "auto", "any", "default":
 		return AnnounceIPModeAuto
 	}
@@ -561,7 +572,7 @@ func InitAnnounceIPModes(fromConfig map[string]string) {
 	for host, mode := range fromConfig {
 		h := strings.TrimSpace(host)
 		m := normalizeAnnounceIPMode(mode)
-		if h != "" && (m == AnnounceIPModeV4 || m == AnnounceIPModeV6) {
+		if h != "" && (m == AnnounceIPModeV4 || m == AnnounceIPModeV6 || m == AnnounceIPModeNone) {
 			announceIPModes[h] = m
 		}
 	}
@@ -786,6 +797,13 @@ func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, down
 	// point queueing on the rate limiter for something we will not send.
 	if ta.gate.blocked() {
 		return nil, ErrStartupPaused
+	}
+	// "none" means this tracker is switched off. Checked here, before the rate
+	// limiter, so a blocked tracker does not spend a token on a request that is
+	// never sent — and checked in announce() rather than at one call site, so
+	// every path (hoard, race, bootstrap, re-announce) is covered by one guard.
+	if announceIPModeFor(trackerURL) == AnnounceIPModeNone {
+		return nil, ErrAnnounceBlocked
 	}
 	// Gate every announce, http:// and udp:// alike, on the engine's
 	// announce_rate_limit before a single byte leaves. No-op when unset.
