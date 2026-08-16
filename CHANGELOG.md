@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.71.0 - 2026-08-16
+
+### Added
+- **Announce IP column in the Trackers tab.** The per-tracker address family was only reachable by editing the config or calling the API, which made it a setting nobody would find. Each tracker row now carries an auto/v4/v6 selector that applies on that tracker's next announce, and the listing reports the mode in `ip_mode`.
+
 ## v3.70.0 - 2026-08-16
 
 ### Changed

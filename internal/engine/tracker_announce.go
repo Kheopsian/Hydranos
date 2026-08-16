@@ -645,6 +645,12 @@ func markFamilyAlive(key string) {
 	delete(familyDead, key)
 }
 
+// AnnounceIPModeForHost reports the announce family pinned for a tracker host,
+// "auto" when none is. Exported for the tracker listing the UI reads.
+func AnnounceIPModeForHost(host string) string {
+	return announceIPModeFor(host)
+}
+
 // announceIPModeFor returns the pinned family for a tracker URL or a dial
 // target ("auto" if no override host substring matches).
 func announceIPModeFor(trackerURL string) string {
