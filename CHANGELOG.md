@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.74.3 - 2026-08-16
+
+### Added
+- **French translation of the Network tab.** All 62 new strings, including the mode descriptions, the warnings and the connectivity report.
+
 ## v3.74.2 - 2026-08-16
 
 ### Fixed
