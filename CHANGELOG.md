@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.70.0 - 2026-08-16
+
+### Changed
+- **Dual-stack hosts now announce on both address families.** Most trackers record only the address an announce arrives from, so leaving by one family made us unreachable for peers on the other — with nothing failing and nothing logged. Hydra now announces once per family with the same peer_id, one peer at two addresses, which is what libtorrent has always done. A family the host does not have, or that a tracker has no address on, is not tried.
+- **`[announce_ip_modes]` "auto" means both families**, not the kernel's pick. Pin `v4` or `v6` for a tracker that miscounts the pair or caps peers per account.
+
 ## v3.69.0 - 2026-08-16
 
 ### Added

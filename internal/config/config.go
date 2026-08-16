@@ -224,10 +224,11 @@ type HydraConfig struct {
 	// Defaut (absent) = "clone". POST /api/announce/secondary-stats.
 	AnnounceSecondaryStats map[string]string `toml:"announce_secondary_stats"`
 	// AnnounceIPModes: famille d adresse des annonces PAR-TRACKER
-	// (sous-chaine host -> "v4"|"v6"|"auto"). Un hote dual-stack annonce en v6
-	// par defaut (RFC 6724) et le tracker n enregistre alors que notre v6 :
-	// les pairs v4-only ne peuvent plus nous joindre. Defaut (absent) = "auto".
-	// POST /api/announce/ip-modes.
+	// (sous-chaine host -> "v4"|"v6"|"auto"). Defaut (absent) = "auto" = une
+	// annonce par famille disponible, meme peer_id, comme libtorrent : le
+	// tracker garde UN pair joignable aux deux adresses. Forcer "v4"/"v6"
+	// seulement pour un tracker qui compte les deux adresses comme deux pairs
+	// ou qui plafonne les pairs par compte. POST /api/announce/ip-modes.
 	AnnounceIPModes map[string]string `toml:"announce_ip_modes"`
 
 	// SourcePath is the file this config was loaded from (set by Load, never
