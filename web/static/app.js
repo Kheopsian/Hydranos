@@ -5839,7 +5839,7 @@ function _netPortsHTML(f) {
 
 function _netSocksHTML(f) {
     return `<div class="settings-section"><div class="settings-section-title">${t("SOCKS5 proxy")}</div>
-        <p class="sr-desc" style="margin:.2em 0 .8em">${t("Entered once, used for both peer connections and tracker announces. Keeping those two apart is how a relay ends up hiding your traffic while the tracker still records your own address.")}</p>
+        <p class="sr-desc" style="margin:.2em 0 .8em">${t("This proxy carries everything that leaves Hydra: the connections to peers and the announces to trackers. Both go through it, so neither can reveal your real address.")}</p>
         ${_netField("net-socks-host", "Proxy host", "text", f.socks5_host, "IP or hostname of the SOCKS5 server.")}
         ${_netField("net-socks-port", "Proxy port", "number", f.socks5_port || "", "")}
         ${_netField("net-socks-user", "Username", "text", f.socks5_user, "Leave both credentials empty for an open proxy.")}

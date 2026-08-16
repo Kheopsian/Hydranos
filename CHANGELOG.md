@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.74.1 - 2026-08-16
+
+### Changed
+- **Clearer wording on the Network tab's proxy field.** It explained yesterday's bug instead of saying what the field does, and read as though two addresses were being handed out.
+
 ## v3.74.0 - 2026-08-16
 
 ### Added
