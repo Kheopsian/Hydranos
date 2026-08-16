@@ -160,6 +160,14 @@ func collectEnvOverrides() []envOverride {
 func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 	var w []string
 	proxied := mode == netModeSocks5 || mode == netModeProxyV2
+	if mode == netModeSocks5 {
+		// A plain SOCKS5 proxy carries outgoing connections only. RFC 1928 has
+		// a BIND command for the other direction, but servers essentially never
+		// implement it and Hydra does not use it. The tracker still publishes
+		// the proxy address with our local listen port, and that pair answers
+		// nobody: the setup looks complete and quietly halves what it can do.
+		w = append(w, "A plain SOCKS5 proxy only carries outgoing connections. Nobody can reach you through it, so the address you announce answers no one and you only trade with peers you connect to yourself. Use the relay mode if you want to stay reachable.")
+	}
 	if proxied {
 		w = append(w, "UDP trackers are skipped in this mode: SOCKS5 carries TCP only, and a direct datagram would hand the tracker the address you are hiding.")
 	}
@@ -526,11 +534,16 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		add("note", "Worth knowing", "warn", w)
 	}
 
-	// Said out loud rather than implied by its absence: nothing here proves a
-	// peer can reach us. That needs someone outside to knock on the port, which
-	// this daemon cannot arrange for itself.
-	add("inbound", "Inbound reachability", "warn",
-		"not tested: checking that peers can reach your port requires a host outside your network to try it")
+	// Inbound: one case is decided by the mode itself, the rest needs someone
+	// outside to knock on the port, which this daemon cannot arrange for itself.
+	// Said out loud rather than implied by its absence.
+	if mode == netModeSocks5 {
+		add("inbound", "Inbound reachability", "fail",
+			"nobody can reach you: a plain SOCKS5 proxy forwards outgoing connections only, so the address you announce answers no one")
+	} else {
+		add("inbound", "Inbound reachability", "warn",
+			"not tested: checking that peers can reach your port requires a host outside your network to try it")
+	}
 
 	c.JSON(http.StatusOK, gin.H{"mode": mode, "results": results})
 }
