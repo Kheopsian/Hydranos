@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.69.0 - 2026-08-16
+
+### Added
+- **Per-tracker announce address family.** On a dual-stack host a plain dial prefers IPv6, so announces leave over v6 and a tracker that records only the announce source address holds a v6 address for us — IPv4-only peers then get a peer entry they cannot dial, with no error logged anywhere. Set `v4` (or `v6`) for a tracker under `[announce_ip_modes]`, or hot via `POST /api/announce/ip-modes`; the default `auto` keeps the previous behaviour. Ignored when an announce proxy is configured, since the egress family is then the proxy's.
+
 ## v3.68.0 - 2026-08-15
 
 ### Added
