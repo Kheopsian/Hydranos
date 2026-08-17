@@ -3,6 +3,13 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.79.0 - 2026-08-16
+
+### Changed
+- **The header dot now reports whether peers can reach you, not whether you have peers.** It was lit by a peer count, which every connection you opened yourself satisfies: a node nobody could reach looked healthy and stayed leech-only. A background probe connects to the address a tracker publishes for you and completes a BitTorrent handshake, which only your own client can answer, and the dot follows that. Unknown is shown as such rather than as success.
+- **One dot per engine.** They listen on different ports and a port forward can cover one and miss the other.
+- **Both addresses are shown on a dual-stack host**, since being reachable over one family says nothing about the other.
+
 ## v3.78.1 - 2026-08-16
 
 ### Fixed
