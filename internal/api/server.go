@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -256,6 +257,12 @@ func NewServer(cfg *config.HydraConfig) *Server {
 
 	// Static files, served from the embedded FS.
 	if staticFS, err := fs.Sub(hydraroot.WebAssets, "web/static"); err == nil {
+		router.Use(func(c *gin.Context) {
+			if strings.HasPrefix(c.Request.URL.Path, "/static/") {
+				c.Header("Cache-Control", "no-cache")
+			}
+			c.Next()
+		})
 		router.StaticFS("/static", http.FS(staticFS))
 	} else {
 		slog.Warn("Failed to mount static assets", "error", err)

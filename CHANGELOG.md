@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.78.1 - 2026-08-16
+
+### Fixed
+- **A browser could keep serving an old copy of the WebUI.** The page itself was already sent with no-cache, but the scripts and stylesheets carried no cache header, so a browser could hold onto them on its own terms and show bugs that were fixed versions ago on that machine only. They are revalidated now.
+
 ## v3.78.0 - 2026-08-16
 
 ### Added
