@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.81.3 - 2026-08-16
+
+### Changed
+- **The reachability dots are labelled.** Hoard and Race are written beside them, and the tooltip now covers the whole row rather than the dot alone.
+
 ## v3.81.2 - 2026-08-16
 
 ### Changed

@@ -2785,5 +2785,7 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 
 .settings-save-bar { display: flex; justify-content: flex-start; padding: 14px 0 4px; margin-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
 
-.health-dots { display: flex; flex-direction: column; gap: 3px; align-items: center; justify-content: center; }
-.health-dots .health-dot { width: 9px; height: 9px; }
+.health-dots { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
+.health-row { display: flex; align-items: center; gap: 6px; cursor: default; }
+.health-row span { font-size: 11px; color: var(--text-secondary); line-height: 1; }
+.health-dots .health-dot { width: 9px; height: 9px; flex: 0 0 auto; }
