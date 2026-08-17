@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +69,25 @@ func (s *Server) probeReachability(ctx context.Context, name string, sec map[str
 		setReachability(name, reachState{State: "unknown", Detail: "no public address or listen port yet", At: time.Now()})
 		return
 	}
+	// Checked first: a peer that reached us settles the question outright, in
+	// every mode, including inside a tunnel where our own probe is blind.
+	var eng interface{ InboundAccepted() (int64, error) }
+	if name == "race" && s.raceEngine != nil {
+		eng = s.raceEngine
+	} else if name == "hoard" && s.hoardEngine != nil {
+		eng = s.hoardEngine
+	}
+	if eng != nil {
+		if n, err := eng.InboundAccepted(); err == nil && n > 0 {
+			setReachability(name, reachState{
+				State:  "reachable",
+				Detail: fmt.Sprintf("%d peers have connected to you since start", n),
+				At:     time.Now(),
+			})
+			return
+		}
+	}
+
 	var sample string
 	if name == "race" && s.raceEngine != nil {
 		sample = s.raceEngine.SampleServedInfoHash()

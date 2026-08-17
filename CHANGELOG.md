@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.83.0 - 2026-08-16
+
+### Added
+- **Reachability is now proven by the peers that reach you.** The engine counts connections opened to it, excluding our own addresses so a probe cannot validate itself, and one stranger getting through settles the question in every mode, including inside a tunnel where a self-sent probe is structurally blind. No third-party port checker, nothing about your address or port handed to anyone.
+
 ## v3.82.0 - 2026-08-16
 
 ### Fixed

@@ -35,6 +35,8 @@ func (emptyRaceEngine) GetTorrentAvailability(string) map[string]interface{}    
 func (emptyRaceEngine) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
 }
+func (emptyRaceEngine) InboundAccepted() (int64, error) { return 0, nil }
+
 func (emptyRaceEngine) EngineOptFlags() (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
 }
@@ -78,6 +80,8 @@ func (emptyHoardEngine) GetTorrentAvailability(string) map[string]interface{} { 
 func (emptyHoardEngine) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
 }
+func (emptyHoardEngine) InboundAccepted() (int64, error) { return 0, nil }
+
 func (emptyHoardEngine) EngineOptFlags() (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
 }

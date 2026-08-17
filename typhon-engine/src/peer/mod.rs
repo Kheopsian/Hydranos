@@ -242,6 +242,16 @@ static SESSION_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 /// measure, not a default to assume.
 static BLOCK_MSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Answer an inbound MSE handshake with `crypto_select = plaintext` whenever
+/// the peer allows it. Outbound has dialed plaintext-first since v2.7.11 for
+/// the same reason; the accepting side kept forcing RC4, which is where a
+/// seedbox's bytes actually are -- most of our traffic runs on connections
+/// somebody else opened, so we are the one choosing.
+///
+/// Costs no peer: "require encryption" clients do not offer plaintext, and
+/// they keep getting RC4. Off by default all the same, see mse.rs.
+static MSE_PREFER_PLAINTEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn session_pinning() -> bool {
     SESSION_PINNING.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -260,6 +270,23 @@ pub fn set_session_pinning(on: bool) {
 
 pub fn block_mse() -> bool {
     BLOCK_MSE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn mse_prefer_plaintext() -> bool {
+    MSE_PREFER_PLAINTEXT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Flip the inbound plaintext preference. Only new handshakes see it: an
+/// established RC4 session cannot drop its cipher mid-stream, so unlike the
+/// MSE block this one cannot reach live sessions and an A/B needs to wait for
+/// the connection pool to turn over.
+pub fn set_mse_prefer_plaintext(on: bool) {
+    MSE_PREFER_PLAINTEXT.store(on, std::sync::atomic::Ordering::Relaxed);
+    if on {
+        info!("[peer] inbound MSE will select plaintext when the peer offers it");
+    } else {
+        info!("[peer] inbound MSE back to selecting RC4");
+    }
 }
 
 /// Flip the MSE block. Unlike session pinning this reaches live sessions too:
@@ -513,6 +540,15 @@ async fn utp_accept_loop(
     }
 }
 
+/// Peers that opened a connection to us, excluding our own addresses.
+///
+/// This is the only proof of reachability that costs nothing and cannot be
+/// faked: a probe we send ourselves turns around at our own router or VPN
+/// provider and proves nothing either way, while a stranger arriving here has,
+/// by definition, got through. Self-addresses are excluded so our own
+/// reachability probe cannot validate itself.
+pub static INBOUND_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 async fn handle_incoming(
     mut stream: PeerTransport,
     addr: SocketAddr,
@@ -528,6 +564,9 @@ async fn handle_incoming(
     use crate::crypto::stream::CryptoStream;
 
     info!("[peer] incoming {} from {}", stream.kind(), addr);
+    if !crate::tracker::is_self_ip(addr.ip()) {
+        INBOUND_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // Read first byte to detect MSE vs plaintext
     let mut first = [0u8; 1];
@@ -589,7 +628,13 @@ async fn handle_incoming(
                     Some(t) => t,
                     None => return,
                 };
-                (CryptoStream::new(stream, Some(enc), Some(dec)), torrent, hs.fast_extension, hs.extended_protocol, hs.peer_id, true)
+                // Only wrap the transport when RC4 was actually selected. A
+                // plaintext-selected session reports is_encrypted = false on
+                // purpose: it is plaintext on the wire, so it belongs on the
+                // zero-copy serve path and has nothing for the MSE block to
+                // drain.
+                let (enc, dec) = if hs.rc4 { (Some(enc), Some(dec)) } else { (None, None) };
+                (CryptoStream::new(stream, enc, dec), torrent, hs.fast_extension, hs.extended_protocol, hs.peer_id, hs.rc4)
             }
             Err(e) => {
                 warn!("[peer] {} MSE handshake failed: {}", addr, e);

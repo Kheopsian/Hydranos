@@ -71,6 +71,8 @@ type RaceEngine interface {
 	GetTorrentAvailability(infoHash string) map[string]interface{}
 	SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error)
 	EngineOptFlags() (map[string]interface{}, error)
+	// InboundAccepted counts peers that connected to us: proof of reachability.
+	InboundAccepted() (int64, error)
 	GetTorrentStatus(infoHash string) map[string]interface{}
 	AddTorrent(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error)
 	FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error)
@@ -106,6 +108,8 @@ type HoardEngine interface {
 	GetTorrentAvailability(infoHash string) map[string]interface{}
 	SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error)
 	EngineOptFlags() (map[string]interface{}, error)
+	// InboundAccepted counts peers that connected to us: proof of reachability.
+	InboundAccepted() (int64, error)
 	AddTorrent(torrentPath, savePath, category string) (string, error)
 	FetchMetadata(infoHash string, trackers, peers []string, bindingID *uint32) (*ltclient.FetchMetadataResult, error)
 	GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error)
