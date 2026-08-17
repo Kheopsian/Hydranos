@@ -717,6 +717,9 @@ func main() {
 		&raceAPIAdapter{engine: raceEngine},
 		&hoardAPIAdapter{engine: hoardEngine},
 	)
+	// Binds the forwarded port, releases the hold placed above, then follows
+	// the port for as long as the daemon runs.
+	apiServer.StartGluetunPortSync(map[string]*config.SessionConfig{"race": raceCfg, "hoard": hoardCfg})
 	apiServer.SetStateManager(stateMgr)
 	// ---- Remote agents ([[agent]]) for multi-home category placement ----
 	// Dialed pull-only; a dead agent is logged + skipped, never blocks boot.
@@ -888,6 +891,11 @@ func main() {
 	raceAnnounceBindings := engine.ApplyAnnounceEgress(
 		engine.DefaultSingleBinding(raceCfg.ListenPort, raceCfg.EnableIPv6, "race", raceCfg.AnnounceRateLimit),
 		raceCfg.AnnounceProxy, raceCfg.AnnounceIP, raceCfg.Socks5OutboundHost, "race")
+
+	// Sessions following gluetun's forwarded port hold their announces from
+	// here: the port is not known yet, and announcing the configured one would
+	// hand every tracker an address that answers nobody for a full cycle.
+	api.HoldForGluetun(map[string]*config.SessionConfig{"race": raceCfg, "hoard": hoardCfg})
 
 	// Startup pause, armed before any announcer starts so nothing escapes in
 	// the gap. Both halves matter: holding the gate stops announces leaving
