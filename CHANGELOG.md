@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.78.0 - 2026-08-16
+
+### Added
+- **Apply a client spoof to every tracker in one action.** `POST /api/announce/clients/bulk` and a button in the Trackers tab. Spoofing tends to be an all-or-nothing decision, and doing it host by host is where entries get missed. An empty prefix clears it everywhere the same way.
+
+### Fixed
+- **Trackers you have configured stay listed while nothing is announcing.** The listing is built from announces that actually happened, so pausing everything emptied it, exactly when someone is likely to be reconfiguring a tracker. Hosts carrying a spoof or a passkey are now always shown, with no torrent count.
+
 ## v3.77.7 - 2026-08-16
 
 ### Changed

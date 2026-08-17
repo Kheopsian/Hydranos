@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,19 +50,19 @@ type trackerAnnouncer struct {
 	// both to be reachable by both — this is what libtorrent does, one peer_id
 	// with two addresses. Nil when an announce proxy is configured (the egress
 	// family is then the proxy's) or when the host lacks that family.
-	clientV4 *http.Client
-	clientV6 *http.Client
-	peerID          string
-	port            int
-	publicIP        string
-	userAgent       string
-	bindingID       int
-	livePort        *atomic.Int64 // runtime port override (nil/0 = use static port)
-	fwmark          int           // SO_MARK for this binding's egress; also used by the udp:// path
+	clientV4  *http.Client
+	clientV6  *http.Client
+	peerID    string
+	port      int
+	publicIP  string
+	userAgent string
+	bindingID int
+	livePort  *atomic.Int64 // runtime port override (nil/0 = use static port)
+	fwmark    int           // SO_MARK for this binding's egress; also used by the udp:// path
 	// proxied reports that announces leave through a SOCKS5 proxy. The udp://
 	// path reads it to refuse rather than fall back to a direct datagram.
-	proxied bool
-	enableIPv6      bool          // take the tracker's BEP-7 `peers6` list
+	proxied    bool
+	enableIPv6 bool // take the tracker's BEP-7 `peers6` list
 	// limiter throttles outbound announces (announce_rate_limit). Shared per
 	// engine+binding, nil when the setting is 0 (unlimited).
 	limiter *announceLimiter
@@ -621,6 +622,34 @@ func InitAnnounceIPModes(fromConfig map[string]string) {
 	if len(announceIPModes) > 0 {
 		slog.Info("tracker_announce: announce ip-family overrides active", "trackers", len(announceIPModes))
 	}
+}
+
+// ConfiguredAnnounceHosts returns every tracker host that carries a setting of
+// ours: a client spoof or a passkey override.
+//
+// The live registry is deliberately O(hot), built from announces that actually
+// happened, and it empties while torrents are paused. On its own that leaves an
+// operator unable to reach the settings of a tracker they had already
+// configured, precisely when nothing is running. These hosts cost nothing to
+// list, since they are already in memory from the config.
+func ConfiguredAnnounceHosts() []string {
+	seen := map[string]bool{}
+	clientOverrideMu.RLock()
+	for host := range clientOverrides {
+		seen[host] = true
+	}
+	clientOverrideMu.RUnlock()
+	passkeyOverrideMu.RLock()
+	for host := range passkeyOverrides {
+		seen[host] = true
+	}
+	passkeyOverrideMu.RUnlock()
+	out := make([]string, 0, len(seen))
+	for host := range seen {
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // SetAnnounceIPMode pins (or with "auto"/"" releases) the announce address

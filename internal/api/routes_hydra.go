@@ -502,6 +502,7 @@ func (s *Server) registerHydraRoutes() {
 		// Per-tracker client spoof (peer_id prefix + UA) to pass client whitelists
 		api.GET("/announce/clients", s.handleGetClients)
 		api.POST("/announce/clients", s.handleSetClient)
+		api.POST("/announce/clients/bulk", s.handleSetClientBulk)
 
 		api.GET("/opt/flags", s.handleGetOptFlags)
 		api.POST("/opt/flags", s.handleSetOptFlag)
@@ -2695,6 +2696,66 @@ func (s *Server) handleSetClient(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides(), "agents_pushed": pushed, "agents_failed": failed, "persisted": persisted})
 }
 
+// handleSetClientBulk applies one client spoof to many trackers at once.
+// Spoofing is normally an all-or-nothing decision: a whitelist-enforcing tracker
+// rejects the real client outright, and someone who wants to look like
+// qBittorrent generally wants it everywhere. Doing that host by host through the
+// single-host route is where entries get missed.
+//
+// With no hosts given it targets every tracker the listing shows, which is the
+// live registry plus the ones we already hold settings for. An empty peer id
+// prefix clears the spoof, so the same call undoes it.
+func (s *Server) handleSetClientBulk(c *gin.Context) {
+	var req struct {
+		Hosts        []string `json:"hosts"`
+		PeerIDPrefix string   `json:"peer_id_prefix"`
+		UserAgent    string   `json:"user_agent"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	hosts := req.Hosts
+	if len(hosts) == 0 {
+		seen := map[string]bool{}
+		for _, st := range engine.TrackerSnapshot() {
+			if !seen[st.Host] {
+				seen[st.Host] = true
+				hosts = append(hosts, st.Host)
+			}
+		}
+		for _, h := range engine.ConfiguredAnnounceHosts() {
+			if !seen[h] {
+				seen[h] = true
+				hosts = append(hosts, h)
+			}
+		}
+	}
+	if len(hosts) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no tracker to apply this to"})
+		return
+	}
+	applied := 0
+	var notPersisted []string
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		engine.SetClientOverride(host, req.PeerIDPrefix, req.UserAgent)
+		s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "client", Host: host, PeerIDPrefix: req.PeerIDPrefix, UserAgent: req.UserAgent})
+		if err := s.persistClientSpoof(host, req.PeerIDPrefix, req.UserAgent); err != nil {
+			notPersisted = append(notPersisted, host)
+		}
+		applied++
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok", "applied": applied, "hosts": hosts,
+		"not_persisted": notPersisted,
+		"clients":       engine.GetClientOverrides(),
+	})
+}
+
 // handleGetOptFlags reports the state of the hot-swappable IPC optimisation
 // flags (see internal/engine/ltclient/opt.go).
 func (s *Server) handleGetOptFlags(c *gin.Context) {
@@ -2876,6 +2937,16 @@ func (s *Server) handleGetTrackers(c *gin.Context) {
 		PasskeySet   bool     `json:"passkey_set"`
 		IPMode       string   `json:"ip_mode"`
 		Sources      []string `json:"sources"`
+	}
+	// A tracker we hold settings for stays listed even with no recent announce:
+	// see engine.ConfiguredAnnounceHosts. Without this the Trackers tab goes
+	// blank while everything is paused, which is when someone is most likely to
+	// be reconfiguring it.
+	for _, host := range engine.ConfiguredAnnounceHosts() {
+		if merged[host] == nil {
+			merged[host] = &engine.TrackerStat{Host: host}
+			sources[host] = []string{"config"}
+		}
 	}
 	rows := make([]trackerRow, 0, len(merged))
 	for host, m := range merged {
