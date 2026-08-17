@@ -995,6 +995,32 @@ func (e *HoardEngine) GetTorrentList() []TorrentStats {
 	return list
 }
 
+// SampleServedInfoHash returns the info hash of one torrent this engine holds,
+// or "" when it holds none. The connectivity check uses it to prove that what
+// answers on our port is really us: a client only completes a BitTorrent
+// handshake for a torrent it actually has, so a stranger accepting the socket
+// cannot fake one. O(1) on purpose, since the alternative at 100k torrents is
+// copying the whole list to read a single field.
+func (e *HoardEngine) SampleServedInfoHash() string {
+	e.cachedStatsMu.RLock()
+	defer e.cachedStatsMu.RUnlock()
+	fallback := ""
+	for ih, s := range e.cachedStats {
+		if s == nil {
+			continue
+		}
+		// A stopped torrent is not served, so it would fail the handshake and
+		// look like a closed port. Prefer one that is actually running.
+		if strings.Contains(strings.ToLower(s.State), "seed") || strings.Contains(strings.ToLower(s.State), "down") {
+			return ih
+		}
+		if fallback == "" {
+			fallback = ih
+		}
+	}
+	return fallback
+}
+
 // GetSessionTotals sums UL/DL over the typed stats cache directly — no map
 // materialization (called ~1Hz for /api/status session stats).
 func (e *HoardEngine) GetSessionTotals() (ul, dl int64) {

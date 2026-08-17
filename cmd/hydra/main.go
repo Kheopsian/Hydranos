@@ -1657,6 +1657,8 @@ func formatBytesHuman(b int64) string {
 
 type raceAPIAdapter struct{ engine *engine.RaceEngine }
 
+func (a *raceAPIAdapter) SampleServedInfoHash() string { return a.engine.SampleServedInfoHash() }
+
 func (a *raceAPIAdapter) GetAllStatus() []map[string]interface{} {
 	list := a.engine.GetTorrentList()
 	result := make([]map[string]interface{}, 0, len(list))
@@ -1745,6 +1747,8 @@ func (a *raceAPIAdapter) AggregateStats() map[string]interface{} {
 }
 
 type hoardAPIAdapter struct{ engine *engine.HoardEngine }
+
+func (a *hoardAPIAdapter) SampleServedInfoHash() string { return a.engine.SampleServedInfoHash() }
 
 func (a *hoardAPIAdapter) GetAllStatus() map[string]interface{} { return a.engine.GetAllStatus() }
 func (a *hoardAPIAdapter) EventHub() *engine.EventHub           { return a.engine.EventHub() }

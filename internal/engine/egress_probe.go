@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Kheopsian/hydra/internal/version"
 )
 
 // DefaultEchoURL is the service asked "what address do you see me from". Plain
@@ -110,15 +115,23 @@ func PeerEgressIP(ctx context.Context, socksHost string, socksPort int, socksUse
 // access: it can succeed where a stranger would fail, and fail where one would
 // succeed. The caller says which of the two cases it is instead of reporting a
 // bare verdict.
-func InboundReachable(ctx context.Context, host string, port int, socksHost string, socksPort int, socksUser, socksPass, bindInterface string) error {
+// ErrNotUs means the connection was accepted but nothing on the other end
+// answered as this client. Measured on a real ProtonVPN tunnel: the provider
+// accepts EVERY port from inside its own tunnel, including ports that were
+// never forwarded, so a bare connect said "open" for a port that no peer could
+// ever reach. A completed BitTorrent handshake is the only answer that cannot
+// be faked by something merely accepting the socket.
+var ErrNotUs = errors.New("something accepted the connection but did not answer as this client")
+
+func InboundReachable(ctx context.Context, host string, port int, socksHost string, socksPort int, socksUser, socksPass, bindInterface, infoHash string) (string, error) {
 	if strings.TrimSpace(host) == "" || port <= 0 {
-		return fmt.Errorf("no address to test")
+		return "", fmt.Errorf("no address to test")
 	}
 	dialer := &net.Dialer{Timeout: 6 * time.Second}
 	if strings.TrimSpace(socksHost) == "" && strings.TrimSpace(bindInterface) != "" {
 		ip, err := resolveInterfaceIP(bindInterface)
 		if err != nil {
-			return fmt.Errorf("bind_interface %q: %w", bindInterface, err)
+			return "", fmt.Errorf("bind_interface %q: %w", bindInterface, err)
 		}
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(ip)}
 	}
@@ -131,9 +144,36 @@ func InboundReachable(ctx context.Context, host string, port int, socksHost stri
 		conn, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	return conn.Close()
+	defer conn.Close()
+
+	ih, herr := hex.DecodeString(strings.TrimSpace(infoHash))
+	if herr != nil || len(ih) != 20 {
+		// Connected, but with no torrent to name we cannot ask the other end to
+		// prove anything. The caller reports that as unproven, not as open.
+		return "", ErrNotUs
+	}
+	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
+	hs := make([]byte, 0, 68)
+	hs = append(hs, 19)
+	hs = append(hs, "BitTorrent protocol"...)
+	hs = append(hs, make([]byte, 8)...)
+	hs = append(hs, ih...)
+	hs = append(hs, generatePeerID(version.PeerFingerprint())...)
+	if _, err := conn.Write(hs); err != nil {
+		return "", err
+	}
+	resp := make([]byte, 68)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return "", ErrNotUs
+	}
+	// A client only answers for a torrent it holds: same info hash back is the
+	// proof. The peer_id it returns is reported for the operator to recognise.
+	if resp[0] != 19 || string(resp[1:20]) != "BitTorrent protocol" || !bytes.Equal(resp[28:48], ih) {
+		return "", ErrNotUs
+	}
+	return string(resp[48:68]), nil
 }
 
 // readEchoIP takes the first line of an echo response and insists it parses as

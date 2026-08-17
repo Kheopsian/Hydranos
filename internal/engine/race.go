@@ -771,6 +771,18 @@ func (e *RaceEngine) AggregateStats() map[string]interface{} {
 	}
 }
 
+// SampleServedInfoHash returns the info hash of one torrent this engine holds,
+// or "" when it holds none. See the hoard version: it exists so the
+// connectivity check can prove the thing answering on our port is this client.
+func (e *RaceEngine) SampleServedInfoHash() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for ih := range e.torrents {
+		return ih
+	}
+	return ""
+}
+
 func (e *RaceEngine) GetAllStatus() map[string]interface{} {
 	e.mu.RLock()
 	count := len(e.torrents)

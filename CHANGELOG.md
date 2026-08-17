@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.76.1 - 2026-08-16
+
+### Fixed
+- **The inbound test now proves that the thing answering is your client.** A bare TCP connect was not enough: measured on a real VPN tunnel, the provider accepts every port from inside its own tunnel, forwarded or not, so a port no peer could ever reach was reported as open. The probe now completes a BitTorrent handshake for a torrent the engine actually holds, which nothing else can answer, and reports the peer id that replied.
+
 ## v3.76.0 - 2026-08-17
 
 ### Removed
