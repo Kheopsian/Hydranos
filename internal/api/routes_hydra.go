@@ -2224,18 +2224,27 @@ func (s *Server) handlePortForwardStatus(c *gin.Context) {
 		}
 	}
 
+	// Reachability is measured, not inferred from peer counts: peers we dialled
+	// ourselves say nothing about anyone being able to reach us. See
+	// reachability.go. Started on first use so no wiring is needed in main.
+	reachProbeOnce.Do(s.StartReachabilityProbe)
+	raceReach, hoardReach := reachabilityOf("race"), reachabilityOf("hoard")
+
 	c.JSON(http.StatusOK, gin.H{
 		"race_port":         racePort,
 		"race_peers":        racePeers,
-		"race_connectable":  racePeers > 0,
+		"race_connectable":  raceReach.State == "reachable",
+		"race_reach":        raceReach,
 		"hoard_port":        hoardPort,
 		"hoard_peers":       hoardPeers,
-		"hoard_connectable": hoardPeers > 0,
-		"all_connectable":   racePeers > 0 && hoardPeers > 0,
+		"hoard_connectable": hoardReach.State == "reachable",
+		"hoard_reach":       hoardReach,
+		"all_connectable":   raceReach.State == "reachable" && hoardReach.State == "reachable",
 		"listen_healthy":    raceHealthy && hoardHealthy,
 		"race_sockets":      raceSockets,
 		"hoard_sockets":     hoardSockets,
 		"public_ip":         getPublicIP(),
+		"public_ip_v6":      getPublicIPv6(),
 	})
 }
 

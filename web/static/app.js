@@ -7,6 +7,28 @@ const POLL_INTERVAL = 1000;
 let _sessionBaselineUl = null;
 let _sessionBaselineDl = null;
 
+// The dot answers "can a peer open a connection to us", which is measured by a
+// probe (see reachability.go). It used to be `peers > 0`, which answers a
+// different question entirely: every peer we dialled ourselves counts, so a node
+// nobody could reach looked perfectly healthy and stayed leech-only.
+function _paintHealthDot(id, reach, port, peers, warnings) {
+    const dot = document.getElementById(id);
+    if (!dot) return;
+    const st = (reach && reach.state) || "unknown";
+    const cls = st === "reachable" ? "ok" : (st === "unreachable" ? "error" : "warn");
+    dot.className = "health-dot " + cls;
+    const head = st === "reachable"
+        ? t("Peers can reach you on port {port}", { port: port })
+        : (st === "unreachable"
+            ? t("Nobody can reach you on port {port}", { port: port })
+            : t("Reachability on port {port} not established yet", { port: port }));
+    let lines = [head];
+    if (reach && reach.detail) lines.push(reach.detail);
+    lines.push(t("{n} peers connected", { n: peers }));
+    if (warnings && warnings.length) lines = [...warnings, "", ...lines];
+    dot.title = lines.join("\n");
+}
+
 async function fetchPortForward() {
     try {
         const d = await api("/api/port-forward");
@@ -27,16 +49,18 @@ async function fetchPortForward() {
             cls = d.race_connectable || d.hoard_connectable ? "warn" : "error";
         }
 
-        dot.className = "health-dot " + cls;
+        if (dot) dot.className = "health-dot " + cls;
+        _paintHealthDot("health-dot-race", d.race_reach, d.race_port, d.race_peers, warnings);
+        _paintHealthDot("health-dot-hoard", d.hoard_reach, d.hoard_port, d.hoard_peers, warnings);
 
-        // Build tooltip
-        let lines = [
-            t("Race :{port}, {n} peers", { port: d.race_port, n: d.race_peers }) + (d.race_connectable ? "" : " ✗"),
-            t("Hoard :{port}, {n} peers", { port: d.hoard_port, n: d.hoard_peers }) + (d.hoard_connectable ? "" : " ✗"),
-            `IP: ${d.public_ip}`,
-        ];
-        if (warnings.length) lines = [...warnings, "", ...lines];
-        dot.title = lines.join("\n");
+        // Dual stack: show both addresses, since a peer reaching us over one
+        // family says nothing about the other.
+        const ipEl = document.getElementById("header-exit-ip");
+        if (ipEl && d.public_ip) {
+            ipEl.textContent = d.public_ip_v6
+                ? incoExitIP(d.public_ip) + "  /  " + incoExitIP(d.public_ip_v6)
+                : incoExitIP(d.public_ip);
+        }
     } catch {}
 }
 
