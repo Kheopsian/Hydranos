@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.77.0 - 2026-08-17
+
+### Added
+- **A torrent whose files have gone missing is now parked in an error state instead of silently rejecting every request forever.** Until now a torrent could keep its seeding state, keep being announced and keep accepting peers long after its data had disappeared, answering each request for a piece with a reject and nothing else. Nobody was told: not the peers, who kept asking, and not the user, whose torrent looked healthy. A read that fails with "no such file or directory" now moves the torrent to `error`, records the path that could not be opened so it can be read from the torrent's details, and stops both serving and announcing it. Only a missing file triggers this. A transient failure such as running out of file descriptors leaves the torrent alone, so a storage hiccup cannot take a whole catalogue down. Recovery is deliberate: restore the files and recheck, the same as qBittorrent's missing files state.
+
 ## v3.76.2 - 2026-08-16
 
 ### Fixed

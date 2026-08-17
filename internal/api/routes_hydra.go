@@ -823,7 +823,7 @@ func ltStatusToRow(t ltclient.TorrentStatus, agent string) map[string]interface{
 		"swarm_seeds": t.ListSeeds, "swarm_leechers": t.ListPeers,
 		"save_path": t.SavePath, "added_time": t.AddedTime, "completed_time": t.CompletedTime,
 		"ratio": ratio, "tracker_error": t.TrackerError, "tracker_error_msg": t.TrackerErrorMsg,
-		"torrent_error": false, "torrent_error_msg": "", "injected_peers": 0,
+		"torrent_error": t.State == "error", "torrent_error_msg": t.ErrorMsg, "injected_peers": 0,
 		"injection_hit": false, "uploader": "", "category": "", "agent": agent,
 	}
 }

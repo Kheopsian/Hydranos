@@ -1129,6 +1129,12 @@ func (e *HoardEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 	}
 	e.cachedStatsMu.RUnlock()
 
+	// Read the broken state from the live status rather than the stats cache:
+	// the cache is refreshed on a tick, and this is the one field a user opens
+	// the panel to read the moment it appears.
+	m["torrent_error"] = s.State == "error"
+	m["torrent_error_msg"] = s.ErrorMsg
+
 	return m
 }
 

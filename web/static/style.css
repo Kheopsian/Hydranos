@@ -2501,6 +2501,14 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
    different situations, so two different colours. */
 .state-badge.state-paused{background:rgba(139,148,158,.15);color:var(--text-dim,#8b949e)}
 .state-badge.state-queued{background:rgba(88,166,255,.12);color:var(--accent-blue,#58a6ff)}
+/* Its data is gone. Nothing the scheduler can fix, so it reads as an alarm. */
+.state-badge.state-error{background:rgba(248,81,73,.15);color:var(--accent-red,#f85149)}
+.detail-error{background:rgba(248,81,73,.1);border:1px solid var(--accent-red,#f85149);
+    border-radius:6px;padding:12px 14px;margin-bottom:14px;color:var(--accent-red,#f85149)}
+/* The path is the actionable part, so it stays readable rather than alarming. */
+.detail-error-msg{margin-top:6px;font-family:monospace;font-size:12px;
+    word-break:break-all;color:var(--text,#c9d1d9)}
+.detail-error-hint{margin-top:6px;font-size:12px;color:var(--text-dim,#8b949e)}
 
 /* ---- Add Torrent: .torrent content preview (parsed in the browser) ---- */
 .preview-toggle {

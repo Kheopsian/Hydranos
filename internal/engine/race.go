@@ -994,6 +994,11 @@ func (e *RaceEngine) checkTrackerHealth() {
 		if s.IsPaused {
 			continue
 		}
+		// Its data is gone, so there is nothing to serve: staying in the swarm
+		// only advertises pieces every peer will be rejected for.
+		if s.State == "error" {
+			continue
+		}
 		ih := s.InfoHash
 		e.mu.RLock()
 		_, tracked := e.torrents[ih]

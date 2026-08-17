@@ -18,6 +18,11 @@ pub enum TorrentStatus {
     Checking = 1,
     Downloading = 2,
     Seeding = 3,
+    /// The data is gone: a read hit ENOENT, so we cannot honour a single
+    /// request on this torrent. Set once, by the serve path, and never
+    /// cleared on its own — nothing retries a torrent it refuses to serve.
+    /// A recheck is what brings it back, same as qBittorrent's missing-files.
+    Error = 4,
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +261,10 @@ pub struct TorrentState {
     pub last_announce_ok: AtomicBool,
     pub last_announce_error: Mutex<String>,
 
+    /// Why this torrent is in `TorrentStatus::Error`, shown when the user
+    /// opens it. Empty for every other status.
+    pub error_msg: Mutex<String>,
+
     // Peer registry: insert at connect, remove at disconnect (via PeerGuard).
     // Each peer task holds its own Arc<PeerStats>, so hot-path updates do
     // NOT need lookups — zero contention during piece transfers.
@@ -330,9 +339,26 @@ impl TorrentState {
             current_tracker: Mutex::new(String::new()),
             last_announce_ok: AtomicBool::new(false),
             last_announce_error: Mutex::new(String::new()),
+            error_msg: Mutex::new(String::new()),
             peer_stats: DashMap::new(),
             connected_addrs: DashSet::new(),
         }
+    }
+
+    /// The data is missing: park the torrent instead of promising pieces we
+    /// cannot deliver. Suspending the serve path is what stops the bleeding —
+    /// every request was allocating a formatted error only to reject the peer.
+    /// Idempotent: the first caller wins, later ones are cheap loads.
+    pub fn mark_error(&self, msg: &str) {
+        if self.status.load(Ordering::Relaxed) == TorrentStatus::Error as u8 {
+            return;
+        }
+        if let Ok(mut g) = self.error_msg.lock() {
+            *g = msg.to_string();
+        }
+        self.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        self.serving_suspended.store(true, Ordering::Relaxed);
+        tracing::warn!("torrent {:?} parked in error: {}", self.meta.name, msg);
     }
 
     pub fn have_bitfield(&self) -> Bytes {
