@@ -368,6 +368,7 @@
   "Port the hoard engine accepts peers on. It has to differ from the race one.": "Port sur lequel le moteur Hoard accepte les pairs. Il doit être différent de celui de Race.",
   "Port the race engine accepts peers on.": "Port sur lequel le moteur Race accepte les pairs.",
   "Ports": "Ports",
+  "Ports, interface and proxy live in the Network tab, which writes them as one coherent set.": "Les ports, l'interface et le proxy sont dans l'onglet Réseau, qui les écrit comme un ensemble cohérent.",
   "Preview": "Aperçu",
   "Preview contents before adding": "Prévisualiser le contenu avant d'ajouter",
   "Preview failed ({status})": "Échec de l'aperçu ({status})",

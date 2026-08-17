@@ -4535,6 +4535,16 @@ function esc(s) {
 }
 // Regroupement des sections toml par domaine (ordre = ordre d'affichage).
 // `tops` = sections toml de 1er niveau ; les sous-tables (race.custom_choking...) heritent du top.
+// Keys the Network tab owns. Shown there, hidden from the flat lists, because
+// the Network tab writes them as a set: editing one of them on its own can
+// produce a combination the tab would have refused.
+const NET_OWNED_KEYS = new Set([
+    "listen_port", "listen_interfaces", "bind_interface", "enable_ipv6",
+    "listen_port_proxy_v2", "listen_addr_proxy_v2", "proxy_v2_trusted_sources",
+    "socks5_outbound_host", "socks5_outbound_port", "socks5_outbound_user",
+    "socks5_outbound_pass", "announce_proxy", "announce_ip",
+]);
+
 const SETTINGS_DOMAINS = [
     { id: "daemon",   label: "General",              icon: "\u2699\uFE0F", tops: ["daemon"] },
     { id: "race",     label: "Session Race", icon: "\u{1F3C1}",     tops: ["race"] },
@@ -4796,6 +4806,7 @@ async function updateSettings() {
             for (const { path, scalars } of sections) {
                 let rows = "";
                 for (const [k, v] of scalars) {
+                    if (NET_OWNED_KEYS.has(k) && (path === "race" || path === "hoard")) continue;
                     const id = "set__" + path + "__" + k;
                     if (!Array.isArray(v)) _settingsOrig[id] = { section: path, key: k, value: v };
                     const search = (path + " " + k).toLowerCase();
@@ -4811,7 +4822,11 @@ async function updateSettings() {
                     </div>`;
                     count++;
                 }
+                if (!rows) continue;
                 body += `<div class="settings-section"><div class="settings-section-title">[${esc(path)}]</div>${rows}</div>`;
+            }
+            if (dom.id === "race" || dom.id === "hoard") {
+                body = `<p class="sr-desc" style="margin:0 0 12px">${t("Ports, interface and proxy live in the Network tab, which writes them as one coherent set.")}</p>` + body;
             }
             _tabsHtml += `<button type="button" class="settings-tab" data-domain="${dom.id}" onclick="showSettingsPanel('${dom.id}')"><span class="sg-title">${esc(t(dom.label))}</span> <span class="sg-count">${count}</span></button>`;
             _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div>` +
