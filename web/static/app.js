@@ -26,7 +26,8 @@ function _paintHealthDot(id, reach, port, peers, warnings, engine) {
     if (reach && reach.detail) lines.push(reach.detail);
     lines.push(t("{n} peers connected", { n: peers }));
     if (warnings && warnings.length) lines = [...warnings, "", ...lines];
-    dot.title = lines.join("\n");
+    const row = dot.closest(".health-row") || dot;
+    row.title = lines.join("\n");
 }
 
 async function fetchPortForward() {
