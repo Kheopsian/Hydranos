@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.77.7 - 2026-08-16
+
+### Changed
+- **Per-tracker client spoofing and announce IP modes moved to the Trackers tab.** Both are per-tracker settings, but neither was listed under any domain, so they landed in the Other catch-all.
+
 ## v3.77.6 - 2026-08-16
 
 ### Changed
