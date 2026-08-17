@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.77.1 - 2026-08-16
+
+### Fixed
+- **The Network tab's fields no longer form a staircase.** They were plain inputs stretching to whatever space the label left them, so each row started at a different place. They now use the same fixed-width field as the rest of the settings page.
+
 ## v3.77.0 - 2026-08-17
 
 ### Added

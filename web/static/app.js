@@ -5841,7 +5841,7 @@ function _netField(id, label, type, value, hint, extra) {
     const v = value === undefined || value === null ? "" : String(value);
     return `<div class="settings-row">
         <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
-        <div class="sr-field"><input type="${type}" id="${id}" value="${esc(v)}" ${attrs}></div>
+        <div class="sr-field"><input type="${type}" class="sr-input" id="${id}" value="${esc(v)}" ${attrs}></div>
     </div>`;
 }
 
