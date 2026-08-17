@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.83.1 - 2026-08-16
+
+### Fixed
+- **v3.83.0 did not build.** Its commit carried unrelated engine changes that reference a symbol not yet published, so the release tag failed to compile. Only the inbound counter remains.
+
 ## v3.83.0 - 2026-08-16
 
 ### Added
