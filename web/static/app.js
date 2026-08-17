@@ -5087,11 +5087,9 @@ async function updateTrackers() {
             // living in it would be torn out from under the pointer mid-click.
             // The family is set from the Edit form, like the spoof and passkey.
             const cur = r.ip_mode || "auto";
-            const ipmode = cur === "none"
-                ? '<span class="mode-tag mode-race">off</span>'
-                : cur !== "auto"
-                    ? `<span class="mode-tag mode-hoard">${esc(cur)}</span>`
-                    : '<span class="sr-desc">auto</span>';
+            const ipmode = cur !== "auto"
+                ? `<span class="mode-tag mode-hoard">${esc(cur)}</span>`
+                : '<span class="sr-desc">auto</span>';
             return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}')">Edit</button></td></tr>`;
         }).join("");
         if (_thtml === _trackersSig) return;
