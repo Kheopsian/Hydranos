@@ -5103,12 +5103,42 @@ function applyTrackerPreset() {
     document.getElementById("trk-pid").value = p.pid;
     document.getElementById("trk-ua").value = p.ua;
 }
+// Whitelist-enforcing trackers reject the real client outright, so someone who
+// wants to look like qBittorrent generally wants it on all of them. Applied one
+// by one through the Edit form, that is where a tracker gets forgotten.
+async function spoofAllTrackers(clear) {
+    const out = document.getElementById("trackers-bulk-result");
+    const spoof = { peer_id_prefix: "-qB5220-", user_agent: "qBittorrent/5.2.2" };
+    const body = clear ? { peer_id_prefix: "", user_agent: "" } : spoof;
+    const question = clear
+        ? t("Remove the client spoof from every tracker?")
+        : t("Make every tracker see this client as qBittorrent 5.2.2?");
+    if (!confirm(question)) return;
+    if (out) out.textContent = t("Applying…");
+    try {
+        const r = await api("/api/announce/clients/bulk", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        if (out) {
+            out.textContent = t("Applied to {n} tracker(s).", { n: r.applied });
+            if (r.not_persisted && r.not_persisted.length) {
+                out.textContent += " " + t("{n} could not be written to the config file and will be lost on restart.", { n: r.not_persisted.length });
+            }
+        }
+        _trackersSig = "";
+        updateTrackers();
+    } catch (e) {
+        if (out) out.textContent = t("Error: {msg}", { msg: e.message });
+    }
+}
+
 async function updateTrackers() {
     try {
         const rows = await api("/api/trackers");
         const tbody = document.getElementById("trackers-tbody");
         if (!rows || !rows.length) {
-            tbody.innerHTML = '<tr><td colspan="8" class="empty">No announces yet</td></tr>';
+            tbody.innerHTML = `<tr><td colspan="8" class="empty">${t("No tracker known yet. They appear here once a torrent announces, or as soon as you give one a setting.")}</td></tr>`;
             return;
         }
         const _thtml = rows.map(r => {
