@@ -4549,7 +4549,7 @@ const SETTINGS_DOMAINS = [
     { id: "daemon",   label: "General",              icon: "\u2699\uFE0F", tops: ["daemon"] },
     { id: "race",     label: "Session Race", icon: "\u{1F3C1}",     tops: ["race", "race_drain"] },
     { id: "hoard",    label: "Session Hoard",          icon: "\u{1F4E6}",     tops: ["hoard"] },
-    { id: "trackers", label: "Trackers & Network",             icon: "\u{1F310}",     tops: ["announce_passkeys"] },
+    { id: "trackers", label: "Trackers & Network",             icon: "\u{1F310}",     tops: ["announce_passkeys", "announce_clients", "announce_ip_modes"] },
     { id: "observ",   label: "Observability",                 icon: "\u{1F4CA}",     tops: ["metrics", "peer_intel"] },
     { id: "maint",    label: "Maintenance",                   icon: "\u{1F9F9}",     tops: ["vpn_speedtest"] },
 ];
