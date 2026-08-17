@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.82.0 - 2026-08-16
+
+### Fixed
+- **The reachability dot no longer reports a working VPN as unreachable.** The probe leaves through your own tunnel and comes back to the provider's address, which is not obliged to return it to its own client: measured on ProtonVPN, a port that peers reach perfectly well answers nothing from inside the tunnel. A refusal is now only reported as closed when the probe genuinely came from outside, through a proxy; otherwise the state is unknown and says why, mentioning gluetun's forwarded port when there is one.
+
 ## v3.81.3 - 2026-08-16
 
 ### Changed
