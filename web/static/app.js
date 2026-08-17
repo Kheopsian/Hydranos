@@ -4647,7 +4647,7 @@ function _collectSections(obj, path, out) {
 
 const _SETTINGS_DEFAULT = {
     "daemon::api_host": "0.0.0.0", "daemon::api_port": 8199,
-    "daemon::data_dir": "/configs",
+    "daemon::data_dir": "/config",
     "daemon::create_torrent_folder": true,
     "race::listen_port": 16171, "race::max_connections": 4000,
     "race::max_uploads_per_torrent": 100,
