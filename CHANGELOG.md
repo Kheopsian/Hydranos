@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.81.2 - 2026-08-16
+
+### Changed
+- **Hoard sits above race in the header, and the dots are a little larger.**
+
 ## v3.81.1 - 2026-08-16
 
 ### Changed
