@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.81.0 - 2026-08-16
+
+### Fixed
+- **IPv6 turned on but unavailable is now visible.** The setting only makes Hydra listen on IPv6 if the host has an address; on a host without one, ticking it changed nothing and looked exactly like it had worked. The header now shows "IPv6 unavailable" where the second address would be, with the reason on hover.
+
 ## v3.80.0 - 2026-08-16
 
 ### Added

@@ -2245,6 +2245,7 @@ func (s *Server) handlePortForwardStatus(c *gin.Context) {
 		"hoard_sockets":     hoardSockets,
 		"public_ip":         getPublicIP(),
 		"public_ip_v6":      getPublicIPv6(),
+		"ipv6_wanted":       s.config != nil && (s.config.Race.EnableIPv6 || s.config.Hoard.EnableIPv6),
 	})
 }
 
