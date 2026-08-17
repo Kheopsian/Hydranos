@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.77.4 - 2026-08-16
+
+### Changed
+- **Connectivity settings now live only in the Network tab.** Ports, interface, IPv6 and proxy credentials also appeared in the flat Session Race and Session Hoard lists, where they could be set one at a time: a SOCKS5 host without an announce proxy is exactly the combination that relays the traffic while the tracker still records your own address. The Network tab writes them as a set, so it is now the only place that offers them.
+
 ## v3.77.3 - 2026-08-16
 
 ### Changed
