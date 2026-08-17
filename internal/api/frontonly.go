@@ -23,6 +23,8 @@ type emptyRaceEngine struct{}
 // NewEmptyRaceEngine returns a no-op RaceEngine for front-only mode.
 func NewEmptyRaceEngine() RaceEngine { return emptyRaceEngine{} }
 
+func (emptyRaceEngine) SampleServedInfoHash() string { return "" }
+
 func (emptyRaceEngine) ClearCategoryLabel(string) int                              { return 0 }
 func (emptyRaceEngine) SetUserPaused(string, bool) error                           { return nil }
 func (emptyRaceEngine) MatchHashes(engine.TorrentFilter, map[string]bool) []string { return nil }
@@ -66,6 +68,7 @@ type emptyHoardEngine struct{}
 func NewEmptyHoardEngine() HoardEngine { return emptyHoardEngine{} }
 
 func (emptyHoardEngine) GetAllStatus() map[string]interface{}                 { return map[string]interface{}{} }
+func (emptyHoardEngine) SampleServedInfoHash() string                         { return "" }
 func (emptyHoardEngine) GetTorrentList() []map[string]interface{}             { return nil }
 func (emptyHoardEngine) GetTorrentListJSON() []json.RawMessage                { return nil }
 func (emptyHoardEngine) GetSessionTotals() (int64, int64)                     { return 0, 0 }

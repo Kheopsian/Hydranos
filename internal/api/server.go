@@ -59,6 +59,9 @@ func SetStartupReady(ready bool) {
 
 // RaceEngine abstracts the race (speed-oriented) torrent engine.
 type RaceEngine interface {
+	// SampleServedInfoHash returns one info hash this engine holds, for the
+	// connectivity check's handshake probe. "" when it holds none.
+	SampleServedInfoHash() string
 	SetUserPaused(infoHash string, paused bool) error
 	MatchHashes(f engine.TorrentFilter, exclude map[string]bool) []string
 	GetAllStatus() []map[string]interface{}
@@ -90,6 +93,9 @@ type RaceEngine interface {
 
 // HoardEngine abstracts the hoard (long-term seeding) torrent engine.
 type HoardEngine interface {
+	// SampleServedInfoHash returns one info hash this engine holds, for the
+	// connectivity check's handshake probe. "" when it holds none.
+	SampleServedInfoHash() string
 	GetAllStatus() map[string]interface{}
 	GetTorrentList() []map[string]interface{}
 	GetTorrentListJSON() []json.RawMessage

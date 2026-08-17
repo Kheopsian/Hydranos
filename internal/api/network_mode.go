@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -582,10 +583,18 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 			continue
 		}
 		target := net.JoinHostPort(ip, strconv.Itoa(port))
-		err := engine.InboundReachable(ctx, ip, port,
+		// Name a torrent this engine holds, so the far end can be made to prove
+		// it is us rather than merely accepting the socket.
+		sample := ""
+		if e.name == "race" && s.raceEngine != nil {
+			sample = s.raceEngine.SampleServedInfoHash()
+		} else if e.name == "hoard" && s.hoardEngine != nil {
+			sample = s.hoardEngine.SampleServedInfoHash()
+		}
+		peerID, err := engine.InboundReachable(ctx, ip, port,
 			tomlStr(e.sec, "socks5_outbound_host"), tomlInt(e.sec, "socks5_outbound_port"),
 			tomlStr(e.sec, "socks5_outbound_user"), tomlStr(e.sec, "socks5_outbound_pass"),
-			tomlStr(e.sec, "bind_interface"))
+			tomlStr(e.sec, "bind_interface"), sample)
 		// Only a probe leaving through a proxy reaches us the way a stranger
 		// would. Through a tunnel it turns around at the VPN provider, and on a
 		// direct setup at your own router, and neither is obliged to loop it
@@ -598,9 +607,13 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		}
 		switch {
 		case err == nil && viaProxy:
-			add("inbound_"+e.name, label, "ok", target+" accepted a connection coming from outside your network")
+			add("inbound_"+e.name, label, "ok", "your client answered on "+target+" (peer "+peerID+") to a connection coming from outside your network: peers can reach you")
 		case err == nil:
-			add("inbound_"+e.name, label, "ok", target+" accepted the connection, so the port is open")
+			add("inbound_"+e.name, label, "ok", "your client answered on "+target+" (peer "+peerID+"): the port is open")
+		case errors.Is(err, engine.ErrNotUs) && sample == "":
+			add("inbound_"+e.name, label, "warn", target+" accepted the connection, but this engine holds no torrent to prove with, so there is no telling whether the answer came from your client")
+		case errors.Is(err, engine.ErrNotUs):
+			add("inbound_"+e.name, label, "fail", target+" accepted the connection but did not answer as your client, so peers are not reaching you. Beware that some VPN providers accept every port from inside their own tunnel, forwarded or not, which looks exactly like this")
 		case mode == netModeSocks5:
 			add("inbound_"+e.name, label, "fail", target+" refused the connection, as expected: a plain SOCKS5 proxy forwards outgoing connections only, so nobody can reach you")
 		case viaProxy:
