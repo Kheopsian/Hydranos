@@ -60,8 +60,25 @@ type SessionConfig struct {
 	// the announce already leaves by the path peers should reach us on. Set it
 	// when the two differ and the tracker honours the parameter — many do not.
 	AnnounceIP string `toml:"announce_ip"`
-	MaxConnections        int      `toml:"max_connections"`
-	MaxUploadsPerTorrent  int      `toml:"max_uploads_per_torrent"`
+	// GluetunPortForward makes this session take its listen port from gluetun
+	// rather than from listen_port. A VPN provider assigns the forwarded port
+	// per lease and rotates it, so a fixed port behind such a tunnel is wrong
+	// the moment the lease turns over, silently: the node keeps announcing a
+	// port that answers nobody.
+	//
+	// While it is on, announces and peer dials are HELD at startup until the
+	// port is known. Announcing first would publish the wrong port to every
+	// tracker, and they keep it for a whole announce cycle.
+	GluetunPortForward bool `toml:"gluetun_port_forward"`
+	// GluetunURL is gluetun's control server. Empty = http://127.0.0.1:8000,
+	// which is where it listens when Hydra shares gluetun's network namespace.
+	GluetunURL string `toml:"gluetun_url"`
+	// GluetunAPIKey authenticates against that control server. Recent gluetun
+	// versions refuse every request without one; the role needs the route
+	// GET /v1/portforward.
+	GluetunAPIKey        string `toml:"gluetun_api_key"`
+	MaxConnections       int    `toml:"max_connections"`
+	MaxUploadsPerTorrent int    `toml:"max_uploads_per_torrent"`
 
 	// AnnounceRateLimit caps outbound tracker announces for this session, in
 	// announces per second. 0 = unlimited (the historical behaviour). A large

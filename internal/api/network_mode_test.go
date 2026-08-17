@@ -34,7 +34,7 @@ func apply(t *testing.T, doc, mode string, f netModeFields) (map[string]interfac
 		{"race", f.RaceListenPort, f.RaceProxyV2Port},
 		{"hoard", f.HoardListenPort, f.HoardProxyV2Port},
 	} {
-		out, err = config.SetTOMLTable(out, e.section, netModeKeys(mode, f, e.listenPort, e.proxyV2Port))
+		out, err = config.SetTOMLTable(out, e.section, netModeKeys(mode, f, e.listenPort, e.proxyV2Port, e.section))
 		if err != nil {
 			t.Fatalf("SetTOMLTable(%s): %v", e.section, err)
 		}

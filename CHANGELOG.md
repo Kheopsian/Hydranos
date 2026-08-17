@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.80.0 - 2026-08-16
+
+### Added
+- **A gluetun mode in the VPN setup.** Tick it and the hoard engine asks gluetun for the port the provider forwarded, binds that, and follows it when the lease rotates. Crucially it does not announce before it has one: publishing the configured port first hands every tracker an address that answers nobody for a whole announce cycle, so announces and peer dials are held from boot until the port is bound. A tunnel that never yields a port releases the hold after ten minutes rather than staying silent forever, since a wrong port is visible and fixable while silence is not.
+
 ## v3.79.0 - 2026-08-16
 
 ### Changed

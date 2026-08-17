@@ -48,6 +48,9 @@ type netModeFields struct {
 	HoardProxyV2Port int      `json:"hoard_proxy_v2_port"`
 	ProxyV2Addr      string   `json:"proxy_v2_listen_addr"`
 	ProxyV2Trusted   []string `json:"proxy_v2_trusted_sources"`
+	GluetunPort      bool     `json:"gluetun_port_forward"`
+	GluetunURL       string   `json:"gluetun_url"`
+	GluetunAPIKey    string   `json:"gluetun_api_key"`
 }
 
 // envOverride names an environment variable that silently outranks a field on
@@ -186,6 +189,9 @@ func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 	if proxied {
 		w = append(w, "UDP trackers are skipped in this mode: SOCKS5 carries TCP only, and a direct datagram would hand the tracker the address you are hiding.")
 	}
+	if mode == netModeVPN && f.GluetunPort {
+		w = append(w, "The hoard engine takes its listen port from gluetun and holds its announces until it has one. A provider forwards a single port, so the race engine keeps its own and stays unreachable.")
+	}
 	if mode == netModeVPN && f.BindInterface != "" && !looksLikeTunnel(f.BindInterface) {
 		w = append(w, "\""+f.BindInterface+"\" does not look like a VPN tunnel (those are usually named tun0, wg0 or similar). Peer connections bound to an ordinary interface leave outside the tunnel, or do not leave at all.")
 	}
@@ -229,6 +235,9 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 		HoardListenPort:  tomlInt(hoard, "listen_port"),
 		EnableIPv6:       tomlBool(race, "enable_ipv6") || tomlBool(hoard, "enable_ipv6"),
 		BindInterface:    firstNonEmpty(tomlStr(hoard, "bind_interface"), tomlStr(race, "bind_interface")),
+		GluetunPort:      tomlBool(race, "gluetun_port_forward") || tomlBool(hoard, "gluetun_port_forward"),
+		GluetunURL:       firstNonEmpty(tomlStr(hoard, "gluetun_url"), tomlStr(race, "gluetun_url")),
+		GluetunAPIKey:    firstNonEmpty(tomlStr(hoard, "gluetun_api_key"), tomlStr(race, "gluetun_api_key")),
 		Socks5Host:       firstNonEmpty(tomlStr(hoard, "socks5_outbound_host"), tomlStr(race, "socks5_outbound_host")),
 		Socks5User:       firstNonEmpty(tomlStr(hoard, "socks5_outbound_user"), tomlStr(race, "socks5_outbound_user")),
 		Socks5Pass:       firstNonEmpty(tomlStr(hoard, "socks5_outbound_pass"), tomlStr(race, "socks5_outbound_pass")),
@@ -343,7 +352,7 @@ func validateNetMode(mode string, f netModeFields) error {
 // netModeKeys renders the TOML keys one engine gets for the chosen mode. Every
 // mode returns the SAME key set — the ones it does not use are blanked, never
 // omitted — so switching modes cannot leave a stale key behind.
-func netModeKeys(mode string, f netModeFields, listenPort, proxyV2Port int) [][2]string {
+func netModeKeys(mode string, f netModeFields, listenPort, proxyV2Port int, scope string) [][2]string {
 	socksHost, socksPort := "", 0
 	socksUser, socksPass := "", ""
 	announceProxy := ""
@@ -376,7 +385,18 @@ func netModeKeys(mode string, f netModeFields, listenPort, proxyV2Port int) [][2
 	if mode != netModeProxyV2 {
 		proxyV2Port = 0
 	}
+	gluetunOn, gluetunURL, gluetunKey := false, "", ""
+	// Only the hoard follows the forwarded port: a provider hands out exactly
+	// one, and pointing both engines at it would have the second fail to bind.
+	if mode == netModeVPN && f.GluetunPort && scope == "hoard" {
+		gluetunOn = true
+		gluetunURL = strings.TrimSpace(f.GluetunURL)
+		gluetunKey = f.GluetunAPIKey
+	}
 	return [][2]string{
+		{"gluetun_port_forward", strconv.FormatBool(gluetunOn)},
+		{"gluetun_url", strconv.Quote(gluetunURL)},
+		{"gluetun_api_key", strconv.Quote(gluetunKey)},
 		{"listen_port", strconv.Itoa(listenPort)},
 		{"enable_ipv6", strconv.FormatBool(f.EnableIPv6)},
 		{"bind_interface", strconv.Quote(bindIface)},
@@ -422,7 +442,7 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 		{"race", req.Fields.RaceListenPort, req.Fields.RaceProxyV2Port},
 		{"hoard", req.Fields.HoardListenPort, req.Fields.HoardProxyV2Port},
 	} {
-		doc, err = config.SetTOMLTable(doc, e.section, netModeKeys(req.Mode, req.Fields, e.listenPort, e.proxyV2Port))
+		doc, err = config.SetTOMLTable(doc, e.section, netModeKeys(req.Mode, req.Fields, e.listenPort, e.proxyV2Port, e.section))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

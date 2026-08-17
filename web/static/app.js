@@ -5997,6 +5997,12 @@ function netModeRender() {
         fields += `<div class="settings-section"><div class="settings-section-title">${t("Tunnel")}</div>
             ${_netSelect("net-bind-iface", "VPN interface name", f.bind_interface, list, "The interface the VPN client creates, for example wg0 or tun0. Peer sockets are bound to it, so they cannot leave outside the tunnel.")}
             <p class="sr-desc">${t("Set the listen port below to the port your VPN provider forwards to you, otherwise nobody can connect to you.")}</p>
+        </div>
+        <div class="settings-section"><div class="settings-section-title">${t("Gluetun")}</div>
+            ${_netCheckbox("net-gluetun", "Take the listen port from gluetun", f.gluetun_port_forward, "Gluetun asks your provider for a forwarded port and that port changes with the lease. Hydra reads it, listens there, and follows it. Announces are held at startup until it knows the port, so no tracker is ever handed the wrong one.")}
+            ${_netField("net-gluetun-url", "Gluetun control server", "text", f.gluetun_url, "Empty means http://127.0.0.1:8000, which is right when Hydra shares gluetun's network.")}
+            ${_netField("net-gluetun-key", "Gluetun API key", "password", f.gluetun_api_key, "Recent gluetun versions refuse every request without one. The role needs the route GET /v1/portforward.")}
+            <p class="sr-desc">${t("A provider forwards a single port, so it goes to the hoard engine. The race engine keeps its own and stays unreachable.")}</p>
         </div>`;
     }
     if (mode === "socks5" || mode === "proxy_v2") fields += _netSocksHTML(f);
@@ -6053,6 +6059,9 @@ function netModeCollect() {
         race_proxy_v2_port: document.getElementById("net-race-pv2") ? num("net-race-pv2") : (prev.race_proxy_v2_port || 0),
         hoard_proxy_v2_port: document.getElementById("net-hoard-pv2") ? num("net-hoard-pv2") : (prev.hoard_proxy_v2_port || 0),
         proxy_v2_listen_addr: document.getElementById("net-pv2-addr") ? str("net-pv2-addr") : (prev.proxy_v2_listen_addr || ""),
+        gluetun_port_forward: document.getElementById("net-gluetun") ? bool("net-gluetun") : !!prev.gluetun_port_forward,
+        gluetun_url: document.getElementById("net-gluetun-url") ? str("net-gluetun-url") : (prev.gluetun_url || ""),
+        gluetun_api_key: document.getElementById("net-gluetun-key") ? str("net-gluetun-key") : (prev.gluetun_api_key || ""),
         proxy_v2_trusted_sources: document.getElementById("net-pv2-trusted")
             ? str("net-pv2-trusted").split(",").map(s => s.trim()).filter(Boolean)
             : (prev.proxy_v2_trusted_sources || []),
