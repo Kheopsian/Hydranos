@@ -250,6 +250,8 @@
   "IP": "IP",
   "IP or hostname of the SOCKS5 server.": "IP ou nom d'hôte du serveur SOCKS5.",
   "IP the HTTP API/WebUI binds to (0.0.0.0 = all interfaces).": "IP sur laquelle l'API HTTP et l'interface web écoutent (0.0.0.0 = toutes les interfaces).",
+  "IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it.": "L'IPv6 est activée dans les réglages, mais cette machine n'a pas d'adresse IPv6 : rien n'écoute ni n'est annoncé dessus.",
+  "IPv6 unavailable": "IPv6 indisponible",
   "Import": "Import",
   "Import complete": "Import terminé",
   "Import everything stopped, no announce until you start them": "Tout importer à l'arrêt, aucune annonce tant qu'ils ne sont pas démarrés",

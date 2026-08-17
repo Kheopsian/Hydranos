@@ -57,9 +57,20 @@ async function fetchPortForward() {
         // family says nothing about the other.
         const ipEl = document.getElementById("header-exit-ip");
         if (ipEl && d.public_ip) {
-            ipEl.textContent = d.public_ip_v6
-                ? incoExitIP(d.public_ip) + "  /  " + incoExitIP(d.public_ip_v6)
-                : incoExitIP(d.public_ip);
+            if (d.public_ip_v6) {
+                ipEl.textContent = incoExitIP(d.public_ip) + "  /  " + incoExitIP(d.public_ip_v6);
+                ipEl.title = "";
+            } else if (d.ipv6_wanted) {
+                // Asked for, not available: say so where the address would be,
+                // rather than showing one address and letting it pass for a
+                // working dual stack.
+                ipEl.innerHTML = esc(incoExitIP(d.public_ip)) +
+                    `  /  <span class="net-warn">${esc(t("IPv6 unavailable"))}</span>`;
+                ipEl.title = t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it.");
+            } else {
+                ipEl.textContent = incoExitIP(d.public_ip);
+                ipEl.title = "";
+            }
         }
     } catch {}
 }
