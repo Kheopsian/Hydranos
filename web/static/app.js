@@ -11,7 +11,7 @@ let _sessionBaselineDl = null;
 // probe (see reachability.go). It used to be `peers > 0`, which answers a
 // different question entirely: every peer we dialled ourselves counts, so a node
 // nobody could reach looked perfectly healthy and stayed leech-only.
-function _paintHealthDot(id, reach, port, peers, warnings) {
+function _paintHealthDot(id, reach, port, peers, warnings, engine) {
     const dot = document.getElementById(id);
     if (!dot) return;
     const st = (reach && reach.state) || "unknown";
@@ -22,7 +22,7 @@ function _paintHealthDot(id, reach, port, peers, warnings) {
         : (st === "unreachable"
             ? t("Nobody can reach you on port {port}", { port: port })
             : t("Reachability on port {port} not established yet", { port: port }));
-    let lines = [head];
+    let lines = [engine + ": " + head];
     if (reach && reach.detail) lines.push(reach.detail);
     lines.push(t("{n} peers connected", { n: peers }));
     if (warnings && warnings.length) lines = [...warnings, "", ...lines];
@@ -50,8 +50,8 @@ async function fetchPortForward() {
         }
 
         if (dot) dot.className = "health-dot " + cls;
-        _paintHealthDot("health-dot-race", d.race_reach, d.race_port, d.race_peers, warnings);
-        _paintHealthDot("health-dot-hoard", d.hoard_reach, d.hoard_port, d.hoard_peers, warnings);
+        _paintHealthDot("health-dot-race", d.race_reach, d.race_port, d.race_peers, warnings, "Race");
+        _paintHealthDot("health-dot-hoard", d.hoard_reach, d.hoard_port, d.hoard_peers, warnings, "Hoard");
 
         // Dual stack: show both addresses, since a peer reaching us over one
         // family says nothing about the other.

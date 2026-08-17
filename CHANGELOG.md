@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.81.1 - 2026-08-16
+
+### Changed
+- **The reachability dots lost their letters and now sit one above the other.** With R and H inside them they read as lottery balls; the position carries the engine and the tooltip names it.
+
 ## v3.81.0 - 2026-08-16
 
 ### Fixed
