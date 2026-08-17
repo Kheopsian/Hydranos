@@ -1712,6 +1712,8 @@ func (a *raceAPIAdapter) SetEngineOptFlag(name string, on bool, value int64) (ma
 	return a.engine.SetEngineOptFlag(name, on, value)
 }
 
+func (a *raceAPIAdapter) InboundAccepted() (int64, error) { return a.engine.InboundAccepted() }
+
 func (a *raceAPIAdapter) EngineOptFlags() (map[string]interface{}, error) {
 	return a.engine.EngineOptFlags()
 }
@@ -1794,6 +1796,8 @@ func (a *hoardAPIAdapter) GetTorrentAvailability(infoHash string) map[string]int
 func (a *hoardAPIAdapter) SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error) {
 	return a.engine.SetEngineOptFlag(name, on, value)
 }
+
+func (a *hoardAPIAdapter) InboundAccepted() (int64, error) { return a.engine.InboundAccepted() }
 
 func (a *hoardAPIAdapter) EngineOptFlags() (map[string]interface{}, error) {
 	return a.engine.EngineOptFlags()

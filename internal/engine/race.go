@@ -771,6 +771,16 @@ func (e *RaceEngine) AggregateStats() map[string]interface{} {
 	}
 }
 
+// InboundAccepted returns how many peers have opened a connection to this
+// engine since it started, excluding our own addresses. See the hoard version.
+func (e *RaceEngine) InboundAccepted() (int64, error) {
+	d, err := e.client.GetDiagnostics()
+	if err != nil {
+		return 0, err
+	}
+	return d.Counters["inbound_accepted"], nil
+}
+
 // SampleServedInfoHash returns the info hash of one torrent this engine holds,
 // or "" when it holds none. See the hoard version: it exists so the
 // connectivity check can prove the thing answering on our port is this client.

@@ -995,6 +995,18 @@ func (e *HoardEngine) GetTorrentList() []TorrentStats {
 	return list
 }
 
+// InboundAccepted returns how many peers have opened a connection to this
+// engine since it started, excluding our own addresses. A stranger arriving
+// here is the one proof of reachability that costs nothing and cannot be
+// faked by a probe we send ourselves.
+func (e *HoardEngine) InboundAccepted() (int64, error) {
+	d, err := e.client.GetDiagnostics()
+	if err != nil {
+		return 0, err
+	}
+	return d.Counters["inbound_accepted"], nil
+}
+
 // SampleServedInfoHash returns the info hash of one torrent this engine holds,
 // or "" when it holds none. The connectivity check uses it to prove that what
 // answers on our port is really us: a client only completes a BitTorrent
