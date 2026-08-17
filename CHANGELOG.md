@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.77.2 - 2026-08-16
+
+### Changed
+- **The settings save button is now a full-sized button at the end of each panel.** It was a small control in the card header, away from the fields being edited and off screen once a panel scrolls, which is also where the result banner sits: the page now scrolls to it after a save.
+
 ## v3.77.1 - 2026-08-16
 
 ### Fixed

@@ -432,6 +432,7 @@
   "Save": "Enregistrer",
   "Save Path": "Chemin d'enregistrement",
   "Save failed: {msg}": "Échec de l'enregistrement : {msg}",
+  "Save settings": "Enregistrer les réglages",
   "Save this mode": "Enregistrer ce mode",
   "Saved. The engines need a restart to pick it up.": "Enregistré. Les moteurs doivent redémarrer pour le prendre en compte.",
   "Scope of this check": "Portée de cette vérification",
