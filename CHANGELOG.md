@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.77.6 - 2026-08-16
+
+### Changed
+- **The race drain settings moved to the Session Race tab.** They govern that engine's disk, so filing them under Maintenance split one engine's settings across two tabs.
+
 ## v3.77.5 - 2026-08-16
 
 ### Fixed
