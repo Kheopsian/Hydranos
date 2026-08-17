@@ -517,7 +517,9 @@ fn tracker_host_of(url: &str) -> String {
 pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let status_u8 = t.status.load(Ordering::Relaxed);
     let is_paused = t.is_paused.load(Ordering::Relaxed);
-    let state = if is_paused {
+    let state = if status_u8 == TorrentStatus::Error as u8 {
+        "error"
+    } else if is_paused {
         "paused"
     } else {
         match status_u8 {
@@ -525,6 +527,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
             1 => "checking_files",
             2 => "downloading",
             3 => "seeding",
+            4 => "error",
             _ => "unknown",
         }
     };
@@ -571,6 +574,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let tracker_host = t.meta.trackers.iter().flatten().next()
         .map(|u| tracker_host_of(u))
         .unwrap_or_default();
+    let error_msg = t.error_msg.lock().map(|g| g.clone()).unwrap_or_default();
 
     json!({
         "info_hash": hex_encode(&t.info_hash),
@@ -603,6 +607,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         "is_announced": announce_ok,
         "tracker_error": !tracker_error.is_empty(),
         "tracker_error_msg": tracker_error,
+        "error_msg": error_msg,
     })
 }
 

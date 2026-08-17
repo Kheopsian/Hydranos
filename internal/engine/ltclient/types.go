@@ -93,6 +93,8 @@ type TorrentStatus struct {
 	IsAnnounced     bool    `json:"is_announced"`
 	TrackerError    bool    `json:"tracker_error"`
 	TrackerErrorMsg string  `json:"tracker_error_msg"`
+	// Why the torrent sits in state "error" (missing data). Empty otherwise.
+	ErrorMsg string `json:"error_msg"`
 }
 
 // ListTorrentsResult from list_torrents.

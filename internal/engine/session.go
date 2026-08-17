@@ -185,6 +185,8 @@ func ltStatusToTorrentStats(s ltclient.TorrentStatus, category, savePath string,
 		SwarmLeechers:   s.ListPeers,
 		TrackerError:    s.TrackerError,
 		TrackerErrorMsg: s.TrackerErrorMsg,
+		TorrentError:    s.State == "error",
+		TorrentErrorMsg: s.ErrorMsg,
 		IsAnnounced:     s.IsAnnounced,
 		TrackerHost:     s.TrackerHost,
 	}

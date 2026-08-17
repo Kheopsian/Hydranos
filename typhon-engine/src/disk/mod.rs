@@ -421,7 +421,7 @@ async fn read_block_direct(
     // would silently read from save_path/<file-path>, which doesn't exist.
     let multi_file = torrent.meta.multi_file;
 
-    tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || {
         let mut result = Vec::with_capacity(length as usize);
 
         for op in ops {
@@ -431,21 +431,40 @@ async fn read_block_direct(
                 save_path.join(&op.path)
             };
 
-            let file = get_or_open(&full_path)
-                .map_err(|e| format!("open {:?}: {}", full_path, e))?;
+            // Keep the ErrorKind. ENOENT means the data is gone for good and
+            // the torrent has to be parked; EMFILE or EIO are transient and
+            // must NOT drag a healthy torrent down with them.
+            let file = get_or_open(&full_path).map_err(|e| {
+                (
+                    e.kind() == std::io::ErrorKind::NotFound,
+                    format!("open {:?}: {}", full_path, e),
+                )
+            })?;
 
             let mut buf = vec![0u8; op.length as usize];
 
             pread_exact(&file, &mut buf, op.file_offset)
-                .map_err(|e| format!("pread {:?}: {}", full_path, e))?;
+                .map_err(|e| (false, format!("pread {:?}: {}", full_path, e)))?;
 
             result.extend_from_slice(&buf);
         }
 
-        Ok(Bytes::from(result))
+        Ok::<Bytes, (bool, String)>(Bytes::from(result))
     })
     .await
-    .map_err(|e| format!("spawn_blocking: {}", e))?
+    .map_err(|e| format!("spawn_blocking: {}", e))?;
+
+    match outcome {
+        Ok(b) => Ok(b),
+        Err((missing, msg)) => {
+            // Park it once. serving_suspended then rejects further requests
+            // upstream, so this path stops being hit at all.
+            if missing {
+                torrent.mark_error(&msg);
+            }
+            Err(msg)
+        }
+    }
 }
 
 

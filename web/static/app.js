@@ -2437,6 +2437,15 @@ async function _reannounceSelected() {
 // them apart is the whole point of the intent flag, same split qBittorrent 5
 // makes, so the words already mean what people expect.
 function displayState(t) {
+    // Broken wins over every other label: a torrent whose data cannot be read
+    // is not merely stopped, and that is the one thing worth seeing at a glance.
+    if (t.state === "error") {
+        return {
+            label: window.t("error"),
+            cls: "state-error",
+            title: t.torrent_error_msg || window.t("Its data could not be read"),
+        };
+    }
     if (t.user_paused || t.state === "stopped") {
         return { label: window.t("stopped"), cls: "state-paused", title: window.t("Stopped by you, survives a restart") };
     }
@@ -2596,6 +2605,20 @@ async function refreshHoardDetail() {
 
         document.getElementById("h-detail-name").textContent = incoName(d);
         document.getElementById("h-detail-state").textContent = d.state;
+        // Say why it broke, and what to do about it. Nothing clears this on its
+        // own: the serve path is suspended, so no read will ever retry.
+        const hErr = document.getElementById("h-detail-error");
+        if (hErr) {
+            if (d.state === "error" || d.torrent_error) {
+                hErr.style.display = "";
+                hErr.innerHTML = `<strong>${esc(window.t("This torrent cannot read its data"))}</strong>`
+                    + `<div class="detail-error-msg">${esc(d.torrent_error_msg || window.t("unknown error"))}</div>`
+                    + `<div class="detail-error-hint">${esc(window.t("Restore the files, then recheck to bring it back"))}</div>`;
+            } else {
+                hErr.style.display = "none";
+                hErr.innerHTML = "";
+            }
+        }
         document.getElementById("h-detail-progress").textContent = (d.progress * 100).toFixed(1) + "%";
         document.getElementById("h-detail-size").textContent = formatBytes(d.total_size);
         document.getElementById("h-detail-downloaded").textContent = formatBytes(d.total_download);
