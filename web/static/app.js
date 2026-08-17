@@ -4814,7 +4814,8 @@ async function updateSettings() {
                 body += `<div class="settings-section"><div class="settings-section-title">[${esc(path)}]</div>${rows}</div>`;
             }
             _tabsHtml += `<button type="button" class="settings-tab" data-domain="${dom.id}" onclick="showSettingsPanel('${dom.id}')"><span class="sg-title">${esc(t(dom.label))}</span> <span class="sg-count">${count}</span></button>`;
-            _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div></div>`;
+            _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div>` +
+                `<div class="settings-save-bar"><button class="btn-primary" onclick="saveSettings()">${t("Save settings")}</button></div></div>`;
         }
         _tabsHtml += `<button type="button" class="settings-tab" data-domain="__import" onclick="showSettingsPanel('__import')"><span class="sg-title">${t("Import")}</span></button>`;
         _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">${t("Import from another client")}</h3><p class="sr-desc" style="margin:.4em 0 1em">${t("From <b>qBittorrent</b> (via its WebUI) or <b>Transmission</b> (by reading its config folder \u2014 it does not even need to be running). Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Torrents stopped in the old client stay stopped. Already-present torrents are skipped, so it is safe to re-run.")}</p><button class="btn-primary" onclick="importFromQbit()">${t("Import\u2026")}</button></div></div>`;
@@ -4901,6 +4902,7 @@ async function saveSettings() {
         if (nv !== orig.value) changes.push({ section: orig.section, key: orig.key, value: nv });
     }
     banner.style.display = "block";
+    banner.scrollIntoView({ block: "nearest", behavior: "smooth" });
     if (!changes.length) {
         banner.className = "result-msg info";
         banner.textContent = t("No changes.");
