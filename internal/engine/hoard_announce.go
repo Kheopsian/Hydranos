@@ -494,13 +494,6 @@ func (h *HoardAnnouncer) announceAllTiers(infoHash string, totalSize, left, uplo
 			if !isSupportedTrackerScheme(url) {
 				continue
 			}
-			// Switched off for this tracker: skip without recording an
-			// observation, so it reads as absent rather than as a tracker that
-			// keeps failing. announce() enforces the same rule for the paths
-			// that do not come through here.
-			if announceIPModeFor(url) == AnnounceIPModeNone {
-				continue
-			}
 			peers, intervalSec, seeds, leechers, errMsg, ok := h.announceFromAllBindings(url, infoHash, uploaded, downloaded, left, event)
 			if !ok {
 				obs.Trackers[url] = TrackerObservation{OK: false, ErrorMsg: errMsg}

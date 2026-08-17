@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"github.com/Kheopsian/hydra/internal/version"
 	"io"
@@ -557,19 +556,19 @@ func secondaryStatsModeFor(trackerURL string) string {
 // Ignored when a SOCKS announce proxy is configured: the egress family is then
 // the proxy's, and forcing one here would break a proxy that is reachable over
 // the other family only.
-//	"none"           — do not announce to this tracker at all. Not an error
-//	                   state: the tracker is skipped silently, so it stops
-//	                   appearing as a failure the way a dead tracker would.
+//
+// There is deliberately no mode that stops announcing to a tracker. A client
+// that can go silent on one tracker while staying in the swarm is what private
+// trackers screen their whitelists for, and they screen on the capability, not
+// on how carefully it is used -- from their side our silence is indistinguishable
+// from a ratio cheat, because all they observe is an absence. Pausing a torrent
+// already covers the honest case and does it better: it emits event=stopped, so
+// we leave the swarm openly instead of vanishing from it.
 const (
 	AnnounceIPModeAuto = "auto"
 	AnnounceIPModeV4   = "v4"
 	AnnounceIPModeV6   = "v6"
-	AnnounceIPModeNone = "none"
 )
-
-// ErrAnnounceBlocked is returned instead of announcing when a tracker is set
-// to "none". Deliberate silence, not a failure.
-var ErrAnnounceBlocked = errors.New("tracker announce: blocked by per-tracker setting")
 
 var (
 	announceIPModeMu sync.RWMutex
@@ -584,12 +583,23 @@ func normalizeAnnounceIPMode(mode string) string {
 		return AnnounceIPModeV4
 	case "v6", "ipv6", "6", "inet6":
 		return AnnounceIPModeV6
-	case "none", "off", "block", "blocked", "disabled":
-		return AnnounceIPModeNone
 	case "", "auto", "any", "default":
 		return AnnounceIPModeAuto
 	}
 	return ""
+}
+
+// isRetiredSilentMode reports the spellings of the withdrawn "do not announce"
+// mode. Kept only to recognise a config written by an older build: dropping such
+// an entry silently would put a tracker an operator had switched off back into
+// the announce rotation without a word, which on a private tracker is exactly
+// the surprise they cannot afford.
+func isRetiredSilentMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "none", "off", "block", "blocked", "disabled":
+		return true
+	}
+	return false
 }
 
 // InitAnnounceIPModes seeds the family map from config at boot.
@@ -598,8 +608,13 @@ func InitAnnounceIPModes(fromConfig map[string]string) {
 	defer announceIPModeMu.Unlock()
 	for host, mode := range fromConfig {
 		h := strings.TrimSpace(host)
+		if h != "" && isRetiredSilentMode(mode) {
+			slog.Warn("tracker_announce: the announce mode that stopped announcing to a tracker has been withdrawn; this tracker is announced to again -- pause its torrents instead if that is not wanted",
+				"tracker", h, "mode", mode)
+			continue
+		}
 		m := normalizeAnnounceIPMode(mode)
-		if h != "" && (m == AnnounceIPModeV4 || m == AnnounceIPModeV6 || m == AnnounceIPModeNone) {
+		if h != "" && (m == AnnounceIPModeV4 || m == AnnounceIPModeV6) {
 			announceIPModes[h] = m
 		}
 	}
@@ -824,13 +839,6 @@ func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, down
 	// point queueing on the rate limiter for something we will not send.
 	if ta.gate.blocked() {
 		return nil, ErrStartupPaused
-	}
-	// "none" means this tracker is switched off. Checked here, before the rate
-	// limiter, so a blocked tracker does not spend a token on a request that is
-	// never sent — and checked in announce() rather than at one call site, so
-	// every path (hoard, race, bootstrap, re-announce) is covered by one guard.
-	if announceIPModeFor(trackerURL) == AnnounceIPModeNone {
-		return nil, ErrAnnounceBlocked
 	}
 	// Gate every announce, http:// and udp:// alike, on the engine's
 	// announce_rate_limit before a single byte leaves. No-op when unset.

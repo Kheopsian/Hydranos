@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.76.0 - 2026-08-17
+
+### Removed
+- **The announce mode that stopped announcing to a single tracker, added in v3.72.0, has been withdrawn.** A client able to fall silent on one tracker while remaining in its swarm is what private trackers screen their whitelists for, and they screen on whether the client can do it rather than on how it is used: from the tracker's side there is nothing to observe but an absence, so a careful use is indistinguishable from a ratio cheat, and no amount of care on our part is visible to them. The honest need it was meant to serve is already met, and met better, by pausing the torrents: that emits `event=stopped`, so we leave the swarm openly instead of disappearing from it. A tracker still carrying the withdrawn setting in `[announce_ip_modes]` is announced to normally again and logs a warning at startup, rather than being dropped without a word.
+
 ## v3.75.1 - 2026-08-16
 
 ### Fixed
