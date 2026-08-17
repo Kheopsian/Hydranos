@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.77.5 - 2026-08-16
+
+### Fixed
+- **The default shown for `data_dir` was wrong.** The settings page announced `/configs`, the shipped config uses `/config`.
+
 ## v3.77.4 - 2026-08-16
 
 ### Changed
