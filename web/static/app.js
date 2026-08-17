@@ -5924,7 +5924,7 @@ function netModeRender() {
         ${env}
         <div style="margin:1em 0;display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn-primary" onclick="netModeSave()">${t("Save this mode")}</button>
-            <button class="btn-small" onclick="netModeCheck()">${t("Check what actually happens")}</button>
+            <button class="btn-small" id="net-check-btn" onclick="netModeCheck()">${t("Check what actually happens")}</button>
         </div>
         <div id="net-mode-result"></div>`;
 }
@@ -5974,7 +5974,13 @@ async function netModeSave() {
 
 async function netModeCheck() {
     const out = document.getElementById("net-mode-result");
-    out.innerHTML = `<div class="result-msg info">${t("Measuring… this asks an outside echo service where our traffic comes from.")}</div>`;
+    const btn = document.getElementById("net-check-btn");
+    // The probes take tens of seconds. Without the button changing, the click
+    // looks like it did nothing at all, so freeze it for the whole run.
+    const label = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = t("Checking…"); }
+    out.innerHTML = `<div class="result-msg info">${t("Measuring… this takes up to a minute: it asks an outside service where our traffic comes from, then knocks on the port a tracker publishes for us.")}</div>`;
+    out.scrollIntoView({ block: "nearest" });
     try {
         const r = await api("/api/network/check", {
             method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
@@ -5988,5 +5994,7 @@ async function netModeCheck() {
         out.innerHTML = `<div class="settings-section"><div class="settings-section-title">${t("What actually happens")}</div>${rows}</div>`;
     } catch (e) {
         out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label; }
     }
 }
