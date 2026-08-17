@@ -4772,7 +4772,7 @@ async function updateSettings() {
         }
 
         const order = SETTINGS_DOMAINS.concat([_SETTINGS_FALLBACK]);
-        let html = _languageCardHTML() + _unitsCardHTML() + _interfacesCardHTML(_detectedIfaces) + `<div class="settings-toolbar">
+        let html = _languageCardHTML() + _unitsCardHTML() + `<div class="settings-toolbar">
             <input type="text" id="settings-search" class="settings-search" placeholder="${t("Search a setting\u2026")}" oninput="filterSettings()">
             <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> ${t("Show advanced settings")}</label>
             <span id="settings-search-count" class="settings-search-count"></span>
@@ -5847,6 +5847,19 @@ function _netField(id, label, type, value, hint, extra) {
     </div>`;
 }
 
+function _netSelect(id, label, value, options, hint) {
+    // Keep a configured value that no longer matches any interface: dropping it
+    // would silently rewrite the config the moment the page is saved.
+    const opts = options.slice();
+    if (value && !opts.includes(value)) opts.push(value);
+    let html = `<option value=""${value ? "" : " selected"}>${esc(t("Select an interface"))}</option>`;
+    for (const o of opts) html += `<option value="${esc(o)}"${o === value ? " selected" : ""}>${esc(o)}</option>`;
+    return `<div class="settings-row">
+        <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
+        <div class="sr-field"><select class="sr-input" id="${id}">${html}</select></div>
+    </div>`;
+}
+
 function _netCheckbox(id, label, checked, hint) {
     return `<div class="settings-row">
         <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
@@ -5911,10 +5924,9 @@ function netModeRender() {
 
     let fields = "";
     if (mode === "vpn") {
-        const list = (_detectedIfaces || []).map(i => `<option value="${esc(i.name || i)}">`).join("");
+        const list = (_detectedIfaces || []).map(i => (i.name || i));
         fields += `<div class="settings-section"><div class="settings-section-title">${t("Tunnel")}</div>
-            ${_netField("net-bind-iface", "VPN interface name", "text", f.bind_interface, "The interface the VPN client creates, for example wg0 or tun0. Peer sockets are bound to it, so they cannot leave outside the tunnel.", `list="net-iface-list"`)}
-            <datalist id="net-iface-list">${list}</datalist>
+            ${_netSelect("net-bind-iface", "VPN interface name", f.bind_interface, list, "The interface the VPN client creates, for example wg0 or tun0. Peer sockets are bound to it, so they cannot leave outside the tunnel.")}
             <p class="sr-desc">${t("Set the listen port below to the port your VPN provider forwards to you, otherwise nobody can connect to you.")}</p>
         </div>`;
     }

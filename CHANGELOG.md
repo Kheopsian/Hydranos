@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.77.3 - 2026-08-16
+
+### Changed
+- **The VPN interface is picked from a list instead of typed.** The host already knows which interfaces exist, and a typed name invites a typo or a plausible wrong pick. A value already in the config that matches nothing is kept in the list rather than silently dropped.
+- **The network interface card no longer sits above every settings page.** It was informational noise everywhere except the one place the interface is chosen, which is now the picker itself.
+
 ## v3.77.2 - 2026-08-16
 
 ### Changed
