@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.76.2 - 2026-08-16
+
+### Fixed
+- **The connectivity check gave no sign it was running.** It takes up to a minute, and the button stayed idle throughout, so the click looked like it had done nothing. The button now reads "Checking" and is held disabled until the report arrives.
+
 ## v3.76.1 - 2026-08-16
 
 ### Fixed
