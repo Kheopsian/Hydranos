@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,7 +86,24 @@ func (s *Server) probeReachability(ctx context.Context, name string, sec map[str
 		tomlStr(sec, "socks5_outbound_user"), tomlStr(sec, "socks5_outbound_pass"),
 		tomlStr(sec, "bind_interface"), sample)
 	if err != nil {
-		setReachability(name, reachState{State: "unreachable", Detail: err.Error(), At: time.Now()})
+		// A failure only means "closed" when the probe genuinely came from
+		// outside, which is the case through a proxy. Inside a tunnel it goes
+		// out and comes back to the provider's own address, and a provider is
+		// under no obligation to send it back to its own client: measured on
+		// ProtonVPN, a port that a peer reaches perfectly well answers nothing
+		// from within the tunnel. On a direct setup the same turnaround happens
+		// at the router. Calling either of those unreachable would have the dot
+		// contradict a node that works.
+		viaProxy := strings.TrimSpace(tomlStr(sec, "socks5_outbound_host")) != ""
+		if viaProxy {
+			setReachability(name, reachState{State: "unreachable", Detail: err.Error(), At: time.Now()})
+			return
+		}
+		detail := "not established: this probe leaves through your own tunnel or router and comes back to the same address, which is not obliged to return it. A peer coming from elsewhere may well get through"
+		if gport, _, active := GluetunStatus(name); active && gport == port {
+			detail += ". Gluetun reports this port as forwarded"
+		}
+		setReachability(name, reachState{State: "unknown", Detail: detail, At: time.Now()})
 		return
 	}
 	setReachability(name, reachState{State: "reachable", Detail: "answered as " + peerID, At: time.Now()})
