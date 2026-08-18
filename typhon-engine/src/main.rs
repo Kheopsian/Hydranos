@@ -171,6 +171,11 @@ async fn main() {
     // that funnels discovered peers into the dial queue.
     dht::start().await;
     for t in torrent_mgr.all().iter() {
+        // Stopped torrents stay off the DHT until they are started again;
+        // tracking them here would resurrect the very tasks stop_torrent kills.
+        if t.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
         dht::track_torrent(t.clone());
     }
 

@@ -148,6 +148,9 @@ impl TorrentManager {
         let to_delete: Option<(Vec<std::path::PathBuf>, Option<std::path::PathBuf>)> =
             if let Some(t) = self.torrents.get(info_hash) {
                 t.is_removed.store(true, Ordering::Relaxed);
+                // is_removed is only observed when the get_peers stream next
+                // yields, which may be never — cancel the task outright.
+                crate::dht::untrack_torrent(info_hash);
                 if !keep_data {
                     let files: Vec<std::path::PathBuf> = t.meta.files.iter().map(|f| {
                         if t.meta.multi_file {
@@ -198,6 +201,8 @@ impl TorrentManager {
     pub fn start_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         t.is_paused.store(false, Ordering::Relaxed);
+        // Resuming re-arms the DHT stream that stop_torrent cancelled.
+        crate::dht::track_torrent(t.clone());
         // A recheck in progress owns the status. Don't let a start (e.g. from the
         // download slot manager filling a slot, or a resume) clobber Checking
         // with Downloading: that flips is_downloading() on and the torrent
@@ -226,6 +231,9 @@ impl TorrentManager {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         t.is_paused.store(true, Ordering::Relaxed);
         t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        // A stopped torrent must not keep a get_peers recursion alive: the
+        // stream loop only checks is_removed, which a stop does not set.
+        crate::dht::untrack_torrent(info_hash);
         Ok(())
     }
 

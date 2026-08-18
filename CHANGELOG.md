@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.87.0 - 2026-08-18
+
+### Fixed
+- **Stopping a torrent left its DHT lookup running forever.** The `get_peers` task only ever exited on the removal flag, and only when the stream happened to yield a peer, so stopped torrents kept querying the DHT for the life of the process. Tasks are now cancelled on stop and on remove, and re-armed on start.
+- **The DHT peer lookup had no ceiling on work in flight.** Requests were pushed into an unbounded queue fed by an unbounded channel, and each answer enqueued up to eight more nodes, so a large torrent set grew the heap without bound — the hoard engine reached 28.9 GB before the kernel killed it. Both ends are now capped.
+
 ## v3.86.1 - 2026-08-18
 
 ### Fixed
