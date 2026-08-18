@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.85.0 - 2026-08-16
+
+### Added
+- **Reset every setting to defaults**, from the button at the right of the settings toolbar. It rebuilds the config from the one a fresh install ships, keeping only the login, the API key and the data directory, since losing those cannot be undone from the UI. The previous config is copied next to it first, under its own name so the next save cannot overwrite it.
+
 ## v3.84.2 - 2026-08-16
 
 ### Changed
