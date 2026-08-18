@@ -188,9 +188,21 @@ struct RecursiveRequest<C: RecursiveRequestCallbacks> {
     dht: Arc<DhtState>,
     useful_nodes: RwLock<Vec<MaybeUsefulNode>>,
     peer_tx: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
-    node_tx: tokio::sync::mpsc::UnboundedSender<(Option<Id20>, SocketAddr, usize)>,
+    node_tx: tokio::sync::mpsc::Sender<(Option<Id20>, SocketAddr, usize)>,
     callbacks: C,
 }
+
+/// Ceiling on get_peers requests in flight at once. Reached only when the DHT
+/// answers slower than the recursion discovers nodes; the excess waits in the
+/// channel below instead of being turned into live futures (each of which
+/// carries a tracing span and a routing-table entry).
+const MAX_INFLIGHT_REQUESTS: usize = 256;
+
+/// Ceiling on nodes queued for querying. Full means the recursion is running
+/// ahead of the network; dropping the newest node is correct here -- DHT
+/// discovery is lossy by design and the root nodes are re-seeded every
+/// REQUERY_INTERVAL.
+const MAX_QUEUED_NODES: usize = 1024;
 
 pub struct RequestPeersStream {
     rx: tokio::sync::mpsc::UnboundedReceiver<SocketAddr>,
@@ -200,7 +212,7 @@ pub struct RequestPeersStream {
 impl RequestPeersStream {
     fn new(dht: Arc<DhtState>, info_hash: Id20, announce_port: Option<u16>) -> Self {
         let (peer_tx, peer_rx) = unbounded_channel();
-        let (node_tx, node_rx) = unbounded_channel();
+        let (node_tx, node_rx) = channel(MAX_QUEUED_NODES);
         let rp = Arc::new(RecursiveRequest {
             max_depth: 4,
             info_hash,
@@ -250,7 +262,7 @@ impl RecursiveRequest<RecursiveRequestCallbacksFindNodes> {
         target: Id20,
         addrs: impl Iterator<Item = SocketAddr>,
     ) -> anyhow::Result<()> {
-        let (node_tx, mut node_rx) = unbounded_channel();
+        let (node_tx, mut node_rx) = channel(MAX_QUEUED_NODES);
         let req = RecursiveRequest {
             max_depth: 4,
             info_hash: target,
@@ -324,7 +336,7 @@ impl RecursiveRequest<RecursiveRequestCallbacksFindNodes> {
 impl RecursiveRequest<RecursiveRequestCallbacksGetPeers> {
     fn request_peers_forever(
         self: &Arc<Self>,
-        mut node_rx: tokio::sync::mpsc::UnboundedReceiver<(Option<Id20>, SocketAddr, usize)>,
+        mut node_rx: tokio::sync::mpsc::Receiver<(Option<Id20>, SocketAddr, usize)>,
     ) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
         spawn(
@@ -356,7 +368,7 @@ impl RecursiveRequest<RecursiveRequestCallbacksGetPeers> {
                 let mut futs = FuturesUnordered::new();
                 loop {
                     tokio::select! {
-                        addr = node_rx.recv() => {
+                        addr = node_rx.recv(), if futs.len() < MAX_INFLIGHT_REQUESTS => {
                             let (id, addr, depth) = addr.unwrap();
                             futs.push(
                                 this.request_one(id, addr, depth)
@@ -385,8 +397,10 @@ impl RecursiveRequest<RecursiveRequestCallbacksGetPeers> {
             .map(|n| (n.id(), n.addr()))
             .take(8)
         {
-            count += 1;
-            self.node_tx.send((Some(id), addr, 0))?;
+            // Bounded queue: drop the node instead of growing the backlog.
+            if self.node_tx.try_send((Some(id), addr, 0)).is_ok() {
+                count += 1;
+            }
         }
         Ok(count)
     }
@@ -442,7 +456,8 @@ impl<C: RecursiveRequestCallbacks> RecursiveRequest<C> {
                     self.max_depth
                 );
                 if should_request {
-                    self.node_tx.send((Some(node.id), addr, depth + 1))?;
+                    // Bounded queue: drop rather than grow (see get_peers_root).
+                    let _ = self.node_tx.try_send((Some(node.id), addr, depth + 1));
                 }
             }
         }
