@@ -2220,7 +2220,10 @@ footer {
     width: 340px;
     max-width: 100%;
     padding: 7px 10px;
-    background: rgba(255, 255, 255, 0.05);
+    /* background-color, NOT the background shorthand: the shorthand resets
+       background-image to none, which wiped the chevron the global select
+       rule paints and left every dropdown looking like a text field. */
+    background-color: rgba(255, 255, 255, 0.05);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text-primary);

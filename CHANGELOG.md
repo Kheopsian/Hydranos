@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.86.1 - 2026-08-18
+
+### Fixed
+- **Dropdowns in the settings looked like plain text fields.** The shared input style used the `background` shorthand, which resets `background-image` and so erased the chevron drawn for every `<select>`. Both the VPN interface and the engine that takes the forwarded port read as a value someone else had set rather than something to click.
+
 ## v3.86.0 - 2026-08-18
 
 ### Added
