@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.84.0 - 2026-08-16
+
+### Added
+- **Leaving the settings page with unsaved changes now asks first.** Switching to another page discarded them silently, with nothing to show they had existed. The prompt offers three explicit ways out, since two of them lose work: save and leave, discard and leave, or stay. Closing the browser tab warns as well.
+
 ## v3.83.4 - 2026-08-16
 
 ### Fixed

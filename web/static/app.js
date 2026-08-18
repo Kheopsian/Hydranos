@@ -711,7 +711,63 @@ async function api(endpoint, options = {}) {
 
 // ─── Tabs ───────────────────────────────────────────────
 
+// Edits typed but never saved are lost the moment the page is swapped out, with
+// nothing to show they existed. Everything below exists to ask first.
+let _netOrig = null;
+
+function _settingsDirtyCount() {
+    let n = 0;
+    for (const [id, orig] of Object.entries(_settingsOrig || {})) {
+        try {
+            if (_readSettingField(id, orig) !== orig.value) n++;
+        } catch (e) {}
+    }
+    if (_netState && _netOrig) {
+        const cur = netModeCollect();
+        if (cur && JSON.stringify({ mode: _netState.mode, fields: cur }) !== _netOrig) n++;
+    }
+    return n;
+}
+
+// Three ways out, all explicit: save and go, drop them and go, or stay. No
+// default action, since two of the three lose work.
+function _confirmLeaveSettings(count, onLeave) {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `<div class="modal-box">
+        <h3>${t("Unsaved settings")}</h3>
+        <p class="modal-desc">${tp ? tp("{n} change is not saved yet. Leaving this page discards it.", "{n} changes are not saved yet. Leaving this page discards them.", count, { n: count }) : t("Changes are not saved yet. Leaving this page discards them.")}</p>
+        <div class="modal-actions">
+            <button class="btn-small" id="leave-stay">${t("Stay here")}</button>
+            <button class="btn-small btn-danger" id="leave-discard">${t("Discard and leave")}</button>
+            <button class="btn-primary" id="leave-save">${t("Save and leave")}</button>
+        </div>
+    </div>`;
+    document.body.appendChild(ov);
+    const close = () => ov.remove();
+    ov.querySelector("#leave-stay").onclick = close;
+    ov.querySelector("#leave-discard").onclick = () => { close(); onLeave(); };
+    ov.querySelector("#leave-save").onclick = async () => {
+        close();
+        try { await saveSettings(); } catch (e) {}
+        onLeave();
+    };
+}
+
 function activateTab(name) {
+    // Only when actually leaving the settings page, and only with real edits.
+    const current = document.querySelector(".tab.active");
+    if (current && current.dataset.tab === "config" && name !== "config") {
+        const dirty = _settingsDirtyCount();
+        if (dirty > 0) {
+            _confirmLeaveSettings(dirty, () => _activateTabNow(name));
+            return;
+        }
+    }
+    _activateTabNow(name);
+}
+
+function _activateTabNow(name) {
     const tab = document.querySelector(`.tab[data-tab="${name}"]`);
     const content = document.getElementById("tab-" + name);
     if (!tab || !content) return;
@@ -4918,6 +4974,14 @@ function showSettingsPanel(id) {
     localStorage.setItem("hydra_settings_tab", id);
 }
 
+window.addEventListener("beforeunload", (e) => {
+    const tab = document.querySelector(".tab.active");
+    if (tab && tab.dataset.tab === "config" && _settingsDirtyCount() > 0) {
+        e.preventDefault();
+        e.returnValue = "";
+    }
+});
+
 function filterSettings() {
     const box = document.getElementById("settings-search");
     if (!box) return;
@@ -6004,6 +6068,7 @@ async function netModeInit() {
         body.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
         return;
     }
+    _netOrig = JSON.stringify({ mode: _netState.mode, fields: _netState.fields });
     netModeRender();
 }
 
@@ -6119,6 +6184,7 @@ async function netModeSave() {
         for (const w of (r.warnings || [])) extra += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
         // Same banner as every other tab, so the restart is always announced in
         // the same place whichever panel wrote the setting.
+        _netOrig = JSON.stringify({ mode: _netState.mode, fields: fields });
         _setRestartBanner(t("Saved. The engines need a restart to pick it up.") +
             ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`);
         out.innerHTML = extra;
