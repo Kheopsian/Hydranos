@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.86.0 - 2026-08-18
+
+### Added
+- **Choose which engine takes the forwarded port from gluetun.** A provider forwards one port, so one engine gets it and the other keeps its own; until now that was always the hoard, with no way to say otherwise. Hoard seeds around the clock, so being reachable pays off continuously, while race needs peers quickly on a fresh torrent. Turning the choice around moves the setting off the engine that had it in the same save, so the two can never end up bound to the same port.
+
 ## v3.85.0 - 2026-08-16
 
 ### Added

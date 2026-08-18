@@ -6083,6 +6083,20 @@ function _netSelect(id, label, value, options, hint) {
     </div>`;
 }
 
+function _netEngineSelect(id, label, value, hint) {
+    // Two fixed choices, so no empty option: there is no such thing as
+    // "no engine" once the forwarded port is being followed.
+    const cur = value === "race" ? "race" : "hoard";
+    let html = "";
+    for (const o of [["hoard", "Hoard"], ["race", "Race"]]) {
+        html += `<option value="${o[0]}"${o[0] === cur ? " selected" : ""}>${esc(t(o[1]))}</option>`;
+    }
+    return `<div class="settings-row">
+        <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
+        <div class="sr-field"><select class="sr-input" id="${id}">${html}</select></div>
+    </div>`;
+}
+
 function _netCheckbox(id, label, checked, hint) {
     return `<div class="settings-row">
         <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
@@ -6157,7 +6171,8 @@ function netModeRender() {
             ${_netCheckbox("net-gluetun", "Take the listen port from gluetun", f.gluetun_port_forward, "Gluetun asks your provider for a forwarded port and that port changes with the lease. Hydra reads it, listens there, and follows it. Announces are held at startup until it knows the port, so no tracker is ever handed the wrong one.")}
             ${_netField("net-gluetun-url", "Gluetun control server", "text", f.gluetun_url, "Empty means http://127.0.0.1:8000, which is right when Hydra shares gluetun's network.")}
             ${_netField("net-gluetun-key", "Gluetun API key", "password", f.gluetun_api_key, "Recent gluetun versions refuse every request without one. The role needs the route GET /v1/portforward.")}
-            <p class="sr-desc">${t("A provider forwards a single port, so it goes to the hoard engine. The race engine keeps its own and stays unreachable.")}</p>
+            ${_netEngineSelect("net-gluetun-engine", "Engine that takes the port", f.gluetun_port_engine, "A provider forwards a single port, so one engine gets it. Hoard seeds around the clock, so being reachable pays off continuously; race needs peers fast on a fresh torrent.")}
+            <p class="sr-desc">${t("The other engine keeps its own listen port and stays unreachable.")}</p>
         </div>`;
     }
     if (mode === "socks5" || mode === "proxy_v2") fields += _netSocksHTML(f);
@@ -6217,6 +6232,7 @@ function netModeCollect() {
         gluetun_port_forward: document.getElementById("net-gluetun") ? bool("net-gluetun") : !!prev.gluetun_port_forward,
         gluetun_url: document.getElementById("net-gluetun-url") ? str("net-gluetun-url") : (prev.gluetun_url || ""),
         gluetun_api_key: document.getElementById("net-gluetun-key") ? str("net-gluetun-key") : (prev.gluetun_api_key || ""),
+        gluetun_port_engine: document.getElementById("net-gluetun-engine") ? str("net-gluetun-engine") : (prev.gluetun_port_engine || "hoard"),
         proxy_v2_trusted_sources: document.getElementById("net-pv2-trusted")
             ? str("net-pv2-trusted").split(",").map(s => s.trim()).filter(Boolean)
             : (prev.proxy_v2_trusted_sources || []),

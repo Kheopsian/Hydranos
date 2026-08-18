@@ -51,6 +51,7 @@ type netModeFields struct {
 	GluetunPort      bool     `json:"gluetun_port_forward"`
 	GluetunURL       string   `json:"gluetun_url"`
 	GluetunAPIKey    string   `json:"gluetun_api_key"`
+	GluetunEngine    string   `json:"gluetun_port_engine"`
 }
 
 // envOverride names an environment variable that silently outranks a field on
@@ -147,6 +148,27 @@ func looksLikeTunnel(name string) bool {
 	return false
 }
 
+// gluetunEngineOf names the engine that follows the forwarded port. A
+// provider hands out exactly one, so pointing both engines at it would have
+// the second fail to bind; the operator picks which one gets it. Empty means
+// hoard, which is what every config written before this choice existed meant.
+func gluetunEngineOf(f netModeFields) string {
+	if strings.TrimSpace(f.GluetunEngine) == "race" {
+		return "race"
+	}
+	return "hoard"
+}
+
+// otherEngine is the one left on its configured port, and therefore the one
+// the warnings have to name: saying "the race engine stays unreachable" while
+// the race is the one holding the port is worse than saying nothing.
+func otherEngine(scope string) string {
+	if scope == "race" {
+		return "hoard"
+	}
+	return "race"
+}
+
 func maskProxyURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.User == nil {
@@ -190,7 +212,8 @@ func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 		w = append(w, "UDP trackers are skipped in this mode: SOCKS5 carries TCP only, and a direct datagram would hand the tracker the address you are hiding.")
 	}
 	if mode == netModeVPN && f.GluetunPort {
-		w = append(w, "The hoard engine takes its listen port from gluetun and holds its announces until it has one. A provider forwards a single port, so the race engine keeps its own and stays unreachable.")
+		eng := gluetunEngineOf(f)
+		w = append(w, "The "+eng+" engine takes its listen port from gluetun and holds its announces until it has one. A provider forwards a single port, so the "+otherEngine(eng)+" engine keeps its own and stays unreachable.")
 	}
 	if mode == netModeVPN && f.BindInterface != "" && !looksLikeTunnel(f.BindInterface) {
 		w = append(w, "\""+f.BindInterface+"\" does not look like a VPN tunnel (those are usually named tun0, wg0 or similar). Peer connections bound to an ordinary interface leave outside the tunnel, or do not leave at all.")
@@ -236,6 +259,10 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 		EnableIPv6:       tomlBool(race, "enable_ipv6") || tomlBool(hoard, "enable_ipv6"),
 		BindInterface:    firstNonEmpty(tomlStr(hoard, "bind_interface"), tomlStr(race, "bind_interface")),
 		GluetunPort:      tomlBool(race, "gluetun_port_forward") || tomlBool(hoard, "gluetun_port_forward"),
+		// The section the flag is true in IS the choice: a separate "which
+		// engine" key would be a second source of truth, wrong the first time
+		// someone edits the file by hand.
+		GluetunEngine:    gluetunEngineFromTOML(race),
 		GluetunURL:       firstNonEmpty(tomlStr(hoard, "gluetun_url"), tomlStr(race, "gluetun_url")),
 		GluetunAPIKey:    firstNonEmpty(tomlStr(hoard, "gluetun_api_key"), tomlStr(race, "gluetun_api_key")),
 		Socks5Host:       firstNonEmpty(tomlStr(hoard, "socks5_outbound_host"), tomlStr(race, "socks5_outbound_host")),
@@ -262,6 +289,16 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 		warn = append(warn, "The two engines have different SOCKS5 hosts in the config file. Saving here sets both to the same value.")
 	}
 	c.JSON(http.StatusOK, netModeResponse{Mode: mode, Fields: f, Env: env, Warnings: warn})
+}
+
+// gluetunEngineFromTOML reports "race" only when the race section is the one
+// following the forwarded port. Everything else, including a config that
+// predates the choice, reads as hoard.
+func gluetunEngineFromTOML(race map[string]interface{}) string {
+	if tomlBool(race, "gluetun_port_forward") {
+		return "race"
+	}
+	return "hoard"
 }
 
 func quotedList(items []string) string {
@@ -302,6 +339,13 @@ func validateNetMode(mode string, f netModeFields) error {
 		}
 		if _, err := net.InterfaceByName(name); err != nil {
 			return fmt.Errorf("no interface named %q on this host. Peer sockets would fall back to the default route and leave outside the tunnel", name)
+		}
+		if f.GluetunPort {
+			switch strings.TrimSpace(f.GluetunEngine) {
+			case "", "race", "hoard":
+			default:
+				return fmt.Errorf("the forwarded port goes to the race or the hoard engine, not %q", f.GluetunEngine)
+			}
 		}
 	case netModeSocks5, netModeProxyV2:
 		if strings.TrimSpace(f.Socks5Host) == "" {
@@ -386,9 +430,11 @@ func netModeKeys(mode string, f netModeFields, listenPort, proxyV2Port int, scop
 		proxyV2Port = 0
 	}
 	gluetunOn, gluetunURL, gluetunKey := false, "", ""
-	// Only the hoard follows the forwarded port: a provider hands out exactly
-	// one, and pointing both engines at it would have the second fail to bind.
-	if mode == netModeVPN && f.GluetunPort && scope == "hoard" {
+	// Exactly one engine follows the forwarded port, and the operator says
+	// which: a provider hands out one port, so pointing both at it would have
+	// the second fail to bind. The other scope gets the flag written false on
+	// the same save, so switching engines can never leave both of them on it.
+	if mode == netModeVPN && f.GluetunPort && scope == gluetunEngineOf(f) {
 		gluetunOn = true
 		gluetunURL = strings.TrimSpace(f.GluetunURL)
 		gluetunKey = f.GluetunAPIKey
