@@ -2789,3 +2789,7 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .health-row { display: flex; align-items: center; gap: 6px; cursor: default; }
 .health-row span { font-size: 11px; color: var(--text-secondary); line-height: 1; }
 .health-dots .health-dot { width: 9px; height: 9px; flex: 0 0 auto; }
+
+/* Kept in view: the save button sits at the bottom of a long panel, and a
+   restart notice scrolled off the top is a notice nobody reads. */
+#settings-restart-banner { position: sticky; bottom: 8px; z-index: 5; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); }
