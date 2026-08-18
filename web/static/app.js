@@ -716,22 +716,36 @@ async function api(endpoint, options = {}) {
 let _netOrig = null;
 
 function _settingsDirtyCount() {
-    let n = 0;
+    return _pendingEdits().count;
+}
+
+// Counts the edits and says whether applying them needs a restart, so the
+// dialog can offer the action that actually finishes the job.
+function _pendingEdits() {
+    let count = 0, needsRestart = false;
     for (const [id, orig] of Object.entries(_settingsOrig || {})) {
         try {
-            if (_readSettingField(id, orig) !== orig.value) n++;
+            if (_readSettingField(id, orig) === orig.value) continue;
+            count++;
+            if (_settingTier(orig.section, orig.key) !== "hot") needsRestart = true;
         } catch (e) {}
     }
     if (_netState && _netOrig) {
         const cur = netModeCollect();
-        if (cur && JSON.stringify({ mode: _netState.mode, fields: cur }) !== _netOrig) n++;
+        if (cur && JSON.stringify({ mode: _netState.mode, fields: cur }) !== _netOrig) {
+            count++;
+            // The network mode rewrites the engines' listen and proxy keys,
+            // which only take effect on restart.
+            needsRestart = true;
+        }
     }
-    return n;
+    return { count: count, needsRestart: needsRestart };
 }
 
 // Three ways out, all explicit: save and go, drop them and go, or stay. No
 // default action, since two of the three lose work.
 function _confirmLeaveSettings(count, onLeave) {
+    const pending = _pendingEdits();
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
@@ -740,7 +754,7 @@ function _confirmLeaveSettings(count, onLeave) {
         <div class="modal-actions">
             <button class="btn-small" id="leave-stay">${t("Stay here")}</button>
             <button class="btn-small btn-danger" id="leave-discard">${t("Discard and leave")}</button>
-            <button class="btn-primary" id="leave-save">${t("Save and leave")}</button>
+            <button class="btn-primary" id="leave-save">${pending.needsRestart ? t("Save and restart") : t("Save and leave")}</button>
         </div>
     </div>`;
     document.body.appendChild(ov);
@@ -749,7 +763,14 @@ function _confirmLeaveSettings(count, onLeave) {
     ov.querySelector("#leave-discard").onclick = () => { close(); onLeave(); };
     ov.querySelector("#leave-save").onclick = async () => {
         close();
-        try { await saveSettings(); } catch (e) {}
+        try { await saveSettings(); } catch (e) { return; }
+        if (pending.needsRestart) {
+            // Restarting reloads the page, so there is nothing to leave to: the
+            // alternative was dropping the user elsewhere with a restart still
+            // owed and the notice about it on the page they just left.
+            await restartDaemon(true);
+            return;
+        }
         onLeave();
     };
 }
@@ -5103,8 +5124,8 @@ async function saveSettings() {
     }
 }
 
-async function restartDaemon() {
-    if (!confirm(t("Restart the Hydra daemon now? (running torrents resume on boot)"))) return;
+async function restartDaemon(skipConfirm) {
+    if (!skipConfirm && !confirm(t("Restart the Hydra daemon now? (running torrents resume on boot)"))) return;
     const banner = document.getElementById("settings-restart-banner");
     try {
         await api("/api/settings/restart", { method: "POST" });

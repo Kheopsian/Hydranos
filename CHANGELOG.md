@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.84.2 - 2026-08-16
+
+### Changed
+- **The unsaved-changes dialog offers "Save and restart" when the edits need one.** Saving and leaving dropped the user on another page with a restart still owed and the notice about it back on the page they had just left. Settings that apply live still offer "Save and leave".
+
 ## v3.84.1 - 2026-08-16
 
 ### Fixed

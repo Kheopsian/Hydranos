@@ -452,6 +452,7 @@
   "Save": "Enregistrer",
   "Save Path": "Chemin d'enregistrement",
   "Save and leave": "Enregistrer et quitter",
+  "Save and restart": "Enregistrer et redémarrer",
   "Save failed: {msg}": "Échec de l'enregistrement : {msg}",
   "Save settings": "Enregistrer les réglages",
   "Save this mode": "Enregistrer ce mode",
