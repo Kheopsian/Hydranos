@@ -4906,6 +4906,7 @@ async function updateSettings() {
             <input type="text" id="settings-search" class="settings-search" placeholder="${t("Search a setting\u2026")}" oninput="filterSettings()">
             <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="settings-show-adv" onchange="filterSettings()"><span class="toggle-track"></span></span> ${t("Show advanced settings")}</label>
             <span id="settings-search-count" class="settings-search-count"></span>
+            <button class="btn-small btn-danger" style="margin-left:auto" onclick="resetSettings()">${t("Reset to defaults")}</button>
         </div>`;
 
         const _activeDomSaved = localStorage.getItem("hydra_settings_tab");
@@ -5122,6 +5123,37 @@ async function saveSettings() {
         banner.className = "result-msg error";
         banner.textContent = t("Error: {msg}", { msg: e.message });
     }
+}
+
+// Says exactly what survives and what does not, because the three values kept
+// are the ones whose loss cannot be undone from the UI, and everything else
+// really does go.
+async function resetSettings() {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `<div class="modal-box">
+        <h3>${t("Reset to defaults")}</h3>
+        <p class="modal-desc">${esc(t("Every setting goes back to what a fresh install ships: ports, network mode, tracker passkeys, client spoofs, engine tuning."))}</p>
+        <p class="modal-desc">${esc(t("Your login, your API key and your data directory are kept, so you do not lock yourself out. A copy of the current config is saved next to it first."))}</p>
+        <div class="modal-actions">
+            <button class="btn-small" id="reset-cancel">${t("Cancel")}</button>
+            <button class="btn-small btn-danger" id="reset-go">${t("Reset and restart")}</button>
+        </div>
+    </div>`;
+    document.body.appendChild(ov);
+    ov.querySelector("#reset-cancel").onclick = () => ov.remove();
+    ov.querySelector("#reset-go").onclick = async () => {
+        ov.remove();
+        try {
+            const r = await api("/api/settings/reset", { method: "POST" });
+            _settingsOrig = {};
+            _netOrig = null;
+            _setRestartBanner(esc(t("Settings reset. Backup saved as {path}", { path: r.backup })));
+            await restartDaemon(true);
+        } catch (e) {
+            _setRestartBanner(esc(t("Error: {msg}", { msg: e.message })), "result-msg error");
+        }
+    };
 }
 
 async function restartDaemon(skipConfirm) {

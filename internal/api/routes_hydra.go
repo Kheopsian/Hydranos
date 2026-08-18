@@ -655,6 +655,7 @@ func (s *Server) registerHydraRoutes() {
 		api.GET("/settings", s.handleSettingsGet)
 		api.POST("/settings", s.handleSettingsPost)
 		api.POST("/settings/restart", s.handleSettingsRestart)
+		api.POST("/settings/reset", s.handleSettingsReset)
 		api.POST("/auth/password", s.handleSetPassword)
 
 		// Port forward
