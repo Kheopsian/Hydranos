@@ -53,10 +53,13 @@ func (h *Hub) SetMirror(w io.Writer) {
 	h.mu.Unlock()
 }
 
-// SetMirrorFileBeside opens/creates <dir(configPath)>/name and mirrors to it.
+// SetMirrorFileBeside opens/creates <dir(configPath)>/name and mirrors to it,
+// rotating the file so it cannot grow without bound (see rotate.go). A mirror
+// that cannot be opened is not fatal: the hub keeps serving the UI and the
+// console, it just has nowhere to write.
 func (h *Hub) SetMirrorFileBeside(configPath, name string) {
-	f, err := os.OpenFile(filepath.Join(filepath.Dir(configPath), name),
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := newRotatingFile(filepath.Join(filepath.Dir(configPath), name),
+		defaultMaxLogBytes, defaultMaxLogFiles)
 	if err != nil {
 		return
 	}
@@ -273,13 +276,50 @@ func (h *Hub) IngestStream(source string, r io.Reader) {
 	}
 }
 
+// parseEngineLevel extracts the level from a raw engine line.
+//
+// The engine writes ANSI-coloured tracing output, so the level arrives wrapped
+// in escape codes ("\x1b[33m WARN\x1b[0m") rather than padded with spaces.
+// Matching on " "+level+" " therefore never hit on a real line and every engine
+// entry was filed as INFO -- warnings and errors included, which made the Logs
+// tab level filter useless for engine sources. Match on a word boundary
+// instead, so an INFO line that merely mentions ERRORS is still INFO.
 func parseEngineLevel(line string) string {
 	for _, l := range []string{"ERROR", "WARN", "INFO", "DEBUG", "TRACE"} {
-		if strings.Contains(line, " "+l+" ") {
+		if i := strings.Index(line, l); i >= 0 && isDelimitedWord(line, i, len(l)) {
 			return l
 		}
 	}
 	return "INFO"
+}
+
+func isDelimitedWord(s string, i, n int) bool {
+	// The byte that terminates an ANSI escape sequence is itself a letter
+	// ("\x1b[31m"), so a bare letter check would reject "\x1b[31mERROR" -- the
+	// exact shape the engine emits when it does not pad the level with a space.
+	if i > 0 && isASCIILetter(s[i-1]) && !endsANSI(s, i) {
+		return false
+	}
+	if end := i + n; end < len(s) && isASCIILetter(s[end]) {
+		return false
+	}
+	return true
+}
+
+// endsANSI reports whether s[:i] ends with a CSI escape sequence: ESC, "[",
+// digits and semicolons, then a final letter.
+func endsANSI(s string, i int) bool {
+	j := i - 1
+	if j < 0 || !isASCIILetter(s[j]) {
+		return false
+	}
+	for j--; j >= 0 && (s[j] == ';' || (s[j] >= '0' && s[j] <= '9')); j-- {
+	}
+	return j >= 1 && s[j] == '[' && s[j-1] == 0x1b
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // ---- startup banner ---------------------------------------------------------
