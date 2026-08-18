@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.88.0 - 2026-08-18
+
+### Fixed
+- **hydra.log grew forever.** Every hub entry was mirrored to a file nothing ever truncated, and the engines log a line per inbound peer connection, so the production instance reached 41 GB on its cache SSD. The mirror now rotates at 128 MiB and keeps five generations, capping it at 640 MiB whatever the traffic.
+- **Engine log lines were all filed as INFO,** warnings and errors included, so the Logs tab level filter did nothing for engine sources. The level is written with ANSI colour codes wrapped around it, which the parser did not expect.
+
 ## v3.87.0 - 2026-08-18
 
 ### Fixed
