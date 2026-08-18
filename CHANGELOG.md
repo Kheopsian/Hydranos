@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.83.2 - 2026-08-16
+
+### Fixed
+- **Clicking the address dropped the IPv6 one.** Two pieces of code wrote the header address and only the polling one knew about IPv6, so a manual refresh replaced both addresses with the v4. There is a single renderer now.
+
 ## v3.83.1 - 2026-08-16
 
 ### Fixed
