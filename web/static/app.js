@@ -54,26 +54,34 @@ async function fetchPortForward() {
         _paintHealthDot("health-dot-race", d.race_reach, d.race_port, d.race_peers, warnings, "Race");
         _paintHealthDot("health-dot-hoard", d.hoard_reach, d.hoard_port, d.hoard_peers, warnings, "Hoard");
 
-        // Dual stack: show both addresses, since a peer reaching us over one
-        // family says nothing about the other.
-        const ipEl = document.getElementById("header-exit-ip");
-        if (ipEl && d.public_ip) {
-            if (d.public_ip_v6) {
-                ipEl.textContent = incoExitIP(d.public_ip) + "  /  " + incoExitIP(d.public_ip_v6);
-                ipEl.title = "";
-            } else if (d.ipv6_wanted) {
-                // Asked for, not available: say so where the address would be,
-                // rather than showing one address and letting it pass for a
-                // working dual stack.
-                ipEl.innerHTML = esc(incoExitIP(d.public_ip)) +
-                    `  /  <span class="net-warn">${esc(t("IPv6 unavailable"))}</span>`;
-                ipEl.title = t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it.");
-            } else {
-                ipEl.textContent = incoExitIP(d.public_ip);
-                ipEl.title = "";
-            }
-        }
+        _ipv6Wanted = !!d.ipv6_wanted;
+        _renderHeaderIP(d.public_ip, d.public_ip_v6);
     } catch {}
+}
+
+// Whether IPv6 was asked for in the settings. Remembered so the manual refresh,
+// which only knows the addresses, still renders the same thing as the poll.
+let _ipv6Wanted = false;
+
+// The single place the header address is written. Two writers used to race
+// here, and the one behind the click knew nothing about IPv6, so refreshing by
+// hand dropped the second address.
+function _renderHeaderIP(v4, v6) {
+    const el = document.getElementById("header-exit-ip");
+    if (!el || !v4) return;
+    if (v6) {
+        el.textContent = incoExitIP(v4) + "  /  " + incoExitIP(v6);
+        el.title = "";
+    } else if (_ipv6Wanted) {
+        // Asked for, not available: say so where the address would be, rather
+        // than showing one address and letting it pass for a working dual stack.
+        el.innerHTML = esc(incoExitIP(v4)) +
+            `  /  <span class="net-warn">${esc(t("IPv6 unavailable"))}</span>`;
+        el.title = t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it.");
+    } else {
+        el.textContent = incoExitIP(v4);
+        el.title = "";
+    }
 }
 
 let ipScrambleTimer = null;
@@ -105,8 +113,7 @@ async function fetchPublicIp(force) {
         const d = await api("/api/public-ip" + (force ? "?refresh=1" : ""));
         if (d.ip && d.ip !== "unknown") {
             if (force) stopIpScramble();
-            const hdrEl = document.getElementById("header-exit-ip");
-            if (hdrEl) hdrEl.textContent = incoExitIP(d.ip);
+            _renderHeaderIP(d.ip, d.ip_v6);
             ipUpdated = true;
             // Leak detection: any IP that is NOT our home WAN means we're
             // properly behind a tunnel. Avoids hardcoding takehost IPs which
