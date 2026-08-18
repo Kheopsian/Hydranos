@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.83.4 - 2026-08-16
+
+### Fixed
+- **The restart notice sits under the save button instead of at the top of the card.** Saving happens at the end of a long panel, so a notice above everything meant scrolling back up to learn a restart was owed.
+
 ## v3.83.3 - 2026-08-16
 
 ### Fixed
