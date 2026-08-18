@@ -27,7 +27,6 @@
   "A VPN client already runs on this host or container. Peer sockets are pinned to its interface.": "Un client VPN tourne déjà sur cette machine ou dans ce conteneur. Les connexions aux pairs sont rattachées à son interface.",
   "A newer version ({v}) is available": "Une version plus récente ({v}) est disponible",
   "A plain SOCKS5 proxy only carries outgoing connections. Nobody can reach you through it, so the address you announce answers no one and you only trade with peers you connect to yourself. Use the relay mode if you want to stay reachable.": "Un proxy SOCKS5 simple ne porte que les connexions sortantes. Personne ne peut vous joindre à travers lui : l'adresse que vous annoncez ne répond à personne, et vous n'échangez qu'avec les pairs que vous contactez vous-même. Utiliser le mode relais pour rester joignable.",
-  "A provider forwards a single port, so it goes to the hoard engine. The race engine keeps its own and stays unreachable.": "Un fournisseur ne redirige qu'un seul port : il va au moteur Hoard. Le moteur Race garde le sien et reste injoignable.",
   "AND": "ET",
   "ARC Demand Hit Rate": "Taux de succès ARC à la demande",
   "ARC Demand Miss/s": "Échecs ARC à la demande/s",
@@ -525,7 +524,6 @@
   "Test": "Test",
   "The conversion did not complete.": "La conversion n'est pas allée au bout.",
   "The daemon did not answer: {err}": "Le démon n'a pas répondu : {err}",
-  "The hoard engine takes its listen port from gluetun and holds its announces until it has one. A provider forwards a single port, so the race engine keeps its own and stays unreachable.": "Le moteur Hoard prend son port d'écoute depuis gluetun et retient ses annonces tant qu'il n'en a pas. Un fournisseur ne redirige qu'un seul port, donc le moteur Race garde le sien et reste injoignable.",
   "The interface the VPN client creates, for example wg0 or tun0. Peer sockets are bound to it, so they cannot leave outside the tunnel.": "L'interface créée par le client VPN, par exemple wg0 ou tun0. Les connexions aux pairs y sont rattachées, elles ne peuvent donc pas sortir hors du tunnel.",
   "The two engines have different SOCKS5 hosts in the config file. Saving here sets both to the same value.": "Les deux moteurs ont des hôtes SOCKS5 différents dans le fichier de configuration. Enregistrer ici met la même valeur pour les deux.",
   "The two passwords do not match.": "Les deux mots de passe ne correspondent pas.",
@@ -703,5 +701,10 @@
   "✓ reachable": "✓ joignable",
   "✗ unreachable: {err}": "✗ injoignable : {err}",
   "Skip": "Passer",
-  "Import failed": "Import échoué"
+  "Import failed": "Import échoué",
+  "Engine that takes the port": "Moteur qui prend le port",
+  "A provider forwards a single port, so one engine gets it. Hoard seeds around the clock, so being reachable pays off continuously; race needs peers fast on a fresh torrent.": "Un fournisseur ne redirige qu'un seul port : un seul moteur l'obtient. Hoard seede en permanence, donc y être joignable rapporte en continu ; Race a besoin de pairs rapidement sur un torrent frais.",
+  "The other engine keeps its own listen port and stays unreachable.": "L'autre moteur garde son propre port d'écoute et reste injoignable.",
+  "Hoard": "Hoard",
+  "Race": "Race"
 }

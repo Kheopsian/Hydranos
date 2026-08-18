@@ -255,3 +255,52 @@ func TestVPNModeFlagsANonTunnelInterface(t *testing.T) {
 		t.Errorf("the naming heuristic blocks a save: %v", err)
 	}
 }
+
+// The forwarded port goes to exactly one engine, and switching which one has to
+// take it away from the other in the same save. Leaving both flags true is the
+// failure this whole choice exists to prevent: the second engine to start would
+// fail to bind, and the tab would still look correctly configured.
+func TestGluetunPortGoesToOneEngineOnly(t *testing.T) {
+	base := netModeFields{
+		RaceListenPort:  16171,
+		HoardListenPort: 16172,
+		BindInterface:   "lo",
+		GluetunPort:     true,
+		GluetunURL:      "http://127.0.0.1:8000",
+	}
+	for _, tc := range []struct{ pick, on, off string }{
+		{"", "hoard", "race"},      // configs written before the choice existed
+		{"hoard", "hoard", "race"},
+		{"race", "race", "hoard"},
+	} {
+		f := base
+		f.GluetunEngine = tc.pick
+		m, _ := apply(t, netSample, netModeVPN, f)
+		if !tomlBool(sectionOf(m, tc.on), "gluetun_port_forward") {
+			t.Fatalf("pick %q: %s does not follow the forwarded port", tc.pick, tc.on)
+		}
+		if tomlBool(sectionOf(m, tc.off), "gluetun_port_forward") {
+			t.Fatalf("pick %q: %s still follows it too, both would bind the same port", tc.pick, tc.off)
+		}
+		if got := tomlStr(sectionOf(m, tc.off), "gluetun_url"); got != "" {
+			t.Fatalf("pick %q: %s kept a gluetun url %q", tc.pick, tc.off, got)
+		}
+		if got := gluetunEngineFromTOML(sectionOf(m, "race")); got != tc.on {
+			t.Fatalf("pick %q: reading the config back says %q, not %q", tc.pick, got, tc.on)
+		}
+	}
+}
+
+// The warning has to name the engine actually left behind. The first version of
+// this page said "hoard takes it, race stays unreachable" as a constant, which
+// becomes a lie the moment the operator picks race.
+func TestGluetunWarningNamesTheEngineLeftOut(t *testing.T) {
+	f := netModeFields{GluetunPort: true, GluetunEngine: "race"}
+	got := strings.Join(modeWarnings(netModeVPN, f, nil), " ")
+	if !strings.Contains(got, "The race engine takes its listen port") {
+		t.Fatalf("warning does not say race takes the port: %q", got)
+	}
+	if !strings.Contains(got, "the hoard engine keeps its own") {
+		t.Fatalf("warning does not say hoard is the one left out: %q", got)
+	}
+}
