@@ -4885,14 +4885,33 @@ async function updateSettings() {
         }
         netModeInit();
         filterSettings();
-        const banner = document.getElementById("settings-restart-banner");
-        if (banner) banner.style.display = "none";
+        // Re-rendering the page must not swallow a restart that is still owed.
+        _applyRestartBanner();
     } catch (e) {
         editor.textContent = t("Error: {msg}", { msg: e.message });
     }
 }
 
 // Filtre live : masque les lignes/sections/groupes sans match, ouvre les groupes qui matchent.
+// A restart owed to the user outlives a re-render and a tab switch: the config
+// is already written, so forgetting to say it needs a restart leaves the daemon
+// running settings nobody can see any more.
+let _restartPending = null;
+
+function _setRestartBanner(html, cls) {
+    _restartPending = html ? { html: html, cls: cls || "result-msg success" } : null;
+    _applyRestartBanner();
+}
+
+function _applyRestartBanner() {
+    const banner = document.getElementById("settings-restart-banner");
+    if (!banner) return;
+    if (!_restartPending) { banner.style.display = "none"; return; }
+    banner.className = _restartPending.cls;
+    banner.innerHTML = _restartPending.html;
+    banner.style.display = "block";
+}
+
 function showSettingsPanel(id) {
     document.querySelectorAll("#settings-panels .settings-panel").forEach((pn) => { pn.hidden = pn.dataset.domain !== id; });
     document.querySelectorAll("#settings-tabs .settings-tab").forEach((t) => { t.classList.toggle("active", t.dataset.domain === id); });
@@ -5025,8 +5044,7 @@ async function restartDaemon() {
     const banner = document.getElementById("settings-restart-banner");
     try {
         await api("/api/settings/restart", { method: "POST" });
-        banner.className = "result-msg info";
-        banner.textContent = t("Restarting… the page will reload in a few seconds.");
+        _setRestartBanner(esc(t("Restarting… the page will reload in a few seconds.")), "result-msg info");
         setTimeout(() => location.reload(), 7000);
     } catch (e) {
         banner.className = "result-msg error";
@@ -6099,8 +6117,11 @@ async function netModeSave() {
         });
         let extra = "";
         for (const w of (r.warnings || [])) extra += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
-        out.innerHTML = `<div class="result-msg success">${t("Saved. The engines need a restart to pick it up.")}
-            <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button></div>${extra}`;
+        // Same banner as every other tab, so the restart is always announced in
+        // the same place whichever panel wrote the setting.
+        _setRestartBanner(t("Saved. The engines need a restart to pick it up.") +
+            ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`);
+        out.innerHTML = extra;
     } catch (e) {
         out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
     }

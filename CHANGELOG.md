@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.83.3 - 2026-08-16
+
+### Fixed
+- **A pending restart no longer disappears when you move around.** Re-rendering the settings page cleared the notice, so changing tab after a save left the daemon running settings nobody could see any more. It is remembered until the restart happens.
+- **Every tab announces the restart in the same place.** The Network tab put it at the bottom of its own panel while the others used the banner at the top; there is one banner now, kept in view at the bottom of the card.
+
 ## v3.83.2 - 2026-08-16
 
 ### Fixed
