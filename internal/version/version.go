@@ -1,14 +1,14 @@
 package version
 
 // Version is the single source of truth.
-var Version = "3.83.4-typhon"
+var Version = "3.84.0-typhon"
 
 // PeerFingerprintID is the Azureus-style BEP-20 peer_id prefix. It MUST be
 // exactly 8 bytes ("-HY####-"): the engine appends a 12-byte random suffix, so
 // 8 + 12 = 20, the only length trackers accept. Encode the version as 4 digits
 // (major, then minor, then patch) e.g. 3.13.9 -> "3139". If minor/patch grow
 // past this, switch to base36 — never let the prefix exceed 8 bytes.
-var PeerFingerprintID = "-HY3834-"
+var PeerFingerprintID = "-HY3840-"
 
 // PeerFingerprint returns the 8-byte BEP-20 peer_id prefix. Defensive: if the
 // literal is ever not 8 bytes, coerce it to 8 so we never emit a 21-byte
