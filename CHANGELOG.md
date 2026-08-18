@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.84.1 - 2026-08-16
+
+### Fixed
+- **The unsaved-changes prompt never appeared.** It used a pluralisation helper that is not a global, so building the dialog threw before it was shown: the page switch was blocked and nothing explained why.
+
 ## v3.84.0 - 2026-08-16
 
 ### Added

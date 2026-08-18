@@ -736,7 +736,7 @@ function _confirmLeaveSettings(count, onLeave) {
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
         <h3>${t("Unsaved settings")}</h3>
-        <p class="modal-desc">${tp ? tp("{n} change is not saved yet. Leaving this page discards it.", "{n} changes are not saved yet. Leaving this page discards them.", count, { n: count }) : t("Changes are not saved yet. Leaving this page discards them.")}</p>
+        <p class="modal-desc">${esc(t("{n} setting(s) changed and not saved. Leaving this page discards them.", { n: count }))}</p>
         <div class="modal-actions">
             <button class="btn-small" id="leave-stay">${t("Stay here")}</button>
             <button class="btn-small btn-danger" id="leave-discard">${t("Discard and leave")}</button>
