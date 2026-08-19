@@ -3,6 +3,11 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.89.0 - 2026-08-19
+
+### Fixed
+- **A missing config file at an explicit `--config` path was fatal.** Only a config Hydra was left to find on its own was ever seeded; passing `--config /config/default.toml` at a path that did not exist logged "Failed to load config" and exited, so a container starting on an empty volume died before it could write one, and died again on every restart. That path is now seeded from the embedded template like any other, in every mode — `--agent-only` and `--front-only` included — with `data_dir` pointing at the config's own directory when the path is absolute, matching what `entrypoint.sh` writes on a first run. Deployments that bypass the entrypoint (Kubernetes, in particular) now come up on an empty volume instead of crash-looping.
+
 ## v3.88.0 - 2026-08-18
 
 ### Fixed
