@@ -135,6 +135,30 @@ header::before {
     font-variant-numeric: tabular-nums;
 }
 
+/* Exit IP: two short lines instead of one long one. A dual-stack pair is about
+   forty characters, which on a single line stretched the header stat far past
+   every other one and pushed the controls beside it off to the right. The
+   addresses stay readable, and the full pair is on the tooltip so truncating
+   never loses one. */
+.exit-ip-stat .stat-value {
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 500;
+    line-height: 1.25;
+    text-align: right;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Each address on its own line: the separator was doing the work of a line
+   break, badly, and wrapped wherever there happened to be room. */
+.exit-ip-stat .stat-value .ip-line {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .stat-ip {
     font-size: 12px;
     font-family: monospace;
@@ -2386,7 +2410,7 @@ footer {
 /* Exit IP refresh: icon always visible, whole block is a hover pill w/ refresh cursor */
 .ip-refresh-btn { opacity: 1; color:#8b949e; }
 .stat:hover .ip-refresh-btn { opacity: 1; }
-.exit-ip-stat { cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%2722%27%20height%3D%2722%27%20viewBox%3D%270%200%2024%2024%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-width%3D%272.2%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M23%204v6h-6%27%2F%3E%3Cpath%20d%3D%27M20.49%2015a9%209%200%201%201-2.12-9.36L23%2010%27%2F%3E%3C%2Fsvg%3E") 11 11, pointer; border: 1px solid transparent; border-radius: 999px; padding: 2px 12px; transition: background .15s, border-color .15s; }
+.exit-ip-stat { cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%2722%27%20height%3D%2722%27%20viewBox%3D%270%200%2024%2024%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-width%3D%272.2%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M23%204v6h-6%27%2F%3E%3Cpath%20d%3D%27M20.49%2015a9%209%200%201%201-2.12-9.36L23%2010%27%2F%3E%3C%2Fsvg%3E") 11 11, pointer; border: 1px solid transparent; border-radius: var(--radius); padding: 2px 12px; max-width: 200px; transition: background .15s, border-color .15s; }
 .exit-ip-stat:hover { background: #0d1117; border-color: #30363d; }
 .exit-ip-stat:hover .ip-refresh-btn { color:#58a6ff; }
 
