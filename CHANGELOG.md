@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.93.1 - 2026-08-19
+
+### Fixed
+
+- **The first announce after a start left directly, ignoring `announce_proxy`.**
+  The race engine built its tracker announcer from a listen port alone, so every
+  other announce-egress setting defaulted to nothing - `announce_proxy` included.
+  A relay setup whose hoard announced through the proxy therefore had its race
+  announces go straight out, handing the tracker this host's own address. It
+  showed at startup because the seed keepalive fires on its first tick after a
+  restart, when no torrent has a recent announce yet; once the proxied loops had
+  run, nothing was due again for 25 minutes and the path looked clean. The
+  tracker was left holding a second seeding location per restart, which on a
+  tracker that caps locations makes later announces fail outright. `announce_ip`
+  and `enable_ipv6` were dropped on the same floor and are now carried too.
+  The built-in network check could not have caught this: it runs on demand,
+  always in the steady state where the path really is correct.
+
+- **Race announces minted a new peer_id every 30 seconds.** The keepalive built
+  a fresh announcer per tick, and building one generates an identity, so the
+  tracker saw a stream of distinct peers claiming the same port rather than one
+  peer refreshing. The announcer is now built once and rebuilt only when the
+  bound port actually moves.
+
 ## v3.93.0 - 2026-08-19
 
 ### Fixed

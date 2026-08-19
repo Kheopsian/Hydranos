@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/version"
 	"io"
 	"log/slog"
@@ -834,16 +835,26 @@ func loadSecondaryAnnounceProxy() *url.URL {
 	return secondaryAnnounceProxyURL
 }
 
-// newTrackerAnnouncer is a thin shim retained for callers that still pass a
-// bare port (race aggressive announce). Equivalent to a single-binding setup
-// with no source-IP override.
-func newTrackerAnnouncer(port int, announceRateLimit float64) *trackerAnnouncer {
-	return newTrackerAnnouncerForBinding(Binding{
-		ID:                0,
-		ListenPort:        port,
-		AnnounceScope:     "race",
-		AnnounceRateLimit: announceRateLimit,
-	})
+// newTrackerAnnouncerForSession builds an announcer for a session that has no
+// binding table of its own (the race engine), from that session's config.
+//
+// It exists because the bare-port shim it replaces built a Binding from the
+// port alone. Every other announce-egress setting therefore defaulted to zero,
+// announce_proxy included — so a relay setup whose hoard announced through the
+// proxy had its race announces leave DIRECT, handing the tracker this host's
+// own address. Worse than a plain bypass: with no proxy on the binding, the
+// dual-family path also came alive and posted the same peer_id from the host's
+// real address, which private trackers count as a second location.
+//
+// Going through DefaultSingleBinding + ApplyAnnounceEgress rather than filling
+// a Binding in place is deliberate: it is the same pair main.go uses for the
+// hoard, so a field added to the announce egress reaches both without anyone
+// having to remember this call site.
+func newTrackerAnnouncerForSession(port int, cfg *config.SessionConfig, scope string) *trackerAnnouncer {
+	bs := ApplyAnnounceEgress(
+		DefaultSingleBinding(port, cfg.EnableIPv6, scope, cfg.AnnounceRateLimit),
+		cfg.AnnounceProxy, cfg.AnnounceIP, cfg.Socks5OutboundHost, scope)
+	return newTrackerAnnouncerForBinding(bs[0])
 }
 
 // generateQBitPeerID generates a peer_id matching qBittorrent 4.6.1 format.
@@ -1323,7 +1334,7 @@ func (e *RaceEngine) raceAnnounceLoop(infoHash, trackerURL string, totalSize int
 		return
 	}
 
-	announcer := newTrackerAnnouncer(e.config.ListenPort, e.config.AnnounceRateLimit)
+	announcer := e.announcer()
 
 	slog.Info("race: starting announce loop",
 		"info_hash", infoHash[:minStr(len(infoHash), 8)],

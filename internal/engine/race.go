@@ -80,6 +80,14 @@ type RaceEngine struct {
 
 	lastAnnounceTime map[string]time.Time
 
+	// Announcer for every race announce. Cached rather than rebuilt per call:
+	// building one mints a fresh peer_id, and a keepalive tick that mints a new
+	// identity every 30s shows up at the tracker as a stream of distinct peers.
+	// Rebuilt only when the live listen port moves under us (gluetun lease).
+	annMu   sync.Mutex
+	ann     *trackerAnnouncer
+	annPort int
+
 	// Cached stats.
 	cachedStatsMu     sync.RWMutex
 	cachedStats       map[string]*TorrentStats
@@ -593,6 +601,22 @@ func (e *RaceEngine) RemoveTorrent(infoHash string, deleteFiles bool) error {
 // Settings & data access
 // ---------------------------------------------------------------------------
 
+// announcer returns this engine's tracker announcer, built from the session
+// config so it carries announce_proxy / announce_ip like the hoard's does.
+// Keyed on the port actually bound right now, not the configured one: under a
+// rotating VPN lease those differ, and announcing the stale one publishes a
+// port nobody answers on.
+func (e *RaceEngine) announcer() *trackerAnnouncer {
+	port := e.ListenPort()
+	e.annMu.Lock()
+	defer e.annMu.Unlock()
+	if e.ann == nil || e.annPort != port {
+		e.ann = newTrackerAnnouncerForSession(port, e.config, "race")
+		e.annPort = port
+	}
+	return e.ann
+}
+
 // LivePort exposes the runtime listen-port override atomic (see hoard).
 func (e *RaceEngine) LivePort() *atomic.Int64 { return &e.livePort }
 
@@ -1081,11 +1105,7 @@ func (e *RaceEngine) checkTrackerHealth() {
 		return
 	}
 	now := time.Now()
-	racePort := e.config.ListenPort
-	if v := e.livePort.Load(); v > 0 {
-		racePort = int(v)
-	}
-	announcer := newTrackerAnnouncer(racePort, e.config.AnnounceRateLimit)
+	announcer := e.announcer()
 	done := 0
 	for _, s := range res.Torrents {
 		if done >= raceSeedReannouncePerTick {
