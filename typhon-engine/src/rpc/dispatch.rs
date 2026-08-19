@@ -35,6 +35,7 @@ pub fn dispatch(
         "set_download_limit" => json!({"ok": true}), // TODO
         "get_session_stats" => get_session_stats(torrent_mgr),
         "get_trackers" => get_trackers(params, torrent_mgr),
+        "set_trackers" => set_trackers(params, torrent_mgr),
         "get_files" => get_files(params, torrent_mgr),
         "get_availability" => get_availability(params, torrent_mgr),
         "set_opt_flag" => set_opt_flag(params),
@@ -269,6 +270,57 @@ fn get_session_stats(mgr: &Arc<TorrentManager>) -> Value {
     })
 }
 
+/// Replace a torrent's tracker list wholesale, in tiers.
+///
+/// Whole-list replacement is the only primitive: add, remove and edit are all
+/// read-modify-write on the caller's side, so there is exactly one path that
+/// can change what we announce to, and it is idempotent. Applying the same
+/// list twice is a no-op rather than a silent duplicate.
+///
+/// Empty URLs and empty tiers are dropped, since a tier with nothing in it
+/// makes the announce loop skip a level for no reason. An empty list overall
+/// IS allowed: it means "announce to nobody", which is a legitimate state for
+/// a torrent kept only for DHT or for local peers.
+fn set_trackers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
+    let ih = match get_info_hash(params) { Ok(ih) => ih, Err(e) => return e };
+    let t = match mgr.get(&ih) {
+        Some(t) => t,
+        None => return json!({"error": "torrent not found"}),
+    };
+    let raw = match params.get("trackers").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return json!({"error": "trackers must be an array of tiers"}),
+    };
+    let mut tiers: Vec<Vec<String>> = Vec::with_capacity(raw.len());
+    for tier in raw {
+        let urls = match tier.as_array() {
+            Some(u) => u,
+            None => return json!({"error": "each tier must be an array of urls"}),
+        };
+        let cleaned: Vec<String> = urls
+            .iter()
+            .filter_map(|u| u.as_str())
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect();
+        if !cleaned.is_empty() {
+            tiers.push(cleaned);
+        }
+    }
+    let count = tiers.iter().map(|t| t.len()).sum::<usize>();
+    // Through the manager, so the resume record is written in the same breath:
+    // a list that only lives in memory is undone by the next restart.
+    let _ = t;
+    if let Err(e) = mgr.set_trackers(&ih, tiers.clone()) {
+        return json!({"error": e});
+    }
+    info!("[rpc] set_trackers {} -> {} tiers, {} urls",
+          crate::torrent::hex_encode(&ih), tiers.len(), count);
+    // Hand back what actually stuck, not what was asked for: the caller writes
+    // this same list to durable storage, and the two must not drift.
+    json!({"trackers": tiers, "count": count})
+}
+
 fn get_trackers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
     let ih = match get_info_hash(params) { Ok(ih) => ih, Err(e) => return e };
     let t = match mgr.get(&ih) {
@@ -283,22 +335,47 @@ fn get_trackers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
     let ok = last_error.is_empty();
     let seeders = t.scrape_seeders.load(Ordering::Relaxed) as i64;
     let leechers = t.scrape_leechers.load(Ordering::Relaxed) as i64;
-    let trackers: Vec<Value> = t.meta.trackers.iter().enumerate().map(|(tier, urls)| {
-        let err_str = if ok { "Success".to_string() } else { last_error.clone() };
-        let msg = if ok { String::new() } else { last_error.clone() };
-        json!({
-            "url": urls.first().unwrap_or(&String::new()),
-            "tier": tier,
-            "verified": ok,
-            "endpoints": [{
-                "last_error": err_str,
-                "message": msg,
-                "next_announce": 0,
-                "scrape_complete": seeders,
-                "scrape_incomplete": leechers,
-            }],
-        })
-    }).collect();
+    // NOTE: hydra-go runs both engines with disable_internal_announce, so the
+    // loop that fills these is inert in the normal deployment and the Go side
+    // overwrites both fields from its own announce observations. They are kept
+    // correct for the case where the internal loop IS enabled, and as the
+    // "never / unknown" default the Go override replaces.
+    // Seconds since / until, not absolute stamps: the UI shows durations, and
+    // sending stamps would make it depend on the browser clock matching ours.
+    // -1 means "never" / "not known", which the UI renders as a dash; 0 is a
+    // real answer meaning "due now" and must stay distinguishable from it.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let last_at = t.last_announce_at.load(Ordering::Relaxed);
+    let next_at = t.next_announce_at.load(Ordering::Relaxed);
+    let last_announce = if last_at > 0 { (now - last_at).max(0) } else { -1 };
+    let next_announce = if next_at > 0 { (next_at - now).max(0) } else { -1 };
+    let live: Vec<Vec<String>> = t.live_trackers.read().clone();
+    // One entry per URL, not per tier. Reporting only `urls.first()` hid every
+    // fallback URL a tier holds, and a caller doing read-modify-write on this
+    // list would have written the hidden ones out of existence.
+    let mut trackers: Vec<Value> = Vec::new();
+    for (tier, urls) in live.iter().enumerate() {
+        for url in urls {
+            let err_str = if ok { "Success".to_string() } else { last_error.clone() };
+            let msg = if ok { String::new() } else { last_error.clone() };
+            trackers.push(json!({
+                "url": url,
+                "tier": tier,
+                "verified": ok,
+                "endpoints": [{
+                    "last_error": err_str,
+                    "message": msg,
+                    "last_announce": last_announce,
+                    "next_announce": next_announce,
+                    "scrape_complete": seeders,
+                    "scrape_incomplete": leechers,
+                }],
+            }));
+        }
+    }
     json!({"trackers": trackers})
 }
 
@@ -572,7 +649,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let tracker_error = t.last_announce_error.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let tracker_host = t.meta.trackers.iter().flatten().next()
+    let tracker_host = t.live_trackers.read().iter().flatten().next()
         .map(|u| tracker_host_of(u))
         .unwrap_or_default();
     let error_msg = t.error_msg.lock().map(|g| g.clone()).unwrap_or_default();

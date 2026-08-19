@@ -43,6 +43,10 @@ type TrackerObservation struct {
 	Leechers int
 	ErrorMsg string    // empty when OK
 	NextAt   time.Time // expected next announce; zero == unknown / immediate
+	// LastAt is when this tracker last answered. Only set on success, so a
+	// failing tracker keeps showing how long it has been since it last worked
+	// rather than how long since we last tried it.
+	LastAt time.Time
 }
 
 // AnnounceObservation summarises a single torrent-announce cycle so the
@@ -506,6 +510,10 @@ func (h *HoardAnnouncer) announceAllTiers(infoHash string, totalSize, left, uplo
 				OK:       true,
 				Seeds:    seeds,
 				Leechers: leechers,
+				// Stamped here, in the literal that records the success: this
+				// assignment replaces the whole map entry, so a LastAt set
+				// anywhere earlier in the cycle is silently thrown away.
+				LastAt: time.Now(),
 			}
 			anyOK = true
 			obs.OK = true

@@ -407,6 +407,13 @@ pub fn start_announce_loop(
     });
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 async fn announce_torrent(torrent: Arc<TorrentState>, disk: Arc<DiskManager>, peer_id: [u8; 20], port: u16, utp_socket: Option<Arc<UtpSocketUdp>>) {
     let ih_hex = crate::torrent::hex_encode(&torrent.info_hash);
     let short_hash = &ih_hex[..8];
@@ -433,7 +440,10 @@ async fn announce_torrent(torrent: Arc<TorrentState>, disk: Arc<DiskManager>, pe
 
         // Try each tracker tier
         let mut announced = false;
-        for tier in &torrent.meta.trackers {
+        // Snapshot: the guard cannot be held across the awaits below, and an
+        // edit mid-pass would otherwise be observed half-applied.
+        let tiers: Vec<Vec<String>> = torrent.live_trackers.read().clone();
+        for tier in &tiers {
             for url in tier {
                 if !url.starts_with("http://") && !url.starts_with("https://") {
                     continue; // Skip UDP trackers for now
@@ -456,6 +466,7 @@ async fn announce_torrent(torrent: Arc<TorrentState>, disk: Arc<DiskManager>, pe
                         torrent.scrape_seeders.store(resp.complete, std::sync::atomic::Ordering::Relaxed);
                         torrent.scrape_leechers.store(resp.incomplete, std::sync::atomic::Ordering::Relaxed);
                         torrent.last_announce_ok.store(true, std::sync::atomic::Ordering::Relaxed);
+                        torrent.last_announce_at.store(now_unix(), std::sync::atomic::Ordering::Relaxed);
                         if let Ok(mut ct) = torrent.current_tracker.lock() {
                             *ct = url.clone();
                         }
@@ -509,8 +520,11 @@ async fn announce_torrent(torrent: Arc<TorrentState>, disk: Arc<DiskManager>, pe
         } else {
             interval
         };
-        // Wait for next announce
-        time::sleep(Duration::from_secs(effective_interval.max(60))).await;
+        // Wait for next announce. Record when that is BEFORE sleeping, so the
+        // detail view can say how long is left instead of guessing.
+        let wait = effective_interval.max(60);
+        torrent.next_announce_at.store(now_unix() + wait as i64, std::sync::atomic::Ordering::Relaxed);
+        time::sleep(Duration::from_secs(wait)).await;
 
         // Check if torrent is still active
         if torrent.is_paused.load(std::sync::atomic::Ordering::Relaxed) {

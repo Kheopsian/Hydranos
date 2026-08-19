@@ -1851,8 +1851,10 @@ async function refreshDetail() {
             ptbody.innerHTML = '<tr><td colspan="8" class="empty">No peers connected</td></tr>';
         }
 
-        // Trackers table
+        // Trackers table. Skipped while the editor is open: redrawing the
+        // list someone is editing is how an edit gets lost mid-typing.
         const ttbody = document.getElementById("detail-trackers-tbody");
+        if (trackerEditorIsOpen()) return;
         if (d.trackers && d.trackers.length > 0) {
             ttbody.innerHTML = d.trackers.map(t => {
                 let domain = t.url;
@@ -1860,7 +1862,8 @@ async function refreshDetail() {
                 const ep = t.endpoints && t.endpoints[0];
                 const hasErr = ep && ep.last_error && ep.last_error !== "Success";
                 const msg = ep ? (ep.message || ep.last_error || "") : "";
-                const nextAnn = ep ? ep.next_announce : 0;
+                const nextAnn = ep && ep.next_announce !== undefined ? ep.next_announce : -1;
+                const lastAnn = ep && ep.last_announce !== undefined ? ep.last_announce : -1;
                 const seeds = ep ? ep.scrape_complete : -1;
                 const leechers = ep ? ep.scrape_incomplete : -1;
                 const statusHtml = hasErr
@@ -1868,13 +1871,123 @@ async function refreshDetail() {
                     : `<span class="tracker-ok">${msg || "OK"}</span>`;
                 const nextStr = nextAnn > 0 ? `${Math.floor(nextAnn/60)}m${nextAnn%60}s` : nextAnn === 0 ? "now" : "-";
                 const scrapeStr = seeds >= 0 ? `${seeds}s/${leechers}l` : "";
-                return `<tr><td class="mono" title="${t.url}">${domain}</td><td>${statusHtml}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
+                return `<tr><td class="mono" title="${t.url}">${domain}</td><td>${statusHtml}</td><td class="mono">${formatAgo(lastAnn)}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
             }).join("");
         } else {
-            ttbody.innerHTML = '<tr><td colspan="4" class="empty">No trackers</td></tr>';
+            ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
         }
     } catch (e) {
         console.error("Failed to refresh detail:", e);
+    }
+}
+
+// ─── Tracker editing ────────────────────────────────────
+//
+// The trackers table refreshes on a timer, so it holds no controls: a button
+// that moves under the pointer is worse than no button. Editing happens in a
+// panel that suspends the refresh while it is open, and the whole list is sent
+// at once -- add, remove and rename are all "edit the text and save".
+//
+// One URL per line, a blank line starts a new tier, which is the convention
+// qBittorrent's editor uses. Tiers are tried in order, so this is not
+// decoration: flattening them would change which tracker answers first.
+
+// Announce timings come as seconds, never absolute stamps: rendering a
+// server timestamp against the browser clock shows nonsense whenever the two
+// disagree. -1 means the engine has no answer (never announced, or a tracker
+// it has not reached yet) and reads as a dash, which is not the same claim as
+// "0 seconds ago".
+function formatAgo(secs) {
+    if (secs === undefined || secs === null || secs < 0) return "-";
+    if (secs < 60) return secs + "s " + t("ago");
+    if (secs < 3600) return Math.floor(secs / 60) + "m " + t("ago");
+    if (secs < 86400) return Math.floor(secs / 3600) + "h " + t("ago");
+    return Math.floor(secs / 86400) + "d " + t("ago");
+}
+
+let _trkEditHash = null;
+let _trkEditEngine = null;
+
+function trackersToText(tiers) {
+    return (tiers || []).map(tier => (tier || []).join("\n")).join("\n\n");
+}
+
+function textToTiers(text) {
+    const tiers = [];
+    let cur = [];
+    for (const rawLine of String(text).split("\n")) {
+        const line = rawLine.trim();
+        if (!line) {
+            if (cur.length) { tiers.push(cur); cur = []; }
+            continue;
+        }
+        cur.push(line);
+    }
+    if (cur.length) tiers.push(cur);
+    return tiers;
+}
+
+async function openTrackerEditor(infoHash) {
+    _trkEditHash = infoHash;
+    const box = document.getElementById("trk-edit-modal");
+    const ta = document.getElementById("trk-edit-text");
+    const out = document.getElementById("trk-edit-result");
+    out.textContent = "";
+    out.className = "trk-edit-msg";
+    ta.value = t("Loading...");
+    ta.disabled = true;
+    box.style.display = "flex";
+    try {
+        const res = await api(`/api/torrents/${infoHash}/trackers`);
+        _trkEditEngine = res.engine || "";
+        ta.value = trackersToText(res.trackers);
+        ta.disabled = false;
+        ta.focus();
+        const eng = document.getElementById("trk-edit-engine");
+        if (eng) eng.textContent = _trkEditEngine ? t("Engine") + ": " + _trkEditEngine : "";
+    } catch (e) {
+        ta.value = "";
+        ta.disabled = true;
+        out.textContent = t("Could not read the tracker list") + ": " + e.message;
+        out.className = "trk-edit-msg error";
+    }
+}
+
+function closeTrackerEditor() {
+    document.getElementById("trk-edit-modal").style.display = "none";
+    _trkEditHash = null;
+}
+
+// The editor is open = the detail refresh must not redraw underneath it.
+function trackerEditorIsOpen() {
+    const box = document.getElementById("trk-edit-modal");
+    return !!box && box.style.display === "flex";
+}
+
+async function saveTrackerEditor() {
+    if (!_trkEditHash) return;
+    const out = document.getElementById("trk-edit-result");
+    const tiers = textToTiers(document.getElementById("trk-edit-text").value);
+    out.className = "trk-edit-msg";
+    out.textContent = t("Saving...");
+    try {
+        const res = await api(`/api/torrents/${_trkEditHash}/trackers`, {
+            method: "POST",
+            body: JSON.stringify({ op: "set", tiers }),
+        });
+        if (res.changed === false) {
+            out.textContent = t("No change to save.");
+            return;
+        }
+        const n = (res.trackers || []).reduce((a, tr) => a + tr.length, 0);
+        // Say what actually happened, including the part that is not obvious:
+        // the change is live now AND written to the stored .torrent.
+        out.textContent = t("Saved. Announcing to") + " " + n + " " + t("tracker(s) from the next announce, and kept across restarts.");
+        closeTrackerEditor();
+        if (typeof refreshDetail === "function") refreshDetail();
+    } catch (e) {
+        out.textContent = e.message;
+        out.className = "trk-edit-msg error";
     }
 }
 
@@ -2786,6 +2899,8 @@ async function refreshHoardDetail() {
             ptbody.innerHTML = '<tr><td colspan="8" class="empty">No peers connected</td></tr>';
         }
 
+        // Same freeze as the race panel: never redraw a list being edited.
+        if (trackerEditorIsOpen()) return;
         const ttbody = document.getElementById("h-detail-trackers-tbody");
         if (d.trackers && d.trackers.length > 0) {
             ttbody.innerHTML = d.trackers.map(t => {
@@ -2794,7 +2909,8 @@ async function refreshHoardDetail() {
                 const ep = t.endpoints && t.endpoints[0];
                 const hasErr = ep && ep.last_error && ep.last_error !== "Success";
                 const msg = ep ? (ep.message || ep.last_error || "") : "";
-                const nextAnn = ep ? ep.next_announce : 0;
+                const nextAnn = ep && ep.next_announce !== undefined ? ep.next_announce : -1;
+                const lastAnn = ep && ep.last_announce !== undefined ? ep.last_announce : -1;
                 const seeds = ep ? ep.scrape_complete : -1;
                 const leechers = ep ? ep.scrape_incomplete : -1;
                 const statusHtml = hasErr
@@ -2802,10 +2918,10 @@ async function refreshHoardDetail() {
                     : `<span class="tracker-ok">${msg || "OK"}</span>`;
                 const nextStr = nextAnn > 0 ? `${Math.floor(nextAnn/60)}m${nextAnn%60}s` : nextAnn === 0 ? "now" : "-";
                 const scrapeStr = seeds >= 0 ? `${seeds}s/${leechers}l` : "";
-                return `<tr><td class="mono" title="${t.url}">${domain}</td><td>${statusHtml}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
+                return `<tr><td class="mono" title="${t.url}">${domain}</td><td>${statusHtml}</td><td class="mono">${formatAgo(lastAnn)}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
             }).join("");
         } else {
-            ttbody.innerHTML = '<tr><td colspan="4" class="empty">No trackers</td></tr>';
+            ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
         }
     } catch (e) {
         console.error("Failed to refresh hoard detail:", e);

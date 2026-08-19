@@ -50,6 +50,11 @@ func (emptyRaceEngine) AddTorrentSeedMode(string, string, string) (string, error
 func (emptyRaceEngine) RemoveTorrent(string, bool) error           { return errNoLocalEngine }
 func (emptyRaceEngine) ReannnounceTorrent(string) bool             { return false }
 func (emptyRaceEngine) AddTrackerToTorrent(string, string) error   { return errNoLocalEngine }
+func (emptyRaceEngine) GetTrackerTiers(string) ([][]string, error) { return nil, errNoLocalEngine }
+func (emptyRaceEngine) SetTrackerTiers(string, [][]string) ([][]string, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyRaceEngine) TorrentFilePath(string) (string, bool)      { return "", false }
 func (emptyRaceEngine) GetChokingStats() map[string]interface{}    { return map[string]interface{}{} }
 func (emptyRaceEngine) GetSessionSettings() map[string]interface{} { return map[string]interface{}{} }
 func (emptyRaceEngine) ApplySettings(map[string]interface{}) map[string]interface{} {
@@ -91,9 +96,14 @@ func (emptyHoardEngine) AddTorrent(string, string, string) (string, error) {
 func (emptyHoardEngine) AddTorrentSeedMode(string, string, string) (string, error) {
 	return "", errNoLocalEngine
 }
-func (emptyHoardEngine) RemoveTorrent(string, bool) error                           { return errNoLocalEngine }
-func (emptyHoardEngine) ReannnounceTorrent(string) bool                             { return false }
-func (emptyHoardEngine) AddTrackerToTorrent(string, string) error                   { return errNoLocalEngine }
+func (emptyHoardEngine) RemoveTorrent(string, bool) error           { return errNoLocalEngine }
+func (emptyHoardEngine) ReannnounceTorrent(string) bool             { return false }
+func (emptyHoardEngine) AddTrackerToTorrent(string, string) error   { return errNoLocalEngine }
+func (emptyHoardEngine) GetTrackerTiers(string) ([][]string, error) { return nil, errNoLocalEngine }
+func (emptyHoardEngine) SetTrackerTiers(string, [][]string) ([][]string, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyHoardEngine) TorrentFilePath(string) (string, bool)                      { return "", false }
 func (emptyHoardEngine) SetListenPort(int) error                                    { return errNoLocalEngine }
 func (emptyHoardEngine) ListenPort() int                                            { return 0 }
 func (emptyHoardEngine) HasTorrent(string) bool                                     { return false }

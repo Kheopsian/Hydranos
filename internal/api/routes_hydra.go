@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -490,6 +491,8 @@ func (s *Server) registerHydraRoutes() {
 		api.DELETE("/torrents/:info_hash", s.handleRemoveTorrent)
 		api.POST("/torrents/:info_hash/reannounce", s.handleReannounce)
 		api.POST("/torrents/:info_hash/add-tracker", s.handleAddTracker)
+		api.GET("/torrents/:info_hash/trackers", s.handleGetTorrentTrackers)
+		api.POST("/torrents/:info_hash/trackers", s.handleEditTorrentTrackers)
 		api.GET("/torrents/:info_hash/files", s.handleTorrentFiles)
 
 		// Startup pause: process-level hold on outbound traffic (start_paused)
@@ -1183,22 +1186,20 @@ func (s *Server) handleAddTracker(c *gin.Context) {
 		return
 	}
 
-	var err error
-	if s.raceEngine != nil && s.raceEngine.HasTorrent(infoHash) {
-		err = s.raceEngine.AddTrackerToTorrent(infoHash, body.URL)
-	} else if s.hoardEngine != nil && s.hoardEngine.HasTorrent(infoHash) {
-		err = s.hoardEngine.AddTrackerToTorrent(infoHash, body.URL)
-	} else {
-		c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
-		return
-	}
-
+	// This used to call a no-op on both engines and answer 200: every caller
+	// since has believed it added a tracker. It now goes through the same edit
+	// path as everything else, so it either works or says why.
+	tiers, changed, err := s.editTrackersOne(infoHash, trackerEditRequest{Op: "add", URLs: []string{body.URL}})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if errors.Is(err, errNoSuchTorrent) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "changed": changed, "trackers": tiers})
 }
 
 // ===========================================================================

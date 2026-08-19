@@ -426,9 +426,61 @@ func (e *RaceEngine) GetTorrentFileList(infoHash string) []map[string]interface{
 	return out
 }
 
+// TorrentFilePath returns the .torrent this engine reloads from at startup.
+// The resume record holds no tracker URLs, so that file -- not the store row --
+// is what decides the tracker list after a restart.
+func (e *RaceEngine) TorrentFilePath(infoHash string) (string, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	info, ok := e.torrents[infoHash]
+	if !ok || info == nil {
+		return "", false
+	}
+	return info.TorrentFilePath, info.TorrentFilePath != ""
+}
+
+// GetTrackerTiers returns the tracker list this torrent is announcing to now,
+// which is not necessarily what its .torrent said: the list is editable at
+// runtime.
+func (e *RaceEngine) GetTrackerTiers(infoHash string) ([][]string, error) {
+	infos, err := e.client.GetTrackers(infoHash)
+	if err != nil {
+		return nil, err
+	}
+	return tiersFromTrackerInfo(infos), nil
+}
+
+// SetTrackerTiers replaces the whole list and returns what the engine kept.
+// Callers persist the returned value, not the requested one.
+func (e *RaceEngine) SetTrackerTiers(infoHash string, tiers [][]string) ([][]string, error) {
+	applied, err := e.client.SetTrackers(infoHash, tiers)
+	if err != nil {
+		return nil, err
+	}
+	if applied == nil {
+		applied = [][]string{}
+	}
+	slog.Info("race: tracker list replaced", "info_hash", infoHash, "tiers", len(applied))
+	return applied, nil
+}
+
+// AddTrackerToTorrent appends one tracker as a new tier. Kept because the
+// route that calls it predates the general edit path; both now go through the
+// same primitive, so neither can quietly do nothing.
 func (e *RaceEngine) AddTrackerToTorrent(infoHash, url string) error {
-	// TODO: add set_trackers command to hydra-engine
-	return nil
+	current, err := e.GetTrackerTiers(infoHash)
+	if err != nil {
+		return err
+	}
+	for _, tier := range current {
+		for _, u := range tier {
+			if u == url {
+				return nil // already there: adding it twice would announce twice
+			}
+		}
+	}
+	_, err = e.SetTrackerTiers(infoHash, append(current, []string{url}))
+	return err
 }
 
 func (e *RaceEngine) SessionGrabbed() int64 {
@@ -724,9 +776,54 @@ func (e *RaceEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 
 	m := detail.ToMap()
 
-	// Inject raw tracker data from engine (preserves endpoints JSON)
+	// Inject raw tracker data from the engine, then overwrite each endpoint
+	// with what the Go announce loop actually observed. Typhon's own tracker
+	// state is stale here because its internal announce loop is disabled, so
+	// passing it through untouched showed placeholders as measurements: a
+	// hardcoded "next announce" of zero, and no last announce at all.
 	if trackers, err := e.client.GetTrackers(infoHash); err == nil {
-		m["trackers"] = trackers
+		obsByURL := trackerObsFor(infoHash)
+		trackerMaps := make([]map[string]interface{}, 0, len(trackers))
+		for _, t := range trackers {
+			tm := map[string]interface{}{
+				"url":      t.URL,
+				"tier":     t.Tier,
+				"verified": t.Verified,
+			}
+			var endpoints []map[string]interface{}
+			if len(t.Endpoints) > 0 {
+				_ = json.Unmarshal(t.Endpoints, &endpoints)
+			}
+			if obs, ok := obsByURL[t.URL]; ok {
+				if len(endpoints) == 0 {
+					endpoints = []map[string]interface{}{{}}
+				}
+				for i := range endpoints {
+					if obs.OK {
+						endpoints[i]["last_error"] = "Success"
+						endpoints[i]["message"] = ""
+						endpoints[i]["scrape_complete"] = obs.Seeds
+						endpoints[i]["scrape_incomplete"] = obs.Leechers
+					} else {
+						endpoints[i]["last_error"] = obs.ErrorMsg
+						endpoints[i]["message"] = obs.ErrorMsg
+					}
+					if !obs.NextAt.IsZero() {
+						secs := int64(time.Until(obs.NextAt).Seconds())
+						if secs < 0 {
+							secs = 0
+						}
+						endpoints[i]["next_announce"] = secs
+					}
+					if !obs.LastAt.IsZero() {
+						endpoints[i]["last_announce"] = int64(time.Since(obs.LastAt).Seconds())
+					}
+				}
+			}
+			tm["endpoints"] = endpoints
+			trackerMaps = append(trackerMaps, tm)
+		}
+		m["trackers"] = trackerMaps
 	}
 
 	return m

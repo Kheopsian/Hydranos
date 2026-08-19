@@ -34,6 +34,7 @@ const (
 	MethodSetEngineOptFlag     = "set_opt_flag"
 	MethodEngineOptFlags       = "get_opt_flags"
 	MethodGetTrackers          = "get_trackers"
+	MethodSetTrackers          = "set_trackers"
 	MethodGetDiagnostics       = "get_diagnostics"
 	MethodAddPeers             = "add_peers"
 	MethodAddRouted            = "add_routed"             // rich placement add: invokes the agent's own Race/Hoard engine
@@ -116,6 +117,12 @@ type AddParams struct {
 	Stopped     bool   `json:"stopped"`
 	SeedMode    bool   `json:"seed_mode"`
 	WithOptions bool   `json:"with_options"` // true => AddTorrentWithOptions (honour SeedMode)
+}
+
+// SetTrackersParams carries a whole replacement tracker list, in tiers.
+type SetTrackersParams struct {
+	InfoHash string     `json:"info_hash"`
+	Trackers [][]string `json:"trackers"`
 }
 
 // InfoHashParams is the params envelope for single-torrent query/lifecycle calls.

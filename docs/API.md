@@ -22,7 +22,15 @@ Auth = `X-API-Key`.
 - `POST /api/torrents` — add (magnet/url).
 - `DELETE /api/torrents/:info_hash` — **retire des DEUX moteurs** (≠ purge race-only).
 - `POST /api/torrents/:info_hash/reannounce`
-- `POST /api/torrents/:info_hash/add-tracker`
+- `POST /api/torrents/:info_hash/add-tracker` — ajoute UN tracker. ⚠️ Jusqu'à cette version la route répondait 200 **sans rien faire** (no-op dans les deux moteurs) ; elle passe désormais par le même chemin que `POST /trackers` avec `op=add`.
+- `GET /api/torrents/:info_hash/trackers` — liste les trackers **réellement annoncés**, groupés en tiers : `{"engine":"hoard","trackers":[["url","url de repli"],["tier 2"]]}`. Ce n'est pas forcément ce que dit le `.torrent` : la liste s'édite à chaud.
+- `POST /api/torrents/:info_hash/trackers` — édite la liste. Corps : `{"op":"add|remove|replace|set", "urls":[...], "from":"...", "to":"..."}`. Réponse : `{"trackers":[[...]], "changed":bool}`.
+  - `add` ajoute chaque URL dans un nouveau tier ; une URL déjà présente est ignorée (`changed:false`) — annoncer deux fois au même tracker double notre charge et nous fait passer pour deux pairs.
+  - `remove` retire les URL citées ; un tier vidé disparaît.
+  - `replace` (`from`/`to`) renomme **en gardant la position dans le tier** — c'est le cas changement de domaine.
+  - `set` remplace tout par `urls` (un tier par URL).
+  - ⚠️ L'édition est appliquée au moteur **puis** écrite dans le `.torrent` stocké (clés `announce`/`announce-list` seules, dict `info` copié octet pour octet → **l'infohash ne change pas**). Si le moteur accepte mais que l'écriture échoue, la réponse le dit explicitement (état vivant OK, perdu au prochain redémarrage).
+  - Les URL sont validées (`http`/`https`/`udp` + hôte) mais **jamais réécrites** : une URL de tracker est une clé ailleurs (compteurs par tracker, override de passkey, onglet Trackers).
 - `GET /api/torrents/:info_hash/files` — contenu du torrent : `files[]` (`path`, `size`), cherché dans le moteur qui le détient. Ajoute `availability` (`min`, `max`, `avg`, `num_pieces`) **uniquement si le torrent a une piece map**, c.-à-d. en mode download — un torrent seed_mode n'a pas de bitfield (c'est ce qui rend 100k torrents pas chers), donc la clé est absente et l'UI affiche « n/a ».
 - `GET /api/opt/flags` / `POST /api/opt/flags` — flags d'optim à chaud. En plus des flags Go (`ipc_route`, `ipc_frame`, `list_cache`, `ipc_prealloc`, `qbit_snapshot`, `totals_cache`, `gogc`, `list_cache_ttl_ms`), deux flags **moteur** (Rust), appliqués aux DEUX moteurs et rendus sous `engine_flags.{race,hoard}` :
   - `session_pinning` (bool) — thread-per-core : épingle chaque session de pair sur un runtime mono-thread. ⚠️ **Ne s'applique qu'aux NOUVELLES sessions** : une bascule met des minutes à prendre effet, le temps que les pairs tournent. Blocs d'A/B assez longs pour survivre à ça.

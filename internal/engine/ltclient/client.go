@@ -803,6 +803,33 @@ func (c *Client) GetTrackers(infoHash string) ([]TrackerInfo, error) {
 	return result.Trackers, nil
 }
 
+// SetTrackers replaces a torrent's tracker list, in tiers, and returns the
+// list the engine actually kept. Whole-list replacement is deliberate: add,
+// remove and edit are read-modify-write above this layer, so only one call can
+// change what gets announced and applying it twice changes nothing.
+func (c *Client) SetTrackers(infoHash string, tiers [][]string) ([][]string, error) {
+	if tiers == nil {
+		// json.Marshal turns a nil slice into null, which the engine rejects as
+		// "not an array". An empty list is a legitimate request (announce to
+		// nobody), so make it explicit rather than accidental.
+		tiers = [][]string{}
+	}
+	raw, err := c.call("set_trackers", map[string]interface{}{
+		"info_hash": infoHash,
+		"trackers":  tiers,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Trackers [][]string `json:"trackers"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	return result.Trackers, nil
+}
+
 // GetDiagnostics returns deep libtorrent session diagnostics.
 func (c *Client) GetDiagnostics() (*DiagnosticStats, error) {
 	raw, err := c.call("get_diagnostics", map[string]interface{}{})
