@@ -70,8 +70,14 @@ function _renderHeaderIP(v4, v6) {
     const el = document.getElementById("header-exit-ip");
     if (!el || !v4) return;
     if (v6) {
-        el.textContent = incoExitIP(v4) + "  /  " + incoExitIP(v6);
-        el.title = "";
+        // One line per address. Joining them with a separator made a ~40
+        // character string that stretched the header, and wrapped at whatever
+        // point the layout happened to run out of room.
+        el.innerHTML = `<span class="ip-line">${esc(incoExitIP(v4))}</span>` +
+            `<span class="ip-line">${esc(incoExitIP(v6))}</span>`;
+        // Truncation must never be the only copy: the tooltip holds both,
+        // masked the same way, so incognito stays incognito on hover too.
+        el.title = incoExitIP(v4) + " / " + incoExitIP(v6);
     } else if (_ipv6Wanted) {
         // Asked for, not available: say so where the address would be, rather
         // than showing one address and letting it pass for a working dual stack.
@@ -80,7 +86,7 @@ function _renderHeaderIP(v4, v6) {
         el.title = t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it.");
     } else {
         el.textContent = incoExitIP(v4);
-        el.title = "";
+        el.title = incoExitIP(v4);
     }
 }
 
