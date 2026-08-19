@@ -10,15 +10,22 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Kheopsian/hydra/internal/agentwire"
 	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
 )
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:9099", "HydraAgent host:port")
-	token := flag.String("token", "", "bearer token")
+	token := flag.String("token", "", "bearer token (defaults to $"+agentwire.TokenEnv+", the same variable the agent reads)")
 	ca := flag.String("ca", "", "TLS CA cert path (empty = plaintext)")
 	engines := flag.String("engines", "race,hoard", "comma-separated engines to probe")
 	flag.Parse()
+	// Probing from the box that serves the agent is the common case, and that
+	// box already exports the token: read it rather than making the operator
+	// paste a secret into a shell that keeps its history.
+	if *token == "" {
+		*token = strings.TrimSpace(os.Getenv(agentwire.TokenEnv))
+	}
 
 	fail := false
 	for _, eng := range strings.Split(*engines, ",") {

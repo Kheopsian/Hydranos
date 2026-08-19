@@ -154,6 +154,38 @@ func chownSeeded(target, dir string) {
 	}
 }
 
+// resolveAgentToken picks the shared bearer token the HydraAgent gRPC
+// data-plane requires, in decreasing order of precedence: --agent-token, then
+// $HYDRA_AGENT_TOKEN, then [daemon] agent_token. The environment is read so an
+// orchestrator can inject the secret the way it injects every other secret --
+// a Kubernetes secretKeyRef, a systemd EnvironmentFile, a compose env_file --
+// instead of putting it in a command line that shows up in `ps` and in the
+// manifest itself. It returns the token and the name of the source it came
+// from, for a log line that says where the token came from without printing
+// it.
+//
+// An empty environment variable counts as absent, not as "no auth": an unset
+// or not-yet-populated secret must fall through to the config rather than
+// silently serve the data-plane unauthenticated. Turning auth off explicitly
+// is what --agent-token="" is for, which is why the flag is tracked by
+// presence and not by value.
+func resolveAgentToken(flagVal string, flagSet bool, cfgVal string) (token, source string) {
+	if flagSet {
+		return strings.TrimSpace(flagVal), "--agent-token"
+	}
+	// Trimmed because a token handed over by an env file or a mounted secret
+	// almost always arrives with a trailing newline, and a token that differs
+	// from the front's by one invisible byte fails authentication with nothing
+	// on either side to explain why.
+	if v := strings.TrimSpace(os.Getenv(agentwire.TokenEnv)); v != "" {
+		return v, "$" + agentwire.TokenEnv
+	}
+	if v := strings.TrimSpace(cfgVal); v != "" {
+		return v, "[daemon] agent_token"
+	}
+	return "", ""
+}
+
 // resolveConfigPath picks the config file. With --config given explicitly we
 // use that path, seeding a fresh config there when the file does not exist.
 // Otherwise try, in order: the compiled default path, a default.toml next to
@@ -399,7 +431,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	frontOnly := flag.Bool("front-only", false, "run as a controller node: no local engine, drive remote [[agent]]s only")
 	agentAddr := flag.String("agent-addr", "", "if set, also serve the HydraAgent gRPC data-plane on this addr (e.g. :9090)")
-	agentToken := flag.String("agent-token", "", "shared bearer token required by the HydraAgent gRPC API (empty = no auth)")
+	agentToken := flag.String("agent-token", "", "shared bearer token required by the HydraAgent gRPC API; overrides $"+agentwire.TokenEnv+" and [daemon] agent_token (empty everywhere = no auth)")
 	agentTLSCert := flag.String("agent-tls-cert", "", "TLS cert file for the HydraAgent gRPC API (with --agent-tls-key)")
 	agentTLSKey := flag.String("agent-tls-key", "", "TLS key file for the HydraAgent gRPC API")
 	agentOnly := flag.Bool("agent-only", false, "run as a dedicated agent: engines + gRPC data-plane, no api.Server, owns events")
@@ -436,10 +468,16 @@ func main() {
 	// default.toml next to the executable (and CWD); if none exists, write a
 	// fresh one there so a freshly-unzipped, double-clicked install just runs.
 	// Docker/systemd pass --config explicitly and keep their exact path.
-	configExplicit := false
+	configExplicit, agentTokenExplicit := false, false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "config" {
+		switch f.Name {
+		case "config":
 			configExplicit = true
+		case "agent-token":
+			// Recorded rather than inferred from an empty value: passing
+			// --agent-token="" is how you turn auth off on a node whose
+			// config or environment sets a token.
+			agentTokenExplicit = true
 		}
 	})
 	resolved, seeded := resolveConfigPath(*configPath, configExplicit)
@@ -483,6 +521,13 @@ func main() {
 		} else {
 			slog.Error("failed to generate API key", "err", e)
 		}
+	}
+	// The data-plane token is resolved once, here, so both the monolith's
+	// optional --agent-addr listener and the dedicated --agent-only node get
+	// the same value from the same three sources.
+	agentSecret, agentSecretFrom := resolveAgentToken(*agentToken, agentTokenExplicit, cfg.Daemon.AgentToken)
+	if agentSecret != "" {
+		slog.Info("HydraAgent token loaded", "from", agentSecretFrom)
 	}
 	// No admin password is generated here on purpose. Hydra used to mint one at
 	// this point and only report it ~700 lines later, after the engines were up
@@ -655,7 +700,7 @@ func main() {
 		return
 	}
 	if *agentOnly {
-		runAgentOnly(ctx, cfg, *agentAddr, *agentToken, *agentTLSCert, *agentTLSKey, *listenPortHook)
+		runAgentOnly(ctx, cfg, *agentAddr, agentSecret, *agentTLSCert, *agentTLSKey, *listenPortHook)
 		return
 	}
 	if storeRepair != nil && storeRepair.Needed {
@@ -743,13 +788,13 @@ func main() {
 	// default = zero impact on the monolith. ownEvents stays false: the
 	// in-process engines already own SetEventHandler on these live clients.
 	if *agentAddr != "" {
-		if *agentToken == "" {
-			slog.Warn("HydraAgent served WITHOUT a token (--agent-token): do not expose off-LAN")
+		if agentSecret == "" {
+			slog.Warn("HydraAgent served WITHOUT a token: set --agent-token, $" + agentwire.TokenEnv + " or [daemon] agent_token before exposing it off-LAN")
 		}
 		agentSrv := agent.NewServer(map[string]engine.EngineClient{
 			agentwire.EngineRace:  raceProc.Client(),
 			agentwire.EngineHoard: hoardProc.Client(),
-		}, cfg.Daemon.DataDir, *agentToken)
+		}, cfg.Daemon.DataDir, agentSecret)
 		agentSrv.SetTLS(*agentTLSCert, *agentTLSKey)
 		agentSrv.SetRichEngines(raceEngine, hoardEngine)
 		go func() {

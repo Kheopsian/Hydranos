@@ -193,9 +193,15 @@ type AuthConfig struct {
 
 // DaemonConfig — top-level daemon settings (maps to [daemon] in TOML).
 type DaemonConfig struct {
-	APIHost             string `toml:"api_host"`
-	APIPort             int    `toml:"api_port"`
-	APIKey              string `toml:"api_key"`
+	APIHost string `toml:"api_host"`
+	APIPort int    `toml:"api_port"`
+	APIKey  string `toml:"api_key"`
+	// AgentToken is the shared bearer token the HydraAgent gRPC data-plane
+	// requires from a front (--agent-addr / --agent-only). It lives here so an
+	// agent node can be handed its token by the config file it already mounts
+	// instead of a command line: --agent-token and $HYDRA_AGENT_TOKEN both
+	// override it. Empty everywhere = the data-plane serves without auth.
+	AgentToken          string `toml:"agent_token"`
 	DataDir             string `toml:"data_dir"`
 	CreateTorrentFolder bool   `toml:"create_torrent_folder"`
 	UpdateCheckDisabled bool   `toml:"update_check_disabled"`
@@ -353,6 +359,7 @@ func DefaultConfig() *HydraConfig {
 // we resurrect only keys we actually want, never the features dropped in the
 // OSS cleanup. Append future keys here.
 var migrationKeys = []struct{ section, key, value string }{
+	{"daemon", "agent_token", `""`},
 	{"race", "bind_interface", `""`},
 	{"race", "enable_ipv6", `false`},
 	{"race", "listen_interfaces", `""`},
