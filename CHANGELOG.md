@@ -3,6 +3,36 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.93.0 - 2026-08-19
+
+### Fixed
+
+- **A resume record could be left truncated by a crash.** Saving one wrote
+  straight to its final path, so an interruption part-way through - a crash, an
+  OOM kill, a full disk - left a half-written or zero-byte file. Loading can
+  only warn and skip such a record, so the torrent silently lost its resume
+  state at the next start. Two records were sitting in exactly that state in a
+  195k-torrent library, months old and unnoticed, because one warning line in a
+  busy log is invisible. Saves now write a sibling temporary file and rename it
+  into place, which is atomic: a reader sees the old record or the new one,
+  never a partial one.
+
+### Added
+
+- **Startup now reports where its time actually goes.** Reloading the library
+  does two very different things: it reads the resume records, then it re-parses
+  the .torrent file each record points at. The second is where the piece hashes
+  live and is far the larger of the two, but with a single duration in the log
+  there was no way to tell them apart, and a slow start got blamed on whichever
+  half was easier to imagine. The engine now logs both, with the record count
+  and the bytes of .torrent re-parsed.
+
+### Changed
+
+- **A temporary resume file left behind by an interrupted save is now swept.**
+  Nothing ever reads one, so without this they would accumulate one per crash
+  and never leave.
+
 ## v3.92.2 - 2026-08-19
 
 ### Added
