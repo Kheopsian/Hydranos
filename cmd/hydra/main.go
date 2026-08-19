@@ -6,9 +6,11 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -92,12 +94,64 @@ func writeDefaultConfig(target, dataDir string) error {
 			doc = d
 		}
 	}
-	if dir := filepath.Dir(target); dir != "" && dir != "." {
+	dir := filepath.Dir(target)
+	if dir == "" {
+		dir = "."
+	}
+	if dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
 	}
-	return os.WriteFile(target, []byte(doc), 0644)
+	tmp, err := os.CreateTemp(dir, ".default.toml.*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // a no-op once the rename succeeded
+	if _, err := tmp.WriteString(doc); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// CreateTemp opens 0600; a config Hydra seeds is world-readable, like the
+	// one entrypoint.sh copies in.
+	if err := os.Chmod(tmp.Name(), 0644); err != nil {
+		return err
+	}
+	if _, err := os.Stat(target); err == nil {
+		return os.ErrExist
+	}
+	if err := os.Rename(tmp.Name(), target); err != nil {
+		return err
+	}
+	chownSeeded(target, dir)
+	return nil
+}
+
+// chownSeeded hands a freshly seeded config to the PUID/PGID account when we
+// run as root. entrypoint.sh chowns the config directory before dropping
+// privileges; a deployment that overrides the entrypoint gets no such pass and
+// would leave a root-owned config in a volume the app is about to read as
+// somebody else. Failures are ignored: this is a courtesy, not a precondition
+// for starting.
+func chownSeeded(target, dir string) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	uid, err := strconv.Atoi(os.Getenv("PUID"))
+	if err != nil {
+		return
+	}
+	gid, err := strconv.Atoi(os.Getenv("PGID"))
+	if err != nil {
+		gid = uid
+	}
+	_ = os.Chown(target, uid, gid)
+	if dir != "." {
+		_ = os.Chown(dir, uid, gid)
+	}
 }
 
 // resolveConfigPath picks the config file. With --config given explicitly we
@@ -110,7 +164,21 @@ func writeDefaultConfig(target, dataDir string) error {
 // mirror is attached (it lives beside the config we are still resolving).
 func resolveConfigPath(def string, explicit bool) (string, bool) {
 	if explicit {
-		if st, err := os.Stat(def); err == nil && !st.IsDir() {
+		st, err := os.Stat(def)
+		switch {
+		case err == nil && !st.IsDir():
+			return def, false
+		case err == nil:
+			// A directory is a path mistake, not an empty volume. Let
+			// config.Load fail with the real reason rather than seeding
+			// something next to it.
+			slog.Error("the requested config path is a directory, not a file", "path", def)
+			return def, false
+		case !errors.Is(err, fs.ErrNotExist):
+			// Unreadable is not missing: a permission error here means the
+			// file may well exist, and writing over it is the last thing we
+			// want. Same treatment — leave it to config.Load to report.
+			slog.Error("could not check the requested config path", "path", def, "err", err)
 			return def, false
 		}
 		// A missing --config used to be fatal, which is exactly the wrong
@@ -126,11 +194,17 @@ func resolveConfigPath(def string, explicit bool) (string, bool) {
 		if dir := filepath.Dir(def); filepath.IsAbs(dir) {
 			dataDir = dir
 		}
-		if err := writeDefaultConfig(def, dataDir); err != nil {
+		switch err := writeDefaultConfig(def, dataDir); {
+		case err == nil:
+			return def, true
+		case errors.Is(err, os.ErrExist):
+			// Another process seeded the same path while we were writing.
+			// Its copy is the one to read.
+			return def, false
+		default:
 			slog.Error("no config at the requested path and could not write one", "path", def, "err", err)
 			return def, false
 		}
-		return def, true
 	}
 	exeDir := ""
 	if exe, err := os.Executable(); err == nil {
@@ -151,11 +225,15 @@ func resolveConfigPath(def string, explicit bool) (string, bool) {
 	if exeDir != "" {
 		target = filepath.Join(exeDir, "default.toml")
 	}
-	if err := writeDefaultConfig(target, ""); err != nil {
+	switch err := writeDefaultConfig(target, ""); {
+	case err == nil:
+		return target, true
+	case errors.Is(err, os.ErrExist):
+		return target, false
+	default:
 		slog.Warn("no config found and could not write a default; using compiled default path", "target", target, "err", err)
 		return def, false
 	}
-	return target, true
 }
 
 // subcommands are the one-shot maintenance commands. Each must be the first
@@ -368,7 +446,14 @@ func main() {
 	*configPath = resolved
 	logHub.SetMirrorFileBeside(*configPath, "hydra.log")
 	if seeded {
-		slog.Info("no config file found, wrote a fresh default", "path", *configPath)
+		if configExplicit {
+			// Worth a warning, not a note: a typo in --config lands here too,
+			// and a fresh config means an instance that knows nothing about
+			// the data the operator expected it to pick up.
+			slog.Warn("no config file at the requested path, wrote a fresh default there", "path", *configPath)
+		} else {
+			slog.Info("no config file found, wrote a fresh default", "path", *configPath)
+		}
 	}
 
 	cfg, err := config.Load(*configPath)
