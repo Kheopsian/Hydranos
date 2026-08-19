@@ -75,14 +75,62 @@ func engineSocketPath(dataDir, name string, tcpPort int) string {
 	return filepath.Join(dataDir, name+".sock")
 }
 
+// writeDefaultConfig seeds a fresh config at target from the embedded template,
+// creating the parent directory if needed. dataDir overrides the template's
+// data_dir; empty means the portable relative "data" (resolved next to the
+// executable at boot).
+func writeDefaultConfig(target, dataDir string) error {
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	doc := hydraroot.DefaultConfigTOML
+	if d, err := config.SetTOMLValue(doc, "daemon", "data_dir", fmt.Sprintf("%q", dataDir)); err == nil {
+		doc = d
+	}
+	if defaultAPIHost != "" {
+		if d, err := config.SetTOMLValue(doc, "daemon", "api_host", `"`+defaultAPIHost+`"`); err == nil {
+			doc = d
+		}
+	}
+	if dir := filepath.Dir(target); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(target, []byte(doc), 0644)
+}
+
 // resolveConfigPath picks the config file. With --config given explicitly we
-// use it as-is. Otherwise try, in order: the compiled default path, a
-// default.toml next to the executable, then default.toml in the working dir.
-// If none exist, write a fresh default.toml next to the executable (with a
-// relative data_dir) so a freshly-unzipped, double-clicked install just runs.
-func resolveConfigPath(def string, explicit bool) string {
+// use that path, seeding a fresh config there when the file does not exist.
+// Otherwise try, in order: the compiled default path, a default.toml next to
+// the executable, then default.toml in the working dir. If none exist, write a
+// fresh default.toml next to the executable (with a relative data_dir) so a
+// freshly-unzipped, double-clicked install just runs. The second return value
+// reports whether a config was seeded, so the caller can say so once the log
+// mirror is attached (it lives beside the config we are still resolving).
+func resolveConfigPath(def string, explicit bool) (string, bool) {
 	if explicit {
-		return def
+		if st, err := os.Stat(def); err == nil && !st.IsDir() {
+			return def, false
+		}
+		// A missing --config used to be fatal, which is exactly the wrong
+		// behaviour under an orchestrator: k8s mounts an empty volume, the
+		// container dies before it can write anything, and it dies again on
+		// every restart. Seed it instead — the same first-run seeding
+		// entrypoint.sh does, but for every mode (--agent-only included) and
+		// for deployments that override the entrypoint. An absolute config
+		// path also takes its own directory as data_dir, matching what
+		// entrypoint.sh writes, so an empty /config volume becomes a complete
+		// install rather than one scattering data next to the binary.
+		dataDir := "data"
+		if dir := filepath.Dir(def); filepath.IsAbs(dir) {
+			dataDir = dir
+		}
+		if err := writeDefaultConfig(def, dataDir); err != nil {
+			slog.Error("no config at the requested path and could not write one", "path", def, "err", err)
+			return def, false
+		}
+		return def, true
 	}
 	exeDir := ""
 	if exe, err := os.Executable(); err == nil {
@@ -95,7 +143,7 @@ func resolveConfigPath(def string, explicit bool) string {
 	candidates = append(candidates, "default.toml")
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
-			return c
+			return c, false
 		}
 	}
 	// Nothing found — write a fresh default next to the executable.
@@ -103,21 +151,11 @@ func resolveConfigPath(def string, explicit bool) string {
 	if exeDir != "" {
 		target = filepath.Join(exeDir, "default.toml")
 	}
-	doc := hydraroot.DefaultConfigTOML
-	if d, err := config.SetTOMLValue(doc, "daemon", "data_dir", `"data"`); err == nil {
-		doc = d
-	}
-	if defaultAPIHost != "" {
-		if d, err := config.SetTOMLValue(doc, "daemon", "api_host", `"`+defaultAPIHost+`"`); err == nil {
-			doc = d
-		}
-	}
-	if err := os.WriteFile(target, []byte(doc), 0644); err != nil {
+	if err := writeDefaultConfig(target, ""); err != nil {
 		slog.Warn("no config found and could not write a default; using compiled default path", "target", target, "err", err)
-		return def
+		return def, false
 	}
-	slog.Info("no config found, wrote a fresh default", "path", target)
-	return target
+	return target, true
 }
 
 // subcommands are the one-shot maintenance commands. Each must be the first
@@ -326,8 +364,12 @@ func main() {
 			configExplicit = true
 		}
 	})
-	*configPath = resolveConfigPath(*configPath, configExplicit)
+	resolved, seeded := resolveConfigPath(*configPath, configExplicit)
+	*configPath = resolved
 	logHub.SetMirrorFileBeside(*configPath, "hydra.log")
+	if seeded {
+		slog.Info("no config file found, wrote a fresh default", "path", *configPath)
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
