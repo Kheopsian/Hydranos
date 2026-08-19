@@ -81,11 +81,13 @@ function _renderHeaderIP(v4, v6) {
     } else if (_ipv6Wanted) {
         // Asked for, not available: say so where the address would be, rather
         // than showing one address and letting it pass for a working dual stack.
-        el.innerHTML = esc(incoExitIP(v4)) +
-            `  /  <span class="net-warn">${esc(t("IPv6 unavailable"))}</span>`;
+        // On its own line: this is a sentence, and a clipped sentence says
+        // nothing, while a clipped address still has the tooltip behind it.
+        el.innerHTML = `<span class="ip-line">${esc(incoExitIP(v4))}</span>` +
+            `<span class="ip-line net-warn">${esc(t("IPv6 unavailable"))}</span>`;
         el.title = t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it.");
     } else {
-        el.textContent = incoExitIP(v4);
+        el.innerHTML = `<span class="ip-line">${esc(incoExitIP(v4))}</span>`;
         el.title = incoExitIP(v4);
     }
 }
