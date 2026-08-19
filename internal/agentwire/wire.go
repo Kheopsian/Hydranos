@@ -8,6 +8,12 @@ package agentwire
 
 import "time"
 
+// TokenEnv is the environment variable holding the shared bearer token the
+// data-plane requires. It lives with the wire contract because both ends read
+// it: the agent to know what to demand, a client (agentprobe) to know what to
+// present. Named once here so the two can never drift apart.
+const TokenEnv = "HYDRA_AGENT_TOKEN"
+
 // Engine session identifiers carried in CallRequest.engine / SubscribeRequest.engine.
 const (
 	EngineRace  = "race"
