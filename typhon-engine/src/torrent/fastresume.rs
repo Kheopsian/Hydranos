@@ -31,12 +31,28 @@ pub struct ResumeData {
 }
 
 /// Save resume data for a torrent.
+///
+/// Writes to a sibling `.tmp` and renames into place. A plain write to the
+/// final path is not atomic: a crash, an OOM kill or a full disk part-way
+/// through leaves a truncated -- often zero-byte -- record, and `load_all`
+/// can only warn and skip it, so the torrent silently loses its resume state
+/// at the next start. Two records were found in exactly that state in
+/// production, months after the fact, because one warn line in a busy log is
+/// invisible. rename(2) inside a directory is atomic: a reader sees either
+/// the old record or the new one, never a half-written one.
 pub fn save(resume_dir: &str, info_hash: &InfoHash, data: &ResumeData) {
-    let path = format!("{}/{}.json", resume_dir, super::hex_encode(info_hash));
+    let hex = super::hex_encode(info_hash);
+    let path = format!("{}/{}.json", resume_dir, hex);
+    let tmp = format!("{}/{}.json.tmp", resume_dir, hex);
     match serde_json::to_string(data) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                warn!("[resume] failed to write {}: {}", path, e);
+            if let Err(e) = std::fs::write(&tmp, json) {
+                warn!("[resume] failed to write {}: {}", tmp, e);
+                return;
+            }
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                warn!("[resume] failed to rename {} -> {}: {}", tmp, path, e);
+                std::fs::remove_file(&tmp).ok();
             }
         }
         Err(e) => warn!("[resume] failed to serialize: {}", e),
@@ -58,6 +74,12 @@ pub fn load_all(resume_dir: &str) -> Vec<ResumeData> {
         };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            // A `.tmp` here is a save that died between write and rename.
+            // Nothing will ever read it, so sweep it rather than let one
+            // leak per crash forever.
+            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                std::fs::remove_file(&path).ok();
+            }
             continue;
         }
         match std::fs::read_to_string(&path) {

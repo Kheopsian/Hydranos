@@ -249,10 +249,26 @@ impl TorrentManager {
     }
 
     pub fn load_resume_data(&self) -> usize {
+        // Timed in two parts on purpose. Reading the resume records is a few
+        // dozen MB of small JSON; re-parsing every .torrent that each record
+        // points at is orders of magnitude more bytes, because that is where
+        // the piece hashes live. Without the split, a slow startup gets blamed
+        // on whichever half is easier to imagine.
+        let t_start = std::time::Instant::now();
         let resumes = fastresume::load_all(&self.resume_dir);
+        let records = resumes.len();
+        let t_records = t_start.elapsed();
         let mut loaded = 0;
+        let mut parse_time = std::time::Duration::ZERO;
+        let mut parse_bytes: u64 = 0;
         for rd in resumes {
-            let meta = match metainfo::parse_torrent_file(&rd.torrent_path) {
+            let t_parse = std::time::Instant::now();
+            let parsed = metainfo::parse_torrent_file(&rd.torrent_path);
+            parse_time += t_parse.elapsed();
+            if let Ok(md) = std::fs::metadata(&rd.torrent_path) {
+                parse_bytes += md.len();
+            }
+            let meta = match parsed {
                 Ok(m) => m,
                 Err(e) => {
                     warn!("[resume] skip {}: {}", &rd.info_hash[..8.min(rd.info_hash.len())], e);
@@ -315,6 +331,16 @@ impl TorrentManager {
             self.torrents.insert(ih, Arc::new(state));
             loaded += 1;
         }
+        info!(
+            "[resume] startup: {} records read in {:.2}s, {} .torrent re-parsed in {:.2}s ({:.1} MiB), {} loaded, total {:.2}s",
+            records,
+            t_records.as_secs_f64(),
+            records,
+            parse_time.as_secs_f64(),
+            parse_bytes as f64 / 1048576.0,
+            loaded,
+            t_start.elapsed().as_secs_f64(),
+        );
         loaded
     }
 
