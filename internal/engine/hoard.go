@@ -807,11 +807,61 @@ func (e *HoardEngine) RemoveTorrent(infoHash string, deleteFiles bool) {
 	slog.Info("hoard: torrent removed", "info_hash", infoHash, "delete_files", deleteFiles)
 }
 
-// AddTrackerToTorrent is not directly supported via current IPC — no-op for now.
+// TorrentFilePath returns the .torrent this engine reloads from at startup.
+// The resume record holds no tracker URLs, so that file -- not the store row --
+// is what decides the tracker list after a restart.
+func (e *HoardEngine) TorrentFilePath(infoHash string) (string, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	info, ok := e.torrents[infoHash]
+	if !ok || info == nil {
+		return "", false
+	}
+	return info.TorrentFilePath, info.TorrentFilePath != ""
+}
+
+// GetTrackerTiers returns the tracker list this torrent is announcing to now,
+// which is not necessarily what its .torrent said: the list is editable at
+// runtime.
+func (e *HoardEngine) GetTrackerTiers(infoHash string) ([][]string, error) {
+	infos, err := e.client.GetTrackers(infoHash)
+	if err != nil {
+		return nil, err
+	}
+	return tiersFromTrackerInfo(infos), nil
+}
+
+// SetTrackerTiers replaces the whole list and returns what the engine kept.
+// Callers persist the returned value, not the requested one.
+func (e *HoardEngine) SetTrackerTiers(infoHash string, tiers [][]string) ([][]string, error) {
+	applied, err := e.client.SetTrackers(infoHash, tiers)
+	if err != nil {
+		return nil, err
+	}
+	if applied == nil {
+		applied = [][]string{}
+	}
+	slog.Info("hoard: tracker list replaced", "info_hash", infoHash, "tiers", len(applied))
+	return applied, nil
+}
+
+// AddTrackerToTorrent appends one tracker as a new tier. Kept because the
+// route that calls it predates the general edit path; both now go through the
+// same primitive, so neither can quietly do nothing.
 func (e *HoardEngine) AddTrackerToTorrent(infoHash, url string) error {
-	// TODO: add set_trackers command to hydra-engine
-	slog.Warn("hoard: AddTrackerToTorrent not yet implemented in libtorrent engine")
-	return nil
+	current, err := e.GetTrackerTiers(infoHash)
+	if err != nil {
+		return err
+	}
+	for _, tier := range current {
+		for _, u := range tier {
+			if u == url {
+				return nil // already there: adding it twice would announce twice
+			}
+		}
+	}
+	_, err = e.SetTrackerTiers(infoHash, append(current, []string{url}))
+	return err
 }
 
 // LivePort exposes the runtime listen-port override atomic so the hoard
@@ -1121,6 +1171,9 @@ func (e *HoardEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 							secs = 0
 						}
 						endpoints[i]["next_announce"] = secs
+					}
+					if !obs.LastAt.IsZero() {
+						endpoints[i]["last_announce"] = int64(time.Since(obs.LastAt).Seconds())
 					}
 				}
 			}

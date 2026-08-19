@@ -20,6 +20,14 @@ pub struct ResumeData {
     /// keeps older resume files compatible.
     #[serde(default)]
     pub bitfield: String,
+    /// The tracker list actually announced to, in tiers, which is NOT
+    /// necessarily what `torrent_path` parses to: the operator can edit it.
+    /// This record is what restores a torrent at startup, so without the
+    /// list here every edit is undone by the next restart. Serde default
+    /// keeps older resume files loadable -- empty means "whatever the
+    /// .torrent says".
+    #[serde(default)]
+    pub trackers: Vec<Vec<String>>,
 }
 
 /// Save resume data for a torrent.

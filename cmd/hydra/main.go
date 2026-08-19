@@ -1095,6 +1095,7 @@ func main() {
 	// race and hoard both announce + seed the same infohash (legit multi-seed).
 	hoardAnnouncer.Start(ctx)
 	raceAnnouncer := engine.NewHoardAnnouncer(raceProc.Client(), raceAnnounceBindings)
+	raceAnnouncer.OnObservation = raceEngine.ObserveAnnounce
 	raceAnnouncer.SetLivePort(raceEngine.LivePort())
 	raceAnnouncer.Start(ctx)
 
@@ -1860,6 +1861,15 @@ func (a *raceAPIAdapter) ReannnounceTorrent(infoHash string) bool { return true 
 func (a *raceAPIAdapter) AddTrackerToTorrent(infoHash, url string) error {
 	return a.engine.AddTrackerToTorrent(infoHash, url)
 }
+func (a *raceAPIAdapter) GetTrackerTiers(infoHash string) ([][]string, error) {
+	return a.engine.GetTrackerTiers(infoHash)
+}
+func (a *raceAPIAdapter) SetTrackerTiers(infoHash string, tiers [][]string) ([][]string, error) {
+	return a.engine.SetTrackerTiers(infoHash, tiers)
+}
+func (a *raceAPIAdapter) TorrentFilePath(infoHash string) (string, bool) {
+	return a.engine.TorrentFilePath(infoHash)
+}
 func (a *raceAPIAdapter) GetChokingStats() map[string]interface{} {
 	return a.engine.GetChokingStats()
 }
@@ -1942,6 +1952,15 @@ func (a *hoardAPIAdapter) RemoveTorrent(infoHash string, deleteFiles bool) error
 func (a *hoardAPIAdapter) ReannnounceTorrent(infoHash string) bool { return true }
 func (a *hoardAPIAdapter) AddTrackerToTorrent(infoHash, url string) error {
 	return a.engine.AddTrackerToTorrent(infoHash, url)
+}
+func (a *hoardAPIAdapter) GetTrackerTiers(infoHash string) ([][]string, error) {
+	return a.engine.GetTrackerTiers(infoHash)
+}
+func (a *hoardAPIAdapter) SetTrackerTiers(infoHash string, tiers [][]string) ([][]string, error) {
+	return a.engine.SetTrackerTiers(infoHash, tiers)
+}
+func (a *hoardAPIAdapter) TorrentFilePath(infoHash string) (string, bool) {
+	return a.engine.TorrentFilePath(infoHash)
 }
 func (a *hoardAPIAdapter) ListenPort() int { return a.engine.ListenPort() }
 

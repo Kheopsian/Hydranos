@@ -221,7 +221,15 @@ impl Drop for PeerGuard {
 
 /// Runtime state for an active torrent.
 pub struct TorrentState {
+    /// Parsed straight from the .torrent. `meta.trackers` is the SEED for
+    /// `live_trackers` and nothing else reads it: the operator can edit the
+    /// tracker list at runtime, so what the file said and what we announce
+    /// to are two different facts.
     pub meta: TorrentMeta,
+    /// The tracker list actually announced to, in tiers. Edited in place by
+    /// the set_trackers command; the announce loop takes a snapshot each
+    /// pass, so a change lands on the next announce without a restart.
+    pub live_trackers: RwLock<Vec<Vec<String>>>,
     pub save_path: RwLock<PathBuf>,
     pub info_hash: InfoHash,
     pub torrent_file_path: String,
@@ -260,6 +268,14 @@ pub struct TorrentState {
     pub current_tracker: Mutex<String>,
     pub last_announce_ok: AtomicBool,
     pub last_announce_error: Mutex<String>,
+    /// Unix seconds of the last SUCCESSFUL announce, 0 = never. Failures
+    /// deliberately do not move it: "last announce 3h ago" next to an error
+    /// is the useful reading, while stamping every failed attempt would show
+    /// a fresh time for a tracker we have not reached in hours.
+    pub last_announce_at: AtomicI64,
+    /// Unix seconds when the next announce is due, 0 = unknown. The UI used
+    /// to be handed a hardcoded 0 here, which it renders as "now", forever.
+    pub next_announce_at: AtomicI64,
 
     /// Why this torrent is in `TorrentStatus::Error`, shown when the user
     /// opens it. Empty for every other status.
@@ -315,6 +331,7 @@ impl TorrentState {
         // so skip the 256-slot ring allocation for every seeder.
         let have_tx = if seed_mode { None } else { Some(broadcast::channel(256).0) };
         Self {
+            live_trackers: RwLock::new(meta.trackers.clone()),
             meta,
             save_path: RwLock::new(save_path),
             info_hash: ih,
@@ -339,6 +356,8 @@ impl TorrentState {
             current_tracker: Mutex::new(String::new()),
             last_announce_ok: AtomicBool::new(false),
             last_announce_error: Mutex::new(String::new()),
+            last_announce_at: AtomicI64::new(0),
+            next_announce_at: AtomicI64::new(0),
             error_msg: Mutex::new(String::new()),
             peer_stats: DashMap::new(),
             connected_addrs: DashSet::new(),

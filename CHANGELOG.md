@@ -3,6 +3,21 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.92.2 - 2026-08-19
+
+### Added
+- **Edit a torrent's trackers from its detail panel.** Add, remove or rename them: the whole list is edited as text, one URL per line, a blank line starting a new tier. Tiers are tried in order, so they are kept rather than flattened. The editor opens from the card header rather than the table, which refreshes on a timer, and that table stops redrawing while the editor is open. The change applies from the next announce and is written to disk, so it survives a restart.
+- **`GET` and `POST /api/torrents/:hash/trackers`**, with `add`, `remove`, `replace` and `set` operations. Adding a tracker that is already there reports that nothing changed, so a bulk pass can skip the work; removing the last URL of a tier drops the tier; replacing keeps the URL's position, which is what makes a domain migration safe across many torrents.
+- **The tracker panel shows when each tracker last answered**, next to when the next announce is due. Only successful announces move it, so a failing tracker shows how long since it actually worked rather than since we last tried.
+
+### Fixed
+- **`POST /api/torrents/:hash/add-tracker` did nothing and answered 200.** It called a no-op on both engines, so every caller since believed it had added a tracker.
+- **The tracker list reported only the first URL of each tier**, hiding every fallback a tier held.
+- **A tracker edit did not survive a restart.** The engine reloads from its resume records, which carried no tracker URLs, so the list fell back to what the .torrent file said. It is now part of the resume record and wins over the file. The stored .torrent is rewritten as well, with the info dict copied through byte for byte: editing trackers cannot change a torrent's infohash.
+- **The race panel showed no announce timings at all**, and its "next announce" read "now" forever. Typhon's internal announce loop is disabled for both engines, so the Go announce cycle is the only source of tracker state, and the race half of that feed had never been connected.
+- **The Exit IP block stretched the header.** It was the only header stat with no width limit and the only one carrying horizontal padding, so it ran to roughly 300 pixels and opened a 44 pixel gutter around itself against 24 elsewhere. One address per line now, in a rounded box sized to its content, with the full pair on the tooltip and the incognito masking applied there too.
+- **The peer fingerprint still advertised 3.88.0** after three version bumps.
+
 ## v3.91.0 - 2026-08-19
 
 ### Fixed

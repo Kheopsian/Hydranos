@@ -293,6 +293,18 @@ func (c *Client) GetTrackers(infoHash string) ([]ltclient.TrackerInfo, error) {
 	return res, nil
 }
 
+func (c *Client) SetTrackers(infoHash string, tiers [][]string) ([][]string, error) {
+	if tiers == nil {
+		tiers = [][]string{}
+	}
+	var res [][]string
+	if err := c.call(agentwire.MethodSetTrackers,
+		agentwire.SetTrackersParams{InfoHash: infoHash, Trackers: tiers}, &res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 func (c *Client) GetDiagnostics() (*ltclient.DiagnosticStats, error) {
 	var res ltclient.DiagnosticStats
 	if err := c.call(agentwire.MethodGetDiagnostics, nil, &res); err != nil {

@@ -2259,6 +2259,35 @@ footer {
 .sr-input:focus { border-color: var(--accent-hoard); outline: none; }
 .sr-input-num { width: 180px; font-variant-numeric: tabular-nums; }
 
+/* Tracker editor. The textarea is the control: the whole list is edited as
+   text and saved in one go, so there is nothing to click per row -- and the
+   trackers table refreshes on a timer, which is no place for a button. */
+.card-head-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.trk-edit-box { width: 640px; max-width: 92vw; }
+.trk-edit-hint { color: var(--text-muted); font-size: 12px; margin: 4px 0 10px; }
+.trk-edit-text {
+    width: 100%;
+    min-height: 220px;
+    resize: vertical;
+    padding: 10px;
+    background-color: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.trk-edit-text:focus { border-color: var(--accent-hoard); outline: none; }
+.trk-edit-engine { color: var(--text-muted); font-size: 12px; margin: 8px 0 0; }
+.trk-edit-msg { font-size: 12px; margin: 6px 0 0; min-height: 16px; color: var(--text-secondary); }
+.trk-edit-msg.error { color: var(--accent-error, #f85149); }
+
 /* Toggle switch (checkbox stylise, la logique .checked reste inchangee) */
 .toggle { position: relative; display: inline-block; cursor: pointer; }
 .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }

@@ -168,6 +168,29 @@ func (s *Store) UpdateStats(infoHash string, completedTime float64, up, down int
 }
 
 // UpdatePlacement updates category/save_path (a move) without touching the blob.
+// UpdateTorrentBlob replaces the stored .torrent bytes for one hash. Used by
+// tracker editing, which rewrites the announce keys and nothing else: the
+// caller is responsible for having kept the info dict identical, since the
+// primary key here IS the hash of that dict.
+func (s *Store) UpdateTorrentBlob(infoHash string, blob []byte) error {
+	if len(blob) == 0 {
+		return fmt.Errorf("store: refusing to write an empty .torrent for %s", infoHash)
+	}
+	s.wmux.Lock()
+	defer s.wmux.Unlock()
+	res, err := s.db.Exec(`UPDATE torrents SET torrent = ? WHERE info_hash = ?`, blob, infoHash)
+	if err != nil {
+		return fmt.Errorf("store update torrent %s: %w", infoHash, err)
+	}
+	// A silent zero-row update would leave the engine and the file disagreeing
+	// after the next restart, which is exactly the failure this is meant to
+	// prevent.
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("store: no torrent row for %s", infoHash)
+	}
+	return nil
+}
+
 func (s *Store) UpdatePlacement(infoHash, category, savePath string) error {
 	s.wmux.Lock()
 	defer s.wmux.Unlock()

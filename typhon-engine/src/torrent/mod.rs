@@ -109,6 +109,7 @@ impl TorrentManager {
             added_time: state.added_time,
             completed_time: state.completed_time.load(Ordering::Relaxed),
             bitfield: String::new(),
+            trackers: state.live_trackers.read().clone(),
         };
         fastresume::save(&self.resume_dir, &ih, &rd);
 
@@ -265,6 +266,7 @@ impl TorrentManager {
             // Use new_with_times so added_time / completed_time persist across
             // reboots. Plain new() falls back to SystemTime::now(), which wipes
             // the fastresume history on every restart.
+            let saved_trackers = rd.trackers.clone();
             let state = TorrentState::new_with_times(
                 meta,
                 rd.save_path.into(),
@@ -273,6 +275,12 @@ impl TorrentManager {
                 Some(rd.added_time),
                 Some(rd.completed_time),
             );
+            // The resume record wins over the .torrent: an edited list lives
+            // here, and the file on disk may be the original one. Empty means
+            // the torrent predates tracker editing, so the parsed list stands.
+            if !saved_trackers.is_empty() {
+                *state.live_trackers.write() = saved_trackers;
+            }
             state.total_uploaded.store(rd.total_uploaded, Ordering::Relaxed);
             state.total_downloaded.store(rd.total_downloaded, Ordering::Relaxed);
             // Restore verified-pieces bitfield FIRST so we don't re-DL 6+ GB
@@ -378,6 +386,7 @@ impl TorrentManager {
             added_time: t.added_time,
             completed_time: t.completed_time.load(Ordering::Relaxed),
             bitfield,
+            trackers: t.live_trackers.read().clone(),
         }
     }
 
@@ -385,6 +394,18 @@ impl TorrentManager {
     /// fastresume so the change survives a crash before the next
     /// periodic save. Caller (hydra-go) must have stopped the torrent
     /// and moved the files on disk *before* invoking this.
+    /// Replace the tracker list and flush the resume record immediately, so
+    /// the change survives a crash before the next periodic save. Mirrors
+    /// set_save_path: mutate, then persist, in one call the caller cannot
+    /// forget half of.
+    pub fn set_trackers(&self, info_hash: &InfoHash, tiers: Vec<Vec<String>>) -> Result<(), String> {
+        let t = self.get(info_hash).ok_or("torrent not found")?;
+        *t.live_trackers.write() = tiers;
+        let rd = Self::build_resume_data(&t);
+        fastresume::save(&self.resume_dir, info_hash, &rd);
+        Ok(())
+    }
+
     pub fn set_save_path(&self, info_hash: &InfoHash, new_path: &str) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         *t.save_path.write() = new_path.into();
@@ -571,6 +592,7 @@ impl TorrentManager {
             added_time: t.added_time,
             completed_time: t.completed_time.load(Ordering::Relaxed),
             bitfield,
+            trackers: t.live_trackers.read().clone(),
         };
         fastresume::save(&self.resume_dir, &ih, &rd);
         info!(

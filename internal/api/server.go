@@ -81,6 +81,9 @@ type RaceEngine interface {
 	RemoveTorrent(infoHash string, deleteFiles bool) error
 	ReannnounceTorrent(infoHash string) bool
 	AddTrackerToTorrent(infoHash, url string) error
+	GetTrackerTiers(infoHash string) ([][]string, error)
+	SetTrackerTiers(infoHash string, tiers [][]string) ([][]string, error)
+	TorrentFilePath(infoHash string) (string, bool)
 	GetChokingStats() map[string]interface{}
 	GetSessionSettings() map[string]interface{}
 	ApplySettings(settings map[string]interface{}) map[string]interface{}
@@ -117,6 +120,9 @@ type HoardEngine interface {
 	RemoveTorrent(infoHash string, deleteFiles bool) error
 	ReannnounceTorrent(infoHash string) bool
 	AddTrackerToTorrent(infoHash, url string) error
+	GetTrackerTiers(infoHash string) ([][]string, error)
+	SetTrackerTiers(infoHash string, tiers [][]string) ([][]string, error)
+	TorrentFilePath(infoHash string) (string, bool)
 	SetListenPort(port int) error
 	ListenPort() int
 	HasTorrent(infoHash string) bool

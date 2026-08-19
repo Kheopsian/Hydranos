@@ -11,6 +11,36 @@ import "github.com/Kheopsian/hydra/internal/engine/ltclient"
 // `*rqbitclient.Client` (rqbit via HTTP REST) satisfy this interface
 // by sharing the same method signatures. Return types come from the
 // ltclient package; rqbitclient re-exports them for compat.
+// tiersFromTrackerInfo regroups the engine's flat tracker list back into tiers.
+// The engine reports one entry per URL with its tier index; the index is the
+// grouping key, so a tier holding two URLs comes back as one tier of two and a
+// read-modify-write round trip keeps the fallbacks it started with.
+func tiersFromTrackerInfo(infos []ltclient.TrackerInfo) [][]string {
+	if len(infos) == 0 {
+		return [][]string{}
+	}
+	maxTier := 0
+	for _, in := range infos {
+		if in.Tier > maxTier {
+			maxTier = in.Tier
+		}
+	}
+	buckets := make([][]string, maxTier+1)
+	for _, in := range infos {
+		if in.URL == "" || in.Tier < 0 {
+			continue
+		}
+		buckets[in.Tier] = append(buckets[in.Tier], in.URL)
+	}
+	out := make([][]string, 0, len(buckets))
+	for _, b := range buckets {
+		if len(b) > 0 {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 type EngineClient interface {
 	// Lifecycle
 	Ping() error
@@ -46,6 +76,7 @@ type EngineClient interface {
 	SetEngineOptFlag(name string, on bool, value int64) (map[string]interface{}, error)
 	EngineOptFlags() (map[string]interface{}, error)
 	GetTrackers(infoHash string) ([]ltclient.TrackerInfo, error)
+	SetTrackers(infoHash string, tiers [][]string) ([][]string, error)
 	GetDiagnostics() (*ltclient.DiagnosticStats, error)
 
 	// Peer injection (patched rqbit endpoint; native in Typhon).
