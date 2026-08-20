@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestConfigPathFromArgs(t *testing.T) {
 	cases := []struct {
@@ -39,5 +42,32 @@ func TestMisplacedSubcommand(t *testing.T) {
 	// A plain daemon invocation must not be mistaken for one.
 	if got := misplacedSubcommand([]string{"/etc/hydra/default.toml"}); got != "" {
 		t.Fatalf("a daemon invocation was flagged as a misplaced %q", got)
+	}
+}
+
+func TestLeftoverArgsError(t *testing.T) {
+	// A plain daemon invocation leaves nothing behind.
+	if got := leftoverArgsError(nil); got != "" {
+		t.Fatalf("a clean invocation was reported as leftover args: %q", got)
+	}
+
+	// The compose case: the entrypoint already ran `hydra --config <cfg>`, so a
+	// `command:` repeating the binary name leaves "hydra ..." positional and
+	// flag.Parse drops --agent-only. Booting a monolith there is the bug.
+	got := leftoverArgsError([]string{"hydra", "--config", "/config/default.toml", "--agent-only"})
+	if got == "" {
+		t.Fatal("the duplicated-entrypoint form was not reported")
+	}
+	if !strings.Contains(got, "entrypoint") || !strings.Contains(got, "--agent-only") {
+		t.Fatalf("the message does not point at the entrypoint or show the form: %q", got)
+	}
+
+	// Any other stray positional is refused too, without the Docker hint.
+	got = leftoverArgsError([]string{"/etc/hydra/default.toml"})
+	if got == "" {
+		t.Fatal("a stray positional path was not reported")
+	}
+	if strings.Contains(got, "entrypoint") {
+		t.Fatalf("the Docker hint leaked into an unrelated case: %q", got)
 	}
 }
