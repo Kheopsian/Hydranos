@@ -1126,19 +1126,34 @@
     <div id="ctx-menu" class="ctx-menu" style="display:none">
         <div class="ctx-label" id="ctx-label">1 torrent selected</div>
         <div class="ctx-separator"></div>
-        <div class="ctx-item" id="ctx-pause" onclick="_pauseSelected(true)">Stop</div>
-        <div class="ctx-item" id="ctx-resume" onclick="_pauseSelected(false)">Start</div>
-        <div class="ctx-item" id="ctx-pin" onclick="_pinSelected(true)">Force download</div>
-        <div class="ctx-item" id="ctx-unpin" onclick="_pinSelected(false)">Stop forcing</div>
+        <div class="ctx-group" id="ctx-grp-state">
+            <div class="ctx-group-title">State</div>
+            <div class="ctx-item" id="ctx-pause" onclick="_pauseSelected(true)">Stop</div>
+            <div class="ctx-item" id="ctx-resume" onclick="_pauseSelected(false)">Start</div>
+            <div class="ctx-item" id="ctx-pin" onclick="_pinSelected(true)">Force download</div>
+            <div class="ctx-item" id="ctx-unpin" onclick="_pinSelected(false)">Stop forcing</div>
+        </div>
         <div class="ctx-separator"></div>
-        <div class="ctx-item" onclick="_reannounceSelected()">Reannounce</div>
-        <div class="ctx-item" id="ctx-recheck" onclick="_recheckSelected()">Recheck</div>
-        <div class="ctx-item" id="ctx-change-category" onclick="_showCategoryPicker(event,false)">Change category &rsaquo;</div>
-        <div class="ctx-item" id="ctx-change-category-move" onclick="_showCategoryPicker(event,true)">Change category + move files &rsaquo;</div>
-        <div class="ctx-item" id="ctx-edit-tags" onclick="_showTagPicker(event)">Edit tags &rsaquo;</div>
+        <div class="ctx-group" id="ctx-grp-torrent">
+            <div class="ctx-group-title">Torrent</div>
+            <div class="ctx-item" onclick="_reannounceSelected()">Reannounce</div>
+            <div class="ctx-item" id="ctx-recheck" onclick="_recheckSelected()">Recheck</div>
+            <div class="ctx-item" id="ctx-change-category" onclick="_showCategoryPicker(event,false)">Change category &rsaquo;</div>
+            <div class="ctx-item" id="ctx-change-category-move" onclick="_showCategoryPicker(event,true)">Change category + move files &rsaquo;</div>
+            <div class="ctx-item" id="ctx-edit-tags" onclick="_showTagPicker(event)">Edit tags &rsaquo;</div>
+        </div>
+        <div class="ctx-separator" id="ctx-sep-agent" style="display:none"></div>
+        <div class="ctx-group" id="ctx-grp-agent" style="display:none">
+            <div class="ctx-group-title">Agent</div>
+            <div class="ctx-item" id="ctx-agent-duplicate" onclick="_showAgentPicker(event,'duplicate')">Duplicate to agent &rsaquo;</div>
+            <div class="ctx-item" id="ctx-agent-move" onclick="_showAgentPicker(event,'move')">Move to agent &rsaquo;</div>
+        </div>
         <div class="ctx-separator"></div>
-        <div class="ctx-item" onclick="_removeSelected(false)">Remove torrent</div>
-        <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
+        <div class="ctx-group" id="ctx-grp-remove">
+            <div class="ctx-group-title">Remove</div>
+            <div class="ctx-item" onclick="_removeSelected(false)">Remove torrent</div>
+            <div class="ctx-item ctx-danger" onclick="_removeSelected(true)">Remove + delete files</div>
+        </div>
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>

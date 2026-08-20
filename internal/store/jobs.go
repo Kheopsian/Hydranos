@@ -38,6 +38,12 @@ func (s JobState) Terminal() bool {
 // JobTypeMoveData relocates a torrent's payload files.
 const JobTypeMoveData = "move_data"
 
+// JobTypeMoveDataRemote relocates a payload to another node, bytes included.
+// Separate from JobTypeMoveData because the two fail in different ways and
+// resume from different state: a local move resumes from a staging directory,
+// a remote one from the destination's bitfield.
+const JobTypeMoveDataRemote = "move_data_remote"
+
 // Job is one unit of durable background work.
 type Job struct {
 	ID       string

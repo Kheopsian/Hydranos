@@ -21,6 +21,11 @@ import (
 	"github.com/Kheopsian/hydra/internal/store"
 )
 
+// agentEngineBasePort is the first TCP loopback IPC port handed to an
+// agent-only node's engines when the unix-socket transport is unavailable
+// (Windows) or unusable (data_dir on a network share).
+const agentEngineBasePort = 9510
+
 // liveEngine is one running engine of an agent node (Option A: a node hosts an
 // arbitrary set of engines, each with an id + role).
 type liveEngine struct {
@@ -87,10 +92,15 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 			le.proc.Stop()
 		}
 	}
-	for _, ec := range engineCfgs {
+	for i, ec := range engineCfgs {
 		eDir := filepath.Join(cfg.Daemon.DataDir, ec.ID)
 		_ = os.MkdirAll(eDir, 0755)
-		sock := filepath.Join(cfg.Daemon.DataDir, ec.ID+".sock")
+		// Same endpoint selection as the monolith: a hardcoded .sock path here
+		// would hand Typhon a unix path on Windows, where its listener is a
+		// stub that refuses to bind, so the engine never starts. Ports are
+		// per-engine so N engines on one node never collide, and start above
+		// the monolith 9501/9502 so an agent can share a machine with a daemon.
+		sock := engineSocketPath(cfg.Daemon.DataDir, ec.ID, agentEngineBasePort+i)
 		le := &liveEngine{id: ec.ID, role: ec.Role, cfg: ec.SessionConfig}
 		proc, perr := engine.StartSessionEngine(&le.cfg, eDir, sock, ec.Role == "race")
 		if perr != nil {

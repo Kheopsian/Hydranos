@@ -254,11 +254,11 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 	// announce leak hide. Hoard wins when the two disagree, and the mismatch is
 	// reported rather than quietly flattened.
 	f := netModeFields{
-		RaceListenPort:   tomlInt(race, "listen_port"),
-		HoardListenPort:  tomlInt(hoard, "listen_port"),
-		EnableIPv6:       tomlBool(race, "enable_ipv6") || tomlBool(hoard, "enable_ipv6"),
-		BindInterface:    firstNonEmpty(tomlStr(hoard, "bind_interface"), tomlStr(race, "bind_interface")),
-		GluetunPort:      tomlBool(race, "gluetun_port_forward") || tomlBool(hoard, "gluetun_port_forward"),
+		RaceListenPort:  tomlInt(race, "listen_port"),
+		HoardListenPort: tomlInt(hoard, "listen_port"),
+		EnableIPv6:      tomlBool(race, "enable_ipv6") || tomlBool(hoard, "enable_ipv6"),
+		BindInterface:   firstNonEmpty(tomlStr(hoard, "bind_interface"), tomlStr(race, "bind_interface")),
+		GluetunPort:     tomlBool(race, "gluetun_port_forward") || tomlBool(hoard, "gluetun_port_forward"),
 		// The section the flag is true in IS the choice: a separate "which
 		// engine" key would be a second source of truth, wrong the first time
 		// someone edits the file by hand.

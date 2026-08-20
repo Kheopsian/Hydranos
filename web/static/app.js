@@ -2507,10 +2507,141 @@ function _showCtxMenu(x, y) {
     if (pItem) pItem.style.display = anyRunning ? "" : "none";
     const rItem = document.getElementById("ctx-resume");
     if (rItem) rItem.style.display = anyPaused ? "" : "none";
+    // The Agent group only exists when there is somewhere to send a torrent.
+    // On a single-node install it is not greyed out, it is absent: an action
+    // that can never apply is noise in a menu this size.
+    const remotes = _ctxAgents.filter(a => a.name && a.name !== "local");
+    const agentGrp = document.getElementById("ctx-grp-agent");
+    const agentSep = document.getElementById("ctx-sep-agent");
+    const showAgent = remotes.length > 0;
+    if (agentGrp) agentGrp.style.display = showAgent ? "" : "none";
+    if (agentSep) agentSep.style.display = showAgent ? "" : "none";
+
+    // A group whose every item is hidden must hide its heading too, or the
+    // menu shows a title introducing nothing.
+    document.querySelectorAll("#ctx-menu .ctx-group").forEach(grp => {
+        if (grp.id === "ctx-grp-agent" && !showAgent) return;
+        const anyVisible = [...grp.querySelectorAll(".ctx-item")]
+            .some(it => it.style.display !== "none");
+        grp.style.display = anyVisible ? "" : "none";
+    });
+
     menu.style.left = x + "px";
     menu.style.top = y + "px";
     menu.style.display = "block";
     _clampCtxMenuToViewport();
+    // Refresh in the background so the next open reflects agents added since.
+    _refreshCtxAgents();
+}
+
+// Known agents, cached so opening the menu stays synchronous.
+let _ctxAgents = [];
+
+async function _refreshCtxAgents() {
+    try {
+        const list = await api("/api/agents");
+        if (Array.isArray(list)) _ctxAgents = list;
+    } catch (e) {
+        // Leave the previous list in place: a failed poll is not evidence that
+        // the agents went away, and blanking it would make the menu flicker.
+    }
+}
+
+// _showAgentPicker lists the agents a selection can be sent to.
+//
+// mode is "duplicate" (both nodes keep it) or "move" (the source is released
+// once the target is verified and running). The destination path is not asked
+// for: it is what the torrent's category defines on that agent.
+async function _showAgentPicker(ev, mode) {
+    if (ev) ev.stopPropagation();
+    _saveCtxActionsView();
+    if (_selected.size === 0) return;
+    await _refreshCtxAgents();
+
+    const sources = new Set([..._selected.keys()].map(_rowAgent));
+    // "local" is a legitimate destination too: a torrent can come back from an
+    // agent. Only the node it already sits on is excluded, and only when the
+    // whole selection agrees on one source.
+    const targets = _ctxAgents
+        .filter(a => a.name)
+        .filter(a => !(sources.size === 1 && sources.has(a.name)));
+
+    const esc = s => String(s).replace(/[&<>"\']/g, ch =>
+        ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\'":"&#39;"}[ch]));
+
+    let items;
+    if (!targets.length) {
+        items = `<div class="ctx-label">${t("No other agent to send to")}</div>`;
+    } else {
+        items = targets.map(a => {
+            const jsName = String(a.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
+            const off = a.online === false ? ` <span class="sr-desc">(${t("offline")})</span>` : "";
+            return `<div class="ctx-item" onclick="_sendToAgentSelected(\'${jsName}\', \'${mode}\')">${esc(a.name)}${off}</div>`;
+        }).join("");
+    }
+    const verb = mode === "move" ? t("Move to agent") : t("Duplicate to agent");
+    const label = verb + ": " + tp(_selected.size, "{n} torrent", "{n} torrents");
+    document.getElementById("ctx-menu").innerHTML =
+        `<div class="ctx-label">${label}</div>` +
+        `<div class="ctx-separator"></div>` +
+        `<div class="ctx-item" onclick="_restoreCtxActionsView()">&lsaquo; ${t("Back")}</div>` +
+        `<div class="ctx-separator"></div>` +
+        `<div class="ctx-scroll">${items}</div>`;
+    _clampCtxMenuToViewport();
+}
+
+// _rowAgent is which node currently holds a torrent, straight off the row.
+function _rowAgent(hash) {
+    const row = document.querySelector(`.t-row[data-hash="${hash}"]`);
+    return (row && row.dataset.agent) || "local";
+}
+
+async function _sendToAgentSelected(agentName, mode) {
+    const entries = [..._selected.entries()];
+    _hideCtxMenu();
+
+    let queued = 0;
+    const errors = [];
+    for (const [hash] of entries) {
+        const source = _rowAgent(hash);
+        if (source === agentName) continue;
+        try {
+            const r = await fetch("/api/jobs/move-remote", {
+                method: "POST",
+                headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    info_hash: hash,
+                    source_agent: source,
+                    target_agent: agentName,
+                    mode: mode,
+                }),
+            });
+            if (r.ok) {
+                queued++;
+            } else {
+                const body = await r.json().catch(() => ({}));
+                errors.push(`${hash.slice(0, 8)}: ${body.error || ("HTTP " + r.status)}`);
+            }
+        } catch (e) {
+            errors.push(`${hash.slice(0, 8)}: ${e.message}`);
+        }
+    }
+    if (errors.length > 0) {
+        alert(t("Sent {ok} to \"{agent}\", {failed} failure(s).",
+            { ok: queued, agent: agentName, failed: errors.length }) + "\n\n" + errors.join("\n"));
+    } else if (queued > 0) {
+        // Hours of transfer follow, so say where to watch it rather than
+        // leaving the row looking unchanged.
+        alert(mode === "move"
+            ? tp(queued,
+                "Moving {n} torrent to \"{agent}\". It keeps seeding on this node until the copy is verified there; follow it in Jobs.",
+                "Moving {n} torrents to \"{agent}\". They keep seeding on this node until their copies are verified there; follow them in Jobs.",
+                { n: queued, agent: agentName })
+            : tp(queued,
+                "Duplicating {n} torrent to \"{agent}\". Both nodes will hold it; follow it in Jobs.",
+                "Duplicating {n} torrents to \"{agent}\". Both nodes will hold them; follow them in Jobs.",
+                { n: queued, agent: agentName }));
+    }
 }
 
 // Re-position the ctx-menu so it fits inside the viewport. Called on

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -221,4 +222,144 @@ func (s *Server) submitMoveJob(c *gin.Context, hash, category string, allowBreak
 		"same_fs":     plan.SameFS,
 	})
 	return false
+}
+
+// CategorySavePathFor is where a category puts payloads on a given agent.
+//
+// For a REMOTE agent a missing mapping is an error, never a fallback. The
+// category's flat SavePath is a path on THIS host -- handing "/data/movies" to
+// a Windows agent would land the payload nowhere and report success. The local
+// node keeps the ordinary fallback, where that path is the right answer.
+func (s *Server) CategorySavePathFor(agent, name string) (string, error) {
+	cat := s.categoryByName(name)
+	if cat == nil {
+		return "", fmt.Errorf("no category named %q", name)
+	}
+	if agent == "" || agent == LocalAgentName {
+		if cat.SavePath == "" {
+			return "", fmt.Errorf("category %q has no save path", name)
+		}
+		return cat.SavePath, nil
+	}
+	if pth := cat.Agents[agent]; pth != "" {
+		return pth, nil
+	}
+	return "", fmt.Errorf("category %q defines no save path for agent %q: set one on the category before moving there", name, agent)
+}
+
+// handleMoveRemote submits a cross-node payload move or duplicate.
+//
+// The destination path is NOT a parameter: it is whatever the category defines
+// for the target agent. A free-text path typed for one host is meaningless on
+// another, and re-categorising is its own action, before or after.
+func (s *Server) handleMoveRemote(c *gin.Context) {
+	if s.jobs == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "background jobs are not running on this node"})
+		return
+	}
+	var req struct {
+		InfoHash       string `json:"info_hash"`
+		SourceAgent    string `json:"source_agent"`
+		TargetAgent    string `json:"target_agent"`
+		Engine         string `json:"engine"`
+		Category       string `json:"category"`
+		Mode           string `json:"mode"` // "move" | "duplicate"
+		KeepSourceData bool   `json:"keep_source_data"`
+		Name           string `json:"name"`
+		BytesPerSecond int64  `json:"bytes_per_second"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Mode == "" {
+		req.Mode = "move"
+	}
+	switch {
+	case req.InfoHash == "":
+		c.JSON(http.StatusBadRequest, gin.H{"error": "info_hash is required"})
+		return
+	case req.TargetAgent == "":
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target_agent is required"})
+		return
+	case req.SourceAgent == req.TargetAgent:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "source and target are the same node"})
+		return
+	case req.Mode != "move" && req.Mode != "duplicate":
+		c.JSON(http.StatusBadRequest, gin.H{"error": `mode must be "move" or "duplicate"`})
+		return
+	}
+	if req.Engine == "" {
+		req.Engine = "hoard"
+	}
+	// The destination is the path THIS torrent's category defines on the target
+	// agent, so the category is read from the torrent rather than passed in.
+	// Re-categorising is its own action; asking for it here would let the two
+	// disagree, and the payload would land somewhere the torrent does not say
+	// it lives.
+	if req.Category == "" {
+		req.Category = s.torrentCategory(req.InfoHash)
+	}
+	if req.Category == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "this torrent has no category, and the destination path comes from the category: set one first"})
+		return
+	}
+	// Resolve everything the job will need NOW, so a bad category or an
+	// unknown agent is a 400 on this request instead of a job that fails a
+	// second later somewhere the user is not looking.
+	if _, err := s.CategorySavePathFor(req.TargetAgent, req.Category); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	for label, agent := range map[string]string{"source": req.SourceAgent, "target": req.TargetAgent} {
+		if agent == "" || agent == LocalAgentName {
+			continue
+		}
+		if _, err := s.RemoteAgentEngineClient(agent, req.Engine); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": label + ": " + err.Error()})
+			return
+		}
+	}
+
+	job, err := s.jobs.Submit(store.JobTypeMoveDataRemote, req.InfoHash, jobs.RemoteMoveParams{
+		SourceAgent:    req.SourceAgent,
+		TargetAgent:    req.TargetAgent,
+		Engine:         req.Engine,
+		Category:       req.Category,
+		ReleaseSource:  req.Mode == "move",
+		KeepSourceData: req.KeepSourceData,
+		Name:           req.Name,
+		BytesPerSecond: req.BytesPerSecond,
+	})
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "ok", "job_id": job.ID, "mode": req.Mode})
+}
+
+// torrentCategory reads a torrent's current category from whichever engine
+// holds it. Empty when nothing knows it.
+func (s *Server) torrentCategory(infoHash string) string {
+	pick := func(m map[string]interface{}) string {
+		if m == nil {
+			return ""
+		}
+		if v, ok := m["category"].(string); ok {
+			return v
+		}
+		return ""
+	}
+	if s.hoardEngine != nil {
+		if cat := pick(s.hoardEngine.GetTorrentDetail(infoHash)); cat != "" {
+			return cat
+		}
+	}
+	if s.raceEngine != nil {
+		if cat := pick(s.raceEngine.GetTorrentStatus(infoHash)); cat != "" {
+			return cat
+		}
+	}
+	return ""
 }

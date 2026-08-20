@@ -568,6 +568,7 @@ func (s *Server) registerHydraRoutes() {
 			jobsGrp.GET("", s.handleJobsList)
 			jobsGrp.GET("/:id", s.handleJobGet)
 			jobsGrp.DELETE("/:id", s.handleJobCancel)
+			jobsGrp.POST("/move-remote", s.handleMoveRemote)
 		}
 		{
 			hoard.GET("/stats", s.handleHoardStats)
