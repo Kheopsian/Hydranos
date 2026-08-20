@@ -9,6 +9,178 @@ All notable changes to Hydra are documented here. This project follows
 
 - **The agent token can be set from the config file or the environment.** `--agent-token` was the only way to give a node's gRPC data-plane its shared secret, which meant putting it in the command line of every agent -- visible in `ps`, and in the Kubernetes manifest or compose file that spells the command out. It now comes from `[daemon] agent_token` or `$HYDRA_AGENT_TOKEN` as well, so the token can travel as a mounted config or a secret reference like every other credential. Precedence runs `--agent-token`, then `$HYDRA_AGENT_TOKEN`, then `[daemon] agent_token`; an empty or absent environment variable falls through to the config rather than silently disabling authentication, and `--agent-token=""` remains the explicit way to turn it off. The value is trimmed, because a secret arriving from an env file or a mounted volume usually carries a trailing newline and a token off by one invisible byte fails with nothing on either side to explain why. Where the token came from is logged; the token itself is not. `agentprobe` reads the same variable when `-token` is not given.
 
+## v3.96.3 - 2026-08-20
+
+### Fixed
+
+- **The Jobs table was capped at 600px.** It was wrapped in the add-form
+  container, which is the right width for a form and the wrong one for a table
+  whose two interesting columns are a release name and a filesystem path: both
+  wrapped into narrow ribbons while two thirds of the screen sat empty. The
+  table now sits straight in the section, with its controls moved up beside the
+  title. Its columns are fixed rather than automatic, so they no longer resize
+  on every two-second tick as the byte counts grow a digit.
+
+## v3.96.2 - 2026-08-20
+
+### Changed
+
+- **A job names the torrent it is acting on.** The Jobs list identified a
+  torrent by the first twelve characters of its hash, which is unreadable and,
+  since the torrent filters do not search by hash, not something that could be
+  pasted anywhere useful either. The name is now captured into the job at
+  submission rather than resolved when the list is drawn: a job outlives the
+  torrent it acted on, so a lookup against currently loaded rows would leave
+  exactly the finished and failed entries blank. Jobs created before this fall
+  back to the last segment of the destination path, which for a move is the
+  release folder. The hash is still shown in full, monospaced and select-all,
+  because it is what gets pasted into an API call or grepped out of a log.
+
+## v3.96.1 - 2026-08-20
+
+### Added
+
+- **A Jobs tab.** The move endpoints told the operator to follow the work in
+  Jobs and there was no such place. There is now: state, progress, destination,
+  and a cancel button while a job is still running. It polls only while it is
+  on screen, because a table nobody is looking at does not need refreshing.
+
+### Fixed
+
+- **A move that came back EXDEV gave up instead of falling back to a copy.**
+  `stat` cannot promise that a rename will succeed - a source that is itself a
+  mount root will not be renamed at all, and overlay and network filesystems
+  have rules of their own - so the rename is now the probe and the copy is the
+  fallback. On EXDEV the move re-checks the things a copy needs and a rename
+  did not: free space, and consent to break hardlinks, which was never asked
+  for because the operator had been told this would be a rename. The torrent is
+  restarted before the copy begins rather than held stopped for its duration.
+- **A torrent whose content root was a mount point would have been relocated
+  and then deleted.** Pointing the first real move at a torrent seeding
+  directly from a bind-mounted share would have moved the entire volume and
+  removed the original. `Inspect` now refuses any source that is a mount point,
+  in the preview as well as at submission.
+
+## v3.95.2 - 2026-08-20
+
+### Fixed
+
+- **The category picker did not open on race rows, and the tag picker threw.**
+  The previous release meant to drop the hoard-only guard from the category
+  submenu. The guard is two lines that appear verbatim in both submenu
+  builders, and the edit landed on the first one it found, which was the tag
+  picker: category items were shown on race rows but clicking them returned
+  immediately, while the tag picker lost the binding the rest of its body reads
+  and threw instead of opening. Both are now edited from anchors that include
+  the function signature, so each edit can only match one place. Tags stay
+  hoard-only, which is why that guard belongs where it is.
+
+## v3.95.1 - 2026-08-20
+
+### Added
+
+- **Change category is offered on race rows, and breaking hardlinks is asked
+  about once.** The context menu hid both category items unless the selection
+  contained a hoard row, because the endpoint behind them was hoard-only. It is
+  not any more: setting a category on a race torrent is precisely how that
+  torrent is handed to the hoard. Each torrent is now addressed on the engine
+  that actually holds it instead of always on `/api/hoard`. A move that would
+  break hardlinks comes back as 409 with a reason rather than a generic
+  failure; the browser collects those refusals across the whole selection, asks
+  once with the file count and the total size, and retries the ones the
+  operator accepted. A queued move answers 202, so a right-click that starts an
+  hour of copying does not look like a right-click that did nothing. Recheck
+  and tags stay hoard-only: those really are hoard-only operations.
+
+## v3.95.0 - 2026-08-20
+
+### Added
+
+- **Changing a torrent's category relocates its payload data.** On one
+  filesystem that is a rename and finishes in milliseconds; across filesystems
+  it is a copy that runs for as long as it runs. Both go through the job runner
+  rather than one being special-cased into the request, so there is a single
+  answer to what is happening to a torrent regardless of which case it fell
+  into. An engine handover and a data move compose: a race torrent given a
+  hoard-mode category whose `save_path` is elsewhere is handed over first, then
+  moved. Refusals are machine-readable because the operator has to answer them:
+  breaking hardlinks returns 409 with the count, the bytes, example filenames
+  and `retry_with: allow_breaking_hardlinks`; not enough space returns 507 with
+  what was needed and what was free. A torrent whose data sits loose in a
+  shared category directory is refused outright, because moving it would move
+  every other torrent in that directory with it. `GET move-preview` answers the
+  same questions without touching anything.
+- **Durable background jobs.** Relocating a payload across filesystems takes
+  minutes to hours, so it cannot live inside a request: the caller would hold a
+  connection open for the duration, a restart would lose track of what was
+  half-done, and nothing else could ask what is running. The jobs table and
+  runner are deliberately general - a move is the first type, not the only one.
+  The move is split in two: `Inspect` only looks, walking the payload and
+  counting multiply-linked files, and its findings are what a caller turns into
+  a prompt; `Execute` acts, and only after being told explicitly that those
+  findings are acceptable, a permission captured in the job's params so a
+  resumed job never silently re-answers it. Ordering is the whole design. A
+  cross-filesystem move copies into a staging directory beside the target while
+  the torrent keeps seeding from the source, verifies what landed, stops the
+  torrent, swaps, repoints the engine, restarts it, and only then removes the
+  old copy. The source is never removed before the destination is verified and
+  in place, so an interruption leaves the payload where the torrent is still
+  seeding from it, plus a staging directory the next attempt reuses. Refusals -
+  not enough free space, a target inside the source, a target that already
+  exists - happen up front, because discovering any of them two hours into
+  copying a 400 GB release is the worst possible moment to find out.
+- **`[daemon] move_max_mb_per_sec` caps move throughput, at 200 MB/s by
+  default.** A cross-filesystem move reads and writes the same disks the
+  torrents are served from, and left uncapped it takes whatever the array can
+  give while the seeding is what gives way. 200 MB/s sits clearly below what
+  the array sustains and still finishes 100 GB in roughly eight minutes. The
+  setting distinguishes unset from zero: unset gets the default, an explicit
+  zero means no cap at all. Only the copy path is affected, a same-filesystem
+  move being a rename that moves no bytes.
+
+### Fixed
+
+- **A job was cancelled the instant the request that created it returned.**
+  Jobs were started with the HTTP request's context. The manager now holds the
+  daemon's context and `Submit` takes none at all: a job outliving its request
+  is the definition of a job, so the API must not offer a way to say otherwise.
+  The safety ordering held while this was broken - the source was untouched,
+  the target absent, and the torrent still seeding.
+
+## v3.94.0 - 2026-08-20
+
+### Added
+
+- **Per-torrent state moved out of the resume directory and into SQLite.** That
+  directory was not slow to read: at production scale, reading the records is
+  about 5% of a cold start against 94% spent re-parsing `.torrent` files. It
+  was expensive to write. `save_all_resume` rewrote every torrent on every
+  five-minute tick whether or not it had changed - roughly 200k file
+  create/write/rename cycles every 300 seconds, about 666 per second, on a
+  machine that was otherwise idle. Each few-hundred-byte record occupies a
+  whole filesystem block, so a sweep dirtied around 780 MiB of copy-on-write
+  blocks that the hourly snapshots then pinned, which made the resume directory
+  the dominant source of snapshot growth on the pool. A directory of files also
+  has no transaction: durability was hand-rolled with `.tmp` plus rename,
+  deletions leaked orphans, and a torrent's identity in the Go-side store could
+  silently disagree with its progression. Typhon now writes only the rows whose
+  fingerprint moved - the hot set rather than the total - in a single
+  transaction, to one database per engine. The legacy directory is imported
+  once on first start and deliberately left on disk, so rolling back is just
+  running an older build. `TYPHON_STATE_DB=0` falls back to the old scheme
+  entirely, and `TYPHON_RESUME_JSON=1` keeps both in step.
+- **A torrent changes engine by changing its category.** A category already
+  carries the engine its torrents belong in, so setting a torrent's category to
+  one whose mode differs from its current engine now performs the handover: the
+  target adopts the exported record - bitfield, counters, edited trackers,
+  added and completed times - and only then does the source let go, so an
+  interruption leaves the torrent in both engines rather than in neither.
+  Because the record that crosses is the same one a restart would read back,
+  the torrent does not re-check a byte. Payload files are deliberately not
+  relocated here: the adopting engine seeds the data where it already is.
+  Moving a torrent to or from a remote agent is refused outright rather than
+  half-performed.
+
 ## v3.93.1 - 2026-08-19
 
 ### Fixed
