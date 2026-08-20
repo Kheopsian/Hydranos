@@ -92,12 +92,17 @@ func Execute(ctx context.Context, p *Plan, opts Options) error {
 		if !isCrossDevice(err) {
 			return fmt.Errorf("move: rename %s -> %s: %w", p.Source, p.Target, err)
 		}
-		// Same device, different mount. Two bind mounts of one filesystem
-		// share an st_dev but rename(2) still refuses to cross between them,
-		// which is the normal arrangement inside a container -- /config and
-		// /calewood can be the same pool and still be two mounts. Predicting
-		// this from stat is not possible, so the rename is the probe and the
-		// copy is the fallback.
+		// A rename that stat said should work. Measured on the real setup,
+		// this is rarer than it first looked: renaming an ordinary directory
+		// between two bind mounts of one filesystem succeeds, so bind mounts
+		// alone do not cause it. The case that produced EXDEV in production
+		// was a source that was itself a mount root, and Inspect now refuses
+		// those outright.
+		//
+		// The fallback stays because stat cannot promise a rename in general
+		// -- overlay and network filesystems have their own rules -- and
+		// because the alternative is failing a move that a copy would have
+		// completed. It is insurance, not the main path.
 		//
 		// The operator was told this was a rename, so hardlinks were never
 		// raised. A copy breaks them, and that answer has to be asked for
