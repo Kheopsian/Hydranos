@@ -14,14 +14,16 @@ import (
 )
 
 // Resetting to defaults must not lock the operator out of their own daemon.
-// Three values are carried across, and they are the ones whose loss cannot be
+// Four values are carried across, and they are the ones whose loss cannot be
 // undone from the UI: the credentials, the API key every client already holds,
-// and the directory the data lives in. Everything else goes back to what a
-// fresh install ships, which is the point of the button.
+// the token the fronts dialling this node's data-plane already hold, and the
+// directory the data lives in. Everything else goes back to what a fresh
+// install ships, which is the point of the button.
 var resetPreserved = []struct{ section, key string }{
 	{"auth", "username"},
 	{"auth", "password_hash"},
 	{"daemon", "api_key"},
+	{"daemon", "agent_token"},
 	{"daemon", "data_dir"},
 }
 

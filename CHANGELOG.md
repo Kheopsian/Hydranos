@@ -3,6 +3,12 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.94.0 - 2026-08-19
+
+### Added
+
+- **The agent token can be set from the config file or the environment.** `--agent-token` was the only way to give a node's gRPC data-plane its shared secret, which meant putting it in the command line of every agent -- visible in `ps`, and in the Kubernetes manifest or compose file that spells the command out. It now comes from `[daemon] agent_token` or `$HYDRA_AGENT_TOKEN` as well, so the token can travel as a mounted config or a secret reference like every other credential. Precedence runs `--agent-token`, then `$HYDRA_AGENT_TOKEN`, then `[daemon] agent_token`; an empty or absent environment variable falls through to the config rather than silently disabling authentication, and `--agent-token=""` remains the explicit way to turn it off. The value is trimmed, because a secret arriving from an env file or a mounted volume usually carries a trailing newline and a token off by one invisible byte fails with nothing on either side to explain why. Where the token came from is logged; the token itself is not. `agentprobe` reads the same variable when `-token` is not given.
+
 ## v3.93.1 - 2026-08-19
 
 ### Fixed
