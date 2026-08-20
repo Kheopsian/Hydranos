@@ -562,6 +562,14 @@ func (s *Server) registerHydraRoutes() {
 		// Hoard engine
 		hoard := api.Group("/hoard")
 		{
+			// Background work. Deliberately not under /hoard or /race: a job
+			// is not the property of an engine.
+			jobsGrp := api.Group("/jobs")
+			jobsGrp.GET("", s.handleJobsList)
+			jobsGrp.GET("/:id", s.handleJobGet)
+			jobsGrp.DELETE("/:id", s.handleJobCancel)
+		}
+		{
 			hoard.GET("/stats", s.handleHoardStats)
 			hoard.GET("/torrents", s.handleHoardTorrents)
 			hoard.GET("/torrents/:info_hash", s.handleHoardTorrentDetail)
@@ -577,6 +585,8 @@ func (s *Server) registerHydraRoutes() {
 			hoard.POST("/verify-downloading", s.handleHoardVerifyDownloading)
 			hoard.POST("/torrents/:info_hash/verify", s.handleHoardVerifyTorrent)
 			hoard.POST("/torrents/:info_hash/category", s.handleHoardSetCategory)
+			hoard.GET("/torrents/:info_hash/move-preview", s.handleMovePreview)
+			race.GET("/torrents/:info_hash/move-preview", s.handleMovePreview)
 			// Same handler under race: setting a race torrent's category to a
 			// hoard-mode category is how a torrent is graduated by hand.
 			race.POST("/torrents/:info_hash/category", s.handleHoardSetCategory)
@@ -1485,6 +1495,11 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 	var body struct {
 		Category  string `json:"category"`
 		MoveFiles bool   `json:"move_files"`
+		// AllowBreakingHardlinks is the operator's answer to a previous 409.
+		// Absent means "not asked yet", which is why a refusal has to be a
+		// distinct, machine-readable response rather than a generic error:
+		// the UI turns it into a checkbox or a modal and asks again.
+		AllowBreakingHardlinks bool `json:"allow_breaking_hardlinks"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
@@ -1524,6 +1539,9 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 	// Payload files are not relocated: race data is on the NVMe and hoard data
 	// on the array, so moving bytes between them is a cross-filesystem copy
 	// with its own failure modes. The new engine seeds the data where it lies.
+	// Set when the torrent changed engine, so the response can say so even
+	// though the reply is written further down.
+	handedOverTo := ""
 	if targetMode := catMode(cats, body.Category); targetMode != "" {
 		var src, dst engineHost
 		switch {
@@ -1544,24 +1562,55 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 			if s.saveStateFn != nil {
 				s.saveStateFn()
 			}
-			c.JSON(http.StatusOK, gin.H{
-				"status":    "ok",
-				"info_hash": hash,
-				"category":  body.Category,
-				"moved_to":  targetMode,
-				"save_path": targetSavePath,
-			})
-			return
+			// The torrent now belongs to the other engine. If its data also
+			// has to move, that is a separate, long-running job -- and it is
+			// submitted below, after the handover, so the job finds the
+			// torrent in the engine that will still hold it when it lands.
+			if !body.MoveFiles {
+				c.JSON(http.StatusOK, gin.H{
+					"status":    "ok",
+					"info_hash": hash,
+					"category":  body.Category,
+					"moved_to":  targetMode,
+					"save_path": targetSavePath,
+				})
+				return
+			}
+			handedOverTo = targetMode
 		}
 	}
 
-	if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
-		var serr error
-		if body.MoveFiles {
-			serr = s.hoardEngine.SetTorrentCategory(hash, body.Category, targetSavePath)
-		} else {
-			serr = s.hoardEngine.SetCategoryLabel(hash, body.Category)
+	// Relocating the payload. Same filesystem is a rename and finishes in
+	// milliseconds; across filesystems it is a copy that runs for as long as
+	// it runs, which is why both go through the job runner rather than one
+	// being special-cased into the request.
+	if body.MoveFiles && s.jobs != nil {
+		if !s.submitMoveJob(c, hash, body.Category, body.AllowBreakingHardlinks) {
+			return
 		}
+		// Nothing to move (already in the right place): fall through and
+		// just relabel.
+	}
+	if handedOverTo != "" {
+		if s.saveStateFn != nil {
+			s.saveStateFn()
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "ok",
+			"info_hash": hash,
+			"category":  body.Category,
+			"moved_to":  handedOverTo,
+			"save_path": targetSavePath,
+		})
+		return
+	}
+
+	if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
+		// MoveFiles is handled by the job above -- including the
+		// same-filesystem case, which the job performs as a rename. Reaching
+		// here with MoveFiles set means there was nothing to move, so all
+		// that is left either way is the label.
+		serr := s.hoardEngine.SetCategoryLabel(hash, body.Category)
 		if err := serr; err != nil {
 			msg := err.Error()
 			if strings.Contains(msg, "cross-filesystem") {

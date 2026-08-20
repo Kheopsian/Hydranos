@@ -36,6 +36,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/drain"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
+	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/fsinfo"
 	"github.com/Kheopsian/hydra/internal/health"
 	"github.com/Kheopsian/hydra/internal/logs"
@@ -848,6 +849,37 @@ func main() {
 	// the port for as long as the daemon runs.
 	apiServer.StartGluetunPortSync(map[string]*config.SessionConfig{"race": raceCfg, "hoard": hoardCfg})
 	apiServer.SetStateManager(stateMgr)
+
+	// ---- Background jobs ----
+	//
+	// Payload moves take minutes to hours, so they run here rather than
+	// inside a request. The manager is also what a rules engine will submit
+	// to later; a move is simply the first registered job type.
+	//
+	// Concurrency is one on purpose: a move is sequential I/O against the
+	// same disks the torrents are served from, so running several at once
+	// makes every one of them slower and the seeding worse.
+	if torStore != nil {
+		jobMgr := jobs.NewManager(ctx, torStore, 1)
+		jobMgr.Register(&jobs.MoveRunner{
+			Host: func(infoHash string) jobs.PayloadHost {
+				if hoardEngine != nil && hoardEngine.HasTorrent(infoHash) {
+					return hoardEngine
+				}
+				if raceEngine != nil && raceEngine.HasTorrent(infoHash) {
+					return raceEngine
+				}
+				return nil
+			},
+		})
+		apiServer.SetJobManager(jobMgr)
+		// Pick up whatever the last shutdown interrupted before the API
+		// starts taking new work, so a resumed move is never racing a fresh
+		// one for the same torrent.
+		jobMgr.ResumeAll()
+		// Finished jobs are kept long enough to be useful and not forever.
+		jobMgr.Prune(30 * 24 * time.Hour)
+	}
 	// ---- Remote agents ([[agent]]) for multi-home category placement ----
 	// Dialed pull-only; a dead agent is logged + skipped, never blocks boot.
 	for _, ag := range cfg.Agents {
