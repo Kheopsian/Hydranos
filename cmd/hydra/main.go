@@ -2402,3 +2402,27 @@ func (a *hoardAPIAdapter) FetchMetadata(infoHash string, trackers, peers []strin
 func (a *hoardAPIAdapter) GetMetadata(infoHash string) (*ltclient.GetMetadataResult, error) {
 	return a.engine.GetMetadata(infoHash)
 }
+
+// The handoff surface is a straight pass-through: the adapters exist to keep
+// the api package from importing the engine types, not to add behaviour.
+func (a *raceAPIAdapter) Role() engine.Role { return a.engine.Role() }
+func (a *raceAPIAdapter) ExportTorrentState(infoHash string) (*ltclient.ResumeRecord, error) {
+	return a.engine.ExportTorrentState(infoHash)
+}
+func (a *raceAPIAdapter) AdoptTorrent(rec *ltclient.ResumeRecord, category string) error {
+	return a.engine.AdoptTorrent(rec, category)
+}
+func (a *raceAPIAdapter) ReleaseTorrent(infoHash string) error {
+	return a.engine.ReleaseTorrent(infoHash)
+}
+
+func (a *hoardAPIAdapter) Role() engine.Role { return a.engine.Role() }
+func (a *hoardAPIAdapter) ExportTorrentState(infoHash string) (*ltclient.ResumeRecord, error) {
+	return a.engine.ExportTorrentState(infoHash)
+}
+func (a *hoardAPIAdapter) AdoptTorrent(rec *ltclient.ResumeRecord, category string) error {
+	return a.engine.AdoptTorrent(rec, category)
+}
+func (a *hoardAPIAdapter) ReleaseTorrent(infoHash string) error {
+	return a.engine.ReleaseTorrent(infoHash)
+}

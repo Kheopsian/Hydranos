@@ -166,3 +166,19 @@ func (emptyHoardEngine) FetchMetadata(string, []string, []string, *uint32) (*ltc
 func (emptyHoardEngine) GetMetadata(string) (*ltclient.GetMetadataResult, error) {
 	return nil, errNoLocalEngine
 }
+
+// A front-only node hosts no engine, so it can neither give up a torrent nor
+// take one on. See errNoLocalEngine.
+func (emptyRaceEngine) Role() engine.Role { return engine.RoleRace }
+func (emptyRaceEngine) ExportTorrentState(string) (*ltclient.ResumeRecord, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyRaceEngine) AdoptTorrent(*ltclient.ResumeRecord, string) error { return errNoLocalEngine }
+func (emptyRaceEngine) ReleaseTorrent(string) error                      { return errNoLocalEngine }
+
+func (emptyHoardEngine) Role() engine.Role { return engine.RoleHoard }
+func (emptyHoardEngine) ExportTorrentState(string) (*ltclient.ResumeRecord, error) {
+	return nil, errNoLocalEngine
+}
+func (emptyHoardEngine) AdoptTorrent(*ltclient.ResumeRecord, string) error { return errNoLocalEngine }
+func (emptyHoardEngine) ReleaseTorrent(string) error                       { return errNoLocalEngine }

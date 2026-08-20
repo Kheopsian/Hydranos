@@ -25,6 +25,8 @@ pub fn dispatch(
         "stop_torrent" => stop_torrent(params, torrent_mgr),
         "set_serving_suspended" => set_serving_suspended(params, torrent_mgr),
         "set_save_path" => set_save_path(params, torrent_mgr),
+        "export_state" => export_state(params, torrent_mgr),
+        "import_state" => import_state(params, torrent_mgr),
         "verify_torrent" => verify_torrent(params, torrent_mgr),
         "recheck_torrent" => verify_torrent(params, torrent_mgr),
         "get_status" => get_status(params, torrent_mgr),
@@ -163,6 +165,32 @@ fn set_save_path(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
     };
     match mgr.set_save_path(&ih, new_path) {
         Ok(()) => json!({"ok": true}),
+        Err(e) => json!({"error": e}),
+    }
+}
+
+/// Hand out a torrent's durable state so another engine can adopt it.
+///
+/// The two halves of a move are kept as separate calls on purpose: the two
+/// engines are separate processes with separate databases, so the orchestrator
+/// (Hydra) is the only thing that can see both. It exports here, imports over
+/// there, and only then removes the original.
+fn export_state(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
+    let ih = match get_info_hash(params) { Ok(ih) => ih, Err(e) => return e };
+    match mgr.export_state(&ih) {
+        Some(rd) => serde_json::to_value(&rd).unwrap_or_else(|e| json!({"error": e.to_string()})),
+        None => json!({"error": "torrent not found"}),
+    }
+}
+
+/// Adopt a torrent exported from another engine, progression included.
+fn import_state(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
+    let rd: crate::torrent::fastresume::ResumeData = match serde_json::from_value(params.clone()) {
+        Ok(rd) => rd,
+        Err(e) => return json!({"error": format!("bad state record: {}", e)}),
+    };
+    match mgr.import_state(&rd) {
+        Ok((ih, name)) => json!({"info_hash": hex_encode(&ih), "name": name}),
         Err(e) => json!({"error": e}),
     }
 }

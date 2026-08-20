@@ -37,6 +37,11 @@ librqbit-utp = "0.7"
 # libssl is older than the build runner's. ring compiles in.
 librqbit-dht = { version = "5", default-features = false, features = ["sha1-ring"] }
 parking_lot = "0.12"
+# Durable per-torrent state. "bundled" compiles SQLite in rather than linking
+# the system library, for the same reason sha1-ring is preferred over the
+# OpenSSL-backed hash above: a release tarball must not depend on whatever
+# libsqlite3 happens to be installed on the host.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # jemalloc (heap profiling of the Linux leak) and nix are Unix-only; the
 # system allocator is used on Windows.

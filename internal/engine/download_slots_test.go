@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -215,4 +216,12 @@ func activeSet(c *stubSlotClient) map[string]bool {
 		}
 	}
 	return out
+}
+
+func (*stubSlotClient) ExportState(string) (*ltclient.ResumeRecord, error) {
+	return nil, errors.New("not supported in this test double")
+}
+
+func (*stubSlotClient) ImportState(*ltclient.ResumeRecord) (string, error) {
+	return "", errors.New("not supported in this test double")
 }

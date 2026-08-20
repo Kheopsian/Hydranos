@@ -65,6 +65,11 @@ type EngineClient interface {
 	// flushes fastresume. Files must already have been moved on disk.
 	SetSavePath(infoHash, savePath string) error
 	VerifyTorrent(infoHash string) error
+	// ExportState/ImportState carry a torrent's durable state between two
+	// engines. The record is the same one the engine persists, so a torrent
+	// that changes engine is indistinguishable from one that restarted.
+	ExportState(infoHash string) (*ltclient.ResumeRecord, error)
+	ImportState(rec *ltclient.ResumeRecord) (string, error)
 
 	// Queries
 	GetStatus(infoHash string) (*ltclient.TorrentStatus, error)
