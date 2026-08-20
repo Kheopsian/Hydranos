@@ -332,3 +332,18 @@ func (e *RaceEngine) ImportFromStore(st *store.AgentStore, uploadsDir string) (i
 	slog.Info("race: store import complete", "imported", imported, "errors", errors)
 	return
 }
+
+// MaterializeTorrentBlob writes shipped .torrent bytes to the durable,
+// content-addressed path every other durability path already agrees on
+// (<uploadsDir>/<info_hash>.torrent) and returns it. Exported for the agent's
+// routed add: an engine keeps the path it was added from as its
+// TorrentFilePath, so adding from a temp file that is deleted right after
+// leaves the torrent with a dangling path, and the store reconcile — which
+// captures the blob by reading that path — can never insert its row.
+func MaterializeTorrentBlob(uploadsDir string, blob []byte) (string, error) {
+	ih, err := infoHashFromTorrentFile(blob)
+	if err != nil {
+		return "", err
+	}
+	return materializeBlob(uploadsDir, ih, blob)
+}
