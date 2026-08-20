@@ -15,10 +15,10 @@ import (
 
 // resolveMovePaths returns the current content root, the content root under
 // the target category, and the engine save_path that goes with it.
-func (s *Server) resolveMovePaths(infoHash, targetCategory string) (src, dst, engineSavePath string, host engineHost, err error) {
+func (s *Server) resolveMovePaths(infoHash, targetCategory string) (src, dst, engineSavePath, name string, host engineHost, err error) {
 	host = s.hostHolding(infoHash)
 	if host == nil {
-		return "", "", "", nil, fmt.Errorf("no engine on this node holds %s", infoHash)
+		return "", "", "", "", nil, fmt.Errorf("no engine on this node holds %s", infoHash)
 	}
 
 	var detail map[string]interface{}
@@ -29,12 +29,13 @@ func (s *Server) resolveMovePaths(infoHash, targetCategory string) (src, dst, en
 		detail = h.GetTorrentDetail(infoHash)
 	}
 	if detail == nil {
-		return "", "", "", nil, fmt.Errorf("torrent %s has no detail to move", infoHash)
+		return "", "", "", "", nil, fmt.Errorf("torrent %s has no detail to move", infoHash)
 	}
 
 	src, _ = detail["save_path"].(string)
+	name, _ = detail["name"].(string)
 	if src == "" {
-		return "", "", "", nil, fmt.Errorf("torrent %s has no save_path", infoHash)
+		return "", "", "", "", nil, fmt.Errorf("torrent %s has no save_path", infoHash)
 	}
 	multi, _ := detail["multi_file"].(bool)
 
@@ -49,10 +50,10 @@ func (s *Server) resolveMovePaths(infoHash, targetCategory string) (src, dst, en
 		}
 	}
 	if !found {
-		return "", "", "", nil, fmt.Errorf("category not found: %s", targetCategory)
+		return "", "", "", "", nil, fmt.Errorf("category not found: %s", targetCategory)
 	}
 	if targetCatDir == "" {
-		return "", "", "", nil, fmt.Errorf("category %s has no save_path", targetCategory)
+		return "", "", "", "", nil, fmt.Errorf("category %s has no save_path", targetCategory)
 	}
 
 	// Refuse the loose layout, where the payload is a bare file sitting
@@ -63,7 +64,7 @@ func (s *Server) resolveMovePaths(infoHash, targetCategory string) (src, dst, en
 	// answer.
 	for _, cat := range cats {
 		if cat.SavePath != "" && filepath.Clean(cat.SavePath) == filepath.Clean(src) {
-			return "", "", "", nil, fmt.Errorf(
+			return "", "", "", "", nil, fmt.Errorf(
 				"torrent %s has no folder of its own (its data sits loose in category directory %s); "+
 					"moving it would move the whole category", infoHash, src)
 		}
@@ -75,7 +76,7 @@ func (s *Server) resolveMovePaths(infoHash, targetCategory string) (src, dst, en
 	} else {
 		engineSavePath = dst
 	}
-	return filepath.Clean(src), filepath.Clean(dst), engineSavePath, host, nil
+	return filepath.Clean(src), filepath.Clean(dst), engineSavePath, name, host, nil
 }
 
 // hostHolding returns the engine that currently holds the torrent, or nil.

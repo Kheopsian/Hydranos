@@ -124,7 +124,7 @@ func (s *Server) handleMovePreview(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "category required"})
 		return
 	}
-	src, dst, _, _, err := s.resolveMovePaths(hash, target)
+	src, dst, _, _, _, err := s.resolveMovePaths(hash, target)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
@@ -164,7 +164,7 @@ func (s *Server) handleMovePreview(c *gin.Context) {
 // Returns 409 with a machine-readable reason when the operator has to decide
 // something -- hardlinks above all -- rather than guessing on their behalf.
 func (s *Server) submitMoveJob(c *gin.Context, hash, category string, allowBreakingHardlinks bool) bool {
-	src, dst, engineSavePath, _, err := s.resolveMovePaths(hash, category)
+	src, dst, engineSavePath, name, _, err := s.resolveMovePaths(hash, category)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return false
@@ -202,6 +202,7 @@ func (s *Server) submitMoveJob(c *gin.Context, hash, category string, allowBreak
 		Target:                 plan.Target,
 		EngineSavePath:         engineSavePath,
 		Category:               category,
+		Name:                   name,
 		AllowBreakingHardlinks: allowBreakingHardlinks,
 		BytesPerSecond:         s.config.Daemon.MoveBytesPerSecond(),
 	})

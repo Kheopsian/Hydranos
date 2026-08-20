@@ -6498,6 +6498,17 @@ function stopJobsPolling() {
     }
 }
 
+// The torrent's name as the job recorded it. Jobs created before the name was
+// stored fall back to the last path segment of the destination, which for a
+// move is the release folder and so usually reads the same.
+function jobName(j) {
+    const p = j.params || {};
+    if (p.name) return p.name;
+    const target = p.target || "";
+    const seg = target.split("/").filter(Boolean).pop();
+    return seg || "-";
+}
+
 function _jobStateLabel(state) {
     switch (state) {
         case "pending": return t("Queued");
@@ -6547,7 +6558,8 @@ async function loadJobs() {
         return `<tr>` +
             `<td>${esc(_jobStateLabel(j.state))}</td>` +
             `<td>${esc(j.type)}</td>` +
-            `<td title="${esc(j.info_hash)}">${esc((j.info_hash || "").slice(0, 12))}</td>` +
+            `<td class="job-torrent"><div class="job-name">${esc(jobName(j))}</div>` +
+            `<div class="job-hash">${esc(j.info_hash)}</div></td>` +
             progressCell +
             `<td title="${esc(target)}">${esc(target)}</td>` +
             `<td>${j.created_at ? new Date(j.created_at * 1000).toLocaleString() : ""}</td>` +

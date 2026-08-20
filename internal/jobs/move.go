@@ -38,6 +38,10 @@ type MoveParams struct {
 	// the content root for a multi-file torrent, the root itself otherwise.
 	EngineSavePath string `json:"engine_save_path"`
 	Category       string `json:"category"`
+	// Name is the torrent's name, copied in when the job is created. The job
+	// outlives the torrent, and a hash alone is not something anyone can read
+	// or search for.
+	Name string `json:"name,omitempty"`
 	// AllowBreakingHardlinks is the operator's explicit answer, captured at
 	// submission time.
 	AllowBreakingHardlinks bool `json:"allow_breaking_hardlinks"`
