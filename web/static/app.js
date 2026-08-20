@@ -4673,6 +4673,36 @@ function setupHoardSSE() {
             // Progressive hydration of the hoard list (replaces the ~76MB REST
             // fetch). Race keeps its own on-view fetch (small list), so ignore it.
             if (data.mode !== "hoard") return;
+            // A partial batch carries the remote agents' rows, re-pushed every
+            // few seconds because no agent event reaches this node's hub. It is
+            // a subset of the list, so it upserts and nothing more: it must
+            // never end a hydration or prune the rows it does not carry.
+            if (data.partial) {
+                const rows = Array.isArray(data.torrents) ? data.torrents : [];
+                if (!rows.length) return;
+                for (const t of rows) {
+                    if (t.total_size > 0 && t.total_done > 0) t.ratio = t.total_upload / t.total_done;
+                }
+                if (_hydMap) {
+                    // Hydration in flight: feed its accumulator instead, or the
+                    // batch we are in the middle of would overwrite these.
+                    for (const t of rows) {
+                        _hydMap.set(t.info_hash, t);
+                        if (_resyncing) _resyncSeen.add(t.info_hash);
+                    }
+                    return;
+                }
+                const byHash = new Map(_hoardAllTorrents.map(t => [t.info_hash, t]));
+                let fresh = false;
+                for (const t of rows) {
+                    if (!byHash.has(t.info_hash)) fresh = true;
+                    byHash.set(t.info_hash, t);
+                }
+                _hoardAllTorrents = Array.from(byHash.values());
+                if (fresh) _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
+                _scheduleHoardRender();
+                return;
+            }
             // Accumulate into a persistent map (O(1)/row) and materialize the
             // array + counts + render ONCE at done. Rebuilding map+array per
             // batch was O(N^2) => ~24s at 106k though the server streams in <1s.

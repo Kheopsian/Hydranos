@@ -77,6 +77,11 @@ func (s *Server) handleSSE(c *gin.Context) {
 	id, ch := hub.Subscribe()
 	defer hub.Unsubscribe(id)
 
+	// Count real browsers, so work that only exists to feed them (polling the
+	// agents, see agentrows.go) stops when the last tab closes.
+	s.sseClients.Add(1)
+	defer s.sseClients.Add(-1)
+
 	// Initial comment tells the browser the stream is open (no data yet).
 	fmt.Fprintf(out, ": connected\n\n")
 	fl.Flush()
@@ -183,7 +188,17 @@ func (s *Server) streamHydration(w interface{ Write([]byte) (int, error) }, flus
 		}
 	}
 	if s.hoardEngine != nil {
-		stream("hoard", s.hoardEngine.GetTorrentListJSON())
+		list := s.hoardEngine.GetTorrentListJSON()
+		// Remote-agent rows ride the same hydration. The hoard list is fed by
+		// this stream alone, so without them a torrent placed on an agent has
+		// no row in /#hoard at all -- it only exists over /api/hoard/torrents,
+		// which the table stopped calling when it moved to SSE.
+		for _, row := range s.agentHoardRows() {
+			if b, err := json.Marshal(row); err == nil {
+				list = append(list, b)
+			}
+		}
+		stream("hoard", list)
 	}
 	if s.raceEngine != nil {
 		stream("race", s.raceEngine.GetAllStatusJSON())
