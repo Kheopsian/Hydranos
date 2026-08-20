@@ -31,6 +31,9 @@ services:
     #   # instance; raise it (and stop_grace_period above with it) if you hold
     #   # several hundred thousand torrents, where the resume sweep is longer.
     #   HYDRA_STOP_TIMEOUT: 10s
+    #   # Send the log stream to stdout (`docker logs hydra`) instead of
+    #   # /config/hydra.log. Any value but 0/false/no/off turns it on.
+    #   HYDRA_LOG_STDOUT: 1
     volumes:
       - ./config:/config    # config, resume data, SQLite store (persistent)
       - ./data:/data         # torrent payload data

@@ -122,3 +122,33 @@ func TestParseEngineLevelHandlesANSI(t *testing.T) {
 		}
 	}
 }
+
+func TestStdoutMirrorEnv(t *testing.T) {
+	for _, tc := range []struct {
+		val  string
+		want bool
+	}{
+		{"", false}, {"0", false}, {"false", false}, {"no", false}, {"off", false},
+		{"1", true}, {"true", true}, {"yes", true}, {" On ", true},
+	} {
+		t.Setenv(StdoutMirrorEnv, tc.val)
+		if got := StdoutMirror(); got != tc.want {
+			t.Errorf("%s=%q: got %v, want %v", StdoutMirrorEnv, tc.val, got, tc.want)
+		}
+	}
+}
+
+func TestSetMirrorStdoutNaming(t *testing.T) {
+	h := NewHub(10)
+	if h.MirrorName() != "" {
+		t.Fatalf("fresh hub reports mirror %q", h.MirrorName())
+	}
+	h.SetMirrorStdout()
+	if h.MirrorName() != "stdout" {
+		t.Fatalf("got %q, want stdout", h.MirrorName())
+	}
+	h.SetMirrorFileBeside(filepath.Join(t.TempDir(), "default.toml"), "hydra.log")
+	if h.MirrorName() != "hydra.log" {
+		t.Fatalf("got %q, want hydra.log", h.MirrorName())
+	}
+}
