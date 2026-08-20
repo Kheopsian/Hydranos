@@ -2297,6 +2297,16 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 		}
 	}()
 	slog.Info("front-only API started", "addr", fmt.Sprintf("http://%s:%d", cfg.Daemon.APIHost, cfg.Daemon.APIPort))
+	// A front-only node restores nothing of its own: there is no local engine
+	// and no local state to page back in, so it is fully started the moment the
+	// API is up. Leaving the flag alone -- as this mode used to -- pins
+	// /api/startup at {"ready":false} forever, and the web UI polls that flag
+	// to lift its splash overlay: the whole UI stayed unreachable behind
+	// "Initializing...", with a backend that was answering every other route
+	// correctly. Deliberately NOT gated on the agents being reachable: agent
+	// health is reported by /api/agents, and blocking the UI on it would put
+	// the same permanent overlay back the moment an agent was down.
+	api.SetStartupReady(true)
 	<-ctx.Done()
 }
 
