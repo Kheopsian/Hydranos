@@ -332,7 +332,8 @@ func startListenPortHook(ctx context.Context, port int, token string, lives []*l
 	go func() {
 		slog.Info("agent-only: listen-port hook serving (loopback only)", "addr", addr)
 		if token == "" {
-			slog.Warn("agent-only: listen-port hook has NO token: loopback-only, but set --agent-token for defense-in-depth")
+			slog.Warn("agent-only: listen-port hook has NO token: loopback-only, but set --agent-token, $" +
+				agentwire.TokenEnv + " or [daemon] agent_token for defense-in-depth")
 		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("agent-only: listen-port hook exited", "error", err)
