@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,9 +38,14 @@ type Server struct {
 
 	engines map[string]engine.EngineClient
 	tmpDir  string
-	token   string
-	tlsCert string
-	tlsKey  string
+	// uploadsDir is where a routed add lands its .torrent for good. Unlike the
+	// thin add path (whose caller keeps the blob), a routed add hands the file
+	// to this node's OWN engine, which stores the path as its TorrentFilePath
+	// and hands it to the store reconcile later — so it has to outlive the RPC.
+	uploadsDir string
+	token      string
+	tlsCert    string
+	tlsKey     string
 
 	// ownEvents gates the Subscribe stream. SetEventHandler is single-slot on a
 	// live ltclient, so an agent sharing the monolith's clients (additive mode)
@@ -70,6 +76,18 @@ func NewServer(engines map[string]engine.EngineClient, tmpDir, token string) *Se
 		wired:   make(map[string]bool),
 		rich:    make(map[string]engine.RichEngine),
 	}
+}
+
+// SetUploadsDir sets where routed adds keep their .torrent. Defaults to
+// <tmpDir>/uploads, which is the same directory the agent's store import
+// materialises blobs into.
+func (s *Server) SetUploadsDir(dir string) { s.uploadsDir = dir }
+
+func (s *Server) uploads() string {
+	if s.uploadsDir != "" {
+		return s.uploadsDir
+	}
+	return filepath.Join(s.tmpDir, "uploads")
 }
 
 // SetTLS enables TLS with the given cert/key files (empty = plaintext).
@@ -423,17 +441,17 @@ func (s *Server) handleAddRouted(p agentwire.AddRoutedParams) (*agentpb.CallRepl
 	if e == nil {
 		return nil, status.Errorf(codes.Unavailable, "engine %q not wired on agent", id)
 	}
-	f, err := os.CreateTemp(s.tmpDir, "agent-routed-*.torrent")
+	// Durable, content-addressed — NOT a temp file. The engine keeps this path
+	// as the torrent's TorrentFilePath and the 5-minute store reconcile reads
+	// it to capture the blob; a path deleted on return meant every routed add
+	// was counted `miss` by the reconcile and never made it into the store, so
+	// it carried no category/save_path/tags across a restart. A blob left
+	// behind by a failed add is content-addressed, so a retry reuses it as is.
+	path, err := engine.MaterializeTorrentBlob(s.uploads(), p.Torrent)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "temp file: %v", err)
+		return nil, status.Errorf(codes.Internal, "materialize torrent: %v", err)
 	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(p.Torrent); err != nil {
-		f.Close()
-		return nil, status.Errorf(codes.Internal, "write temp: %v", err)
-	}
-	f.Close()
-	ih, err := e.AddRouted(f.Name(), "", p.SavePath, nil, p.Category)
+	ih, err := e.AddRouted(path, "", p.SavePath, nil, p.Category)
 	return reply(&ltclient.AddTorrentResult{InfoHash: ih}, err)
 }
 
