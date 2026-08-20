@@ -3,7 +3,7 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
-## v3.94.0 - 2026-08-19
+## v3.97.0 - 2026-08-20
 
 ### Added
 
