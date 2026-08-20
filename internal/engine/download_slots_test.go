@@ -75,7 +75,7 @@ func (c *stubSlotClient) SetEngineOptFlag(string, bool, int64) (map[string]inter
 }
 func (c *stubSlotClient) EngineOptFlags() (map[string]interface{}, error)    { return nil, nil }
 func (c *stubSlotClient) GetTrackers(string) ([]ltclient.TrackerInfo, error) { return nil, nil }
-func (c *stubSlotClient) SetTrackers(string, [][]string) ([][]string, error)  { return nil, nil }
+func (c *stubSlotClient) SetTrackers(string, [][]string) ([][]string, error) { return nil, nil }
 func (c *stubSlotClient) GetDiagnostics() (*ltclient.DiagnosticStats, error) { return nil, nil }
 
 // Added to EngineClient by the magnet work; the slot tests do not resolve

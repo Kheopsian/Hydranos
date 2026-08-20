@@ -269,7 +269,7 @@ func TestGluetunPortGoesToOneEngineOnly(t *testing.T) {
 		GluetunURL:      "http://127.0.0.1:8000",
 	}
 	for _, tc := range []struct{ pick, on, off string }{
-		{"", "hoard", "race"},      // configs written before the choice existed
+		{"", "hoard", "race"}, // configs written before the choice existed
 		{"hoard", "hoard", "race"},
 		{"race", "race", "hoard"},
 	} {

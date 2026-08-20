@@ -433,3 +433,10 @@ type Graduator interface {
 
 // SetGraduator wires the race->hoard graduation mover (called once at startup).
 func (d *RaceDrain) SetGraduator(g Graduator) { d.grad = g }
+
+// TotalFree reports total and available bytes at path.
+//
+// Exported so the move preflight can reuse the platform code that already
+// exists here (statfs on unix, GetDiskFreeSpaceExW on Windows) rather than
+// growing a second copy with its own Windows bugs.
+func TotalFree(path string) (total, free int64, err error) { return fsTotalFree(path) }

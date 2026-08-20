@@ -36,9 +36,9 @@ import (
 	"github.com/Kheopsian/hydra/internal/drain"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
-	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/fsinfo"
 	"github.com/Kheopsian/hydra/internal/health"
+	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/logs"
 	"github.com/Kheopsian/hydra/internal/metrics"
 	"github.com/Kheopsian/hydra/internal/notify"
@@ -602,16 +602,28 @@ func main() {
 			hoardCfg = &ec.SessionConfig
 		}
 	}
-	if raceCfg == nil || hoardCfg == nil {
-		slog.Error("monolith requires at least one race and one hoard engine")
-		os.Exit(1)
+	// Only the monolith needs both roles: it drives raceCfg and hoardCfg
+	// directly below and would nil-deref without them. A front-only or
+	// agent-only node runs whatever set ResolveEngines gave it, so enforcing
+	// the pair here would reject a dedicated agent hosting a single engine --
+	// which is the whole point of an agent node.
+	if *frontOnly || *agentOnly {
+		slog.Info("Config loaded",
+			"engines", len(engineCfgs),
+			"data_dir", cfg.Daemon.DataDir,
+		)
+	} else {
+		if raceCfg == nil || hoardCfg == nil {
+			slog.Error("monolith requires at least one race and one hoard engine")
+			os.Exit(1)
+		}
+		slog.Info("Config loaded",
+			"api", fmt.Sprintf("%s:%d", cfg.Daemon.APIHost, cfg.Daemon.APIPort),
+			"race_port", raceCfg.ListenPort,
+			"hoard_port", hoardCfg.ListenPort,
+			"data_dir", cfg.Daemon.DataDir,
+		)
 	}
-	slog.Info("Config loaded",
-		"api", fmt.Sprintf("%s:%d", cfg.Daemon.APIHost, cfg.Daemon.APIPort),
-		"race_port", raceCfg.ListenPort,
-		"hoard_port", hoardCfg.ListenPort,
-		"data_dir", cfg.Daemon.DataDir,
-	)
 
 	// Discord notifications
 	var notifier *notify.Notifier
@@ -915,6 +927,45 @@ func main() {
 					return raceEngine
 				}
 				return nil
+			},
+		})
+		// Cross-node moves. The dialers resolve at RUN time, not here: agents
+		// are registered further down in boot, and a resumed job must find the
+		// agent as it is now rather than as it was when the job was created.
+		// An empty agent name, or "local", means this node. Resolving it to a
+		// localEndpoint is what lets a monolith be one end of a move -- the
+		// common case, since the front is usually where the library lives.
+		isLocal := func(agent string) bool { return agent == "" || agent == api.LocalAgentName }
+		localFor := func(engineID string) *localEndpoint {
+			client := hoardProc.Client()
+			if engineID == agentwire.EngineRace {
+				client = raceProc.Client()
+			}
+			return &localEndpoint{client: client, dataDir: cfg.Daemon.DataDir}
+		}
+		jobMgr.Register(&jobs.RemoteMoveRunner{
+			DialSource: func(p jobs.RemoteMoveParams) (jobs.PieceSource, error) {
+				if isLocal(p.SourceAgent) {
+					return localFor(p.Engine), nil
+				}
+				return apiServer.RemoteAgentEngineClient(p.SourceAgent, p.Engine)
+			},
+			DialSink: func(p jobs.RemoteMoveParams) (jobs.PieceSink, error) {
+				if isLocal(p.TargetAgent) {
+					return localFor(p.Engine), nil
+				}
+				return apiServer.RemoteAgentEngineClient(p.TargetAgent, p.Engine)
+			},
+			ResolveSavePath: apiServer.CategorySavePathFor,
+			FreeSpace: func(agent, path string) (int64, error) {
+				if isLocal(agent) {
+					return localFreeSpace(path)
+				}
+				cl, err := apiServer.RemoteAgentEngineClient(agent, agentwire.EngineHoard)
+				if err != nil {
+					return 0, err
+				}
+				return cl.DiskFree(path)
 			},
 		})
 		apiServer.SetJobManager(jobMgr)

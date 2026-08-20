@@ -7,13 +7,16 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +29,7 @@ import (
 
 	"github.com/Kheopsian/hydra/internal/agentpb"
 	"github.com/Kheopsian/hydra/internal/agentwire"
+	"github.com/Kheopsian/hydra/internal/drain"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 )
@@ -308,6 +312,116 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		}
 		return reply(nil, c.VerifyTorrent(p.InfoHash))
 
+	case agentwire.MethodExportState:
+		var p agentwire.InfoHashParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		return reply(c.ExportState(p.InfoHash))
+
+	case agentwire.MethodImportState:
+		// The params are the record itself, not an envelope around it.
+		var rec ltclient.ResumeRecord
+		if err := unmarshal(&rec); err != nil {
+			return nil, badParams(err)
+		}
+		if rec.InfoHash == "" {
+			return nil, badParams(fmt.Errorf("import_state: empty info_hash"))
+		}
+		ih, iErr := c.ImportState(&rec)
+		if iErr != nil {
+			return reply(nil, iErr)
+		}
+		return reply(map[string]string{"info_hash": ih}, nil)
+
+	case agentwire.MethodGetTorrentFile:
+		var p agentwire.InfoHashParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		rec, rErr := c.ExportState(p.InfoHash)
+		if rErr != nil {
+			return reply(nil, rErr)
+		}
+		blob, bErr := os.ReadFile(rec.TorrentPath)
+		if bErr != nil {
+			return reply(nil, fmt.Errorf("get_torrent_file: %w", bErr))
+		}
+		return reply(map[string][]byte{"torrent": blob}, nil)
+
+	case agentwire.MethodImportStateFile:
+		var p agentwire.ImportStateFileParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		var rec ltclient.ResumeRecord
+		if err := json.Unmarshal(p.Record, &rec); err != nil {
+			return nil, badParams(fmt.Errorf("import_state_file: record: %w", err))
+		}
+		if rec.InfoHash == "" {
+			return nil, badParams(fmt.Errorf("import_state_file: empty info_hash"))
+		}
+		if len(p.TorrentBlob) == 0 {
+			return nil, badParams(fmt.Errorf("import_state_file: empty .torrent bytes"))
+		}
+		// The incoming torrent_path is a path on the SOURCE host. Keep our own
+		// copy and point the record at it, exactly as handleAdd does for a
+		// shipped .torrent -- an adopted torrent whose file lives in a temp
+		// that gets swept would fail to reload on the next restart, so this
+		// lands beside the agent's other durable state, keyed by info_hash.
+		dst := filepath.Join(s.tmpDir, "agent-import-"+rec.InfoHash+".torrent")
+		if err := os.WriteFile(dst, p.TorrentBlob, 0644); err != nil {
+			return reply(nil, fmt.Errorf("import_state_file: write torrent: %w", err))
+		}
+		rec.TorrentPath = dst
+		ih, iErr := c.ImportState(&rec)
+		if iErr != nil {
+			// Do not leave the file behind on a refused adopt.
+			_ = os.Remove(dst)
+			return reply(nil, iErr)
+		}
+		return reply(map[string]string{"info_hash": ih}, nil)
+
+	case agentwire.MethodDiskFree:
+		var p agentwire.PathParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		total, free, dErr := drain.TotalFree(p.Path)
+		if dErr != nil {
+			return reply(nil, fmt.Errorf("disk_free %s: %w", p.Path, dErr))
+		}
+		return reply(map[string]int64{"total": total, "free": free}, nil)
+
+	case agentwire.MethodReadPiece:
+		var p agentwire.PieceParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		pc, pErr := s.pieceContextFor(c, p.InfoHash)
+		if pErr != nil {
+			return reply(nil, pErr)
+		}
+		data, rErr := pc.ReadPiece(p.Piece)
+		if rErr != nil {
+			return reply(nil, rErr)
+		}
+		return reply(map[string][]byte{"data": data}, nil)
+
+	case agentwire.MethodWritePiece:
+		var p agentwire.PieceParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		pc, pErr := s.pieceContextFor(c, p.InfoHash)
+		if pErr != nil {
+			return reply(nil, pErr)
+		}
+		if wErr := pc.WritePiece(p.Piece, p.Data); wErr != nil {
+			return reply(nil, wErr)
+		}
+		return reply(map[string]int{"piece": p.Piece}, nil)
+
 	case agentwire.MethodSetSavePath:
 		var p agentwire.SetSavePathParams
 		if err := unmarshal(&p); err != nil {
@@ -378,26 +492,59 @@ func badParams(err error) error {
 	return status.Errorf(codes.InvalidArgument, "bad params: %v", err)
 }
 
-// handleAdd materialises the shipped .torrent bytes to a temp file, then calls
-// the local AddTorrent variant.
+// keepTorrentBlob writes shipped .torrent bytes somewhere the engine can still
+// find them later, and returns that path.
+//
+// It must NOT be a temp file the caller deletes. The engine keeps the path it
+// was handed as the torrent's durable torrent_file_path: it is what a restart
+// re-parses, and what export_state hands to another engine. A .torrent removed
+// as soon as the add returned left every torrent added to an agent working
+// until the next restart and gone after it, with nothing in the logs.
+//
+// The name is content-addressed rather than random so that re-adding the same
+// .torrent reuses one file instead of growing a new one on every call.
+func (s *Server) keepTorrentBlob(prefix string, blob []byte) (string, error) {
+	sum := sha256.Sum256(blob)
+	path := filepath.Join(s.tmpDir, prefix+"-"+hex.EncodeToString(sum[:8])+".torrent")
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	}
+	// Write-then-rename: a crash mid-write must not leave a truncated
+	// .torrent behind under a name that later looks complete.
+	tmp, err := os.CreateTemp(s.tmpDir, prefix+"-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("temp file: %w", err)
+	}
+	if _, err := tmp.Write(blob); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("write torrent: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("close torrent: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("rename torrent: %w", err)
+	}
+	return path, nil
+}
+
+// handleAdd materialises the shipped .torrent bytes under the agent's data
+// dir, then calls the local AddTorrent variant.
 func (s *Server) handleAdd(c engine.EngineClient, p agentwire.AddParams) (*agentpb.CallReply, error) {
 	if len(p.Torrent) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "add_torrent: empty torrent bytes")
 	}
-	f, err := os.CreateTemp(s.tmpDir, "agent-add-*.torrent")
+	path, err := s.keepTorrentBlob("agent-add", p.Torrent)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "temp file: %v", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(p.Torrent); err != nil {
-		f.Close()
-		return nil, status.Errorf(codes.Internal, "write temp: %v", err)
-	}
-	f.Close()
 	if p.WithOptions {
-		return reply(c.AddTorrentWithOptions(f.Name(), p.SavePath, p.Stopped, p.SeedMode))
+		return reply(c.AddTorrentWithOptions(path, p.SavePath, p.Stopped, p.SeedMode))
 	}
-	return reply(c.AddTorrent(f.Name(), p.SavePath, p.Stopped))
+	return reply(c.AddTorrent(path, p.SavePath, p.Stopped))
 }
 
 // handleAddRouted materialises the shipped .torrent and adds it through the
@@ -423,17 +570,11 @@ func (s *Server) handleAddRouted(p agentwire.AddRoutedParams) (*agentpb.CallRepl
 	if e == nil {
 		return nil, status.Errorf(codes.Unavailable, "engine %q not wired on agent", id)
 	}
-	f, err := os.CreateTemp(s.tmpDir, "agent-routed-*.torrent")
+	path, err := s.keepTorrentBlob("agent-routed", p.Torrent)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "temp file: %v", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(p.Torrent); err != nil {
-		f.Close()
-		return nil, status.Errorf(codes.Internal, "write temp: %v", err)
-	}
-	f.Close()
-	ih, err := e.AddRouted(f.Name(), "", p.SavePath, nil, p.Category)
+	ih, err := e.AddRouted(path, "", p.SavePath, nil, p.Category)
 	return reply(&ltclient.AddTorrentResult{InfoHash: ih}, err)
 }
 

@@ -200,18 +200,116 @@ func (c *Client) VerifyTorrent(infoHash string) error {
 	return c.call(agentwire.MethodVerifyTorrent, agentwire.InfoHashParams{InfoHash: infoHash}, nil)
 }
 
-// ExportState and ImportState are not routed to a remote agent yet.
-//
-// Handing a torrent between two engines on the same host is a local matter;
-// doing it across hosts also has to move the payload bytes, which is a
-// different feature entirely. Refusing clearly beats a partial move that
-// leaves a torrent adopted on one side and still seeding on the other.
+// ExportState and ImportState carry a torrent's identity and progression to
+// or from a remote agent. They move no payload bytes and never claim to: the
+// record's save_path is taken at face value on the far side, exactly as in the
+// local case. That makes them correct on their own only when the data already
+// sits on both hosts (a cross-seed, a restore from an existing copy); a move
+// that genuinely relocates bytes is a separate job type on top of these.
 func (c *Client) ExportState(infoHash string) (*ltclient.ResumeRecord, error) {
-	return nil, errors.New("grpcclient: moving a torrent off a remote agent is not supported")
+	var rec ltclient.ResumeRecord
+	if err := c.call(agentwire.MethodExportState, agentwire.InfoHashParams{InfoHash: infoHash}, &rec); err != nil {
+		return nil, err
+	}
+	// Same guard as the local client: an empty record unmarshals happily from
+	// a null result, and adopting one would register a torrent with no
+	// progression at all rather than fail.
+	if rec.InfoHash == "" {
+		return nil, fmt.Errorf("grpcclient: agent returned an empty state record for %s", infoHash)
+	}
+	return &rec, nil
 }
 
 func (c *Client) ImportState(rec *ltclient.ResumeRecord) (string, error) {
-	return "", errors.New("grpcclient: moving a torrent onto a remote agent is not supported")
+	if rec == nil {
+		return "", errors.New("grpcclient: import_state: nil record")
+	}
+	var res struct {
+		InfoHash string `json:"info_hash"`
+		Name     string `json:"name"`
+	}
+	if err := c.call(agentwire.MethodImportState, rec, &res); err != nil {
+		return "", err
+	}
+	return res.InfoHash, nil
+}
+
+// GetTorrentFile fetches the raw .torrent bytes backing a torrent on the
+// agent. Deliberately NOT part of engine.EngineClient: it exists only to make
+// a record exported from one host adoptable on another, and the local engines
+// have no use for it.
+func (c *Client) GetTorrentFile(infoHash string) ([]byte, error) {
+	var res struct {
+		Torrent []byte `json:"torrent"`
+	}
+	if err := c.call(agentwire.MethodGetTorrentFile, agentwire.InfoHashParams{InfoHash: infoHash}, &res); err != nil {
+		return nil, err
+	}
+	if len(res.Torrent) == 0 {
+		return nil, fmt.Errorf("grpcclient: agent returned no .torrent bytes for %s", infoHash)
+	}
+	return res.Torrent, nil
+}
+
+// ImportStateWithFile adopts a record onto this agent, shipping the .torrent
+// bytes with it. The agent writes them to its own disk and rewrites the
+// record's torrent_path before adopting, which is what makes this work across
+// hosts at all -- plain ImportState would hand the far engine a path that only
+// means something on the machine the record came from.
+//
+// It still moves no payload: save_path is taken at face value, so the data
+// must already be reachable there. That is the honest boundary of this call.
+func (c *Client) ImportStateWithFile(rec *ltclient.ResumeRecord, torrent []byte) (string, error) {
+	if rec == nil {
+		return "", errors.New("grpcclient: import_state_file: nil record")
+	}
+	if len(torrent) == 0 {
+		return "", errors.New("grpcclient: import_state_file: empty .torrent bytes")
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return "", fmt.Errorf("grpcclient: marshal record: %w", err)
+	}
+	var res struct {
+		InfoHash string `json:"info_hash"`
+	}
+	if err := c.call(agentwire.MethodImportStateFile,
+		agentwire.ImportStateFileParams{Record: raw, TorrentBlob: torrent}, &res); err != nil {
+		return "", err
+	}
+	return res.InfoHash, nil
+}
+
+// DiskFree reports the bytes available at a path on the agent.
+func (c *Client) DiskFree(path string) (int64, error) {
+	var res struct {
+		Free int64 `json:"free"`
+	}
+	if err := c.call(agentwire.MethodDiskFree, agentwire.PathParams{Path: path}, &res); err != nil {
+		return 0, err
+	}
+	return res.Free, nil
+}
+
+// ReadPiece fetches one whole piece from the agent holding the payload.
+// Cross-host only, like GetTorrentFile: not part of engine.EngineClient.
+func (c *Client) ReadPiece(infoHash string, piece int) ([]byte, error) {
+	var res struct {
+		Data []byte `json:"data"`
+	}
+	if err := c.call(agentwire.MethodReadPiece,
+		agentwire.PieceParams{InfoHash: infoHash, Piece: piece}, &res); err != nil {
+		return nil, err
+	}
+	return res.Data, nil
+}
+
+// WritePiece hands one whole piece to the agent that will serve it. The agent
+// checks it against the torrent's own hash before writing, so a corrupted
+// transfer fails here rather than surfacing as a bad recheck days later.
+func (c *Client) WritePiece(infoHash string, piece int, data []byte) error {
+	return c.call(agentwire.MethodWritePiece,
+		agentwire.PieceParams{InfoHash: infoHash, Piece: piece, Data: data}, nil)
 }
 
 func (c *Client) GetStatus(infoHash string) (*ltclient.TorrentStatus, error) {

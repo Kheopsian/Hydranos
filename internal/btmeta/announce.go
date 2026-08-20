@@ -122,7 +122,11 @@ func InfoSpan(raw []byte) ([]byte, error) {
 // Only enough to walk a value and record where it ends. Nothing here allocates
 // a decoded tree for anything but the tracker keys.
 
-func topLevel(raw []byte) ([]entry, error) {
+func topLevel(raw []byte) ([]entry, error) { return dictEntries(raw) }
+
+// dictEntries walks any bencoded dict, not just the metafile's outer one, and
+// records where each value starts and ends.
+func dictEntries(raw []byte) ([]entry, error) {
 	if len(raw) == 0 || raw[0] != 'd' {
 		return nil, errors.New("btmeta: not a bencoded dict")
 	}

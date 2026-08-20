@@ -2896,3 +2896,16 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     vertical-align: top;
     word-break: break-word;
 }
+
+/* Context menu groups. The heading is a label, never a target: it must not
+   look clickable next to the items it introduces. */
+.ctx-group-title {
+    padding: 6px 12px 2px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--text-dim, #8a8a8a);
+    cursor: default;
+    user-select: none;
+}

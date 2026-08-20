@@ -6,7 +6,10 @@
 // *params* need envelopes here.
 package agentwire
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // TokenEnv is the environment variable holding the shared bearer token the
 // data-plane requires. It lives with the wire contract because both ends read
@@ -24,13 +27,34 @@ const (
 // EngineClient method (SetEventHandler is local-only; SubscribeEvents maps to
 // the Subscribe stream; Close is local).
 const (
-	MethodPing                 = "ping"
-	MethodAddTorrent           = "add_torrent" // covers AddTorrent + AddTorrentWithOptions
-	MethodRemoveTorrent        = "remove_torrent"
-	MethodStartTorrent         = "start_torrent"
-	MethodStopTorrent          = "stop_torrent"
-	MethodSetSavePath          = "set_save_path"
-	MethodVerifyTorrent        = "verify_torrent"
+	MethodPing          = "ping"
+	MethodAddTorrent    = "add_torrent" // covers AddTorrent + AddTorrentWithOptions
+	MethodRemoveTorrent = "remove_torrent"
+	MethodStartTorrent  = "start_torrent"
+	MethodStopTorrent   = "stop_torrent"
+	MethodSetSavePath   = "set_save_path"
+	MethodVerifyTorrent = "verify_torrent"
+	// export_state / import_state carry a torrent's durable state (bitfield,
+	// counters, dates, edited trackers) between two engines. The params of
+	// import_state ARE an ltclient.ResumeRecord marshalled verbatim, in the
+	// same spirit as the results: the record already has explicit JSON tags
+	// that must mirror the Rust serde names, so wrapping it in a second
+	// envelope here would only add a place for the two to drift apart.
+	MethodExportState = "export_state"
+	MethodImportState = "import_state"
+	// The two above are enough between engines on ONE host, where the
+	// record's torrent_path resolves on both sides. Across hosts it does not:
+	// the path names a file on the source's disk. These two ship the .torrent
+	// bytes themselves so the far side can materialise its own copy.
+	MethodGetTorrentFile  = "get_torrent_file"
+	MethodImportStateFile = "import_state_file"
+	// Payload transfer, one whole piece at a time. The piece grid is the
+	// torrent's own, so the receiver verifies every piece against the SHA-1
+	// already in the metainfo and an interrupted transfer resumes from what
+	// verified. No separate manifest, no checksum scheme of our own.
+	MethodReadPiece            = "read_piece"
+	MethodWritePiece           = "write_piece"
+	MethodDiskFree             = "disk_free" // move preflight: room at a path
 	MethodGetStatus            = "get_status"
 	MethodListTorrents         = "list_torrents"
 	MethodGetPeers             = "get_peers"
@@ -123,6 +147,31 @@ type AddParams struct {
 	Stopped     bool   `json:"stopped"`
 	SeedMode    bool   `json:"seed_mode"`
 	WithOptions bool   `json:"with_options"` // true => AddTorrentWithOptions (honour SeedMode)
+}
+
+// PathParams names a path on the agent's filesystem.
+type PathParams struct {
+	Path string `json:"path"`
+}
+
+// PieceParams addresses one piece of one torrent. Data is empty on a read
+// request and carries the piece on a write.
+type PieceParams struct {
+	InfoHash string `json:"info_hash"`
+	Piece    int    `json:"piece"`
+	Data     []byte `json:"data,omitempty"` // base64 in JSON
+}
+
+// ImportStateFileParams carries a state record together with the .torrent
+// bytes it refers to.
+//
+// Record stays a RawMessage on purpose: at this layer the record is opaque.
+// Its field names are a contract with typhon's serde struct, and re-declaring
+// them here would create a second copy of that contract, free to drift from
+// the first -- the exact failure the package comment warns about.
+type ImportStateFileParams struct {
+	Record      json.RawMessage `json:"record"`
+	TorrentBlob []byte          `json:"torrent_blob"` // raw .torrent bytes (base64 in JSON)
 }
 
 // SetTrackersParams carries a whole replacement tracker list, in tiers.

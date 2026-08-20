@@ -174,7 +174,7 @@ func (emptyRaceEngine) ExportTorrentState(string) (*ltclient.ResumeRecord, error
 	return nil, errNoLocalEngine
 }
 func (emptyRaceEngine) AdoptTorrent(*ltclient.ResumeRecord, string) error { return errNoLocalEngine }
-func (emptyRaceEngine) ReleaseTorrent(string) error                      { return errNoLocalEngine }
+func (emptyRaceEngine) ReleaseTorrent(string) error                       { return errNoLocalEngine }
 
 func (emptyHoardEngine) Role() engine.Role { return engine.RoleHoard }
 func (emptyHoardEngine) ExportTorrentState(string) (*ltclient.ResumeRecord, error) {

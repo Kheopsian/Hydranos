@@ -18,8 +18,8 @@ import (
 	"github.com/Kheopsian/hydra/internal/bench"
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
-	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
+	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/state"
 	"github.com/gin-gonic/gin"
 
@@ -219,13 +219,13 @@ type HealthReporter interface {
 
 // Server is the main HTTP API server for Hydra.
 type Server struct {
-	router         *gin.Engine
-	config         *config.HydraConfig
-	raceEngine     RaceEngine
-	hoardEngine    HoardEngine
+	router      *gin.Engine
+	config      *config.HydraConfig
+	raceEngine  RaceEngine
+	hoardEngine HoardEngine
 	// jobs runs the work that outlives a request -- payload moves today,
 	// whatever a rules engine schedules later. nil on a front-only node.
-	jobs *jobs.Manager
+	jobs           *jobs.Manager
 	stateManager   *state.Manager
 	raceDrain      RaceDrainService
 	gradReporter   GraduationReporter
@@ -507,4 +507,36 @@ func (s *Server) Router() http.Handler {
 }
 
 // SetJobManager wires the background job runner. Called once at startup.
+// LocalAgentName is how the node running the front refers to itself, matching
+// the "local" default already used by category placement.
+const LocalAgentName = "local"
+
 func (s *Server) SetJobManager(m *jobs.Manager) { s.jobs = m }
+
+// RemoteAgentEngineClient resolves a named agent's engine to its live client.
+// engine matches an engine id first, then a role, so both "hoard" as an id and
+// "hoard" as a role resolve the way a caller would expect.
+//
+// The returned client is the shared, long-lived one: callers must not close it.
+func (s *Server) RemoteAgentEngineClient(agent, engine string) (*grpcclient.Client, error) {
+	ra := s.remoteAgentByName(agent)
+	if ra == nil {
+		return nil, fmt.Errorf("no agent named %q is registered", agent)
+	}
+	s.agentsMu.RLock()
+	defer s.agentsMu.RUnlock()
+	for _, e := range ra.engines {
+		if e.id == engine {
+			return e.client, nil
+		}
+	}
+	for _, e := range ra.engines {
+		if e.role == engine {
+			return e.client, nil
+		}
+	}
+	if c := ra.anyClient(); c != nil && engine == "" {
+		return c, nil
+	}
+	return nil, fmt.Errorf("agent %q has no engine %q", agent, engine)
+}
