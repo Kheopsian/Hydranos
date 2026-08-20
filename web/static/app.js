@@ -2025,7 +2025,8 @@ function setHoardTagFilter(el, value) {
 async function _showTagPicker(ev) {
     if (ev) ev.stopPropagation();
     _saveCtxActionsView();
-    if (_selected.size === 0) return;
+    const hoardOnly = [..._selected.entries()].filter(([, m]) => m === "hoard");
+    if (hoardOnly.length === 0) return;
     let known = [];
     try { known = await api("/api/tags"); } catch (e) { known = []; }
     const firstRow = _hoardAllTorrents.find(t => t.info_hash === hoardOnly[0][0]);
@@ -2555,8 +2556,7 @@ function _restoreCtxActionsView() {
 async function _showCategoryPicker(ev, move) {
     if (ev) ev.stopPropagation();
     _saveCtxActionsView();
-    const hoardOnly = [..._selected.entries()].filter(([, m]) => m === "hoard");
-    if (hoardOnly.length === 0) return;
+    if (_selected.size === 0) return;
     let cats = [];
     try {
         cats = await api("/api/categories");
