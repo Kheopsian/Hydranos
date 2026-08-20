@@ -2856,3 +2856,23 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 /* Kept in view: the save button sits at the bottom of a long panel, and a
    restart notice scrolled off the top is a notice nobody reads. */
 #settings-restart-banner { position: sticky; bottom: 8px; z-index: 5; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); }
+
+/* Jobs tab. The name is what a person reads and searches for; the hash is
+   there to be copied into an API call or grepped out of a log, so it is
+   present in full but visually secondary. */
+.job-torrent .job-name {
+    font-weight: 500;
+    word-break: break-word;
+}
+
+.job-torrent .job-hash {
+    font-family: monospace;
+    font-size: 0.78em;
+    color: var(--text-secondary);
+    user-select: all;
+}
+
+.job-error {
+    color: var(--accent-red);
+    word-break: break-word;
+}
