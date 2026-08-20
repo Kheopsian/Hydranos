@@ -4561,8 +4561,13 @@ document.querySelectorAll(".tab").forEach(tab => {
 function _startNormalPolling() {
     // Immediate header paint while SSE is establishing.
     updateOverview();
+    // poll() already fetches what the active tab needs, categories included.
+    // Calling updateCategories() unconditionally on top of it made every page
+    // load pay for the category rollups even with the categories screen shut --
+    // and on a large library that is the longest request there is, so landing
+    // on Trackers left the tracker list and Add torrent waiting behind it on
+    // the store's single connection.
     poll();
-    updateCategories();
     fetchPublicIp();
     fetchPortForward();
     setInterval(poll, POLL_INTERVAL);

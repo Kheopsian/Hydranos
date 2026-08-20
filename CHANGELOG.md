@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.98.1 - 2026-08-20
+
+### Fixed
+- The category rollups no longer read the whole database. `GROUP BY category`
+  had no index, so it scanned every torrents row -- blob included -- which at
+  195k torrents is 4 GB and ~19 s, spent holding the store's single connection:
+  the tracker list, Add torrent and everything else queued behind it. A
+  covering index on `(category, session, save_path)` brings the same query to
+  ~0.2 s. The index is built once, at the first boot on this version (~1 min on
+  a large database).
+- Page load no longer fetches the category rollups when the categories screen
+  is not open; the poll loop already did that, per tab.
+
 ## v3.98.0 - 2026-08-20
 
 ### Changed

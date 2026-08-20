@@ -77,6 +77,19 @@ var migrationsMonolith = []string{
 	CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs(state);
 	CREATE INDEX IF NOT EXISTS jobs_torrent_idx ON jobs(info_hash);
 	`,
+	// v6: covering index for the category rollups. Every column they touch is
+	// in the index, so they never open a torrents row -- which is what made
+	// them expensive: each row carries the .torrent blob, so a plain GROUP BY
+	// reads the whole 4 GB file to answer a question about 17 labels. Measured
+	// at 195k torrents: ~19 s before, ~0.2 s after -- and those 19 s were spent
+	// holding the store's single connection, so every other API call queued
+	// behind them.
+	// Unlike the others this migration is not metadata-only: it builds the
+	// index with a full scan, ~1 min on a 4 GB database, once, at the upgrade
+	// boot.
+	`
+	CREATE INDEX IF NOT EXISTS idx_torrents_category ON torrents(category, session, save_path);
+	`,
 }
 
 // migrationsAgent evolves the per-agent store (store_agent.go). Kept as its own
