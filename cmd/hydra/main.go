@@ -36,9 +36,9 @@ import (
 	"github.com/Kheopsian/hydra/internal/drain"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
-	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/fsinfo"
 	"github.com/Kheopsian/hydra/internal/health"
+	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/logs"
 	"github.com/Kheopsian/hydra/internal/metrics"
 	"github.com/Kheopsian/hydra/internal/notify"
@@ -312,7 +312,7 @@ func configPathFromArgs(args []string) string {
 	return ""
 }
 
-// leftoverArgsError explains a positional argument the daemon cannot take.
+// leftoverArgsMessage explains a positional argument the daemon cannot take.
 // flag.Parse stops at the first non-flag argument and drops everything after
 // it into flag.Args() in silence, so `hydra --config x hydra --config x
 // --front-only` parses --config, ignores --front-only and boots a monolith.
@@ -320,13 +320,24 @@ func configPathFromArgs(args []string) string {
 // compose `command:` that repeats the binary name lands here: the shape flags
 // are dropped and the node comes up as the wrong kind of node, with nothing in
 // the log to say so. Returns "" when there is nothing to report.
-func leftoverArgsError(args []string) string {
+func leftoverArgsMessage(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
-	msg := fmt.Sprintf("unexpected argument %q: hydra takes flags only, "+
-		"and every flag after it was ignored\n", args[0])
-	if base := filepath.Base(args[0]); base == "hydra" || base == "hydra.exe" {
+	msg := fmt.Sprintf("unexpected argument %q: hydra takes flags only\n", args[0])
+	// Only claim flags were dropped when some actually were: a lone stray
+	// positional drops nothing, and saying otherwise sends the reader hunting
+	// for a flag that was never there.
+	if len(args) > 1 {
+		msg += fmt.Sprintf("everything after it was ignored: %s\n", strings.Join(args[1:], " "))
+	}
+	// Windows resolves the name case-insensitively, so `Hydra.exe` is the same
+	// mistake and deserves the same hint. Cut on both separators by hand rather
+	// than with filepath.Base: this string comes from the user's compose file,
+	// not from the running filesystem, so a Windows path must be understood by
+	// a Linux build too -- filepath.Base there does not treat `\` as one and
+	// hands back `C:\hydra\Hydra.exe` whole.
+	if base := strings.ToLower(args[0][strings.LastIndexAny(args[0], `/\`)+1:]); base == "hydra" || base == "hydra.exe" {
 		msg += "the container entrypoint already runs `hydra --config <config>`, so a compose\n" +
 			"`command:` must carry the EXTRA FLAGS ONLY, e.g.\n" +
 			"  command: [\"--agent-only\", \"--agent-addr\", \":9090\"]\n"
@@ -463,7 +474,7 @@ func main() {
 	flag.Parse()
 	// flag.Parse stops at the first positional argument; the daemon takes
 	// none, so a leftover means the flags behind it were dropped on the floor.
-	if msg := leftoverArgsError(flag.Args()); msg != "" {
+	if msg := leftoverArgsMessage(flag.Args()); msg != "" {
 		fmt.Fprint(os.Stderr, msg)
 		os.Exit(2)
 	}
@@ -2258,18 +2269,33 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 	}
 }
 
+// agentConfigError names the field an [[agent]] block is missing, or "" when
+// the block is usable. name is the agent's identity everywhere -- placement,
+// agents.json, the UI -- and addr is how we reach it, so neither can be
+// defaulted. Kept apart from the dialing so it can be tested without a server.
+func agentConfigError(ag config.AgentConfig) string {
+	switch {
+	case ag.Name == "" && ag.Addr == "":
+		return "both name and addr are missing"
+	case ag.Name == "":
+		return "name is missing"
+	case ag.Addr == "":
+		return "addr is missing"
+	}
+	return ""
+}
+
 // registerConfigAgents dials the [[agent]] blocks of the config and registers
 // them for placement. Dialed pull-only; a dead agent is logged + skipped, never
 // blocks boot.
 func registerConfigAgents(apiServer *api.Server, agents []config.AgentConfig) {
 	for _, ag := range agents {
-		// name is the agent's identity everywhere -- placement, agents.json, the
-		// UI -- so a block without one cannot be registered. Skipping it in
-		// silence, as we used to, is indistinguishable from a front that dialed
-		// nothing: no agents, no error, an empty dashboard.
-		if ag.Name == "" || ag.Addr == "" {
-			slog.Warn("[[agent]] block ignored: name and addr are both required",
-				"name", ag.Name, "addr", ag.Addr)
+		// Skipping an unusable block in silence, as we used to, is
+		// indistinguishable from a front that dialed nothing: no agents, no
+		// error, an empty dashboard.
+		if why := agentConfigError(ag); why != "" {
+			slog.Warn("[[agent]] block ignored, it cannot be dialed",
+				"reason", why, "name", ag.Name, "addr", ag.Addr)
 			continue
 		}
 		if err := apiServer.AddRemoteAgent(ag.Name, ag.Addr, ag.Token, ag.TLSCa); err != nil {
