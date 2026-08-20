@@ -3,6 +3,32 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.98.0 - 2026-08-20
+
+### Changed
+
+- **The peer_id fingerprint is derived from the version instead of being kept
+  in step with it by hand, and encodes in base62.** The prefix has four
+  characters between `-HY` and the closing dash, and the old encoding spent
+  them on decimal digits: one for the major, two for the minor, one for the
+  patch. That overflows into a ninth byte at 3.100.0, which the length guard
+  truncated back to eight, dropping the closing dash and leaving a malformed
+  prefix that trackers accept without complaint. At roughly four minor bumps a
+  day, 3.100.0 was days away. The four characters are now base62 -- one for the
+  major, two for the minor, one for the patch -- which holds a minor up to 3843
+  instead of 99, and the value is computed from `Version` at package init so
+  there is no second copy to drift. A version that does not fit panics at
+  startup and under test rather than being silently truncated onto the wire.
+  `3.98.0` is `-HY31a0-`.
+
+  This changes the prefix for a given version: 3.97.0 was `-HY3970-` and would
+  now be `-HY31Z0-`. Nothing on the protocol depends on it, the peer_id being
+  regenerated per session, and no third-party client reads it correctly either
+  way -- a generic Azureus-style parser takes four independent single-character
+  fields, so libtorrent has always rendered 3.97.0 as "HY 3.9.7.0". Base62 is
+  what Transmission writes and what its `clients.cc` decodes, and it agrees
+  with the base36 libtorrent emits on every value below 36.
+
 ## v3.97.0 - 2026-08-20
 
 ### Added
