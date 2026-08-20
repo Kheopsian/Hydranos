@@ -199,6 +199,43 @@ type DaemonConfig struct {
 	DataDir             string `toml:"data_dir"`
 	CreateTorrentFolder bool   `toml:"create_torrent_folder"`
 	UpdateCheckDisabled bool   `toml:"update_check_disabled"`
+	// MoveMaxMBPerSec caps how fast a payload move copies, in MB/s.
+	//
+	// A move that crosses filesystems reads and writes the same disks the
+	// torrents are served from, sequentially and greedily; left uncapped it
+	// takes whatever the array can give and the seeding feels it. Only the
+	// copy path is affected -- a same-filesystem move is a rename and moves
+	// no bytes at all.
+	//
+	// A pointer so that "not configured" and "configured to zero" are
+	// different answers: unset gets DefaultMoveMaxMBPerSec, an explicit 0
+	// means no cap, and anything else is taken literally.
+	MoveMaxMBPerSec *int `toml:"move_max_mb_per_sec"`
+}
+
+// DefaultMoveMaxMBPerSec is the throughput cap applied when the config does
+// not set one.
+//
+// 200 MB/s sits clearly below what the array sustains while still finishing a
+// large release in a sensible time: a 100 GB move takes about eight minutes, a
+// 400 GB one a little over half an hour. Production already serves a few
+// hundred MB/s of seeding off these same disks, so an uncapped copy competing
+// for them is noticed immediately, whereas this leaves the bulk of the
+// throughput to the thing users actually see. It is one line to change, and
+// the honest way to tune it is to watch the first real move.
+const DefaultMoveMaxMBPerSec = 200
+
+// MoveBytesPerSecond converts the configured cap into the byte rate the mover
+// wants: zero means uncapped, unset means the default.
+func (d DaemonConfig) MoveBytesPerSecond() int64 {
+	mb := DefaultMoveMaxMBPerSec
+	if d.MoveMaxMBPerSec != nil {
+		mb = *d.MoveMaxMBPerSec
+	}
+	if mb <= 0 {
+		return 0
+	}
+	return int64(mb) * 1024 * 1024
 }
 
 // HydraConfig — root configuration.
