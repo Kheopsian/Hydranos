@@ -254,6 +254,14 @@ type Server struct {
 
 	// reconnect backs incremental SSE reconnects (delta since a cursor).
 	reconnect *reconnectState
+
+	// agentRows caches the remote agents' hoard torrents (see agentrows.go).
+	agentRows agentRowCache
+
+	// sseClients counts the browsers on /api/events. The hub's own NumSubs
+	// cannot answer that: the reconnect watcher holds a subscription for the
+	// life of the process, so it never reads zero.
+	sseClients atomic.Int32
 }
 
 // NewServer creates a new API server with all routes registered.
@@ -496,6 +504,7 @@ func (s *Server) Run() error {
 	s.startSnapshotPusher()
 	s.reconnect = newReconnectState()
 	s.startReconnectWatcher()
+	s.startAgentRowPusher()
 	addr := fmt.Sprintf("%s:%d", s.config.Daemon.APIHost, s.config.Daemon.APIPort)
 	slog.Info("Starting Hydra API server", "addr", addr, "version", Version)
 	return s.router.Run(addr)

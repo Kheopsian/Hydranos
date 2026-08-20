@@ -470,6 +470,10 @@ func (s *Server) handleActionRouted(p agentwire.ActionRoutedParams) (*agentpb.Ca
 		return nil, status.Errorf(codes.Unavailable, "engine %q not wired on agent", id)
 	}
 	switch p.Action {
+	case "pause":
+		return reply(nil, e.SetUserPaused(p.InfoHash, true))
+	case "resume":
+		return reply(nil, e.SetUserPaused(p.InfoHash, false))
 	case "remove":
 		return reply(nil, e.RemoveRouted(p.InfoHash, p.DeleteFiles))
 	case "verify":
