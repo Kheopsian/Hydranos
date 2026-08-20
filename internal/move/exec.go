@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -76,18 +77,48 @@ func Execute(ctx context.Context, p *Plan, opts Options) error {
 				return fmt.Errorf("move: preparing the swap: %w", err)
 			}
 		}
-		if err := os.Rename(p.Source, p.Target); err != nil {
+		err := os.Rename(p.Source, p.Target)
+		if err == nil {
+			if opts.AfterSwap != nil {
+				if err := opts.AfterSwap(); err != nil {
+					return fmt.Errorf("move: payload is at %s but the engine was not updated: %w", p.Target, err)
+				}
+			}
+			if opts.OnProgress != nil {
+				opts.OnProgress(p.TotalBytes)
+			}
+			return nil
+		}
+		if !isCrossDevice(err) {
 			return fmt.Errorf("move: rename %s -> %s: %w", p.Source, p.Target, err)
 		}
+		// Same device, different mount. Two bind mounts of one filesystem
+		// share an st_dev but rename(2) still refuses to cross between them,
+		// which is the normal arrangement inside a container -- /config and
+		// /calewood can be the same pool and still be two mounts. Predicting
+		// this from stat is not possible, so the rename is the probe and the
+		// copy is the fallback.
+		//
+		// The operator was told this was a rename, so hardlinks were never
+		// raised. A copy breaks them, and that answer has to be asked for
+		// rather than assumed.
+		if p.HardlinkedFiles > 0 && !opts.AllowBreakingHardlinks {
+			return fmt.Errorf("%w: %d of %d files are hardlinked (%d bytes), e.g. %s -- "+
+				"the target turned out to be a separate mount, so this has to be a copy, "+
+				"which leaves a second full copy on disk",
+				ErrWouldBreakHardlinks, p.HardlinkedFiles, len(p.Files),
+				p.HardlinkedBytes, strings.Join(p.HardlinkExamples, ", "))
+		}
+		if err := ensureSpace(p); err != nil {
+			return err
+		}
+		// The torrent was stopped for what was meant to be an instant swap.
+		// The copy can take hours, so put it back to work first.
 		if opts.AfterSwap != nil {
 			if err := opts.AfterSwap(); err != nil {
-				return fmt.Errorf("move: payload is at %s but the engine was not updated: %w", p.Target, err)
+				return fmt.Errorf("move: could not restart the torrent before falling back to a copy: %w", err)
 			}
 		}
-		if opts.OnProgress != nil {
-			opts.OnProgress(p.TotalBytes)
-		}
-		return nil
 	}
 
 	staging := p.Target + stagingSuffix
@@ -181,6 +212,20 @@ func Execute(ctx context.Context, p *Plan, opts Options) error {
 		// Leaving the old copy behind wastes space, which is a complaint, not
 		// a data loss.
 		return fmt.Errorf("move: completed, but the old copy at %s could not be removed: %w", p.Source, err)
+	}
+	return nil
+}
+
+// ensureSpace re-runs the free-space test for a move that only discovered it
+// was a copy once the rename had already failed.
+func ensureSpace(p *Plan) error {
+	free := freeSpace(p.Target)
+	if free <= 0 {
+		return nil
+	}
+	need := p.TotalBytes + p.TotalBytes/100 + (64 << 20)
+	if free < need {
+		return fmt.Errorf("%w: need %d bytes, %d free on %s", ErrNotEnoughSpace, need, free, p.Target)
 	}
 	return nil
 }

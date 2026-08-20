@@ -24,6 +24,12 @@ func sameFilesystem(a, b string) bool {
 	return va != "" && va == vb
 }
 
+// isMountPoint reports whether p is the root of a volume. Moving a whole
+// volume is never what someone meant by moving a torrent.
+func isMountPoint(p string) bool {
+	return parentDir(p) == p || filepath.Clean(p) == filepath.VolumeName(p)+string(os.PathSeparator)
+}
+
 func freeSpace(p string) int64 {
 	target := p
 	for {

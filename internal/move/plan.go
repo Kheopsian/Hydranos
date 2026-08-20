@@ -83,6 +83,13 @@ func Inspect(source, target string) (*Plan, error) {
 	if _, err := os.Stat(src); err != nil {
 		return nil, fmt.Errorf("move: source unreadable: %w", err)
 	}
+	// A content root that is itself a mount is not a release, it is a volume.
+	// Seen in production: a torrent whose save_path was /calewood, whose move
+	// would have relocated and then deleted the entire share.
+	if isMountPoint(src) {
+		return nil, fmt.Errorf("move: %s is a mount point, not a torrent folder; "+
+			"moving it would move the whole volume", src)
+	}
 
 	p := &Plan{Source: src, Target: dst}
 	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
