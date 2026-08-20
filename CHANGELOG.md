@@ -3,6 +3,35 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.99.0 - 2026-08-20
+
+### Changed
+- **Hydra now refuses to start when it is given a positional argument**, instead
+  of ignoring it. `flag.Parse` stops at the first non-flag argument and drops
+  every flag behind it in silence, so a compose `command:` that repeated the
+  binary name -- the form the wiki used to document -- lost `--agent-only` /
+  `--front-only` and booted two monoliths: the agent never opened its gRPC
+  data-plane, the front came up with local engines of its own, and neither log
+  said a word. If your `command:` starts with `hydra`, drop it: the container
+  entrypoint already runs `hydra --config <config> "$@"`, so `command:` carries
+  the extra flags only, e.g. `command: ["--agent-only", "--agent-addr", ":9090"]`.
+  The error names the stray argument and, when it is the binary itself, prints
+  that form. Subcommands (`hash-password`, `reset-password`, `set-listen-port`)
+  are unaffected.
+
+### Fixed
+- A front-only node reports itself ready once its API is up. It has no local
+  engine and no state to page back in, so it was fully started already, but the
+  readiness flag was never set: `/api/startup` stayed `{"ready":false}` forever
+  and the web UI sat behind its "Initializing..." overlay against a backend that
+  was answering every other route. Not gated on the agents being reachable --
+  agent health belongs to `/api/agents`, and gating here would restore the same
+  permanent overlay the moment an agent went down.
+- An `[[agent]]` block missing `name` or `addr` is logged instead of skipped in
+  silence, naming the field at fault. The documented front-only config omits
+  `name`, so the front dialed nothing and said nothing about it, which reads
+  exactly like having no agents configured at all.
+
 ## v3.98.1 - 2026-08-20
 
 ### Fixed

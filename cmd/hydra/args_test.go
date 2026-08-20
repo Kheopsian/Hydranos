@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/Kheopsian/hydra/internal/config"
+)
 
 func TestConfigPathFromArgs(t *testing.T) {
 	cases := []struct {
@@ -39,5 +44,70 @@ func TestMisplacedSubcommand(t *testing.T) {
 	// A plain daemon invocation must not be mistaken for one.
 	if got := misplacedSubcommand([]string{"/etc/hydra/default.toml"}); got != "" {
 		t.Fatalf("a daemon invocation was flagged as a misplaced %q", got)
+	}
+}
+
+func TestLeftoverArgsMessage(t *testing.T) {
+	// A plain daemon invocation leaves nothing behind.
+	if got := leftoverArgsMessage(nil); got != "" {
+		t.Fatalf("a clean invocation was reported as leftover args: %q", got)
+	}
+
+	// The compose case: the entrypoint already ran `hydra --config <cfg>`, so a
+	// `command:` repeating the binary name leaves "hydra ..." positional and
+	// flag.Parse drops --agent-only. Booting a monolith there is the bug.
+	got := leftoverArgsMessage([]string{"hydra", "--config", "/config/default.toml", "--agent-only"})
+	if got == "" {
+		t.Fatal("the duplicated-entrypoint form was not reported")
+	}
+	if !strings.Contains(got, "entrypoint") || !strings.Contains(got, "--agent-only") {
+		t.Fatalf("the message does not point at the entrypoint or show the form: %q", got)
+	}
+
+	// Windows resolves the binary name case-insensitively, so the same mistake
+	// spelled `Hydra.exe` must still earn the hint.
+	got = leftoverArgsMessage([]string{`C:\hydra\Hydra.exe`, "--front-only"})
+	if !strings.Contains(got, "entrypoint") {
+		t.Fatalf("the hint was withheld from a Windows-cased binary name: %q", got)
+	}
+
+	// Any other stray positional is refused too, without the Docker hint.
+	got = leftoverArgsMessage([]string{"/etc/hydra/default.toml"})
+	if got == "" {
+		t.Fatal("a stray positional path was not reported")
+	}
+	if strings.Contains(got, "entrypoint") {
+		t.Fatalf("the Docker hint leaked into an unrelated case: %q", got)
+	}
+	// Nothing followed it, so nothing was dropped: claiming otherwise sends the
+	// reader hunting for a flag that was never passed.
+	if strings.Contains(got, "ignored") {
+		t.Fatalf("a lone positional was reported as having swallowed flags: %q", got)
+	}
+}
+
+func TestAgentConfigError(t *testing.T) {
+	// A complete block registers; the optional fields stay optional.
+	if got := agentConfigError(config.AgentConfig{Name: "boreas", Addr: "10.0.0.2:9090"}); got != "" {
+		t.Fatalf("a usable [[agent]] block was rejected: %q", got)
+	}
+	// Each missing field is named, so the log line is enough to fix the TOML
+	// without opening the source.
+	cases := []struct {
+		ag   config.AgentConfig
+		want string
+	}{
+		{config.AgentConfig{Addr: "10.0.0.2:9090"}, "name"},
+		{config.AgentConfig{Name: "boreas"}, "addr"},
+		{config.AgentConfig{}, "both"},
+	}
+	for _, c := range cases {
+		got := agentConfigError(c.ag)
+		if got == "" {
+			t.Fatalf("an unusable block %+v was accepted", c.ag)
+		}
+		if !strings.Contains(got, c.want) {
+			t.Fatalf("the reason for %+v does not name %q: %q", c.ag, c.want, got)
+		}
 	}
 }

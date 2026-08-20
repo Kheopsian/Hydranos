@@ -312,6 +312,39 @@ func configPathFromArgs(args []string) string {
 	return ""
 }
 
+// leftoverArgsMessage explains a positional argument the daemon cannot take.
+// flag.Parse stops at the first non-flag argument and drops everything after
+// it into flag.Args() in silence, so `hydra --config x hydra --config x
+// --front-only` parses --config, ignores --front-only and boots a monolith.
+// The container entrypoint already runs `hydra --config <cfg> "$@"`, so a
+// compose `command:` that repeats the binary name lands here: the shape flags
+// are dropped and the node comes up as the wrong kind of node, with nothing in
+// the log to say so. Returns "" when there is nothing to report.
+func leftoverArgsMessage(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	msg := fmt.Sprintf("unexpected argument %q: hydra takes flags only\n", args[0])
+	// Only claim flags were dropped when some actually were: a lone stray
+	// positional drops nothing, and saying otherwise sends the reader hunting
+	// for a flag that was never there.
+	if len(args) > 1 {
+		msg += fmt.Sprintf("everything after it was ignored: %s\n", strings.Join(args[1:], " "))
+	}
+	// Windows resolves the name case-insensitively, so `Hydra.exe` is the same
+	// mistake and deserves the same hint. Cut on both separators by hand rather
+	// than with filepath.Base: this string comes from the user's compose file,
+	// not from the running filesystem, so a Windows path must be understood by
+	// a Linux build too -- filepath.Base there does not treat `\` as one and
+	// hands back `C:\hydra\Hydra.exe` whole.
+	if base := strings.ToLower(args[0][strings.LastIndexAny(args[0], `/\`)+1:]); base == "hydra" || base == "hydra.exe" {
+		msg += "the container entrypoint already runs `hydra --config <config>`, so a compose\n" +
+			"`command:` must carry the EXTRA FLAGS ONLY, e.g.\n" +
+			"  command: [\"--agent-only\", \"--agent-addr\", \":9090\"]\n"
+	}
+	return msg + "(refusing to start rather than run with the flags silently dropped)\n"
+}
+
 func main() {
 	// A subcommand that is not first is a mistake, not a request to serve.
 	if len(os.Args) > 2 {
@@ -439,6 +472,12 @@ func main() {
 	listenPortHook := flag.Int("listen-port-hook", 0, "agent-only: serve a loopback-only (127.0.0.1) HTTP POST /listen-port hook on this port so a co-netns gluetun UP_COMMAND can push the forwarded BT port; 0 = disabled")
 	bootFromStore := flag.Bool("boot-from-store", true, "load torrents from the SQLite store (content-addressed, durable); state.json runs as an overlay/fallback. Default on since v2.9.x; disable with --boot-from-store=false")
 	flag.Parse()
+	// flag.Parse stops at the first positional argument; the daemon takes
+	// none, so a leftover means the flags behind it were dropped on the floor.
+	if msg := leftoverArgsMessage(flag.Args()); msg != "" {
+		fmt.Fprint(os.Stderr, msg)
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Println("hydra", version)
@@ -978,16 +1017,7 @@ func main() {
 	}
 	// ---- Remote agents ([[agent]]) for multi-home category placement ----
 	// Dialed pull-only; a dead agent is logged + skipped, never blocks boot.
-	for _, ag := range cfg.Agents {
-		if ag.Name == "" || ag.Addr == "" {
-			continue
-		}
-		if err := apiServer.AddRemoteAgent(ag.Name, ag.Addr, ag.Token, ag.TLSCa); err != nil {
-			slog.Warn("remote agent dial failed", "name", ag.Name, "addr", ag.Addr, "err", err)
-			continue
-		}
-		slog.Info("remote agent registered", "name", ag.Name, "addr", ag.Addr)
-	}
+	registerConfigAgents(apiServer, cfg.Agents)
 	apiServer.LoadPersistedAgents()
 	apiServer.SetRaceDrain(raceDrain)
 	apiServer.SetGraduationReporter(gradr)
@@ -2290,6 +2320,43 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 	}
 }
 
+// agentConfigError names the field an [[agent]] block is missing, or "" when
+// the block is usable. name is the agent's identity everywhere -- placement,
+// agents.json, the UI -- and addr is how we reach it, so neither can be
+// defaulted. Kept apart from the dialing so it can be tested without a server.
+func agentConfigError(ag config.AgentConfig) string {
+	switch {
+	case ag.Name == "" && ag.Addr == "":
+		return "both name and addr are missing"
+	case ag.Name == "":
+		return "name is missing"
+	case ag.Addr == "":
+		return "addr is missing"
+	}
+	return ""
+}
+
+// registerConfigAgents dials the [[agent]] blocks of the config and registers
+// them for placement. Dialed pull-only; a dead agent is logged + skipped, never
+// blocks boot.
+func registerConfigAgents(apiServer *api.Server, agents []config.AgentConfig) {
+	for _, ag := range agents {
+		// Skipping an unusable block in silence, as we used to, is
+		// indistinguishable from a front that dialed nothing: no agents, no
+		// error, an empty dashboard.
+		if why := agentConfigError(ag); why != "" {
+			slog.Warn("[[agent]] block ignored, it cannot be dialed",
+				"reason", why, "name", ag.Name, "addr", ag.Addr)
+			continue
+		}
+		if err := apiServer.AddRemoteAgent(ag.Name, ag.Addr, ag.Token, ag.TLSCa); err != nil {
+			slog.Warn("remote agent dial failed", "name", ag.Name, "addr", ag.Addr, "err", err)
+			continue
+		}
+		slog.Info("remote agent registered", "name", ag.Name, "addr", ag.Addr)
+	}
+}
+
 // runFrontOnly serves a controller node: no local Typhon engine, only the API
 // + dialed remote agents. Category placement routes adds to those agents. Read
 // endpoints use empty engine stubs (list aggregation across agents is a later
@@ -2299,16 +2366,7 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 	apiServer := api.NewServer(cfg)
 	apiServer.SetFrontOnly(true)
 	apiServer.SetEngines(api.NewEmptyRaceEngine(), api.NewEmptyHoardEngine())
-	for _, ag := range cfg.Agents {
-		if ag.Name == "" || ag.Addr == "" {
-			continue
-		}
-		if err := apiServer.AddRemoteAgent(ag.Name, ag.Addr, ag.Token, ag.TLSCa); err != nil {
-			slog.Warn("remote agent dial failed", "name", ag.Name, "addr", ag.Addr, "err", err)
-			continue
-		}
-		slog.Info("remote agent registered", "name", ag.Name, "addr", ag.Addr)
-	}
+	registerConfigAgents(apiServer, cfg.Agents)
 	apiServer.LoadPersistedAgents()
 	go func() {
 		if err := apiServer.Run(); err != nil {
@@ -2316,6 +2374,16 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 		}
 	}()
 	slog.Info("front-only API started", "addr", fmt.Sprintf("http://%s:%d", cfg.Daemon.APIHost, cfg.Daemon.APIPort))
+	// A front-only node restores nothing of its own: there is no local engine
+	// and no local state to page back in, so it is fully started the moment the
+	// API is up. Leaving the flag alone -- as this mode used to -- pins
+	// /api/startup at {"ready":false} forever, and the web UI polls that flag
+	// to lift its splash overlay: the whole UI stayed unreachable behind
+	// "Initializing...", with a backend that was answering every other route
+	// correctly. Deliberately NOT gated on the agents being reachable: agent
+	// health is reported by /api/agents, and blocking the UI on it would put
+	// the same permanent overlay back the moment an agent was down.
+	api.SetStartupReady(true)
 	<-ctx.Done()
 }
 
