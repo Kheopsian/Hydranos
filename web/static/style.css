@@ -2876,3 +2876,23 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     color: var(--accent-red);
     word-break: break-word;
 }
+
+/* Jobs table. Fixed layout on purpose: the list re-renders every two seconds
+   while a move runs, and with automatic widths the columns would resize on
+   every tick as the byte counts grow. The two columns worth reading -- the
+   release name and where it is going -- take whatever the fixed ones leave. */
+#jobs-table {
+    width: 100%;
+    table-layout: fixed;
+}
+
+#jobs-table .jt-state { width: 90px; }
+#jobs-table .jt-type { width: 110px; }
+#jobs-table .jt-progress { width: 220px; }
+#jobs-table .jt-started { width: 160px; }
+#jobs-table .jt-action { width: 90px; }
+
+#jobs-table td {
+    vertical-align: top;
+    word-break: break-word;
+}
