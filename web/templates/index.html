@@ -106,6 +106,7 @@
         <button class="tab" data-tab="benchmark">Benchmark</button>
         <button class="tab" data-tab="changelog">Changelog</button>
         <button class="tab" data-tab="logs">Logs</button>
+        <button class="tab" data-tab="jobs">Jobs</button>
         <button class="tab" data-tab="add">+ Add Torrent</button>
     </nav>
 
@@ -1023,6 +1024,34 @@
             </div>
         </section>
         <!-- Logs -->
+        <section id="tab-jobs" class="tab-content">
+            <div class="add-form-container">
+                <h2>Jobs</h2>
+                <p class="modal-desc">Long-running work: moving a torrent's data between filesystems keeps
+                    running here, and the torrent keeps seeding while it does.</p>
+                <div class="logs-controls">
+                    <label><input type="checkbox" id="jobs-active-only"> Active only</label>
+                    <button class="btn" onclick="loadJobs()">Refresh</button>
+                </div>
+                <table id="jobs-table">
+                    <thead>
+                        <tr>
+                            <th>State</th>
+                            <th>Type</th>
+                            <th>Torrent</th>
+                            <th>Progress</th>
+                            <th>Destination</th>
+                            <th>Started</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-tbody">
+                        <tr><td colspan="7">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
         <section id="tab-logs" class="tab-content">
             <div class="add-form-container">
                 <h2>Logs</h2>

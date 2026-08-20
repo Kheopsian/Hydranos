@@ -811,6 +811,8 @@ function _activateTabNow(name) {
     else if (name === "agents") { updateAgents(); updateEngines(); }
     else if (name === "trackers") { updateTrackers(); loadTrackerStats(); }
     else if (name === "logs") loadLogs();
+    else if (name === "jobs") startJobsPolling();
+    if (name !== "jobs") stopJobsPolling();
 }
 
 document.querySelectorAll(".tab").forEach(tab => {
@@ -833,6 +835,7 @@ window.addEventListener("DOMContentLoaded", () => {
         else if (_hashTab === "agents") { await updateAgents(); updateEngines(); }
         else if (_hashTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
         else if (_hashTab === "benchmark") await updateBenchmark();
+        else if (_hashTab === "jobs") startJobsPolling();
     });
 });
 
@@ -6471,4 +6474,102 @@ async function netModeCheck() {
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = label; }
     }
+}
+
+
+// --- Jobs tab -------------------------------------------------------------
+//
+// A move can run for hours, so the one thing this view must get right is
+// telling a job that is progressing apart from one that is stuck. It polls
+// while it is on screen and stops when it is not: there is no point refreshing
+// a table nobody is looking at, and a finished list does not change.
+
+let _jobsTimer = null;
+
+function startJobsPolling() {
+    loadJobs();
+    if (_jobsTimer === null) _jobsTimer = setInterval(loadJobs, 2000);
+}
+
+function stopJobsPolling() {
+    if (_jobsTimer !== null) {
+        clearInterval(_jobsTimer);
+        _jobsTimer = null;
+    }
+}
+
+function _jobStateLabel(state) {
+    switch (state) {
+        case "pending": return t("Queued");
+        case "running": return t("Running");
+        case "verifying": return t("Verifying");
+        case "done": return t("Done");
+        case "failed": return t("Failed");
+        case "cancelled": return t("Cancelled");
+        default: return state;
+    }
+}
+
+async function loadJobs() {
+    const tbody = document.getElementById("jobs-tbody");
+    if (!tbody) return;
+    let jobs = [];
+    try {
+        jobs = await api("/api/jobs?limit=200");
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="7">${t("Could not load jobs")}: ${String(err.message)}</td></tr>`;
+        return;
+    }
+    if (!Array.isArray(jobs)) jobs = [];
+    const activeOnly = document.getElementById("jobs-active-only");
+    if (activeOnly && activeOnly.checked) {
+        jobs = jobs.filter(j => j.state === "pending" || j.state === "running" || j.state === "verifying");
+    }
+    if (jobs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="7">${t("Nothing running.")}</td></tr>`;
+        return;
+    }
+    const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, ch =>
+        ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+    tbody.innerHTML = jobs.map(j => {
+        const pct = Math.min(100, Math.max(0, j.percent || 0));
+        const running = j.state === "pending" || j.state === "running" || j.state === "verifying";
+        const target = (j.params && j.params.target) || "";
+        // The error is the whole story on a failed job, so it replaces the
+        // progress bar rather than hiding in a tooltip.
+        const progressCell = j.state === "failed"
+            ? `<td class="job-error">${esc(j.error)}</td>`
+            : `<td><div class="progress-bar"><div class="progress-fill${running ? " downloading" : ""}" style="width:${pct.toFixed(1)}%"></div></div>` +
+              `<div class="progress-text">${pct.toFixed(1)}% ${j.total_bytes ? "(" + formatBytes(j.progress_bytes) + " / " + formatBytes(j.total_bytes) + ")" : ""}</div></td>`;
+        const action = running
+            ? `<td><button class="btn btn-small" onclick="cancelJob('${esc(j.id)}')">${t("Cancel")}</button></td>`
+            : "<td></td>";
+        return `<tr>` +
+            `<td>${esc(_jobStateLabel(j.state))}</td>` +
+            `<td>${esc(j.type)}</td>` +
+            `<td title="${esc(j.info_hash)}">${esc((j.info_hash || "").slice(0, 12))}</td>` +
+            progressCell +
+            `<td title="${esc(target)}">${esc(target)}</td>` +
+            `<td>${j.created_at ? new Date(j.created_at * 1000).toLocaleString() : ""}</td>` +
+            action +
+            `</tr>`;
+    }).join("");
+}
+
+async function cancelJob(id) {
+    if (!confirm(t("Cancel this job? A move stops where it is; the data stays where the torrent is seeding from."))) return;
+    try {
+        const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+            headers: { "X-Api-Key": API_KEY },
+        });
+        if (!r.ok) {
+            let msg = `HTTP ${r.status}`;
+            try { const j = await r.json(); if (j && j.error) msg = j.error; } catch (_) { /* empty */ }
+            alert(msg);
+        }
+    } catch (err) {
+        alert(err.message);
+    }
+    loadJobs();
 }
