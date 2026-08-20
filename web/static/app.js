@@ -2025,8 +2025,7 @@ function setHoardTagFilter(el, value) {
 async function _showTagPicker(ev) {
     if (ev) ev.stopPropagation();
     _saveCtxActionsView();
-    const hoardOnly = [..._selected.entries()].filter(([, m]) => m === "hoard");
-    if (hoardOnly.length === 0) return;
+    if (_selected.size === 0) return;
     let known = [];
     try { known = await api("/api/tags"); } catch (e) { known = []; }
     const firstRow = _hoardAllTorrents.find(t => t.info_hash === hoardOnly[0][0]);
@@ -2471,11 +2470,15 @@ function _showCtxMenu(x, y) {
     const count = _selected.size;
     document.getElementById("ctx-label").textContent =
         tp(count, "{n} torrent selected", "{n} torrents selected");
-    // "Change category" only applies to hoard torrents. Hide the item if
-    // the current selection has no hoard rows.
+    // Changing category works on both engines now: the category carries the
+    // engine its torrents belong in, so setting one on a race torrent is how
+    // it is handed to the hoard, and moving the files is a background job
+    // either way. It used to be hoard-only, and the item was hidden here.
     const anyHoard = [..._selected.entries()].some(([, m]) => m === "hoard");
     const catItem = document.getElementById("ctx-change-category");
-    if (catItem) catItem.style.display = anyHoard ? "" : "none";
+    if (catItem) catItem.style.display = "";
+    const catMoveItem = document.getElementById("ctx-change-category-move");
+    if (catMoveItem) catMoveItem.style.display = "";
     const rcItem = document.getElementById("ctx-recheck");
     if (rcItem) rcItem.style.display = anyHoard ? "" : "none";
     const tgItem = document.getElementById("ctx-edit-tags");
@@ -2571,7 +2574,7 @@ async function _showCategoryPicker(ev, move) {
         return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\', ${move ? "true" : "false"})" title="${safePath}">${safeName}</div>`;
     }).join("");
     const verb = move ? t("Move to category") : t("Set category (no move)");
-    const label = verb + ": " + tp(hoardOnly.length, "{n} torrent", "{n} torrents");
+    const label = verb + ": " + tp(_selected.size, "{n} torrent", "{n} torrents");
     document.getElementById("ctx-menu").innerHTML =
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
@@ -2582,39 +2585,96 @@ async function _showCategoryPicker(ev, move) {
 }
 
 async function _changeCategorySelected(catName, move) {
-    const entries = [..._selected.entries()].filter(([, m]) => m === "hoard");
+    const entries = [..._selected.entries()];
     _hideCtxMenu();
+
+    // Each torrent is addressed on the engine that currently holds it. The
+    // endpoint works out the rest: relabel, hand over to the other engine, or
+    // move the payload, depending on what the target category asks for.
+    const post = (hash, mode, allowBreakingHardlinks) =>
+        fetch(`/api/${mode}/torrents/${hash}/category`, {
+            method: "POST",
+            headers: {
+                "X-Api-Key": API_KEY,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                category: catName,
+                move_files: !!move,
+                allow_breaking_hardlinks: !!allowBreakingHardlinks,
+            }),
+        });
+
     let okCount = 0;
+    let movingCount = 0;
     const errors = [];
-    for (const [hash] of entries) {
+    const needConsent = [];
+
+    for (const [hash, mode] of entries) {
         try {
-            const r = await fetch(`/api/hoard/torrents/${hash}/category`, {
-                method: "POST",
-                headers: {
-                    "X-Api-Key": API_KEY,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ category: catName, move_files: !!move }),
-            });
-            if (!r.ok) {
-                let msg = `HTTP ${r.status}`;
-                try {
-                    const j = await r.json();
-                    if (j && j.error) msg = j.error;
-                } catch (_) { /* ignore */ }
-                errors.push(`${hash.slice(0, 8)}: ${msg}`);
-            } else {
-                okCount++;
+            const r = await post(hash, mode, false);
+            let j = null;
+            try { j = await r.json(); } catch (_) { /* empty body */ }
+            if (r.status === 409 && j && j.reason === "hardlinks") {
+                // Not a failure: a question. Collected and asked once below,
+                // rather than one prompt per torrent.
+                needConsent.push({ hash, mode, files: j.hardlinked_files || 0, bytes: j.hardlinked_bytes || 0 });
+                continue;
             }
+            if (!r.ok) {
+                errors.push(`${hash.slice(0, 8)}: ${(j && j.error) || ("HTTP " + r.status)}`);
+                continue;
+            }
+            if (r.status === 202) movingCount++; else okCount++;
         } catch (err) {
             errors.push(`${hash.slice(0, 8)}: ${err.message}`);
         }
     }
-    if (errors.length > 0) {
-        alert(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: okCount, failed: errors.length }) + "\n\n" + errors.join("\n"));
+
+    if (needConsent.length > 0) {
+        const files = needConsent.reduce((n, x) => n + x.files, 0);
+        const bytes = needConsent.reduce((n, x) => n + x.bytes, 0);
+        const question = tp(needConsent.length,
+            "{n} torrent cannot move without breaking hardlinks.",
+            "{n} torrents cannot move without breaking hardlinks.", { n: needConsent.length })
+            + "\n\n"
+            + t("{files} file(s), {size}, are hardlinked elsewhere (usually the Sonarr or Radarr library). The target is on another filesystem, so copying them leaves a second full copy on disk.",
+                { files: files, size: formatBytes(bytes) })
+            + "\n\n" + t("Move them anyway?");
+        if (confirm(question)) {
+            for (const { hash, mode } of needConsent) {
+                try {
+                    const r = await post(hash, mode, true);
+                    if (!r.ok) {
+                        let j = null;
+                        try { j = await r.json(); } catch (_) { /* empty body */ }
+                        errors.push(`${hash.slice(0, 8)}: ${(j && j.error) || ("HTTP " + r.status)}`);
+                    } else if (r.status === 202) {
+                        movingCount++;
+                    } else {
+                        okCount++;
+                    }
+                } catch (err) {
+                    errors.push(`${hash.slice(0, 8)}: ${err.message}`);
+                }
+            }
+        }
     }
-    // Optimistic: reflect the new category in the held rows immediately, so it
-    // shows without waiting for the next full refresh.
+
+    if (errors.length > 0) {
+        alert(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: okCount + movingCount, failed: errors.length }) + "\n\n" + errors.join("\n"));
+    } else if (movingCount > 0) {
+        // A move runs in the background and can take hours, so say so rather
+        // than leaving the row looking like nothing happened.
+        alert(tp(movingCount,
+            "Moving {n} torrent to \"{cat}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.",
+            "Moving {n} torrents to \"{cat}\" in the background. They keep seeding while their data is copied; follow them in Jobs.",
+            { n: movingCount, cat: catName }));
+    }
+
+    // Optimistic: reflect the new category in the held hoard rows immediately,
+    // so it shows without waiting for the next full refresh. Race rows are
+    // rendered from freshly fetched data, so they need no such nudge.
     if (Array.isArray(_hoardAllTorrents)) {
         for (const [hash] of entries) {
             const t = _hoardAllTorrents.find(x => x.info_hash === hash);
