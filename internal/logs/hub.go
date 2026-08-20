@@ -34,6 +34,8 @@ type Hub struct {
 	max    int
 	subs   map[chan Entry]struct{}
 	mirror io.Writer
+	// mirrorName describes the mirror destination for the startup banner.
+	mirrorName string
 }
 
 // Default is the process-wide hub.
@@ -46,10 +48,27 @@ func NewHub(max int) *Hub {
 	return &Hub{max: max, subs: make(map[chan Entry]struct{})}
 }
 
-// SetMirror tees every entry to w (best-effort).
-func (h *Hub) SetMirror(w io.Writer) {
+// StdoutMirrorEnv asks for the mirror on stdout instead of the log file.
+// Set it to any value other than the usual "off" spellings (0/false/no/off).
+const StdoutMirrorEnv = "HYDRA_LOG_STDOUT"
+
+// StdoutMirror reports whether the environment asks for the log mirror on
+// stdout. A file inside the config volume is the wrong place to look when
+// Hydra runs under Docker, systemd or a process supervisor: those want the
+// stream on stdout, where `docker logs` and the journal pick it up.
+func StdoutMirror() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(StdoutMirrorEnv))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// SetMirror tees every entry to w (best-effort). name describes the
+// destination for the startup banner; it may be empty.
+func (h *Hub) SetMirror(w io.Writer, name string) {
 	h.mu.Lock()
-	h.mirror = w
+	h.mirror, h.mirrorName = w, name
 	h.mu.Unlock()
 }
 
@@ -63,7 +82,20 @@ func (h *Hub) SetMirrorFileBeside(configPath, name string) {
 	if err != nil {
 		return
 	}
-	h.SetMirror(f)
+	h.SetMirror(f, name)
+}
+
+// SetMirrorStdout mirrors every entry to stdout instead of a file. Unlike the
+// file mirror this needs no config path, so it can be attached before the
+// config is resolved and catch the very first lines of the run.
+func (h *Hub) SetMirrorStdout() { h.SetMirror(os.Stdout, "stdout") }
+
+// MirrorName describes where the mirror writes ("hydra.log", "stdout"), or ""
+// when there is no mirror.
+func (h *Hub) MirrorName() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.mirrorName
 }
 
 func (h *Hub) Add(e Entry) {
@@ -581,6 +613,10 @@ func PrintReady(host string, port int, firstRun bool) {
 	} else {
 		b.WriteString(centered("Login already set. Lost the password? run: hydra reset-password <new>", w) + "\n")
 	}
-	b.WriteString("\n" + centered("Detailed logs -> hydra.log   |   UI \"Logs\" tab", w) + "\n\n")
+	logsLine := "UI \"Logs\" tab"
+	if dest := Default.MirrorName(); dest != "" {
+		logsLine = "Detailed logs -> " + dest + "   |   " + logsLine
+	}
+	b.WriteString("\n" + centered(logsLine, w) + "\n\n")
 	fmt.Fprint(os.Stdout, b.String())
 }
