@@ -200,6 +200,20 @@ func (c *Client) VerifyTorrent(infoHash string) error {
 	return c.call(agentwire.MethodVerifyTorrent, agentwire.InfoHashParams{InfoHash: infoHash}, nil)
 }
 
+// ExportState and ImportState are not routed to a remote agent yet.
+//
+// Handing a torrent between two engines on the same host is a local matter;
+// doing it across hosts also has to move the payload bytes, which is a
+// different feature entirely. Refusing clearly beats a partial move that
+// leaves a torrent adopted on one side and still seeding on the other.
+func (c *Client) ExportState(infoHash string) (*ltclient.ResumeRecord, error) {
+	return nil, errors.New("grpcclient: moving a torrent off a remote agent is not supported")
+}
+
+func (c *Client) ImportState(rec *ltclient.ResumeRecord) (string, error) {
+	return "", errors.New("grpcclient: moving a torrent onto a remote agent is not supported")
+}
+
 func (c *Client) GetStatus(infoHash string) (*ltclient.TorrentStatus, error) {
 	var res ltclient.TorrentStatus
 	if err := c.call(agentwire.MethodGetStatus, agentwire.InfoHashParams{InfoHash: infoHash}, &res); err != nil {

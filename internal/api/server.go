@@ -60,6 +60,12 @@ func SetStartupReady(ready bool) {
 
 // RaceEngine abstracts the race (speed-oriented) torrent engine.
 type RaceEngine interface {
+	// Handing this torrent to the other engine, progression included.
+	Role() engine.Role
+	ExportTorrentState(infoHash string) (*ltclient.ResumeRecord, error)
+	AdoptTorrent(rec *ltclient.ResumeRecord, category string) error
+	ReleaseTorrent(infoHash string) error
+
 	// SampleServedInfoHash returns one info hash this engine holds, for the
 	// connectivity check's handshake probe. "" when it holds none.
 	SampleServedInfoHash() string
@@ -135,6 +141,13 @@ type HoardEngine interface {
 	VerifyDownloading() int
 	VerifyTorrent(infoHash string) error
 	SetTorrentCategory(infoHash, newCategory, newSavePath string) error
+	// Handing this torrent to the other engine, progression included. The
+	// category's mode decides which engine should hold a torrent, so a
+	// category change can imply a move.
+	Role() engine.Role
+	ExportTorrentState(infoHash string) (*ltclient.ResumeRecord, error)
+	AdoptTorrent(rec *ltclient.ResumeRecord, category string) error
+	ReleaseTorrent(infoHash string) error
 	SetCategoryLabel(infoHash, category string) error
 	ClearCategoryLabel(category string) int
 	GetTags(infoHash string) []string

@@ -577,6 +577,9 @@ func (s *Server) registerHydraRoutes() {
 			hoard.POST("/verify-downloading", s.handleHoardVerifyDownloading)
 			hoard.POST("/torrents/:info_hash/verify", s.handleHoardVerifyTorrent)
 			hoard.POST("/torrents/:info_hash/category", s.handleHoardSetCategory)
+			// Same handler under race: setting a race torrent's category to a
+			// hoard-mode category is how a torrent is graduated by hand.
+			race.POST("/torrents/:info_hash/category", s.handleHoardSetCategory)
 			hoard.POST("/torrents/:info_hash/tags", s.handleHoardSetTags)
 			hoard.GET("/download-slots", s.handleHoardDownloadSlotsGet)
 			hoard.POST("/download-slots", s.handleHoardDownloadSlotsSet)
@@ -1510,6 +1513,46 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 	if body.MoveFiles && targetSavePath == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "target category has empty save_path"})
 		return
+	}
+
+	// A category carries the engine that should hold its torrents. If the
+	// torrent is currently in the other one, changing its category IS the move
+	// -- the caller says where the torrent belongs and Hydra works out that
+	// this means handing it over, rather than making them drive two APIs and
+	// hope the progression survives the round trip.
+	//
+	// Payload files are not relocated: race data is on the NVMe and hoard data
+	// on the array, so moving bytes between them is a cross-filesystem copy
+	// with its own failure modes. The new engine seeds the data where it lies.
+	if targetMode := catMode(cats, body.Category); targetMode != "" {
+		var src, dst engineHost
+		switch {
+		case s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) && targetMode == "race":
+			src, dst = s.hoardEngine, s.raceEngine
+		case s.raceEngine != nil && s.raceEngine.HasTorrent(hash) && targetMode == "hoard":
+			src, dst = s.raceEngine, s.hoardEngine
+		}
+		if src != nil {
+			if dst == nil {
+				c.JSON(http.StatusConflict, gin.H{"error": "target engine is not running on this node"})
+				return
+			}
+			if err := engine.MoveTorrent(src, dst, hash, body.Category); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if s.saveStateFn != nil {
+				s.saveStateFn()
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"status":    "ok",
+				"info_hash": hash,
+				"category":  body.Category,
+				"moved_to":  targetMode,
+				"save_path": targetSavePath,
+			})
+			return
+		}
 	}
 
 	if s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash) {
@@ -3499,4 +3542,31 @@ func (s *Server) handleTorrentFiles(c *gin.Context) {
 		out["availability"] = avail
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// engineHost is the handoff surface shared by both engine interfaces. Declared
+// here rather than reusing engine.TorrentHost directly so the api package keeps
+// depending on its own interfaces, which is what lets a front-only node
+// substitute the empty engines.
+type engineHost interface {
+	Role() engine.Role
+	HasTorrent(infoHash string) bool
+	ExportTorrentState(infoHash string) (*ltclient.ResumeRecord, error)
+	AdoptTorrent(rec *ltclient.ResumeRecord, category string) error
+	ReleaseTorrent(infoHash string) error
+}
+
+// catMode returns the engine a category's torrents belong in ("race" or
+// "hoard"), or "" if the category is unknown. An empty mode on a known
+// category means hoard, matching the add path.
+func catMode(cats []category, name string) string {
+	for _, cat := range cats {
+		if cat.Name == name {
+			if cat.Mode == "" {
+				return "hoard"
+			}
+			return cat.Mode
+		}
+	}
+	return ""
 }

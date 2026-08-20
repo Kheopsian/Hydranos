@@ -2,6 +2,7 @@ pub mod meta;
 pub mod metainfo;
 pub mod piece_picker;
 pub mod fastresume;
+pub mod statedb;
 pub mod rate;
 
 use std::sync::Arc;
@@ -27,11 +28,49 @@ pub struct TorrentManager {
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
+    /// Durable per-torrent state. `None` only if SQLite could not be opened at
+    /// all, in which case everything falls back to the legacy JSON directory
+    /// so a broken database degrades into the old behaviour instead of losing
+    /// state outright.
+    state_db: Option<Arc<statedb::StateDb>>,
+    /// Last state written per torrent, so a sweep can skip the rows that did
+    /// not move. Without this the periodic save rewrites every torrent every
+    /// five minutes regardless of activity, which is what made the old scheme
+    /// expensive.
+    last_saved: DashMap<InfoHash, statedb::Fingerprint>,
+    /// Keep mirroring every record into the legacy `resume/` JSON directory.
+    /// Off by default: the mirror costs one file write per torrent per sweep,
+    /// which is the entire cost the state database exists to remove. Set
+    /// TYPHON_RESUME_JSON=1 to keep both in step while validating.
+    mirror_json: bool,
 }
 
 impl TorrentManager {
     pub fn new(data_dir: String, resume_dir: String, disk: Arc<DiskManager>) -> Self {
         std::fs::create_dir_all(&resume_dir).ok();
+        let mirror_json = std::env::var("TYPHON_RESUME_JSON").map(|v| v == "1").unwrap_or(false);
+        let state_db = if std::env::var("TYPHON_STATE_DB").map(|v| v == "0").unwrap_or(false) {
+            info!("[statedb] disabled by TYPHON_STATE_DB=0, using legacy resume JSON only");
+            None
+        } else {
+            // The database sits beside the resume directory, inside the
+            // engine's own config folder: one engine, one file, which is what
+            // makes relocating an engine a folder copy.
+            let path = std::path::Path::new(&resume_dir)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("state.db");
+            match statedb::StateDb::open(&path) {
+                Ok(db) => {
+                    info!("[statedb] opened {}", path.display());
+                    Some(Arc::new(db))
+                }
+                Err(e) => {
+                    warn!("[statedb] could not open {}: {} -- falling back to resume JSON", path.display(), e);
+                    None
+                }
+            }
+        };
         Self {
             torrents: DashMap::new(),
             data_dir,
@@ -41,6 +80,40 @@ impl TorrentManager {
             download_rate: rate::RateTracker::new(),
             cached_unseeded_peers: std::sync::atomic::AtomicUsize::new(0),
             skey_index: DashMap::new(),
+            state_db,
+            last_saved: DashMap::new(),
+            mirror_json,
+        }
+    }
+
+    /// Persist one record now.
+    ///
+    /// Every path that used to call `fastresume::save` directly goes through
+    /// here, so there is exactly one place that decides which backend is
+    /// authoritative and whether the legacy mirror is being kept.
+    fn persist(&self, ih: &InfoHash, rd: &fastresume::ResumeData) {
+        match &self.state_db {
+            Some(db) => {
+                if let Err(e) = db.put(rd) {
+                    // Do not lose the record over a transient database error:
+                    // fall back to the JSON file for this one write, which the
+                    // next start still knows how to read.
+                    warn!("[statedb] put {} failed: {} -- writing JSON instead", &rd.info_hash[..8.min(rd.info_hash.len())], e);
+                    fastresume::save(&self.resume_dir, ih, rd);
+                    return;
+                }
+                // Record what is now on disk so the next sweep can tell this
+                // torrent apart from one that has since moved. Absent during
+                // add_torrent, where the state is not in the map yet -- the
+                // first sweep then writes it once and starts tracking.
+                if let Some(t) = self.get(ih) {
+                    self.last_saved.insert(*ih, fingerprint_of(&t));
+                }
+                if self.mirror_json {
+                    fastresume::save(&self.resume_dir, ih, rd);
+                }
+            }
+            None => fastresume::save(&self.resume_dir, ih, rd),
         }
     }
 
@@ -111,7 +184,7 @@ impl TorrentManager {
             bitfield: String::new(),
             trackers: state.live_trackers.read().clone(),
         };
-        fastresume::save(&self.resume_dir, &ih, &rd);
+        self.persist(&ih, &rd);
 
         let state_arc = Arc::new(state);
         let total_size = state_arc.meta.total_size;
@@ -135,7 +208,7 @@ impl TorrentManager {
     }
 
     pub fn remove_torrent(&self, info_hash: &InfoHash, keep_data: bool) -> Result<(), String> {
-        fastresume::remove(&self.resume_dir, info_hash);
+        self.forget_state(info_hash);
         // Flag the TorrentState as removed BEFORE dropping the DashMap entry
         // so in-flight peer tasks (which hold Arc<TorrentState>) can observe
         // the flag on their next loop iteration and exit cleanly. Otherwise
@@ -248,6 +321,28 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// Read every durable record, from whichever backend holds them.
+    ///
+    /// An installation upgrading into the state database has a full `resume/`
+    /// directory and an empty table; that case imports the directory once and
+    /// carries on from the table. The JSON files are left on disk, so dropping
+    /// back to an older build is just running it. Once the table has rows it
+    /// is the only thing consulted -- a half-stale directory must never be
+    /// allowed to resurrect torrents that were deleted since.
+    fn load_state_records(&self) -> Vec<fastresume::ResumeData> {
+        let db = match &self.state_db {
+            Some(db) => db,
+            None => return fastresume::load_all(&self.resume_dir),
+        };
+        if db.count() == 0 {
+            let imported = db.import_legacy(&self.resume_dir);
+            if imported > 0 {
+                info!("[statedb] first start on SQLite state: {} records carried over", imported);
+            }
+        }
+        db.load_all()
+    }
+
     pub fn load_resume_data(&self) -> usize {
         // Timed in two parts on purpose. Reading the resume records is a few
         // dozen MB of small JSON; re-parsing every .torrent that each record
@@ -255,7 +350,7 @@ impl TorrentManager {
         // the piece hashes live. Without the split, a slow startup gets blamed
         // on whichever half is easier to imagine.
         let t_start = std::time::Instant::now();
-        let resumes = fastresume::load_all(&self.resume_dir);
+        let resumes = self.load_state_records();
         let records = resumes.len();
         let t_records = t_start.elapsed();
         let mut loaded = 0;
@@ -328,7 +423,12 @@ impl TorrentManager {
                 state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
             }
             self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
-            self.torrents.insert(ih, Arc::new(state));
+            let state = Arc::new(state);
+            // Seed the sweep's baseline from what was just read back, so the
+            // first sweep after a start writes only what has moved since --
+            // otherwise every start would rewrite the whole table once.
+            self.last_saved.insert(ih, fingerprint_of(&state));
+            self.torrents.insert(ih, state);
             loaded += 1;
         }
         info!(
@@ -384,12 +484,73 @@ impl TorrentManager {
         self.cached_unseeded_peers.store(total, Ordering::Relaxed);
     }
 
-    /// Persist current upload/download stats for all torrents.
+    /// Persist current state for every torrent that changed since the last
+    /// sweep, in one transaction.
+    ///
+    /// The old version wrote every torrent every time. At 200k torrents on a
+    /// five-minute tick that is ~666 file rewrites per second forever, almost
+    /// all of them byte-identical to what was already on disk, each one
+    /// dirtying a filesystem block that the next snapshot then pins. Comparing
+    /// a six-field fingerprint first reduces the sweep to the torrents that
+    /// actually moved -- the hot set, not the total.
     pub fn save_all_resume(&self) {
+        let db = match &self.state_db {
+            Some(db) => db.clone(),
+            None => {
+                // Legacy path, unchanged.
+                for entry in self.torrents.iter() {
+                    let t = entry.value();
+                    let rd = Self::build_resume_data(t);
+                    fastresume::save(&self.resume_dir, &t.info_hash, &rd);
+                }
+                return;
+            }
+        };
+
+        let started = std::time::Instant::now();
+        let mut dirty: Vec<fastresume::ResumeData> = Vec::new();
+        let mut hashes: Vec<InfoHash> = Vec::new();
+        let mut fps: Vec<statedb::Fingerprint> = Vec::new();
+        let total = self.torrents.len();
         for entry in self.torrents.iter() {
             let t = entry.value();
-            let rd = Self::build_resume_data(t);
-            fastresume::save(&self.resume_dir, &t.info_hash, &rd);
+            let fp = fingerprint_of(t);
+            if self.last_saved.get(&t.info_hash).map(|p| *p.value() == fp).unwrap_or(false) {
+                continue;
+            }
+            dirty.push(Self::build_resume_data(t));
+            hashes.push(t.info_hash);
+            fps.push(fp);
+        }
+        if dirty.is_empty() {
+            return;
+        }
+        let mirror = self.mirror_json;
+        match db.put_batch(&dirty) {
+            Ok(n) => {
+                for (ih, fp) in hashes.iter().zip(fps.iter()) {
+                    self.last_saved.insert(*ih, *fp);
+                }
+                if mirror {
+                    for (rd, ih) in dirty.iter().zip(hashes.iter()) {
+                        fastresume::save(&self.resume_dir, ih, rd);
+                    }
+                }
+                info!(
+                    "[statedb] sweep: {} of {} torrents changed, committed in {:.3}s",
+                    n,
+                    total,
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            Err(e) => {
+                // Never drop a sweep silently: fall back to the JSON files for
+                // this round rather than leave the changes unpersisted.
+                warn!("[statedb] sweep commit failed: {} -- writing {} JSON records instead", e, dirty.len());
+                for (rd, ih) in dirty.iter().zip(hashes.iter()) {
+                    fastresume::save(&self.resume_dir, ih, rd);
+                }
+            }
         }
     }
 
@@ -428,7 +589,7 @@ impl TorrentManager {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         *t.live_trackers.write() = tiers;
         let rd = Self::build_resume_data(&t);
-        fastresume::save(&self.resume_dir, info_hash, &rd);
+        self.persist(info_hash, &rd);
         Ok(())
     }
 
@@ -436,8 +597,128 @@ impl TorrentManager {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         *t.save_path.write() = new_path.into();
         let rd = Self::build_resume_data(&t);
-        fastresume::save(&self.resume_dir, info_hash, &rd);
+        self.persist(info_hash, &rd);
         Ok(())
+    }
+
+    /// Drop every trace of a torrent's durable state.
+    ///
+    /// Both backends are cleared unconditionally, including the legacy JSON
+    /// file even when the mirror is off: production accumulated thousands of
+    /// orphaned resume files precisely because a removal path forgot one of
+    /// the places state lived. Deleting from a place that has nothing is free.
+    fn forget_state(&self, info_hash: &InfoHash) {
+        if let Some(db) = &self.state_db {
+            if let Err(e) = db.remove(&hex_encode(info_hash)) {
+                warn!("[statedb] remove {} failed: {}", &hex_encode(info_hash)[..8], e);
+            }
+        }
+        self.last_saved.remove(info_hash);
+        fastresume::remove(&self.resume_dir, info_hash);
+    }
+
+    /// Export one torrent's durable state, for handing it to another engine.
+    /// Returns None if the torrent is not held here.
+    pub fn export_state(&self, info_hash: &InfoHash) -> Option<fastresume::ResumeData> {
+        self.get(info_hash).map(|t| Self::build_resume_data(&t))
+    }
+
+    /// Adopt a torrent from another engine, progression and all.
+    ///
+    /// This is the receiving half of a move. It is deliberately the same code
+    /// path a restart takes -- the record that crosses between engines is the
+    /// exact record that would have been written to disk and read back -- so a
+    /// torrent that moves engines is indistinguishable from one that restarted.
+    /// The alternative, re-adding and re-checking, would re-hash every byte on
+    /// disk for a torrent that never lost a piece.
+    ///
+    /// The caller is responsible for having already moved (or decided not to
+    /// move) the payload files, and for removing the torrent from the source
+    /// engine afterwards: this end only adopts.
+    pub fn import_state(&self, rd: &fastresume::ResumeData) -> Result<(InfoHash, String), String> {
+        let meta = metainfo::parse_torrent_file(&rd.torrent_path)
+            .map_err(|e| format!("import: parse {}: {}", rd.torrent_path, e))?;
+        let ih = meta.info_hash;
+        let name = meta.name.clone();
+        if self.torrents.contains_key(&ih) {
+            return Err("torrent already present in this engine".into());
+        }
+
+        let state = TorrentState::new_with_times(
+            meta,
+            rd.save_path.clone().into(),
+            rd.torrent_path.clone(),
+            rd.seed_mode,
+            Some(rd.added_time),
+            Some(rd.completed_time),
+        );
+        // An edited tracker list lives in the record, not in the .torrent on
+        // disk. Dropping it here would silently undo the edit on every move.
+        if !rd.trackers.is_empty() {
+            *state.live_trackers.write() = rd.trackers.clone();
+        }
+        state.total_uploaded.store(rd.total_uploaded, Ordering::Relaxed);
+        state.total_downloaded.store(rd.total_downloaded, Ordering::Relaxed);
+        // Bitfield before status, for the same reason the startup path does it
+        // in that order: the status is derived from completeness.
+        if !rd.bitfield.is_empty() {
+            if let Some(picker) = state.picker.get() {
+                let bytes = hex_decode_bytes(&rd.bitfield);
+                if !bytes.is_empty() {
+                    picker.lock().unwrap().import_bitfield(&bytes);
+                }
+            }
+        }
+        if rd.paused {
+            state.is_paused.store(true, Ordering::Relaxed);
+            state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        } else if rd.seed_mode || state.picker.get().is_none() {
+            state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        } else if state.picker.get().unwrap().lock().unwrap().is_complete() {
+            state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        } else {
+            state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        }
+
+        let state = Arc::new(state);
+        let total_size = state.meta.total_size;
+        let num_pieces = state.meta.num_pieces();
+        let private = state.meta.private;
+        self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
+        self.torrents.insert(ih, state.clone());
+        crate::dht::track_torrent(state);
+        // Durable here before the source is told to let go, so a crash in the
+        // middle leaves the torrent in both engines rather than in neither.
+        self.persist(&ih, rd);
+        crate::rpc::events::publish(crate::rpc::events::Event::TorrentAdded {
+            info_hash: hex_encode(&ih),
+            name: name.clone(),
+            save_path: rd.save_path.clone(),
+            total_size,
+            num_pieces,
+            private,
+            seed_mode: rd.seed_mode,
+        });
+        Ok((ih, name))
+    }
+}
+
+/// Summarise the parts of a torrent's live state that are worth persisting.
+///
+/// Read straight off atomics plus one short lock on the picker, so this is
+/// cheap enough to run for every torrent on every sweep -- which is the point:
+/// it is what lets the sweep skip the ones that have not moved. The verified
+/// piece count stands in for the bitfield itself, because the bitfield cannot
+/// change without the count changing too, and comparing a u32 is free next to
+/// exporting and comparing a multi-kilobyte bitfield per torrent.
+fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
+    statedb::Fingerprint {
+        total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
+        total_downloaded: t.total_downloaded.load(Ordering::Relaxed),
+        completed_time: t.completed_time.load(Ordering::Relaxed),
+        num_have: t.picker.get().map(|p| p.lock().unwrap().num_have()).unwrap_or(0),
+        paused: t.is_paused.load(Ordering::Relaxed),
+        seed_mode: t.seed_mode,
     }
 }
 
@@ -620,7 +901,7 @@ impl TorrentManager {
             bitfield,
             trackers: t.live_trackers.read().clone(),
         };
-        fastresume::save(&self.resume_dir, &ih, &rd);
+        self.persist(&ih, &rd);
         info!(
             "[recheck] {} verified {}/{} pieces -> {}",
             &hex_encode(&ih)[..8],
