@@ -245,8 +245,14 @@ type CategoryCount struct {
 func (s *Store) CategoryCounts() ([]CategoryCount, error) {
 	// Grouped by the three things at once, then reduced in Go: picking the
 	// commonest session and save path per category in SQL costs a correlated
-	// subquery each, and the row count here is the number of distinct
-	// (category, session, path) triples, which is tiny.
+	// subquery each. The row count is the number of distinct (category,
+	// session, path) triples, which is NOT small -- save paths are close to
+	// unique per torrent, so it is 95k rows at 195k torrents. It stays cheap
+	// only because idx_torrents_category covers it: the scan reads the index
+	// and never a torrents row (each of which carries the .torrent blob), and
+	// the index order matches the GROUP BY so there is no temp b-tree either.
+	// Changing these columns or their order without changing the index turns
+	// this back into a ~19 s full-table scan on the store's single connection.
 	rows, err := s.db.Query(
 		`SELECT category, session, save_path, COUNT(*)
 		   FROM torrents WHERE category != ''
