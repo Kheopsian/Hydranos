@@ -56,6 +56,27 @@ var migrationsMonolith = []string{
 	`
 	ALTER TABLE torrents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
 	`,
+	// v5: durable background work. Moving a payload across filesystems takes
+	// minutes to hours, so it cannot live inside a request; and a rules engine
+	// firing moves on its own needs somewhere to look to see what is running.
+	// The table is generic on purpose -- a move is the first job type, not the
+	// only one.
+	`
+	CREATE TABLE IF NOT EXISTS jobs (
+	    id             TEXT PRIMARY KEY,
+	    type           TEXT NOT NULL,
+	    state          TEXT NOT NULL,
+	    info_hash      TEXT NOT NULL DEFAULT '',
+	    params         TEXT NOT NULL DEFAULT '',
+	    progress_bytes INTEGER NOT NULL DEFAULT 0,
+	    total_bytes    INTEGER NOT NULL DEFAULT 0,
+	    error          TEXT NOT NULL DEFAULT '',
+	    created_at     INTEGER NOT NULL DEFAULT 0,
+	    updated_at     INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs(state);
+	CREATE INDEX IF NOT EXISTS jobs_torrent_idx ON jobs(info_hash);
+	`,
 }
 
 // migrationsAgent evolves the per-agent store (store_agent.go). Kept as its own
