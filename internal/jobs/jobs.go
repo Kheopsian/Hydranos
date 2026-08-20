@@ -57,6 +57,16 @@ type Manager struct {
 	st      Store
 	runners map[string]Runner
 
+	// base is the lifetime of the daemon, and every job runs under it.
+	//
+	// It is held here rather than taken per call for a reason found the hard
+	// way: passing the caller's context meant passing an HTTP request's
+	// context, so the job was cancelled the instant the request that created
+	// it returned -- which is the precise opposite of what a job is for. A
+	// job outlives its request by definition, so the API for starting one
+	// must not offer a way to say otherwise.
+	base context.Context
+
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
 
@@ -66,12 +76,14 @@ type Manager struct {
 	sem chan struct{}
 }
 
-// NewManager builds a manager. concurrency below 1 is treated as 1.
-func NewManager(st Store, concurrency int) *Manager {
+// NewManager builds a manager whose jobs live as long as ctx -- the daemon's
+// lifetime, never a request's. concurrency below 1 is treated as 1.
+func NewManager(ctx context.Context, st Store, concurrency int) *Manager {
 	if concurrency < 1 {
 		concurrency = 1
 	}
 	return &Manager{
+		base:    ctx,
 		st:      st,
 		runners: map[string]Runner{},
 		cancels: map[string]context.CancelFunc{},
@@ -84,7 +96,7 @@ func (m *Manager) Register(r Runner) { m.runners[r.Type()] = r }
 
 // Submit records a new job and starts it. The job is durable before this
 // returns, so a crash a millisecond later still leaves a trace of the intent.
-func (m *Manager) Submit(ctx context.Context, typ, infoHash string, params interface{}) (*store.Job, error) {
+func (m *Manager) Submit(typ, infoHash string, params interface{}) (*store.Job, error) {
 	if _, ok := m.runners[typ]; !ok {
 		return nil, fmt.Errorf("jobs: no runner registered for %q", typ)
 	}
@@ -111,13 +123,13 @@ func (m *Manager) Submit(ctx context.Context, typ, infoHash string, params inter
 	if err := m.st.PutJob(j); err != nil {
 		return nil, err
 	}
-	m.start(ctx, j)
+	m.start(j)
 	return j, nil
 }
 
 // ResumeAll picks up whatever the last shutdown interrupted. Called once at
 // startup, before the API starts accepting new work.
-func (m *Manager) ResumeAll(ctx context.Context) {
+func (m *Manager) ResumeAll() {
 	pending, err := m.st.UnfinishedJobs()
 	if err != nil {
 		slog.Error("jobs: could not read unfinished jobs", "error", err)
@@ -130,7 +142,7 @@ func (m *Manager) ResumeAll(ctx context.Context) {
 			continue
 		}
 		if j.State == store.JobPending {
-			m.start(ctx, j)
+			m.start(j)
 			continue
 		}
 		resume, reason := r.Resume(j)
@@ -140,7 +152,7 @@ func (m *Manager) ResumeAll(ctx context.Context) {
 			continue
 		}
 		slog.Info("jobs: resuming interrupted job", "id", j.ID, "type", j.Type)
-		m.start(ctx, j)
+		m.start(j)
 	}
 }
 
@@ -181,8 +193,8 @@ func (m *Manager) Prune(age time.Duration) {
 	}
 }
 
-func (m *Manager) start(parent context.Context, j *store.Job) {
-	ctx, cancel := context.WithCancel(parent)
+func (m *Manager) start(j *store.Job) {
+	ctx, cancel := context.WithCancel(m.base)
 	m.mu.Lock()
 	m.cancels[j.ID] = cancel
 	m.mu.Unlock()

@@ -18,6 +18,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/bench"
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
+	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
 	"github.com/Kheopsian/hydra/internal/state"
 	"github.com/gin-gonic/gin"
@@ -222,6 +223,9 @@ type Server struct {
 	config         *config.HydraConfig
 	raceEngine     RaceEngine
 	hoardEngine    HoardEngine
+	// jobs runs the work that outlives a request -- payload moves today,
+	// whatever a rules engine schedules later. nil on a front-only node.
+	jobs *jobs.Manager
 	stateManager   *state.Manager
 	raceDrain      RaceDrainService
 	gradReporter   GraduationReporter
@@ -501,3 +505,6 @@ func (s *Server) Run() error {
 func (s *Server) Router() http.Handler {
 	return s.router
 }
+
+// SetJobManager wires the background job runner. Called once at startup.
+func (s *Server) SetJobManager(m *jobs.Manager) { s.jobs = m }
