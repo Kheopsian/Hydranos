@@ -5,6 +5,10 @@ api_host = "0.0.0.0"
 api_port = 8199
 # auto-generated on first start when empty
 api_key = ""
+# Shared bearer token the HydraAgent gRPC data-plane requires from a front
+# (--agent-addr / --agent-only). Empty = no auth: fine on a private LAN, not
+# fine anywhere else. Overridden by $HYDRA_AGENT_TOKEN, then by --agent-token.
+agent_token = ""
 data_dir = "/config"
 create_torrent_folder = false
 

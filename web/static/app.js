@@ -4865,6 +4865,7 @@ const _SETTINGS_DESC = {
     api_host: "IP the HTTP API/WebUI binds to (0.0.0.0 = all interfaces).",
     api_port: "TCP port for the HTTP API and WebUI.",
     api_key: "Secret required in the X-API-Key header to call the API.",
+    agent_token: "Shared bearer token a front must present to drive this node's agent (gRPC) data-plane. Empty = no auth, which is only safe on a private LAN. $HYDRA_AGENT_TOKEN overrides this, and --agent-token overrides both.",
     data_dir: "Root directory for daemon state (categories, DBs, configs).",
     create_torrent_folder: "Create a per-torrent subfolder for single-file torrents (like qBittorrent's subfolder option). Off = single files saved directly in the category folder; multi-file torrents always keep their own folder. Applies to newly added torrents only.",
     // session (race/hoard)
