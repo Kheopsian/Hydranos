@@ -3,6 +3,34 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.100.0 - 2026-08-21
+
+### Added
+- **`HYDRA_LOG_STDOUT` streams the log to stdout instead of `hydra.log`.** Under
+  Docker, systemd or any other supervisor the log belongs on stdout, where
+  `docker logs` and the journal pick it up and rotate it; a file inside the
+  config volume is the wrong place to look. Set the variable to anything but
+  `0`/`false`/`no`/`off` and no `hydra.log` is opened at all. The mirror is
+  attached when the logger is built rather than after the config path is
+  resolved, so unlike the file mirror it also carries the lines logged while
+  the config is still being read. `ERROR` is no longer echoed to stderr in that
+  mode, since the mirror already puts it on the console. The startup banner
+  names whichever destination is in use.
+- The shipped `docker-compose.yml` now caps the Docker json-file log at
+  128 MiB x 5, the ceiling the file mirror already applies to itself. The
+  driver caps nothing by default, and this is a chatty log: it reached 41 GB in
+  production before the file mirror was capped, and routing it to stdout
+  without this would have brought that back.
+
+### Fixed
+- **The stdout mirror can no longer stall Hydra.** Every hub entry is formatted
+  into the mirror while the hub lock is held, so a mirror that blocks blocks
+  every log producer in the process -- the engines' stdout ingestion, gin,
+  every `slog` call. A file write returns; a pipe whose reader has stopped does
+  not. The stdout mirror therefore writes through a bounded queue and drops
+  lines rather than blocking, reporting the number dropped as soon as the
+  consumer catches up. The file mirror is unchanged.
+
 ## v3.99.0 - 2026-08-20
 
 ### Changed

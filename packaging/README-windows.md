@@ -51,7 +51,8 @@ If you need a console window in a case where there isn't one to attach to (a
 shortcut, a scheduler, debugging), start it with `--console`.
 
 Either way every line is also written to **`hydra.log`**, next to the config,
-and shown in the UI's **Logs** tab.
+and shown in the UI's **Logs** tab. Setting `HYDRA_LOG_STDOUT` sends that
+mirror to stdout instead, and no `hydra.log` is written at all.
 
 ## Updating
 

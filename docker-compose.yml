@@ -32,8 +32,20 @@ services:
     #   # several hundred thousand torrents, where the resume sweep is longer.
     #   HYDRA_STOP_TIMEOUT: 10s
     #   # Send the log stream to stdout (`docker logs hydra`) instead of
-    #   # /config/hydra.log. Any value but 0/false/no/off turns it on.
+    #   # /config/hydra.log. Any value but 0/false/no/off turns it on. Mind the
+    #   # logging block below: on stdout it is Docker, not Hydra, that caps the
+    #   # log, and the default json-file driver caps nothing.
     #   HYDRA_LOG_STDOUT: 1
+    # The file mirror rotates itself at 128 MiB x 5. Nothing rotates the Docker
+    # json-file driver unless you say so, and this is a chatty log -- one line
+    # per inbound peer connection, which reached 41 GB in production before the
+    # file mirror was capped. Same ceiling here, so HYDRA_LOG_STDOUT cannot
+    # bring that back.
+    logging:
+      driver: json-file
+      options:
+        max-size: "128m"
+        max-file: "5"
     volumes:
       - ./config:/config    # config, resume data, SQLite store (persistent)
       - ./data:/data         # torrent payload data
