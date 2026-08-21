@@ -3,6 +3,21 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.110.0 - 2026-08-21
+
+### Changed
+- **`GET /api/port-forward` no longer builds the whole torrent listing to add
+  up one integer.** It summed `num_peers` by materialising a 30-key map per
+  torrent -- 196k of them per call -- for a total the engine already keeps in
+  its cached stats and exposes through `GetAllStatus`. This was 2.2GB per 300s,
+  17% of everything the process allocated. The endpoint is polled by the UI and
+  sits in the logger's `SkipPaths`, so none of it appeared in the access log:
+  it took an allocation profile to find, not a slow request.
+- **The category filter moved into the hoard engine.** The adapter still had to
+  copy all 196k `TorrentStats` before dropping the ones it did not want; the
+  engine now filters while walking its own cache, so neither the copy nor the
+  discarded rows happen.
+
 ## v3.109.0 - 2026-08-21
 
 ### Changed

@@ -2108,14 +2108,11 @@ func (a *hoardAPIAdapter) GetTorrentList() []map[string]interface{} {
 	return result
 }
 func (a *hoardAPIAdapter) GetTorrentListInCategory(category string) []map[string]interface{} {
-	list := a.engine.GetTorrentList()
-	// Filter on the struct, before building the map: the map is the expensive
-	// part (one 30-key allocation per torrent) and is what we would discard.
-	result := make([]map[string]interface{}, 0, 64)
+	// The engine filters while it walks its own cache, so neither the copy of
+	// the 196k structs nor the maps for the rows we would drop ever happen.
+	list := a.engine.GetTorrentListInCategory(category)
+	result := make([]map[string]interface{}, 0, len(list))
 	for i := range list {
-		if list[i].Category != category {
-			continue
-		}
 		result = append(result, torrentStatsToMap(&list[i]))
 	}
 	return result

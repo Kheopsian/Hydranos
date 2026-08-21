@@ -1055,6 +1055,23 @@ func (e *HoardEngine) GetTorrentMetas() map[string]*TorrentMeta {
 	return metas
 }
 
+// GetTorrentListInCategory returns only the torrents in one category.
+//
+// Filtering here rather than in the caller keeps the O(N) struct copy off the
+// path entirely: the qBittorrent shim answers per-category polls from the *arr
+// stack, and those categories hold a couple of percent of the catalogue.
+func (e *HoardEngine) GetTorrentListInCategory(category string) []TorrentStats {
+	e.cachedStatsMu.RLock()
+	defer e.cachedStatsMu.RUnlock()
+	list := make([]TorrentStats, 0, 64)
+	for _, s := range e.cachedStats {
+		if s.Category == category {
+			list = append(list, *s)
+		}
+	}
+	return list
+}
+
 func (e *HoardEngine) GetTorrentList() []TorrentStats {
 	// Build directly from cachedStats on each call so push events
 	// (stats_snapshot updates cachedStats in-place) are immediately
