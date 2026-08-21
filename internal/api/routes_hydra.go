@@ -2357,12 +2357,19 @@ func (s *Server) handlePortForwardStatus(c *gin.Context) {
 		}
 	}
 	if s.hoardEngine != nil {
-		for _, t := range s.hoardEngine.GetTorrentList() {
-			if v, ok := t["num_peers"].(int); ok {
-				hoardPeers += v
-			} else if v, ok := t["num_peers"].(int64); ok {
-				hoardPeers += int(v)
-			}
+		// GetAllStatus already sums this over the engine's cached stats, with
+		// no per-torrent allocation. Walking the full listing to add up one
+		// integer built a 30-key map for each of 196k torrents and threw them
+		// all away: 2.2GB per 300s, 17% of everything the process allocated,
+		// for a number the engine had already computed. The UI polls this
+		// endpoint, and it is in the logger's SkipPaths, so the cost was
+		// invisible in the access log.
+		st := s.hoardEngine.GetAllStatus()
+		switch v := st["active_peers"].(type) {
+		case int:
+			hoardPeers = v
+		case int64:
+			hoardPeers = int(v)
 		}
 	}
 
