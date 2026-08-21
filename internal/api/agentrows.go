@@ -48,6 +48,14 @@ func (s *Server) refreshAgentHoardRows() []map[string]interface{} {
 	return s.pollAgentHoardRows(false)
 }
 
+// staleAgentRows reports whether the cache has not been polled for longer than
+// the slowest cadence the pusher ever uses.
+func (s *Server) staleAgentRows() bool {
+	s.agentRows.mu.RLock()
+	defer s.agentRows.mu.RUnlock()
+	return time.Since(s.agentRows.at) > agentRowBackstop
+}
+
 // forceRefreshAgentHoardRows polls unconditionally. The pusher is what keeps
 // the cache fresh, so it must never coalesce onto a poll it did not make.
 func (s *Server) forceRefreshAgentHoardRows() []map[string]interface{} {
@@ -262,6 +270,14 @@ func numOf(v interface{}) int64 {
 // stay node-local: they feed announce accounting, which belongs to the node
 // that actually announces.
 func (s *Server) mergeAgentHoardStats(status map[string]interface{}) {
+	// With no browser on /api/events the pusher stops polling, so the cache
+	// freezes -- and these counts would keep reporting rates and peers from
+	// whenever the last one disconnected. A REST caller asking for the status
+	// pays a refresh instead, at most one per backstop interval.
+	if s.staleAgentRows() {
+		s.refreshAgentHoardRows()
+	}
+
 	s.agentRows.mu.RLock()
 	defer s.agentRows.mu.RUnlock()
 

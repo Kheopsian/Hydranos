@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.106.0 - 2026-08-21
+
+### Fixed
+- **Torrents living on an agent are back in the hoard list.** The list is
+  hydrated and kept live entirely over SSE, and that stream carried the local
+  engine only, so a torrent placed on an agent had no row in /#hoard at all --
+  it ran, announced and answered over /api/hoard/torrents while looking like it
+  had vanished the moment it was moved. The agents' rows are now polled on one
+  loop and published into the same stream, feeding the hydration, the live
+  push, /api/hoard/torrents and the tab header from a single cache.
+- **Stop and start work on an agent's torrents.** Both were applied to the
+  local engine, which has never heard of the hash: a 404 on a monolith, and a
+  silent no-op on a front-only node whose local engine answers "fine" to
+  everything. The intent is now recorded through the agent's own engine, so its
+  slot manager stops handing the torrent a slot on the next pass.
+- **A routed add keeps its .torrent.** The blob was materialised into a file
+  deleted on return, so the five-minute store reconcile -- which captures it by
+  reading that path -- counted every routed add a miss and never inserted its
+  row. The torrent then carried no category, save path or tags across a
+  restart.
+- **A front-only node has a working web UI.** Its empty hoard engine returned a
+  nil event hub, and /api/events refuses to serve without one, which left the
+  whole interface permanently empty.
+
 ## v3.105.0 - 2026-08-21
 
 ### Added
