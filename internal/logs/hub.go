@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -88,7 +89,54 @@ func (h *Hub) SetMirrorFileBeside(configPath, name string) {
 // SetMirrorStdout mirrors every entry to stdout instead of a file. Unlike the
 // file mirror this needs no config path, so it can be attached before the
 // config is resolved and catch the very first lines of the run.
-func (h *Hub) SetMirrorStdout() { h.SetMirror(os.Stdout, "stdout") }
+//
+// The write goes through an async queue, which the file mirror does not need.
+// Add formats the mirror line while holding the hub lock, so a mirror that
+// blocks blocks every log producer in the process with it -- the engines'
+// stdout ingestion, gin, every slog call. A regular file write returns; stdout
+// under a supervisor is a pipe, and a pipe whose reader stalls does not.
+func (h *Hub) SetMirrorStdout() { h.SetMirror(newAsyncWriter(os.Stdout, asyncMirrorDepth), "stdout") }
+
+// asyncMirrorDepth is the queue the stdout mirror absorbs a stalled reader
+// with. At the production rate -- the engines log a line per inbound peer
+// connection -- this is a few seconds of slack before anything is dropped.
+const asyncMirrorDepth = 4096
+
+// asyncWriter hands writes to a single drain goroutine through a bounded
+// queue, and drops rather than blocks when the queue is full: losing log lines
+// beats wedging the process that produces them. Drops are never silent -- the
+// count is reported inline as soon as the consumer catches up.
+type asyncWriter struct {
+	ch      chan []byte
+	dropped atomic.Uint64
+}
+
+func newAsyncWriter(w io.Writer, depth int) *asyncWriter {
+	a := &asyncWriter{ch: make(chan []byte, depth)}
+	go func() {
+		for b := range a.ch {
+			if n := a.dropped.Swap(0); n > 0 {
+				fmt.Fprintf(w, "%s %-13s %-5s log mirror dropped %d line(s): consumer too slow\n",
+					time.Now().Format("2006-01-02T15:04:05.000"), "logs", "WARN", n)
+			}
+			_, _ = w.Write(b)
+		}
+	}()
+	return a
+}
+
+// Write never blocks and never fails: a log mirror has nothing useful to do
+// with a write error, exactly as the file mirror treats its own.
+func (a *asyncWriter) Write(p []byte) (int, error) {
+	b := make([]byte, len(p))
+	copy(b, p)
+	select {
+	case a.ch <- b:
+	default:
+		a.dropped.Add(1)
+	}
+	return len(p), nil
+}
 
 // MirrorName describes where the mirror writes ("hydra.log", "stdout"), or ""
 // when there is no mirror.
