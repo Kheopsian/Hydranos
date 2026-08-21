@@ -111,6 +111,12 @@ type HoardEngine interface {
 	SampleServedInfoHash() string
 	GetAllStatus() map[string]interface{}
 	GetTorrentList() []map[string]interface{}
+	// GetTorrentListInCategory returns only the rows in one category. The
+	// *arr stack polls the qBittorrent shim once per category, and every one
+	// of those polls was building a row for the whole catalogue before
+	// discarding all but its own: at 196k torrents the five categories they
+	// ask for hold 4.4k torrents, so 97.7% of the work was thrown away.
+	GetTorrentListInCategory(category string) []map[string]interface{}
 	GetTorrentListJSON() []json.RawMessage
 	GetSessionTotals() (int64, int64)
 	GetTorrentDetail(infoHash string) map[string]interface{}

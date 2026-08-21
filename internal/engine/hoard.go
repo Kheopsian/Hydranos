@@ -1855,16 +1855,22 @@ func (e *HoardEngine) enforceDownloadSlots() {
 
 	now := time.Now()
 
-	// Snapshot tracker-scrape seed counts from the announce cache. The
-	// engine list_torrents RPC carries no swarm data, and ListSeeds is
-	// connected-only (0 on parked torrents), which made slot priority
-	// effectively random. cachedStats is fed by ObserveAnnounce.
-	swarmSeeds := make(map[string]int)
-	e.cachedStatsMu.RLock()
-	for ih, cs := range e.cachedStats {
-		swarmSeeds[ih] = cs.SwarmSeeds
+	// Tracker-scrape seed counts come from the announce cache: the engine
+	// list_torrents RPC carries no swarm data, and ListSeeds is connected-only
+	// (0 on parked torrents), which made slot priority effectively random.
+	//
+	// Looked up per torrent rather than copied wholesale. Only the incomplete
+	// ones are ever asked for -- a few thousand against a 196k catalogue --
+	// so snapshotting the whole map every 30s was allocating the other 97%
+	// for nothing.
+	swarmSeedsOf := func(ih string) int {
+		e.cachedStatsMu.RLock()
+		defer e.cachedStatsMu.RUnlock()
+		if cs := e.cachedStats[ih]; cs != nil {
+			return cs.SwarmSeeds
+		}
+		return 0
 	}
-	e.cachedStatsMu.RUnlock()
 
 	// Classify torrents
 	type dlTorrent struct {
@@ -1877,7 +1883,7 @@ func (e *HoardEngine) enforceDownloadSlots() {
 
 	var incomplete []dlTorrent
 	var actives []string
-	byHash := make(map[string]int, len(result.Torrents))
+	byHash := make(map[string]int)
 
 	for _, s := range result.Torrents {
 		if s.IsFinished || s.Progress >= 1.0 {
@@ -1887,7 +1893,7 @@ func (e *HoardEngine) enforceDownloadSlots() {
 		byHash[s.InfoHash] = len(incomplete)
 		incomplete = append(incomplete, dlTorrent{
 			InfoHash: s.InfoHash,
-			Seeds:    swarmSeeds[s.InfoHash], // tracker-scrape seeds from announce cache
+			Seeds:    swarmSeedsOf(s.InfoHash), // tracker-scrape seeds from announce cache
 			Active:   isActive,
 			Bytes:    s.TotalDone,
 			Rate:     s.DownloadRate,

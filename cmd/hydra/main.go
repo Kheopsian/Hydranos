@@ -2107,6 +2107,20 @@ func (a *hoardAPIAdapter) GetTorrentList() []map[string]interface{} {
 	}
 	return result
 }
+func (a *hoardAPIAdapter) GetTorrentListInCategory(category string) []map[string]interface{} {
+	list := a.engine.GetTorrentList()
+	// Filter on the struct, before building the map: the map is the expensive
+	// part (one 30-key allocation per torrent) and is what we would discard.
+	result := make([]map[string]interface{}, 0, 64)
+	for i := range list {
+		if list[i].Category != category {
+			continue
+		}
+		result = append(result, torrentStatsToMap(&list[i]))
+	}
+	return result
+}
+
 func (a *hoardAPIAdapter) GetTorrentListJSON() []json.RawMessage {
 	list := a.engine.GetTorrentList()
 	sort.Slice(list, func(i, j int) bool { return list[i].AddedTime > list[j].AddedTime })
