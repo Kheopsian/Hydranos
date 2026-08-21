@@ -284,22 +284,45 @@ func (s *Server) qbitTorrentsInfo(c *gin.Context) {
 	// we do not control, and each poll was rebuilding a map per torrent.
 	// qbitSnapshot hands back a copy of the slice (the sort below is in place),
 	// sharing the maps, which are read-only once built.
-	allTorrents := qbitSnapshot(func() []map[string]interface{} {
+	// A category poll builds only that category. The hoard side filters on the
+	// struct before building any row, which is where the cost is; race and the
+	// pending magnets are small enough to build and filter. Same rows as the
+	// full path would have yielded after its own category filter, so the block
+	// below is skipped rather than run twice.
+	scope := ""
+	if categoryFilter != "" {
+		scope = "cat:" + categoryFilter
+	}
+	allTorrents := qbitSnapshotFor(scope, func() []map[string]interface{} {
 		// Non-nil: an empty listing must marshal as [], never null.
 		out := make([]map[string]interface{}, 0)
+		keep := func(row map[string]interface{}) {
+			if categoryFilter != "" {
+				if cat, _ := row["category"].(string); cat != categoryFilter {
+					return
+				}
+			}
+			out = append(out, row)
+		}
 		// Magnets whose metadata has not landed yet: qBit calls this metaDL,
 		// and clients poll for it rather than treating the grab as lost.
 		for _, p := range PendingMagnets() {
-			out = append(out, p.QbitRow())
+			keep(p.QbitRow())
 		}
 		if s.raceEngine != nil {
 			for _, t := range s.raceEngine.GetAllStatus() {
-				out = append(out, hydraToQbitTorrent(t, "race"))
+				keep(hydraToQbitTorrent(t, "race"))
 			}
 		}
 		if s.hoardEngine != nil {
-			for _, t := range s.hoardEngine.GetTorrentList() {
-				out = append(out, hydraToQbitTorrent(t, "hoard"))
+			if categoryFilter != "" {
+				for _, t := range s.hoardEngine.GetTorrentListInCategory(categoryFilter) {
+					out = append(out, hydraToQbitTorrent(t, "hoard"))
+				}
+			} else {
+				for _, t := range s.hoardEngine.GetTorrentList() {
+					out = append(out, hydraToQbitTorrent(t, "hoard"))
+				}
 			}
 		}
 		return out
@@ -328,17 +351,7 @@ func (s *Server) qbitTorrentsInfo(c *gin.Context) {
 		allTorrents = filtered
 	}
 
-	// Filter by category
-	if categoryFilter != "" {
-		filtered := make([]map[string]interface{}, 0)
-		for _, t := range allTorrents {
-			cat, _ := t["category"].(string)
-			if cat == categoryFilter {
-				filtered = append(filtered, t)
-			}
-		}
-		allTorrents = filtered
-	}
+	// Category filtering already happened inside the scoped build above.
 
 	// Filter by tag (qBittorrent: torrents having the given tag)
 	if tagFilter != "" {

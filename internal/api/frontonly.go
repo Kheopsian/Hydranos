@@ -74,14 +74,15 @@ type emptyHoardEngine struct{}
 // NewEmptyHoardEngine returns a no-op HoardEngine for front-only mode.
 func NewEmptyHoardEngine() HoardEngine { return emptyHoardEngine{} }
 
-func (emptyHoardEngine) GetAllStatus() map[string]interface{}                 { return map[string]interface{}{} }
-func (emptyHoardEngine) SampleServedInfoHash() string                         { return "" }
-func (emptyHoardEngine) GetTorrentList() []map[string]interface{}             { return nil }
-func (emptyHoardEngine) GetTorrentListJSON() []json.RawMessage                { return nil }
-func (emptyHoardEngine) GetSessionTotals() (int64, int64)                     { return 0, 0 }
-func (emptyHoardEngine) GetTorrentDetail(string) map[string]interface{}       { return nil }
-func (emptyHoardEngine) GetTorrentFileList(string) []map[string]interface{}   { return nil }
-func (emptyHoardEngine) GetTorrentAvailability(string) map[string]interface{} { return nil }
+func (emptyHoardEngine) GetAllStatus() map[string]interface{}                     { return map[string]interface{}{} }
+func (emptyHoardEngine) SampleServedInfoHash() string                             { return "" }
+func (emptyHoardEngine) GetTorrentList() []map[string]interface{}                 { return nil }
+func (emptyHoardEngine) GetTorrentListInCategory(string) []map[string]interface{} { return nil }
+func (emptyHoardEngine) GetTorrentListJSON() []json.RawMessage                    { return nil }
+func (emptyHoardEngine) GetSessionTotals() (int64, int64)                         { return 0, 0 }
+func (emptyHoardEngine) GetTorrentDetail(string) map[string]interface{}           { return nil }
+func (emptyHoardEngine) GetTorrentFileList(string) []map[string]interface{}       { return nil }
+func (emptyHoardEngine) GetTorrentAvailability(string) map[string]interface{}     { return nil }
 func (emptyHoardEngine) SetEngineOptFlag(string, bool, int64) (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
 }

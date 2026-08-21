@@ -118,9 +118,17 @@ const qbitSnapTTL = 2 * time.Second
 
 var (
 	qbitSnapMu sync.Mutex
-	qbitSnap   []map[string]interface{}
-	qbitSnapAt time.Time
+	// Keyed by listing scope: "" is the whole catalogue, "cat:<name>" one
+	// category. The *arr stack polls per category and never asks for the
+	// whole thing, so a single full-catalogue slot meant every one of those
+	// polls paid for all 196k rows.
+	qbitSnaps = map[string]*qbitSnapEntry{}
 )
+
+type qbitSnapEntry struct {
+	rows []map[string]interface{}
+	at   time.Time
+}
 
 // qbitSnapshot returns the full qBittorrent listing, rebuilding it via build
 // only when the cached copy has expired.
@@ -131,17 +139,25 @@ var (
 // read once built. Copying 107k pointers costs about 1.7MB against the ~68GB/h
 // that rebuilding the maps was allocating.
 func qbitSnapshot(build func() []map[string]interface{}) []map[string]interface{} {
+	return qbitSnapshotFor("", build)
+}
+
+// qbitSnapshotFor is qbitSnapshot for one listing scope. Scopes are cached
+// independently: a category poll never builds, nor invalidates, the full
+// catalogue.
+func qbitSnapshotFor(key string, build func() []map[string]interface{}) []map[string]interface{} {
 	if !optQbitSnapshot.Load() {
 		return build()
 	}
 	qbitSnapMu.Lock()
 	defer qbitSnapMu.Unlock()
-	if qbitSnap == nil || time.Since(qbitSnapAt) > qbitSnapTTL {
-		qbitSnap = build()
-		qbitSnapAt = time.Now()
+	e := qbitSnaps[key]
+	if e == nil || time.Since(e.at) > qbitSnapTTL {
+		e = &qbitSnapEntry{rows: build(), at: time.Now()}
+		qbitSnaps[key] = e
 	}
-	out := make([]map[string]interface{}, len(qbitSnap))
-	copy(out, qbitSnap)
+	out := make([]map[string]interface{}, len(e.rows))
+	copy(out, e.rows)
 	return out
 }
 
@@ -149,7 +165,9 @@ func qbitSnapshot(build func() []map[string]interface{}) []map[string]interface{
 // the two-second window visibly wrong (an add or a delete through the shim).
 func InvalidateQbitSnapshot() {
 	qbitSnapMu.Lock()
-	qbitSnap = nil
+	// Every scope: an add lands in a category, and leaving that category's
+	// slot warm would hide the new torrent from the poller that asked for it.
+	clear(qbitSnaps)
 	qbitSnapMu.Unlock()
 }
 

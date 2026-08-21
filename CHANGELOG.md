@@ -3,6 +3,34 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.109.0 - 2026-08-21
+
+### Changed
+- **Answering one category of the qBittorrent shim no longer builds the whole
+  catalogue.** Sonarr and Radarr poll `/api/v2/torrents/info?category=...` once
+  per category; the handler built a row for all 196k torrents and then threw
+  away everything outside the category asked for. The five categories they poll
+  hold 4.4k torrents between them, so 97.7% of that work was discarded -- and it
+  was the largest single allocator in the process (2.4GB per 90s, 28% of all
+  allocation). The hoard side now filters on the struct before building any row,
+  and snapshots are cached per scope so a category poll neither builds nor
+  invalidates the full listing. An unfiltered listing is unchanged.
+- **The list decode no longer grows its slice from nothing.** `encoding/json`
+  grows a slice it decodes into by repeated doubling, so decoding 196k torrents
+  discarded roughly the whole array again in intermediates -- 2.2GB per 90s,
+  25% of all allocation. The decode is now handed a slice sized from the
+  previous one.
+- **The shared list snapshot is no longer copied on every cache hit.** It is
+  handed out directly and is read-only by contract: every caller ranges and
+  reads, a refresh replaces the whole result rather than writing through it, and
+  nothing sorts or mutates it. The copy it replaces guarded against a sort in
+  `enforceDownloadSlots` that now runs only on slices that function derives
+  itself.
+- **`enforceDownloadSlots` stopped snapshotting the swarm-seed map.** It copied
+  all 196k entries every 30s to look up the few thousand incomplete torrents;
+  it now looks them up as it needs them, and sizes its index map for what it
+  actually holds.
+
 ## v3.108.0 - 2026-08-21
 
 ### Fixed

@@ -128,9 +128,17 @@ func TestRouteFrameFastPathIgnoresPayloadShape(t *testing.T) {
 	}
 }
 
-// The shared snapshot hands copies out: enforceDownloadSlots sorts what it
-// gets, and must not be able to reorder another caller's view.
-func TestCachedListReturnsIndependentCopies(t *testing.T) {
+// The snapshot is shared, not copied, and a refresh replaces it wholesale so a
+// caller still holding the previous one keeps a consistent view.
+//
+// This replaces a contract that copied the whole array on every cache hit. That
+// copy guarded against enforceDownloadSlots sorting what it was handed -- which
+// it no longer does: its four sorts all run on slices it derives itself
+// (eligible/remaining/evictees/newcomers), and nothing in the tree sorts or
+// writes through a ListTorrentsResult. At 196k torrents the copy was a
+// 196k-element array per hit, protecting against something that does not
+// happen. If a caller ever does need to mutate, it copies what it needs.
+func TestCachedListSharesSnapshotAndSurvivesRefresh(t *testing.T) {
 	optListCache.Store(true)
 	defer optListCache.Store(false)
 
@@ -145,14 +153,23 @@ func TestCachedListReturnsIndependentCopies(t *testing.T) {
 	if first == nil {
 		t.Fatal("fresh snapshot returned nil")
 	}
-	first.Torrents[0].InfoHash = "mutated"
-
-	second := c.cachedList()
-	if second == nil {
-		t.Fatal("second read returned nil")
+	// Shared, not copied: that is the whole point of the change.
+	if first != c.listCache {
+		t.Error("cachedList copied the snapshot instead of sharing it")
 	}
-	if second.Torrents[0].InfoHash != "a" {
-		t.Errorf("caller mutation leaked into the shared snapshot: %q", second.Torrents[0].InfoHash)
+
+	// A refresh swaps the pointer; it must not write through the old one.
+	c.listMu.Lock()
+	c.listCache = &ListTorrentsResult{Torrents: []TorrentStatus{{InfoHash: "c"}}, Count: 1}
+	c.listCachedAt = time.Now()
+	c.listMu.Unlock()
+
+	if first.Torrents[0].InfoHash != "a" {
+		t.Errorf("refresh disturbed a snapshot a caller still held: %q", first.Torrents[0].InfoHash)
+	}
+	second := c.cachedList()
+	if second == nil || second.Torrents[0].InfoHash != "c" {
+		t.Error("second read did not see the refreshed snapshot")
 	}
 }
 
