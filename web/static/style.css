@@ -149,12 +149,14 @@ header::before {
 }
 /* Each address on its own line: the separator was doing the work of a line
    break, badly, and wrapped wherever there happened to be room. */
-/* A full IPv6 is 39 characters at worst; 23ch of 11px monospace holds every
-   address we actually show, and the tooltip holds the rest. The warning line
-   is a sentence and is never clipped: it is shorter than an address anyway. */
+/* A full IPv6 is 39 characters at worst, and the header has the room: size the
+   line for the longest address there is, so a real address is never clipped.
+   The ellipsis stays as a floor for anything longer than a v6 literal, and the
+   tooltip still holds both addresses in full. The warning line is a sentence
+   and is never clipped: it is shorter than an address anyway. */
 .exit-ip-stat .stat-value .ip-line {
     display: block;
-    max-width: 23ch;
+    max-width: 39ch;
     margin-left: auto;
     overflow: hidden;
     text-overflow: ellipsis;

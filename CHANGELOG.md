@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.107.0 - 2026-08-21
+
+### Fixed
+- **The header no longer clips the IPv6 exit address.** The address line was
+  capped at 23 characters, which is shorter than a full IPv6 literal, so a
+  perfectly ordinary address was shown truncated with an ellipsis and had to be
+  hovered to be read. The line is now sized for the longest address there is,
+  39 characters, which the header has the room for.
+
 ## v3.106.0 - 2026-08-21
 
 ### Fixed
