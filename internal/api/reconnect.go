@@ -120,6 +120,13 @@ func (s *Server) streamDelta(w interface{ Write([]byte) (int, error) }, flusher 
 	if s.reconnect == nil {
 		return false
 	}
+	// The delta only tracks this node's own engines. With agents registered, a
+	// torrent that arrived on one since the last connect would be missing from
+	// the delta and stay invisible until a full reload, so decline and let the
+	// caller hydrate in full -- which does aggregate agents.
+	if len(s.agentsSnapshot()) > 0 {
+		return false
+	}
 	added, removed, ok := s.reconnect.changesSince(since)
 	if !ok {
 		return false

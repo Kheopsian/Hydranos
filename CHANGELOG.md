@@ -3,6 +3,253 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.104.1 - 2026-08-20
+
+### Fixed
+- The emptied-folder prune added in 3.104.0 never fired: it compared the folder
+  name to the torrent name, and a single-file torrent is wrapped in a folder
+  named after it WITHOUT its extension, so the two never matched. It now asks
+  the flag that actually answers the question -- does this torrent own its
+  folder.
+
+## v3.104.0 - 2026-08-20
+
+### Fixed
+- **Editing the trackers of a torrent that lives on an agent reported "no such
+  torrent".** Both tracker endpoints funnel through one edit path, and that path
+  only looked at the local engines. It now runs the same edit on the agent that
+  holds the torrent.
+- **Deleting a torrent's data left its folder behind, empty.** The engine
+  unlinks files, never the directory that held them. The torrent's own folder is
+  now pruned when it is emptied -- and only ever its own: a single-file torrent
+  stored unwrapped has the category directory as its save path, and removing
+  that because it happens to be empty would delete the category.
+- Setting tags on a torrent held by an agent now says so instead of writing the
+  label onto this node's copy.
+
+## v3.103.0 - 2026-08-20
+
+### Fixed
+- **An interrupted cross-node job died on the very restart it was built to
+  survive.** Unfinished jobs were picked up before the remote agents were
+  registered, so a resumed move failed outright with "no agent named ...".
+  Resuming now happens once the agents are known, and still before the API
+  takes new work.
+
+## v3.102.6 - 2026-08-20
+
+### Fixed
+- **Cross-node move jobs showed a dash instead of the torrent's name.** A job
+  outlives the torrent it acts on, and a hash is not something anyone can read
+  in a list, so the name is now resolved when the job is created -- from
+  whichever node holds the torrent, including an agent.
+
+## v3.102.5 - 2026-08-20
+
+### Fixed
+- **Removing a torrent silently did nothing.** Keying the selection by row
+  rather than by hash changed what its map keys are, and five loops still read
+  those keys as info hashes -- building requests against a key instead of a
+  hash, with the failure swallowed by the surrounding catch. All of them now
+  read the hash from the selection entry.
+
+## v3.102.4 - 2026-08-20
+
+### Fixed
+- **Clicking one copy of a duplicated torrent selected both.** The selection was
+  keyed by info hash, so the two rows of a duplicate were indistinguishable to
+  it and to the highlight. A selection entry is now the ROW -- node and hash --
+  and the clicked row itself decides which node an action reaches, instead of a
+  lookup that returned whichever copy came first.
+
+## v3.102.3 - 2026-08-20
+
+### Fixed
+- **A payload adopted onto this node landed under the wrong category's folder.**
+  The adopt path derives the on-disk layout from the category it is given, and
+  it was being given none, so the files were filed somewhere the torrent did not
+  point at and the copy sat at 0%. The job's category is now passed through.
+
+## v3.102.2 - 2026-08-20
+
+### Fixed
+- **A torrent moved or duplicated ONTO this node arrived half-registered.** The
+  adopt went straight to the engine, so Hydra's own layer never learned of it:
+  no name, no save path, no event, and the row stayed incomplete until something
+  reloaded. Local adopts now go through the same path an engine hand-over uses,
+  which registers the metadata and emits the event.
+
+## v3.102.1 - 2026-08-20
+
+### Fixed
+- **Rows living on an agent never updated between page loads.** SSE carries this
+  node's engines only, so a remote torrent stayed frozen at whatever it looked
+  like when the stream opened -- a freshly duplicated one sat there incomplete
+  until a reload. A new `GET /api/agents/torrents` returns the agent slice
+  alone, polled every few seconds and merged in place, so remote rows go live
+  without bringing back the full-list fetch that hydration replaced.
+
+## v3.102.0 - 2026-08-20
+
+### Added
+- **`POST /api/agents/:name/action`** runs one per-torrent action on a named
+  agent: pause, resume, verify, reannounce, remove, and the two category forms.
+  The per-torrent endpoints resolve their target by looking locally first, which
+  is only unambiguous while a hash lives in one place; naming the node is what
+  makes acting on a duplicate's remote copy possible at all.
+
+### Fixed
+- **Pause, resume, recheck and reannounce acted on the local copy of a
+  duplicated torrent.** They now follow the node the row belongs to, like remove
+  already did.
+
+## v3.101.4 - 2026-08-20
+
+### Fixed
+- **An action on a duplicated torrent could hit the wrong node.** Selecting a row
+  remembered only the info hash, and removing a torrent tried the local engines
+  first, falling back to an agent only when nothing local held it. With the same
+  hash on two nodes that always acted on the local copy. A selection now carries
+  the node it was made on, and DELETE accepts an explicit `?agent=`.
+
+## v3.101.3 - 2026-08-20
+
+### Fixed
+- **A duplicated torrent showed only once in the list.** The same info hash can
+  legitimately live on two nodes -- that is what duplicating one is for -- but
+  the list was keyed by hash alone, so the second copy replaced the first and
+  the duplicate looked like it had done nothing. Rows are now identified by node
+  and hash. Local engine events (stats, added, removed) no longer reach an
+  agent's copy of the same hash either.
+
+## v3.101.2 - 2026-08-20
+
+### Fixed
+- **Moving or duplicating a torrent OFF an agent was refused for having no
+  category**, even when it plainly had one. The category behind the destination
+  path was only ever looked up on the local engines, so a torrent living on an
+  agent came back empty and the request was rejected. The owning agent is now
+  asked too.
+
+## v3.101.1 - 2026-08-20
+
+### Fixed
+- **Changing the category of a torrent that lives on an agent failed with a
+  bogus cross-filesystem refusal.** The handler always drove the local engine
+  and resolved the category's local save_path, so it measured the agent's path
+  against this node's and refused over hardlinks that were never involved. A
+  remote torrent is now relabelled where it lives; relocating its payload
+  between nodes stays an explicit action, never a side effect of naming a
+  category.
+
+## v3.101.0 - 2026-08-20
+
+### Changed
+- **Every browser alert and confirm is now Hydra's own modal.** 17 alerts and 13
+  confirmations moved over: they are styled like the rest of the UI, they do not
+  freeze the page, they close on Escape or a click outside, and a confirmation
+  can always be declined. Destructive confirmations keep the red button.
+
+## v3.100.7 - 2026-08-20
+
+### Changed
+- **Agent actions report through Hydra's own modal instead of a browser alert.**
+  A native alert cannot be styled, freezes the page, and offers no way out but
+  OK. The new dialog takes a title, a message and its own buttons, closes on
+  Escape or a click outside, and has a Cancel that means it.
+
+## v3.100.6 - 2026-08-20
+
+### Fixed
+- **A cross-node move that failed after adopting left an empty torrent on the
+  destination.** The target has to know the torrent before pieces can be written
+  to it, so the adopt necessarily comes first; a transfer that then failed left
+  that shell in the list, looking like a real torrent holding nothing. A failure
+  now removes exactly what the run adopted, and a resumed run never removes a
+  torrent an earlier run had already filled.
+
+## v3.100.5 - 2026-08-20
+
+### Fixed
+- **An agent's torrents showed no tracker and no category.** The row builder for
+  agent torrents never mapped the tracker the engine already reports, and
+  hardcoded the category to an empty string, which reads as "no category"
+  rather than "this row cannot know". The tracker is now mapped, and categories
+  are fetched from the agent alongside its torrent list.
+- **A torrent moved to another node arrived without its category.** The category
+  is Hydra's own layer: it is in neither the resume record nor the torrent
+  status, so it does not travel with the payload. A move now labels the torrent
+  on the destination once it is running, without touching its files -- the
+  routed "setcategory" action relocates the payload, which after a move would
+  move it a second time. A label that fails is logged, never fatal: the bytes
+  are delivered and verified, and a category is fixable from the UI.
+
+## v3.100.4 - 2026-08-20
+
+### Fixed
+- **Torrents living on a registered agent were missing from the torrent list.**
+  `/api/hoard/torrents` has aggregated agents all along, but the list stopped
+  reading it when hydration moved to SSE, and the SSE hydration streamed only
+  this node's own engines. Agent torrents were therefore invisible in the UI --
+  which looked like a torrent vanishing the moment it was moved to an agent.
+  Hydration now streams local rows first, then each agent's, with a bounded
+  per-agent timeout so a slow node cannot hold up the rest of the list.
+- A reconnect served from the delta path no longer hides agent torrents: the
+  delta tracks only local engines, so it declines when agents are registered and
+  lets the full hydration run instead.
+
+## v3.100.3 - 2026-08-20
+
+### Changed
+- **A context submenu now lines up with the row that opened it** instead of the
+  top of the parent menu. On a tall menu the panel appeared nowhere near the
+  item clicked, which is not how a cascading menu reads.
+
+## v3.100.2 - 2026-08-20
+
+### Changed
+- **Context menu submenus now open beside the menu instead of replacing it.**
+  Choosing a category, a tag or an agent used to swap the menu's contents, so
+  the actions you came from disappeared and getting back needed a "Back" row
+  that existed only because of the swap. The submenu is now a second panel
+  hinged on the parent's right edge, flipping to the left when there is no room,
+  so the choice stays visibly attached to the action that opened it.
+
+## v3.100.1 - 2026-08-20
+
+### Fixed
+- **The Agent group was missing from the context menu on the first right-click
+  of a session.** The list of agents was only fetched at the end of opening the
+  menu, so the first open decided on an empty list and hid the group; it
+  appeared only from the second open onwards. The list is now loaded at startup,
+  and a refresh that lands while the menu is open re-applies the grouping.
+
+## v3.100.0 - 2026-08-20
+
+### Added
+- **Move or duplicate a torrent between nodes, payload included.** Right-clicking
+  a torrent now offers an Agent group, present only when there are agents to send
+  to, with "Duplicate to agent" (both nodes keep it) and "Move to agent" (the
+  source is released once the target is verified and running). The destination is
+  the path the torrent's own category defines for that agent, so re-categorising
+  stays a separate action instead of being smuggled into a move.
+- The bytes travel over the existing authenticated agent connection, one whole
+  piece at a time, and every piece is checked against the SHA-1 already in the
+  torrent before the receiver writes it. That makes an interrupted transfer
+  resumable from the target's own bitfield: nothing else is recorded, because
+  nothing else has to be. A move refuses up front when the target has no room,
+  and either end may be the node running the front.
+
+### Fixed
+- **`--agent-only` could never start on Windows**: the agent built a Unix socket
+  path for its engine while the Windows engine only listens on TCP loopback, and
+  the monolith's "one race and one hoard" check ran before the agent-only branch,
+  so a dedicated agent was required to declare engines it never runs.
+- **A torrent added to an agent disappeared on restart**: the shipped `.torrent`
+  was written to a temporary file that was deleted as soon as the add returned,
+  while the engine kept that path as the torrent's durable location. Nothing was
+  logged; the torrent was simply gone at the next boot.
+
 ## v3.99.0 - 2026-08-20
 
 ### Changed

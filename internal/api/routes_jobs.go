@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -322,6 +324,13 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 		}
 	}
 
+	// A job outlives the torrent it acts on, and a hash is not something anyone
+	// can read in a list. Resolve the name here rather than trusting the caller
+	// to pass one: the UI has it, but the API is also driven by hand.
+	if req.Name == "" {
+		req.Name = s.torrentName(req.InfoHash)
+	}
+
 	job, err := s.jobs.Submit(store.JobTypeMoveDataRemote, req.InfoHash, jobs.RemoteMoveParams{
 		SourceAgent:    req.SourceAgent,
 		TargetAgent:    req.TargetAgent,
@@ -359,6 +368,63 @@ func (s *Server) torrentCategory(infoHash string) string {
 	if s.raceEngine != nil {
 		if cat := pick(s.raceEngine.GetTorrentStatus(infoHash)); cat != "" {
 			return cat
+		}
+	}
+	// A torrent that lives on an agent has no local engine to ask, and the
+	// local lookup returning "" reads as "no category" -- which refused a move
+	// off an agent for a torrent that plainly had one.
+	if ra, _, ok := s.findRemoteOwner(infoHash); ok && ra != nil {
+		for _, e := range ra.engines {
+			if e.client == nil {
+				continue
+			}
+			cats, err := e.client.TorrentCategories(e.id)
+			if err != nil {
+				continue
+			}
+			if cat := cats[infoHash]; cat != "" {
+				return cat
+			}
+		}
+	}
+	return ""
+}
+
+// torrentName reads a torrent's display name from whichever node holds it.
+func (s *Server) torrentName(infoHash string) string {
+	pick := func(m map[string]interface{}) string {
+		if m == nil {
+			return ""
+		}
+		if v, ok := m["name"].(string); ok {
+			return v
+		}
+		return ""
+	}
+	if s.hoardEngine != nil {
+		if n := pick(s.hoardEngine.GetTorrentDetail(infoHash)); n != "" {
+			return n
+		}
+	}
+	if s.raceEngine != nil {
+		if n := pick(s.raceEngine.GetTorrentStatus(infoHash)); n != "" {
+			return n
+		}
+	}
+	if ra, _, ok := s.findRemoteOwner(infoHash); ok && ra != nil {
+		for _, e := range ra.engines {
+			if e.client == nil {
+				continue
+			}
+			lst, err := e.client.ListTorrentsTimeout(4 * time.Second)
+			if err != nil || lst == nil {
+				continue
+			}
+			for _, t := range lst.Torrents {
+				if strings.EqualFold(t.InfoHash, infoHash) && t.Name != "" {
+					return t.Name
+				}
+			}
 		}
 	}
 	return ""

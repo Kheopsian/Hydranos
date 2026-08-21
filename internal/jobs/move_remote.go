@@ -30,6 +30,8 @@ type PieceSink interface {
 	WritePiece(infoHash string, piece int, data []byte) error
 	VerifyTorrent(infoHash string) error
 	StartTorrent(infoHash string) error
+	// Undoing an adopt this run created, when the transfer then fails.
+	RemoveTorrent(infoHash string, keepData bool) error
 }
 
 // Neither interface has Close, deliberately. The connections these resolve to
@@ -79,6 +81,14 @@ type RemoteMoveRunner struct {
 	// out of it. It must REFUSE rather than fall back to a local default: a
 	// Linux path handed to a Windows agent lands the payload nowhere, silently.
 	ResolveSavePath func(agent, category string) (string, error)
+	// SetTargetCategory labels the torrent on the destination once it is live.
+	//
+	// The category is Hydra's own layer: it is in neither the resume record nor
+	// the torrent status, so it does not travel with the payload. Without this
+	// the torrent lands correctly on disk and shows up with no category at all,
+	// which reads as data loss even though nothing was lost. Supplied by the
+	// front, which knows how to reach a local engine or a remote one; nil skips.
+	SetTargetCategory func(p RemoteMoveParams, infoHash string) error
 	// FreeSpace reports the bytes available at a path on an agent, for the
 	// preflight. Returning an error skips the check rather than failing the
 	// job: not knowing is not the same as knowing there is no room.
@@ -151,6 +161,11 @@ func (r *RemoteMoveRunner) Run(ctx context.Context, j *store.Job, report func(do
 		}
 	}
 
+	// Tracks whether THIS run created the target torrent, so a failure can undo
+	// exactly what it made. A resumed run must not remove a shell an earlier
+	// run left with real pieces already in it.
+	adoptedHere := false
+
 	// Adopt only on a fresh run. On a resumed one the destination already holds
 	// the torrent, and re-adopting would discard the bitfield that says how far
 	// the previous attempt got.
@@ -167,6 +182,7 @@ func (r *RemoteMoveRunner) Run(ctx context.Context, j *store.Job, report func(do
 		if _, aErr := dst.ImportStateWithFile(&adopt, blob); aErr != nil {
 			return fmt.Errorf("remote move: adopt on target: %w", aErr)
 		}
+		adoptedHere = true
 		slog.Info("remote move: adopted on target, paused",
 			"info_hash", j.InfoHash, "target", p.TargetAgent, "save_path", targetSavePath)
 	} else {
@@ -188,21 +204,34 @@ func (r *RemoteMoveRunner) Run(ctx context.Context, j *store.Job, report func(do
 	report(done, layout.TotalSize)
 
 	throttle := newThrottle(p.BytesPerSecond)
+	// A failure after the adopt must not leave a torrent on the target with no
+	// data behind it: it shows up in the list as a real torrent that holds
+	// nothing, which is worse than no trace at all.
+	undoAdopt := func(cause error) error {
+		if adoptedHere {
+			if rErr := dst.RemoveTorrent(j.InfoHash, false); rErr != nil {
+				slog.Warn("remote move: failed and the target shell could not be removed",
+					"info_hash", j.InfoHash, "target", p.TargetAgent, "err", rErr)
+			}
+		}
+		return cause
+	}
+
 	for i := 0; i < layout.NumPieces(); i++ {
 		if err := ctx.Err(); err != nil {
-			return err
+			return undoAdopt(err)
 		}
 		if present[i] {
 			continue
 		}
 		data, err := src.ReadPiece(j.InfoHash, i)
 		if err != nil {
-			return fmt.Errorf("remote move: reading piece %d: %w", i, err)
+			return undoAdopt(fmt.Errorf("remote move: reading piece %d: %w", i, err))
 		}
 		if err := dst.WritePiece(j.InfoHash, i, data); err != nil {
 			// The target hashes before it writes, so this is a real mismatch,
 			// not a warning to carry on past.
-			return fmt.Errorf("remote move: writing piece %d: %w", i, err)
+			return undoAdopt(fmt.Errorf("remote move: writing piece %d: %w", i, err))
 		}
 		done += int64(len(data))
 		report(done, layout.TotalSize)
@@ -213,10 +242,18 @@ func (r *RemoteMoveRunner) Run(ctx context.Context, j *store.Job, report func(do
 	// them into the target engine's own bitfield and lets it call itself
 	// complete.
 	if err := dst.VerifyTorrent(j.InfoHash); err != nil {
-		return fmt.Errorf("remote move: recheck on target: %w", err)
+		return undoAdopt(fmt.Errorf("remote move: recheck on target: %w", err))
 	}
 	if err := dst.StartTorrent(j.InfoHash); err != nil {
 		return fmt.Errorf("remote move: starting on target: %w", err)
+	}
+	// Label it, but never fail a delivered payload over a label: the bytes are
+	// there and verified, and a missing category is fixable from the UI.
+	if r.SetTargetCategory != nil {
+		if cErr := r.SetTargetCategory(p, j.InfoHash); cErr != nil {
+			slog.Warn("remote move: payload delivered but the category could not be set",
+				"info_hash", j.InfoHash, "category", p.Category, "target", p.TargetAgent, "err", cErr)
+		}
 	}
 
 	if !p.ReleaseSource {

@@ -169,9 +169,11 @@ func (s *Server) streamHydration(w interface{ Write([]byte) (int, error) }, flus
 		fmt.Fprintf(w, "data: %s\n\n", frame)
 		flusher.Flush()
 	}
-	stream := func(mode string, list []json.RawMessage) {
+	stream := func(mode string, list []json.RawMessage, done bool) {
 		if len(list) == 0 {
-			emit(mode, nil, true)
+			if done {
+				emit(mode, nil, true)
+			}
 			return
 		}
 		for i := 0; i < len(list); i += chunk {
@@ -179,13 +181,71 @@ func (s *Server) streamHydration(w interface{ Write([]byte) (int, error) }, flus
 			if end > len(list) {
 				end = len(list)
 			}
-			emit(mode, list[i:end], end == len(list))
+			emit(mode, list[i:end], done && end == len(list))
 		}
 	}
-	if s.hoardEngine != nil {
-		stream("hoard", s.hoardEngine.GetTorrentListJSON())
+
+	// A node's own engines are only part of the picture: torrents living on
+	// registered agents belong in the same list, and this is the ONLY path that
+	// fills it. /api/hoard/torrents has aggregated agents all along, but the
+	// list stopped reading it when hydration moved to SSE, so agent torrents
+	// silently vanished from the UI -- visible the moment a torrent is moved to
+	// an agent and appears to disappear.
+	//
+	// Local rows go first and agent rows follow, so the bulk of the list paints
+	// without waiting on the network, and `done` is only set on the very last
+	// batch of a mode.
+	agents := s.agentsSnapshot()
+	agentRows := func(role string) []json.RawMessage {
+		var rows []json.RawMessage
+		for _, ra := range agents {
+			for _, e := range ra.byRole(role) {
+				// Bounded: a slow or dead agent must not hold up hydration for
+				// everything else.
+				lst, err := e.client.ListTorrentsTimeout(4 * time.Second)
+				if err != nil || lst == nil {
+					continue
+				}
+				cats, _ := e.client.TorrentCategories(e.id)
+				for _, t := range lst.Torrents {
+					if b, mErr := json.Marshal(ltStatusToRow(t, ra.name, cats)); mErr == nil {
+						rows = append(rows, b)
+					}
+				}
+			}
+		}
+		return rows
 	}
-	if s.raceEngine != nil {
-		stream("race", s.raceEngine.GetAllStatusJSON())
+	hasRole := func(role string) bool {
+		for _, ra := range agents {
+			if len(ra.byRole(role)) > 0 {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, m := range []struct {
+		mode, role string
+		local      func() []json.RawMessage
+	}{
+		{"hoard", "hoard", func() []json.RawMessage {
+			if s.hoardEngine == nil {
+				return nil
+			}
+			return s.hoardEngine.GetTorrentListJSON()
+		}},
+		{"race", "race", func() []json.RawMessage {
+			if s.raceEngine == nil {
+				return nil
+			}
+			return s.raceEngine.GetAllStatusJSON()
+		}},
+	} {
+		remote := hasRole(m.role)
+		stream(m.mode, m.local(), !remote)
+		if remote {
+			stream(m.mode, agentRows(m.role), true)
+		}
 	}
 }

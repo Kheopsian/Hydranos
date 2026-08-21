@@ -606,6 +606,8 @@ func (s *Server) registerHydraRoutes() {
 		api.GET("/agents", s.handleAgentsGet)
 		api.POST("/agents", s.handleAgentCreate)
 		api.POST("/agents/test", s.handleAgentTest)
+		api.POST("/agents/:name/action", s.handleAgentAction)
+		api.GET("/agents/torrents", s.handleAgentTorrents)
 		api.PUT("/agents/:name", s.handleAgentUpdate)
 		api.GET("/agents/removed", s.handleAgentsRemovedGet)
 		api.POST("/agents/restore/:name", s.handleAgentRestore)
@@ -829,7 +831,13 @@ func (s *Server) agentTorrentCount(name string) int {
 
 // ltStatusToRow maps a remote agent's ltclient.TorrentStatus into the same
 // JSON row shape the UI reads for local torrents, tagged with its origin agent.
-func ltStatusToRow(t ltclient.TorrentStatus, agent string) map[string]interface{} {
+// ltStatusToRow renders one agent torrent as a list row.
+//
+// cats maps info hash to category: the category is Hydra's own layer and is
+// absent from the engine status, so it is fetched alongside and passed in. It
+// used to be hardcoded to "", which read as "this torrent has no category"
+// rather than "this row cannot know".
+func ltStatusToRow(t ltclient.TorrentStatus, agent string, cats map[string]string) map[string]interface{} {
 	ratio := 0.0
 	if t.TotalDownload > 0 {
 		ratio = float64(t.TotalUpload) / float64(t.TotalDownload)
@@ -842,8 +850,11 @@ func ltStatusToRow(t ltclient.TorrentStatus, agent string) map[string]interface{
 		"swarm_seeds": t.ListSeeds, "swarm_leechers": t.ListPeers,
 		"save_path": t.SavePath, "added_time": t.AddedTime, "completed_time": t.CompletedTime,
 		"ratio": ratio, "tracker_error": t.TrackerError, "tracker_error_msg": t.TrackerErrorMsg,
+		// The list column reads tracker_host; leaving it out showed "-" for
+		// every agent torrent even though the engine reports it.
+		"tracker_host": t.TrackerHost, "current_tracker": t.CurrentTracker,
 		"torrent_error": t.State == "error", "torrent_error_msg": t.ErrorMsg, "injected_peers": 0,
-		"injection_hit": false, "uploader": "", "category": "", "agent": agent,
+		"injection_hit": false, "uploader": "", "category": cats[t.InfoHash], "agent": agent,
 	}
 }
 
@@ -1124,6 +1135,28 @@ func (s *Server) handleRemoveTorrent(c *gin.Context) {
 
 	removed := false
 
+	// With duplicates, "which torrent" is ambiguous: the same info hash can be
+	// held by this node AND by an agent. Trying local first silently acted on
+	// the wrong copy, so the caller can name the node it means.
+	if want := c.Query("agent"); want != "" && want != "local" {
+		ra, mode, ok := s.findRemoteOwner(infoHash)
+		if !ok || ra == nil || ra.name != want {
+			c.JSON(http.StatusNotFound, gin.H{"error": "agent " + want + " does not hold this torrent"})
+			return
+		}
+		cl := ra.anyClient()
+		if cl == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "agent " + want + " is not reachable"})
+			return
+		}
+		if err := cl.ActionRouted(mode, "remove", infoHash, deleteFiles, "", ""); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "info_hash": infoHash, "agent": ra.name})
+		return
+	}
+
 	if s.raceEngine != nil && s.raceEngine.HasTorrent(infoHash) {
 		// Stats absorption gérée par le callback OnBeforeRemove de l'engine.
 		if err := s.raceEngine.RemoveTorrent(infoHash, deleteFiles); err != nil {
@@ -1300,8 +1333,9 @@ func (s *Server) handleRaceTorrents(c *gin.Context) {
 			if err != nil || lst == nil {
 				continue
 			}
+			cats, _ := e.client.TorrentCategories(e.id)
 			for _, t := range lst.Torrents {
-				out = append(out, ltStatusToRow(t, ra.name))
+				out = append(out, ltStatusToRow(t, ra.name, cats))
 			}
 		}
 	}
@@ -1411,8 +1445,9 @@ func (s *Server) handleHoardTorrents(c *gin.Context) {
 			if err != nil || lst == nil {
 				continue
 			}
+			cats, _ := e.client.TorrentCategories(e.id)
 			for _, t := range lst.Torrents {
-				out = append(out, ltStatusToRow(t, ra.name))
+				out = append(out, ltStatusToRow(t, ra.name, cats))
 			}
 		}
 	}
@@ -1508,6 +1543,37 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 	}
 	if body.Category == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "category required"})
+		return
+	}
+
+	// A torrent living on an agent is not ours to relocate. Everything below
+	// drives the LOCAL engine and resolves the category's LOCAL save_path, so
+	// running it for a remote torrent compares that node's path against ours
+	// and reports a cross-filesystem move nobody asked for -- which is exactly
+	// what a plain category change produced: an agent's Windows path measured
+	// against a local one, refused over hardlinks that were never involved.
+	//
+	// Relabel it where it lives instead. Moving its payload between nodes is a
+	// separate, explicit action (Move to agent), never a side effect of naming
+	// a category.
+	if ra, engineID, ok := s.findRemoteOwner(hash); ok && ra != nil {
+		cl := ra.anyClient()
+		for _, e := range ra.byRole("hoard") {
+			cl = e.client
+			engineID = e.id
+			break
+		}
+		if cl == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "agent " + ra.name + " is not reachable"})
+			return
+		}
+		if err := cl.SetCategoryLabel(engineID, hash, body.Category); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status": "ok", "info_hash": hash, "category": body.Category, "agent": ra.name,
+		})
 		return
 	}
 
@@ -2629,6 +2695,15 @@ func (s *Server) fanoutAnnounceOverride(p agentwire.AnnounceOverrideParams) (int
 // overlay so they survive restart.
 func (s *Server) handleHoardSetTags(c *gin.Context) {
 	hash := c.Param("info_hash")
+	// Tags and pins live only in this node's own bookkeeping: the agent
+	// data-plane has no call for either. Acting locally on a torrent that lives
+	// elsewhere would write the label onto the wrong copy, so refuse and say
+	// which node holds it.
+	if ra, _, ok := s.findRemoteOwner(hash); ok && ra != nil {
+		c.JSON(http.StatusNotImplemented, gin.H{
+			"error": "this torrent lives on agent " + ra.name + ", which does not support this yet"})
+		return
+	}
 	var body struct {
 		Tags []string `json:"tags"`
 		Op   string   `json:"op"`
@@ -3619,4 +3694,99 @@ func catMode(cats []category, name string) string {
 		}
 	}
 	return ""
+}
+
+// handleAgentAction runs one per-torrent action on a NAMED agent.
+//
+// The per-torrent endpoints all resolve their target by looking locally first,
+// which is unambiguous only while a hash lives in one place. A duplicate puts
+// the same hash on two nodes on purpose, so acting on the remote copy needs to
+// name it rather than hope the lookup guesses right.
+func (s *Server) handleAgentAction(c *gin.Context) {
+	name := c.Param("name")
+	var body struct {
+		Engine      string `json:"engine"`
+		Action      string `json:"action"`
+		InfoHash    string `json:"info_hash"`
+		DeleteFiles bool   `json:"delete_files"`
+		Category    string `json:"category"`
+		SavePath    string `json:"save_path"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.InfoHash == "" || body.Action == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "info_hash and action are required"})
+		return
+	}
+	ra := s.remoteAgentByName(name)
+	if ra == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no agent named " + name})
+		return
+	}
+	cl := ra.anyClient()
+	engineID := body.Engine
+	for _, e := range ra.engines {
+		if engineID == "" || e.id == engineID || e.role == engineID {
+			cl, engineID = e.client, e.id
+			break
+		}
+	}
+	if cl == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "agent " + name + " is not reachable"})
+		return
+	}
+
+	var err error
+	switch body.Action {
+	// Pause and resume are not routed actions on the agent: they are the plain
+	// engine calls, which the data-plane already exposes.
+	case "pause":
+		err = cl.StopTorrent(body.InfoHash)
+	case "resume":
+		err = cl.StartTorrent(body.InfoHash)
+	case "setcategorylabel":
+		err = cl.SetCategoryLabel(engineID, body.InfoHash, body.Category)
+	case "remove", "verify", "reannounce", "setcategory":
+		err = cl.ActionRouted(engineID, body.Action, body.InfoHash, body.DeleteFiles, body.Category, body.SavePath)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown action " + body.Action})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "agent": name, "action": body.Action, "info_hash": body.InfoHash})
+}
+
+// handleAgentTorrents returns ONLY the rows that live on agents.
+//
+// Agent rows reach the UI through SSE hydration and nothing else: the live
+// frames (stats, added, removed) come from this node's engines, so a remote
+// torrent sits frozen at whatever it looked like when the stream opened. That
+// is why a freshly duplicated torrent appeared incomplete until a reload.
+// Polling the full list back would undo the reason hydration moved to SSE, so
+// this returns the agent slice alone, which is small.
+func (s *Server) handleAgentTorrents(c *gin.Context) {
+	out := []interface{}{}
+	for _, ra := range s.agentsSnapshot() {
+		for _, e := range ra.engines {
+			if e.client == nil {
+				continue
+			}
+			lst, err := e.client.ListTorrentsTimeout(4 * time.Second)
+			if err != nil || lst == nil {
+				continue
+			}
+			cats, _ := e.client.TorrentCategories(e.id)
+			for _, t := range lst.Torrents {
+				row := ltStatusToRow(t, ra.name, cats)
+				row["mode"] = e.role
+				out = append(out, row)
+			}
+		}
+	}
+	c.JSON(http.StatusOK, out)
 }

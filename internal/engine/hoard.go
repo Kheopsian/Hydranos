@@ -785,11 +785,22 @@ func (e *HoardEngine) RemoveTorrent(infoHash string, deleteFiles bool) {
 	}
 
 	e.mu.Lock()
-	_, exists := e.torrents[infoHash]
+	info, exists := e.torrents[infoHash]
 	if !exists {
 		e.mu.Unlock()
 		slog.Warn("hoard: torrent not found for removal", "info_hash", infoHash)
 		return
+	}
+	var onDisk string
+	var wrapped bool
+	if info != nil {
+		onDisk = info.SavePath
+		// ContentFolder answers the only question that matters here: does this
+		// torrent own its directory? Comparing the folder name to the torrent
+		// name does not -- a single-file torrent is wrapped in a folder named
+		// after it WITHOUT its extension, so the two never matched and nothing
+		// was ever pruned.
+		wrapped = info.ContentFolder == nil || *info.ContentFolder
 	}
 	delete(e.torrents, infoHash)
 	e.mu.Unlock()
@@ -797,6 +808,20 @@ func (e *HoardEngine) RemoveTorrent(infoHash string, deleteFiles bool) {
 	keepData := !deleteFiles
 	if err := e.client.RemoveTorrent(infoHash, keepData); err != nil {
 		slog.Error("hoard: error removing torrent", "info_hash", infoHash, "error", err)
+	}
+
+	// The engine unlinks files, never the folder that held them, so deleting a
+	// torrent's data left its directory behind, empty. Harmless once, ugly by
+	// the hundredth.
+	//
+	// Only a torrent that OWNS its folder is pruned: stored unwrapped, its
+	// save_path IS the category directory, and removing that because it happens
+	// to be empty would delete the category itself. os.Remove refuses a
+	// non-empty directory, so a stray file also stops it.
+	if deleteFiles && wrapped && onDisk != "" {
+		if err := os.Remove(onDisk); err == nil {
+			slog.Info("hoard: pruned the emptied content folder", "path", onDisk)
+		}
 	}
 
 	e.cachedStatsMu.Lock()

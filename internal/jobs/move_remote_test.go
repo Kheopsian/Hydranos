@@ -76,6 +76,7 @@ type fakeSink struct {
 	written  map[int][]byte
 	verified bool
 	started  bool
+	removed  bool
 	savePath string
 	log      *[]string
 }
@@ -115,6 +116,12 @@ func (f *fakeSink) VerifyTorrent(string) error {
 func (f *fakeSink) StartTorrent(string) error {
 	f.started = true
 	*f.log = append(*f.log, "sink.start")
+	return nil
+}
+func (f *fakeSink) RemoveTorrent(_ string, keepData bool) error {
+	f.removed = true
+	f.adopted = nil
+	*f.log = append(*f.log, "sink.remove")
 	return nil
 }
 
@@ -313,5 +320,35 @@ func TestResumeRejectsUnreadableParams(t *testing.T) {
 	}
 	if reason == "" {
 		t.Error("a refusal must say why")
+	}
+}
+
+// A transfer that fails after the adopt must not leave a torrent on the target
+// holding nothing: that shows up in the list as real and is worse than no trace.
+func TestFailedTransferRemovesTheShellItAdopted(t *testing.T) {
+	r := newRig(t, RemoteMoveParams{}, 1<<30)
+	r.src.readErrAt = 1
+	if err := r.run(context.Background()); err == nil {
+		t.Fatal("expected the read failure to fail the job")
+	}
+	if !r.sink.removed {
+		t.Fatal("the adopted shell was left on the target")
+	}
+	if r.sink.adopted != nil {
+		t.Error("target still holds the torrent after the rollback")
+	}
+}
+
+// A resumed run must NOT remove what an earlier run left: those pieces are real.
+func TestResumedRunDoesNotRemoveOnFailure(t *testing.T) {
+	r := newRig(t, RemoteMoveParams{}, 1<<30)
+	r.sink.adopted = &ltclient.ResumeRecord{InfoHash: testIH, SavePath: "/target/films"}
+	r.sink.present[0] = true
+	r.src.readErrAt = 1
+	if err := r.run(context.Background()); err == nil {
+		t.Fatal("expected failure")
+	}
+	if r.sink.removed {
+		t.Fatal("a resumed run removed a torrent it did not adopt")
 	}
 }
