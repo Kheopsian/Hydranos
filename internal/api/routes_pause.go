@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -108,6 +109,12 @@ func (s *Server) setPausedOne(hash string, paused, race bool) (string, error) {
 	}
 	if local == nil {
 		return "", errNoEngine
+	}
+	if s.frontOnly {
+		// The "local engine" here is the front-only stub: it answers nil to
+		// everything, so falling through would report ok having done nothing —
+		// the exact silent no-op this path exists to remove.
+		return "", fmt.Errorf("no engine or agent holds %s", hash)
 	}
 	// Claimed by nobody: let the local engine raise the not-found it always did.
 	return "local", local.SetUserPaused(hash, paused)
