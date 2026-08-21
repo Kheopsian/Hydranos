@@ -20,7 +20,18 @@ import (
 type localEndpoint struct {
 	client  engine.EngineClient
 	dataDir string
+	// adopt registers the torrent with the Go layer as well as the engine.
+	//
+	// Going straight to the engine client leaves Hydra itself unaware of it:
+	// no name, no save path, no event, so the row stays half-empty until
+	// something reloads. The engine-level import is only half an adopt.
+	adopt func(rec *ltclient.ResumeRecord) error
 }
+
+// category is baked in per job: the adopt path derives the on-disk layout from
+// it, so handing it an empty string files the payload under the wrong category
+// entirely -- which is how a duplicate landed in another category's directory
+// with nothing in it.
 
 func (l *localEndpoint) ExportState(infoHash string) (*ltclient.ResumeRecord, error) {
 	return l.client.ExportState(infoHash)
@@ -78,9 +89,16 @@ func (l *localEndpoint) ImportStateWithFile(rec *ltclient.ResumeRecord, torrent 
 	if err := os.WriteFile(dst, torrent, 0644); err != nil {
 		return "", fmt.Errorf("import: writing .torrent: %w", err)
 	}
-	adopt := *rec
-	adopt.TorrentPath = dst
-	ih, err := l.client.ImportState(&adopt)
+	rec2 := *rec
+	rec2.TorrentPath = dst
+	if l.adopt != nil {
+		if err := l.adopt(&rec2); err != nil {
+			os.Remove(dst)
+			return "", err
+		}
+		return rec2.InfoHash, nil
+	}
+	ih, err := l.client.ImportState(&rec2)
 	if err != nil {
 		os.Remove(dst)
 		return "", err

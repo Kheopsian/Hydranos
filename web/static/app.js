@@ -952,6 +952,8 @@ async function showStoreRepairModal() {
     });
 }
 
+window.addEventListener("DOMContentLoaded", () => { _refreshCtxAgents(); });
+
 window.addEventListener("DOMContentLoaded", async () => {
     _refreshHoardPins();
     // Pick the language and translate the static markup before anything else
@@ -2027,8 +2029,8 @@ function setHoardTagFilter(el, value) {
 // --- Tags context-menu editor (hoard-only, multi-select) ---
 async function _showTagPicker(ev) {
     if (ev) ev.stopPropagation();
-    _saveCtxActionsView();
-    const hoardOnly = [..._selected.entries()].filter(([, m]) => m === "hoard");
+    const anchor = ev && ev.currentTarget;
+    const hoardOnly = [..._selected.entries()].filter(([, v]) => _selMode(v) === "hoard");
     if (hoardOnly.length === 0) return;
     let known = [];
     try { known = await api("/api/tags"); } catch (e) { known = []; }
@@ -2041,20 +2043,18 @@ async function _showTagPicker(ev) {
         return `<div class="ctx-item" onclick="_toggleTagSelected('${jsT}', ${on ? "false" : "true"})">${on ? "✓ " : " "}${esch(t)}</div>`;
     }).join("");
     const label = tp(hoardOnly.length, "Edit tags, {n} torrent", "Edit tags, {n} torrents");
-    document.getElementById("ctx-menu").innerHTML =
+    _openCtxSubmenu(
         `<div class="ctx-label">${label}</div>` +
-        `<div class="ctx-separator"></div>` +
-        `<div class="ctx-item" onclick="_restoreCtxActionsView()">&lsaquo; Retour</div>` +
         `<div class="ctx-separator"></div>` +
         `<div style="padding:6px 10px"><input type="text" id="ctx-new-tag" placeholder="${t("new tag + Enter")}" style="width:100%" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();_addNewTagSelected();}"></div>` +
         `<div class="ctx-separator"></div>` +
-        `<div class="ctx-scroll">${rows || '<div class="ctx-item" style="opacity:.6">No tags yet</div>'}</div>`;
-    _clampCtxMenuToViewport();
+        `<div class="ctx-scroll">${rows || '<div class="ctx-item" style="opacity:.6">No tags yet</div>'}</div>`, anchor);
 }
 
 async function _applyTagOp(tags, op) {
-    const entries = [..._selected.entries()].filter(([, m]) => m === "hoard");
-    for (const [hash] of entries) {
+    const entries = [..._selected.entries()].filter(([, v]) => _selMode(v) === "hoard");
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
         try {
             await fetch(`/api/hoard/torrents/${hash}/tags`, {
                 method: "POST",
@@ -2307,7 +2307,20 @@ function closeHoardDetail() {
 
 // ─── Multi-selection + Context menu ─────────────────────
 
-const _selected = new Map(); // hash → mode
+// hash -> {mode, agent}. The node matters: the same hash can be held by this
+// node and by an agent at once, and an action has to reach the one clicked.
+const _selected = new Map();
+
+function _selMode(v) { return (v && v.mode !== undefined) ? v.mode : v; }
+function _selAgent(v) { return (v && v.agent) ? v.agent : "local"; }
+function _selHash(v) { return (v && v.hash) ? v.hash : v; }
+
+// Key of a selection entry: the row, never the hash on its own.
+function _selKeyOf(hash, agent) { return (agent || "local") + "|" + hash; }
+function _rowSelKey(row) { return _selKeyOf(row.dataset.hash, row.dataset.agent); }
+function _selEntry(row) {
+    return { hash: row.dataset.hash, mode: row.dataset.mode, agent: row.dataset.agent || "local" };
+}
 let _anchorHash = null;      // last click without shift (range start point)
 let _hoardFiltered = [];     // last filtered hoard set (see renderHoardTable)
 
@@ -2357,7 +2370,9 @@ function _hoardMatches(t, search, skip) {
 async function _pinSelected(on) {
     _hideCtxMenu();
     const entries = [..._selected.entries()];
-    for (const [hash, mode] of entries) {
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
+        const mode = _selMode(sel);
         if (mode !== "hoard") continue;
         try {
             const res = await fetch(`/api/hoard/torrents/${hash}/${on ? "pin" : "unpin"}`, {
@@ -2384,7 +2399,9 @@ async function _pinSelected(on) {
 function _selectAllFiltered() {
     if (!_hoardFiltered.length) return;
     _selected.clear();
-    for (const t of _hoardFiltered) _selected.set(t.info_hash, "hoard");
+    for (const t of _hoardFiltered) {
+        _selected.set(_selKeyOf(t.info_hash, t.agent), { hash: t.info_hash, mode: "hoard", agent: t.agent || "local" });
+    }
     _anchorHash = null;
     _updateRowHighlights();
     _flashSelectionCount(_selected.size);
@@ -2419,33 +2436,36 @@ document.addEventListener("keydown", e => {
 });
 
 function handleRowClick(e, hash, mode) {
+    const row = e.target.closest(".t-row");
+    const key = row ? _rowSelKey(row) : _selKeyOf(hash, "local");
+    const entry = row ? _selEntry(row) : { hash: hash, mode: mode, agent: "local" };
     if (e.shiftKey && _anchorHash) {
         // Range selection: all .t-row between the anchor and the clicked row
         const rows = [...document.querySelectorAll(".t-row")];
-        const aIdx = rows.findIndex(r => r.dataset.hash === _anchorHash);
-        const bIdx = rows.findIndex(r => r.dataset.hash === hash);
+        const aIdx = rows.findIndex(r => _rowSelKey(r) === _anchorHash);
+        const bIdx = rows.findIndex(r => _rowSelKey(r) === key);
         if (aIdx !== -1 && bIdx !== -1) {
             const lo = Math.min(aIdx, bIdx);
             const hi = Math.max(aIdx, bIdx);
             // Keep only the range selection (like Windows Explorer)
             _selected.clear();
             for (let i = lo; i <= hi; i++) {
-                _selected.set(rows[i].dataset.hash, rows[i].dataset.mode);
+                _selected.set(_rowSelKey(rows[i]), _selEntry(rows[i]));
             }
         }
         _updateRowHighlights();
         return;
     }
     if (e.ctrlKey || e.metaKey) {
-        if (_selected.has(hash)) _selected.delete(hash);
-        else _selected.set(hash, mode);
-        _anchorHash = hash;
+        if (_selected.has(key)) _selected.delete(key);
+        else _selected.set(key, entry);
+        _anchorHash = key;
         _updateRowHighlights();
         return;
     }
     _selected.clear();
-    _selected.set(hash, mode);
-    _anchorHash = hash;
+    _selected.set(key, entry);
+    _anchorHash = key;
     _updateRowHighlights();
     requestAnimationFrame(() => {
         if (mode === "race") showDetail(hash);
@@ -2455,9 +2475,11 @@ function handleRowClick(e, hash, mode) {
 
 function handleRowContextMenu(e, hash, mode) {
     e.preventDefault();
-    if (!_selected.has(hash)) {
+    const row = e.target.closest(".t-row");
+    const key = row ? _rowSelKey(row) : _selKeyOf(hash, "local");
+    if (!_selected.has(key)) {
         _selected.clear();
-        _selected.set(hash, mode);
+        _selected.set(key, row ? _selEntry(row) : { hash: hash, mode: mode, agent: "local" });
         _updateRowHighlights();
     }
     _showCtxMenu(e.clientX, e.clientY);
@@ -2465,7 +2487,7 @@ function handleRowContextMenu(e, hash, mode) {
 
 function _updateRowHighlights() {
     document.querySelectorAll(".t-row").forEach(row => {
-        row.classList.toggle("row-selected", _selected.has(row.dataset.hash));
+        row.classList.toggle("row-selected", _selected.has(_rowSelKey(row)));
     });
 }
 
@@ -2478,7 +2500,7 @@ function _showCtxMenu(x, y) {
     // engine its torrents belong in, so setting one on a race torrent is how
     // it is handed to the hoard, and moving the files is a background job
     // either way. It used to be hoard-only, and the item was hidden here.
-    const anyHoard = [..._selected.entries()].some(([, m]) => m === "hoard");
+    const anyHoard = [..._selected.entries()].some(([, v]) => _selMode(v) === "hoard");
     const catItem = document.getElementById("ctx-change-category");
     if (catItem) catItem.style.display = "";
     const catMoveItem = document.getElementById("ctx-change-category-move");
@@ -2489,7 +2511,7 @@ function _showCtxMenu(x, y) {
     if (tgItem) tgItem.style.display = anyHoard ? "" : "none";
     // Force download applies to incomplete hoard torrents only: a pin buys a
     // download slot, so it says nothing about one that has finished.
-    const hoardSel = [..._selected.entries()].filter(([, m]) => m === "hoard").map(([h]) => h);
+    const hoardSel = [..._selected.values()].filter(v => _selMode(v) === "hoard").map(v => _selHash(v));
     const incomplete = hoardSel.filter(h => {
         const row = _hoardAllTorrents.find(x => x.info_hash === h);
         return row && (row.progress || 0) < 1;
@@ -2500,38 +2522,52 @@ function _showCtxMenu(x, y) {
     if (unpinItem) unpinItem.style.display = hoardSel.some(h => _hoardPinned.has(h)) ? "" : "none";
     // Offer whichever of Pause/Resume the selection can actually act on. A
     // mixed selection gets both.
-    const intents = [..._selected.keys()].map(_isUserPaused);
+    const intents = [..._selected.values()].map(v => _isUserPaused(_selHash(v)));
     const anyPaused = intents.some(v => v === true || v === null);
     const anyRunning = intents.some(v => v === false || v === null);
     const pItem = document.getElementById("ctx-pause");
     if (pItem) pItem.style.display = anyRunning ? "" : "none";
     const rItem = document.getElementById("ctx-resume");
     if (rItem) rItem.style.display = anyPaused ? "" : "none";
+    _applyCtxGroups();
+    _hideCtxSubmenu();
+
+    menu.style.left = x + "px";
+    menu.style.top = y + "px";
+    menu.style.display = "block";
+    _clampCtxMenuToViewport();
+
+    // Refresh in the background, then re-apply: the first open of a session
+    // would otherwise decide on an empty list and hide the Agent group until
+    // the menu was opened a second time.
+    _refreshCtxAgents().then(() => {
+        if (document.getElementById("ctx-menu").style.display === "block") {
+            _applyCtxGroups();
+            _clampCtxMenuToViewport();
+        }
+    });
+}
+
+// _applyCtxGroups decides which groups the current selection can act on.
+function _applyCtxGroups() {
     // The Agent group only exists when there is somewhere to send a torrent.
     // On a single-node install it is not greyed out, it is absent: an action
     // that can never apply is noise in a menu this size.
     const remotes = _ctxAgents.filter(a => a.name && a.name !== "local");
+    const showAgent = remotes.length > 0;
     const agentGrp = document.getElementById("ctx-grp-agent");
     const agentSep = document.getElementById("ctx-sep-agent");
-    const showAgent = remotes.length > 0;
     if (agentGrp) agentGrp.style.display = showAgent ? "" : "none";
     if (agentSep) agentSep.style.display = showAgent ? "" : "none";
 
     // A group whose every item is hidden must hide its heading too, or the
     // menu shows a title introducing nothing.
     document.querySelectorAll("#ctx-menu .ctx-group").forEach(grp => {
-        if (grp.id === "ctx-grp-agent" && !showAgent) return;
+        if (grp.id === "ctx-grp-agent") return; // decided above
         const anyVisible = [...grp.querySelectorAll(".ctx-item")]
             .some(it => it.style.display !== "none");
         grp.style.display = anyVisible ? "" : "none";
     });
-
-    menu.style.left = x + "px";
-    menu.style.top = y + "px";
-    menu.style.display = "block";
-    _clampCtxMenuToViewport();
-    // Refresh in the background so the next open reflects agents added since.
-    _refreshCtxAgents();
 }
 
 // Known agents, cached so opening the menu stays synchronous.
@@ -2554,11 +2590,11 @@ async function _refreshCtxAgents() {
 // for: it is what the torrent's category defines on that agent.
 async function _showAgentPicker(ev, mode) {
     if (ev) ev.stopPropagation();
-    _saveCtxActionsView();
+    const anchor = ev && ev.currentTarget;
     if (_selected.size === 0) return;
     await _refreshCtxAgents();
 
-    const sources = new Set([..._selected.keys()].map(_rowAgent));
+    const sources = new Set([..._selected.values()].map(v => _selAgent(v)));
     // "local" is a legitimate destination too: a torrent can come back from an
     // agent. Only the node it already sits on is excluded, and only when the
     // whole selection agrees on one source.
@@ -2581,13 +2617,10 @@ async function _showAgentPicker(ev, mode) {
     }
     const verb = mode === "move" ? t("Move to agent") : t("Duplicate to agent");
     const label = verb + ": " + tp(_selected.size, "{n} torrent", "{n} torrents");
-    document.getElementById("ctx-menu").innerHTML =
+    _openCtxSubmenu(
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
-        `<div class="ctx-item" onclick="_restoreCtxActionsView()">&lsaquo; ${t("Back")}</div>` +
-        `<div class="ctx-separator"></div>` +
-        `<div class="ctx-scroll">${items}</div>`;
-    _clampCtxMenuToViewport();
+        `<div class="ctx-scroll">${items}</div>`, anchor);
 }
 
 // _rowAgent is which node currently holds a torrent, straight off the row.
@@ -2602,7 +2635,8 @@ async function _sendToAgentSelected(agentName, mode) {
 
     let queued = 0;
     const errors = [];
-    for (const [hash] of entries) {
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
         const source = _rowAgent(hash);
         if (source === agentName) continue;
         try {
@@ -2627,12 +2661,13 @@ async function _sendToAgentSelected(agentName, mode) {
         }
     }
     if (errors.length > 0) {
-        alert(t("Sent {ok} to \"{agent}\", {failed} failure(s).",
-            { ok: queued, agent: agentName, failed: errors.length }) + "\n\n" + errors.join("\n"));
+        hydraNotify(t("Send to agent"),
+            t("Sent {ok} to \"{agent}\", {failed} failure(s).",
+                { ok: queued, agent: agentName, failed: errors.length }) + "\n\n" + errors.join("\n"));
     } else if (queued > 0) {
         // Hours of transfer follow, so say where to watch it rather than
         // leaving the row looking unchanged.
-        alert(mode === "move"
+        hydraNotify(mode === "move" ? t("Move to agent") : t("Duplicate to agent"), mode === "move"
             ? tp(queued,
                 "Moving {n} torrent to \"{agent}\". It keeps seeding on this node until the copy is verified there; follow it in Jobs.",
                 "Moving {n} torrents to \"{agent}\". They keep seeding on this node until their copies are verified there; follow them in Jobs.",
@@ -2667,29 +2702,71 @@ function _clampCtxMenuToViewport() {
 
 function _hideCtxMenu() {
     document.getElementById("ctx-menu").style.display = "none";
-    _restoreCtxActionsView();
+    _hideCtxSubmenu();
 }
 
-// Cached HTML of the default ctx-menu (actions view) so we can restore it
-// after navigating into the category sub-picker.
-let _ctxActionsHTML = null;
-
-function _saveCtxActionsView() {
-    if (_ctxActionsHTML === null) {
-        _ctxActionsHTML = document.getElementById("ctx-menu").innerHTML;
-    }
+function _hideCtxSubmenu() {
+    const sub = document.getElementById("ctx-submenu");
+    if (sub) sub.style.display = "none";
+    _ctxSubAnchor = null;
 }
 
-function _restoreCtxActionsView() {
-    if (_ctxActionsHTML !== null) {
-        document.getElementById("ctx-menu").innerHTML = _ctxActionsHTML;
-        _clampCtxMenuToViewport();
-    }
+// _openCtxSubmenu shows a second panel BESIDE the first, rather than replacing
+// its contents.
+//
+// Swapping the menu in place cost the reader their bearings: the actions they
+// came from vanished, and getting back needed a "Back" row that exists only
+// because of the swap. A cascading panel keeps the parent on screen, so the
+// choice being made stays visibly attached to the action that opened it.
+// The row the open submenu belongs to. Kept so a submenu that re-renders
+// itself (adding a tag re-opens the tag panel) stays where it was.
+let _ctxSubAnchor = null;
+
+function _openCtxSubmenu(html, anchor) {
+    const main = document.getElementById("ctx-menu");
+    const sub = document.getElementById("ctx-submenu");
+    if (!main || !sub) return;
+    if (anchor) _ctxSubAnchor = anchor;
+    sub.innerHTML = html;
+    // Measure before showing: the panel's size decides which side it opens on,
+    // and a visible reflow would flash it in the wrong place first.
+    sub.style.visibility = "hidden";
+    sub.style.display = "block";
+    sub.style.left = "0px";
+    sub.style.top = "0px";
+    requestAnimationFrame(() => {
+        const m = main.getBoundingClientRect();
+        const r = sub.getBoundingClientRect();
+        const margin = 8;
+        // Sit against the parent's right edge, overlapping its border by a
+        // pixel so the two panels read as one object.
+        let left = m.right - 1;
+        if (left + r.width > window.innerWidth - margin) {
+            left = m.left - r.width + 1;   // no room on the right: open left
+        }
+        if (left < margin) left = margin;
+        // Line the panel up with the row that opened it, the way a cascading
+        // menu does: aligning on the parent's top edge puts the panel nowhere
+        // near the item clicked once the menu is tall. The 4px lifts it by the
+        // panel's own vertical padding so the two rows read level.
+        const a = _ctxSubAnchor;
+        let top = m.top;
+        if (a && document.contains(a)) {
+            top = a.getBoundingClientRect().top - 4;
+        }
+        if (top < margin) top = margin;
+        if (top + r.height > window.innerHeight - margin) {
+            top = Math.max(margin, window.innerHeight - r.height - margin);
+        }
+        sub.style.left = left + "px";
+        sub.style.top = top + "px";
+        sub.style.visibility = "";
+    });
 }
 
 async function _showCategoryPicker(ev, move) {
     if (ev) ev.stopPropagation();
-    _saveCtxActionsView();
+    const anchor = ev && ev.currentTarget;
     if (_selected.size === 0) return;
     let cats = [];
     try {
@@ -2709,13 +2786,10 @@ async function _showCategoryPicker(ev, move) {
     }).join("");
     const verb = move ? t("Move to category") : t("Set category (no move)");
     const label = verb + ": " + tp(_selected.size, "{n} torrent", "{n} torrents");
-    document.getElementById("ctx-menu").innerHTML =
+    _openCtxSubmenu(
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
-        `<div class="ctx-item" onclick="_restoreCtxActionsView()">&lsaquo; Retour</div>` +
-        `<div class="ctx-separator"></div>` +
-        `<div class="ctx-scroll">${items}</div>`;
-    _clampCtxMenuToViewport();
+        `<div class="ctx-scroll">${items}</div>`, anchor);
 }
 
 async function _changeCategorySelected(catName, move) {
@@ -2744,7 +2818,9 @@ async function _changeCategorySelected(catName, move) {
     const errors = [];
     const needConsent = [];
 
-    for (const [hash, mode] of entries) {
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
+        const mode = _selMode(sel);
         try {
             const r = await post(hash, mode, false);
             let j = null;
@@ -2775,7 +2851,7 @@ async function _changeCategorySelected(catName, move) {
             + t("{files} file(s), {size}, are hardlinked elsewhere (usually the Sonarr or Radarr library). The target is on another filesystem, so copying them leaves a second full copy on disk.",
                 { files: files, size: formatBytes(bytes) })
             + "\n\n" + t("Move them anyway?");
-        if (confirm(question)) {
+        if (await hydraConfirm(question)) {
             for (const { hash, mode } of needConsent) {
                 try {
                     const r = await post(hash, mode, true);
@@ -2796,11 +2872,11 @@ async function _changeCategorySelected(catName, move) {
     }
 
     if (errors.length > 0) {
-        alert(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: okCount + movingCount, failed: errors.length }) + "\n\n" + errors.join("\n"));
+        hydraNotify(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: okCount + movingCount, failed: errors.length }) + "\n\n" + errors.join("\n"));
     } else if (movingCount > 0) {
         // A move runs in the background and can take hours, so say so rather
         // than leaving the row looking like nothing happened.
-        alert(tp(movingCount,
+        hydraNotify(tp(movingCount,
             "Moving {n} torrent to \"{cat}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.",
             "Moving {n} torrents to \"{cat}\" in the background. They keep seeding while their data is copied; follow them in Jobs.",
             { n: movingCount, cat: catName }));
@@ -2810,7 +2886,8 @@ async function _changeCategorySelected(catName, move) {
     // so it shows without waiting for the next full refresh. Race rows are
     // rendered from freshly fetched data, so they need no such nudge.
     if (Array.isArray(_hoardAllTorrents)) {
-        for (const [hash] of entries) {
+        for (const [, sel] of entries) {
+            const hash = _selHash(sel);
             const t = _hoardAllTorrents.find(x => x.info_hash === hash);
             if (t) t.category = catName;
         }
@@ -2819,7 +2896,7 @@ async function _changeCategorySelected(catName, move) {
 }
 
 document.addEventListener("click", e => {
-    if (!e.target.closest("#ctx-menu")) _hideCtxMenu();
+    if (!e.target.closest("#ctx-menu") && !e.target.closest("#ctx-submenu")) _hideCtxMenu();
 });
 
 document.addEventListener("keydown", e => {
@@ -2837,6 +2914,7 @@ document.addEventListener("click", e => {
         e.target.closest("#torrent-detail") ||
         e.target.closest("#hoard-detail-panel") ||
         e.target.closest("#ctx-menu") ||
+        e.target.closest("#ctx-submenu") ||
         e.target.closest(".modal-overlay")) return;
     _hideCtxMenu();
     _selected.clear();
@@ -2848,8 +2926,13 @@ document.addEventListener("click", e => {
 async function _reannounceSelected() {
     _hideCtxMenu();
     const entries = [..._selected.entries()];
-    for (const [hash] of entries) {
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
         try {
+            if (_selAgent(sel) !== "local") {
+                await _agentAction(_selAgent(sel), _selMode(sel), "reannounce", hash);
+                continue;
+            }
             await fetch(`/api/torrents/${hash}/reannounce`, {
                 method: "POST",
                 headers: { "X-Api-Key": API_KEY },
@@ -2934,11 +3017,11 @@ async function _pauseSelected(paused) {
     // deselected): send the filter, not the hashes.
     if (_selected.size > BULK_FILTER_THRESHOLD && _hoardFiltered.length) {
         const excluded = _hoardFiltered
-            .filter(t => !_selected.has(t.info_hash))
+            .filter(t => !_selected.has(_selKeyOf(t.info_hash, t.agent)))
             .map(t => t.info_hash);
         // Only worth it while the selection really is "the filter minus a few".
         if (excluded.length * 4 < _selected.size) {
-            if (!confirm(action === "stop" ? t("Stop {n} torrents?", { n: _selected.size }) : t("Start {n} torrents?", { n: _selected.size }))) return;
+            if (!await hydraConfirm(action === "stop" ? t("Stop {n} torrents?", { n: _selected.size }) : t("Start {n} torrents?", { n: _selected.size }))) return;
             try {
                 const r = await fetch("/api/hoard/torrents/bulk", {
                     method: "POST",
@@ -2948,7 +3031,7 @@ async function _pauseSelected(paused) {
                 const j = await r.json();
                 if (j && typeof j.matched === "number" && j.matched !== _selected.size) {
                     console.warn(`bulk ${action}: server matched ${j.matched}, UI had ${_selected.size}`);
-                    alert(t("Heads up: the server matched {matched} torrents, the table showed {shown}. Applied to {applied}.", { matched: j.matched, shown: _selected.size, applied: j.applied }));
+                    hydraNotify(t("Heads up: the server matched {matched} torrents, the table showed {shown}. Applied to {applied}.", { matched: j.matched, shown: _selected.size, applied: j.applied }));
                 }
                 _markLocallyStopped(
                     _hoardFiltered.map(t => t.info_hash).filter(h => !excluded.includes(h)),
@@ -2962,8 +3045,22 @@ async function _pauseSelected(paused) {
     }
 
     const byEngine = { hoard: [], race: [] };
-    for (const [hash, mode] of _selected.entries()) {
+    const remote = [];
+    for (const sel of _selected.values()) {
+        const hash = _selHash(sel);
+        const mode = _selMode(sel);
+        const agent = _selAgent(sel);
+        if (agent !== "local") { remote.push({ hash, mode, agent }); continue; }
         (byEngine[mode] || byEngine.hoard).push(hash);
+    }
+    // The bulk endpoint below is this node's own; an agent's copy would
+    // otherwise be silently skipped, or worse, applied to the local twin.
+    for (const r of remote) {
+        try {
+            await _agentAction(r.agent, r.mode, paused ? "pause" : "resume", r.hash);
+        } catch (err) {
+            console.error("Failed to " + action + " on " + r.agent, r.hash, err);
+        }
     }
     for (const engine of ["hoard", "race"]) {
         const hashes = byEngine[engine];
@@ -2997,9 +3094,16 @@ function _currentHoardFilter() {
 async function _recheckSelected() {
     _hideCtxMenu();
     const entries = [..._selected.entries()];
-    for (const [hash, mode] of entries) {
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
+        const mode = _selMode(sel);
         if (mode !== "hoard") continue;
+        const agent = _selAgent(sel);
         try {
+            if (agent !== "local") {
+                await _agentAction(agent, mode, "verify", hash);
+                continue;
+            }
             await fetch(`/api/hoard/torrents/${hash}/verify`, {
                 method: "POST",
                 headers: { "X-Api-Key": API_KEY },
@@ -3016,9 +3120,10 @@ async function _removeSelected(deleteFiles) {
     const entries = [..._selected.entries()];
     _selected.clear();
     _updateRowHighlights();
-    for (const [hash] of entries) {
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
         try {
-            await fetch(`/api/torrents/${hash}?delete_files=${deleteFiles}`, {
+            await fetch(`/api/torrents/${hash}?delete_files=${deleteFiles}&agent=${encodeURIComponent(_selAgent(sel))}`, {
                 method: "DELETE",
                 headers: { "X-Api-Key": API_KEY },
             });
@@ -3168,7 +3273,7 @@ async function confirmRemove(deleteFiles) {
         updateRaceTorrents();
         updateOverview();
     } catch (e) {
-        alert(t("Failed to remove: {msg}", { msg: e.message }));
+        hydraNotify(t("Failed to remove: {msg}", { msg: e.message }));
     }
 }
 
@@ -3829,12 +3934,12 @@ async function saveCategory() {
 }
 
 async function deleteCategory(name) {
-    if (!confirm(t("Delete category \"{name}\"?", { name: name }))) return;
+    if (!await hydraConfirm(t("Delete category \"{name}\"?", { name: name }))) return;
     try {
         await api(`/api/categories/${encodeURIComponent(name)}`, { method: "DELETE" });
         await updateCategories();
     } catch (e) {
-        alert(t("Error: {msg}", { msg: e.message }));
+        hydraNotify(t("Error: {msg}", { msg: e.message }));
     }
 }
 
@@ -4577,18 +4682,18 @@ async function _rpSave(key, value) {
         await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }) });
         document.getElementById("rp-apply").style.display = "";
-    } catch (e) { alert(t("Save failed: {msg}", { msg: e.message })); }
+    } catch (e) { hydraNotify(t("Save failed: {msg}", { msg: e.message })); }
     // Thresholds decide whether the age/ratio policy can fire at all, so the
     // Drain now button has to be re-evaluated after any field edit too.
     _rpUpdateDrainBtn();
 }
 async function _rpRestart() {
-    if (!confirm(t("Restart Hydra now to apply the race drain settings?"))) return;
+    if (!await hydraConfirm(t("Restart Hydra now to apply the race drain settings?"))) return;
     try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
 }
 async function _rpDrainNow(btn) {
     if (_rpUnboundedDelete() &&
-        !confirm(t("Both thresholds are 0, so this deletes EVERY race torrent older than the keep floor, data included.") + "\n\n" + t("Run it?"))) return;
+        !await hydraConfirm(t("Both thresholds are 0, so this deletes EVERY race torrent older than the keep floor, data included.") + "\n\n" + t("Run it?"))) return;
     btn.disabled = true; const t = btn.textContent; btn.textContent = window.t("Draining…");
     let msg;
     try {
@@ -4756,6 +4861,11 @@ let _resyncing = false; // tab-return full re-hydration in progress
 let _resyncSeen = null;
 let _hydMap = null; // persistent upsert map during a hydration stream (avoids O(N^2))
 
+// A row is identified by node AND hash. The same torrent on two nodes is two
+// rows, which is the whole point of duplicating one; keyed by hash alone the
+// second simply replaced the first.
+function _rowKey(t) { return (t.agent || "local") + "|" + t.info_hash; }
+
 function setupHoardSSE() {
     if (_sseConn) return;
     // On a reconnect where we already hold the hoard list (e.g. returning to a
@@ -4807,7 +4917,7 @@ function setupHoardSSE() {
             // Accumulate into a persistent map (O(1)/row) and materialize the
             // array + counts + render ONCE at done. Rebuilding map+array per
             // batch was O(N^2) => ~24s at 106k though the server streams in <1s.
-            if (!_hydMap) _hydMap = new Map(_hoardAllTorrents.map(t => [t.info_hash, t]));
+            if (!_hydMap) _hydMap = new Map(_hoardAllTorrents.map(t => [_rowKey(t), t]));
             if (Array.isArray(data.torrents) && data.torrents.length) {
                 for (const t of data.torrents) {
                     // Ratio against data-held (matches the detail panel). The
@@ -4815,8 +4925,8 @@ function setupHoardSSE() {
                     // uploads (download==0); recompute at ingest so the list
                     // and the sort agree with the detail.
                     if (t.total_size > 0 && t.total_done > 0) t.ratio = t.total_upload / t.total_done;
-                    _hydMap.set(t.info_hash, t);
-                    if (_resyncing) _resyncSeen.add(t.info_hash);
+                    _hydMap.set(_rowKey(t), t);
+                    if (_resyncing) _resyncSeen.add(_rowKey(t));
                 }
             }
             if (data.done) {
@@ -4835,7 +4945,8 @@ function setupHoardSSE() {
             return;
         }
         if (type === "torrent_added" && data.info_hash) {
-            if (_hoardAllTorrents && !_hoardAllTorrents.some(t => t.info_hash === data.info_hash)) {
+            if (_hoardAllTorrents && !_hoardAllTorrents.some(
+                    t => t.info_hash === data.info_hash && (t.agent || "local") === "local")) {
                 _hoardAllTorrents.unshift(data); // newest first; dynamic fields fill via stats_snapshot
                 _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
                 _scheduleHoardRender();
@@ -4846,7 +4957,11 @@ function setupHoardSSE() {
             if (!_hoardAllTorrents || !_hoardAllTorrents.length) return;
             const byHash = new Map();
             for (let i = 0; i < _hoardAllTorrents.length; i++) {
-                byHash.set(_hoardAllTorrents[i].info_hash, _hoardAllTorrents[i]);
+                const row = _hoardAllTorrents[i];
+                // Local-engine stats: an agent's copy of the same hash keeps its
+                // own figures, which arrive with the next hydration.
+                if ((row.agent || "local") !== "local") continue;
+                byHash.set(row.info_hash, row);
             }
             let touched = 0;
             for (const m of data.torrents) {
@@ -4867,7 +4982,8 @@ function setupHoardSSE() {
             if (touched > 0) _scheduleHoardRender();
         } else if (type === "torrent_removed" && data.info_hash) {
             if (_hoardAllTorrents) {
-                _hoardAllTorrents = _hoardAllTorrents.filter(t => t.info_hash !== data.info_hash);
+                _hoardAllTorrents = _hoardAllTorrents.filter(
+                    t => !(t.info_hash === data.info_hash && (t.agent || "local") === "local"));
                 _scheduleHoardRender();
             }
         }
@@ -5481,7 +5597,7 @@ async function resetSettings() {
 }
 
 async function restartDaemon(skipConfirm) {
-    if (!skipConfirm && !confirm(t("Restart the Hydra daemon now? (running torrents resume on boot)"))) return;
+    if (!skipConfirm && !await hydraConfirm(t("Restart the Hydra daemon now? (running torrents resume on boot)"))) return;
     const banner = document.getElementById("settings-restart-banner");
     try {
         await api("/api/settings/restart", { method: "POST" });
@@ -5569,9 +5685,9 @@ async function saveAgent() {
     } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 async function deleteAgent(name) {
-    if (!confirm(t("Delete agent \"{name}\"?", { name: name }))) return;
+    if (!await hydraConfirm(t("Delete agent \"{name}\"?", { name: name }))) return;
     try { await api(`/api/agents/${encodeURIComponent(name)}`, { method: "DELETE" }); await updateAgents(); }
-    catch (e) { alert(t("Error: {msg}", { msg: e.message })); }
+    catch (e) { hydraNotify(t("Error: {msg}", { msg: e.message })); }
 }
 
 // Soft-delete safety: an accidentally removed agent stays here for one-click
@@ -5588,7 +5704,7 @@ async function updateRemovedAgents() {
 }
 async function restoreAgent(name) {
     try { await api(`/api/agents/restore/${encodeURIComponent(name)}`, { method: "POST" }); await updateAgents(); }
-    catch (e) { alert(t("Error: {msg}", { msg: e.message })); }
+    catch (e) { hydraNotify(t("Error: {msg}", { msg: e.message })); }
 }
 
 
@@ -5615,7 +5731,7 @@ async function spoofAllTrackers(clear) {
     const question = clear
         ? t("Remove the client spoof from every tracker?")
         : t("Make every tracker see this client as qBittorrent 5.2.2?");
-    if (!confirm(question)) return;
+    if (!await hydraConfirm(question)) return;
     if (out) out.textContent = t("Applying…");
     try {
         const r = await api("/api/announce/clients/bulk", {
@@ -5849,27 +5965,27 @@ async function addEngine(){
     const id = document.getElementById("eng-id").value.trim();
     const role = document.getElementById("eng-role").value;
     const port = parseInt(document.getElementById("eng-port").value) || 0;
-    if(!id){ alert(t("id required")); return; }
+    if(!id){ hydraNotify(t("id required")); return; }
     try{
         await api("/api/engines", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({id:id, role:role, listen_port:port})});
         hideEngineForm();
         document.getElementById("eng-id").value="";
         document.getElementById("restart-banner").style.display="block";
         updateEngines();
-    }catch(err){ alert(t("Add engine failed: {err}", { err: err })); }
+    }catch(err){ hydraNotify(t("Add engine failed: {err}", { err: err })); }
 }
 async function deleteEngine(id){
-    if(!confirm(t("Delete engine {id}? Its torrents stop seeding after restart.", { id: id }))) return;
+    if(!await hydraConfirm(t("Delete engine {id}? Its torrents stop seeding after restart.", { id: id }))) return;
     try{
         await api("/api/engines/" + encodeURIComponent(id), {method:"DELETE"});
         document.getElementById("restart-banner").style.display="block";
         updateEngines();
-    }catch(err){ alert(t("Delete failed: {err}", { err: err })); }
+    }catch(err){ hydraNotify(t("Delete failed: {err}", { err: err })); }
 }
 async function restartHydra(){
-    if(!confirm(t("Restart Hydra to apply engine changes? (~40s)"))) return;
+    if(!await hydraConfirm(t("Restart Hydra to apply engine changes? (~40s)"))) return;
     try{ await api("/api/restart", {method:"POST"}); }catch(err){}
-    alert(t("Restarting, reconnect in ~40s."));
+    hydraNotify(t("Restarting, reconnect in ~40s."));
 }
 
 
@@ -6357,7 +6473,7 @@ async function releaseStartupPause() {
         await api("/api/startup-pause/release", { method: "POST" });
     } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = window.t("Start now"); }
-        alert(window.t("Error: {msg}", { msg: e.message }));
+        hydraNotify(window.t("Error: {msg}", { msg: e.message }));
         return;
     }
     await refreshStartupPause();
@@ -6706,7 +6822,7 @@ async function loadJobs() {
 }
 
 async function cancelJob(id) {
-    if (!confirm(t("Cancel this job? A move stops where it is; the data stays where the torrent is seeding from."))) return;
+    if (!await hydraConfirm(t("Cancel this job? A move stops where it is; the data stays where the torrent is seeding from."))) return;
     try {
         const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, {
             method: "DELETE",
@@ -6715,10 +6831,145 @@ async function cancelJob(id) {
         if (!r.ok) {
             let msg = `HTTP ${r.status}`;
             try { const j = await r.json(); if (j && j.error) msg = j.error; } catch (_) { /* empty */ }
-            alert(msg);
+            hydraNotify(msg);
         }
     } catch (err) {
-        alert(err.message);
+        hydraNotify(err.message);
     }
     loadJobs();
 }
+
+// ── Dialogs ─────────────────────────────────────────────────────────────────
+//
+// Hydra's own modal, never native hydraNotify()/await hydraConfirm(): those cannot be styled,
+// they freeze the page, and an alert gives the reader no way out but OK, which
+// is wrong for anything they might want to back out of.
+
+let _hydraModalResolve = null;
+
+function _hydraModalClose(value) {
+    document.getElementById("hydra-modal").style.display = "none";
+    const done = _hydraModalResolve;
+    _hydraModalResolve = null;
+    if (done) done(value);
+}
+
+// hydraDialog renders a title, a body and a set of buttons. Each button is
+// {label, value, kind} where kind maps to the existing modal button styles.
+// Returns the chosen value; Escape and a click on the backdrop resolve to null.
+function hydraDialog(title, body, buttons) {
+    return new Promise(resolve => {
+        // A dialog opening over another must not strand the first one's caller.
+        if (_hydraModalResolve) _hydraModalClose(null);
+        _hydraModalResolve = resolve;
+
+        document.getElementById("hydra-modal-title").textContent = title || "";
+        const bodyEl = document.getElementById("hydra-modal-body");
+        bodyEl.textContent = body || "";
+        // Multi-line messages keep their line breaks rather than running on.
+        bodyEl.style.whiteSpace = "pre-line";
+
+        const actions = document.getElementById("hydra-modal-actions");
+        actions.innerHTML = "";
+        (buttons || [{ label: t("OK"), value: true, kind: "keep" }]).forEach(b => {
+            const el = document.createElement("button");
+            el.className = "btn-modal btn-" + (b.kind || "keep");
+            el.textContent = b.label;
+            el.onclick = () => _hydraModalClose(b.value);
+            actions.appendChild(el);
+        });
+
+        const overlay = document.getElementById("hydra-modal");
+        overlay.style.display = "";
+        overlay.onclick = e => { if (e.target === overlay) _hydraModalClose(null); };
+        document.addEventListener("keydown", function esc(e) {
+            if (e.key === "Escape") {
+                document.removeEventListener("keydown", esc);
+                _hydraModalClose(null);
+            }
+        });
+    });
+}
+
+// hydraNotify states something that has already happened: one way out.
+// Called with a single argument it is a drop-in for hydraNotify().
+function hydraNotify(title, body) {
+    if (body === undefined) { body = title; title = t("Hydra"); }
+    return hydraDialog(title, body, [{ label: t("OK"), value: true, kind: "keep" }]);
+}
+
+// hydraConfirm asks before acting, and can always be declined. Called with a
+// single argument it is a drop-in for await hydraConfirm() -- except that it returns a
+// promise, so every caller must await it.
+function hydraConfirm(title, body, okLabel, danger) {
+    if (body === undefined) { body = title; title = t("Confirm"); }
+    return hydraDialog(title, body, [
+        { label: okLabel || t("Confirm"), value: true, kind: danger ? "delete" : "keep" },
+        { label: t("Cancel"), value: false, kind: "cancel" },
+    ]).then(v => v === true);
+}
+
+// _agentAction runs one action on a torrent that lives on an agent. Local rows
+// keep their own endpoints; only the remote ones need the node named.
+function _agentAction(agent, engine, action, hash, extra) {
+    return fetch(`/api/agents/${encodeURIComponent(agent)}/action`, {
+        method: "POST",
+        headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify(Object.assign({ engine: engine, action: action, info_hash: hash }, extra || {})),
+    });
+}
+
+// ── Live refresh for agent rows ─────────────────────────────────────────────
+//
+// SSE carries this node's engines only, so rows on agents never move between
+// hydrations. A short poll of the agent slice alone keeps them current without
+// bringing back the full-list fetch that hydration replaced.
+const AGENT_POLL_INTERVAL = 5000;
+let _agentPollTimer = null;
+
+async function _pollAgentRows() {
+    if (!_ctxAgents.some(a => a.name && a.name !== "local")) return;
+    if (document.hidden) return;
+    let rows;
+    try {
+        rows = await api("/api/agents/torrents");
+    } catch (e) {
+        return; // a failed poll is not evidence that anything changed
+    }
+    if (!Array.isArray(rows) || !_hoardAllTorrents) return;
+
+    const byKey = new Map(_hoardAllTorrents.map(t => [_rowKey(t), t]));
+    let changed = false;
+    const seen = new Set();
+    for (const r of rows) {
+        if ((r.mode || "hoard") !== "hoard") continue;
+        const k = _rowKey(r);
+        seen.add(k);
+        const cur = byKey.get(k);
+        if (!cur) {
+            _hoardAllTorrents.push(r);
+            changed = true;
+            continue;
+        }
+        // Upsert in place so sort order and selection survive the refresh.
+        Object.assign(cur, r);
+        changed = true;
+    }
+    // A torrent removed on an agent has to leave the list too.
+    for (const [k, t] of byKey) {
+        if ((t.agent || "local") === "local") continue;
+        if (!seen.has(k)) {
+            _hoardAllTorrents = _hoardAllTorrents.filter(x => _rowKey(x) !== k);
+            changed = true;
+        }
+    }
+    if (changed) {
+        try { _renderHoardCounts(); } catch (_) {}
+        _scheduleHoardRender();
+    }
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+    if (_agentPollTimer) clearInterval(_agentPollTimer);
+    _agentPollTimer = setInterval(_pollAgentRows, AGENT_POLL_INTERVAL);
+});

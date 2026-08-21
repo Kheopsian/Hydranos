@@ -955,6 +955,8 @@ func main() {
 	// Concurrency is one on purpose: a move is sequential I/O against the
 	// same disks the torrents are served from, so running several at once
 	// makes every one of them slower and the seeding worse.
+	// Set when a job manager exists; called once agents are registered.
+	var resumeJobs func()
 	if torStore != nil {
 		jobMgr := jobs.NewManager(ctx, torStore, 1)
 		jobMgr.Register(&jobs.MoveRunner{
@@ -975,27 +977,48 @@ func main() {
 		// localEndpoint is what lets a monolith be one end of a move -- the
 		// common case, since the front is usually where the library lives.
 		isLocal := func(agent string) bool { return agent == "" || agent == api.LocalAgentName }
-		localFor := func(engineID string) *localEndpoint {
+		localFor := func(engineID, category string) *localEndpoint {
 			client := hoardProc.Client()
 			if engineID == agentwire.EngineRace {
 				client = raceProc.Client()
 			}
-			return &localEndpoint{client: client, dataDir: cfg.Daemon.DataDir}
+			le := &localEndpoint{client: client, dataDir: cfg.Daemon.DataDir}
+			// Only the hoard has an adopt path that registers Go-side metadata;
+			// a race target keeps the plain engine import.
+			if engineID != agentwire.EngineRace && hoardEngine != nil {
+				le.adopt = func(rec *ltclient.ResumeRecord) error {
+					return hoardEngine.AdoptTorrent(rec, category)
+				}
+			}
+			return le
 		}
 		jobMgr.Register(&jobs.RemoteMoveRunner{
 			DialSource: func(p jobs.RemoteMoveParams) (jobs.PieceSource, error) {
 				if isLocal(p.SourceAgent) {
-					return localFor(p.Engine), nil
+					return localFor(p.Engine, p.Category), nil
 				}
 				return apiServer.RemoteAgentEngineClient(p.SourceAgent, p.Engine)
 			},
 			DialSink: func(p jobs.RemoteMoveParams) (jobs.PieceSink, error) {
 				if isLocal(p.TargetAgent) {
-					return localFor(p.Engine), nil
+					return localFor(p.Engine, p.Category), nil
 				}
 				return apiServer.RemoteAgentEngineClient(p.TargetAgent, p.Engine)
 			},
 			ResolveSavePath: apiServer.CategorySavePathFor,
+			SetTargetCategory: func(p jobs.RemoteMoveParams, infoHash string) error {
+				if isLocal(p.TargetAgent) {
+					if hoardEngine == nil {
+						return nil
+					}
+					return hoardEngine.SetCategoryLabel(infoHash, p.Category)
+				}
+				cl, err := apiServer.RemoteAgentEngineClient(p.TargetAgent, p.Engine)
+				if err != nil {
+					return err
+				}
+				return cl.SetCategoryLabel(p.Engine, infoHash, p.Category)
+			},
 			FreeSpace: func(agent, path string) (int64, error) {
 				if isLocal(agent) {
 					return localFreeSpace(path)
@@ -1008,17 +1031,23 @@ func main() {
 			},
 		})
 		apiServer.SetJobManager(jobMgr)
-		// Pick up whatever the last shutdown interrupted before the API
-		// starts taking new work, so a resumed move is never racing a fresh
-		// one for the same torrent.
-		jobMgr.ResumeAll()
 		// Finished jobs are kept long enough to be useful and not forever.
 		jobMgr.Prune(30 * 24 * time.Hour)
+		resumeJobs = jobMgr.ResumeAll
 	}
 	// ---- Remote agents ([[agent]]) for multi-home category placement ----
 	// Dialed pull-only; a dead agent is logged + skipped, never blocks boot.
 	registerConfigAgents(apiServer, cfg.Agents)
 	apiServer.LoadPersistedAgents()
+
+	// Only now can interrupted work be picked up. A cross-node job resolves its
+	// agents when it runs, and resuming before they were registered failed it
+	// outright with "no agent named ...": the very restart the job was built to
+	// survive was what killed it. Still before the API takes new work, so a
+	// resumed move never races a fresh one for the same torrent.
+	if resumeJobs != nil {
+		resumeJobs()
+	}
 	apiServer.SetRaceDrain(raceDrain)
 	apiServer.SetGraduationReporter(gradr)
 	apiServer.SetArrCleanup(arrCleanup)

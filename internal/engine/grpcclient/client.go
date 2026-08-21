@@ -280,6 +280,24 @@ func (c *Client) ImportStateWithFile(rec *ltclient.ResumeRecord, torrent []byte)
 	return res.InfoHash, nil
 }
 
+// SetCategoryLabel labels a torrent on the agent without moving its files.
+func (c *Client) SetCategoryLabel(engineID, infoHash, category string) error {
+	return c.call(agentwire.MethodSetCategoryLabel,
+		agentwire.CategoryLabelParams{Engine: engineID, InfoHash: infoHash, Category: category}, nil)
+}
+
+// TorrentCategories returns the agent's category per info hash. Categories are
+// Hydra's own layer: they are absent from both the resume record and the
+// torrent status, so the list has to ask for them separately.
+func (c *Client) TorrentCategories(engineID string) (map[string]string, error) {
+	var res map[string]string
+	if err := c.call(agentwire.MethodTorrentCategories,
+		agentwire.EngineParams{Engine: engineID}, &res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // DiskFree reports the bytes available at a path on the agent.
 func (c *Client) DiskFree(path string) (int64, error) {
 	var res struct {

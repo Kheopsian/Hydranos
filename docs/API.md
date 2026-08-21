@@ -41,6 +41,9 @@ Auth = `X-API-Key`.
 - `GET /api/status` — état global (baseline, hoard{...}, day_uploaded...).
 - `GET /api/hoard/torrents` — **liste hoard complète** (info_hash, name, state, progress, save_path, total_size, total_upload, swarm_seeds, tracker_error, tracker_error_msg...). LA source pour auditer.
 - `GET /api/race/torrents` — liste race.
+- `POST /api/agents/:name/action` — exécute UNE action par-torrent sur un agent NOMMÉ : `{engine, action, info_hash, delete_files?, category?, save_path?}`. Actions : `pause` · `resume` · `verify` · `reannounce` · `remove` · `setcategory` (relocalise) · `setcategorylabel` (libellé seul). ⚠️ Les endpoints par-torrent classiques résolvent leur cible en regardant **le local d'abord** : ce n'est non ambigu que tant qu'un infohash ne vit qu'à un endroit. Un `duplicate` le met volontairement sur deux nœuds, d'où la nécessité de nommer le nœud.
+- `POST /api/jobs/move-remote` — `{info_hash, source_agent, target_agent, engine?, mode}` avec `mode` = `move` | `duplicate`. La destination est le chemin que la **catégorie du torrent** définit pour l'agent cible ; elle ne se passe pas en paramètre. `202 {job_id}`, suivi dans Jobs.
+- `DELETE /api/torrents/:info_hash?agent=<nom>` — vise explicitement un nœud (`local` ou un agent).
 - `GET /api/stats/baseline`
 - `GET /api/events` — SSE push.
 

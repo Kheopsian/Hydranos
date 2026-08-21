@@ -52,9 +52,14 @@ const (
 	// torrent's own, so the receiver verifies every piece against the SHA-1
 	// already in the metainfo and an interrupted transfer resumes from what
 	// verified. No separate manifest, no checksum scheme of our own.
-	MethodReadPiece            = "read_piece"
-	MethodWritePiece           = "write_piece"
-	MethodDiskFree             = "disk_free" // move preflight: room at a path
+	MethodReadPiece  = "read_piece"
+	MethodWritePiece = "write_piece"
+	MethodDiskFree   = "disk_free" // move preflight: room at a path
+	// Category lives in Hydra's layer, not in the engine's: it is neither in a
+	// resume record nor in a torrent status, so it needs its own two calls to
+	// cross to an agent and to come back for the list.
+	MethodSetCategoryLabel     = "set_category_label"
+	MethodTorrentCategories    = "torrent_categories"
 	MethodGetStatus            = "get_status"
 	MethodListTorrents         = "list_torrents"
 	MethodGetPeers             = "get_peers"
@@ -147,6 +152,21 @@ type AddParams struct {
 	Stopped     bool   `json:"stopped"`
 	SeedMode    bool   `json:"seed_mode"`
 	WithOptions bool   `json:"with_options"` // true => AddTorrentWithOptions (honour SeedMode)
+}
+
+// CategoryLabelParams sets a torrent's category label WITHOUT touching its
+// files. Distinct from the "setcategory" routed action, which relocates the
+// payload: after a cross-node move the bytes are already where the category
+// says, and re-running a relocation would move them a second time.
+type CategoryLabelParams struct {
+	Engine   string `json:"engine"`
+	InfoHash string `json:"info_hash"`
+	Category string `json:"category"`
+}
+
+// EngineParams names one of the agent's engines.
+type EngineParams struct {
+	Engine string `json:"engine"`
 }
 
 // PathParams names a path on the agent's filesystem.

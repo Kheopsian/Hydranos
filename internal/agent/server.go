@@ -382,6 +382,46 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		}
 		return reply(map[string]string{"info_hash": ih}, nil)
 
+	case agentwire.MethodSetCategoryLabel:
+		var p agentwire.CategoryLabelParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		e := s.rich[engineOrHoard(p.Engine)]
+		if e == nil {
+			return nil, status.Errorf(codes.Unavailable, "engine %q not wired on agent", p.Engine)
+		}
+		lab, ok := e.(interface {
+			SetCategoryLabel(infoHash, category string) error
+		})
+		if !ok {
+			return reply(nil, fmt.Errorf("engine %q cannot carry a category label", p.Engine))
+		}
+		return reply(nil, lab.SetCategoryLabel(p.InfoHash, p.Category))
+
+	case agentwire.MethodTorrentCategories:
+		var p agentwire.EngineParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		e := s.rich[engineOrHoard(p.Engine)]
+		if e == nil {
+			return reply(map[string]string{}, nil)
+		}
+		mp, ok := e.(interface {
+			GetTorrentMetas() map[string]*engine.TorrentMeta
+		})
+		if !ok {
+			return reply(map[string]string{}, nil)
+		}
+		out := map[string]string{}
+		for ih, m := range mp.GetTorrentMetas() {
+			if m != nil && m.Category != "" {
+				out[ih] = m.Category
+			}
+		}
+		return reply(out, nil)
+
 	case agentwire.MethodDiskFree:
 		var p agentwire.PathParams
 		if err := unmarshal(&p); err != nil {
@@ -787,4 +827,13 @@ func (s *Server) handleSetAnnounceOverride(p agentwire.AnnounceOverrideParams) (
 		return reply(nil, fmt.Errorf("unknown announce override kind %q", p.Kind))
 	}
 	return reply(nil, nil)
+}
+
+// engineOrHoard defaults an unspecified engine id to the hoard, which is the
+// one a category label is about in every current caller.
+func engineOrHoard(id string) string {
+	if id == "" {
+		return agentwire.EngineHoard
+	}
+	return id
 }

@@ -375,6 +375,53 @@ func sameTiers(a, b [][]string) bool {
 // editTrackersOne is the single path every tracker edit goes through, whatever
 // called it: this route, the legacy add-tracker route, or the qBittorrent shim.
 func (s *Server) editTrackersOne(infoHash string, req trackerEditRequest) ([][]string, bool, error) {
+	// A torrent on an agent has no local engine holding it, so this used to
+	// report "no such torrent" for something plainly in the list. The agent's
+	// data-plane already speaks get/set trackers, so the same edit runs there.
+	if ra, engineID, ok := s.findRemoteOwner(infoHash); ok && ra != nil {
+		cl := ra.anyClient()
+		for _, e := range ra.engines {
+			if e.id == engineID || e.role == engineID {
+				cl, engineID = e.client, e.id
+				break
+			}
+		}
+		if cl == nil {
+			return nil, false, fmt.Errorf("agent %s is not reachable", ra.name)
+		}
+		infos, err := cl.GetTrackers(infoHash)
+		if err != nil {
+			return nil, false, err
+		}
+		// The agent reports a flat list with a tier number each; the edit
+		// helpers work on tiers, so regroup before touching anything.
+		var current [][]string
+		for _, ti := range infos {
+			for len(current) <= ti.Tier {
+				current = append(current, nil)
+			}
+			current[ti.Tier] = append(current[ti.Tier], ti.URL)
+		}
+		var next [][]string
+		var changed bool
+		if req.Op == "set" && len(req.Tiers) > 0 {
+			if next, err = tiersFromRequest(req.Tiers); err != nil {
+				return nil, false, err
+			}
+			changed = !sameTiers(current, next)
+		} else if next, changed, err = applyTrackerOp(current, req.Op, req.URLs, req.From, req.To); err != nil {
+			return nil, false, err
+		}
+		if !changed {
+			return current, false, nil
+		}
+		applied, err := cl.SetTrackers(infoHash, next)
+		if err != nil {
+			return nil, false, err
+		}
+		return applied, true, nil
+	}
+
 	eng, _, ok := s.engineHolding(infoHash)
 	if !ok {
 		return nil, false, errNoSuchTorrent
