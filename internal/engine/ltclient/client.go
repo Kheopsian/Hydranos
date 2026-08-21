@@ -666,17 +666,36 @@ func (c *Client) listTorrents(slim bool) (*ListTorrentsResult, error) {
 // copy what it needs, not silently write here.
 func (c *Client) cachedList() *ListTorrentsResult { return c.cachedListFor(false) }
 
+// slimCacheTTL bounds how stale the scheduling loops accept their listing to
+// be. It sits just ABOVE their period on purpose.
+//
+// The loops that use the slim projection run every 10s (announce reconcile,
+// verify batching) and 30s (download slots). With a TTL below 10s, a 10s loop
+// misses its own previous snapshot by construction -- every single firing
+// re-fetches, which is what the first version of this shipped and why the
+// frame count went up instead of down. One notch above the period, consecutive
+// firings share, and the listing is at most a second staler than the loops
+// already tolerated.
+const slimCacheTTL = 11 * time.Second
+
 func (c *Client) cachedListFor(slim bool) *ListTorrentsResult {
 	c.listMu.Lock()
 	defer c.listMu.Unlock()
-	cached, at := c.listCache, c.listCachedAt
-	if slim {
-		cached, at = c.slimCache, c.slimCachedAt
+
+	// A full row carries every field a slim caller reads, so a fresh full
+	// snapshot answers a slim request too. Checked first, and for both kinds:
+	// without this the loops stopped piggybacking on a listing somebody else
+	// had already paid for, and each went and fetched its own.
+	if c.listCache != nil && time.Since(c.listCachedAt).Nanoseconds() <= listCacheTTL.Load() {
+		return c.listCache
 	}
-	if cached == nil || time.Since(at).Nanoseconds() > listCacheTTL.Load() {
+	if !slim {
 		return nil
 	}
-	return cached
+	if c.slimCache != nil && time.Since(c.slimCachedAt) <= slimCacheTTL {
+		return c.slimCache
+	}
+	return nil
 }
 
 // GetPeers returns connected peers for a torrent.

@@ -3,6 +3,23 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.112.0 - 2026-08-21
+
+### Fixed
+- **The slim listing added to v3.111.0 was fetched far more often than it
+  needed to be, and gave back only part of what it should have.** Two causes,
+  both in how it was cached. Its snapshots lived in a slot of their own, so the
+  scheduling loops stopped piggybacking on a listing another caller had already
+  paid for. And its lifetime was shorter than the loops' own period, so a 10s
+  loop missed its previous snapshot every single firing by construction. The
+  frames got 3.9x smaller but there were more of them, which ate most of the
+  win.
+
+  A slim request now takes a fresh full snapshot when there is one -- a full row
+  carries every field a slim caller reads -- and the slim slot outlives the loop
+  period. A full listing is still never served slim rows: that direction would
+  blank most of TorrentStatus silently instead of failing.
+
 ## v3.111.0 - 2026-08-21
 
 ### Changed
