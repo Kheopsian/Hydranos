@@ -79,25 +79,27 @@ func (s *Server) bulkAction(c *gin.Context, race bool) {
 	}
 
 	matched := len(hashes)
-	applied := make([]string, 0, matched)
+	applied := 0
+	// Only what stayed local has a row in this node's store; an agent persists
+	// the intent of its own torrents itself.
+	localApplied := make([]string, 0, matched)
 	for _, h := range hashes {
-		var err error
-		if race {
-			err = s.raceEngine.SetUserPaused(h, stop)
-		} else {
-			err = s.hoardEngine.SetUserPaused(h, stop)
+		agent, err := s.setPausedOne(h, stop, race)
+		if err != nil {
+			continue
 		}
-		if err == nil {
-			applied = append(applied, h)
+		applied++
+		if agent == "local" {
+			localApplied = append(localApplied, h)
 		}
 	}
-	persistPaused(applied, stop)
+	persistPaused(localApplied, stop)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "ok",
 		"action":  body.Action,
 		"matched": matched,
-		"applied": len(applied),
-		"failed":  matched - len(applied),
+		"applied": applied,
+		"failed":  matched - applied,
 	})
 }

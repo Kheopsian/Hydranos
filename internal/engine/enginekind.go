@@ -24,6 +24,10 @@ type RichEngine interface {
 	HasTorrent(infoHash string) bool
 	AddRouted(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error)
 	RemoveRouted(infoHash string, deleteFiles bool) error
+	// SetUserPaused records the operator's stop/start intent. Routed rather
+	// than served by a thin StopTorrent because the intent is what the slot
+	// manager and the next restart read; a bare stop is undone within minutes.
+	SetUserPaused(infoHash string, paused bool) error
 	VerifyTorrent(infoHash string) error
 	SetTorrentCategory(infoHash, category, savePath string) error
 }

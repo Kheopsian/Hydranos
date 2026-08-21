@@ -207,6 +207,7 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 		engines[le.id] = le.proc.Client()
 	}
 	agentSrv := agent.NewServer(engines, cfg.Daemon.DataDir, token)
+	agentSrv.SetUploadsDir(uploadsDir)
 	agentSrv.SetTLS(tlsCert, tlsKey)
 	agentSrv.SetOwnEvents(true)
 	for _, le := range lives {

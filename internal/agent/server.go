@@ -41,9 +41,14 @@ type Server struct {
 
 	engines map[string]engine.EngineClient
 	tmpDir  string
-	token   string
-	tlsCert string
-	tlsKey  string
+	// uploadsDir is where a routed add lands its .torrent for good. Unlike the
+	// thin add path (whose caller keeps the blob), a routed add hands the file
+	// to this node's OWN engine, which stores the path as its TorrentFilePath
+	// and hands it to the store reconcile later — so it has to outlive the RPC.
+	uploadsDir string
+	token      string
+	tlsCert    string
+	tlsKey     string
 
 	// ownEvents gates the Subscribe stream. SetEventHandler is single-slot on a
 	// live ltclient, so an agent sharing the monolith's clients (additive mode)
@@ -74,6 +79,18 @@ func NewServer(engines map[string]engine.EngineClient, tmpDir, token string) *Se
 		wired:   make(map[string]bool),
 		rich:    make(map[string]engine.RichEngine),
 	}
+}
+
+// SetUploadsDir sets where routed adds keep their .torrent. Defaults to
+// <tmpDir>/uploads, which is the same directory the agent's store import
+// materialises blobs into.
+func (s *Server) SetUploadsDir(dir string) { s.uploadsDir = dir }
+
+func (s *Server) uploads() string {
+	if s.uploadsDir != "" {
+		return s.uploadsDir
+	}
+	return filepath.Join(s.tmpDir, "uploads")
 }
 
 // SetTLS enables TLS with the given cert/key files (empty = plaintext).
@@ -633,6 +650,10 @@ func (s *Server) handleActionRouted(p agentwire.ActionRoutedParams) (*agentpb.Ca
 		return nil, status.Errorf(codes.Unavailable, "engine %q not wired on agent", id)
 	}
 	switch p.Action {
+	case "pause":
+		return reply(nil, e.SetUserPaused(p.InfoHash, true))
+	case "resume":
+		return reply(nil, e.SetUserPaused(p.InfoHash, false))
 	case "remove":
 		return reply(nil, e.RemoveRouted(p.InfoHash, p.DeleteFiles))
 	case "verify":

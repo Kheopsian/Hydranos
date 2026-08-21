@@ -252,7 +252,7 @@ type AddRoutedParams struct {
 // per-torrent operation run through the agent's OWN engine.
 type ActionRoutedParams struct {
 	Mode        string `json:"mode"`   // "race" | "hoard"
-	Action      string `json:"action"` // reannounce|remove|verify|setcategory
+	Action      string `json:"action"` // reannounce|remove|verify|setcategory|pause|resume
 	InfoHash    string `json:"info_hash"`
 	DeleteFiles bool   `json:"delete_files,omitempty"`
 	Category    string `json:"category,omitempty"`

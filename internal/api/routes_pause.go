@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -13,6 +14,17 @@ import (
 // Every route here writes the user's *intent* and then acts on it. The intent
 // is what gets persisted, on the torrent's own row; the schedulers read it and
 // never write it. See internal/engine/pause.go for why the two are separate.
+
+// errNoEngine means this node has no engine of that kind at all — distinct
+// from "no engine here holds it", which routes to an agent instead.
+var errNoEngine = errors.New("engine not available")
+
+func engineName(race bool) string {
+	if race {
+		return "race"
+	}
+	return "hoard"
+}
 
 type pauseBody struct {
 	Hashes []string `json:"hashes"`
@@ -51,28 +63,76 @@ func (s *Server) handleHoardResume(c *gin.Context) { s.pauseOne(c, false, false)
 func (s *Server) handleRacePause(c *gin.Context)   { s.pauseOne(c, true, true) }
 func (s *Server) handleRaceResume(c *gin.Context)  { s.pauseOne(c, false, true) }
 
+// setPausedOne writes the intent wherever the torrent actually lives and
+// reports who took it ("local" or an agent name).
+//
+// A torrent on an agent is paused through that agent's OWN engine, not with a
+// thin stop: the agent records the intent, so its slot manager stops handing
+// the torrent a download slot again on its next pass. Without this, stop and
+// start on an agent row were applied to the local engine, which has never
+// heard of the hash -- 404 on a monolith, and a silent no-op on a front-only
+// node whose local engine is a stub that answers "fine" to everything.
+func (s *Server) setPausedOne(hash string, paused, race bool) (string, error) {
+	var local interface {
+		HasTorrent(string) bool
+		SetUserPaused(string, bool) error
+	}
+	if race {
+		if s.raceEngine != nil {
+			local = s.raceEngine
+		}
+	} else if s.hoardEngine != nil {
+		local = s.hoardEngine
+	}
+	if local != nil && local.HasTorrent(hash) {
+		return "local", local.SetUserPaused(hash, paused)
+	}
+	action := "resume"
+	if paused {
+		action = "pause"
+	}
+	// Hoard rows are already cached by the row poller, so a whole selection
+	// resolves without a round trip. Anything it does not know (a race
+	// torrent, a hash no listing carried) falls back to probing the agents.
+	if !race {
+		if name, engineID, ok := s.agentHoardOwner(hash); ok {
+			if ra := s.remoteAgentByName(name); ra != nil {
+				if cl := ra.anyClient(); cl != nil {
+					return name, cl.ActionRouted(engineID, action, hash, false, "", "")
+				}
+			}
+		}
+	}
+	if ra, mode, ok := s.findRemoteOwner(hash); ok {
+		return ra.name, ra.anyClient().ActionRouted(mode, action, hash, false, "", "")
+	}
+	if local == nil {
+		return "", errNoEngine
+	}
+	// Claimed by nobody: let the local engine raise the not-found it always did.
+	return "local", local.SetUserPaused(hash, paused)
+}
+
 func (s *Server) pauseOne(c *gin.Context, paused, race bool) {
 	hash := c.Param("info_hash")
-	var err error
-	if race {
-		if s.raceEngine == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "race engine not available"})
-			return
-		}
-		err = s.raceEngine.SetUserPaused(hash, paused)
-	} else {
-		if s.hoardEngine == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
-			return
-		}
-		err = s.hoardEngine.SetUserPaused(hash, paused)
-	}
-	if err != nil {
+	agent, err := s.setPausedOne(hash, paused, race)
+	switch {
+	case errors.Is(err, errNoEngine):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": engineName(race) + " engine not available"})
+		return
+	case err != nil && agent != "" && agent != "local":
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "agent": agent})
+		return
+	case err != nil:
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
-	persistPaused([]string{hash}, paused)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "info_hash": hash, "paused": paused})
+	// Only a local torrent has a row in this node's store; an agent persists
+	// the intent on its own side.
+	if agent == "local" {
+		persistPaused([]string{hash}, paused)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "info_hash": hash, "paused": paused, "agent": agent})
 }
 
 // handleHoardPauseBulk applies one intent to a selection — what the UI sends
@@ -86,24 +146,20 @@ func (s *Server) pauseBulk(c *gin.Context, race bool) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "expected {hashes: [...], paused: bool}"})
 		return
 	}
-	applied := make([]string, 0, len(body.Hashes))
+	applied, localApplied := 0, make([]string, 0, len(body.Hashes))
 	for _, h := range body.Hashes {
-		var err error
-		if race {
-			if s.raceEngine == nil {
-				break
-			}
-			err = s.raceEngine.SetUserPaused(h, body.Paused)
-		} else {
-			if s.hoardEngine == nil {
-				break
-			}
-			err = s.hoardEngine.SetUserPaused(h, body.Paused)
+		agent, err := s.setPausedOne(h, body.Paused, race)
+		if errors.Is(err, errNoEngine) {
+			break
 		}
-		if err == nil {
-			applied = append(applied, h)
+		if err != nil {
+			continue
+		}
+		applied++
+		if agent == "local" {
+			localApplied = append(localApplied, h)
 		}
 	}
-	persistPaused(applied, body.Paused)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "applied": len(applied), "paused": body.Paused})
+	persistPaused(localApplied, body.Paused)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "applied": applied, "paused": body.Paused})
 }
