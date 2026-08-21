@@ -1422,6 +1422,11 @@ func (s *Server) hoardStatsPayload() gin.H {
 		status["session_uploaded"] = hoardSessionUL
 		status["session_downloaded"] = hoardSessionDL
 	}
+	// The torrents this node's agents hold are in the table below this header,
+	// so they have to be in the header too -- otherwise a front-only node,
+	// whose every torrent lives on an agent, summarised itself as empty.
+	// /api/status stays node-local: it reports this node's engines.
+	s.mergeAgentHoardStats(status)
 	return status
 }
 
@@ -1439,17 +1444,8 @@ func (s *Server) handleHoardTorrents(c *gin.Context) {
 			out = append(out, t)
 		}
 	}
-	for _, ra := range s.agentsSnapshot() {
-		for _, e := range ra.byRole("hoard") {
-			lst, err := e.client.ListTorrentsTimeout(4 * time.Second)
-			if err != nil || lst == nil {
-				continue
-			}
-			cats, _ := e.client.TorrentCategories(e.id)
-			for _, t := range lst.Torrents {
-				out = append(out, ltStatusToRow(t, ra.name, cats))
-			}
-		}
+	for _, row := range s.agentHoardRows() {
+		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, out)
 }

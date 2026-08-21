@@ -77,6 +77,11 @@ func (s *Server) handleSSE(c *gin.Context) {
 	id, ch := hub.Subscribe()
 	defer hub.Unsubscribe(id)
 
+	// Count real browsers, so work that only exists to feed them (polling the
+	// agents, see agentrows.go) stops when the last tab closes.
+	s.sseClients.Add(1)
+	defer s.sseClients.Add(-1)
+
 	// Initial comment tells the browser the stream is open (no data yet).
 	fmt.Fprintf(out, ": connected\n\n")
 	fl.Flush()
@@ -198,6 +203,18 @@ func (s *Server) streamHydration(w interface{ Write([]byte) (int, error) }, flus
 	agents := s.agentsSnapshot()
 	agentRows := func(role string) []json.RawMessage {
 		var rows []json.RawMessage
+		// Hoard rides the cache the row pusher keeps (see agentrows.go): the
+		// live pushes diff against what hydration painted, so both have to be
+		// the same snapshot, and a browser connecting must not cost one
+		// listing per agent on top of the poll.
+		if role == "hoard" {
+			for _, r := range s.agentHoardRows() {
+				if b, err := json.Marshal(r); err == nil {
+					rows = append(rows, b)
+				}
+			}
+			return rows
+		}
 		for _, ra := range agents {
 			for _, e := range ra.byRole(role) {
 				// Bounded: a slow or dead agent must not hold up hydration for

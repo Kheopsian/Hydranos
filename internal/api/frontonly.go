@@ -134,7 +134,16 @@ func (emptyHoardEngine) ClearDownloadSlotsOverride()  {}
 func (emptyHoardEngine) PinTorrent(string)            {}
 func (emptyHoardEngine) UnpinTorrent(string)          {}
 func (emptyHoardEngine) PinnedList() []string         { return nil }
-func (emptyHoardEngine) EventHub() *engine.EventHub   { return nil }
+
+// EventHub returns a real hub even though there is no engine behind it. The
+// whole web UI is fed over /api/events, and that handler refuses to serve
+// without one: a nil hub left a front-only node with a permanently empty
+// interface. The snapshot pusher and the agent-row pusher publish into this.
+func (emptyHoardEngine) EventHub() *engine.EventHub { return frontOnlyHub }
+
+// frontOnlyHub is process-wide: a front-only node has exactly one empty hoard
+// engine, and the stub is a value type with nowhere to keep it.
+var frontOnlyHub = engine.NewEventHub(256)
 
 // SetFrontOnly marks this server as a front-only controller: the built-in
 // "local" agent is hidden from /api/agents and category placement never
