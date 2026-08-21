@@ -45,8 +45,28 @@ type agentRowCache struct {
 // different snapshot, and the pusher's view of what disappeared would depend
 // on who won.
 func (s *Server) refreshAgentHoardRows() []map[string]interface{} {
+	return s.pollAgentHoardRows(false)
+}
+
+// forceRefreshAgentHoardRows polls unconditionally. The pusher is what keeps
+// the cache fresh, so it must never coalesce onto a poll it did not make.
+func (s *Server) forceRefreshAgentHoardRows() []map[string]interface{} {
+	return s.pollAgentHoardRows(true)
+}
+
+func (s *Server) pollAgentHoardRows(force bool) []map[string]interface{} {
 	s.agentRows.pollMu.Lock()
 	defer s.agentRows.pollMu.Unlock()
+
+	// Someone else may have polled while we waited for the lock. Without this
+	// re-check, N browsers connecting at once cost N full polls back to back,
+	// each up to one 4s timeout per unreachable agent.
+	s.agentRows.mu.RLock()
+	fresh := time.Since(s.agentRows.at) < agentRowInterval
+	s.agentRows.mu.RUnlock()
+	if fresh && !force {
+		return s.allAgentRows()
+	}
 
 	next := map[string][]map[string]interface{}{}
 	for _, ra := range s.agentsSnapshot() {
@@ -95,6 +115,17 @@ func (s *Server) refreshAgentHoardRows() []map[string]interface{} {
 	return rows
 }
 
+// allAgentRows flattens the cache. Callers hold no lock.
+func (s *Server) allAgentRows() []map[string]interface{} {
+	s.agentRows.mu.RLock()
+	defer s.agentRows.mu.RUnlock()
+	var rows []map[string]interface{}
+	for _, list := range s.agentRows.byAgent {
+		rows = append(rows, list...)
+	}
+	return rows
+}
+
 // agentRowsFor returns the cached rows of one agent, or nil.
 func (s *Server) agentRowsFor(name string) []map[string]interface{} {
 	s.agentRows.mu.RLock()
@@ -113,13 +144,7 @@ func (s *Server) agentHoardRows() []map[string]interface{} {
 	if !fresh {
 		return s.refreshAgentHoardRows()
 	}
-	s.agentRows.mu.RLock()
-	defer s.agentRows.mu.RUnlock()
-	var rows []map[string]interface{}
-	for _, list := range s.agentRows.byAgent {
-		rows = append(rows, list...)
-	}
-	return rows
+	return s.allAgentRows()
 }
 
 // startAgentRowPusher keeps the rows of an open /#hoard live, since no agent
@@ -146,7 +171,7 @@ func (s *Server) startAgentRowPusher() {
 			if s.sseClients.Load() == 0 {
 				continue
 			}
-			rows := s.refreshAgentHoardRows()
+			rows := s.forceRefreshAgentHoardRows()
 			live := make(map[string]bool, len(rows))
 			for _, r := range rows {
 				if h, _ := r["info_hash"].(string); h != "" {
