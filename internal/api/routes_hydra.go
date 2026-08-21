@@ -2604,7 +2604,13 @@ func dedupeStrings(in []string) []string {
 // public-ip lookups. Returns "" on any failure (caller keeps its cached
 // value rather than blanking the UI).
 func fetchPublicIP(url string) string {
-	transport := &http.Transport{}
+	// A Transport literal zero-values every timeout, and the Client Timeout
+	// below does not cover a dial: net/http detaches it from the request, so a
+	// proxy that accepts TCP and then goes silent blocks the dial for good.
+	transport := &http.Transport{
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 20 * time.Second,
+	}
 	if d := getSocks5Proxy(); d != nil {
 		transport.DialContext = d.DialContext
 	}

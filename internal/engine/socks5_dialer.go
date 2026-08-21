@@ -7,7 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 )
+
+// socks5HandshakeTimeout bounds everything after the TCP connect. DialContext
+// honours ctx, but the greeting, the auth exchange and the CONNECT reply are
+// plain socket I/O: without a deadline a proxy that accepts the connection and
+// then stays silent blocks the dial forever, and net/http never reclaims the
+// wantConn queued behind it.
+const socks5HandshakeTimeout = 15 * time.Second
 
 // dialSOCKS5h opens a TCP connection to socksAddr, authenticates with
 // user/pass if user is non-empty (RFC 1929), sends a CONNECT request for
@@ -31,6 +39,15 @@ func dialSOCKS5h(ctx context.Context, dialer *net.Dialer, socksAddr, user, pass,
 			conn.Close()
 		}
 	}()
+
+	// Bound the handshake, and never past the caller's own deadline.
+	hsDeadline := time.Now().Add(socks5HandshakeTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(hsDeadline) {
+		hsDeadline = d
+	}
+	if err := conn.SetDeadline(hsDeadline); err != nil {
+		return nil, fmt.Errorf("socks5: set handshake deadline: %w", err)
+	}
 
 	// Greeting — RFC 1928 §3.
 	var greet []byte
@@ -115,6 +132,11 @@ func dialSOCKS5h(ctx context.Context, dialer *net.Dialer, socksAddr, user, pass,
 	}
 	if _, err := io.CopyN(io.Discard, br, skip); err != nil {
 		return nil, fmt.Errorf("socks5: skip bnd: %w", err)
+	}
+
+	// The handshake deadline must not leak into the caller's data phase.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("socks5: clear handshake deadline: %w", err)
 	}
 
 	success = true
