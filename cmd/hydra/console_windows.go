@@ -21,8 +21,9 @@ import (
 // icon. --console forces a fresh console for the cases in between (started by
 // a shortcut, by a scheduler, or while debugging).
 //
-// Nothing is lost either way: every line also goes to hydra.log next to the
-// config, and to the UI's Logs tab.
+// Nothing is lost either way: every line also goes to the UI's Logs tab, and
+// to hydra.log next to the config -- or to stdout instead, when
+// HYDRA_LOG_STDOUT is set.
 func init() {
 	const attachParentProcess = ^uint32(0) // (DWORD)-1
 
