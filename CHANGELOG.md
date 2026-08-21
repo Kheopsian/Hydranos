@@ -3,6 +3,32 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.108.0 - 2026-08-21
+
+### Fixed
+- **Announcing leaked memory for as long as the process ran: ~0.3 GB/h at 196k
+  torrents, 9 GB of live heap after 29 h.** None of the HTTP clients Hydra
+  builds by hand set `TLSHandshakeTimeout`, and a `http.Transport` literal
+  zero-values it, which means "no limit" -- only `http.DefaultTransport` sets
+  one, and nothing here inherits from it. A tracker that accepted the TCP
+  connection and then never finished the TLS handshake therefore blocked its
+  dial forever. That alone would only cost one announce, but `net/http` purges
+  `Transport.dialsInProgress` from the front only, so the stuck dial pinned
+  every `wantConn` queued behind it, each retaining the `connectMethod` built
+  from its announce URL. With keep-alives disabled every announce dials, so the
+  queue grew by one retained object per announce: 36M live objects behind three
+  pinned dials, for 54 requests actually in flight. The `http.Client` timeout
+  never covered this -- the dial is detached from the request, so cancelling
+  the request does not unblock it. All five hand-built transports now bound
+  both the handshake and the response headers, and a test fails the build on
+  any `http.Transport` literal that does not.
+- **A SOCKS5 proxy that went silent mid-handshake blocked the dial forever.**
+  Only the initial connect honoured the context; the greeting, the auth
+  exchange and the CONNECT reply were deadline-free socket I/O. The handshake
+  is now bounded (and never past the caller's own deadline), and the deadline
+  is cleared before the connection is handed back so it cannot leak into the
+  data phase.
+
 ## v3.107.1 - 2026-08-21
 
 ### Fixed

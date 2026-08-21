@@ -42,6 +42,23 @@ type TrackerAnnounceResult struct {
 // each carries its own peer_id, public IP (advertised via BEP-7 &ip=),
 // and source IP (HTTP client source-bound to that local addr so the
 // announce request leaves through the right WireGuard tunnel).
+// A dial that never returns costs far more than the announce it was carrying.
+// net/http purges Transport.dialsInProgress only from the front, so a single
+// hung dial pins every wantConn queued behind it, and each of those retains
+// the connectMethod built from the announce URL. With DisableKeepAlives every
+// announce dials, so the queue grows for as long as the head stays stuck: a
+// tracker that accepts the TCP connection and then never finishes the TLS
+// handshake left 36M live wantConn (~9 GB of heap) behind three pinned dials
+// after 29 h at 196k torrents. The Client Timeout does not cover this -- the
+// dial is detached from the request, so cancelling the request never unblocks
+// it. Only the Transport's own timeouts do, and a Transport literal
+// zero-values them (means "no limit"); http.DefaultTransport is what sets
+// them, and none of these Transports inherit from it.
+const (
+	announceTLSHandshakeTimeout   = 10 * time.Second
+	announceResponseHeaderTimeout = 20 * time.Second
+)
+
 type trackerAnnouncer struct {
 	httpClient      *http.Client
 	secondaryClient *http.Client // optional, fire-and-forget via TYPHON_ANNOUNCE_V6_PROXY (v4 egress path)
@@ -182,9 +199,11 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	}
 
 	transport := &http.Transport{
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
-		DisableKeepAlives: true,
-		DialContext:       dial,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		DisableKeepAlives:     true,
+		DialContext:           dial,
+		TLSHandshakeTimeout:   announceTLSHandshakeTimeout,
+		ResponseHeaderTimeout: announceResponseHeaderTimeout,
 	}
 	// If a SOCKS5 outbound proxy is configured (TYPHON_ANNOUNCE_PROXY env),
 	// route every announce through it. The base dialer above is reused to
@@ -225,6 +244,8 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return base.DialContext(ctx, narrow(network), addr)
 				},
+				TLSHandshakeTimeout:   announceTLSHandshakeTimeout,
+				ResponseHeaderTimeout: announceResponseHeaderTimeout,
 			}}
 		}
 		if HostHasIPv4() {
@@ -247,8 +268,10 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		socksPass, _ := pu.User.Password()
 		baseDialer := dialer
 		secondaryTransport := &http.Transport{
-			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
-			DisableKeepAlives: true,
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+			DisableKeepAlives:     true,
+			TLSHandshakeTimeout:   announceTLSHandshakeTimeout,
+			ResponseHeaderTimeout: announceResponseHeaderTimeout,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				host, portStr, err := net.SplitHostPort(addr)
 				if err != nil {

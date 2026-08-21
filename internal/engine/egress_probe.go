@@ -72,7 +72,11 @@ func PeerEgressIP(ctx context.Context, socksHost string, socksPort int, socksUse
 		}
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(ip)}
 	}
-	transport := &http.Transport{DisableKeepAlives: true}
+	transport := &http.Transport{
+		DisableKeepAlives:     true,
+		TLSHandshakeTimeout:   announceTLSHandshakeTimeout,
+		ResponseHeaderTimeout: announceResponseHeaderTimeout,
+	}
 	if h := strings.TrimSpace(socksHost); h != "" {
 		proxyAddr := net.JoinHostPort(h, fmt.Sprint(socksPort))
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
