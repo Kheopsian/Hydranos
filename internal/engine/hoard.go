@@ -1568,7 +1568,8 @@ func (e *HoardEngine) stopAllVerifying() {
 }
 
 func (e *HoardEngine) manageVerifyBatches() int {
-	result, err := e.client.ListTorrents()
+	// Reads State, InfoHash, Progress and TotalSize only.
+	result, err := e.client.ListTorrentsSlim()
 	if err != nil {
 		return 0
 	}
@@ -1865,7 +1866,9 @@ func (e *HoardEngine) enforceDownloadSlots() {
 		return
 	}
 
-	result, err := e.client.ListTorrents()
+	// Reads IsFinished, Progress, IsPaused, State, InfoHash, TotalDone and
+	// DownloadRate only.
+	result, err := e.client.ListTorrentsSlim()
 	if err != nil {
 		return
 	}

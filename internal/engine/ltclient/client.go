@@ -53,6 +53,11 @@ type Client struct {
 	listCache    *ListTorrentsResult
 	listCachedAt time.Time
 	listLenHint  atomic.Int64
+	// The slim projection gets its own slot: handing a caller that asked for
+	// the full listing a slim one would silently blank most of its fields.
+	slimCache    *ListTorrentsResult
+	slimCachedAt time.Time
+	slimLenHint  atomic.Int64
 
 	done   chan struct{}
 	closed atomic.Bool
@@ -577,14 +582,33 @@ func (c *Client) SubscribeEvents() error {
 }
 
 // ListTorrents returns all torrents in the session.
-func (c *Client) ListTorrents() (*ListTorrentsResult, error) {
+// ListTorrents returns every field the engine knows about each torrent.
+func (c *Client) ListTorrents() (*ListTorrentsResult, error) { return c.listTorrents(false) }
+
+// ListTorrentsSlim returns only the eight fields the scheduling loops read:
+// info hash, state, progress, total size, bytes done, download rate, paused and
+// finished. Everything else on TorrentStatus comes back zero, so this is for
+// callers that have been checked against that list -- not a drop-in for
+// ListTorrents.
+//
+// The full listing is the largest thing either process allocates at 196k
+// torrents, and the three loops that poll it every 10-30s read a handful of
+// fields. The engine skips the strings and the per-torrent mutexes it would
+// need for the rest.
+func (c *Client) ListTorrentsSlim() (*ListTorrentsResult, error) { return c.listTorrents(true) }
+
+func (c *Client) listTorrents(slim bool) (*ListTorrentsResult, error) {
 	if optListCache.Load() {
-		if r := c.cachedList(); r != nil {
+		if r := c.cachedListFor(slim); r != nil {
 			return r, nil
 		}
 	}
 
-	raw, err := c.callBulk("list_torrents", map[string]interface{}{})
+	params := map[string]interface{}{}
+	if slim {
+		params["slim"] = true
+	}
+	raw, err := c.callBulk("list_torrents", params)
 	if err != nil {
 		return nil, err
 	}
@@ -595,19 +619,28 @@ func (c *Client) ListTorrents() (*ListTorrentsResult, error) {
 	// previous decode makes it fill that one instead of growing its own. The
 	// count only moves when torrents are added or removed, so the hint is
 	// right nearly always and merely imperfect when it is not.
+	lenHint := &c.listLenHint
+	if slim {
+		lenHint = &c.slimLenHint
+	}
 	result := ListTorrentsResult{}
-	if hint := int(c.listLenHint.Load()); hint > 0 {
+	if hint := int(lenHint.Load()); hint > 0 {
 		result.Torrents = make([]TorrentStatus, 0, hint)
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("ltclient: unmarshal list: %w", err)
 	}
-	c.listLenHint.Store(int64(len(result.Torrents)))
+	lenHint.Store(int64(len(result.Torrents)))
 
 	if optListCache.Load() {
 		c.listMu.Lock()
-		c.listCache = &result
-		c.listCachedAt = time.Now()
+		if slim {
+			c.slimCache = &result
+			c.slimCachedAt = time.Now()
+		} else {
+			c.listCache = &result
+			c.listCachedAt = time.Now()
+		}
 		c.listMu.Unlock()
 	}
 	return &result, nil
@@ -631,13 +664,19 @@ func (c *Client) ListTorrents() (*ListTorrentsResult, error) {
 // array on every cache hit -- the copy was pure overhead, since what it
 // protected against does not happen. A future caller that needs to mutate must
 // copy what it needs, not silently write here.
-func (c *Client) cachedList() *ListTorrentsResult {
+func (c *Client) cachedList() *ListTorrentsResult { return c.cachedListFor(false) }
+
+func (c *Client) cachedListFor(slim bool) *ListTorrentsResult {
 	c.listMu.Lock()
 	defer c.listMu.Unlock()
-	if c.listCache == nil || time.Since(c.listCachedAt).Nanoseconds() > listCacheTTL.Load() {
+	cached, at := c.listCache, c.listCachedAt
+	if slim {
+		cached, at = c.slimCache, c.slimCachedAt
+	}
+	if cached == nil || time.Since(at).Nanoseconds() > listCacheTTL.Load() {
 		return nil
 	}
-	return c.listCache
+	return cached
 }
 
 // GetPeers returns connected peers for a torrent.

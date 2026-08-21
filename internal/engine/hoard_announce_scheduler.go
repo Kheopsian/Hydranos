@@ -192,7 +192,9 @@ func (s *hoardScheduler) reconcile() {
 	if s.h.startupHeld() {
 		return
 	}
-	res, err := s.h.client.ListTorrents()
+	// Reads InfoHash, TotalSize, and State/IsPaused through shouldAnnounce --
+	// all four are in the slim projection.
+	res, err := s.h.client.ListTorrentsSlim()
 	if err != nil {
 		slog.Debug("hoard_announce sched: ListTorrents failed", "error", err)
 		return
