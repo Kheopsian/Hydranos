@@ -3,6 +3,23 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.111.0 - 2026-08-21
+
+### Changed
+- **`list_torrents` can return just the fields the scheduling loops read.** The
+  announce reconcile, verify batching and download-slot loops poll the listing
+  every 10 to 30 seconds and look at eight fields out of thirty-two. They now
+  ask for `slim: true`, and the engine skips what the rest would cost: the name,
+  save path, current tracker and announce error strings, and the three mutex
+  acquisitions per torrent needed to read them. At 196k torrents this decode was
+  54% of everything the Go side allocated.
+
+  Both projections derive state, progress and bytes-done from one shared
+  function, so they cannot disagree about a torrent. Without the parameter the
+  response is byte-identical to before, and a remote agent answers with the full
+  listing rather than needing a newer wire protocol -- the slim field set is a
+  subset, so callers cannot tell.
+
 ## v3.110.0 - 2026-08-21
 
 ### Changed

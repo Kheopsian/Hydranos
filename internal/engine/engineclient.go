@@ -74,6 +74,13 @@ type EngineClient interface {
 	// Queries
 	GetStatus(infoHash string) (*ltclient.TorrentStatus, error)
 	ListTorrents() (*ltclient.ListTorrentsResult, error)
+	// ListTorrentsSlim returns the same rows with only the fields the
+	// scheduling loops read populated: info hash, state, progress, total size,
+	// bytes done, download rate, paused and finished. Everything else is zero.
+	// Callers must have been checked against that list. An implementation is
+	// always free to answer with the full listing -- the slim set is a subset,
+	// so a caller cannot tell the difference.
+	ListTorrentsSlim() (*ltclient.ListTorrentsResult, error)
 	GetPeers(infoHash string) ([]ltclient.PeerInfo, error)
 	GetSessionStats() (*ltclient.SessionStats, error)
 	GetFiles(infoHash string) ([]ltclient.FileInfo, error)

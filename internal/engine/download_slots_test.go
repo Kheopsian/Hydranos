@@ -19,6 +19,12 @@ type stubSlotClient struct {
 	stops    int
 }
 
+// enforceDownloadSlots reads the slim projection; the stub serves the same rows
+// either way, which is exactly the contract.
+func (c *stubSlotClient) ListTorrentsSlim() (*ltclient.ListTorrentsResult, error) {
+	return c.ListTorrents()
+}
+
 func (c *stubSlotClient) ListTorrents() (*ltclient.ListTorrentsResult, error) {
 	out := make([]ltclient.TorrentStatus, 0, len(c.order))
 	for _, ih := range c.order {

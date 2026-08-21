@@ -30,7 +30,7 @@ pub fn dispatch(
         "verify_torrent" => verify_torrent(params, torrent_mgr),
         "recheck_torrent" => verify_torrent(params, torrent_mgr),
         "get_status" => get_status(params, torrent_mgr),
-        "list_torrents" => list_torrents(torrent_mgr),
+        "list_torrents" => list_torrents(params, torrent_mgr),
         "get_peers" => get_peers(params, torrent_mgr),
         "add_peers" => add_peers(params, torrent_mgr),
         "set_upload_limit" => json!({"ok": true}), // TODO
@@ -213,10 +213,97 @@ fn get_status(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
     torrent_to_json(&t)
 }
 
-fn list_torrents(mgr: &Arc<TorrentManager>) -> Value {
+/// `slim: true` returns the eight fields the scheduling loops read, instead of
+/// the thirty-two the UI needs.
+///
+/// Three loops on the Go side (announce reconcile, verify batching, download
+/// slots) poll this every 10 to 30 seconds and look at a handful of fields. At
+/// 196k torrents the full listing is the single biggest thing either process
+/// allocates, and most of it is thrown away by those three callers: strings for
+/// the name, the save path, the current tracker and the announce error, plus
+/// three mutex acquisitions per torrent to read them. The slim projection
+/// touches none of that.
+///
+/// Absent or false, the response is byte-identical to what it always was.
+fn list_torrents(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
+    let slim = params.get("slim").and_then(|v| v.as_bool()).unwrap_or(false);
     let all = mgr.all();
-    let torrents: Vec<Value> = all.iter().map(|t| torrent_to_json(t)).collect();
+    let torrents: Vec<Value> = if slim {
+        all.iter().map(|t| torrent_to_json_slim(t)).collect()
+    } else {
+        all.iter().map(|t| torrent_to_json(t)).collect()
+    };
     json!({"torrents": torrents, "count": torrents.len()})
+}
+
+/// The subset the scheduling loops read. Field names and values match
+/// `torrent_to_json` exactly -- both derive them from `torrent_core`, so a
+/// change to how state or progress is computed cannot make the two disagree.
+pub fn torrent_to_json_slim(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
+    let c = torrent_core(t);
+    json!({
+        "info_hash": hex_encode(&t.info_hash),
+        "state": c.state,
+        "progress": c.progress,
+        "total_size": t.meta.total_size,
+        "total_done": c.total_done,
+        "download_rate": t.download_rate.get(),
+        "is_paused": c.is_paused,
+        "is_finished": c.progress >= 1.0,
+    })
+}
+
+/// State, progress and bytes-done, shared by the full and slim projections so
+/// they cannot drift apart.
+struct TorrentCore {
+    state: &'static str,
+    progress: f64,
+    total_done: u64,
+    is_paused: bool,
+    status_u8: u8,
+}
+
+fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
+    let status_u8 = t.status.load(Ordering::Relaxed);
+    let is_paused = t.is_paused.load(Ordering::Relaxed);
+    let state = if status_u8 == TorrentStatus::Error as u8 {
+        "error"
+    } else if is_paused {
+        "paused"
+    } else {
+        match status_u8 {
+            0 => "stopped",
+            1 => "checking_files",
+            2 => "downloading",
+            3 => "seeding",
+            4 => "error",
+            _ => "unknown",
+        }
+    };
+    // Real progress from picker's have count (was a 0.0/1.0 placeholder).
+    let (num_have, progress) = if status_u8 == TorrentStatus::Seeding as u8 {
+        (t.meta.num_pieces(), 1.0_f64)
+    } else if let Some(picker) = t.picker.get() {
+        let n = picker.lock().unwrap().num_have();
+        let total = t.meta.num_pieces();
+        let p = if total > 0 { n as f64 / total as f64 } else { 0.0 };
+        (n, p)
+    } else {
+        // No picker = added in seed_mode = its data is trusted whole (that is
+        // what makes 100k seeders cheap). Stopped before it ever ran it still
+        // holds the files, so report it complete instead of a bogus 0 % --
+        // start_torrent draws the same conclusion from the same fact.
+        (t.meta.num_pieces(), 1.0)
+    };
+    // Approximate -- over-reports by <=1 piece_length when the last (short)
+    // piece is among the have set but we can't tell cheaply. Good enough
+    // for a progress display.
+    let total_done: u64 = if progress >= 1.0 {
+        t.meta.total_size
+    } else {
+        (num_have as u64 * t.meta.piece_length as u64).min(t.meta.total_size)
+    };
+    TorrentCore { state, progress, total_done, is_paused, status_u8 }
 }
 
 fn get_peers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
@@ -621,45 +708,14 @@ fn tracker_host_of(url: &str) -> String {
 }
 
 pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
-    let status_u8 = t.status.load(Ordering::Relaxed);
-    let is_paused = t.is_paused.load(Ordering::Relaxed);
-    let state = if status_u8 == TorrentStatus::Error as u8 {
-        "error"
-    } else if is_paused {
-        "paused"
-    } else {
-        match status_u8 {
-            0 => "stopped",
-            1 => "checking_files",
-            2 => "downloading",
-            3 => "seeding",
-            4 => "error",
-            _ => "unknown",
-        }
-    };
-    // Real progress from picker's have count (was a 0.0/1.0 placeholder).
-    let (num_have, progress) = if status_u8 == TorrentStatus::Seeding as u8 {
-        (t.meta.num_pieces(), 1.0_f64)
-    } else if let Some(picker) = t.picker.get() {
-        let n = picker.lock().unwrap().num_have();
-        let total = t.meta.num_pieces();
-        let p = if total > 0 { n as f64 / total as f64 } else { 0.0 };
-        (n, p)
-    } else {
-        // No picker = added in seed_mode = its data is trusted whole (that is
-        // what makes 100k seeders cheap). Stopped before it ever ran it still
-        // holds the files, so report it complete instead of a bogus 0 % —
-        // start_torrent draws the same conclusion from the same fact.
-        (t.meta.num_pieces(), 1.0)
-    };
-    // Approximate — over-reports by ≤1 piece_length when the last (short)
-    // piece is among the have set but we can't tell cheaply. Good enough
-    // for a progress display.
-    let total_done: u64 = if progress >= 1.0 {
-        t.meta.total_size
-    } else {
-        (num_have as u64 * t.meta.piece_length as u64).min(t.meta.total_size)
-    };
+    // Shared with the slim projection so the two cannot disagree on what a
+    // torrent's state or progress is.
+    let core = torrent_core(t);
+    let status_u8 = core.status_u8;
+    let is_paused = core.is_paused;
+    let state = core.state;
+    let progress = core.progress;
+    let total_done = core.total_done;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

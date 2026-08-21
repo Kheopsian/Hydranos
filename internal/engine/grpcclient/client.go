@@ -359,6 +359,17 @@ func (c *Client) ListTorrentsTimeout(d time.Duration) (*ltclient.ListTorrentsRes
 	return &res, nil
 }
 
+// ListTorrentsSlim answers with the full listing.
+//
+// The projection exists to spare the local engine the strings and mutexes it
+// would touch for 196k torrents; a remote agent holds a small set, and teaching
+// the agent wire protocol a new parameter would mean an agent running an older
+// binary could not serve it. The slim field set is a subset of the full one, so
+// the caller sees exactly what it asked for either way.
+func (c *Client) ListTorrentsSlim() (*ltclient.ListTorrentsResult, error) {
+	return c.ListTorrents()
+}
+
 func (c *Client) ListTorrents() (*ltclient.ListTorrentsResult, error) {
 	var res ltclient.ListTorrentsResult
 	if err := c.call(agentwire.MethodListTorrents, nil, &res); err != nil {
