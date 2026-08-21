@@ -1,10 +1,13 @@
 package logs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestRotatingFileRotatesAtLimit(t *testing.T) {
@@ -121,4 +124,95 @@ func TestParseEngineLevelHandlesANSI(t *testing.T) {
 			t.Errorf("parseEngineLevel(%q) = %q, want %q", tc.line, got, tc.want)
 		}
 	}
+}
+
+func TestStdoutMirrorEnv(t *testing.T) {
+	for _, tc := range []struct {
+		val  string
+		want bool
+	}{
+		{"", false}, {"0", false}, {"false", false}, {"no", false}, {"off", false},
+		{"1", true}, {"true", true}, {"yes", true}, {" On ", true},
+	} {
+		t.Setenv(StdoutMirrorEnv, tc.val)
+		if got := StdoutMirror(); got != tc.want {
+			t.Errorf("%s=%q: got %v, want %v", StdoutMirrorEnv, tc.val, got, tc.want)
+		}
+	}
+}
+
+func TestSetMirrorStdoutNaming(t *testing.T) {
+	h := NewHub(10)
+	if h.MirrorName() != "" {
+		t.Fatalf("fresh hub reports mirror %q", h.MirrorName())
+	}
+	h.SetMirrorStdout()
+	if h.MirrorName() != "stdout" {
+		t.Fatalf("got %q, want stdout", h.MirrorName())
+	}
+	h.SetMirrorFileBeside(filepath.Join(t.TempDir(), "default.toml"), "hydra.log")
+	if h.MirrorName() != "hydra.log" {
+		t.Fatalf("got %q, want hydra.log", h.MirrorName())
+	}
+}
+
+// blockingWriter stands in for a stdout pipe whose reader has stopped: every
+// write parks until the test lets it through.
+type blockingWriter struct {
+	release chan struct{}
+	mu      sync.Mutex
+	got     []string
+}
+
+func (b *blockingWriter) Write(p []byte) (int, error) {
+	<-b.release
+	b.mu.Lock()
+	b.got = append(b.got, string(p))
+	b.mu.Unlock()
+	return len(p), nil
+}
+
+func (b *blockingWriter) contains(sub string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, g := range b.got {
+		if strings.Contains(g, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAsyncWriterDropsInsteadOfBlocking(t *testing.T) {
+	release := make(chan struct{})
+	bw := &blockingWriter{release: release}
+	a := newAsyncWriter(bw, 2)
+
+	// Hub.Add writes the mirror under the hub lock, so a write that parks here
+	// parks every log producer in the process. Returning is the assertion.
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			fmt.Fprintf(a, "line %d\n", i)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("writes blocked on a stalled consumer")
+	}
+	if a.dropped.Load() == 0 {
+		t.Fatal("100 lines through a depth-2 queue dropped nothing")
+	}
+
+	// Once the consumer catches up the loss is reported, not swallowed.
+	close(release)
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if bw.contains("log mirror dropped") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("drops never reported once the consumer caught up")
 }

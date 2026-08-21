@@ -488,10 +488,21 @@ func main() {
 	// UI "Logs" tab + hydra.log mirror). The console stays clean: only ERROR
 	// surfaces there, plus the explicit human startup banner below.
 	logHub := logs.Default
-	logger := slog.New(logs.NewMultiHandler(
-		logs.NewSlogHandler(logHub, slog.LevelInfo),
-		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}),
-	))
+	// $HYDRA_LOG_STDOUT sends the mirror to stdout instead of the file. It
+	// needs no config path, so attach it here rather than next to the
+	// SetMirrorFileBeside call below: the mirror then catches every line of
+	// the run, including the ones logged while the config is being resolved.
+	stdoutLogs := logs.StdoutMirror()
+	if stdoutLogs {
+		logHub.SetMirrorStdout()
+	}
+	handlers := []slog.Handler{logs.NewSlogHandler(logHub, slog.LevelInfo)}
+	if !stdoutLogs {
+		// With the mirror on stdout every ERROR is already on the console;
+		// the stderr handler would print each one a second time.
+		handlers = append(handlers, slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	}
+	logger := slog.New(logs.NewMultiHandler(handlers...))
 	slog.SetDefault(logger)
 	logs.PrintHeader(version)
 
@@ -522,7 +533,9 @@ func main() {
 	})
 	resolved, seeded := resolveConfigPath(*configPath, configExplicit)
 	*configPath = resolved
-	logHub.SetMirrorFileBeside(*configPath, "hydra.log")
+	if !stdoutLogs {
+		logHub.SetMirrorFileBeside(*configPath, "hydra.log")
+	}
 	if seeded {
 		if configExplicit {
 			// Worth a warning, not a note: a typo in --config lands here too,

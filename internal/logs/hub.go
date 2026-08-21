@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,8 @@ type Hub struct {
 	max    int
 	subs   map[chan Entry]struct{}
 	mirror io.Writer
+	// mirrorName describes the mirror destination for the startup banner.
+	mirrorName string
 }
 
 // Default is the process-wide hub.
@@ -46,10 +49,27 @@ func NewHub(max int) *Hub {
 	return &Hub{max: max, subs: make(map[chan Entry]struct{})}
 }
 
-// SetMirror tees every entry to w (best-effort).
-func (h *Hub) SetMirror(w io.Writer) {
+// StdoutMirrorEnv asks for the mirror on stdout instead of the log file.
+// Set it to any value other than the usual "off" spellings (0/false/no/off).
+const StdoutMirrorEnv = "HYDRA_LOG_STDOUT"
+
+// StdoutMirror reports whether the environment asks for the log mirror on
+// stdout. A file inside the config volume is the wrong place to look when
+// Hydra runs under Docker, systemd or a process supervisor: those want the
+// stream on stdout, where `docker logs` and the journal pick it up.
+func StdoutMirror() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(StdoutMirrorEnv))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// SetMirror tees every entry to w (best-effort). name describes the
+// destination for the startup banner; it may be empty.
+func (h *Hub) SetMirror(w io.Writer, name string) {
 	h.mu.Lock()
-	h.mirror = w
+	h.mirror, h.mirrorName = w, name
 	h.mu.Unlock()
 }
 
@@ -63,7 +83,67 @@ func (h *Hub) SetMirrorFileBeside(configPath, name string) {
 	if err != nil {
 		return
 	}
-	h.SetMirror(f)
+	h.SetMirror(f, name)
+}
+
+// SetMirrorStdout mirrors every entry to stdout instead of a file. Unlike the
+// file mirror this needs no config path, so it can be attached before the
+// config is resolved and catch the very first lines of the run.
+//
+// The write goes through an async queue, which the file mirror does not need.
+// Add formats the mirror line while holding the hub lock, so a mirror that
+// blocks blocks every log producer in the process with it -- the engines'
+// stdout ingestion, gin, every slog call. A regular file write returns; stdout
+// under a supervisor is a pipe, and a pipe whose reader stalls does not.
+func (h *Hub) SetMirrorStdout() { h.SetMirror(newAsyncWriter(os.Stdout, asyncMirrorDepth), "stdout") }
+
+// asyncMirrorDepth is the queue the stdout mirror absorbs a stalled reader
+// with. At the production rate -- the engines log a line per inbound peer
+// connection -- this is a few seconds of slack before anything is dropped.
+const asyncMirrorDepth = 4096
+
+// asyncWriter hands writes to a single drain goroutine through a bounded
+// queue, and drops rather than blocks when the queue is full: losing log lines
+// beats wedging the process that produces them. Drops are never silent -- the
+// count is reported inline as soon as the consumer catches up.
+type asyncWriter struct {
+	ch      chan []byte
+	dropped atomic.Uint64
+}
+
+func newAsyncWriter(w io.Writer, depth int) *asyncWriter {
+	a := &asyncWriter{ch: make(chan []byte, depth)}
+	go func() {
+		for b := range a.ch {
+			if n := a.dropped.Swap(0); n > 0 {
+				fmt.Fprintf(w, "%s %-13s %-5s log mirror dropped %d line(s): consumer too slow\n",
+					time.Now().Format("2006-01-02T15:04:05.000"), "logs", "WARN", n)
+			}
+			_, _ = w.Write(b)
+		}
+	}()
+	return a
+}
+
+// Write never blocks and never fails: a log mirror has nothing useful to do
+// with a write error, exactly as the file mirror treats its own.
+func (a *asyncWriter) Write(p []byte) (int, error) {
+	b := make([]byte, len(p))
+	copy(b, p)
+	select {
+	case a.ch <- b:
+	default:
+		a.dropped.Add(1)
+	}
+	return len(p), nil
+}
+
+// MirrorName describes where the mirror writes ("hydra.log", "stdout"), or ""
+// when there is no mirror.
+func (h *Hub) MirrorName() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.mirrorName
 }
 
 func (h *Hub) Add(e Entry) {
@@ -581,6 +661,10 @@ func PrintReady(host string, port int, firstRun bool) {
 	} else {
 		b.WriteString(centered("Login already set. Lost the password? run: hydra reset-password <new>", w) + "\n")
 	}
-	b.WriteString("\n" + centered("Detailed logs -> hydra.log   |   UI \"Logs\" tab", w) + "\n\n")
+	logsLine := "UI \"Logs\" tab"
+	if dest := Default.MirrorName(); dest != "" {
+		logsLine = "Detailed logs -> " + dest + "   |   " + logsLine
+	}
+	b.WriteString("\n" + centered(logsLine, w) + "\n\n")
 	fmt.Fprint(os.Stdout, b.String())
 }
