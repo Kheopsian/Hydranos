@@ -346,6 +346,30 @@ func (ra *remoteAgent) anyClient() *grpcclient.Client {
 	return nil
 }
 
+// resolveEngine maps an engine selector -- an engine id ("race-0") OR a role
+// ("race") -- to the client and the REAL engine id to put on the wire. The
+// agent indexes its rich engines by config id, so sending a role straight
+// through misses whenever the id is not literally "race"/"hoard". Returns a
+// nil client when the agent hosts nothing matching.
+func (ra *remoteAgent) resolveEngine(sel string) (*grpcclient.Client, string) {
+	for _, e := range ra.engines {
+		if e.id == sel {
+			return e.client, e.id
+		}
+	}
+	for _, e := range ra.engines {
+		if e.role == sel {
+			return e.client, e.id
+		}
+	}
+	if sel == "" {
+		if c := ra.anyClient(); c != nil {
+			return c, ra.engines[0].id
+		}
+	}
+	return nil, sel
+}
+
 // byRole returns the agent's engines of a given role.
 func (ra *remoteAgent) byRole(role string) []remoteEngine {
 	var out []remoteEngine

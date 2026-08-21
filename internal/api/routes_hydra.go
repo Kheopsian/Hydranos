@@ -947,8 +947,12 @@ func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, catego
 	if cat != nil {
 		sp = cat.SavePathFor(target)
 	}
+	cl, engineID := ra.resolveEngine(mode)
+	if cl == nil {
+		return "", fmt.Errorf("agent %q hosts no %s engine", target, mode)
+	}
 	var r *ltclient.AddTorrentResult
-	r, err := ra.anyClient().AddRouted(mode, torrentPath, sp, category)
+	r, err := cl.AddRouted(engineID, torrentPath, sp, category)
 	if err != nil {
 		return "", err
 	}
@@ -3721,14 +3725,7 @@ func (s *Server) handleAgentAction(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no agent named " + name})
 		return
 	}
-	cl := ra.anyClient()
-	engineID := body.Engine
-	for _, e := range ra.engines {
-		if engineID == "" || e.id == engineID || e.role == engineID {
-			cl, engineID = e.client, e.id
-			break
-		}
-	}
+	cl, engineID := ra.resolveEngine(body.Engine)
 	if cl == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "agent " + name + " is not reachable"})
 		return

@@ -3,6 +3,20 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.107.1 - 2026-08-21
+
+### Fixed
+- **Adding a torrent to a remote agent no longer fails with `engine "race" not
+  wired on agent`.** An agent names its engines from its own config, where the
+  id is free-form (`race-0`) and the role is what says what the engine is. The
+  add path put the *role* on the wire as the engine id, so the agent -- which
+  indexes its engines by id -- found nothing unless the id happened to be
+  spelled exactly like the role. Every other routed call already carried the
+  real id, which is why only add broke, and only on agents whose ids are not
+  literally `race`/`hoard`. The control plane now resolves a selector (id or
+  role) to the agent's real engine id before the call, and an agent that hosts
+  no such engine is reported as that, rather than as an opaque gRPC failure.
+
 ## v3.107.0 - 2026-08-21
 
 ### Fixed

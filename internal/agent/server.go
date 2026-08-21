@@ -180,7 +180,7 @@ func (s *Server) authStream(srv interface{}, ss grpc.ServerStream, _ *grpc.Strea
 // rawHubFor returns the raw ltclient.Event hub of the rich engine registered
 // under id, or nil if none (additive mode).
 func (s *Server) rawHubFor(id string) *engine.EventHub {
-	if e := s.rich[id]; e != nil {
+	if e := s.resolveRich(id); e != nil {
 		return e.RawEventHub()
 	}
 	return nil
@@ -615,6 +615,21 @@ func (s *Server) handleListEngines() (*agentpb.CallReply, error) {
 	return reply(out, nil)
 }
 
+// resolveRich looks an engine up by id, then falls back to the first engine
+// whose ROLE matches. Config engine ids are arbitrary ("race-0") while callers
+// address engines by role ("race"), so an id-only lookup misses.
+func (s *Server) resolveRich(id string) engine.RichEngine {
+	if e := s.rich[id]; e != nil {
+		return e
+	}
+	for _, e := range s.rich {
+		if string(e.Role()) == id {
+			return e
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleAddRouted(p agentwire.AddRoutedParams) (*agentpb.CallReply, error) {
 	if len(p.Torrent) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "add_routed: empty torrent bytes")
@@ -623,7 +638,7 @@ func (s *Server) handleAddRouted(p agentwire.AddRoutedParams) (*agentpb.CallRepl
 	if id == "" {
 		id = agentwire.EngineRace
 	}
-	e := s.rich[id]
+	e := s.resolveRich(id)
 	if e == nil {
 		return nil, status.Errorf(codes.Unavailable, "engine %q not wired on agent", id)
 	}
@@ -645,7 +660,7 @@ func (s *Server) handleActionRouted(p agentwire.ActionRoutedParams) (*agentpb.Ca
 	if id == "" {
 		id = agentwire.EngineHoard
 	}
-	e := s.rich[id]
+	e := s.resolveRich(id)
 	if e == nil {
 		return nil, status.Errorf(codes.Unavailable, "engine %q not wired on agent", id)
 	}

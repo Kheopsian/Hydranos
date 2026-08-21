@@ -379,13 +379,7 @@ func (s *Server) editTrackersOne(infoHash string, req trackerEditRequest) ([][]s
 	// report "no such torrent" for something plainly in the list. The agent's
 	// data-plane already speaks get/set trackers, so the same edit runs there.
 	if ra, engineID, ok := s.findRemoteOwner(infoHash); ok && ra != nil {
-		cl := ra.anyClient()
-		for _, e := range ra.engines {
-			if e.id == engineID || e.role == engineID {
-				cl, engineID = e.client, e.id
-				break
-			}
-		}
+		cl, _ := ra.resolveEngine(engineID)
 		if cl == nil {
 			return nil, false, fmt.Errorf("agent %s is not reachable", ra.name)
 		}
