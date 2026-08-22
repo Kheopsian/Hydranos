@@ -3,6 +3,23 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.115.0 - 2026-08-22
+
+### Added
+- **A dedicated agent node now answers a health probe.** Agent-only runs no
+  api.Server, so a container built around one had nothing to reply to a health
+  check with and every agent came up as "unknown" to whatever orchestrated it.
+  The node now serves `GET /health` and nothing else: other paths 404, writes
+  405. Healthy means every engine answers a ping rather than merely that the
+  process is alive, because an engine can die with the gRPC server still
+  replying normally, and a check that only proves the process exists keeps a
+  node in rotation that can seed nothing. Each ping is bounded so a wedged
+  engine fails the probe instead of hanging it, and the body names the engine
+  that failed. The listener defaults to `[daemon] api_host:api_port`, free on
+  an agent for want of an api.Server and already published by whatever runs the
+  container; `--health-addr` moves it and `--health-addr=off` drops it
+  entirely. Thanks to @the-sblah (#27).
+
 ## v3.114.0 - 2026-08-22
 
 ### Changed
