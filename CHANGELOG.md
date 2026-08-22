@@ -3,6 +3,23 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.116.0 - 2026-08-22
+
+### Fixed
+- **A front that started before its agents were reachable never picked them
+  up.** The boot dial ran once; an agent that was still starting, or briefly
+  unreachable, stayed unregistered until the whole front was restarted. A
+  background loop now re-dials the configured agents every minute until each
+  one registers and answers a ping, so the order the machines boot in stops
+  mattering. Thanks to @the-sblah (#28).
+- **Deleting an agent declared in the TOML no longer undoes itself.** The
+  retry loop replayed every `[[agent]]` block unconditionally, and a delete
+  made from the Agents menu can only tombstone entries that live in
+  agents.json, so an agent declared in the config came back on the next tick.
+  A delete now records itself for TOML agents too, and the retry loop skips
+  everything in the removed store; restoring an agent still brings it back at
+  once.
+
 ## v3.115.0 - 2026-08-22
 
 ### Added

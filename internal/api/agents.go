@@ -204,7 +204,20 @@ func (s *Server) handleAgentDelete(c *gin.Context) {
 	m := loadAgentStore(s.config.Daemon.DataDir)
 	// Soft-delete: park the config in the removed store so an accidental
 	// delete is one click to restore. The remote agent keeps running.
-	if entry, ok := m[name]; ok {
+	entry, ok := m[name]
+	if !ok {
+		// A [[agent]] block from the TOML never lands in agents.json, so the
+		// removed store is the only place a delete can be recorded for it.
+		// Without that record the reconnect loop dials it again a minute later
+		// and the delete undoes itself.
+		for _, ag := range s.config.Agents {
+			if ag.Name == name {
+				entry, ok = agentStore{Addr: ag.Addr, Token: ag.Token, TLSCa: ag.TLSCa}, true
+				break
+			}
+		}
+	}
+	if ok {
 		rm := loadRemovedStore(s.config.Daemon.DataDir)
 		rm[name] = entry
 		saveRemovedStore(s.config.Daemon.DataDir, rm)
