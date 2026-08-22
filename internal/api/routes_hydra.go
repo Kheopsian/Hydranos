@@ -414,6 +414,8 @@ type agentInfo struct {
 	Addr       string              `json:"addr,omitempty"`
 	Engines    []engineInfo        `json:"engines,omitempty"`
 	ExitIP     string              `json:"exit_ip,omitempty"`
+	ExitIPv6   string              `json:"exit_ip_v6,omitempty"`
+	IPv6Wanted bool                `json:"ipv6_wanted,omitempty"`
 	Interfaces []agentwire.NICInfo `json:"interfaces,omitempty"`
 }
 
@@ -430,7 +432,13 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 		if s.hoardEngine != nil {
 			engs = append(engs, engineInfo{ID: "hoard", Role: "hoard", Online: true})
 		}
-		agents = append(agents, agentInfo{Name: "local", Kind: "local", Online: len(engs) > 0, Engines: engs, ExitIP: getPublicIP(), Interfaces: localNICs()})
+		localV6Wanted := s.config != nil && (s.config.Race.EnableIPv6 || s.config.Hoard.EnableIPv6)
+		localV6 := ""
+		if localV6Wanted { // no v6 lookup unless an engine listens on it (see PublicIPs)
+			localV6 = getPublicIPv6()
+		}
+		agents = append(agents, agentInfo{Name: "local", Kind: "local", Online: len(engs) > 0, Engines: engs,
+			ExitIP: getPublicIP(), ExitIPv6: localV6, IPv6Wanted: localV6Wanted, Interfaces: localNICs()})
 	}
 	for _, ra := range s.agentsSnapshot() {
 		var engs []engineInfo
@@ -440,14 +448,16 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 			online = online || up
 			engs = append(engs, engineInfo{ID: e.id, Role: e.role, Online: up})
 		}
-		var exitIP string
+		var exitIP, exitIPv6 string
+		var v6Wanted bool
 		var ifaces []agentwire.NICInfo
 		if len(ra.engines) > 0 && ra.engines[0].client != nil {
 			if ni, nerr := ra.engines[0].client.NodeInfo(); nerr == nil {
-				exitIP, ifaces = ni.PublicIP, ni.Interfaces
+				exitIP, exitIPv6, v6Wanted, ifaces = ni.PublicIP, ni.PublicIPv6, ni.IPv6Wanted, ni.Interfaces
 			}
 		}
-		agents = append(agents, agentInfo{Name: ra.name, Kind: "grpc", Addr: ra.addr, Online: online, Engines: engs, ExitIP: exitIP, Interfaces: ifaces})
+		agents = append(agents, agentInfo{Name: ra.name, Kind: "grpc", Addr: ra.addr, Online: online, Engines: engs,
+			ExitIP: exitIP, ExitIPv6: exitIPv6, IPv6Wanted: v6Wanted, Interfaces: ifaces})
 	}
 	c.JSON(http.StatusOK, agents)
 }

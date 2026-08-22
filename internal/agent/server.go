@@ -65,6 +65,8 @@ type Server struct {
 	// a node hosts an arbitrary set of engines). Empty in additive mode. Each
 	// value is role-typed via RichEngine.Role().
 	rich map[string]engine.RichEngine
+
+	ipv6Wanted bool // enable_ipv6 on any engine here; set at boot
 }
 
 // NewServer builds an agent over the given named EngineClients (e.g.
@@ -99,6 +101,10 @@ func (s *Server) SetTLS(certFile, keyFile string) { s.tlsCert, s.tlsKey = certFi
 // SetOwnEvents opts the agent into owning the engine event handler. Safe only
 // when nothing else consumes these EngineClients' events (dedicated agent).
 func (s *Server) SetOwnEvents(v bool) { s.ownEvents = v }
+
+// SetIPv6Wanted opts node_info into reporting the v6 egress. The engine configs
+// live in the process that builds them, not here, hence the setter.
+func (s *Server) SetIPv6Wanted(v bool) { s.ipv6Wanted = v }
 
 // AddRichEngine registers a role-typed local engine under an id for routed
 // add/action/subscribe. Ids are arbitrary ("race", "hoard", "hoard2", ...).
@@ -780,35 +786,57 @@ func (s *Server) broadcast(name string, frame []byte) {
 
 // ---- Node-level info (exit IP + interfaces) ----
 
+type pubIPCache struct {
+	mu      sync.Mutex
+	ip      string
+	at      time.Time
+	lastTry time.Time
+	url     string
+}
+
+// Retry throttle after a FAILED lookup: without it a v6-enabled node on a host
+// with no v6 pays the 8s timeout on every node_info, and the agents table asks
+// one node after another.
+const pubIPRetryAfter = 60 * time.Second
+
 var (
-	agentPubIP     string
-	agentPubIPTime time.Time
-	agentPubIPMu   sync.Mutex
+	agentPubIP   = &pubIPCache{url: "https://api.ipify.org/"}
+	agentPubIPv6 = &pubIPCache{url: "https://api6.ipify.org/"}
 )
 
-// agentPublicIP returns this agent's egress IP (its own tunnel's public IP when
-// behind a per-agent VPN). Cached 5 min. Empty on failure (keeps last value).
-func agentPublicIP() string {
-	agentPubIPMu.Lock()
-	defer agentPubIPMu.Unlock()
-	if agentPubIP != "" && time.Since(agentPubIPTime) < 5*time.Minute {
-		return agentPubIP
+// get refreshes at most every 5 min, and keeps the last known value on failure
+// rather than blanking a display that was correct a moment ago.
+func (c *pubIPCache) get() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ip != "" && time.Since(c.at) < 5*time.Minute {
+		return c.ip
 	}
+	if !c.lastTry.IsZero() && time.Since(c.lastTry) < pubIPRetryAfter {
+		return c.ip
+	}
+	c.lastTry = time.Now()
 	cl := &http.Client{Timeout: 8 * time.Second}
-	resp, err := cl.Get("https://api.ipify.org/")
+	resp, err := cl.Get(c.url)
 	if err != nil {
-		return agentPubIP
+		return c.ip
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 64))
 	if err != nil {
-		return agentPubIP
+		return c.ip
 	}
 	if ip := strings.TrimSpace(string(b)); ip != "" {
-		agentPubIP, agentPubIPTime = ip, time.Now()
+		c.ip, c.at = ip, time.Now()
 	}
-	return agentPubIP
+	return c.ip
 }
+
+// agentPublicIP is this agent's egress IP -- its own tunnel's, behind a VPN.
+func agentPublicIP() string { return agentPubIP.get() }
+
+// agentPublicIPv6 hits an AAAA-only endpoint: a v4-only host returns "".
+func agentPublicIPv6() string { return agentPubIPv6.get() }
 
 func agentNICs() []agentwire.NICInfo {
 	out := []agentwire.NICInfo{}
@@ -834,7 +862,16 @@ func agentNICs() []agentwire.NICInfo {
 }
 
 func (s *Server) handleNodeInfo() (*agentpb.CallReply, error) {
-	return reply(agentwire.NodeInfo{PublicIP: agentPublicIP(), Interfaces: agentNICs()}, nil)
+	ni := agentwire.NodeInfo{
+		PublicIP:   agentPublicIP(),
+		IPv6Wanted: s.ipv6Wanted,
+		Interfaces: agentNICs(),
+	}
+	// Off, the AAAA-only endpoint is unreachable: don't pay its timeout.
+	if s.ipv6Wanted {
+		ni.PublicIPv6 = agentPublicIPv6()
+	}
+	return reply(ni, nil)
 }
 
 // handleGetAnnounceOverrides returns this agent's per-host passkey + client

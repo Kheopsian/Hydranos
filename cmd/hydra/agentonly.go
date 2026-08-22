@@ -210,9 +210,12 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 	agentSrv.SetUploadsDir(uploadsDir)
 	agentSrv.SetTLS(tlsCert, tlsKey)
 	agentSrv.SetOwnEvents(true)
+	v6 := false
 	for _, le := range lives {
 		agentSrv.AddRichEngine(le.id, le.rich)
+		v6 = v6 || le.cfg.EnableIPv6
 	}
+	agentSrv.SetIPv6Wanted(v6)
 	go func() {
 		slog.Info("HydraAgent (agent-only) serving", "addr", addr)
 		if serr := agentSrv.Serve(ctx, addr); serr != nil {
