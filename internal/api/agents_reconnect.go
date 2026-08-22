@@ -41,17 +41,26 @@ func (s *Server) reconnectRemoteAgents() {
 }
 
 // desiredRemoteAgents merges TOML [[agent]] blocks with agents.json. Config
-// wins on name collisions; agents_removed.json is not consulted.
+// wins on name collisions. Soft-deleted agents are left out: re-dialling one
+// would undo a delete the user made from the Agents menu, and for a TOML agent
+// the removed store is the only record that delete leaves.
 func (s *Server) desiredRemoteAgents() map[string]agentStore {
+	removed := loadRemovedStore(s.config.Daemon.DataDir)
 	out := make(map[string]agentStore)
 	for _, ag := range s.config.Agents {
 		if ag.Name == "" || ag.Addr == "" {
+			continue
+		}
+		if _, gone := removed[ag.Name]; gone {
 			continue
 		}
 		out[ag.Name] = agentStore{Addr: ag.Addr, Token: ag.Token, TLSCa: ag.TLSCa}
 	}
 	for name, a := range loadAgentStore(s.config.Daemon.DataDir) {
 		if _, exists := out[name]; exists {
+			continue
+		}
+		if _, gone := removed[name]; gone {
 			continue
 		}
 		out[name] = a
