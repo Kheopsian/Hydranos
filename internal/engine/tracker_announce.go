@@ -488,17 +488,78 @@ func GetClientOverrides() map[string]ClientSpoof {
 	return out
 }
 
-// clientOverrideFor returns the spoof preset for a tracker URL, if any host
-// substring matches.
+// overrideHost extracts the host used to match per-tracker override keys. It
+// accepts the three shapes callers pass in: a full tracker URL, a bare host,
+// and a dial target "host:port" (announceIPModeFor is called with all three).
+// Returns "" when no host can be recovered.
+func overrideHost(target string) string {
+	t := strings.TrimSpace(target)
+	if t == "" {
+		return ""
+	}
+	if strings.Contains(t, "://") {
+		if u, err := url.Parse(t); err == nil && u.Hostname() != "" {
+			return strings.ToLower(u.Hostname())
+		}
+		return ""
+	}
+	// Bare "host:port" (or "[v6]:port"); SplitHostPort fails on a bare host,
+	// in which case the input already is the host.
+	if h, _, err := net.SplitHostPort(t); err == nil && h != "" {
+		return strings.ToLower(h)
+	}
+	return strings.ToLower(strings.Trim(t, "[]"))
+}
+
+// hostKeyMatches reports whether a tracker host matches a configured override
+// key, by exact host or on a dot boundary. This replaces a plain substring
+// test: "torr" used to match "torr9.net", so a passkey configured for one
+// tracker could be sent to a different one. Worse, the old form walked a Go
+// map, whose iteration order is randomised, so with several keys the wrong
+// match was picked intermittently rather than every time.
+func hostKeyMatches(host, key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if host == "" || key == "" {
+		return false
+	}
+	return host == key || strings.HasSuffix(host, "."+key)
+}
+
+// longestOverrideKey returns the longest configured key matching host, so
+// overlapping keys ("tr4ker.net" and "tk.tr4ker.net") resolve to the most
+// specific one deterministically, whatever the map order. Caller holds the
+// relevant read lock.
+func longestOverrideKey(host string, keys func(func(string) bool)) string {
+	best := ""
+	keys(func(k string) bool {
+		if hostKeyMatches(host, k) && len(k) > len(best) {
+			best = k
+		}
+		return true
+	})
+	return best
+}
+
+// clientOverrideFor returns the spoof preset for a tracker URL. Matching is on
+// the URL host, exact or dot-boundary; the longest configured key wins.
 func clientOverrideFor(trackerURL string) (ClientSpoof, bool) {
 	clientOverrideMu.RLock()
 	defer clientOverrideMu.RUnlock()
-	for host, c := range clientOverrides {
-		if strings.Contains(trackerURL, host) {
-			return c, true
-		}
+	host := overrideHost(trackerURL)
+	if host == "" {
+		return ClientSpoof{}, false
 	}
-	return ClientSpoof{}, false
+	key := longestOverrideKey(host, func(yield func(string) bool) {
+		for k := range clientOverrides {
+			if !yield(k) {
+				return
+			}
+		}
+	})
+	if key == "" {
+		return ClientSpoof{}, false
+	}
+	return clientOverrides[key], true
 }
 
 // Per-tracker secondary-announce stats mode (host-substring -> mode). Controls
@@ -582,12 +643,21 @@ func GetSecondaryStatsOverrides() map[string]string {
 func secondaryStatsModeFor(trackerURL string) string {
 	secondaryStatsMu.RLock()
 	defer secondaryStatsMu.RUnlock()
-	for host, m := range secondaryStatsOverrides {
-		if strings.Contains(trackerURL, host) {
-			return m
-		}
+	host := overrideHost(trackerURL)
+	if host == "" {
+		return "clone"
 	}
-	return "clone"
+	key := longestOverrideKey(host, func(yield func(string) bool) {
+		for k := range secondaryStatsOverrides {
+			if !yield(k) {
+				return
+			}
+		}
+	})
+	if key == "" {
+		return "clone"
+	}
+	return secondaryStatsOverrides[key]
 }
 
 // Per-tracker announce address family (host-substring -> mode). A dual-stack
@@ -800,12 +870,21 @@ func AnnounceIPModeForHost(host string) string {
 func announceIPModeFor(trackerURL string) string {
 	announceIPModeMu.RLock()
 	defer announceIPModeMu.RUnlock()
-	for host, m := range announceIPModes {
-		if strings.Contains(trackerURL, host) {
-			return m
-		}
+	host := overrideHost(trackerURL)
+	if host == "" {
+		return AnnounceIPModeAuto
 	}
-	return AnnounceIPModeAuto
+	key := longestOverrideKey(host, func(yield func(string) bool) {
+		for k := range announceIPModes {
+			if !yield(k) {
+				return
+			}
+		}
+	})
+	if key == "" {
+		return AnnounceIPModeAuto
+	}
+	return announceIPModes[key]
 }
 
 // applyPasskeyOverride rewrites the /announce/<passkey> path segment for any
@@ -817,26 +896,34 @@ func applyPasskeyOverride(trackerURL string) string {
 	if len(passkeyOverrides) == 0 {
 		return trackerURL
 	}
-	for host, pk := range passkeyOverrides {
-		if !strings.Contains(trackerURL, host) {
-			continue
-		}
-		const marker = "/announce/"
-		i := strings.Index(trackerURL, marker)
-		if i < 0 {
-			continue
-		}
-		start := i + len(marker)
-		end := len(trackerURL)
-		for j := start; j < len(trackerURL); j++ {
-			if trackerURL[j] == '/' || trackerURL[j] == '?' {
-				end = j
-				break
+	host := overrideHost(trackerURL)
+	if host == "" {
+		return trackerURL
+	}
+	key := longestOverrideKey(host, func(yield func(string) bool) {
+		for k := range passkeyOverrides {
+			if !yield(k) {
+				return
 			}
 		}
-		return trackerURL[:start] + pk + trackerURL[end:]
+	})
+	if key == "" {
+		return trackerURL
 	}
-	return trackerURL
+	const marker = "/announce/"
+	i := strings.Index(trackerURL, marker)
+	if i < 0 {
+		return trackerURL
+	}
+	start := i + len(marker)
+	end := len(trackerURL)
+	for j := start; j < len(trackerURL); j++ {
+		if trackerURL[j] == '/' || trackerURL[j] == '?' {
+			end = j
+			break
+		}
+	}
+	return trackerURL[:start] + passkeyOverrides[key] + trackerURL[end:]
 }
 
 func loadAnnounceProxy() *url.URL {
