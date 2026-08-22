@@ -1138,16 +1138,19 @@ func (e *RaceEngine) checkTrackerHealth() {
 			continue
 		}
 
-		trackerURL := ""
+		// Every tracker this torrent carries, not just the first: a torrent
+		// cross-seeded to a second tracker was announced only to whichever
+		// tracker happened to come first in the engine's list, and dropped out
+		// of every other swarm as its announce interval expired.
+		var trackerURLs []string
 		if trks, terr := e.client.GetTrackers(ih); terr == nil {
 			for _, t := range trks {
 				if isSupportedTrackerScheme(t.URL) {
-					trackerURL = t.URL
-					break
+					trackerURLs = append(trackerURLs, t.URL)
 				}
 			}
 		}
-		if trackerURL == "" {
+		if len(trackerURLs) == 0 {
 			continue
 		}
 
@@ -1157,34 +1160,43 @@ func (e *RaceEngine) checkTrackerHealth() {
 		e.lastAnnounceTime[ih] = now
 		e.mu.Unlock()
 
-		// Periodic seeding announce (event=""): reports the real cumulative
-		// uploaded/downloaded so ratio is credited, and refreshes swarmData.
-		result, aerr := announcer.announce(trackerURL, ih, s.TotalUpload, s.TotalDownload, 0, "")
-		if aerr != nil || result == nil || result.FailureReason != "" {
-			continue
-		}
+		announced := false
+		for _, trackerURL := range trackerURLs {
+			// Periodic seeding announce (event=""): reports the real cumulative
+			// uploaded/downloaded so ratio is credited, and refreshes swarmData.
+			result, aerr := announcer.announce(trackerURL, ih, s.TotalUpload, s.TotalDownload, 0, "")
+			if aerr != nil || result == nil || result.FailureReason != "" {
+				continue
+			}
+			announced = true
 
-		e.mu.Lock()
-		if e.swarmData[ih] == nil {
-			e.swarmData[ih] = &SwarmData{}
-		}
-		e.swarmData[ih].Seeds = result.Complete
-		e.swarmData[ih].Leechers = result.Incomplete
-		e.swarmData[ih].LastSeen = now
-		e.mu.Unlock()
+			// swarmData holds one entry per torrent, so the last tracker to
+			// answer wins. Peers are additive across trackers, counts are not.
+			e.mu.Lock()
+			if e.swarmData[ih] == nil {
+				e.swarmData[ih] = &SwarmData{}
+			}
+			e.swarmData[ih].Seeds = result.Complete
+			e.swarmData[ih].Leechers = result.Incomplete
+			e.swarmData[ih].LastSeen = now
+			e.mu.Unlock()
 
-		if len(result.Peers) > 0 {
-			peers := make([]struct {
-				IP   string
-				Port int
-			}, len(result.Peers))
-			for i, p := range result.Peers {
-				peers[i] = struct {
+			if len(result.Peers) > 0 {
+				peers := make([]struct {
 					IP   string
 					Port int
-				}{p.IP, p.Port}
+				}, len(result.Peers))
+				for i, p := range result.Peers {
+					peers[i] = struct {
+						IP   string
+						Port int
+					}{p.IP, p.Port}
+				}
+				e.client.AddPeers(ih, peers)
 			}
-			e.client.AddPeers(ih, peers)
+		}
+		if !announced {
+			continue
 		}
 		done++
 	}
