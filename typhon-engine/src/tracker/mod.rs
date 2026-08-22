@@ -4,13 +4,11 @@ pub mod http;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicI64, Ordering as AtomicOrdering};
 use std::time::Duration;
-use tokio::time;
-use tracing::{info, warn, debug};
+use tracing::{info, warn};
 use librqbit_utp::UtpSocketUdp;
 
 use crate::disk::DiskManager;
-use crate::torrent::TorrentManager;
-use crate::torrent::meta::{TorrentState, TorrentStatus};
+use crate::torrent::meta::TorrentState;
 
 pub static DIAL_ATTEMPTED: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_TCP_OK: AtomicU64 = AtomicU64::new(0);
@@ -270,8 +268,8 @@ fn pick_binding_for_dial(
 
 /// Start tracker announce loops for all torrents.
 /// Spawns a task per torrent that periodically announces to its trackers.
-/// When `disable_announce` is true, the announce loop is skipped (Go owns
-/// announces) but the dial queue stays wired up so PEX/DHT outbound still works.
+/// The Go control plane owns every announce; this only wires up the dial queue
+/// so PEX/DHT outbound works.
 ///
 /// `bindings` drives the dial queue consumer's per-peer source-IP / peer_id
 /// selection: each outbound dial (PEX/DHT/add_peers) is hashed onto one binding
@@ -281,11 +279,9 @@ fn pick_binding_for_dial(
 /// binding (so the peer always sees the same peer_id from us). Single-binding
 /// (legacy) collapses to a single (peer_id, source_ip).
 pub fn start_announce_loop(
-    torrent_mgr: Arc<TorrentManager>,
     disk_mgr: Arc<DiskManager>,
     bindings: Vec<crate::config::ResolvedBinding>,
     utp_socket: Option<Arc<UtpSocketUdp>>,
-    disable_announce: bool,
     max_dials_per_sec: f64,
 ) {
     if bindings.is_empty() {
@@ -340,198 +336,9 @@ pub fn start_announce_loop(
         });
     }
 
-    if disable_announce {
-        info!("[tracker] internal announce loop disabled (Go owns announces)");
-        return;
-    }
-
-    // Legacy internal announce loop uses bindings[0] — single peer_id+port.
-    // Reaching this code requires disable_internal_announce=false in config,
-    // which the Hydra Go orchestrator no longer sets.
-    let legacy_pid = bindings.first().map(|b| b.peer_id).unwrap_or([0u8; 20]);
-    let legacy_port = bindings.first().map(|b| b.addr.port()).unwrap_or(0);
-    let peer_id = legacy_pid;
-    let listen_port = legacy_port;
-    let mgr = torrent_mgr.clone();
-    let disk = disk_mgr.clone();
-    tokio::spawn(async move {
-        info!("[tracker] announce loop started, waiting 5s...");
-        time::sleep(Duration::from_secs(5)).await;
-        info!("[tracker] announce loop active");
-
-        let mut announced: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
-        // Stagger: max 100 new announces per 10s cycle (~10/sec = 13k torrents in ~22 min)
-        // Stagger: 500/cycle = 50/sec. La Cale benched OK to 100/s.
-        // 13k torrents in ~4.5 min.
-        const MAX_NEW_PER_CYCLE: usize = 500;
-
-        loop {
-            let all = mgr.all();
-            let mut new_this_cycle = 0;
-            for t in &all {
-                if announced.contains(&t.info_hash) {
-                    continue;
-                }
-                let status = t.status.load(std::sync::atomic::Ordering::Relaxed);
-                if status != TorrentStatus::Seeding as u8
-                    && status != TorrentStatus::Downloading as u8
-                {
-                    continue;
-                }
-                if t.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    continue;
-                }
-                if new_this_cycle >= MAX_NEW_PER_CYCLE {
-                    break; // throttle, pick up remaining next cycle
-                }
-
-                let ih_hex = crate::torrent::hex_encode(&t.info_hash);
-                if announced.is_empty() || new_this_cycle == 0 {
-                    info!("[tracker] announcing {} new torrents this cycle (total: {}/{})",
-                        all.iter().filter(|t| !announced.contains(&t.info_hash)).count().min(MAX_NEW_PER_CYCLE),
-                        announced.len(), all.len());
-                }
-                announced.insert(t.info_hash);
-                new_this_cycle += 1;
-                let torrent = t.clone();
-                let pid = peer_id;
-                let port = listen_port;
-                let d = disk.clone();
-                let utp = utp_socket.clone();
-                tokio::spawn(async move {
-                    announce_torrent(torrent, d, pid, port, utp).await;
-                });
-            }
-            time::sleep(Duration::from_secs(10)).await;
-        }
-    });
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
 
-async fn announce_torrent(torrent: Arc<TorrentState>, disk: Arc<DiskManager>, peer_id: [u8; 20], port: u16, utp_socket: Option<Arc<UtpSocketUdp>>) {
-    let ih_hex = crate::torrent::hex_encode(&torrent.info_hash);
-    let short_hash = &ih_hex[..8];
-
-    // Initial announce
-    let mut interval = 1800u64; // default 30 min
-    let mut first_announce = true;
-
-    loop {
-        let uploaded = torrent.total_uploaded.load(std::sync::atomic::Ordering::Relaxed);
-        let downloaded = torrent.total_downloaded.load(std::sync::atomic::Ordering::Relaxed);
-        let is_seeding = torrent.status.load(std::sync::atomic::Ordering::Relaxed)
-            == TorrentStatus::Seeding as u8;
-        // Seeders must announce left=0 or the tracker marks them as leechers and
-        // distributes their IP only to other seeders (who ignore it). Imported
-        // torrents have downloaded=0 so we can't derive left from that.
-        let left = if is_seeding {
-            0
-        } else {
-            torrent.meta.total_size.saturating_sub(downloaded)
-        };
-        // "started" only on the first announce. Later announces use "" (periodic).
-        let event = if first_announce { "started" } else { "" };
-
-        // Try each tracker tier
-        let mut announced = false;
-        // Snapshot: the guard cannot be held across the awaits below, and an
-        // edit mid-pass would otherwise be observed half-applied.
-        let tiers: Vec<Vec<String>> = torrent.live_trackers.read().clone();
-        for tier in &tiers {
-            for url in tier {
-                if !url.starts_with("http://") && !url.starts_with("https://") {
-                    continue; // Skip UDP trackers for now
-                }
-                match http::announce(
-                    url,
-                    &torrent.info_hash,
-                    &peer_id,
-                    port,
-                    uploaded,
-                    downloaded,
-                    left,
-                    event,
-                ).await {
-                    Ok(resp) => {
-                        if resp.interval > 0 {
-                            interval = resp.interval as u64;
-                        }
-                        // Store scrape data + current tracker + announce OK
-                        torrent.scrape_seeders.store(resp.complete, std::sync::atomic::Ordering::Relaxed);
-                        torrent.scrape_leechers.store(resp.incomplete, std::sync::atomic::Ordering::Relaxed);
-                        torrent.last_announce_ok.store(true, std::sync::atomic::Ordering::Relaxed);
-                        torrent.last_announce_at.store(now_unix(), std::sync::atomic::Ordering::Relaxed);
-                        if let Ok(mut ct) = torrent.current_tracker.lock() {
-                            *ct = url.clone();
-                        }
-                        if let Ok(mut err) = torrent.last_announce_error.lock() {
-                            err.clear();
-                        }
-                        if !resp.peers.is_empty() {
-                            info!("[tracker] {} got {} peers from {}", short_hash, resp.peers.len(), url);
-                            // Connect to each peer
-                            for addr in &resp.peers {
-                                let t = torrent.clone();
-                                let d = disk.clone();
-                                let a = *addr;
-                                let pid = peer_id;
-                                let utp = utp_socket.clone();
-                                let lp = port;
-                                tokio::spawn(async move {
-                                    // Legacy internal-announce dial path: no
-                                    // fwmark (single-binding caller).
-                                    dial_peer(a, t, d, pid, utp, lp, 0).await;
-                                });
-                            }
-                        }
-                        announced = true;
-                        break; // Success on this tier, move on
-                    }
-                    Err(e) => {
-                        warn!("[tracker] {} announce to {} failed: {}", short_hash, url, e);
-                        if let Ok(mut err) = torrent.last_announce_error.lock() {
-                            *err = e.clone();
-                        }
-                    }
-                }
-            }
-            if announced { break; }
-        }
-
-        if !announced {
-            warn!("[tracker] {} no tracker responded", short_hash);
-        } else {
-            first_announce = false;
-        }
-
-        // Peer deficit re-announce: if the tracker still reports leechers but we have
-        // zero peers connected, the default 30-min interval leaves us invisible.
-        // Shorten to 5 min (respecting BT client etiquette ~= qBittorrent behavior).
-        let peers_now = torrent.peers_connected.load(std::sync::atomic::Ordering::Relaxed);
-        let leechers_scrape = torrent.scrape_leechers.load(std::sync::atomic::Ordering::Relaxed);
-        let effective_interval = if leechers_scrape > 0 && peers_now == 0 {
-            interval.min(300)
-        } else {
-            interval
-        };
-        // Wait for next announce. Record when that is BEFORE sleeping, so the
-        // detail view can say how long is left instead of guessing.
-        let wait = effective_interval.max(60);
-        torrent.next_announce_at.store(now_unix() + wait as i64, std::sync::atomic::Ordering::Relaxed);
-        time::sleep(Duration::from_secs(wait)).await;
-
-        // Check if torrent is still active
-        if torrent.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
-        }
-    }
-}
 
 /// Best-effort peer-client identification from the 20-byte peer_id (Azureus style).
 pub fn client_from_peer_id(pid: &[u8; 20]) -> String {

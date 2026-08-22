@@ -244,18 +244,18 @@ async fn main() {
         });
     }
 
-    // Start tracker announce loops (with uTP socket for outgoing fallback)
+    // Start the outbound dial queue consumer (with uTP socket for outgoing
+    // fallback). Announces themselves belong to the Go control plane.
     // Multi-binding: dial queue consumer hashes peer addr → picks one binding,
     // source-binds outbound TcpSocket on that binding's listen_addr. Single
     // binding collapses to the legacy single-source-IP behavior.
-    let tm2 = torrent_mgr.clone();
     let dm2 = disk_mgr.clone();
     // Connection ceiling: honoured from here on. This key has been in the
     // config (and echoed by get_config) since long before anything read it,
     // so an existing install may already carry a value that has never taken
     // effect -- it starts biting at this upgrade.
     tracker::dial_limiter::set_max_connections(config.max_connections);
-    tracker::start_announce_loop(tm2, dm2, resolved_bindings.clone(), utp_socket.clone(), config.disable_internal_announce, config.max_dials_per_sec);
+    tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp_socket.clone(), config.max_dials_per_sec);
 
     // Choking engine DISABLED (2.4.13-typhon).
     // Le loop tickait toutes les 10s et chokait tous les peers sauf top-4 par

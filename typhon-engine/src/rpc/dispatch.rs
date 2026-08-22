@@ -450,7 +450,7 @@ fn get_trackers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
     let ok = last_error.is_empty();
     let seeders = t.scrape_seeders.load(Ordering::Relaxed) as i64;
     let leechers = t.scrape_leechers.load(Ordering::Relaxed) as i64;
-    // NOTE: hydra-go runs both engines with disable_internal_announce, so the
+    // NOTE: the Go control plane owns every announce, so the
     // loop that fills these is inert in the normal deployment and the Go side
     // overwrites both fields from its own announce observations. They are kept
     // correct for the case where the internal loop IS enabled, and as the
