@@ -242,6 +242,7 @@ type Server struct {
 	gradReporter   GraduationReporter
 	arrCleanup     ArrCleanupService
 	benchDB        BenchDB
+	fleet          fleetStats // agents' share of the overview totals
 	healthReporter HealthReporter
 	// saveStateFn flushes state.json on demand. Wired by main.go after
 	// NewServer; called e.g. right after a category move so the new
@@ -544,6 +545,7 @@ func (s *Server) Run() error {
 	s.reconnect = newReconnectState()
 	s.startReconnectWatcher()
 	s.startAgentRowPusher()
+	s.startAgentRaceStatsSampler()
 	addr := fmt.Sprintf("%s:%d", s.config.Daemon.APIHost, s.config.Daemon.APIPort)
 	slog.Info("Starting Hydra API server", "addr", addr, "version", Version)
 	return s.router.Run(addr)
