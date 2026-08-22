@@ -110,7 +110,9 @@ race_path = "/race"
 min_age_minutes = 10
 
 # Optional per-tracker announce passkey override (host substring -> passkey).
-# Hot-swap via POST /api/announce/passkeys. Ships empty.
+# Hot-swap via POST /api/announce/passkeys. Ships empty. Set here, it applies to
+# this node AND to every agent it drives: the four announce tables are pushed
+# fleet-wide, so a passkey is written in one place rather than in each node.
 # [announce_passkeys]
 # "tracker.example.net" = "your-passkey-here"
 
@@ -118,6 +120,32 @@ min_age_minutes = 10
 username = "admin"
 # bcrypt hash — generate with: hydra hash-password <password>
 password_hash = ""
+
+# ─────────────────────────────────────────────
+# AGENTS - remote nodes this instance configures and drives
+# ─────────────────────────────────────────────
+# An agent (started with --agent-only) knows only its own identity: for each
+# engine an id, a role, a listen port and whether IPv6 is on, given through
+# --engine or $HYDRA_ENGINE_ID / $HYDRA_ENGINE_ROLE / $HYDRA_ENGINE_LISTEN_PORT
+# / $HYDRA_ENGINE_ENABLE_IPV6. It needs no config file of its own. Everything
+# else is composed here and pushed to it over the gRPC channel: [race] and
+# [hoard] above double as the FLEET PROFILES for remote engines of that role.
+#
+# listen_port and enable_ipv6 are never taken from here for a remote engine.
+# They describe the agent's own machine, and the agent reapplies its own values
+# over whatever arrives.
+#
+# [[agent]]
+# name  = "de-1"                 # how this node is named in the UI
+# addr  = "10.0.0.5:9090"        # its --agent-addr, reachable from here
+# token = ""                     # must match the agent's $HYDRA_AGENT_TOKEN
+# tls_ca = ""                    # path to the CA cert when the agent serves TLS
+#
+# A sparse exception to the role profile, for one engine, keyed by the id the
+# agent declares. Only the keys written here are overridden.
+#   [[agent.engine]]
+#   id = "race-0"
+#   announce_proxy = "socks5h://user:pass@127.0.0.1:1080"
 
 # --- Advanced: per-disk seed-slot regulation (HDD quiet mode) ---------------
 # Off by default. Bounds concurrent active uploaders per disk so spinning

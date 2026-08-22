@@ -515,6 +515,7 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"mode":             req.Mode,
 		"restart_required": true,
+		"agents_notified":  s.pushConfigToAgentsAsync(),
 		"warnings":         modeWarnings(req.Mode, req.Fields, collectEnvOverrides()),
 	})
 }

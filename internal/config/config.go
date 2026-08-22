@@ -8,39 +8,46 @@ import (
 )
 
 // RaceChokingConfig — custom choking algorithm settings.
+//
+// The json tags here and on every struct a front pushes to an agent
+// (SessionConfig, DiskSlotsConfig, DiskEntry, ClientSpoofConfig) mirror the
+// toml ones on purpose: the agent wire carries these types verbatim rather
+// than re-declaring them (see internal/agentwire), so an operator reads the
+// same key names in default.toml, in an apply_config frame and in the agent's
+// cached pushed-config.json.
 type RaceChokingConfig struct {
-	Enabled             bool    `toml:"enabled"`
-	TickIntervalSeconds float64 `toml:"tick_interval_seconds"`
-	Strategy            string  `toml:"strategy"`
-	MaxUnchoked         int     `toml:"max_unchoked"`
-	RarityWeight        float64 `toml:"rarity_weight"`
-	SpeedWeight         float64 `toml:"speed_weight"`
+	Enabled             bool    `toml:"enabled" json:"enabled"`
+	TickIntervalSeconds float64 `toml:"tick_interval_seconds" json:"tick_interval_seconds"`
+	Strategy            string  `toml:"strategy" json:"strategy"`
+	MaxUnchoked         int     `toml:"max_unchoked" json:"max_unchoked"`
+	RarityWeight        float64 `toml:"rarity_weight" json:"rarity_weight"`
+	SpeedWeight         float64 `toml:"speed_weight" json:"speed_weight"`
 }
 
 // SessionConfig — engine session parameters (race or hoard). Only fields the
 // Typhon engine actually consumes are kept; libtorrent-era tuning knobs were
 // removed (see git history — they were packed into the engine JSON but ignored).
 type SessionConfig struct {
-	ListenPort       int    `toml:"listen_port"`
-	ListenInterfaces string `toml:"listen_interfaces"`
-	BindInterface    string `toml:"bind_interface"` // interface NAME (e.g. "wg0"); resolved to its IP at engine start
+	ListenPort       int    `toml:"listen_port" json:"listen_port"`
+	ListenInterfaces string `toml:"listen_interfaces" json:"listen_interfaces"`
+	BindInterface    string `toml:"bind_interface" json:"bind_interface"` // interface NAME (e.g. "wg0"); resolved to its IP at engine start
 	// Listen for peers over IPv6 too, and take the v6 peers trackers and PEX
 	// offer. Off by default: v4 only, which is what every install has run so
 	// far. Enabling it adds a v6-only listener beside the v4 one rather than
 	// replacing it, so v4 peers keep their v4 addresses everywhere.
-	EnableIPv6 bool `toml:"enable_ipv6"`
+	EnableIPv6 bool `toml:"enable_ipv6" json:"enable_ipv6"`
 	// Optional second TCP listener expecting HAProxy PROXY protocol v2 (real
 	// peer IP in header). Used by the v6 bypass path: peer → VPS haproxy →
 	// the router rdr → the seedbox host [::]:listen_port_proxy_v2. 0 = disabled.
-	ListenPortProxyV2 int `toml:"listen_port_proxy_v2"`
+	ListenPortProxyV2 int `toml:"listen_port_proxy_v2" json:"listen_port_proxy_v2"`
 	// Explicit bind addr for the PROXY v2 listener (e.g. "[2001:db8:abc:d12::2]").
 	// Empty = [::] wildcard (risk of source-selection bug with multiple v6 IPs).
-	ListenAddrProxyV2     string   `toml:"listen_addr_proxy_v2"`
-	ProxyV2TrustedSources []string `toml:"proxy_v2_trusted_sources"`
-	Socks5OutboundHost    string   `toml:"socks5_outbound_host"`
-	Socks5OutboundPort    int      `toml:"socks5_outbound_port"`
-	Socks5OutboundUser    string   `toml:"socks5_outbound_user"`
-	Socks5OutboundPass    string   `toml:"socks5_outbound_pass"`
+	ListenAddrProxyV2     string   `toml:"listen_addr_proxy_v2" json:"listen_addr_proxy_v2"`
+	ProxyV2TrustedSources []string `toml:"proxy_v2_trusted_sources" json:"proxy_v2_trusted_sources"`
+	Socks5OutboundHost    string   `toml:"socks5_outbound_host" json:"socks5_outbound_host"`
+	Socks5OutboundPort    int      `toml:"socks5_outbound_port" json:"socks5_outbound_port"`
+	Socks5OutboundUser    string   `toml:"socks5_outbound_user" json:"socks5_outbound_user"`
+	Socks5OutboundPass    string   `toml:"socks5_outbound_pass" json:"socks5_outbound_pass"`
 	// AnnounceProxy routes this session's tracker announces through a SOCKS5
 	// proxy ("socks5h://user:pass@host:port"). Empty falls back to the legacy
 	// TYPHON_ANNOUNCE_PROXY env, and failing that the announce goes direct.
@@ -53,13 +60,13 @@ type SessionConfig struct {
 	// Note that UDP trackers are skipped while it is set: SOCKS5 carries TCP
 	// only, and falling back to a direct datagram would leak the address the
 	// operator asked us to hide.
-	AnnounceProxy string `toml:"announce_proxy"`
+	AnnounceProxy string `toml:"announce_proxy" json:"announce_proxy"`
 	// AnnounceIP is the address advertised to trackers in the BEP-7 `ip=`
 	// parameter. Empty (the default) omits the parameter entirely and lets the
 	// tracker observe the announce's source address, which is correct whenever
 	// the announce already leaves by the path peers should reach us on. Set it
 	// when the two differ and the tracker honours the parameter — many do not.
-	AnnounceIP string `toml:"announce_ip"`
+	AnnounceIP string `toml:"announce_ip" json:"announce_ip"`
 	// GluetunPortForward makes this session take its listen port from gluetun
 	// rather than from listen_port. A VPN provider assigns the forwarded port
 	// per lease and rotates it, so a fixed port behind such a tunnel is wrong
@@ -69,16 +76,16 @@ type SessionConfig struct {
 	// While it is on, announces and peer dials are HELD at startup until the
 	// port is known. Announcing first would publish the wrong port to every
 	// tracker, and they keep it for a whole announce cycle.
-	GluetunPortForward bool `toml:"gluetun_port_forward"`
+	GluetunPortForward bool `toml:"gluetun_port_forward" json:"gluetun_port_forward"`
 	// GluetunURL is gluetun's control server. Empty = http://127.0.0.1:8000,
 	// which is where it listens when Hydra shares gluetun's network namespace.
-	GluetunURL string `toml:"gluetun_url"`
+	GluetunURL string `toml:"gluetun_url" json:"gluetun_url"`
 	// GluetunAPIKey authenticates against that control server. Recent gluetun
 	// versions refuse every request without one; the role needs the route
 	// GET /v1/portforward.
-	GluetunAPIKey        string `toml:"gluetun_api_key"`
-	MaxConnections       int    `toml:"max_connections"`
-	MaxUploadsPerTorrent int    `toml:"max_uploads_per_torrent"`
+	GluetunAPIKey        string `toml:"gluetun_api_key" json:"gluetun_api_key"`
+	MaxConnections       int    `toml:"max_connections" json:"max_connections"`
+	MaxUploadsPerTorrent int    `toml:"max_uploads_per_torrent" json:"max_uploads_per_torrent"`
 
 	// AnnounceRateLimit caps outbound tracker announces for this session, in
 	// announces per second. 0 = unlimited (the historical behaviour). A large
@@ -87,7 +94,7 @@ type SessionConfig struct {
 	// tail, which surfaces as tracker failures. Smoothing the same volume over
 	// time fixes that. Fractional values are allowed (0.5 = one announce every
 	// two seconds).
-	AnnounceRateLimit float64 `toml:"announce_rate_limit"`
+	AnnounceRateLimit float64 `toml:"announce_rate_limit" json:"announce_rate_limit"`
 
 	// MaxDialsPerSec caps new outbound peer connections for this session, in
 	// dials per second. 0 = unlimited (the historical behaviour).
@@ -97,7 +104,7 @@ type SessionConfig struct {
 	// still mean thousands of new flows a second through one VPN tunnel. This
 	// is the equivalent of qBittorrent's connections-per-second knob, and it
 	// is the one that bounds what a tunnel actually sees.
-	MaxDialsPerSec float64 `toml:"max_dials_per_sec"`
+	MaxDialsPerSec float64 `toml:"max_dials_per_sec" json:"max_dials_per_sec"`
 
 	// StartPaused holds this session's outbound traffic at startup: no
 	// announces leave and no peers are dialed until the pause is released
@@ -107,23 +114,23 @@ type SessionConfig struct {
 	//
 	// This is a process-level hold, never per-torrent paused state: releasing
 	// it must not resume torrents the user paused deliberately.
-	StartPaused bool `toml:"start_paused"`
+	StartPaused bool `toml:"start_paused" json:"start_paused"`
 
-	PeerTimeout       int `toml:"peer_timeout"`
-	InactivityTimeout int `toml:"inactivity_timeout"`
+	PeerTimeout       int `toml:"peer_timeout" json:"peer_timeout"`
+	InactivityTimeout int `toml:"inactivity_timeout" json:"inactivity_timeout"`
 
-	ActiveSeeds     int `toml:"active_seeds"`
-	ActiveLimit     int `toml:"active_limit"`
-	ActiveDownloads int `toml:"active_downloads"`
-	FilePoolSize    int `toml:"file_pool_size"`
+	ActiveSeeds     int `toml:"active_seeds" json:"active_seeds"`
+	ActiveLimit     int `toml:"active_limit" json:"active_limit"`
+	ActiveDownloads int `toml:"active_downloads" json:"active_downloads"`
+	FilePoolSize    int `toml:"file_pool_size" json:"file_pool_size"`
 
-	UploadRateLimit int `toml:"upload_rate_limit"`
+	UploadRateLimit int `toml:"upload_rate_limit" json:"upload_rate_limit"`
 
 	// Sub-sections (race only)
-	CustomChoking *RaceChokingConfig `toml:"custom_choking,omitempty"`
+	CustomChoking *RaceChokingConfig `toml:"custom_choking,omitempty" json:"custom_choking,omitempty"`
 
 	// Advanced hoard-only: per-disk seed-slot regulation (HDD quiet mode).
-	DiskSlots *DiskSlotsConfig `toml:"disk_slots,omitempty"`
+	DiskSlots *DiskSlotsConfig `toml:"disk_slots,omitempty" json:"disk_slots,omitempty"`
 }
 
 // ArrCleanupConfig — Radarr/Sonarr cleanup settings.
@@ -253,29 +260,35 @@ type AgentConfig struct {
 	Addr  string `toml:"addr"`
 	Token string `toml:"token"`
 	TLSCa string `toml:"tls_ca"`
+	// EngineOverrides are sparse per-engine exceptions to the [race]/[hoard]
+	// fleet profile, written as [[agent.engine]] blocks keyed by engine id.
+	// Kept as raw maps rather than a typed SessionConfig so "absent" and "set
+	// to the zero value" stay distinguishable without turning every field of
+	// SessionConfig into a pointer; ComposeSession merges them key by key.
+	EngineOverrides []map[string]interface{} `toml:"engine"`
 }
 
 // DiskEntry is one regulated disk in [hoard.disk_slots]; semantics live in the
 // disk-slots manager (internal/engine).
 type DiskEntry struct {
-	Key       string `toml:"key"`
-	Type      string `toml:"type"`
-	MaxActive int    `toml:"max_active"`
-	WakeBelow int    `toml:"wake_below"`
+	Key       string `toml:"key" json:"key"`
+	Type      string `toml:"type" json:"type"`
+	MaxActive int    `toml:"max_active" json:"max_active"`
+	WakeBelow int    `toml:"wake_below" json:"wake_below"`
 }
 
 // DiskSlotsConfig is the advanced [hoard.disk_slots] section (HDD quiet mode).
 // Enabled defaults false -> inert unless explicitly turned on.
 type DiskSlotsConfig struct {
-	Enabled              bool        `toml:"enabled"`
-	Disks                []DiskEntry `toml:"disk"`
-	DefaultMaxActive     int         `toml:"default_max_active"`
-	SuperSeedThreshold   int         `toml:"super_seed_threshold"`
-	CycleSeconds         int         `toml:"cycle_seconds"`
-	PauseCooldownSec     int         `toml:"pause_cooldown_sec"`
-	WakeCooldownSec      int         `toml:"wake_cooldown_sec"`
-	WarmupSec            int         `toml:"warmup_sec"`
-	WakeAgingBonusPerMin float64     `toml:"wake_aging_bonus_per_min"`
+	Enabled              bool        `toml:"enabled" json:"enabled"`
+	Disks                []DiskEntry `toml:"disk" json:"disk"`
+	DefaultMaxActive     int         `toml:"default_max_active" json:"default_max_active"`
+	SuperSeedThreshold   int         `toml:"super_seed_threshold" json:"super_seed_threshold"`
+	CycleSeconds         int         `toml:"cycle_seconds" json:"cycle_seconds"`
+	PauseCooldownSec     int         `toml:"pause_cooldown_sec" json:"pause_cooldown_sec"`
+	WakeCooldownSec      int         `toml:"wake_cooldown_sec" json:"wake_cooldown_sec"`
+	WarmupSec            int         `toml:"warmup_sec" json:"warmup_sec"`
+	WakeAgingBonusPerMin float64     `toml:"wake_aging_bonus_per_min" json:"wake_aging_bonus_per_min"`
 }
 
 type HydraConfig struct {
@@ -319,8 +332,8 @@ type HydraConfig struct {
 // ClientSpoofConfig is a per-tracker fake client identity presented to a
 // tracker to pass its client whitelist. Mirrors engine.ClientSpoof.
 type ClientSpoofConfig struct {
-	PeerIDPrefix string `toml:"peer_id_prefix"`
-	UserAgent    string `toml:"user_agent"`
+	PeerIDPrefix string `toml:"peer_id_prefix" json:"peer_id_prefix"`
+	UserAgent    string `toml:"user_agent" json:"user_agent"`
 }
 
 // DefaultConfig returns a config with sane defaults matching the Python version.
@@ -475,6 +488,15 @@ func ensureConfigKeys(path string) {
 
 func Load(path string) (*HydraConfig, error) {
 	ensureConfigKeys(path)
+	return Reload(path)
+}
+
+// Reload re-reads a config file WITHOUT the additive migration pass. The
+// migration rewrites the file, which is right once at boot and wrong for a
+// caller that re-reads it on a timer: the front recomposes what it pushes to
+// its agents from the file on every reconcile tick, because the settings
+// editor writes there and does not update the in-memory struct.
+func Reload(path string) (*HydraConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

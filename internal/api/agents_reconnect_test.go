@@ -36,7 +36,7 @@ func TestDesiredRemoteAgentsMergesConfigAndPersisted(t *testing.T) {
 		},
 	}}
 
-	got := s.desiredRemoteAgents()
+	got := s.desiredRemoteAgents(s.config)
 	if len(got) != 3 {
 		t.Fatalf("got %d agents, want 3: %#v", len(got), got)
 	}
@@ -58,7 +58,7 @@ func TestDesiredRemoteAgentsEmptyWhenNothingConfigured(t *testing.T) {
 	s := &Server{config: &config.HydraConfig{
 		Daemon: config.DaemonConfig{DataDir: t.TempDir()},
 	}}
-	if got := s.desiredRemoteAgents(); len(got) != 0 {
+	if got := s.desiredRemoteAgents(s.config); len(got) != 0 {
 		t.Fatalf("got %#v, want empty map", got)
 	}
 }
@@ -68,7 +68,7 @@ func TestDesiredRemoteAgentsReadsPersistedFileEachCall(t *testing.T) {
 	s := &Server{config: &config.HydraConfig{
 		Daemon: config.DaemonConfig{DataDir: dir},
 	}}
-	if got := s.desiredRemoteAgents(); len(got) != 0 {
+	if got := s.desiredRemoteAgents(s.config); len(got) != 0 {
 		t.Fatalf("initial set = %#v, want empty", got)
 	}
 	entry := map[string]agentStore{"late": {Addr: "10.0.0.8:9090"}}
@@ -79,7 +79,7 @@ func TestDesiredRemoteAgentsReadsPersistedFileEachCall(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "agents.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	got := s.desiredRemoteAgents()
+	got := s.desiredRemoteAgents(s.config)
 	if len(got) != 1 || got["late"].Addr != "10.0.0.8:9090" {
 		t.Fatalf("after write got %#v", got)
 	}
@@ -108,7 +108,7 @@ func TestDesiredRemoteAgentsSkipsSoftDeletedTomlAgent(t *testing.T) {
 		Daemon: config.DaemonConfig{DataDir: dir},
 		Agents: []config.AgentConfig{{Name: "heracles", Addr: "10.0.0.7:9090", Token: "t"}},
 	}}
-	if _, ok := s.desiredRemoteAgents()["heracles"]; ok {
+	if _, ok := s.desiredRemoteAgents(s.config)["heracles"]; ok {
 		t.Fatal("deleted TOML agent is still in the desired set: the loop would re-dial it")
 	}
 }
@@ -132,7 +132,7 @@ func TestAgentDeleteTombstonesATomlAgent(t *testing.T) {
 	if entry, ok := loadRemovedStore(dir)["heracles"]; !ok || entry.Addr != "10.0.0.7:9090" {
 		t.Fatalf("TOML agent left no tombstone: %#v", loadRemovedStore(dir))
 	}
-	if _, ok := s.desiredRemoteAgents()["heracles"]; ok {
+	if _, ok := s.desiredRemoteAgents(s.config)["heracles"]; ok {
 		t.Fatal("agent came back into the desired set right after being deleted")
 	}
 }

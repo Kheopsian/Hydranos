@@ -39,8 +39,25 @@ import (
 type Server struct {
 	agentpb.UnimplementedHydraAgentServer
 
-	engines map[string]engine.EngineClient
-	tmpDir  string
+	// enginesMu guards engines, rich, declared and hubs. A dedicated agent
+	// takes its configuration from the front, so its engines are not a fixed
+	// set decided at construction: they appear when the first config arrives
+	// and are swapped out whenever a pushed change needs a Typhon restart,
+	// while the gRPC server keeps serving throughout.
+	enginesMu sync.RWMutex
+	engines   map[string]engine.EngineClient
+	// declared is the boot identity: the engines this node WILL host, known
+	// before any of them runs. list_engines answers from it so a front can
+	// compose a config for a node whose engines are still down.
+	declared []agentwire.EngineDescriptor
+	// hubs are per-engine-id event fan-outs that outlive an engine restart.
+	// Subscribing straight to a RichEngine's own hub would leave every front
+	// subscription attached to a dead engine's hub after a config change --
+	// silent, and only noticed as a UI that stopped updating.
+	hubs map[string]*engine.EventHub
+	// configManager owns this node's configuration (nil in additive mode).
+	configManager ConfigManager
+	tmpDir        string
 	// uploadsDir is where a routed add lands its .torrent for good. Unlike the
 	// thin add path (whose caller keeps the blob), a routed add hands the file
 	// to this node's OWN engine, which stores the path as its TorrentFilePath
@@ -73,6 +90,9 @@ type Server struct {
 // {"race": ..., "hoard": ...}). tmpDir holds shipped .torrent bytes on add.
 // token (if non-empty) is the required bearer token.
 func NewServer(engines map[string]engine.EngineClient, tmpDir, token string) *Server {
+	if engines == nil {
+		engines = make(map[string]engine.EngineClient)
+	}
 	return &Server{
 		engines: engines,
 		tmpDir:  tmpDir,
@@ -80,7 +100,86 @@ func NewServer(engines map[string]engine.EngineClient, tmpDir, token string) *Se
 		subs:    make(map[string]map[int]chan []byte),
 		wired:   make(map[string]bool),
 		rich:    make(map[string]engine.RichEngine),
+		hubs:    make(map[string]*engine.EventHub),
 	}
+}
+
+// DeclareEngines records the engines this node is going to host, before any of
+// them is running. It is what list_engines reports while the node waits for its
+// first config: without it a front would see a node with no engines, compose an
+// empty config for it, and the node would wait forever for the config it needs
+// in order to have the engines that would have made the front send one.
+func (s *Server) DeclareEngines(d []agentwire.EngineDescriptor) {
+	s.enginesMu.Lock()
+	defer s.enginesMu.Unlock()
+	s.declared = append(s.declared[:0], d...)
+}
+
+// ReplaceEngine installs (or swaps) one engine under an id. Passing a nil
+// client removes it. The engine's raw events are pumped into this id's stable
+// hub until the returned stop function is called, which the caller does before
+// replacing the engine again.
+func (s *Server) ReplaceEngine(id string, c engine.EngineClient, r engine.RichEngine) (stopPump func()) {
+	s.enginesMu.Lock()
+	if c == nil {
+		delete(s.engines, id)
+		delete(s.rich, id)
+		s.enginesMu.Unlock()
+		return func() {}
+	}
+	s.engines[id] = c
+	if r != nil {
+		s.rich[id] = r
+	} else {
+		delete(s.rich, id)
+	}
+	hub := s.hubLocked(id)
+	s.enginesMu.Unlock()
+
+	if r == nil {
+		return func() {}
+	}
+	return pumpHub(r.RawEventHub(), hub)
+}
+
+// pumpHub forwards one engine generation's events into the id's stable hub.
+func pumpHub(from, to *engine.EventHub) func() {
+	if from == nil || to == nil {
+		return func() {}
+	}
+	subID, ch := from.Subscribe()
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case frame, ok := <-ch:
+				if !ok {
+					return
+				}
+				to.Publish(frame)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		from.Unsubscribe(subID)
+	}
+}
+
+// hubLocked returns the stable hub for an engine id, creating it on first use.
+// Caller holds enginesMu.
+func (s *Server) hubLocked(id string) *engine.EventHub {
+	if s.hubs == nil {
+		s.hubs = make(map[string]*engine.EventHub)
+	}
+	h := s.hubs[id]
+	if h == nil {
+		h = engine.NewEventHub(256)
+		s.hubs[id] = h
+	}
+	return h
 }
 
 // SetUploadsDir sets where routed adds keep their .torrent. Defaults to
@@ -109,6 +208,8 @@ func (s *Server) SetIPv6Wanted(v bool) { s.ipv6Wanted = v }
 // AddRichEngine registers a role-typed local engine under an id for routed
 // add/action/subscribe. Ids are arbitrary ("race", "hoard", "hoard2", ...).
 func (s *Server) AddRichEngine(id string, r engine.RichEngine) {
+	s.enginesMu.Lock()
+	defer s.enginesMu.Unlock()
 	if s.rich == nil {
 		s.rich = make(map[string]engine.RichEngine)
 	}
@@ -183,21 +284,93 @@ func (s *Server) authStream(srv interface{}, ss grpc.ServerStream, _ *grpc.Strea
 
 // --- Call dispatch ---
 
-// rawHubFor returns the raw ltclient.Event hub of the rich engine registered
-// under id, or nil if none (additive mode).
+// rawHubFor returns the stable event hub for an engine id, or nil when this
+// node has no rich engine matching (additive mode). The hub is the agent's own
+// rather than the engine's, so a subscription survives an engine restart.
 func (s *Server) rawHubFor(id string) *engine.EventHub {
-	if e := s.resolveRich(id); e != nil {
-		return e.RawEventHub()
+	s.enginesMu.Lock()
+	defer s.enginesMu.Unlock()
+	e := s.resolveRichLocked(id)
+	if e == nil {
+		return nil
+	}
+	// Resolve by role too: the hub must be keyed by the id the engine is
+	// registered under, not by the selector the caller happened to use.
+	for regID, re := range s.rich {
+		if re == e {
+			return s.hubLocked(regID)
+		}
 	}
 	return nil
 }
 
 func (s *Server) client(name string) (engine.EngineClient, error) {
+	s.enginesMu.RLock()
 	c, ok := s.engines[name]
+	s.enginesMu.RUnlock()
 	if !ok || c == nil {
+		// Declared but not started: the node knows this engine exists and is
+		// waiting for a config to bring it up. Saying so beats "unknown
+		// engine", which reads like a misconfigured front.
+		if s.isDeclared(name) {
+			return nil, status.Errorf(codes.Unavailable, "engine %q is declared but not configured yet", name)
+		}
 		return nil, status.Errorf(codes.NotFound, "unknown engine %q", name)
 	}
 	return c, nil
+}
+
+// isDeclared reports whether an id belongs to this node's boot identity.
+func (s *Server) isDeclared(id string) bool {
+	s.enginesMu.RLock()
+	defer s.enginesMu.RUnlock()
+	for _, d := range s.declared {
+		if d.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ConfigManager is the node's configuration owner: it applies what a front
+// pushes and reports what the node is running. The agent server only routes
+// the two calls to it, because starting and restarting engines is the process
+// supervisor's job, not the wire layer's (see cmd/hydra/agentsupervisor.go).
+type ConfigManager interface {
+	ApplyConfig(agentwire.ApplyConfigParams) agentwire.ConfigState
+	ConfigState() agentwire.ConfigState
+}
+
+// SetConfigManager wires the node's config owner. Left nil (the monolith's
+// additive agent, which configures itself from its own file), apply_config is
+// declined as unimplemented and the front falls back to the older per-override
+// announce push.
+func (s *Server) SetConfigManager(m ConfigManager) {
+	s.enginesMu.Lock()
+	defer s.enginesMu.Unlock()
+	s.configManager = m
+}
+
+func (s *Server) configMgr() ConfigManager {
+	s.enginesMu.RLock()
+	defer s.enginesMu.RUnlock()
+	return s.configManager
+}
+
+func (s *Server) handleApplyConfig(p agentwire.ApplyConfigParams) (*agentpb.CallReply, error) {
+	m := s.configMgr()
+	if m == nil {
+		return nil, status.Error(codes.Unimplemented, "this node configures itself locally and takes no pushed config")
+	}
+	return reply(m.ApplyConfig(p), nil)
+}
+
+func (s *Server) handleGetConfigState() (*agentpb.CallReply, error) {
+	m := s.configMgr()
+	if m == nil {
+		return nil, status.Error(codes.Unimplemented, "this node configures itself locally and takes no pushed config")
+	}
+	return reply(m.ConfigState(), nil)
 }
 
 // reply wraps a (result-value, error) into a CallReply. A nil value yields an
@@ -224,6 +397,18 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 	}
 	if req.Method == agentwire.MethodNodeInfo {
 		return s.handleNodeInfo()
+	}
+	if req.Method == agentwire.MethodApplyConfig {
+		var p agentwire.ApplyConfigParams
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return nil, err
+			}
+		}
+		return s.handleApplyConfig(p)
+	}
+	if req.Method == agentwire.MethodGetConfigState {
+		return s.handleGetConfigState()
 	}
 	if req.Method == agentwire.MethodGetAnnounceOverrides {
 		return s.handleGetAnnounceOverrides()
@@ -410,7 +595,7 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		if err := unmarshal(&p); err != nil {
 			return nil, badParams(err)
 		}
-		e := s.rich[engineOrHoard(p.Engine)]
+		e := s.resolveRich(engineOrHoard(p.Engine))
 		if e == nil {
 			return nil, status.Errorf(codes.Unavailable, "engine %q not wired on agent", p.Engine)
 		}
@@ -427,7 +612,7 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		if err := unmarshal(&p); err != nil {
 			return nil, badParams(err)
 		}
-		e := s.rich[engineOrHoard(p.Engine)]
+		e := s.resolveRich(engineOrHoard(p.Engine))
 		if e == nil {
 			return reply(map[string]string{}, nil)
 		}
@@ -610,10 +795,17 @@ func (s *Server) handleAdd(c engine.EngineClient, p agentwire.AddParams) (*agent
 	return reply(c.AddTorrent(path, p.SavePath, p.Stopped))
 }
 
-// handleAddRouted materialises the shipped .torrent and adds it through the
-// agent's OWN rich engine (race or hoard), so category/announce/drain run here.
-// handleListEngines enumerates the role-typed engines this agent hosts.
+// handleListEngines enumerates the engines this agent hosts. It answers from
+// the declared identity when there is one, so a node that has not been given a
+// config yet still tells the front what to compose for.
 func (s *Server) handleListEngines() (*agentpb.CallReply, error) {
+	s.enginesMu.RLock()
+	defer s.enginesMu.RUnlock()
+	if len(s.declared) > 0 {
+		out := make([]agentwire.EngineDescriptor, len(s.declared))
+		copy(out, s.declared)
+		return reply(out, nil)
+	}
 	out := make([]agentwire.EngineDescriptor, 0, len(s.rich))
 	for id, e := range s.rich {
 		out = append(out, agentwire.EngineDescriptor{ID: id, Role: string(e.Role())})
@@ -625,6 +817,13 @@ func (s *Server) handleListEngines() (*agentpb.CallReply, error) {
 // whose ROLE matches. Config engine ids are arbitrary ("race-0") while callers
 // address engines by role ("race"), so an id-only lookup misses.
 func (s *Server) resolveRich(id string) engine.RichEngine {
+	s.enginesMu.RLock()
+	defer s.enginesMu.RUnlock()
+	return s.resolveRichLocked(id)
+}
+
+// resolveRichLocked is resolveRich for callers already holding enginesMu.
+func (s *Server) resolveRichLocked(id string) engine.RichEngine {
 	if e := s.rich[id]; e != nil {
 		return e
 	}
@@ -636,6 +835,8 @@ func (s *Server) resolveRich(id string) engine.RichEngine {
 	return nil
 }
 
+// handleAddRouted materialises the shipped .torrent and adds it through the
+// agent's OWN rich engine (race or hoard), so category/announce/drain run here.
 func (s *Server) handleAddRouted(p agentwire.AddRoutedParams) (*agentpb.CallReply, error) {
 	if len(p.Torrent) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "add_routed: empty torrent bytes")

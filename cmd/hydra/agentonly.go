@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/Kheopsian/hydra/internal/agent"
 	"github.com/Kheopsian/hydra/internal/agentwire"
-	"github.com/Kheopsian/hydra/internal/choking"
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/store"
@@ -29,17 +29,19 @@ import (
 const agentEngineBasePort = 9510
 
 // liveEngine is one running engine of an agent node (Option A: a node hosts an
-// arbitrary set of engines, each with an id + role).
+// arbitrary set of engines, each with an id + role). cfg is the session config
+// it was started on, kept so a later push can be compared against it.
 type liveEngine struct {
-	id    string
-	role  string
-	cfg   config.SessionConfig
-	proc  *engine.EngineProcess
-	race  *engine.RaceEngine  // set when role == race
-	hoard *engine.HoardEngine // set when role == hoard
-	rich  engine.RichEngine
-	store *store.AgentStore
-	ann   *engine.HoardAnnouncer
+	id       string
+	role     string
+	cfg      config.SessionConfig
+	proc     *engine.EngineProcess
+	race     *engine.RaceEngine  // set when role == race
+	hoard    *engine.HoardEngine // set when role == hoard
+	rich     engine.RichEngine
+	store    *store.AgentStore
+	ann      *engine.HoardAnnouncer
+	stopPump func() // detaches this generation's events from the id's stable hub
 }
 
 func (le *liveEngine) metas() map[string]*engine.TorrentMeta {
@@ -50,21 +52,28 @@ func (le *liveEngine) metas() map[string]*engine.TorrentMeta {
 }
 
 // runAgentOnly serves a dedicated data-plane agent node: it owns its Typhon
-// engines (an arbitrary set resolved from config) and their event handlers
-// (ownEvents=true), persists each engine to its own per-agent store, and exposes
-// the HydraAgent gRPC API — no api.Server. Egress is unchanged: the SOCKS5 proxy
-// lives in each engine's Typhon config applied at StartSessionEngine.
-func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, tlsCert, tlsKey string, listenPortHook int, healthAddr string) {
+// engines and their event handlers (ownEvents=true), persists each engine to
+// its own per-agent store, and exposes the HydraAgent gRPC API — no api.Server.
+// Egress is unchanged: the SOCKS5 proxy lives in each engine's Typhon config
+// applied at StartSessionEngine.
+//
+// The node knows only its own identity at boot (engine id, role, listen port,
+// IPv6) and takes the rest from its front, so the ORDER here matters: gRPC
+// comes up first, before any engine, because the front has to be able to reach
+// this node in order to give it the configuration its engines need. See
+// engineSupervisor in agentsupervisor.go.
+func runAgentOnly(parent context.Context, cfg *config.HydraConfig, boot []agentBootEngine, identitySource, addr, token, tlsCert, tlsKey string, listenPortHook int, healthAddr string) {
 	if addr == "" {
-		slog.Error("agent-only mode requires --agent-addr")
+		slog.Error("agent-only mode requires --agent-addr or $" + envAgentAddr)
 		os.Exit(1)
 	}
-	engineCfgs, err := cfg.ResolveEngines()
-	if err != nil {
-		slog.Error("agent-only: invalid engine config", "error", err)
+	if err := validateAgentBoot(boot); err != nil {
+		slog.Error("agent-only: invalid engine identity", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("starting in AGENT-ONLY mode", "addr", addr, "engines", len(engineCfgs))
+	logAgentBoot(boot, identitySource)
+	warnIgnoredAgentSections(cfg, identitySource)
+	slog.Info("starting in AGENT-ONLY mode", "addr", addr, "engines", len(boot))
 
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -76,113 +85,38 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 		cancel()
 	}()
 
-	engine.InitPasskeyOverrides(cfg.AnnouncePasskeys)
-	clientSpoofs := make(map[string]engine.ClientSpoof, len(cfg.AnnounceClients))
-	for host, c := range cfg.AnnounceClients {
-		clientSpoofs[host] = engine.ClientSpoof{PeerIDPrefix: c.PeerIDPrefix, UserAgent: c.UserAgent}
+	// ---- HydraAgent gRPC (owns events), before any engine ----
+	if token == "" {
+		slog.Warn("agent-only served WITHOUT a token: set --agent-token, $" + agentwire.TokenEnv + " or [daemon] agent_token before exposing it off-LAN")
 	}
-	engine.InitClientOverrides(clientSpoofs)
-	engine.InitSecondaryStatsOverrides(cfg.AnnounceSecondaryStats)
-
-	uploadsDir := filepath.Join(cfg.Daemon.DataDir, "uploads")
-
-	// ---- Spawn + build each engine ----
-	var lives []*liveEngine
-	var raceEngines []*engine.RaceEngine
-	stopAll := func() {
-		for _, le := range lives {
-			le.proc.Stop()
-		}
+	agentSrv := agent.NewServer(nil, cfg.Daemon.DataDir, token)
+	agentSrv.SetUploadsDir(filepath.Join(cfg.Daemon.DataDir, "uploads"))
+	agentSrv.SetTLS(tlsCert, tlsKey)
+	agentSrv.SetOwnEvents(true)
+	descs := make([]agentwire.EngineDescriptor, 0, len(boot))
+	v6 := false
+	for _, b := range boot {
+		descs = append(descs, b.descriptor())
+		v6 = v6 || b.EnableIPv6
 	}
-	for i, ec := range engineCfgs {
-		eDir := filepath.Join(cfg.Daemon.DataDir, ec.ID)
-		_ = os.MkdirAll(eDir, 0755)
-		// Same endpoint selection as the monolith: a hardcoded .sock path here
-		// would hand Typhon a unix path on Windows, where its listener is a
-		// stub that refuses to bind, so the engine never starts. Ports are
-		// per-engine so N engines on one node never collide, and start above
-		// the monolith 9501/9502 so an agent can share a machine with a daemon.
-		sock := engineSocketPath(cfg.Daemon.DataDir, ec.ID, agentEngineBasePort+i)
-		le := &liveEngine{id: ec.ID, role: ec.Role, cfg: ec.SessionConfig}
-		proc, perr := engine.StartSessionEngine(&le.cfg, eDir, sock, ec.Role == "race")
-		if perr != nil {
-			slog.Error("agent-only: start engine", "id", ec.ID, "error", perr)
-			stopAll()
-			os.Exit(1)
-		}
-		le.proc = proc
-		if ec.Role == "race" {
-			var ck engine.ChokingEngineInterface
-			if le.cfg.CustomChoking != nil && le.cfg.CustomChoking.Enabled {
-				ck = choking.NewChokingEngine(le.cfg.CustomChoking)
-			}
-			re := engine.NewRaceEngine(&le.cfg, ck, nil, eDir)
-			re.SetClient(proc.Client())
-			le.race, le.rich = re, re
-			raceEngines = append(raceEngines, re)
-		} else {
-			he := engine.NewHoardEngine(&le.cfg, eDir)
-			he.SetClient(proc.Client())
-			le.hoard, le.rich = he, he
-		}
-		if st, serr := store.OpenAgent(filepath.Join(eDir, "store.db")); serr != nil {
-			slog.Error("agent-only: open store", "id", ec.ID, "error", serr)
-		} else {
-			le.store = st
-		}
-		lives = append(lives, le)
-	}
+	agentSrv.DeclareEngines(descs)
+	// Whether this node wants a v6 egress is part of its identity, not of what
+	// the front pushes: it is read from the boot values, which are also the
+	// ones overlaid onto every config that arrives.
+	agentSrv.SetIPv6Wanted(v6)
 
-	// Aggregated race gate: a hoard must not announce an info_hash any race
-	// engine on this node already holds (anti dual-announce), generalised to N
-	// race engines.
-	raceGate := func(infoHash string) bool {
-		for _, r := range raceEngines {
-			if r.HasTorrent(infoHash) {
-				return true
-			}
-		}
-		return false
-	}
+	sup := newEngineSupervisor(ctx, cfg, boot, agentSrv)
+	agentSrv.SetConfigManager(sup)
 
-	// ---- Start engines, announcers, reload from store ----
-	for _, le := range lives {
-		if le.race != nil {
-			if serr := le.race.Start(ctx); serr != nil {
-				slog.Error("agent-only: race start", "id", le.id, "error", serr)
-				stopAll()
-				os.Exit(1)
-			}
-		} else {
-			if serr := le.hoard.Start(ctx); serr != nil {
-				slog.Error("agent-only: hoard start", "id", le.id, "error", serr)
-				stopAll()
-				os.Exit(1)
-			}
+	go func() {
+		slog.Info("HydraAgent (agent-only) serving", "addr", addr)
+		if serr := agentSrv.Serve(ctx, addr); serr != nil {
+			slog.Error("agent-only: gRPC server exited", "error", serr)
 		}
-		ann := engine.NewHoardAnnouncer(le.proc.Client(), engine.ApplyAnnounceEgress(
-			engine.DefaultSingleBinding(le.cfg.ListenPort, le.cfg.EnableIPv6, "hoard", le.cfg.AnnounceRateLimit),
-			le.cfg.AnnounceProxy, le.cfg.AnnounceIP, le.cfg.Socks5OutboundHost, "hoard"))
-		if le.hoard != nil {
-			ann.OnObservation = le.hoard.ObserveAnnounce
-			le.hoard.SetBootstrapAnnounce(ann.BootstrapAnnounce)
-			le.hoard.SetReAnnounce(ann.ReAnnounce)
-			ann.SetRaceGate(raceGate)
-			ann.SetOffsetFn(le.hoard.AnnounceOffset)
-		}
-		ann.Start(ctx)
-		le.ann = ann
+	}()
 
-		if le.store != nil {
-			var imp, errs int
-			if le.race != nil {
-				imp, errs = le.race.ImportFromStore(le.store, uploadsDir)
-			} else {
-				imp, errs = le.hoard.ImportFromStore(le.store, uploadsDir)
-			}
-			slog.Info("agent-only: store reload", "id", le.id, "imported", imp, "errors", errs)
-		}
-	}
+	// ---- Bring the engines up from the cache or the local file ----
+	sup.Bootstrap(cfg, identitySource)
 
 	// ---- Periodic store reconcile ----
 	go func() {
@@ -193,35 +127,25 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				for _, le := range lives {
-					reconcileAgentStore(le.id, le.store, le.metas())
-				}
+				sup.Reconcile()
 			}
 		}
 	}()
 
-	// ---- HydraAgent gRPC (owns events) ----
-	if token == "" {
-		slog.Warn("agent-only served WITHOUT a token: set --agent-token, $" + agentwire.TokenEnv + " or [daemon] agent_token before exposing it off-LAN")
-	}
-	engines := make(map[string]engine.EngineClient, len(lives))
-	for _, le := range lives {
-		engines[le.id] = le.proc.Client()
-	}
-	agentSrv := agent.NewServer(engines, cfg.Daemon.DataDir, token)
-	agentSrv.SetUploadsDir(uploadsDir)
-	agentSrv.SetTLS(tlsCert, tlsKey)
-	agentSrv.SetOwnEvents(true)
-	v6 := false
-	for _, le := range lives {
-		agentSrv.AddRichEngine(le.id, le.rich)
-		v6 = v6 || le.cfg.EnableIPv6
-	}
-	agentSrv.SetIPv6Wanted(v6)
+	// ---- Retry engines that failed to start ----
+	// The front will not re-push: it compares revisions, sees a match and
+	// stays quiet. So a node that could not bring an engine up has to keep
+	// trying on its own, or it waits for a config change that may never come.
 	go func() {
-		slog.Info("HydraAgent (agent-only) serving", "addr", addr)
-		if serr := agentSrv.Serve(ctx, addr); serr != nil {
-			slog.Error("agent-only: gRPC server exited", "error", serr)
+		t := time.NewTicker(engineRetryInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				sup.RetryFailedEngines()
+			}
 		}
 	}()
 
@@ -230,31 +154,19 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 	// via a plain wget, since agent-only has no api.Server. Bound to 127.0.0.1
 	// ONLY: never reachable off the shared netns, never over the VPN tunnel.
 	if listenPortHook > 0 {
-		startListenPortHook(ctx, listenPortHook, token, lives)
+		startListenPortHook(ctx, listenPortHook, token, sup)
 	}
 
 	// ---- Health endpoint for the orchestrator ----
 	if a := resolveHealthAddr(healthAddr, cfg); a != "" {
-		startHealthEndpoint(ctx, a, lives)
+		startHealthEndpoint(ctx, a, sup)
 	}
 
 	slog.Info("agent-only: all systems GO")
 	<-ctx.Done()
 
-	// ---- Graceful shutdown ----
 	slog.Info("agent-only: stopping")
-	for _, le := range lives {
-		if le.ann != nil {
-			le.ann.Stop()
-		}
-	}
-	for _, le := range lives {
-		if le.store != nil {
-			reconcileAgentStore(le.id, le.store, le.metas())
-			le.store.Close()
-		}
-		le.proc.Stop()
-	}
+	sup.Shutdown()
 }
 
 // reconcileAgentStore mirrors one engine's current torrents into its store.
@@ -290,7 +202,7 @@ func reconcileAgentStore(name string, st *store.AgentStore, metas map[string]*en
 // only from within the shared netns (gluetun + this agent) and never over the
 // VPN tunnel or the LAN. When a token is set (--agent-token) it is required in
 // the X-API-Key header, matching the monolith's native /api/*/listen-port.
-func startListenPortHook(ctx context.Context, port int, token string, lives []*liveEngine) {
+func startListenPortHook(ctx context.Context, port int, token string, sup *engineSupervisor) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/listen-port", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -313,7 +225,11 @@ func startListenPortHook(ctx context.Context, port int, token string, lives []*l
 			return
 		}
 		n, failed := 0, 0
-		for _, le := range lives {
+		// Read the live set per request rather than closing over a boot-time
+		// slice: a config push restarts engines, and a hook holding the old
+		// objects would rebind engines that no longer exist while the running
+		// ones kept the port the VPN has stopped forwarding.
+		for _, le := range sup.liveEngines() {
 			var sp interface{ SetListenPort(int) error }
 			if le.race != nil {
 				sp = le.race
@@ -386,9 +302,9 @@ const enginePingTimeout = 3 * time.Second
 
 // startHealthEndpoint serves GET /health, the only HTTP an agent-only node has.
 // Unauthenticated like the monolith's: a container probe carries no token.
-func startHealthEndpoint(ctx context.Context, addr string, lives []*liveEngine) {
+func startHealthEndpoint(ctx context.Context, addr string, sup *engineSupervisor) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", agentHealthHandler(lives)) // everything else 404s: this is a probe, not the REST API
+	mux.HandleFunc("/health", agentHealthHandler(sup)) // everything else 404s: this is a probe, not the REST API
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
 		<-ctx.Done()
@@ -413,21 +329,42 @@ type engineHealth struct {
 
 // A dead engine still leaves gRPC answering, so healthy means every engine
 // pings -- not merely that this process exists.
-func agentHealthHandler(lives []*liveEngine) http.HandlerFunc {
+//
+// The set probed is the one this node DECLARES, not the one it happens to be
+// running: an engine waiting for a configuration, or one whose last start
+// failed, is a node that seeds nothing, and reporting only the live engines
+// would call that healthy because the list came out empty.
+func agentHealthHandler(sup *engineSupervisor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		engines := make([]engineHealth, 0, len(lives))
+		st := sup.ConfigState()
+		lives := make(map[string]*liveEngine, len(st.Engines))
+		for _, le := range sup.liveEngines() {
+			lives[le.id] = le
+		}
+		engines := make([]engineHealth, 0, len(st.Engines))
 		healthy := true
-		for _, le := range lives {
-			eh := engineHealth{ID: le.id, Role: le.role, OK: true}
-			if err := pingEngine(le); err != nil {
-				eh.OK, eh.Error, healthy = false, err.Error(), false
+		for id, es := range st.Engines {
+			eh := engineHealth{ID: id, Role: es.Role, OK: true}
+			switch le := lives[id]; {
+			case es.State == agentwire.EngineStateError:
+				eh.OK, eh.Error = false, es.Error
+			case le == nil:
+				eh.OK, eh.Error = false, "no configuration yet: waiting for the front to push one"
+			default:
+				if err := pingEngine(le); err != nil {
+					eh.OK, eh.Error = false, err.Error()
+				}
 			}
+			healthy = healthy && eh.OK
 			engines = append(engines, eh)
 		}
+		// ConfigState keys a map, and a probe that reorders its own output
+		// between two calls reads like something changed.
+		sort.Slice(engines, func(i, j int) bool { return engines[i].ID < engines[j].ID })
 		status, code := "healthy", http.StatusOK
 		if !healthy {
 			status, code = "unhealthy", http.StatusServiceUnavailable

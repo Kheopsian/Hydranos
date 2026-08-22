@@ -142,6 +142,23 @@ func (c *Client) SetAnnounceOverride(p agentwire.AnnounceOverrideParams) error {
 	return c.call(agentwire.MethodSetAnnounceOverride, p, nil)
 }
 
+// ApplyConfig pushes this node's whole composed configuration (node-level).
+// The agent applies it, restarts only the engines whose engine config actually
+// changed, and caches it so it can boot from it while the front is down.
+func (c *Client) ApplyConfig(p agentwire.ApplyConfigParams) (agentwire.ConfigState, error) {
+	var out agentwire.ConfigState
+	err := c.call(agentwire.MethodApplyConfig, p, &out)
+	return out, err
+}
+
+// GetConfigState reports which config revision the agent is running and how
+// each of its engines took it (node-level).
+func (c *Client) GetConfigState() (agentwire.ConfigState, error) {
+	var out agentwire.ConfigState
+	err := c.call(agentwire.MethodGetConfigState, nil, &out)
+	return out, err
+}
+
 // TrackerSnapshot returns the agent's per-host announce aggregate (node-level).
 func (c *Client) TrackerSnapshot() ([]agentwire.TrackerStatWire, error) {
 	var out []agentwire.TrackerStatWire

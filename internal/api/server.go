@@ -258,6 +258,10 @@ type Server struct {
 	// agentsMu guards remoteAgents for runtime add/remove via the Agents menu.
 	agentsMu sync.RWMutex
 
+	// agentConfigState is the last config revision each agent reported back,
+	// so the agents view can show which nodes are running what (agentconfig.go).
+	agentConfigState configStateCache
+
 	// reconnect backs incremental SSE reconnects (delta since a cursor).
 	reconnect *reconnectState
 

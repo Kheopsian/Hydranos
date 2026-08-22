@@ -81,6 +81,8 @@ const (
 	MethodTrackerSnapshot      = "tracker_snapshot"       // node-level: per-host announce aggregate
 	MethodFetchMetadata        = "fetch_metadata"         // magnet: start resolving an info dict from the swarm
 	MethodGetMetadata          = "get_metadata"           // magnet: poll a resolution started by fetch_metadata
+	MethodApplyConfig          = "apply_config"           // node-level: the front pushes this node's whole composed config
+	MethodGetConfigState       = "get_config_state"       // node-level: which config revision the node is running, and how each engine took it
 )
 
 // FetchMetadataParams starts a magnet resolution on the agent's own engine.
