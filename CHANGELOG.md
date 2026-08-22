@@ -3,6 +3,18 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.114.0 - 2026-08-22
+
+### Changed
+- **A controller node no longer shows an Exit IP in its navbar.** In front-only
+  mode the machine running the web UI drives remote agents and holds no engine
+  of its own, so the address it egresses from is not the one any torrent
+  announces from. Displaying it invited exactly the wrong conclusion when
+  checking whether the fleet was leaking. The stat is now gone from the header
+  in that mode, and with it the two-minute poll that fetched it; per-node
+  addresses stay where they mean something, in the agents tab. Thanks to
+  @the-sblah (#26).
+
 ## v3.113.0 - 2026-08-22
 
 ### Added
