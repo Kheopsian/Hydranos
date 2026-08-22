@@ -151,6 +151,35 @@ type VpnSpeedtestConfig struct {
 	DurationSecs int    `toml:"duration_secs"`
 }
 
+// BenchConfig — bounds on the bench/telemetry database (bench.db).
+//
+// race_snapshots records one row per racing torrent every sampling interval.
+// It shares a single year-long retention with the low-rate tables, which lets
+// it grow to multi-GB on a large instance before a single row is pruned, so it
+// gets its own window here.
+type BenchConfig struct {
+	// Enabled=false stops every bench writer (samples, race snapshots, race
+	// events, tracker samples). Reads keep working on what is already stored.
+	Enabled *bool `toml:"enabled"`
+	// RetentionDays bounds the low-rate tables. 0 = 365. Negative = keep all.
+	RetentionDays int `toml:"retention_days"`
+	// RaceSnapshotRetentionDays bounds race_snapshots. 0 = 7. Negative = keep all.
+	RaceSnapshotRetentionDays int `toml:"race_snapshot_retention_days"`
+	// SnapshotIntervalSecs is the race sampling cadence. 0 = 5.
+	SnapshotIntervalSecs int `toml:"snapshot_interval_secs"`
+	// PruneIntervalMins is how often retention runs. 0 = 60.
+	PruneIntervalMins int `toml:"prune_interval_mins"`
+	// Vacuum reclaims the file after a prune that deleted rows. Off by
+	// default: VACUUM rewrites the whole DB and needs as much free space again.
+	Vacuum bool `toml:"vacuum"`
+}
+
+// BenchEnabled reports whether bench recording is on (absent key = on, which
+// is what every install ran before this section existed).
+func (b BenchConfig) BenchEnabled() bool {
+	return b.Enabled == nil || *b.Enabled
+}
+
 // ProxyConfig — shared SOCKS5 exit used by the Go orchestrator (getPublicIP,
 // vpn_speedtest) so observed IP + measured bandwidth match the path torrents
 // actually take.
@@ -299,6 +328,7 @@ type HydraConfig struct {
 	Engines      []EngineConfig     `toml:"engine"`
 	ArrCleanup   ArrCleanupConfig   `toml:"arr_cleanup"`
 	VpnSpeedtest VpnSpeedtestConfig `toml:"vpn_speedtest"`
+	Bench        BenchConfig        `toml:"bench"`
 	RaceDrain    RaceDrainConfig    `toml:"race_drain"`
 	Notify       NotifyConfig       `toml:"notify"`
 	Proxy        ProxyConfig        `toml:"proxy"`

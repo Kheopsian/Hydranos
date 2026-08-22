@@ -1492,8 +1492,33 @@ func main() {
 		}
 	}()
 
+	// Bench recording cadence and retention are configurable: race_snapshots
+	// gets one row per racing torrent per tick, so both the interval and the
+	// window decide how big bench.db gets.
+	benchCfg := cfg.Bench
+	benchDB.SetRetention(bench.RetentionPolicy{
+		GeneralDays:      benchCfg.RetentionDays,
+		RaceSnapshotDays: benchCfg.RaceSnapshotRetentionDays,
+		Vacuum:           benchCfg.Vacuum,
+	})
+	benchSnapshotInterval := 5 * time.Second
+	if benchCfg.SnapshotIntervalSecs > 0 {
+		benchSnapshotInterval = time.Duration(benchCfg.SnapshotIntervalSecs) * time.Second
+	}
+	benchPruneInterval := time.Hour
+	if benchCfg.PruneIntervalMins > 0 {
+		benchPruneInterval = time.Duration(benchCfg.PruneIntervalMins) * time.Minute
+	}
+	benchRecording := benchCfg.BenchEnabled()
+	if !benchRecording {
+		slog.Info("bench: recording disabled by config ([bench] enabled=false); retention still runs")
+	}
+
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		if !benchRecording {
+			return
+		}
+		ticker := time.NewTicker(benchSnapshotInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -1541,8 +1566,12 @@ func main() {
 	}()
 
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(benchPruneInterval)
 		defer ticker.Stop()
+		// Prune once at boot too: an instance that has been running on the old
+		// year-long window carries millions of stale race_snapshots, and
+		// waiting a full interval to start on them serves nothing.
+		benchDB.PurgeOld()
 		for {
 			select {
 			case <-ctx.Done():
@@ -2395,7 +2424,7 @@ func (a *benchAPIAdapter) InsertRaceEvent(ev bench.RaceEvent) { a.db.InsertRaceE
 func (a *benchAPIAdapter) InsertRaceSnapshots(snapshots []bench.RaceSnapshot) {
 	a.db.InsertRaceSnapshots(snapshots)
 }
-func (a *benchAPIAdapter) PurgeOld() { a.db.PurgeOld() }
+func (a *benchAPIAdapter) PurgeOld() int64 { return a.db.PurgeOld() }
 
 func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 	return map[string]interface{}{

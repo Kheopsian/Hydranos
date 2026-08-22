@@ -215,7 +215,7 @@ type BenchDB interface {
 	// this package is what samples the agents, so it writes as well as reads.
 	InsertRaceEvent(ev bench.RaceEvent)
 	InsertRaceSnapshots(snapshots []bench.RaceSnapshot)
-	PurgeOld()
+	PurgeOld() int64
 }
 
 // HealthReporter exposes the latest invariant-anomaly report. Satisfied by

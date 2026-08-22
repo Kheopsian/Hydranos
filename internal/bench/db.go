@@ -20,9 +20,54 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
+	// RetentionDays is the default window for the low-rate tables. It stays a
+	// year: bench_samples and friends add a handful of rows per interval.
 	RetentionDays = 365
 	retentionSecs = RetentionDays * 86400
+
+	// DefaultRaceSnapshotDays bounds race_snapshots, which is a different
+	// animal: one row per racing torrent every 5s. On a 196k-torrent instance
+	// it reached 10.3M rows in 58 days (bench.db at 3.2 GB) and the year-long
+	// window had not pruned a single row yet. The table feeds the per-torrent
+	// race timeline panel, which is read over a run of minutes to hours, so a
+	// week is already far more history than it is asked for.
+	DefaultRaceSnapshotDays = 7
 )
+
+// RetentionPolicy bounds how long each family of bench rows is kept, in days.
+// Zero on either field means "use the default"; a negative value disables
+// pruning for that family.
+type RetentionPolicy struct {
+	GeneralDays      int
+	RaceSnapshotDays int
+	// Vacuum reclaims the file after a prune that actually deleted rows.
+	// Off by default: VACUUM rewrites the whole database and needs as much
+	// free space again, which is not something to do behind an operator's
+	// back on a multi-GB file.
+	Vacuum bool
+}
+
+func (r RetentionPolicy) generalCutoff(now time.Time) (float64, bool) {
+	d := r.GeneralDays
+	if d == 0 {
+		d = RetentionDays
+	}
+	if d < 0 {
+		return 0, false
+	}
+	return float64(now.Unix()) - float64(d)*86400, true
+}
+
+func (r RetentionPolicy) raceSnapshotCutoff(now time.Time) (float64, bool) {
+	d := r.RaceSnapshotDays
+	if d == 0 {
+		d = DefaultRaceSnapshotDays
+	}
+	if d < 0 {
+		return 0, false
+	}
+	return float64(now.Unix()) - float64(d)*86400, true
+}
 
 // MetricCols is the ordered list of metric columns in the bench_samples table.
 var MetricCols = []string{
@@ -157,6 +202,9 @@ type BenchDB struct {
 	mu   sync.Mutex
 	conn *sql.DB
 	path string
+
+	// retention is read under mu; zero value means the defaults above.
+	retention RetentionPolicy
 
 	// roConn is a dedicated read-only connection for heavy, unbounded read
 	// aggregates (records) so they never hold the write mutex and stall the
@@ -316,19 +364,60 @@ func (b *BenchDB) Insert(snap map[string]interface{}) {
 	b.conn.Exec(sqlStr, vals...)
 }
 
-// PurgeOld removes entries older than 30 days.
-func (b *BenchDB) PurgeOld() {
-	cutoff := float64(time.Now().Unix()) - retentionSecs
+// SetRetention installs the retention policy. Safe to call before or after
+// the DB is opened.
+func (b *BenchDB) SetRetention(p RetentionPolicy) {
+	b.mu.Lock()
+	b.retention = p
+	b.mu.Unlock()
+}
+
+// PurgeOld deletes rows past their retention window and reports how many went.
+// race_snapshots has its own, much shorter window: it outgrows every other
+// table by two orders of magnitude.
+func (b *BenchDB) PurgeOld() int64 {
+	now := time.Now()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.conn == nil {
-		return
+		return 0
 	}
-	b.conn.Exec("DELETE FROM bench_samples WHERE ts < ?", cutoff)
-	b.conn.Exec("DELETE FROM vpn_speedtest WHERE ts < ?", cutoff)
-	b.conn.Exec("DELETE FROM race_events WHERE ts < ?", cutoff)
-	b.conn.Exec("DELETE FROM race_snapshots WHERE ts < ?", cutoff)
-	b.conn.Exec("DELETE FROM tracker_samples WHERE ts < ?", cutoff)
+	pol := b.retention
+
+	var deleted int64
+	del := func(table string, cutoff float64) {
+		res, err := b.conn.Exec("DELETE FROM "+table+" WHERE ts < ?", cutoff)
+		if err != nil {
+			slog.Warn("bench: prune failed", "table", table, "err", err)
+			return
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			deleted += n
+		}
+	}
+
+	if cutoff, ok := pol.generalCutoff(now); ok {
+		del("bench_samples", cutoff)
+		del("vpn_speedtest", cutoff)
+		del("race_events", cutoff)
+		del("tracker_samples", cutoff)
+	}
+	if cutoff, ok := pol.raceSnapshotCutoff(now); ok {
+		del("race_snapshots", cutoff)
+	}
+
+	if deleted > 0 {
+		slog.Info("bench: pruned old rows", "rows", deleted)
+		if pol.Vacuum {
+			t0 := time.Now()
+			if _, err := b.conn.Exec("VACUUM"); err != nil {
+				slog.Warn("bench: vacuum failed", "err", err)
+			} else {
+				slog.Info("bench: vacuumed", "took", time.Since(t0).Round(time.Second))
+			}
+		}
+	}
+	return deleted
 }
 
 // InsertVpn stores a VPN speed test result.
