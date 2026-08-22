@@ -755,6 +755,9 @@ func (s *Server) handleIndex(c *gin.Context) {
 	c.Header("Cache-Control", "no-cache")
 	c.HTML(http.StatusOK, "index.html", gin.H{
 		"Version": Version,
+		// A controller node's own egress is not the fleet's: hide it rather
+		// than show an address no torrent ever announces.
+		"FrontOnly": s.frontOnly,
 	})
 }
 
