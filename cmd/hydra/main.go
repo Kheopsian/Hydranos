@@ -35,6 +35,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/drain"
 	"github.com/Kheopsian/hydra/internal/engine"
+	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 	"github.com/Kheopsian/hydra/internal/fsinfo"
 	"github.com/Kheopsian/hydra/internal/health"
@@ -2411,10 +2412,6 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 	}
 }
 
-// agentConfigError names the field an [[agent]] block is missing, or "" when
-// the block is usable. name is the agent's identity everywhere -- placement,
-// agents.json, the UI -- and addr is how we reach it, so neither can be
-// defaulted. Kept apart from the dialing so it can be tested without a server.
 // runFrontOnly serves a controller node: no local Typhon engine, only the API
 // + dialed remote agents. Category placement routes adds to those agents. Read
 // endpoints use empty engine stubs (list aggregation across agents is a later
@@ -2428,7 +2425,14 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 	// announce with, so it has to load its own [announce_*] tables: without
 	// this it would push empty override maps over every agent's spoofing.
 	api.InitAnnounceOverrides(cfg)
+	resumeJobs := startFrontOnlyJobs(ctx, cfg, apiServer)
 	apiServer.StartAgentReconciler(ctx)
+	// Only once the agents are registered: a move resolves both of its ends by
+	// name when it runs, and resuming before the dial fails it with "no agent
+	// named ..." -- the restart the job was built to survive killing it.
+	if resumeJobs != nil {
+		resumeJobs()
+	}
 	go func() {
 		if err := apiServer.Run(); err != nil {
 			slog.Error("API server error", "error", err)
@@ -2446,6 +2450,75 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 	// the same permanent overlay back the moment an agent was down.
 	api.SetStartupReady(true)
 	<-ctx.Done()
+}
+
+// startFrontOnlyJobs gives a controller node its background job manager and
+// returns the resume hook, or nil when the store could not be opened.
+//
+// A controller runs no engine, but a cross-agent move is its work by
+// definition: both ends are agents and it is the only node connected to both.
+// Without this the Jobs view answers 503 on a node where moving payload
+// between agents is the whole point, and /api/jobs/move-remote cannot be
+// submitted at all.
+//
+// The store here holds the job table and nothing else -- it is deliberately
+// NOT handed to api.SetStore: this node hosts no torrents, and an empty
+// torrent table presented as the truth would have the counters and listings
+// report zero rather than say they live on the agents.
+func startFrontOnlyJobs(ctx context.Context, cfg *config.HydraConfig, apiServer *api.Server) func() {
+	st, err := store.Open(filepath.Join(cfg.Daemon.DataDir, "hydra.db"))
+	if err != nil {
+		slog.Error("store: open failed, background jobs are off on this node", "error", err)
+		return nil
+	}
+	context.AfterFunc(ctx, func() { st.Close() })
+
+	// Both ends are named agents, resolved at RUN time: a resumed job must
+	// find the agent as it is now, not as it was when the job was created.
+	// "local" is not a node here, and saying so beats dialing nothing.
+	dial := func(agent, engineID string) (*grpcclient.Client, error) {
+		if agent == "" || agent == api.LocalAgentName {
+			return nil, fmt.Errorf("this node is a controller and hosts no torrents: name the agent instead of %q", api.LocalAgentName)
+		}
+		return apiServer.RemoteAgentEngineClient(agent, engineID)
+	}
+
+	jobMgr := jobs.NewManager(ctx, st, 1)
+	jobMgr.Register(&jobs.RemoteMoveRunner{
+		DialSource: func(p jobs.RemoteMoveParams) (jobs.PieceSource, error) {
+			cl, derr := dial(p.SourceAgent, p.Engine)
+			if derr != nil {
+				return nil, derr
+			}
+			return cl, nil
+		},
+		DialSink: func(p jobs.RemoteMoveParams) (jobs.PieceSink, error) {
+			cl, derr := dial(p.TargetAgent, p.Engine)
+			if derr != nil {
+				return nil, derr
+			}
+			return cl, nil
+		},
+		ResolveSavePath: apiServer.CategorySavePathFor,
+		SetTargetCategory: func(p jobs.RemoteMoveParams, infoHash string) error {
+			cl, derr := dial(p.TargetAgent, p.Engine)
+			if derr != nil {
+				return derr
+			}
+			return cl.SetCategoryLabel(p.Engine, infoHash, p.Category)
+		},
+		FreeSpace: func(agent, path string) (int64, error) {
+			cl, derr := dial(agent, agentwire.EngineHoard)
+			if derr != nil {
+				return 0, derr
+			}
+			return cl.DiskFree(path)
+		},
+	})
+	apiServer.SetJobManager(jobMgr)
+	// Finished jobs are kept long enough to be useful and not forever.
+	jobMgr.Prune(30 * 24 * time.Hour)
+	return jobMgr.ResumeAll
 }
 
 // ---------------------------------------------------------------------------
