@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,7 +54,7 @@ func (le *liveEngine) metas() map[string]*engine.TorrentMeta {
 // (ownEvents=true), persists each engine to its own per-agent store, and exposes
 // the HydraAgent gRPC API — no api.Server. Egress is unchanged: the SOCKS5 proxy
 // lives in each engine's Typhon config applied at StartSessionEngine.
-func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, tlsCert, tlsKey string, listenPortHook int) {
+func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, tlsCert, tlsKey string, listenPortHook int, healthAddr string) {
 	if addr == "" {
 		slog.Error("agent-only mode requires --agent-addr")
 		os.Exit(1)
@@ -228,6 +230,11 @@ func runAgentOnly(parent context.Context, cfg *config.HydraConfig, addr, token, 
 		startListenPortHook(ctx, listenPortHook, token, lives)
 	}
 
+	// ---- Health endpoint for the orchestrator ----
+	if a := resolveHealthAddr(healthAddr, cfg); a != "" {
+		startHealthEndpoint(ctx, a, lives)
+	}
+
 	slog.Info("agent-only: all systems GO")
 	<-ctx.Done()
 
@@ -350,4 +357,102 @@ func startListenPortHook(ctx context.Context, port int, token string, lives []*l
 			slog.Error("agent-only: listen-port hook exited", "error", err)
 		}
 	}()
+}
+
+// resolveHealthAddr defaults to the config's API host:port: agent-only runs no
+// api.Server, so that port is free and is the one already published.
+func resolveHealthAddr(flagVal string, cfg *config.HydraConfig) string {
+	if strings.EqualFold(flagVal, "off") || strings.EqualFold(flagVal, "none") {
+		return ""
+	}
+	if flagVal != "" {
+		return flagVal
+	}
+	host := cfg.Daemon.APIHost
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	if cfg.Daemon.APIPort <= 0 {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(cfg.Daemon.APIPort))
+}
+
+// A wedged engine must fail the probe, not hold it open until its own timeout.
+const enginePingTimeout = 3 * time.Second
+
+// startHealthEndpoint serves GET /health, the only HTTP an agent-only node has.
+// Unauthenticated like the monolith's: a container probe carries no token.
+func startHealthEndpoint(ctx context.Context, addr string, lives []*liveEngine) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", agentHealthHandler(lives)) // everything else 404s: this is a probe, not the REST API
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		slog.Info("agent-only: health endpoint serving", "addr", addr, "path", "/health")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("agent-only: health endpoint exited", "error", err)
+		}
+	}()
+}
+
+var agentStart = time.Now()
+
+type engineHealth struct {
+	ID    string `json:"id"`
+	Role  string `json:"role"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// A dead engine still leaves gRPC answering, so healthy means every engine
+// pings -- not merely that this process exists.
+func agentHealthHandler(lives []*liveEngine) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		engines := make([]engineHealth, 0, len(lives))
+		healthy := true
+		for _, le := range lives {
+			eh := engineHealth{ID: le.id, Role: le.role, OK: true}
+			if err := pingEngine(le); err != nil {
+				eh.OK, eh.Error, healthy = false, err.Error(), false
+			}
+			engines = append(engines, eh)
+		}
+		status, code := "healthy", http.StatusOK
+		if !healthy {
+			status, code = "unhealthy", http.StatusServiceUnavailable
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  status,
+			"mode":    "agent-only",
+			"version": version,
+			"uptime":  time.Since(agentStart).Seconds(),
+			"engines": engines,
+		})
+	}
+}
+
+// pingEngine probes one engine. Ping takes no context, so a hung one is left to
+// its own goroutine instead of holding the response.
+func pingEngine(le *liveEngine) error {
+	if le.proc == nil || le.proc.Client() == nil {
+		return fmt.Errorf("engine not started")
+	}
+	done := make(chan error, 1)
+	go func() { done <- le.proc.Client().Ping() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(enginePingTimeout):
+		return fmt.Errorf("ping timed out after %s", enginePingTimeout)
+	}
 }
