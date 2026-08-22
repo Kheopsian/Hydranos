@@ -77,19 +77,24 @@ func (r *raceRecorder) tick() {
 	now := float64(time.Now().Unix())
 	var snapshots []bench.RaceSnapshot
 	live := map[string]bool{}
+	var agg raceAgg
+	engines, answered := 0, 0
 
 	for _, ra := range r.srv.agentsSnapshot() {
 		for _, e := range ra.byRole("race") {
 			if e.client == nil {
 				continue
 			}
+			engines++
 			lst, err := e.client.ListTorrentsTimeout(raceTimelineListTO)
 			if err != nil || lst == nil {
 				continue
 			}
+			answered++
 			cats, _ := e.client.TorrentCategories(e.id)
 			for _, t := range lst.Torrents {
 				live[t.InfoHash] = true
+				agg.add(t)
 				if ev, ok := r.lifecycleEvent(t, cats[t.InfoHash], now); ok {
 					r.srv.benchDB.InsertRaceEvent(ev)
 				}
@@ -103,8 +108,26 @@ func (r *raceRecorder) tick() {
 	if len(snapshots) > 0 {
 		r.srv.benchDB.InsertRaceSnapshots(snapshots)
 	}
-	// A torrent that left the agents is not coming back under the same
-	// lifecycle: forget it rather than grow these maps for the process's life.
+	// This pass already listed every race engine, so the overview totals come
+	// free with it -- see refreshAgentRaceStats, which stands down while this
+	// is running.
+	r.srv.publishRaceAgg(agg, engines, answered)
+	r.forgetDeparted(live, engines == answered)
+}
+
+// forgetDeparted drops the torrents that are no longer on any agent. A torrent
+// that left is not coming back under the same lifecycle, and keeping it would
+// grow these maps for the life of the process.
+//
+// Only when the pass saw every engine. An agent that timed out contributed
+// nothing to live, so its torrents all look departed -- forget them and the
+// next tick sights them as new, writing a second "added" for a torrent that
+// never went anywhere. One 4s timeout would be enough to put a duplicate in a
+// timeline that is supposed to be the record of what happened.
+func (r *raceRecorder) forgetDeparted(live map[string]bool, complete bool) {
+	if !complete {
+		return
+	}
 	for ih := range r.seen {
 		if !live[ih] {
 			delete(r.seen, ih)
@@ -194,9 +217,14 @@ func racePeersJSON(peers []ltclient.PeerInfo) string {
 		Progress float64 `json:"progress"`
 		Flags    string  `json:"flags"`
 	}
-	sort.Slice(peers, func(i, j int) bool { return peers[i].DLRate > peers[j].DLRate })
+	// Sorted on a copy: this is the slice GetPeers just returned to the
+	// caller, and reordering someone else's data to build a JSON blob is a
+	// surprise waiting for the first caller that reads it after us.
+	ranked := make([]ltclient.PeerInfo, len(peers))
+	copy(ranked, peers)
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].DLRate > ranked[j].DLRate })
 	out := make([]peerSnap, 0, raceTimelinePeerRows)
-	for i, p := range peers {
+	for i, p := range ranked {
 		if i >= raceTimelinePeerRows && p.Progress < 0.8 {
 			continue
 		}
