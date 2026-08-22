@@ -1316,6 +1316,7 @@ func (s *Server) statusPayload() gin.H {
 			hoardStatus["session_uploaded"] = hoardSessionUL
 			hoardStatus["session_downloaded"] = hoardSessionDL
 		}
+		s.mergeAgentHoardStats(hoardStatus)
 		result["hoard"] = hoardStatus
 	}
 
@@ -1333,6 +1334,10 @@ func (s *Server) statusPayload() gin.H {
 	dayUL, dayDL := GetDayDelta()
 	result["day_uploaded"] = dayUL
 	result["day_downloaded"] = dayDL
+
+	// The agents run engines too, and the overview counts what Hydra is doing,
+	// not what this node is doing.
+	s.addAgentRaceStats(result)
 
 	result["tunnels"] = GetTunnelSnapshot()
 	// Cursor for incremental SSE reconnects: the client echoes this back as ?since=.
@@ -1472,8 +1477,8 @@ func (s *Server) hoardStatsPayload() gin.H {
 	}
 	// The torrents this node's agents hold are in the table below this header,
 	// so they have to be in the header too -- otherwise a front-only node,
-	// whose every torrent lives on an agent, summarised itself as empty.
-	// /api/status stays node-local: it reports this node's engines.
+	// whose every torrent lives on an agent, summarised itself as empty. The
+	// same merge runs in statusPayload, for the same reason.
 	s.mergeAgentHoardStats(status)
 	return status
 }
