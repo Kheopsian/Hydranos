@@ -39,6 +39,12 @@ type engineSupervisor struct {
 	boot       []agentBootEngine
 	bootIndex  map[string]int // engine id -> position, for a stable IPC socket
 
+	// reconcileMu is held for the whole of a store reconcile, and by Shutdown
+	// while it closes the stores. It is deliberately not mu: a reconcile walks
+	// every torrent of every engine, and holding mu for that would stall the
+	// announce race gate and every ConfigState the front asks for.
+	reconcileMu sync.Mutex
+
 	mu       sync.Mutex
 	lives    map[string]*liveEngine
 	stores   map[string]*store.AgentStore
@@ -86,11 +92,18 @@ func newEngineSupervisor(ctx context.Context, cfg *config.HydraConfig, boot []ag
 func (s *engineSupervisor) ApplyConfig(p agentwire.ApplyConfigParams) agentwire.ConfigState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.apply(p, agentwire.ConfigSourceFront)
-	// Cached only after the apply: a config that could not be applied is not
-	// one this node should boot from next time.
-	if err := s.writeCache(p); err != nil {
-		slog.Warn("agent: could not cache the pushed config", "err", err)
+	// Cached only when the apply worked: a config that brought no engine up is
+	// not one this node should boot from next time. Caching it anyway would
+	// make readCache succeed on the next boot and shadow the local-file
+	// fallback, so a node would replay a config it has already proven it
+	// cannot run.
+	if s.apply(p, agentwire.ConfigSourceFront) {
+		if err := s.writeCache(p); err != nil {
+			slog.Warn("agent: could not cache the pushed config", "err", err)
+		}
+	} else {
+		slog.Warn("agent: no engine came up on the pushed config, not caching it",
+			"revision", p.Revision)
 	}
 	return s.state()
 }
@@ -135,13 +148,15 @@ func (s *engineSupervisor) Bootstrap(cfg *config.HydraConfig, identitySource str
 
 	if p, ok := s.readCache(); ok {
 		slog.Info("agent: starting from the last config the front pushed", "revision", p.Revision)
-		s.apply(p, agentwire.ConfigSourceCache)
+		// The result is not acted on: an engine that fails here is retried by
+		// RetryFailedEngines, and the cache it came from is already on disk.
+		_ = s.apply(p, agentwire.ConfigSourceCache)
 		return
 	}
 	if identitySource == "file" {
 		if p, ok := s.localConfig(cfg); ok {
 			slog.Info("agent: no cached config, starting from this node's own config file", "path", cfg.SourcePath)
-			s.apply(p, agentwire.ConfigSourceLocal)
+			_ = s.apply(p, agentwire.ConfigSourceLocal)
 			return
 		}
 	}
@@ -177,8 +192,9 @@ func (s *engineSupervisor) localConfig(cfg *config.HydraConfig) (agentwire.Apply
 
 // ---- apply ----
 
-// apply reconciles the running engines against a configuration. Caller holds mu.
-func (s *engineSupervisor) apply(p agentwire.ApplyConfigParams, source string) {
+// apply reconciles the running engines against a configuration and reports
+// whether every declared engine ended up running. Caller holds mu.
+func (s *engineSupervisor) apply(p agentwire.ApplyConfigParams, source string) bool {
 	applyAnnounceOverrides(p.Announce)
 
 	want := make(map[string]config.SessionConfig, len(p.Engines))
@@ -216,6 +232,7 @@ func (s *engineSupervisor) apply(p agentwire.ApplyConfigParams, source string) {
 		delete(s.lastErr, b.ID)
 	}
 	s.revision, s.source, s.applied = p.Revision, source, p
+	return len(s.lastErr) == 0
 }
 
 // RetryFailedEngines re-attempts the engines whose last start failed, on the
@@ -441,6 +458,8 @@ func (s *engineSupervisor) liveEngines() []*liveEngine {
 
 // Reconcile mirrors every running engine's torrents into its store.
 func (s *engineSupervisor) Reconcile() {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
 	for _, le := range s.liveEngines() {
 		reconcileAgentStore(le.id, le.store, le.metas())
 	}
@@ -449,10 +468,20 @@ func (s *engineSupervisor) Reconcile() {
 // Shutdown stops every engine and closes the stores.
 func (s *engineSupervisor) Shutdown() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, b := range s.boot {
 		s.stopEngine(b.ID)
 	}
+	s.mu.Unlock()
+
+	// The stores close only once no reconcile is in flight. The reconcile
+	// ticker and this run both end on the same ctx.Done, so a tick that had
+	// already started would otherwise write into a handle closed underneath
+	// it -- a use-after-close on SQLite, at the one moment nobody is watching
+	// the log.
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for id, st := range s.stores {
 		st.Close()
 		delete(s.stores, id)

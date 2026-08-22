@@ -151,3 +151,21 @@ func TestLocalConfigFallbackBuildsAPayloadFromTheNodesOwnFile(t *testing.T) {
 		t.Fatal("the fallback payload has no revision, so a front could never see it change")
 	}
 }
+
+// A push that brings no engine up must not be cached: the next boot would read
+// it back, skip the local-file fallback, and replay a configuration this node
+// has already proven it cannot run.
+func TestAFailedApplyIsNotCached(t *testing.T) {
+	sup := testSupervisor(t, agentBootEngine{ID: "race-0", Role: "race", ListenPort: 12314})
+
+	st := sup.ApplyConfig(agentwire.ApplyConfigParams{Revision: 5})
+	if st.Engines["race-0"].State != agentwire.EngineStateError {
+		t.Fatalf("an engine the push ignored is not reported in error: %+v", st.Engines["race-0"])
+	}
+	if _, err := os.Stat(sup.cachePath()); !os.IsNotExist(err) {
+		t.Fatalf("a config that brought no engine up was cached (stat err = %v)", err)
+	}
+	if _, ok := sup.readCache(); ok {
+		t.Fatal("the failed config would be replayed on the next boot")
+	}
+}

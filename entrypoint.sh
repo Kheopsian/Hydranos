@@ -24,8 +24,13 @@ else
     CFG_FILE="$CFG_DIR/default.toml"
 fi
 # One --config, built once, so the three exec paths below cannot disagree about
-# whether this container has a config file.
-set -- ${CFG_FILE:+--config "$CFG_FILE"} "$@"
+# whether this container has a config file. Built with an if rather than
+# ${CFG_FILE:+...}: that expansion cannot be quoted as a whole, so a config
+# directory containing a space would split into two argv entries and hydra
+# would start on a truncated path instead of failing loudly.
+if [ -n "$CFG_FILE" ]; then
+    set -- --config "$CFG_FILE" "$@"
+fi
 # data_dir has no config file to come from in the environment-driven case.
 : "${HYDRA_DATA_DIR:=$CFG_DIR}"
 export HYDRA_DATA_DIR
