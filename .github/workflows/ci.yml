@@ -1,0 +1,106 @@
+name: ci
+
+# The check every change goes through, PRs included. The other four workflows
+# all fire on a tag, a push to main or a release, so until this file existed a
+# pull request arrived with nothing run against it at all -- PR #21 and PR #30
+# were both built and tested by hand in a golang container before merging.
+#
+# Deliberately cheap: build, vet and test, no release artifacts. The expensive
+# multi-arch static builds stay in release.yml, where a tag pays for them once.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A PR that is pushed to twice in a minute does not need the first run to
+# finish. main is never cancelled: its runs are the record of what merged.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      # The repo vendors its dependencies, so the build must use them: without
+      # this a CI run would resolve modules from the network and could go green
+      # on a dependency tree that no release build ever sees.
+      - name: Build
+        run: go build -mod=vendor ./...
+      - name: Vet
+        run: go vet -mod=vendor ./...
+      - name: Gofmt
+        run: |
+          unformatted=$(gofmt -l cmd internal)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite these files:"
+            echo "$unformatted"
+            gofmt -d cmd internal
+            exit 1
+          fi
+      # -race because the bugs this codebase actually ships are concurrency
+      # ones: a store closed under a reconcile in flight, a supervisor mutex
+      # taken from an announce callback. A test suite run without it would have
+      # gone green on every one of them.
+      - name: Test
+        run: go test -mod=vendor -race ./...
+
+  # entrypoint.sh is the first thing every container runs and it is not covered
+  # by any Go test: a syntax error in it turns into a container that exits
+  # before hydra is even reached.
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse the entrypoint
+        run: sh -n entrypoint.sh
+      - name: Shellcheck
+        run: shellcheck -s sh entrypoint.sh
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # jemalloc and aws-lc build C: the hosted image ships cmake, but naming
+      # the dependency here means a runner image that drops it fails on this
+      # line instead of somewhere inside a five-minute compile.
+      - name: Build dependencies
+        run: sudo apt-get install -y --no-install-recommends cmake
+      # Keyed on the lockfile: a dependency change gets a cold build, everything
+      # else reuses the last one. Without it a PR touching one Rust line pays
+      # for jemalloc, ring and aws-lc every time.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            typhon-engine/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('typhon-engine/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      # Same cfg release.yml builds with: the engine uses tokio's unstable
+      # runtime metrics, and without it the code behind that cfg is never
+      # compiled here -- so CI would miss exactly what ships.
+      - name: Check
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: cargo check --all-targets
+      - name: Test
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: cargo test
+      # No cargo fmt check: rustfmt disagrees with 35 of the crate's files as
+      # they stand, so gating on it would mean reformatting the whole engine in
+      # the same commit that adds CI -- a diff that buries every git blame in
+      # the crate and conflicts with every branch in flight. Worth doing, worth
+      # doing on its own.
