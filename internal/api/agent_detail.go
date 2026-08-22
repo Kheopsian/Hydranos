@@ -199,10 +199,6 @@ func (s *Server) raceDetailFromRemote(agentHint, hash string) map[string]interfa
 	return s.torrentDetailFromRemote(agentHint, hash, "race")
 }
 
-func (s *Server) remoteHoardDetail(ra *remoteAgent, engineID, hash, category string) map[string]interface{} {
-	return s.remoteTorrentDetail(ra, engineID, hash, category)
-}
-
 func (s *Server) filesFromRemote(agentHint, hash, role string) (files []map[string]interface{}, avail map[string]interface{}, ok bool) {
 	ra, engineID, _, found := s.resolveRemoteDetailTarget(hash, agentHint, role)
 	if !found {

@@ -3,6 +3,23 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.117.0 - 2026-08-22
+
+### Fixed
+- **Opening a torrent that lives on an agent showed nothing.** The hoard list
+  already merged rows from every agent, but clicking one asked the local engine
+  for the detail and the Content tab, so in a split front + agent deployment
+  both came back empty for anything the controller did not hold itself. Detail
+  and file listing now go to the agent that owns the torrent, and the row
+  carries which agent that is, so the panel matches the line that was clicked.
+  Thanks to @the-sblah (#29).
+- **The UDP tracker wire test could not run under the race detector.** Its fake
+  tracker recorded what it had been told from the serving goroutine while the
+  test read those fields back on its own, and a UDP datagram is not a
+  synchronisation edge between the two, so `go test -race ./internal/engine/`
+  reported a data race and failed. The recorded fields now live behind a mutex
+  and are copied out in one go. Test-only: nothing that ships was affected.
+
 ## v3.116.0 - 2026-08-22
 
 ### Fixed

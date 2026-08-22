@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,15 +16,31 @@ import (
 type fakeUDPTracker struct {
 	conn *net.UDPConn
 
-	gotInfoHash [20]byte
-	gotPeerID   [20]byte
-	gotPort     uint16
-	gotEvent    uint32
-	gotLeft     uint64
-	gotUploaded uint64
-	connects    int
-	announces   int
-	done        chan struct{}
+	// A UDP datagram is not a synchronisation edge: the serving goroutine
+	// writes these while the test goroutine reads them once udpAnnounce
+	// returns, and nothing orders the two. Guard them so -race can run.
+	mu   sync.Mutex
+	seen udpSeen
+
+	done chan struct{}
+}
+
+// udpSeen is what the tracker was told, copied out under the lock.
+type udpSeen struct {
+	infoHash  [20]byte
+	peerID    [20]byte
+	port      uint16
+	event     uint32
+	left      uint64
+	uploaded  uint64
+	connects  int
+	announces int
+}
+
+func (f *fakeUDPTracker) snapshot() udpSeen {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.seen
 }
 
 func startFakeUDPTracker(t *testing.T) *fakeUDPTracker {
@@ -59,7 +76,9 @@ func (f *fakeUDPTracker) serve() {
 			if binary.BigEndian.Uint64(buf[0:8]) != udpProtocolID {
 				continue // not a BEP 15 connect; ignore like a real tracker would
 			}
-			f.connects++
+			f.mu.Lock()
+			f.seen.connects++
+			f.mu.Unlock()
 			resp := make([]byte, 16)
 			binary.BigEndian.PutUint32(resp[0:4], udpActionConnect)
 			binary.BigEndian.PutUint32(resp[4:8], txn)
@@ -70,13 +89,15 @@ func (f *fakeUDPTracker) serve() {
 			if n < 98 {
 				continue
 			}
-			f.announces++
-			copy(f.gotInfoHash[:], buf[16:36])
-			copy(f.gotPeerID[:], buf[36:56])
-			f.gotLeft = binary.BigEndian.Uint64(buf[64:72])
-			f.gotUploaded = binary.BigEndian.Uint64(buf[72:80])
-			f.gotEvent = binary.BigEndian.Uint32(buf[80:84])
-			f.gotPort = binary.BigEndian.Uint16(buf[96:98])
+			f.mu.Lock()
+			f.seen.announces++
+			copy(f.seen.infoHash[:], buf[16:36])
+			copy(f.seen.peerID[:], buf[36:56])
+			f.seen.left = binary.BigEndian.Uint64(buf[64:72])
+			f.seen.uploaded = binary.BigEndian.Uint64(buf[72:80])
+			f.seen.event = binary.BigEndian.Uint32(buf[80:84])
+			f.seen.port = binary.BigEndian.Uint16(buf[96:98])
+			f.mu.Unlock()
 
 			resp := make([]byte, 20+12)
 			binary.BigEndian.PutUint32(resp[0:4], udpActionAnnounce)
@@ -134,20 +155,21 @@ func TestUDPAnnounceWireRoundTrip(t *testing.T) {
 
 	// What the tracker actually received: these are the fields a private
 	// tracker credits us on, so a silent offset error costs real ratio.
-	if got := hexOf(f.gotInfoHash[:]); got != wireTestHash {
+	seen := f.snapshot()
+	if got := hexOf(seen.infoHash[:]); got != wireTestHash {
 		t.Errorf("tracker saw info_hash %s, want %s", got, wireTestHash)
 	}
-	if string(f.gotPeerID[:]) != ta.peerID {
-		t.Errorf("tracker saw peer_id %q, want %q", f.gotPeerID, ta.peerID)
+	if string(seen.peerID[:]) != ta.peerID {
+		t.Errorf("tracker saw peer_id %q, want %q", seen.peerID, ta.peerID)
 	}
-	if f.gotPort != 51413 {
-		t.Errorf("tracker saw port %d, want 51413", f.gotPort)
+	if seen.port != 51413 {
+		t.Errorf("tracker saw port %d, want 51413", seen.port)
 	}
-	if f.gotEvent != 2 {
-		t.Errorf("tracker saw event %d, want 2 (started)", f.gotEvent)
+	if seen.event != 2 {
+		t.Errorf("tracker saw event %d, want 2 (started)", seen.event)
 	}
-	if f.gotLeft != 1024 || f.gotUploaded != 4096 {
-		t.Errorf("tracker saw left=%d uploaded=%d, want 1024/4096", f.gotLeft, f.gotUploaded)
+	if seen.left != 1024 || seen.uploaded != 4096 {
+		t.Errorf("tracker saw left=%d uploaded=%d, want 1024/4096", seen.left, seen.uploaded)
 	}
 }
 
@@ -168,11 +190,12 @@ func TestUDPConnectionIDIsReused(t *testing.T) {
 			t.Fatalf("announce %d: %v", i, err)
 		}
 	}
-	if f.connects != 1 {
-		t.Errorf("tracker saw %d connects for 3 announces, want 1", f.connects)
+	seen := f.snapshot()
+	if seen.connects != 1 {
+		t.Errorf("tracker saw %d connects for 3 announces, want 1", seen.connects)
 	}
-	if f.announces != 3 {
-		t.Errorf("tracker saw %d announces, want 3", f.announces)
+	if seen.announces != 3 {
+		t.Errorf("tracker saw %d announces, want 3", seen.announces)
 	}
 }
 
