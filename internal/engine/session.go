@@ -126,8 +126,8 @@ type TorrentDetail struct {
 // libtorrent type conversion helpers
 // ---------------------------------------------------------------------------
 
-// ltStatusToTorrentStats converts an ltclient TorrentStatus to our TorrentStats.
-func ltStatusToTorrentStats(s ltclient.TorrentStatus, category, savePath string, addedTime, completedTime time.Time) TorrentStats {
+// LtStatusToTorrentStats converts an ltclient TorrentStatus to our TorrentStats.
+func LtStatusToTorrentStats(s ltclient.TorrentStatus, category, savePath string, addedTime, completedTime time.Time) TorrentStats {
 	progress := s.Progress
 	if s.State == "seeding" {
 		progress = 1.0
@@ -208,8 +208,8 @@ func normalizeTags(tags []string) []string {
 	return out
 }
 
-// ltPeerToPeerInfo converts an ltclient PeerInfo to our PeerInfo.
-func ltPeerToPeerInfo(p ltclient.PeerInfo) PeerInfo {
+// LtPeerToPeerInfo converts an ltclient PeerInfo to our PeerInfo.
+func LtPeerToPeerInfo(p ltclient.PeerInfo) PeerInfo {
 	// Split flags string into individual flag characters
 	var flags []string
 	for _, c := range p.Flags {

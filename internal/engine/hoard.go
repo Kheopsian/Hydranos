@@ -1156,13 +1156,13 @@ func (e *HoardEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 		}).ToMap()
 	}
 
-	stats := ltStatusToTorrentStats(*s, info.Category, info.SavePath, info.AddedTime, info.CompletedTime)
+	stats := LtStatusToTorrentStats(*s, info.Category, info.SavePath, info.AddedTime, info.CompletedTime)
 
 	// Get peers.
 	ltPeers, _ := e.client.GetPeers(infoHash)
 	peers := make([]PeerInfo, 0, len(ltPeers))
 	for _, p := range ltPeers {
-		peers = append(peers, ltPeerToPeerInfo(p))
+		peers = append(peers, LtPeerToPeerInfo(p))
 	}
 
 	detail := &TorrentDetail{
@@ -1394,7 +1394,7 @@ func (e *HoardEngine) refreshStats() {
 			addedTime = time.Unix(s.AddedTime, 0)
 		}
 
-		stats := ltStatusToTorrentStats(s, category, savePath, addedTime, completedTime)
+		stats := LtStatusToTorrentStats(s, category, savePath, addedTime, completedTime)
 		if info != nil {
 			stats.ContentFolder = info.ContentFolder
 			stats.Tags = info.Tags
@@ -1418,7 +1418,7 @@ func (e *HoardEngine) refreshStats() {
 	e.cachedStatsMu.Lock()
 	// Preserve announce-derived fields (populated by HoardAnnouncer.ObserveAnnounce)
 	// across the periodic refresh — Typhon's internal announce loop is disabled
-	// so ltStatusToTorrentStats returns zero for these and would clobber our
+	// so LtStatusToTorrentStats returns zero for these and would clobber our
 	// Go-canonical values otherwise.
 	for ih, ns := range newStats {
 		if old, ok := e.cachedStats[ih]; ok {
