@@ -1204,8 +1204,10 @@ async function updateOverview() {
 // ─── Race torrents ──────────────────────────────────────
 
 let selectedTorrent = null;
+let selectedTorrentAgent = "local";
 let detailRefreshTimer = null;
 let selectedHoardTorrent = null;
+let selectedHoardTorrentAgent = "local";
 let hoardDetailTimer = null;
 
 // Race sort
@@ -1293,8 +1295,9 @@ async function updateRaceTorrents() {
     }
 }
 
-async function showDetail(infoHash) {
+async function showDetail(infoHash, agent) {
     selectedTorrent = infoHash;
+    selectedTorrentAgent = agent || "local";
     const panel = document.getElementById("torrent-detail");
     panel.style.display = "block";
 
@@ -1309,6 +1312,7 @@ async function showDetail(infoHash) {
 
 function closeDetail() {
     selectedTorrent = null;
+    selectedTorrentAgent = "local";
     if (detailRefreshTimer) clearInterval(detailRefreshTimer);
     if (_tlProgressChart) { _tlProgressChart.destroy(); _tlProgressChart = null; }
     if (_tlPeerChart) { _tlPeerChart.destroy(); _tlPeerChart = null; }
@@ -1334,7 +1338,7 @@ function switchDetailTab(tab) {
     document.getElementById("detail-tab-content").style.display = tab === "content" ? "" : "none";
     if (tab === "timeline" && selectedTorrent) loadTimeline(selectedTorrent);
     if (tab === "content" && selectedTorrent) {
-        loadTorrentContent(selectedTorrent, "detail-content-body", "detail-content-summary");
+        loadTorrentContent(selectedTorrent, "detail-content-body", "detail-content-summary", selectedTorrentAgent, "race");
     }
 }
 
@@ -1348,7 +1352,7 @@ function switchHoardDetailTab(tab) {
     document.getElementById("h-detail-tab-info").style.display = tab === "info" ? "" : "none";
     document.getElementById("h-detail-tab-content").style.display = tab === "content" ? "" : "none";
     if (tab === "content" && selectedHoardTorrent) {
-        loadTorrentContent(selectedHoardTorrent, "h-detail-content-body", "h-detail-content-summary");
+        loadTorrentContent(selectedHoardTorrent, "h-detail-content-body", "h-detail-content-summary", selectedHoardTorrentAgent, "hoard");
     }
 }
 
@@ -1360,7 +1364,7 @@ function switchHoardDetailTab(tab) {
 // torrent: only the newest request is allowed to paint.
 let _contentReq = 0;
 
-async function loadTorrentContent(infoHash, bodyId, summaryId) {
+async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
     const body = document.getElementById(bodyId);
     const summary = document.getElementById(summaryId);
     if (!body) return;
@@ -1369,7 +1373,11 @@ async function loadTorrentContent(infoHash, bodyId, summaryId) {
     if (summary) summary.textContent = "";
     let files, avail;
     try {
-        const d = await api(`/api/torrents/${infoHash}/files`);
+        const params = new URLSearchParams();
+        if (agent && agent !== "local") params.set("agent", agent);
+        if (mode && agent && agent !== "local") params.set("mode", mode);
+        const q = params.toString() ? `?${params.toString()}` : "";
+        const d = await api(`/api/torrents/${infoHash}/files${q}`);
         files = d.files || [];
         avail = d.availability || null;
     } catch (err) {
@@ -1806,7 +1814,9 @@ function displayRatio(d) {
 async function refreshDetail() {
     if (!selectedTorrent) return;
     try {
-        const d = await api(`/api/race/torrents/${selectedTorrent}`);
+        const q = selectedTorrentAgent && selectedTorrentAgent !== "local"
+            ? `?agent=${encodeURIComponent(selectedTorrentAgent)}` : "";
+        const d = await api(`/api/race/torrents/${selectedTorrent}${q}`);
 
         _detailAddedTime = d.added_time || 0;
         document.getElementById("detail-name").textContent = incoName(d);
@@ -2286,8 +2296,9 @@ async function updateHoardStats() {
     }
 }
 
-async function showHoardDetail(infoHash) {
+async function showHoardDetail(infoHash, agent) {
     selectedHoardTorrent = infoHash;
+    selectedHoardTorrentAgent = agent || "local";
     switchHoardDetailTab("info");
     document.getElementById("hoard-detail-panel").style.display = "block";
     if (hoardDetailTimer) clearInterval(hoardDetailTimer);
@@ -2297,6 +2308,7 @@ async function showHoardDetail(infoHash) {
 
 function closeHoardDetail() {
     selectedHoardTorrent = null;
+    selectedHoardTorrentAgent = "local";
     if (hoardDetailTimer) clearInterval(hoardDetailTimer);
     const panel = document.getElementById("hoard-detail-panel");
     if (panel.style.display === "none") return;
@@ -2470,8 +2482,8 @@ function handleRowClick(e, hash, mode) {
     _anchorHash = key;
     _updateRowHighlights();
     requestAnimationFrame(() => {
-        if (mode === "race") showDetail(hash);
-        else showHoardDetail(hash);
+        if (mode === "race") showDetail(hash, entry.agent);
+        else showHoardDetail(hash, entry.agent);
     });
 }
 
@@ -3143,7 +3155,9 @@ async function _removeSelected(deleteFiles) {
 async function refreshHoardDetail() {
     if (!selectedHoardTorrent) return;
     try {
-        const d = await api(`/api/hoard/torrents/${selectedHoardTorrent}`);
+        const q = selectedHoardTorrentAgent && selectedHoardTorrentAgent !== "local"
+            ? `?agent=${encodeURIComponent(selectedHoardTorrentAgent)}` : "";
+        const d = await api(`/api/hoard/torrents/${selectedHoardTorrent}${q}`);
 
         document.getElementById("h-detail-name").textContent = incoName(d);
         document.getElementById("h-detail-state").textContent = d.state;

@@ -179,7 +179,7 @@ func (e *RaceEngine) Start(ctx context.Context) error {
 				// Fire completed event (only for fresh completions, not resumed).
 				if info != nil && !alreadyCompleted && e.onEvent != nil {
 					if s, err := e.client.GetStatus(data.InfoHash); err == nil {
-						stats := ltStatusToTorrentStats(*s, info.Category, info.SavePath, info.AddedTime, now)
+						stats := LtStatusToTorrentStats(*s, info.Category, info.SavePath, info.AddedTime, now)
 						go e.onEvent("completed", stats)
 					}
 				}
@@ -748,7 +748,7 @@ func (e *RaceEngine) GetPeersForTorrent(infoHash string) []PeerInfo {
 	}
 	peers := make([]PeerInfo, 0, len(ltPeers))
 	for _, p := range ltPeers {
-		peers = append(peers, ltPeerToPeerInfo(p))
+		peers = append(peers, LtPeerToPeerInfo(p))
 	}
 	return peers
 }
@@ -772,12 +772,12 @@ func (e *RaceEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 		}).ToMap()
 	}
 
-	stats := ltStatusToTorrentStats(*s, info.Category, info.SavePath, info.AddedTime, info.CompletedTime)
+	stats := LtStatusToTorrentStats(*s, info.Category, info.SavePath, info.AddedTime, info.CompletedTime)
 
 	ltPeers, _ := e.client.GetPeers(infoHash)
 	peers := make([]PeerInfo, 0, len(ltPeers))
 	for _, p := range ltPeers {
-		peers = append(peers, ltPeerToPeerInfo(p))
+		peers = append(peers, LtPeerToPeerInfo(p))
 	}
 
 	detail := &TorrentDetail{
@@ -1022,7 +1022,7 @@ func (e *RaceEngine) refreshStats() {
 			addedTime = time.Unix(s.AddedTime, 0)
 		}
 
-		stats := ltStatusToTorrentStats(s, category, savePath, addedTime, completedTime)
+		stats := LtStatusToTorrentStats(s, category, savePath, addedTime, completedTime)
 
 		// Track completion.
 		if stats.Progress >= 1.0 && completedTime.IsZero() && info != nil {
