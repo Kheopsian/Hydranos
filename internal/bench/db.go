@@ -385,14 +385,36 @@ func (b *BenchDB) PurgeOld() int64 {
 	pol := b.retention
 
 	var deleted int64
+	// Deleted in batches: the first prune on an instance that has been running
+	// with the old window has millions of rows to clear, and a single DELETE
+	// holds the write mutex for the whole of it -- which stalls the 5s sampler
+	// and, with it, the overview totals it publishes on the way past. A batch
+	// is one lock hold, and the loop yields between them.
+	const pruneBatch = 20000
 	del := func(table string, cutoff float64) {
-		res, err := b.conn.Exec("DELETE FROM "+table+" WHERE ts < ?", cutoff)
-		if err != nil {
-			slog.Warn("bench: prune failed", "table", table, "err", err)
-			return
-		}
-		if n, err := res.RowsAffected(); err == nil {
+		for {
+			res, err := b.conn.Exec(
+				"DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE ts < ? LIMIT ?)",
+				cutoff, pruneBatch)
+			if err != nil {
+				slog.Warn("bench: prune failed", "table", table, "err", err)
+				return
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return
+			}
 			deleted += n
+			if n < pruneBatch {
+				return
+			}
+			// Let a waiting writer in before taking the next batch.
+			b.mu.Unlock()
+			time.Sleep(time.Millisecond)
+			b.mu.Lock()
+			if b.conn == nil {
+				return
+			}
 		}
 	}
 
