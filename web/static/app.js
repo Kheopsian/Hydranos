@@ -809,6 +809,7 @@ function _activateTabNow(name) {
     window.location.hash = name;
     if (name !== "logs") stopLogsTail();
     if (name === "config") updateSettings();
+    else if (name === "add") refreshCategoryOptions();
     else if (name === "changelog") loadChangelog();
     else if (name === "agents") { updateAgents(); updateEngines(); }
     else if (name === "trackers") { updateTrackers(); loadTrackerStats(); }
@@ -3661,14 +3662,25 @@ async function updateCategories() {
             _lastCategoryRows = html;
         }
 
-        // Update add-torrent dropdown
-        const sel = document.getElementById("torrent-category");
-        const current = sel.value;
-        sel.innerHTML = '<option value="">- none -</option>' +
-            cats.map(cat => `<option value="${cat.name}"${cat.name === current ? " selected" : ""}>${esc(incoCat(cat.name))}</option>`).join("");
+        refreshCategoryOptions(cats);
     } catch (e) {
         console.error("Failed to update categories:", e);
     }
+}
+
+// The add form's category picker, split out of updateCategories() so it no
+// longer waits on the categories tab being opened: that tab's rollups are too
+// heavy to run on every load, and the dropdown sat empty until they did.
+async function refreshCategoryOptions(cats) {
+    const sel = document.getElementById("torrent-category");
+    if (!sel) return;
+    if (!cats) {
+        try { cats = await api("/api/categories"); }
+        catch (e) { console.error("load categories", e); return; }
+    }
+    const current = sel.value;
+    sel.innerHTML = '<option value="">- none -</option>' +
+        (cats || []).map(cat => `<option value="${cat.name}"${cat.name === current ? " selected" : ""}>${esc(incoCat(cat.name))}</option>`).join("");
 }
 
 async function showCategoryForm(name = null) {
