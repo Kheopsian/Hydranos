@@ -97,3 +97,27 @@ func TestRacePeersJSONKeepsFastAndNearCompletePeers(t *testing.T) {
 		t.Errorf("port = %v, want the string \"0\" the panel expects", out[0]["port"])
 	}
 }
+
+// One agent timing out must not evict the torrents it holds: they would be
+// sighted as new on the next tick and get a second "added" in a timeline whose
+// whole job is to say when things happened.
+func TestForgetDepartedWaitsForACompletePass(t *testing.T) {
+	r := newTestRecorder(1000)
+	r.seen["aa"], r.seen["bb"] = true, true
+	r.done["aa"] = true
+
+	// bb lives on the agent that did not answer, so it is missing from live.
+	r.forgetDeparted(map[string]bool{"aa": true}, false)
+	if !r.seen["bb"] {
+		t.Fatal("a torrent on an agent that timed out was forgotten; the next tick logs it as added again")
+	}
+
+	// A pass that reached every engine is authoritative: bb really is gone.
+	r.forgetDeparted(map[string]bool{"aa": true}, true)
+	if r.seen["bb"] {
+		t.Fatal("a departed torrent was kept: these maps would grow for the life of the process")
+	}
+	if !r.seen["aa"] || !r.done["aa"] {
+		t.Fatal("a live torrent lost its lifecycle state")
+	}
+}

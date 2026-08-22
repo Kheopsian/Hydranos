@@ -38,6 +38,9 @@ type raceAgg struct {
 type fleetStats struct {
 	mu   sync.RWMutex
 	race raceAgg
+	// at is when race was last replaced. It is what lets the sampler stand
+	// down while the timeline recorder is polling the same engines.
+	at time.Time
 }
 
 func (s *Server) startAgentRaceStatsSampler() {
@@ -51,6 +54,19 @@ func (s *Server) startAgentRaceStatsSampler() {
 }
 
 func (s *Server) refreshAgentRaceStats() {
+	// The race timeline recorder fans out over the same engines every 5s on a
+	// controller node, and publishes what it counted on the way past. Polling
+	// again here would ask every agent for the same listing twice -- and
+	// ListTorrents is the most allocating call this fleet makes, which is the
+	// whole reason the hoard side rides the agent-row poll instead of running
+	// its own.
+	s.fleet.mu.RLock()
+	fedByRecorder := !s.fleet.at.IsZero() && time.Since(s.fleet.at) < 2*raceTimelineInterval
+	s.fleet.mu.RUnlock()
+	if fedByRecorder {
+		return
+	}
+
 	var agg raceAgg
 	engines, answered := 0, 0
 	for _, ra := range s.agentsSnapshot() {
@@ -69,14 +85,24 @@ func (s *Server) refreshAgentRaceStats() {
 			}
 		}
 	}
-	// Every engine timed out at once: keep the last good sample. Publishing
-	// zeros here would read as "the fleet stopped", which is the opposite of
-	// what an unreachable agent means.
-	if engines > 0 && answered == 0 {
+	s.publishRaceAgg(agg, engines, answered)
+}
+
+// publishRaceAgg installs a sample, but only a sample that covers every engine
+// polled.
+//
+// A partial one must not: with three of four agents answering, the totals drop
+// by a quarter and the overview reads as if the fleet lost a node -- from one
+// agent being slow for one tick. Keeping the last good sample is right for the
+// same reason it is right when every engine times out, and an agent that is
+// really gone leaves the snapshot altogether, so this cannot freeze the numbers
+// for longer than the agent takes to disconnect.
+func (s *Server) publishRaceAgg(agg raceAgg, engines, answered int) {
+	if engines > 0 && answered < engines {
 		return
 	}
 	s.fleet.mu.Lock()
-	s.fleet.race = agg
+	s.fleet.race, s.fleet.at = agg, time.Now()
 	s.fleet.mu.Unlock()
 }
 
