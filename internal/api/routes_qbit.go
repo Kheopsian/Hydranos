@@ -56,6 +56,9 @@ func (s *Server) registerQbitRoutes() {
 	v2.POST("/torrents/start", s.qbitTorrentsResume)
 	v2.POST("/torrents/recheck", s.qbitTorrentsRecheck)
 	v2.POST("/torrents/setCategory", s.qbitTorrentsSetCategory)
+	v2.POST("/torrents/addTrackers", s.qbitTorrentsAddTrackers)
+	v2.POST("/torrents/removeTrackers", s.qbitTorrentsRemoveTrackers)
+	v2.POST("/torrents/reannounce", s.qbitTorrentsReannounce)
 
 	// Categories
 	v2.GET("/torrents/categories", s.qbitCategoriesGet)
