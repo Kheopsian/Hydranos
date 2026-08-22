@@ -106,11 +106,6 @@ pub struct EngineConfig {
     pub peer_fingerprint: String,
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
-    /// When true, Typhon's internal HTTP tracker announce loop is skipped.
-    /// The dial queue (PEX/DHT outbound) stays wired up. Used when the Go
-    /// orchestrator owns announces (canonical post-multi-binding migration).
-    #[serde(default)]
-    pub disable_internal_announce: bool,
     /// Listen for incoming peers over IPv6 as well, on the same port. Off by
     /// default: the engine binds v4 only, exactly as it always has. On, a
     /// second v6-only listener is added beside the v4 one (see

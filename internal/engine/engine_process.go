@@ -125,7 +125,6 @@ type EngineConfig struct {
 	// When true, Typhon's internal HTTP tracker announce loop is skipped.
 	// Used post-multi-binding migration where the Go orchestrator owns
 	// announces. Dial queue (PEX/DHT outbound) stays wired up.
-	DisableInternalAnnounce bool `json:"disable_internal_announce,omitempty"`
 
 	// Listen on [::] beside the v4 listener and accept PEX added6.
 	// Mirrors SessionConfig.EnableIPv6. Omitted when off, so an engine that
@@ -264,7 +263,6 @@ func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		// Hydra Go orchestrator owns tracker announces (via HoardAnnouncer).
 		// Typhon's internal announce loop is disabled; the dial queue
 		// (PEX/DHT outbound) stays wired up.
-		DisableInternalAnnounce: true,
 
 		// I/O
 		AIOThreads:      32,
@@ -374,7 +372,6 @@ func BuildRaceConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		// Hydra Go orchestrator owns tracker announces (via HoardAnnouncer).
 		// Typhon's internal announce loop is disabled; the dial queue
 		// (PEX/DHT outbound) stays wired up.
-		DisableInternalAnnounce: true,
 
 		// I/O
 		AIOThreads:      16,
