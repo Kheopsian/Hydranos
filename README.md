@@ -1,8 +1,8 @@
 # Hydra
 
 A self-hosted BitTorrent daemon built for **scale and seeding**: a Go control
-plane driving a purpose-built Rust engine ("Typhon"). Hydra holds **100k+
-torrents** in a single instance, exposes a live web UI, a native REST API, and a
+plane driving a purpose-built Rust engine ("Typhon"). One instance holds a
+six-figure torrent set, exposes a live web UI, a native REST API, and a
 qBittorrent-compatible shim so your existing `*arr` / autobrr / cross-seed setup
 just works.
 
@@ -11,19 +11,41 @@ just works.
 
 ---
 
+## Measured, not promised
+
+These are numbers from the production instance, not a benchmark rig:
+
+| | |
+|---|---|
+| **196,000 torrents** seeding | in a single instance, on an i5-12500 (6c/12t) |
+| **~16 GB of RAM** | ~65 KB per idle torrent |
+| **1.4 cores idle, 4.6 cores at 950 MB/s** | CPU tracks **bytes pushed**, not catalogue size |
+| **~8 Gbit/s sustained upload** | measured at the interface counter, not self-reported |
+
+The shape matters more than the peaks: CPU cost is roughly **0.34 cores per 100
+MB/s** on top of a ~1.4 core floor, and it does *not* grow with the number of
+torrents you hold -- at 196k torrents only 7.5% have a connected peer at any
+moment. Holding torrents is cheap; moving bytes is what costs. The design target
+is a million torrents per node, and the remaining work is on the hot set, not on
+the catalogue.
+
+---
+
 ## Why Hydra?
 
 - **Two engine roles.** A **race** session (aggressive, low-latency, for hot
   downloads) and a **hoard** session (upload-optimized, for long-term seeding),
   each tuned independently. You can also run any number of extra engines.
-- **Scales.** Tens of thousands of torrents per instance, with a push-based
-  (SSE) UI that streams the torrent list instead of shipping giant REST blobs.
+- **Distributed.** Run engines across several machines -- Linux or native
+  Windows -- and drive them all from one front. Route new torrents per-category,
+  and **move or duplicate payload data between nodes** from the UI.
+- **Durable background work.** Long operations (moving data between disks or
+  hosts, recategorising) run as **jobs**: persisted in SQLite, resumable across
+  restarts, visible and throttleable instead of blocking an HTTP request.
 - **Flexible networking.** Direct, SOCKS5 egress, a lightweight PROXY-v2 relay
   (change your seedbox's public IP without a VPN tunnel), or gluetun with
   **hot listen-port rebind** (no restart when your VPN's forwarded port rotates).
-- **Distributed.** Run engines across several machines and aggregate them behind
-  one front; route new torrents per-category with placement/strategy and a
-  save-path per agent.
+  Announce traffic can be routed separately from peer traffic (HTTP trackers).
 - **Data-aware adds.** Add a torrent whose data is already on disk (a re-add, a
   cross-seed, or a half-finished download) and Hydra hash-checks what's there
   instead of blindly re-downloading over it: verified pieces are kept and
@@ -35,27 +57,27 @@ just works.
 
 ## Screenshots
 
-**Overview** — live dashboard: global up/down, seeding/leeching counts,
+**Overview** -- live dashboard: global up/down, seeding/leeching counts,
 per-session throughput, all streamed over SSE.
 
 ![Overview](docs/img/hydra_01_overview.png)
 
-**Race** — per-torrent detail with live peer speed and progress timelines for
+**Race** -- per-torrent detail with live peer speed and progress timelines for
 the hot download you're racing.
 
 ![Race timeline](docs/img/hydra_02_race_timeline.png)
 
-**Hoard** — the long-term seeding set: tens of thousands of torrents in one
+**Hoard** -- the long-term seeding set: a six-figure torrent list in one
 virtualized, push-updated table.
 
 ![Hoard](docs/img/hydra_03_hoard.png)
 
-**Agents** — run engines across several machines and manage them from one
+**Agents** -- run engines across several machines and manage them from one
 front: status, free space, and per-engine roles.
 
 ![Agents](docs/img/hydra_04_agents.png)
 
-**Benchmark** — built-in throughput history so you can see exactly what your
+**Benchmark** -- built-in throughput history so you can see exactly what your
 box sustains.
 
 ![Benchmark](docs/img/hydra_05_benchmark.png)
@@ -89,6 +111,7 @@ grace period above twice that.
 Install steps, architecture, every networking mode and the edge cases live in
 the **[Wiki](https://github.com/Kheopsian/Hydra/wiki)**:
 
+- [Concepts](https://github.com/Kheopsian/Hydra/wiki/Concepts) -- start here
 - [Installation & First Run](https://github.com/Kheopsian/Hydra/wiki/Installation-and-First-Run)
 - [Architecture](https://github.com/Kheopsian/Hydra/wiki/Architecture)
 - [Networking Modes](https://github.com/Kheopsian/Hydra/wiki/Networking-Modes)
