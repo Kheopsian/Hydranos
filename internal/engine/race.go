@@ -386,13 +386,13 @@ func (e *RaceEngine) addTorrentInternal(torrentPath, magnetURI, savePath string,
 		if err != nil {
 			return
 		}
-		trackerURL := trackerURLFromTorrentFile(torrentBytes)
+		trackerURLs := trackerURLsFromTorrentFile(torrentBytes)
 		var totalSize int64
 		// Get size from engine status.
 		if s, err := e.client.GetStatus(infoHash); err == nil {
 			totalSize = s.TotalSize
 		}
-		e.raceAnnounceLoop(infoHash, trackerURL, totalSize)
+		e.raceAnnounceLoop(infoHash, trackerURLs, totalSize)
 	}()
 
 	return infoHash, nil

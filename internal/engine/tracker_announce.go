@@ -1454,18 +1454,50 @@ func bdecodeString(data []byte) (interface{}, int, error) {
 // Tracker URL extraction from .torrent files
 // ---------------------------------------------------------------------------
 
-// trackerURLFromTorrentFile extracts the announce URL from a .torrent file.
-func trackerURLFromTorrentFile(data []byte) string {
+// trackerURLsFromTorrentFile extracts every tracker a .torrent declares: the
+// "announce" key first, then the tiers of "announce-list" (BEP 12) in order,
+// deduplicated.
+//
+// Only "announce" used to be read, so a multi-tracker torrent was announced to
+// exactly one tracker and was invisible on the others, and a torrent carrying
+// only "announce-list" -- which BEP 12 permits and modern clients emit -- got
+// no announce at all.
+func trackerURLsFromTorrentFile(data []byte) []string {
 	dict, err := bdecodeDict(data)
 	if err != nil {
-		return ""
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(u string) {
+		u = strings.TrimSpace(u)
+		if u == "" || seen[u] {
+			return
+		}
+		seen[u] = true
+		out = append(out, u)
 	}
 	if announce, ok := dict["announce"]; ok {
 		if s, ok := announce.(string); ok {
-			return s
+			add(s)
 		}
 	}
-	return ""
+	if al, ok := dict["announce-list"]; ok {
+		if tiers, ok := al.([]interface{}); ok {
+			for _, tier := range tiers {
+				urls, ok := tier.([]interface{})
+				if !ok {
+					continue
+				}
+				for _, u := range urls {
+					if s, ok := u.(string); ok {
+						add(s)
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -1476,8 +1508,8 @@ func trackerURLFromTorrentFile(data []byte) string {
 // Phase 1: every 5s for 60s (12 attempts)
 // Phase 2: every 30s until the torrent completes or is removed (safety cap 6h)
 // Stops when the torrent is complete or removed.
-func (e *RaceEngine) raceAnnounceLoop(infoHash, trackerURL string, totalSize int64) {
-	if trackerURL == "" {
+func (e *RaceEngine) raceAnnounceLoop(infoHash string, trackerURLs []string, totalSize int64) {
+	if len(trackerURLs) == 0 {
 		slog.Warn("race: no tracker URL, skipping announce loop", "info_hash", infoHash[:minStr(len(infoHash), 8)])
 		return
 	}
@@ -1486,10 +1518,11 @@ func (e *RaceEngine) raceAnnounceLoop(infoHash, trackerURL string, totalSize int
 
 	slog.Info("race: starting announce loop",
 		"info_hash", infoHash[:minStr(len(infoHash), 8)],
-		"tracker", trackerURL)
+		"trackers", len(trackerURLs),
+		"tracker", trackerURLs[0])
 
 	// Phase 1: aggressive — every 5s for 60s.
-	if e.announcePhase(infoHash, trackerURL, totalSize, announcer, 5*time.Second, 60*time.Second) {
+	if e.announcePhase(infoHash, trackerURLs, totalSize, announcer, 5*time.Second, 60*time.Second) {
 		return
 	}
 
@@ -1497,18 +1530,18 @@ func (e *RaceEngine) raceAnnounceLoop(infoHash, trackerURL string, totalSize int
 	// Private-tracker races rarely exceed 5 peers, so the old "stop at >0 peers"
 	// rule killed the loop immediately. We now feed the swarm with fresh peers
 	// throughout the download.
-	e.announcePhase(infoHash, trackerURL, totalSize, announcer, 30*time.Second, 6*time.Hour)
+	e.announcePhase(infoHash, trackerURLs, totalSize, announcer, 30*time.Second, 6*time.Hour)
 }
 
 // announcePhase runs announces at a fixed interval for a duration.
 // Returns true if the loop should stop (peers found, torrent removed, or context cancelled).
-func (e *RaceEngine) announcePhase(infoHash, trackerURL string, totalSize int64, announcer *trackerAnnouncer, interval, duration time.Duration) bool {
+func (e *RaceEngine) announcePhase(infoHash string, trackerURLs []string, totalSize int64, announcer *trackerAnnouncer, interval, duration time.Duration) bool {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	deadline := time.After(duration)
 
 	// Do one announce immediately at start of phase.
-	if e.doAnnounceAndInject(infoHash, trackerURL, totalSize, announcer) {
+	if e.announceAllAndInject(infoHash, trackerURLs, totalSize, announcer) {
 		return true
 	}
 
@@ -1519,11 +1552,24 @@ func (e *RaceEngine) announcePhase(infoHash, trackerURL string, totalSize int64,
 		case <-deadline:
 			return false
 		case <-ticker.C:
-			if e.doAnnounceAndInject(infoHash, trackerURL, totalSize, announcer) {
+			if e.announceAllAndInject(infoHash, trackerURLs, totalSize, announcer) {
 				return true
 			}
 		}
 	}
+}
+
+// announceAllAndInject announces to every tracker the torrent declares and
+// injects the peers each one returns, so a cross-seeded torrent is present in
+// all of its swarms rather than only the first tracker's. Stops the loop as
+// soon as any announce reports the torrent gone or complete.
+func (e *RaceEngine) announceAllAndInject(infoHash string, trackerURLs []string, totalSize int64, announcer *trackerAnnouncer) bool {
+	for _, u := range trackerURLs {
+		if e.doAnnounceAndInject(infoHash, u, totalSize, announcer) {
+			return true
+		}
+	}
+	return false
 }
 
 // doAnnounceAndInject performs a single announce, injects peers, and fires the announce event.
