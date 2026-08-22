@@ -1601,8 +1601,18 @@ func (e *RaceEngine) doAnnounceAndInject(infoHash, trackerURL string, totalSize 
 		return true
 	}
 
-	// Determine left bytes.
-	left := totalSize - s.TotalDone
+	// Bytes left, from the live status first. totalSize is captured once when
+	// the torrent is added, and the engine often does not know the size yet at
+	// that point, so it can be 0 for the life of the loop: left then went
+	// negative, got clamped, and we announced left=0 -- telling every tracker
+	// we were a seeder while still downloading. A private tracker reading that
+	// hands our address only to other seeders, who have nothing to ask us for,
+	// so the race starts with a swarm that cannot feed it.
+	size := s.TotalSize
+	if size <= 0 {
+		size = totalSize
+	}
+	left := size - s.TotalDone
 	if left < 0 {
 		left = 0
 	}
