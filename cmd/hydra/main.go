@@ -469,6 +469,7 @@ func main() {
 	agentTLSCert := flag.String("agent-tls-cert", "", "TLS cert file for the HydraAgent gRPC API (with --agent-tls-key)")
 	agentTLSKey := flag.String("agent-tls-key", "", "TLS key file for the HydraAgent gRPC API")
 	agentOnly := flag.Bool("agent-only", false, "run as a dedicated agent: engines + gRPC data-plane, no api.Server, owns events")
+	healthAddr := flag.String("health-addr", "", "agent-only: serve GET /health on this addr for an orchestrator's container probe; empty = [daemon] api_host:api_port, \"off\" = no HTTP listener at all")
 	listenPortHook := flag.Int("listen-port-hook", 0, "agent-only: serve a loopback-only (127.0.0.1) HTTP POST /listen-port hook on this port so a co-netns gluetun UP_COMMAND can push the forwarded BT port; 0 = disabled")
 	bootFromStore := flag.Bool("boot-from-store", true, "load torrents from the SQLite store (content-addressed, durable); state.json runs as an overlay/fallback. Default on since v2.9.x; disable with --boot-from-store=false")
 	flag.Parse()
@@ -765,7 +766,7 @@ func main() {
 		return
 	}
 	if *agentOnly {
-		runAgentOnly(ctx, cfg, *agentAddr, agentSecret, *agentTLSCert, *agentTLSKey, *listenPortHook)
+		runAgentOnly(ctx, cfg, *agentAddr, agentSecret, *agentTLSCert, *agentTLSKey, *listenPortHook, *healthAddr)
 		return
 	}
 	if storeRepair != nil && storeRepair.Needed {
