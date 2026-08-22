@@ -2125,7 +2125,9 @@ func (a *raceAPIAdapter) AddTorrentSeedMode(torrentPath, savePath, category stri
 func (a *raceAPIAdapter) RemoveTorrent(infoHash string, deleteFiles bool) error {
 	return a.engine.RemoveTorrent(infoHash, deleteFiles)
 }
-func (a *raceAPIAdapter) ReannnounceTorrent(infoHash string) bool { return true }
+func (a *raceAPIAdapter) ReannnounceTorrent(infoHash string) bool {
+	return a.engine.ReannounceNow(infoHash)
+}
 func (a *raceAPIAdapter) AddTrackerToTorrent(infoHash, url string) error {
 	return a.engine.AddTrackerToTorrent(infoHash, url)
 }
@@ -2228,7 +2230,9 @@ func (a *hoardAPIAdapter) RemoveTorrent(infoHash string, deleteFiles bool) error
 	a.engine.RemoveTorrent(infoHash, deleteFiles)
 	return nil
 }
-func (a *hoardAPIAdapter) ReannnounceTorrent(infoHash string) bool { return true }
+func (a *hoardAPIAdapter) ReannnounceTorrent(infoHash string) bool {
+	return a.engine.ReannounceNow(infoHash)
+}
 func (a *hoardAPIAdapter) AddTrackerToTorrent(infoHash, url string) error {
 	return a.engine.AddTrackerToTorrent(infoHash, url)
 }
