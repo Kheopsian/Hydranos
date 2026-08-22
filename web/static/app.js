@@ -4804,10 +4804,14 @@ function _startNormalPolling() {
     // on Trackers left the tracker list and Add torrent waiting behind it on
     // the store's single connection.
     poll();
-    fetchPublicIp();
+    // Front-only drops the header stat, and with it the reason to ask a
+    // controller for an egress address it never announces from.
+    if (document.getElementById("header-exit-ip")) {
+        fetchPublicIp();
+        setInterval(fetchPublicIp, 2 * 60 * 1000);
+    }
     fetchPortForward();
     setInterval(poll, POLL_INTERVAL);
-    setInterval(fetchPublicIp, 2 * 60 * 1000);
     setInterval(fetchPortForward, 60 * 1000);
     setupHoardSSE();
 }
