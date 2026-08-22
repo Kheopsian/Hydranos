@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.113.0 - 2026-08-22
+
+### Added
+- **The agents tab now shows each node's IPv6 exit address next to its IPv4
+  one.** The header had been reporting both families for a while, but a remote
+  node in the agents table still showed a lone v4 line, so a dual-stack agent
+  was indistinguishable from a v4-only one at a glance. Both places now render
+  through the same helper: one masked line per family, every address repeated
+  in the tooltip so a column too narrow to fit an IPv6 literal never becomes
+  the only copy. When IPv6 is enabled in the settings but the host has none,
+  the cell says so instead of quietly showing the v4 line alone, which used to
+  pass for a working dual stack. Thanks to @the-sblah (#25).
+
 ## v3.112.0 - 2026-08-21
 
 ### Fixed

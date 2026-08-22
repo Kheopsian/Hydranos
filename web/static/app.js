@@ -75,10 +75,8 @@ function _exitIPMarkup(v4, v6, v6Wanted) {
         // Asked for, not available: saying so beats a lone v4 that passes for a
         // working dual stack.
         lines.push(`<span class="ip-line net-warn">${esc(t("IPv6 unavailable"))}</span>`);
-        return {
-            html: lines.join(""),
-            title: t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it."),
-        };
+        tips.push(t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it."));
+        return { html: lines.join(""), title: tips.join(" / ") };
     }
     // The tooltip holds every address, masked the same way, so a clipped line
     // is never the only copy and incognito stays incognito on hover.
