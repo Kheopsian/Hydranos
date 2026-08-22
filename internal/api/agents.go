@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -72,22 +71,6 @@ func saveAgentStore(dataDir string, m map[string]agentStore) error {
 		return err
 	}
 	return os.Rename(tmp, agentsFile(dataDir))
-}
-
-// LoadPersistedAgents dials every agent in agents.json at boot. A dead agent is
-// logged + skipped (same policy as toml [[agent]]). A name already registered
-// from toml wins — agents.json is additive.
-func (s *Server) LoadPersistedAgents() {
-	for name, a := range loadAgentStore(s.config.Daemon.DataDir) {
-		if s.remoteAgentByName(name) != nil {
-			continue
-		}
-		if err := s.AddRemoteAgent(name, a.Addr, a.Token, a.TLSCa); err != nil {
-			slog.Warn("persisted agent dial failed", "name", name, "err", err)
-			continue
-		}
-		slog.Info("persisted agent registered", "name", name, "addr", a.Addr)
-	}
 }
 
 // agentsSnapshot returns a copy of the live remote-agent list under RLock, so

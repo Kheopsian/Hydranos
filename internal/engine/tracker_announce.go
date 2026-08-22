@@ -374,6 +374,20 @@ func InitPasskeyOverrides(fromConfig map[string]string) {
 	}
 }
 
+// ResetPasskeyOverrides REPLACES the override map with the given one.
+//
+// The Init* seeders above merge, which is right for a boot that reads one
+// config file. It is wrong for an agent taking a whole configuration pushed by
+// its front: there, an override the operator deleted on the front is expressed
+// as an absence, and merging would leave the agent announcing under a passkey
+// nobody can see any more.
+func ResetPasskeyOverrides(fromFront map[string]string) {
+	passkeyOverrideMu.Lock()
+	clear(passkeyOverrides)
+	passkeyOverrideMu.Unlock()
+	InitPasskeyOverrides(fromFront)
+}
+
 // SetPasskeyOverride sets (passkey=="" clears) the announce passkey for trackers
 // whose URL contains host. Takes effect on the next announce (no restart).
 func SetPasskeyOverride(host, passkey string) {
@@ -434,6 +448,14 @@ func InitClientOverrides(fromConfig map[string]ClientSpoof) {
 	if len(clientOverrides) > 0 {
 		slog.Info("tracker_announce: client spoof overrides active", "trackers", len(clientOverrides))
 	}
+}
+
+// ResetClientOverrides REPLACES the spoof map (see ResetPasskeyOverrides).
+func ResetClientOverrides(fromFront map[string]ClientSpoof) {
+	clientOverrideMu.Lock()
+	clear(clientOverrides)
+	clientOverrideMu.Unlock()
+	InitClientOverrides(fromFront)
 }
 
 // SetClientOverride sets (peerIDPrefix=="" clears) the spoof for trackers whose
@@ -515,6 +537,14 @@ func InitSecondaryStatsOverrides(fromConfig map[string]string) {
 	if len(secondaryStatsOverrides) > 0 {
 		slog.Info("tracker_announce: secondary-stats overrides active", "trackers", len(secondaryStatsOverrides))
 	}
+}
+
+// ResetSecondaryStatsOverrides REPLACES the mode map (see ResetPasskeyOverrides).
+func ResetSecondaryStatsOverrides(fromFront map[string]string) {
+	secondaryStatsMu.Lock()
+	clear(secondaryStatsOverrides)
+	secondaryStatsMu.Unlock()
+	InitSecondaryStatsOverrides(fromFront)
 }
 
 // SetSecondaryStatsOverride sets the secondary stats mode for trackers whose
@@ -646,6 +676,14 @@ func InitAnnounceIPModes(fromConfig map[string]string) {
 	if len(announceIPModes) > 0 {
 		slog.Info("tracker_announce: announce ip-family overrides active", "trackers", len(announceIPModes))
 	}
+}
+
+// ResetAnnounceIPModes REPLACES the family map (see ResetPasskeyOverrides).
+func ResetAnnounceIPModes(fromFront map[string]string) {
+	announceIPModeMu.Lock()
+	clear(announceIPModes)
+	announceIPModeMu.Unlock()
+	InitAnnounceIPModes(fromFront)
 }
 
 // ConfiguredAnnounceHosts returns every tracker host that carries a setting of

@@ -7,8 +7,8 @@ import "fmt"
 // carries the same tunables as the legacy [race]/[hoard] sections, plus an
 // arbitrary id and a role.
 type EngineConfig struct {
-	ID   string `toml:"id"`
-	Role string `toml:"role"` // "race" | "hoard"
+	ID   string `toml:"id" json:"id"`
+	Role string `toml:"role" json:"role"` // "race" | "hoard"
 	SessionConfig
 }
 

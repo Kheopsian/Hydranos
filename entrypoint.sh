@@ -4,14 +4,31 @@ set -e
 # Defaults to /config (linuxserver/*arr convention). Override with
 # HYDRA_CONFIG_DIR to relocate it (e.g. legacy setups mounting /configs).
 CFG_DIR="${HYDRA_CONFIG_DIR:-/config}"
-# First run: seed the config so an empty volume just works.
-if [ ! -f "$CFG_DIR/default.toml" ]; then
+# An agent that was given its identity in the environment needs no config file:
+# it takes its whole session config, and its tracker spoofing, from the front it
+# is attached to. Seeding a template into its volume would leave a file that
+# reads like the node's settings while the node ignores every line of it.
+if [ -n "$HYDRA_ENGINE_ID" ] || [ -n "$HYDRA_ENGINES" ]; then
     mkdir -p "$CFG_DIR"
-    cp /app/configs/default.toml "$CFG_DIR/default.toml"
-    # Keep data_dir consistent with the chosen config directory.
-    sed -i "s#^data_dir = .*#data_dir = \"$CFG_DIR\"#" "$CFG_DIR/default.toml"
-    echo "hydra: seeded $CFG_DIR/default.toml from image defaults (first run)"
+    echo "hydra: engine identity from the environment, running without a config file"
+    CFG_FILE=""
+else
+    # First run: seed the config so an empty volume just works.
+    if [ ! -f "$CFG_DIR/default.toml" ]; then
+        mkdir -p "$CFG_DIR"
+        cp /app/configs/default.toml "$CFG_DIR/default.toml"
+        # Keep data_dir consistent with the chosen config directory.
+        sed -i "s#^data_dir = .*#data_dir = \"$CFG_DIR\"#" "$CFG_DIR/default.toml"
+        echo "hydra: seeded $CFG_DIR/default.toml from image defaults (first run)"
+    fi
+    CFG_FILE="$CFG_DIR/default.toml"
 fi
+# One --config, built once, so the three exec paths below cannot disagree about
+# whether this container has a config file.
+set -- ${CFG_FILE:+--config "$CFG_FILE"} "$@"
+# data_dir has no config file to come from in the environment-driven case.
+: "${HYDRA_DATA_DIR:=$CFG_DIR}"
+export HYDRA_DATA_DIR
 # One socket per torrent -> raise the fd limit (needs privileged / SYS_RESOURCE;
 # falls back quietly otherwise). Done before dropping privileges so the limit is
 # inherited by the unprivileged process.
@@ -58,11 +75,11 @@ if [ -n "$PUID" ] || [ -n "$PGID" ]; then
                 --addamb=cap_net_admin -- -c true >/dev/null 2>&1; then
                 exec capsh --caps="cap_net_admin+eip cap_setuid+ep cap_setgid+ep" \
                     --keep=1 --user="$EXIST_USR" --addamb=cap_net_admin \
-                    -- -c 'exec hydra --config "$0" "$@"' "$CFG_DIR/default.toml" "$@"
+                    -- -c 'exec hydra "$@"' hydra "$@"
             fi
             echo "hydra: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN to keep fwmark routing"
         fi
-        exec gosu "$RUN_UID:$RUN_GID" hydra --config "$CFG_DIR/default.toml" "$@"
+        exec gosu "$RUN_UID:$RUN_GID" hydra "$@"
     fi
 fi
-exec hydra --config "$CFG_DIR/default.toml" "$@"
+exec hydra "$@"

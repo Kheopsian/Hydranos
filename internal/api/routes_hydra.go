@@ -405,6 +405,11 @@ type engineInfo struct {
 	ID     string `json:"id"`
 	Role   string `json:"role"`
 	Online bool   `json:"online"`
+	// ConfigState is how this engine took the front's last config push:
+	// "running", "pending" (declared but waiting for a config) or "error".
+	// Empty for a local engine, which configures itself from its own file.
+	ConfigState string `json:"config_state,omitempty"`
+	ConfigError string `json:"config_error,omitempty"`
 }
 
 type agentInfo struct {
@@ -417,6 +422,12 @@ type agentInfo struct {
 	ExitIPv6   string              `json:"exit_ip_v6,omitempty"`
 	IPv6Wanted bool                `json:"ipv6_wanted,omitempty"`
 	Interfaces []agentwire.NICInfo `json:"interfaces,omitempty"`
+	// ConfigRevision / ConfigSource say which configuration the node is
+	// actually running and where it came from. A source other than "front"
+	// means the node has not taken a push yet -- it booted from its cache
+	// while this front was down, or it predates apply_config.
+	ConfigRevision uint64 `json:"config_revision,omitempty"`
+	ConfigSource   string `json:"config_source,omitempty"`
 }
 
 // handleAgentsGet lists the agents a category's placement can target. v1 exposes
@@ -441,12 +452,17 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 			ExitIP: getPublicIP(), ExitIPv6: localV6, IPv6Wanted: localV6Wanted, Interfaces: localNICs()})
 	}
 	for _, ra := range s.agentsSnapshot() {
+		// The reconciler refreshes this every tick; reading its cache keeps
+		// this poll from adding a config round-trip per agent.
+		cfgState, _ := s.AgentConfigState(ra.name)
 		var engs []engineInfo
 		online := false
 		for _, e := range ra.engines {
 			up := e.client != nil && e.client.Ping() == nil
 			online = online || up
-			engs = append(engs, engineInfo{ID: e.id, Role: e.role, Online: up})
+			es := cfgState.Engines[e.id]
+			engs = append(engs, engineInfo{ID: e.id, Role: e.role, Online: up,
+				ConfigState: es.State, ConfigError: es.Error})
 		}
 		var exitIP, exitIPv6 string
 		var v6Wanted bool
@@ -456,8 +472,9 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 				exitIP, exitIPv6, v6Wanted, ifaces = ni.PublicIP, ni.PublicIPv6, ni.IPv6Wanted, ni.Interfaces
 			}
 		}
-		agents = append(agents, agentInfo{Name: ra.name, Kind: "grpc", Addr: ra.addr, Online: online, Engines: engs,
-			ExitIP: exitIP, ExitIPv6: exitIPv6, IPv6Wanted: v6Wanted, Interfaces: ifaces})
+		agents = append(agents, agentInfo{Name: ra.name, Kind: "grpc", Addr: ra.addr, Online: online,
+			Engines: engs, ExitIP: exitIP, ExitIPv6: exitIPv6, IPv6Wanted: v6Wanted, Interfaces: ifaces,
+			ConfigRevision: cfgState.Revision, ConfigSource: cfgState.Source})
 	}
 	c.JSON(http.StatusOK, agents)
 }
@@ -2722,27 +2739,6 @@ func absorbGlobalMem(engine string, ul, dl int64) {
 	}
 }
 
-// fanoutAnnounceOverride pushes an announce override to every connected remote
-// agent so a global setting (client spoof / passkey) stays consistent across
-// the fleet. Best-effort, returns (pushed, failed): an unreachable agent counts
-// as failed, not fatal (it re-seeds from its own toml on restart, and re-saving
-// re-pushes). Read stays local -- the front is the source of truth.
-func (s *Server) fanoutAnnounceOverride(p agentwire.AnnounceOverrideParams) (int, int) {
-	pushed, failed := 0, 0
-	for _, ra := range s.agentsSnapshot() {
-		cl := ra.anyClient()
-		if cl == nil {
-			continue
-		}
-		if err := cl.SetAnnounceOverride(p); err != nil {
-			failed++
-		} else {
-			pushed++
-		}
-	}
-	return pushed, failed
-}
-
 // handleHoardSetTags sets/adds/removes a hoard torrent's tags (qBittorrent-style
 // labels). Body: {"tags":[...], "op":"set"|"add"|"remove"} (default set). Tags
 // take effect immediately (cachedStats) and are persisted to the tags.json
@@ -2902,8 +2898,8 @@ func (s *Server) handleSetPasskey(c *gin.Context) {
 		return
 	}
 	engine.SetPasskeyOverride(req.Host, req.Passkey)
-	pushed, failed := s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "passkey", Host: req.Host, Passkey: req.Passkey})
 	persisted := persistedFlag(s.persistPasskey(req.Host, req.Passkey), "passkey", req.Host)
+	pushed, failed := s.PushConfigToAgents()
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "passkeys": engine.GetPasskeyOverrides(), "agents_pushed": pushed, "agents_failed": failed, "persisted": persisted})
 }
 
@@ -2925,8 +2921,8 @@ func (s *Server) handleSetClient(c *gin.Context) {
 		return
 	}
 	engine.SetClientOverride(req.Host, req.PeerIDPrefix, req.UserAgent)
-	pushed, failed := s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "client", Host: req.Host, PeerIDPrefix: req.PeerIDPrefix, UserAgent: req.UserAgent})
 	persisted := persistedFlag(s.persistClientSpoof(req.Host, req.PeerIDPrefix, req.UserAgent), "client", req.Host)
+	pushed, failed := s.PushConfigToAgents()
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "clients": engine.GetClientOverrides(), "agents_pushed": pushed, "agents_failed": failed, "persisted": persisted})
 }
 
@@ -2977,16 +2973,19 @@ func (s *Server) handleSetClientBulk(c *gin.Context) {
 			continue
 		}
 		engine.SetClientOverride(host, req.PeerIDPrefix, req.UserAgent)
-		s.fanoutAnnounceOverride(agentwire.AnnounceOverrideParams{Kind: "client", Host: host, PeerIDPrefix: req.PeerIDPrefix, UserAgent: req.UserAgent})
 		if err := s.persistClientSpoof(host, req.PeerIDPrefix, req.UserAgent); err != nil {
 			notPersisted = append(notPersisted, host)
 		}
 		applied++
 	}
+	// One push for the whole batch: the payload carries every override, so
+	// pushing per host would send the same fleet config N times.
+	pushed, failed := s.PushConfigToAgents()
 	c.JSON(http.StatusOK, gin.H{
 		"status": "ok", "applied": applied, "hosts": hosts,
 		"not_persisted": notPersisted,
 		"clients":       engine.GetClientOverrides(),
+		"agents_pushed": pushed, "agents_failed": failed,
 	})
 }
 
@@ -3223,7 +3222,9 @@ func (s *Server) handleSetSecondaryStats(c *gin.Context) {
 	}
 	engine.SetSecondaryStatsOverride(req.Host, req.Mode)
 	persisted := persistedFlag(s.persistSecondaryStats(req.Host, req.Mode), "secondary_stats", req.Host)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "secondary_stats": engine.GetSecondaryStatsOverrides(), "persisted": persisted})
+	pushed, failed := s.PushConfigToAgents()
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "secondary_stats": engine.GetSecondaryStatsOverrides(),
+		"agents_pushed": pushed, "agents_failed": failed, "persisted": persisted})
 }
 
 // handleGetAnnounceIPModes lists the per-tracker announce address families.
@@ -3253,7 +3254,9 @@ func (s *Server) handleSetAnnounceIPMode(c *gin.Context) {
 		return
 	}
 	persisted := persistedFlag(s.persistAnnounceIPMode(req.Host), "ip_mode", req.Host)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "ip_modes": engine.GetAnnounceIPModes(), "persisted": persisted})
+	pushed, failed := s.PushConfigToAgents()
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "ip_modes": engine.GetAnnounceIPModes(),
+		"agents_pushed": pushed, "agents_failed": failed, "persisted": persisted})
 }
 
 // ---------------------------------------------------------------------------
@@ -3522,9 +3525,16 @@ func (s *Server) handleSettingsPost(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	// Engine/session params are not hot-reloadable -> restart to apply. We persist
-	// now; the UI surfaces "restart required" + an "Apply & restart" button.
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "changed": len(req.Changes), "restart_required": true})
+	// Remote agents take their session config from here, so an edit to
+	// [race]/[hoard] or to an [[agent.engine]] override is theirs too: push it
+	// now rather than leaving the fleet a reconcile tick behind the file.
+	agentsNotified := s.pushConfigToAgentsAsync()
+	// The LOCAL engine is a different story: session params are not
+	// hot-reloadable in-process -> restart to apply. We persist now; the UI
+	// surfaces "restart required" + an "Apply & restart" button. Agents need no
+	// such button, they restart the engines the edit actually touched.
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "changed": len(req.Changes), "restart_required": true,
+		"agents_notified": agentsNotified})
 }
 
 func (s *Server) handleSettingsRestart(c *gin.Context) {

@@ -195,7 +195,13 @@ func resolveAgentToken(flagVal string, flagSet bool, cfgVal string) (token, sour
 // freshly-unzipped, double-clicked install just runs. The second return value
 // reports whether a config was seeded, so the caller can say so once the log
 // mirror is attached (it lives beside the config we are still resolving).
-func resolveConfigPath(def string, explicit bool) (string, bool) {
+// seed=false means "use this path if it exists, but never create it": an agent
+// configured from its environment holds no config file, and writing one would
+// put a full template back in the volume it was meant to do without.
+func resolveConfigPath(def string, explicit, seed bool) (string, bool) {
+	if !seed {
+		return def, false
+	}
 	if explicit {
 		st, err := os.Stat(def)
 		switch {
@@ -470,7 +476,9 @@ func main() {
 	agentTLSKey := flag.String("agent-tls-key", "", "TLS key file for the HydraAgent gRPC API")
 	agentOnly := flag.Bool("agent-only", false, "run as a dedicated agent: engines + gRPC data-plane, no api.Server, owns events")
 	healthAddr := flag.String("health-addr", "", "agent-only: serve GET /health on this addr for an orchestrator's container probe; empty = [daemon] api_host:api_port, \"off\" = no HTTP listener at all")
-	listenPortHook := flag.Int("listen-port-hook", 0, "agent-only: serve a loopback-only (127.0.0.1) HTTP POST /listen-port hook on this port so a co-netns gluetun UP_COMMAND can push the forwarded BT port; 0 = disabled")
+	var engineSpecs engineSpecFlag
+	flag.Var(&engineSpecs, "engine", "agent-only: declare one engine this node hosts, as id=race-0,role=race,port=12314,ipv6=true. Repeatable. Overrides $"+envEngines+" / $"+envEngineID+" and the config file; everything else about the engine comes from the front")
+	listenPortHook := flag.Int("listen-port-hook", 0, "agent-only: serve a loopback-only (127.0.0.1) HTTP POST /listen-port hook on this port so a co-netns gluetun UP_COMMAND can push the forwarded BT port; 0 = disabled (also $"+envListenPortHook+")")
 	bootFromStore := flag.Bool("boot-from-store", true, "load torrents from the SQLite store (content-addressed, durable); state.json runs as an overlay/fallback. Default on since v2.9.x; disable with --boot-from-store=false")
 	flag.Parse()
 	// flag.Parse stops at the first positional argument; the daemon takes
@@ -532,7 +540,12 @@ func main() {
 			agentTokenExplicit = true
 		}
 	})
-	resolved, seeded := resolveConfigPath(*configPath, configExplicit)
+	// An agent whose identity comes from flags or the environment needs no
+	// config file at all: it takes everything else from its front. Seeding one
+	// would write a full template into its volume and re-create exactly the
+	// duplication this mode exists to remove.
+	fileless := *agentOnly && agentIdentityFromArgs(engineSpecs)
+	resolved, seeded := resolveConfigPath(*configPath, configExplicit, !fileless)
 	*configPath = resolved
 	if !stdoutLogs {
 		logHub.SetMirrorFileBeside(*configPath, "hydra.log")
@@ -549,15 +562,27 @@ func main() {
 	}
 
 	cfg, err := config.Load(*configPath)
-	if err != nil {
+	switch {
+	case err == nil:
+	case fileless && errors.Is(err, fs.ErrNotExist):
+		// Expected: this agent was handed its identity on the command line or
+		// in its environment and takes everything else from its front.
+		cfg = config.DefaultConfig()
+		slog.Info("no config file, running on the environment plus what the front pushes", "path", *configPath)
+	default:
 		slog.Error("Failed to load config", "path", *configPath, "error", err)
 		os.Exit(1)
+	}
+	if v := strings.TrimSpace(os.Getenv(envDataDir)); v != "" {
+		cfg.Daemon.DataDir = v
 	}
 	// Cle API auto-generee au 1er demarrage UNIQUEMENT si vide (une install fraiche
 	// = api_key="" dans le template) et persistee -> cle unique sans config manuelle.
 	// On ne touche PAS une cle existante meme "change-me-in-production" : ecraser une
 	// cle en place casse les clients (autobrr/arr) qui l'utilisent deja.
-	if cfg.Daemon.APIKey == "" {
+	// Skipped without a config file: an agent-only node serves no HTTP API, so
+	// the key would authenticate nothing and could not be persisted anywhere.
+	if cfg.Daemon.APIKey == "" && !fileless {
 		b := make([]byte, 24)
 		if _, e := rand.Read(b); e == nil {
 			cfg.Daemon.APIKey = hex.EncodeToString(b)
@@ -591,7 +616,9 @@ func main() {
 	// password_hash now means "first run", and the UI asks a human to pick one.
 	// Nothing is generated, so nothing can be lost.
 	firstRun := cfg.Auth.PasswordHash == ""
-	if firstRun {
+	// An agent-only node serves no web UI, so pointing its operator at one is
+	// advice they cannot follow. Its access control is the agent token.
+	if firstRun && !*agentOnly {
 		slog.Info("first run: no admin password set, open the web UI to create one")
 	}
 	// ---- Resolve the engines this node runs (Option A). A legacy default.toml
@@ -660,7 +687,13 @@ func main() {
 	// agent-only node runs whatever set ResolveEngines gave it, so enforcing
 	// the pair here would reject a dedicated agent hosting a single engine --
 	// which is the whole point of an agent node.
-	if *frontOnly || *agentOnly {
+	if *agentOnly {
+		// Not engineCfgs: an agent takes its identity from flags or the
+		// environment as often as from the file, and resolveAgentBoot logs the
+		// engines it actually resolved. Repeating a file-derived count here
+		// would contradict it.
+		slog.Info("Config loaded", "data_dir", cfg.Daemon.DataDir)
+	} else if *frontOnly {
 		slog.Info("Config loaded",
 			"engines", len(engineCfgs),
 			"data_dir", cfg.Daemon.DataDir,
@@ -766,7 +799,15 @@ func main() {
 		return
 	}
 	if *agentOnly {
-		runAgentOnly(ctx, cfg, *agentAddr, agentSecret, *agentTLSCert, *agentTLSKey, *listenPortHook, *healthAddr)
+		boot, identitySource, berr := resolveAgentBoot(engineSpecs, cfg)
+		if berr != nil {
+			slog.Error("agent-only: could not resolve the engine identity", "source", identitySource, "error", berr)
+			os.Exit(1)
+		}
+		runAgentOnly(ctx, cfg, boot, identitySource,
+			envOr(*agentAddr, envAgentAddr), agentSecret,
+			envOr(*agentTLSCert, envAgentTLSCert), envOr(*agentTLSKey, envAgentTLSKey),
+			envIntOr(*listenPortHook, envListenPortHook), envOr(*healthAddr, envHealthAddr))
 		return
 	}
 	if storeRepair != nil && storeRepair.Needed {
@@ -809,14 +850,7 @@ func main() {
 		chokingEngine = choking.NewChokingEngine(raceCfg.CustomChoking)
 	}
 
-	engine.InitPasskeyOverrides(cfg.AnnouncePasskeys)
-	clientSpoofs := make(map[string]engine.ClientSpoof, len(cfg.AnnounceClients))
-	for host, c := range cfg.AnnounceClients {
-		clientSpoofs[host] = engine.ClientSpoof{PeerIDPrefix: c.PeerIDPrefix, UserAgent: c.UserAgent}
-	}
-	engine.InitClientOverrides(clientSpoofs)
-	engine.InitSecondaryStatsOverrides(cfg.AnnounceSecondaryStats)
-	engine.InitAnnounceIPModes(cfg.AnnounceIPModes)
+	api.InitAnnounceOverrides(cfg)
 	raceEngine := engine.NewRaceEngine(raceCfg, chokingEngine, nil, raceDataDir)
 	raceEngine.SetClient(raceProc.Client())
 
@@ -1050,11 +1084,12 @@ func main() {
 		jobMgr.Prune(30 * 24 * time.Hour)
 		resumeJobs = jobMgr.ResumeAll
 	}
-	// ---- Remote agents ([[agent]]) for multi-home category placement ----
-	// Dialed pull-only; a dead agent is logged + skipped, never blocks boot.
-	registerConfigAgents(apiServer, cfg.Agents)
-	apiServer.LoadPersistedAgents()
-	apiServer.StartAgentReconnectLoop(ctx)
+	// ---- Remote agents ([[agent]] + agents.json) for multi-home placement ----
+	// The reconciler dials them, pushes each one its composed config, and keeps
+	// doing both on a timer, so an agent that was down at boot or came back on a
+	// stale config is picked up. A dead agent is logged + skipped, never blocks
+	// boot.
+	apiServer.StartAgentReconciler(ctx)
 
 	// Only now can interrupted work be picked up. A cross-node job resolves its
 	// agents when it runs, and resuming before they were registered failed it
@@ -2380,39 +2415,6 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 // the block is usable. name is the agent's identity everywhere -- placement,
 // agents.json, the UI -- and addr is how we reach it, so neither can be
 // defaulted. Kept apart from the dialing so it can be tested without a server.
-func agentConfigError(ag config.AgentConfig) string {
-	switch {
-	case ag.Name == "" && ag.Addr == "":
-		return "both name and addr are missing"
-	case ag.Name == "":
-		return "name is missing"
-	case ag.Addr == "":
-		return "addr is missing"
-	}
-	return ""
-}
-
-// registerConfigAgents dials the [[agent]] blocks of the config and registers
-// them for placement. Dialed pull-only; a dead agent is logged + skipped, never
-// blocks boot.
-func registerConfigAgents(apiServer *api.Server, agents []config.AgentConfig) {
-	for _, ag := range agents {
-		// Skipping an unusable block in silence, as we used to, is
-		// indistinguishable from a front that dialed nothing: no agents, no
-		// error, an empty dashboard.
-		if why := agentConfigError(ag); why != "" {
-			slog.Warn("[[agent]] block ignored, it cannot be dialed",
-				"reason", why, "name", ag.Name, "addr", ag.Addr)
-			continue
-		}
-		if err := apiServer.AddRemoteAgent(ag.Name, ag.Addr, ag.Token, ag.TLSCa); err != nil {
-			slog.Warn("remote agent dial failed", "name", ag.Name, "addr", ag.Addr, "err", err)
-			continue
-		}
-		slog.Info("remote agent registered", "name", ag.Name, "addr", ag.Addr)
-	}
-}
-
 // runFrontOnly serves a controller node: no local Typhon engine, only the API
 // + dialed remote agents. Category placement routes adds to those agents. Read
 // endpoints use empty engine stubs (list aggregation across agents is a later
@@ -2422,9 +2424,11 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 	apiServer := api.NewServer(cfg)
 	apiServer.SetFrontOnly(true)
 	apiServer.SetEngines(api.NewEmptyRaceEngine(), api.NewEmptyHoardEngine())
-	registerConfigAgents(apiServer, cfg.Agents)
-	apiServer.LoadPersistedAgents()
-	apiServer.StartAgentReconnectLoop(ctx)
+	// A front-only node never announces, but it composes what its agents
+	// announce with, so it has to load its own [announce_*] tables: without
+	// this it would push empty override maps over every agent's spoofing.
+	api.InitAnnounceOverrides(cfg)
+	apiServer.StartAgentReconciler(ctx)
 	go func() {
 		if err := apiServer.Run(); err != nil {
 			slog.Error("API server error", "error", err)

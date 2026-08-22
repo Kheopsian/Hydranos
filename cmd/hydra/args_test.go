@@ -3,8 +3,6 @@ package main
 import (
 	"strings"
 	"testing"
-
-	"github.com/Kheopsian/hydra/internal/config"
 )
 
 func TestConfigPathFromArgs(t *testing.T) {
@@ -83,31 +81,5 @@ func TestLeftoverArgsMessage(t *testing.T) {
 	// reader hunting for a flag that was never passed.
 	if strings.Contains(got, "ignored") {
 		t.Fatalf("a lone positional was reported as having swallowed flags: %q", got)
-	}
-}
-
-func TestAgentConfigError(t *testing.T) {
-	// A complete block registers; the optional fields stay optional.
-	if got := agentConfigError(config.AgentConfig{Name: "boreas", Addr: "10.0.0.2:9090"}); got != "" {
-		t.Fatalf("a usable [[agent]] block was rejected: %q", got)
-	}
-	// Each missing field is named, so the log line is enough to fix the TOML
-	// without opening the source.
-	cases := []struct {
-		ag   config.AgentConfig
-		want string
-	}{
-		{config.AgentConfig{Addr: "10.0.0.2:9090"}, "name"},
-		{config.AgentConfig{Name: "boreas"}, "addr"},
-		{config.AgentConfig{}, "both"},
-	}
-	for _, c := range cases {
-		got := agentConfigError(c.ag)
-		if got == "" {
-			t.Fatalf("an unusable block %+v was accepted", c.ag)
-		}
-		if !strings.Contains(got, c.want) {
-			t.Fatalf("the reason for %+v does not name %q: %q", c.ag, c.want, got)
-		}
 	}
 }

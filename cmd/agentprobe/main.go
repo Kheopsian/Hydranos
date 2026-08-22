@@ -95,6 +95,12 @@ func main() {
 		return
 	}
 
+	// Node-level, once per agent rather than per engine: which configuration
+	// the node is running and where it came from. A source other than "front"
+	// on a node with a front is the first thing to check when an agent is not
+	// behaving like its fleet.
+	probeConfigState(*addr, *token, *ca)
+
 	fail := false
 	for _, eng := range strings.Split(*engines, ",") {
 		eng = strings.TrimSpace(eng)
@@ -139,6 +145,31 @@ func main() {
 	}
 	if fail {
 		os.Exit(1)
+	}
+}
+
+// probeConfigState reports the node's configuration revision and the state of
+// each declared engine. An agent that predates the pushed-config model answers
+// Unimplemented, which is a fact about the node worth printing rather than a
+// probe failure.
+func probeConfigState(addr, token, ca string) {
+	c, err := grpcclient.New(grpcclient.Config{Addr: addr, Engine: agentwire.EngineRace, Token: token, TLSCa: ca})
+	if err != nil {
+		return // the per-engine loop below reports the dial failure properly
+	}
+	defer c.Close()
+	st, err := c.GetConfigState()
+	if err != nil {
+		fmt.Printf("[node] config_state unavailable: %v\n", err)
+		return
+	}
+	fmt.Printf("[node] config revision=%d source=%s engines=%d\n", st.Revision, st.Source, len(st.Engines))
+	for id, es := range st.Engines {
+		line := fmt.Sprintf("[node]   %s role=%s port=%d state=%s", id, es.Role, es.ListenPort, es.State)
+		if es.Error != "" {
+			line += " error=" + es.Error
+		}
+		fmt.Println(line)
 	}
 }
 

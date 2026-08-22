@@ -34,7 +34,7 @@ func TestResolveConfigPathSeedsMissingExplicitPath(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "config")
 	target := filepath.Join(dir, "default.toml")
 
-	got, seeded := resolveConfigPath(target, true)
+	got, seeded := resolveConfigPath(target, true, true)
 	if got != target || !seeded {
 		t.Fatalf("resolveConfigPath = (%q, %v), want (%q, true)", got, seeded, target)
 	}
@@ -62,7 +62,7 @@ func TestResolveConfigPathSeedsMissingExplicitPath(t *testing.T) {
 func TestResolveConfigPathRelativeKeepsRelativeDataDir(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	got, seeded := resolveConfigPath("hydra.toml", true)
+	got, seeded := resolveConfigPath("hydra.toml", true, true)
 	if got != "hydra.toml" || !seeded {
 		t.Fatalf("resolveConfigPath = (%q, %v), want (\"hydra.toml\", true)", got, seeded)
 	}
@@ -79,7 +79,7 @@ func TestResolveConfigPathLeavesAnExistingConfigAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, seeded := resolveConfigPath(target, true)
+	got, seeded := resolveConfigPath(target, true, true)
 	if got != target || seeded {
 		t.Fatalf("resolveConfigPath = (%q, %v), want (%q, false)", got, seeded, target)
 	}
@@ -97,7 +97,7 @@ func TestResolveConfigPathLeavesAnExistingConfigAlone(t *testing.T) {
 func TestResolveConfigPathDirectoryIsNotSeeded(t *testing.T) {
 	dir := t.TempDir()
 
-	got, seeded := resolveConfigPath(dir, true)
+	got, seeded := resolveConfigPath(dir, true, true)
 	if got != dir || seeded {
 		t.Fatalf("resolveConfigPath = (%q, %v), want (%q, false)", got, seeded, dir)
 	}
@@ -129,9 +129,25 @@ func TestResolveConfigPathUnreadableIsNotSeeded(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0700) })
 
-	got, seeded := resolveConfigPath(target, true)
+	got, seeded := resolveConfigPath(target, true, true)
 	if got != target || seeded {
 		t.Fatalf("resolveConfigPath = (%q, %v), want (%q, false)", got, seeded, target)
+	}
+}
+
+// An agent that took its identity from the environment runs without a config
+// file at all. Seeding one would put a full template back into its volume, and
+// the operator would be right to read that template as the node's settings --
+// when in fact the node ignores every line of it and follows its front.
+func TestResolveConfigPathDoesNotSeedWhenSeedingIsOff(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "default.toml")
+
+	got, seeded := resolveConfigPath(target, true, false)
+	if got != target || seeded {
+		t.Fatalf("resolveConfigPath = (%q, %v), want (%q, false)", got, seeded, target)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("a config file was written for a file-less agent: %v", err)
 	}
 }
 
@@ -144,7 +160,7 @@ func TestResolveConfigPathUnstattableIsNotSeeded(t *testing.T) {
 	}
 	target := filepath.Join(notADir, "default.toml")
 
-	got, seeded := resolveConfigPath(target, true)
+	got, seeded := resolveConfigPath(target, true, true)
 	if got != target || seeded {
 		t.Fatalf("resolveConfigPath = (%q, %v), want (%q, false)", got, seeded, target)
 	}
