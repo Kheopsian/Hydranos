@@ -22,6 +22,9 @@ fn make_torrent(i: u32) -> Arc<TorrentState> {
         trackers: vec![vec!["http://t.example/announce".to_string()]],
         private: false,
         multi_file: false,
+        // Size of the raw info dict, as metainfo parsing fills it. The bench
+        // never sends metadata pieces, but the field is not optional.
+        info_dict_len: 0,
     };
     let save_path = PathBuf::from("/data");
     let torrent_file_path = format!("/torrents/doc-{}.torrent", i);

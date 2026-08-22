@@ -37,6 +37,9 @@ export HYDRA_DATA_DIR
 # One socket per torrent -> raise the fd limit (needs privileged / SYS_RESOURCE;
 # falls back quietly otherwise). Done before dropping privileges so the limit is
 # inherited by the unprivileged process.
+# shellcheck disable=SC3045 # ulimit -n is outside POSIX but busybox ash, which
+# is what runs this in the Alpine image, implements it; the || true already
+# covers a shell that does not.
 ulimit -n 1000000 2>/dev/null || ulimit -n 200000 2>/dev/null || true
 
 # PUID/PGID (linuxserver convention): when either is set, run as that uid/gid so
