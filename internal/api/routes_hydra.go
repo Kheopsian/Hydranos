@@ -1347,17 +1347,31 @@ func (s *Server) handleRaceTorrents(c *gin.Context) {
 }
 
 func (s *Server) handleRaceTorrentDetail(c *gin.Context) {
-	if s.raceEngine == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "race engine not available"})
-		return
-	}
 	infoHash := strings.ToLower(c.Param("info_hash"))
-	detail := s.raceEngine.GetTorrentDetail(infoHash)
-	if detail == nil {
+	agentHint := c.Query("agent")
+
+	if want := agentHint; want != "" && want != "local" {
+		if detail := s.raceDetailFromRemote(want, infoHash); detail != nil {
+			c.JSON(http.StatusOK, detail)
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
 		return
 	}
-	c.JSON(http.StatusOK, detail)
+
+	if s.raceEngine != nil && s.raceEngine.HasTorrent(infoHash) {
+		if detail := s.raceEngine.GetTorrentDetail(infoHash); detail != nil {
+			c.JSON(http.StatusOK, detail)
+			return
+		}
+	}
+	if ra, engineID, category, ok := s.resolveRaceDetailTarget(infoHash, ""); ok {
+		if detail := s.remoteTorrentDetail(ra, engineID, infoHash, category); detail != nil {
+			c.JSON(http.StatusOK, detail)
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
 }
 
 // handleRacePurge retire un torrent du SEUL moteur race (pas du hoard) — comme
@@ -1455,17 +1469,31 @@ func (s *Server) handleHoardTorrents(c *gin.Context) {
 }
 
 func (s *Server) handleHoardTorrentDetail(c *gin.Context) {
-	if s.hoardEngine == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "hoard engine not available"})
-		return
-	}
 	infoHash := strings.ToLower(c.Param("info_hash"))
-	detail := s.hoardEngine.GetTorrentDetail(infoHash)
-	if detail == nil {
+	agentHint := c.Query("agent")
+
+	if want := agentHint; want != "" && want != "local" {
+		if detail := s.hoardDetailFromRemote(want, infoHash); detail != nil {
+			c.JSON(http.StatusOK, detail)
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
 		return
 	}
-	c.JSON(http.StatusOK, detail)
+
+	if s.hoardEngine != nil && s.hoardEngine.HasTorrent(infoHash) {
+		if detail := s.hoardEngine.GetTorrentDetail(infoHash); detail != nil {
+			c.JSON(http.StatusOK, detail)
+			return
+		}
+	}
+	if ra, engineID, category, ok := s.resolveHoardDetailTarget(infoHash, ""); ok {
+		if detail := s.remoteTorrentDetail(ra, engineID, infoHash, category); detail != nil {
+			c.JSON(http.StatusOK, detail)
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
 }
 
 func (s *Server) handleHoardPauseAll(c *gin.Context) {
@@ -3659,18 +3687,40 @@ func verLess(a, b [3]int) bool {
 // shim; this is the native-API counterpart the WebUI uses for its Content tab.
 func (s *Server) handleTorrentFiles(c *gin.Context) {
 	hash := strings.ToLower(c.Param("info_hash"))
+	agentHint := c.Query("agent")
+	mode := c.DefaultQuery("mode", "hoard")
+	if mode != "race" {
+		mode = "hoard"
+	}
 	var files []map[string]interface{}
 	var avail map[string]interface{}
-	switch {
-	case s.raceEngine != nil && s.raceEngine.HasTorrent(hash):
-		files = s.raceEngine.GetTorrentFileList(hash)
-		avail = s.raceEngine.GetTorrentAvailability(hash)
-	case s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash):
-		files = s.hoardEngine.GetTorrentFileList(hash)
-		avail = s.hoardEngine.GetTorrentAvailability(hash)
-	default:
-		c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
-		return
+
+	if want := agentHint; want != "" && want != "local" {
+		var ok bool
+		files, avail, ok = s.filesFromRemote(want, hash, mode)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
+			return
+		}
+	} else {
+		switch {
+		case s.raceEngine != nil && s.raceEngine.HasTorrent(hash):
+			files = s.raceEngine.GetTorrentFileList(hash)
+			avail = s.raceEngine.GetTorrentAvailability(hash)
+		case s.hoardEngine != nil && s.hoardEngine.HasTorrent(hash):
+			files = s.hoardEngine.GetTorrentFileList(hash)
+			avail = s.hoardEngine.GetTorrentAvailability(hash)
+		default:
+			var ok bool
+			files, avail, ok = s.filesFromRemote("", hash, "race")
+			if !ok {
+				files, avail, ok = s.filesFromRemote("", hash, "hoard")
+			}
+			if !ok {
+				c.JSON(http.StatusNotFound, gin.H{"error": "torrent not found"})
+				return
+			}
+		}
 	}
 	if files == nil {
 		files = []map[string]interface{}{}
