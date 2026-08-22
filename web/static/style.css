@@ -164,6 +164,14 @@ header::before {
 }
 .exit-ip-stat .stat-value .net-warn { font-family: inherit; }
 
+/* Same two-line address in the agents table. No max-width: the cell grows. */
+#agents-table .exit-ip-cell .ip-line { display: block; }
+/* The cell's .mono break-all is right for an address, wrong for a sentence. */
+#agents-table .exit-ip-cell .net-warn {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    word-break: normal;
+}
+
 .stat-ip {
     font-size: 12px;
     font-family: monospace;

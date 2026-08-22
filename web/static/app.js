@@ -63,33 +63,37 @@ async function fetchPortForward() {
 // which only knows the addresses, still renders the same thing as the poll.
 let _ipv6Wanted = false;
 
+// One node's exit address as {html, title}, one line per family. Shared by the
+// header and the agents table so a remote node reads exactly like this one.
+function _exitIPMarkup(v4, v6, v6Wanted) {
+    const lines = [], tips = [];
+    if (v4) { lines.push(`<span class="ip-line">${esc(incoExitIP(v4))}</span>`); tips.push(incoExitIP(v4)); }
+    if (v6) {
+        lines.push(`<span class="ip-line">${esc(incoExitIP(v6))}</span>`);
+        tips.push(incoExitIP(v6));
+    } else if (v6Wanted) {
+        // Asked for, not available: saying so beats a lone v4 that passes for a
+        // working dual stack.
+        lines.push(`<span class="ip-line net-warn">${esc(t("IPv6 unavailable"))}</span>`);
+        return {
+            html: lines.join(""),
+            title: t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it."),
+        };
+    }
+    // The tooltip holds every address, masked the same way, so a clipped line
+    // is never the only copy and incognito stays incognito on hover.
+    return { html: lines.join("") || "\u2014", title: tips.join(" / ") };
+}
+
 // The single place the header address is written. Two writers used to race
 // here, and the one behind the click knew nothing about IPv6, so refreshing by
 // hand dropped the second address.
 function _renderHeaderIP(v4, v6) {
     const el = document.getElementById("header-exit-ip");
     if (!el || !v4) return;
-    if (v6) {
-        // One line per address. Joining them with a separator made a ~40
-        // character string that stretched the header, and wrapped at whatever
-        // point the layout happened to run out of room.
-        el.innerHTML = `<span class="ip-line">${esc(incoExitIP(v4))}</span>` +
-            `<span class="ip-line">${esc(incoExitIP(v6))}</span>`;
-        // Truncation must never be the only copy: the tooltip holds both,
-        // masked the same way, so incognito stays incognito on hover too.
-        el.title = incoExitIP(v4) + " / " + incoExitIP(v6);
-    } else if (_ipv6Wanted) {
-        // Asked for, not available: say so where the address would be, rather
-        // than showing one address and letting it pass for a working dual stack.
-        // On its own line: this is a sentence, and a clipped sentence says
-        // nothing, while a clipped address still has the tooltip behind it.
-        el.innerHTML = `<span class="ip-line">${esc(incoExitIP(v4))}</span>` +
-            `<span class="ip-line net-warn">${esc(t("IPv6 unavailable"))}</span>`;
-        el.title = t("IPv6 is enabled in the settings, but this host has no IPv6 address, so nothing is listening or announced on it.");
-    } else {
-        el.innerHTML = `<span class="ip-line">${esc(incoExitIP(v4))}</span>`;
-        el.title = incoExitIP(v4);
-    }
+    const m = _exitIPMarkup(v4, v6, _ipv6Wanted);
+    el.innerHTML = m.html;
+    el.title = m.title;
 }
 
 let ipScrambleTimer = null;
@@ -5662,7 +5666,9 @@ async function updateAgents() {
                 ? '<span class="sr-desc">' + t("built-in") + '</span>'
                 : `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">${t("Edit")}</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">${t("Delete")}</button>`;
             const ifTip = (a.interfaces||[]).map(i=>i.name+": "+incoIP(i.ip)+(i.up?"":" " + t("(down)"))).join("\n");
-            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono" style="font-size:12px" title="${esc(ifTip)}">${esc(incoExitIP(a.exit_ip) || "\u2014")}</td><td>${dot}</td><td>${actions}</td></tr>`;
+            const exit = _exitIPMarkup(a.exit_ip, a.exit_ip_v6, !!a.ipv6_wanted);
+            const exitTip = [exit.title, ifTip].filter(Boolean).join("\n");
+            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono exit-ip-cell" style="font-size:12px" title="${esc(exitTip)}">${exit.html}</td><td>${dot}</td><td>${actions}</td></tr>`;
         }).join("");
     } catch (e) { console.error("Failed to update agents:", e); }
 }
