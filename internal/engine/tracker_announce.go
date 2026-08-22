@@ -1564,7 +1564,11 @@ func (e *RaceEngine) announcePhase(infoHash string, trackerURLs []string, totalS
 // all of its swarms rather than only the first tracker's. Stops the loop as
 // soon as any announce reports the torrent gone or complete.
 func (e *RaceEngine) announceAllAndInject(infoHash string, trackerURLs []string, totalSize int64, announcer *trackerAnnouncer) bool {
+	now := time.Now()
 	for _, u := range trackerURLs {
+		if !e.breaker.allows(overrideHost(u), now) {
+			continue
+		}
 		if e.doAnnounceAndInject(infoHash, u, totalSize, announcer) {
 			return true
 		}
@@ -1605,11 +1609,15 @@ func (e *RaceEngine) doAnnounceAndInject(infoHash, trackerURL string, totalSize 
 
 	result, err := announcer.announce(trackerURL, infoHash, s.TotalUpload, s.TotalDownload, left, "started")
 	if err != nil {
+		// Only a transport error means the tracker is not answering; a
+		// failure reason below is an answer, so it does not trip the breaker.
+		e.breaker.record(overrideHost(trackerURL), false, time.Now())
 		slog.Debug("race: announce failed",
 			"info_hash", infoHash[:minStr(len(infoHash), 8)],
 			"error", err)
 		return false // retry
 	}
+	e.breaker.record(overrideHost(trackerURL), true, time.Now())
 
 	if result.FailureReason != "" {
 		slog.Warn("race: tracker failure",

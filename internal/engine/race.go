@@ -73,6 +73,7 @@ type RaceEngine struct {
 	// Race-specific tracking.
 	swarmData       map[string]*SwarmData
 	trackerFails    map[string]int
+	breaker         *trackerBreaker
 	firstPeerTime   map[string]time.Time
 	firstUploadTime map[string]time.Time
 	addedTime       map[string]time.Time
@@ -126,6 +127,7 @@ func NewRaceEngine(cfg *config.SessionConfig, choking ChokingEngineInterface, ca
 		torrents:         make(map[string]*TorrentInfo),
 		swarmData:        make(map[string]*SwarmData),
 		trackerFails:     make(map[string]int),
+		breaker:          newTrackerBreaker(),
 		firstPeerTime:    make(map[string]time.Time),
 		firstUploadTime:  make(map[string]time.Time),
 		addedTime:        make(map[string]time.Time),
@@ -1162,12 +1164,20 @@ func (e *RaceEngine) checkTrackerHealth() {
 
 		announced := false
 		for _, trackerURL := range trackerURLs {
+			host := overrideHost(trackerURL)
+			if !e.breaker.allows(host, now) {
+				continue
+			}
 			// Periodic seeding announce (event=""): reports the real cumulative
 			// uploaded/downloaded so ratio is credited, and refreshes swarmData.
 			result, aerr := announcer.announce(trackerURL, ih, s.TotalUpload, s.TotalDownload, 0, "")
 			if aerr != nil || result == nil || result.FailureReason != "" {
+				// A failure reason is the tracker answering, so it is up: only
+				// a transport error counts against the breaker.
+				e.breaker.record(host, aerr == nil && result != nil, now)
 				continue
 			}
+			e.breaker.record(host, true, now)
 			announced = true
 
 			// swarmData holds one entry per torrent, so the last tracker to
