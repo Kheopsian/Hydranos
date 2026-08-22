@@ -271,5 +271,7 @@ type NICInfo struct {
 // interfaces for binding.
 type NodeInfo struct {
 	PublicIP   string    `json:"public_ip"`
+	PublicIPv6 string    `json:"public_ip_v6,omitempty"` // empty unless an engine here enables IPv6
+	IPv6Wanted bool      `json:"ipv6_wanted,omitempty"`  // tells "no v6 configured" from "configured, host has none"
 	Interfaces []NICInfo `json:"interfaces"`
 }

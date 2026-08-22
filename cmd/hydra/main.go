@@ -862,6 +862,7 @@ func main() {
 		}, cfg.Daemon.DataDir, agentSecret)
 		agentSrv.SetTLS(*agentTLSCert, *agentTLSKey)
 		agentSrv.SetRichEngines(raceEngine, hoardEngine)
+		agentSrv.SetIPv6Wanted(raceCfg.EnableIPv6 || hoardCfg.EnableIPv6)
 		go func() {
 			slog.Info("HydraAgent gRPC serving", "addr", *agentAddr)
 			if err := agentSrv.Serve(ctx, *agentAddr); err != nil {

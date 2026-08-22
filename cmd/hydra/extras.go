@@ -140,9 +140,12 @@ func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs 
 	}
 	srv := agent.NewServer(engines, cfg.Daemon.DataDir, token)
 	srv.SetOwnEvents(true)
+	v6 := false
 	for _, le := range lives {
 		srv.AddRichEngine(le.id, le.rich)
+		v6 = v6 || le.cfg.EnableIPv6
 	}
+	srv.SetIPv6Wanted(v6)
 	go func() {
 		if serr := srv.Serve(ctx, extraShardAddr); serr != nil {
 			slog.Error("extra engines: agent serve failed", "error", serr)
