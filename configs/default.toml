@@ -86,6 +86,30 @@ active_downloads = 10
 # announce_ip = ""
 
 # ─────────────────────────────────────────────
+# BENCH / TELEMETRY DB (bench.db)
+# ─────────────────────────────────────────────
+# race_snapshots holds one row per racing torrent per sampling tick, so it
+# outgrows every other table by orders of magnitude and gets its own, much
+# shorter retention window. Every key below is optional; the defaults shown
+# are what applies when the section is absent.
+[bench]
+# false stops all bench recording (samples, race snapshots, events, tracker
+# samples). Retention keeps running so an existing file still shrinks.
+enabled = true
+# Window for the low-rate tables (bench_samples, vpn_speedtest, race_events,
+# tracker_samples). 0 = 365. Negative = never prune.
+retention_days = 365
+# Window for race_snapshots. 0 = 7. Negative = never prune.
+race_snapshot_retention_days = 7
+# Race sampling cadence in seconds. 0 = 5.
+snapshot_interval_secs = 5
+# How often retention runs, in minutes. 0 = 60. A prune also runs at boot.
+prune_interval_mins = 60
+# Reclaim the file after a prune that deleted rows. Off by default: VACUUM
+# rewrites the whole database and needs as much free space again.
+vacuum = false
+
+# ─────────────────────────────────────────────
 # VPN SPEEDTEST
 # ─────────────────────────────────────────────
 [vpn_speedtest]
