@@ -1052,6 +1052,7 @@ func main() {
 	// Dialed pull-only; a dead agent is logged + skipped, never blocks boot.
 	registerConfigAgents(apiServer, cfg.Agents)
 	apiServer.LoadPersistedAgents()
+	apiServer.StartAgentReconnectLoop(ctx)
 
 	// Only now can interrupted work be picked up. A cross-node job resolves its
 	// agents when it runs, and resuming before they were registered failed it
@@ -2421,6 +2422,7 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 	apiServer.SetEngines(api.NewEmptyRaceEngine(), api.NewEmptyHoardEngine())
 	registerConfigAgents(apiServer, cfg.Agents)
 	apiServer.LoadPersistedAgents()
+	apiServer.StartAgentReconnectLoop(ctx)
 	go func() {
 		if err := apiServer.Run(); err != nil {
 			slog.Error("API server error", "error", err)
