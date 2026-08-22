@@ -211,6 +211,11 @@ type BenchDB interface {
 	GetRaceSnapshots(infoHash string) []bench.RaceSnapshot
 	GetTrackerCurrent() []map[string]interface{}
 	GetTrackerRange(start, end, step int, tracker string) []map[string]interface{}
+	// The write half, used by the race timeline recorder: on a controller node
+	// this package is what samples the agents, so it writes as well as reads.
+	InsertRaceEvent(ev bench.RaceEvent)
+	InsertRaceSnapshots(snapshots []bench.RaceSnapshot)
+	PurgeOld()
 }
 
 // HealthReporter exposes the latest invariant-anomaly report. Satisfied by

@@ -2391,6 +2391,11 @@ func (a *benchAPIAdapter) GetTrackerCurrent() []map[string]interface{} {
 func (a *benchAPIAdapter) GetTrackerRange(start, end, step int, tracker string) []map[string]interface{} {
 	return a.db.GetTrackerRange(start, end, step, tracker)
 }
+func (a *benchAPIAdapter) InsertRaceEvent(ev bench.RaceEvent) { a.db.InsertRaceEvent(ev) }
+func (a *benchAPIAdapter) InsertRaceSnapshots(snapshots []bench.RaceSnapshot) {
+	a.db.InsertRaceSnapshots(snapshots)
+}
+func (a *benchAPIAdapter) PurgeOld() { a.db.PurgeOld() }
 
 func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 	return map[string]interface{}{
@@ -2426,6 +2431,7 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 	// this it would push empty override maps over every agent's spoofing.
 	api.InitAnnounceOverrides(cfg)
 	resumeJobs := startFrontOnlyJobs(ctx, cfg, apiServer)
+	startFrontOnlyBench(ctx, cfg, apiServer)
 	apiServer.StartAgentReconciler(ctx)
 	// Only once the agents are registered: a move resolves both of its ends by
 	// name when it runs, and resuming before the dial fails it with "no agent
@@ -2450,6 +2456,24 @@ func runFrontOnly(ctx context.Context, cfg *config.HydraConfig) {
 	// the same permanent overlay back the moment an agent was down.
 	api.SetStartupReady(true)
 	<-ctx.Done()
+}
+
+// startFrontOnlyBench opens this node's bench DB and starts sampling the agents'
+// race engines into it.
+//
+// The timeline is fed by an engine's own events and a 5s sampler in the
+// monolith. A controller has neither, so the panel had no data for any torrent
+// on an agent -- and the agents cannot fill it either: they hold no bench DB
+// and no history. The node that talks to all of them does.
+func startFrontOnlyBench(ctx context.Context, cfg *config.HydraConfig, apiServer *api.Server) {
+	db := bench.NewBenchDB(filepath.Join(cfg.Daemon.DataDir, "bench.db"))
+	if err := db.Open(); err != nil {
+		slog.Warn("bench: open failed, the race timeline stays empty on this node", "error", err)
+		return
+	}
+	context.AfterFunc(ctx, func() { db.Close() })
+	apiServer.SetBenchDB(&benchAPIAdapter{db: db})
+	apiServer.StartRaceTimelineRecorder(ctx)
 }
 
 // startFrontOnlyJobs gives a controller node its background job manager and
