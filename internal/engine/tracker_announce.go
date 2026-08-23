@@ -1454,14 +1454,19 @@ func bdecodeString(data []byte) (interface{}, int, error) {
 // Tracker URL extraction from .torrent files
 // ---------------------------------------------------------------------------
 
-// trackerURLsFromTorrentFile extracts every tracker a .torrent declares: the
-// "announce" key first, then the tiers of "announce-list" (BEP 12) in order,
-// deduplicated.
+// trackerURLsFromTorrentFile extracts every tracker a .torrent declares that we
+// can speak to: the "announce" key first, then the tiers of "announce-list"
+// (BEP 12) in order, deduplicated.
 //
 // Only "announce" used to be read, so a multi-tracker torrent was announced to
 // exactly one tracker and was invisible on the others, and a torrent carrying
 // only "announce-list" -- which BEP 12 permits and modern clients emit -- got
 // no announce at all.
+//
+// Schemes we have no client for (tcp://, wss://) are dropped here rather than
+// downstream: kept in, each one costs a failed announce on every pass of the
+// loop, and every one of those failures counts against the circuit breaker for
+// a host whose http:// and udp:// URLs are answering perfectly well.
 func trackerURLsFromTorrentFile(data []byte) []string {
 	dict, err := bdecodeDict(data)
 	if err != nil {
@@ -1471,7 +1476,7 @@ func trackerURLsFromTorrentFile(data []byte) []string {
 	seen := map[string]bool{}
 	add := func(u string) {
 		u = strings.TrimSpace(u)
-		if u == "" || seen[u] {
+		if u == "" || seen[u] || !isSupportedTrackerScheme(u) {
 			return
 		}
 		seen[u] = true
