@@ -1,6 +1,9 @@
 package engine
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // cachedTrackerObs is a process-wide map of (info_hash → url → last
 // observation), populated by ObserveAnnounce. Kept package-level so we
@@ -76,6 +79,25 @@ func (e *RaceEngine) ObserveAnnounce(infoHash string, obs AnnounceObservation) {
 	}
 }
 
+// recordTrackerObs folds ONE tracker's outcome in, leaving the torrent's other
+// trackers alone.
+//
+// ObserveAnnounce above replaces the whole per-torrent map, which is right for
+// the hoard scheduler: it announces a torrent to every tracker in one cycle and
+// reports the lot. The race loop walks the trackers one at a time, so the same
+// call would leave each torrent holding only whichever tracker answered last --
+// a cross-seeded torrent's panel would flip between its trackers.
+func recordTrackerObs(infoHash, url string, obs TrackerObservation) {
+	cachedTrackerObsMu.Lock()
+	defer cachedTrackerObsMu.Unlock()
+	byURL := cachedTrackerObs[infoHash]
+	if byURL == nil {
+		byURL = map[string]TrackerObservation{}
+		cachedTrackerObs[infoHash] = byURL
+	}
+	byURL[url] = obs
+}
+
 // trackerObsFor returns a snapshot of per-tracker observations for the
 // given info_hash, or nil if none. Read by GetTorrentDetail to overwrite
 // Typhon's stale endpoints[] in the trackers passthrough.
@@ -98,4 +120,28 @@ func forgetTrackerObs(infoHash string) {
 	cachedTrackerObsMu.Lock()
 	delete(cachedTrackerObs, infoHash)
 	cachedTrackerObsMu.Unlock()
+}
+
+// Announce failures are logged per host at most this often. The race loop
+// announces every 5s per torrent per tracker, so an unreachable tracker with a
+// handful of torrents on it would otherwise write thousands of identical lines
+// an hour -- and the operator would lose the one line that matters in it.
+const announceFailureLogEvery = 2 * time.Minute
+
+var (
+	announceFailureLogMu sync.Mutex
+	announceFailureLogAt = map[string]time.Time{}
+)
+
+// announceFailureIsWorthLogging reports whether this host's failure is due a
+// line. The first failure always is: the point is to see it start.
+func announceFailureIsWorthLogging(host string) bool {
+	announceFailureLogMu.Lock()
+	defer announceFailureLogMu.Unlock()
+	now := time.Now()
+	if last, seen := announceFailureLogAt[host]; seen && now.Sub(last) < announceFailureLogEvery {
+		return false
+	}
+	announceFailureLogAt[host] = now
+	return true
 }
