@@ -869,54 +869,11 @@ func (e *RaceEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 
 	m := detail.ToMap()
 
-	// Inject raw tracker data from the engine, then overwrite each endpoint
-	// with what the Go announce loop actually observed. Typhon's own tracker
-	// state is stale here because its internal announce loop is disabled, so
-	// passing it through untouched showed placeholders as measurements: a
-	// hardcoded "next announce" of zero, and no last announce at all.
+	// The engine's tracker URLs, with every endpoint reporting what our own
+	// announce loop observed -- see TrackerRows for why the engine's own
+	// tracker state must not be passed through.
 	if trackers, err := e.client.GetTrackers(infoHash); err == nil {
-		obsByURL := trackerObsFor(infoHash)
-		trackerMaps := make([]map[string]interface{}, 0, len(trackers))
-		for _, t := range trackers {
-			tm := map[string]interface{}{
-				"url":      t.URL,
-				"tier":     t.Tier,
-				"verified": t.Verified,
-			}
-			var endpoints []map[string]interface{}
-			if len(t.Endpoints) > 0 {
-				_ = json.Unmarshal(t.Endpoints, &endpoints)
-			}
-			if obs, ok := obsByURL[t.URL]; ok {
-				if len(endpoints) == 0 {
-					endpoints = []map[string]interface{}{{}}
-				}
-				for i := range endpoints {
-					if obs.OK {
-						endpoints[i]["last_error"] = "Success"
-						endpoints[i]["message"] = ""
-						endpoints[i]["scrape_complete"] = obs.Seeds
-						endpoints[i]["scrape_incomplete"] = obs.Leechers
-					} else {
-						endpoints[i]["last_error"] = obs.ErrorMsg
-						endpoints[i]["message"] = obs.ErrorMsg
-					}
-					if !obs.NextAt.IsZero() {
-						secs := int64(time.Until(obs.NextAt).Seconds())
-						if secs < 0 {
-							secs = 0
-						}
-						endpoints[i]["next_announce"] = secs
-					}
-					if !obs.LastAt.IsZero() {
-						endpoints[i]["last_announce"] = int64(time.Since(obs.LastAt).Seconds())
-					}
-				}
-			}
-			tm["endpoints"] = endpoints
-			trackerMaps = append(trackerMaps, tm)
-		}
-		m["trackers"] = trackerMaps
+		m["trackers"] = TrackerRowsWithObs(infoHash, trackers)
 	}
 
 	return m
@@ -1235,10 +1192,26 @@ func (e *RaceEngine) checkTrackerHealth() {
 				// A failure reason is the tracker answering, so it is up: only
 				// a transport error counts against the breaker.
 				e.breaker.record(host, aerr == nil && result != nil, now)
+				reason := "no answer"
+				if aerr != nil {
+					reason = aerr.Error()
+				} else if result != nil {
+					reason = result.FailureReason
+				}
+				recordTrackerObs(ih, trackerURL, TrackerObservation{ErrorMsg: reason})
+				if announceFailureIsWorthLogging(host) {
+					slog.Warn("race: seed announce failed",
+						"info_hash", ih[:minStr(len(ih), 8)], "tracker", trackerURL, "error", reason)
+				}
 				continue
 			}
 			e.breaker.record(host, true, now)
 			announced = true
+			obs := TrackerObservation{OK: true, Seeds: result.Complete, Leechers: result.Incomplete, LastAt: now}
+			if result.Interval > 0 {
+				obs.NextAt = now.Add(time.Duration(result.Interval) * time.Second)
+			}
+			recordTrackerObs(ih, trackerURL, obs)
 
 			// swarmData holds one entry per torrent, so the last tracker to
 			// answer wins. Peers are additive across trackers, counts are not.
