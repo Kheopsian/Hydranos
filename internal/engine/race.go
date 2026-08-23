@@ -198,6 +198,7 @@ func (e *RaceEngine) Start(ctx context.Context) error {
 	// Index resumed torrents and start them (race has few torrents, no stagger needed).
 	e.indexResumedTorrents()
 	e.startAllResumed()
+	e.resumeAnnounceLoops()
 
 	// Start choking engine.
 	if e.choking != nil {
@@ -261,6 +262,72 @@ func (e *RaceEngine) indexResumedTorrents() {
 		e.addedTime[ih] = now
 
 	}
+}
+
+// resumeAnnounceLoops re-arms the aggressive announce loop for every torrent
+// that came back unfinished.
+//
+// raceAnnounceLoop is started by the add path and stops at completion, and the
+// keepalive below only walks FINISHED torrents. Between the two, a torrent that
+// was still downloading when the process went down came back announcing to
+// nobody: the tracker never heard from it again, so it got no peers, so it
+// never finished -- for as long as the engine ran. Restarting the loop here is
+// what the add path would have done, and it is idempotent: the first announce
+// that sees the torrent complete stops it again.
+func (e *RaceEngine) resumeAnnounceLoops() {
+	targets := e.resumeAnnounceTargets()
+	for _, t := range targets {
+		go e.raceAnnounceLoop(t.infoHash, t.trackerURLs, t.totalSize)
+	}
+	if len(targets) > 0 {
+		slog.Info("race: re-armed the announce loop for resumed downloads", "count", len(targets))
+	}
+}
+
+// announceTarget is one resumed torrent that needs its loop back.
+type announceTarget struct {
+	infoHash    string
+	trackerURLs []string
+	totalSize   int64
+}
+
+// resumeAnnounceTargets picks the torrents resumeAnnounceLoops arms. A paused
+// one stays quiet (the operator stopped it), an errored one has nothing to
+// serve, and a finished one belongs to the keepalive instead.
+func (e *RaceEngine) resumeAnnounceTargets() []announceTarget {
+	res, err := e.client.ListTorrents()
+	if err != nil {
+		return nil
+	}
+	var out []announceTarget
+	for _, s := range res.Torrents {
+		if s.IsFinished || s.IsPaused || s.State == "error" {
+			continue
+		}
+		urls := e.supportedTrackerURLs(s.InfoHash)
+		if len(urls) == 0 {
+			continue
+		}
+		out = append(out, announceTarget{infoHash: s.InfoHash, trackerURLs: urls, totalSize: s.TotalSize})
+	}
+	return out
+}
+
+// supportedTrackerURLs is every tracker the engine holds for a torrent that we
+// can actually speak to. A .torrent may declare schemes we have no client for
+// (tcp://, wss://); announcing to those only produces a failure per pass.
+func (e *RaceEngine) supportedTrackerURLs(infoHash string) []string {
+	trks, err := e.client.GetTrackers(infoHash)
+	if err != nil {
+		return nil
+	}
+	var urls []string
+	for _, t := range trks {
+		if isSupportedTrackerScheme(t.URL) {
+			urls = append(urls, t.URL)
+		}
+	}
+	return urls
 }
 
 // startAllResumed starts all resumed torrents (race = few torrents, no stagger needed).
@@ -1144,14 +1211,7 @@ func (e *RaceEngine) checkTrackerHealth() {
 		// cross-seeded to a second tracker was announced only to whichever
 		// tracker happened to come first in the engine's list, and dropped out
 		// of every other swarm as its announce interval expired.
-		var trackerURLs []string
-		if trks, terr := e.client.GetTrackers(ih); terr == nil {
-			for _, t := range trks {
-				if isSupportedTrackerScheme(t.URL) {
-					trackerURLs = append(trackerURLs, t.URL)
-				}
-			}
-		}
+		trackerURLs := e.supportedTrackerURLs(ih)
 		if len(trackerURLs) == 0 {
 			continue
 		}
