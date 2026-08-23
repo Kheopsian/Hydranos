@@ -1,7 +1,7 @@
 # Minimal single-node (monolith) Hydra using the prebuilt image.
-# First start seeds a default config into ./config and generates an admin login.
-# Log in at http://localhost:8199 with user "admin" and the temporary password:
-#   docker compose logs hydra | grep "temporary admin password"
+# First start seeds a default config into ./config. No password is generated:
+# open http://localhost:8199 and the first-run form asks you to create the admin
+# account. It is accepted only from localhost or a private network.
 services:
   hydra:
     image: ghcr.io/kheopsian/hydra:latest
