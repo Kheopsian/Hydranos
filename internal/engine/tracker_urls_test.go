@@ -52,6 +52,22 @@ func TestTrackerURLsReadsAnnounceList(t *testing.T) {
 			want: []string{"http://b.invalid/announce"},
 		},
 		{
+			// The tracker offers three endpoints and we have a client for two
+			// of them. Announcing to tcp:// fails on every pass of the loop and
+			// counts against the breaker for a host that is answering fine.
+			name: "unsupported scheme dropped",
+			tor: "d" + bstr("announce") + bstr("http://a.invalid:6969/announce") +
+				bstr("announce-list") + blist(
+				blist(bstr("http://a.invalid:6969/announce")),
+				blist(bstr("udp://a.invalid:6969/announce")),
+				blist(bstr("tcp://a.invalid:6970")),
+			) + "e",
+			want: []string{
+				"http://a.invalid:6969/announce",
+				"udp://a.invalid:6969/announce",
+			},
+		},
+		{
 			name: "no tracker",
 			tor:  "d" + bstr("comment") + bstr("nothing here") + "e",
 			want: nil,
