@@ -24,7 +24,7 @@ These are numbers from the production instance, not a benchmark rig:
 
 The shape matters more than the peaks: CPU cost is roughly **0.34 cores per 100
 MB/s** on top of a ~1.4 core floor, and it does *not* grow with the number of
-torrents you hold -- at 196k torrents only 7.5% have a connected peer at any
+torrents you hold: at 196k torrents only 7.5% have a connected peer at any
 moment. Holding torrents is cheap; moving bytes is what costs. The design target
 is a million torrents per node, and the remaining work is on the hot set, not on
 the catalogue.
@@ -36,8 +36,8 @@ the catalogue.
 - **Two engine roles.** A **race** session (aggressive, low-latency, for hot
   downloads) and a **hoard** session (upload-optimized, for long-term seeding),
   each tuned independently. You can also run any number of extra engines.
-- **Distributed.** Run engines across several machines -- Linux or native
-  Windows -- and drive them all from one front. Route new torrents per-category,
+- **Distributed.** Run engines across several machines (Linux or native
+  Windows) and drive them all from one front. Route new torrents per-category,
   and **move or duplicate payload data between nodes** from the UI.
 - **Durable background work.** Long operations (moving data between disks or
   hosts, recategorising) run as **jobs**: persisted in SQLite, resumable across
@@ -57,27 +57,27 @@ the catalogue.
 
 ## Screenshots
 
-**Overview** -- live dashboard: global up/down, seeding/leeching counts,
+**Overview**: live dashboard: global up/down, seeding/leeching counts,
 per-session throughput, all streamed over SSE.
 
 ![Overview](docs/img/hydra_01_overview.png)
 
-**Race** -- per-torrent detail with live peer speed and progress timelines for
+**Race**: per-torrent detail with live peer speed and progress timelines for
 the hot download you're racing.
 
 ![Race timeline](docs/img/hydra_02_race_timeline.png)
 
-**Hoard** -- the long-term seeding set: a six-figure torrent list in one
+**Hoard**: the long-term seeding set: a six-figure torrent list in one
 virtualized, push-updated table.
 
 ![Hoard](docs/img/hydra_03_hoard.png)
 
-**Agents** -- run engines across several machines and manage them from one
+**Agents**: run engines across several machines and manage them from one
 front: status, free space, and per-engine roles.
 
 ![Agents](docs/img/hydra_04_agents.png)
 
-**Benchmark** -- built-in throughput history so you can see exactly what your
+**Benchmark**: built-in throughput history so you can see exactly what your
 box sustains.
 
 ![Benchmark](docs/img/hydra_05_benchmark.png)
@@ -101,7 +101,7 @@ docker run --stop-timeout 30 ...      # and: docker stop -t 30 hydra
 
 Each engine gets ten seconds of that budget, and the two are stopped one after
 the other. If you hold several hundred thousand torrents the sweep takes
-longer -- raise `HYDRA_STOP_TIMEOUT` (e.g. `45s`) and keep the supervisor's
+longer, so raise `HYDRA_STOP_TIMEOUT` (e.g. `45s`) and keep the supervisor's
 grace period above twice that.
 
 ---
@@ -111,7 +111,7 @@ grace period above twice that.
 Install steps, architecture, every networking mode and the edge cases live in
 the **[Wiki](https://github.com/Kheopsian/Hydra/wiki)**:
 
-- [Concepts](https://github.com/Kheopsian/Hydra/wiki/Concepts) -- start here
+- [Concepts](https://github.com/Kheopsian/Hydra/wiki/Concepts), start here
 - [Installation & First Run](https://github.com/Kheopsian/Hydra/wiki/Installation-and-First-Run)
 - [Architecture](https://github.com/Kheopsian/Hydra/wiki/Architecture)
 - [Networking Modes](https://github.com/Kheopsian/Hydra/wiki/Networking-Modes)
