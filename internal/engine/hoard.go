@@ -1176,53 +1176,10 @@ func (e *HoardEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 
 	m := detail.ToMap()
 
-	// Inject raw tracker data from engine, but overwrite each endpoint's
-	// last_error/message/scrape_* using the cachedTrackerObs we filled
-	// from the Go-canonical announce loop. Typhon's tracker state is stale
-	// because internal_announce is off — see feedback_announce_propagation_pattern.md.
+	// See TrackerRows: the engine's own tracker state is a placeholder, so the
+	// endpoints report our announce observations or nothing at all.
 	if trackers, err := e.client.GetTrackers(infoHash); err == nil {
-		obsByURL := trackerObsFor(infoHash)
-		trackerMaps := make([]map[string]interface{}, 0, len(trackers))
-		for _, t := range trackers {
-			tm := map[string]interface{}{
-				"url":      t.URL,
-				"tier":     t.Tier,
-				"verified": t.Verified,
-			}
-			var endpoints []map[string]interface{}
-			if len(t.Endpoints) > 0 {
-				_ = json.Unmarshal(t.Endpoints, &endpoints)
-			}
-			if obs, ok := obsByURL[t.URL]; ok {
-				if len(endpoints) == 0 {
-					endpoints = []map[string]interface{}{{}}
-				}
-				for i := range endpoints {
-					if obs.OK {
-						endpoints[i]["last_error"] = "Success"
-						endpoints[i]["message"] = ""
-						endpoints[i]["scrape_complete"] = obs.Seeds
-						endpoints[i]["scrape_incomplete"] = obs.Leechers
-					} else {
-						endpoints[i]["last_error"] = obs.ErrorMsg
-						endpoints[i]["message"] = obs.ErrorMsg
-					}
-					if !obs.NextAt.IsZero() {
-						secs := int64(time.Until(obs.NextAt).Seconds())
-						if secs < 0 {
-							secs = 0
-						}
-						endpoints[i]["next_announce"] = secs
-					}
-					if !obs.LastAt.IsZero() {
-						endpoints[i]["last_announce"] = int64(time.Since(obs.LastAt).Seconds())
-					}
-				}
-			}
-			tm["endpoints"] = endpoints
-			trackerMaps = append(trackerMaps, tm)
-		}
-		m["trackers"] = trackerMaps
+		m["trackers"] = TrackerRowsWithObs(infoHash, trackers)
 	}
 
 	// Merge top-level swarm/tracker_error fields from cachedStats.

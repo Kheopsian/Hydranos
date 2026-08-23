@@ -1627,19 +1627,36 @@ func (e *RaceEngine) doAnnounceAndInject(infoHash, trackerURL string, totalSize 
 		// Only a transport error means the tracker is not answering; a
 		// failure reason below is an answer, so it does not trip the breaker.
 		e.breaker.record(overrideHost(trackerURL), false, time.Now())
-		slog.Debug("race: announce failed",
-			"info_hash", infoHash[:minStr(len(infoHash), 8)],
-			"error", err)
+		recordTrackerObs(infoHash, trackerURL, TrackerObservation{ErrorMsg: err.Error()})
+		// Warn, not Debug: a torrent that announces to nobody looks exactly
+		// like a healthy one -- it is started, it has a tracker list, it just
+		// never gets a peer. This line was the only place the truth existed
+		// and nothing at the default level printed it. Throttled per host so a
+		// tracker that is down for a day cannot bury the log.
+		if announceFailureIsWorthLogging(overrideHost(trackerURL)) {
+			slog.Warn("race: announce failed",
+				"info_hash", infoHash[:minStr(len(infoHash), 8)],
+				"tracker", trackerURL,
+				"error", err)
+		}
 		return false // retry
 	}
 	e.breaker.record(overrideHost(trackerURL), true, time.Now())
 
 	if result.FailureReason != "" {
+		recordTrackerObs(infoHash, trackerURL, TrackerObservation{ErrorMsg: result.FailureReason})
 		slog.Warn("race: tracker failure",
 			"info_hash", infoHash[:minStr(len(infoHash), 8)],
+			"tracker", trackerURL,
 			"reason", result.FailureReason)
 		return false
 	}
+
+	obs := TrackerObservation{OK: true, Seeds: result.Complete, Leechers: result.Incomplete, LastAt: time.Now()}
+	if result.Interval > 0 {
+		obs.NextAt = obs.LastAt.Add(time.Duration(result.Interval) * time.Second)
+	}
+	recordTrackerObs(infoHash, trackerURL, obs)
 
 	// Fire announce event.
 	if e.onEvent != nil {
