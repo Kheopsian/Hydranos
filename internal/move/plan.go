@@ -15,6 +15,7 @@ package move
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -31,6 +32,18 @@ var ErrWouldBreakHardlinks = errors.New("move would break hardlinks")
 // payload. Checked up front because discovering it two hours into a copy of a
 // 400 GB release is the worst possible moment.
 var ErrNotEnoughSpace = errors.New("not enough free space on target")
+
+// ErrTargetExists is returned when something already occupies the target path.
+// Checked by Inspect, so a cross-filesystem move is refused before the copy
+// starts rather than after it: the old code only looked once the bytes were
+// already written, which burned the whole copy to reach a refusal that was
+// knowable up front.
+//
+// An EMPTY target directory is not this error. The *arr stack routinely leaves
+// one behind (a grab creates the save path before any data arrives), and
+// refusing that would block the ordinary case for no reason -- Execute removes
+// it and renames into its place.
+var ErrTargetExists = errors.New("target already exists")
 
 // Plan is what Inspect found. It is a snapshot, not a promise: free space can
 // change under a long copy, which is why Execute re-checks nothing it cannot
@@ -56,6 +69,12 @@ type Plan struct {
 	HardlinkExamples []string
 
 	FreeBytes int64
+
+	// TargetExists means something is already at Target. TargetEmpty
+	// narrows it to the harmless case: an empty directory, which Execute
+	// removes on its way past.
+	TargetExists bool
+	TargetEmpty  bool
 }
 
 // Inspect walks the payload and reports what moving it would involve. It reads
@@ -92,6 +111,10 @@ func Inspect(source, target string) (*Plan, error) {
 	}
 
 	p := &Plan{Source: src, Target: dst}
+	if st, err := os.Stat(dst); err == nil {
+		p.TargetExists = true
+		p.TargetEmpty = st.IsDir() && dirIsEmpty(dst)
+	}
 	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -138,6 +161,11 @@ func Inspect(source, target string) (*Plan, error) {
 // found, and is consulted only when it actually matters: a same-filesystem
 // move preserves hardlinks, so it never needs permission.
 func (p *Plan) Check(allowBreakingHardlinks bool) error {
+	// Before anything else, and on both paths: a rename onto an occupied
+	// path fails, and a copy onto one wastes hours to fail the same way.
+	if p.TargetExists && !p.TargetEmpty {
+		return fmt.Errorf("%w: %s", ErrTargetExists, p.Target)
+	}
 	if p.SameFS {
 		return nil
 	}
@@ -158,4 +186,20 @@ func (p *Plan) Check(allowBreakingHardlinks bool) error {
 			p.HardlinkedBytes, strings.Join(p.HardlinkExamples, ", "))
 	}
 	return nil
+}
+
+// dirIsEmpty reports whether dir holds no entries. An unreadable directory is
+// reported as non-empty: refusing a move is recoverable, clearing a directory
+// we could not read is not.
+func dirIsEmpty(dir string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if err != nil && err != io.EOF {
+		return false
+	}
+	return len(names) == 0
 }

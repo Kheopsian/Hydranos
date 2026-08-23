@@ -3,6 +3,32 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.128.0 - 2026-08-23
+
+### Fixed
+- **A cross-filesystem category move copied the whole payload and only then
+  refused it.** Nothing checked the destination before the copy started: the
+  only test happened once every byte was written, so a move onto an occupied
+  path spent its entire copy to reach a refusal that was knowable in the first
+  second. The destination is now examined during preflight and the move is
+  refused up front, with `reason: "target_exists"` on the 409 so the UI can say
+  what is in the way.
+- **An empty destination directory blocked the move for no reason.** Sonarr and
+  Radarr create the save path when they grab a release, well before anything is
+  downloaded into it, so the ordinary case is a destination that exists and is
+  empty. That is no longer an obstacle: an empty directory is removed and the
+  payload renamed into its place. Anything with content in it still stops the
+  move, untouched.
+- **The refusal blamed a race that had not happened.** It always read "target
+  appeared during the copy", including when the destination had been sitting
+  there since before the move was submitted. It now says which of the two it
+  was.
+- **The category shown on a row changed even when nothing had moved.** The list
+  repainted every selected row at click time, including rows whose payload was
+  only queued for a background move that can fail hours later. Only a completed
+  relabel updates the row now; a row being moved keeps its category until the
+  job is done.
+
 ## v3.117.0 - 2026-08-22
 
 ### Fixed
