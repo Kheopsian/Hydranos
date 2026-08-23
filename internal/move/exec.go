@@ -69,8 +69,8 @@ func Execute(ctx context.Context, p *Plan, opts Options) error {
 		if err := os.MkdirAll(filepath.Dir(p.Target), 0o755); err != nil {
 			return fmt.Errorf("move: mkdir %s: %w", filepath.Dir(p.Target), err)
 		}
-		if _, err := os.Stat(p.Target); err == nil {
-			return fmt.Errorf("move: target already exists: %s", p.Target)
+		if err := clearTarget(p); err != nil {
+			return err
 		}
 		if opts.BeforeSwap != nil {
 			if err := opts.BeforeSwap(); err != nil {
@@ -189,8 +189,8 @@ func Execute(ctx context.Context, p *Plan, opts Options) error {
 	if err := os.MkdirAll(filepath.Dir(p.Target), 0o755); err != nil {
 		return fmt.Errorf("move: mkdir %s: %w", filepath.Dir(p.Target), err)
 	}
-	if _, err := os.Stat(p.Target); err == nil {
-		return fmt.Errorf("move: target appeared during the copy: %s", p.Target)
+	if err := clearTarget(p); err != nil {
+		return err
 	}
 	// The copy is done and verified; everything up to here was free to abort.
 	// Only now is it worth interrupting the torrent, and only for as long as
@@ -219,6 +219,34 @@ func Execute(ctx context.Context, p *Plan, opts Options) error {
 		return fmt.Errorf("move: completed, but the old copy at %s could not be removed: %w", p.Source, err)
 	}
 	return nil
+}
+
+// clearTarget makes the target path free for the rename that is about to take
+// it, or explains why it cannot.
+//
+// The only thing it will remove is an empty directory, and only one: the save
+// path an *arr grab created before its download had anything to write there.
+// Anything with content in it is somebody's data and the move stops.
+//
+// The wording distinguishes the two cases on purpose. Inspect records whether
+// the target was already there, so a refusal here says "was already there" or
+// "appeared while we worked" truthfully instead of always blaming a race.
+func clearTarget(p *Plan) error {
+	st, err := os.Stat(p.Target)
+	if err != nil {
+		return nil // free, which is the normal case
+	}
+	if st.IsDir() && dirIsEmpty(p.Target) {
+		if err := os.Remove(p.Target); err != nil {
+			return fmt.Errorf("move: target %s is an empty directory but could not be removed: %w", p.Target, err)
+		}
+		return nil
+	}
+	when := "appeared while the move was running"
+	if p.TargetExists {
+		when = "was already there before the move started"
+	}
+	return fmt.Errorf("%w: %s (%s)", ErrTargetExists, p.Target, when)
 }
 
 // ensureSpace re-runs the free-space test for a move that only discovered it

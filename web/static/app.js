@@ -2830,6 +2830,10 @@ async function _changeCategorySelected(catName, move) {
 
     let okCount = 0;
     let movingCount = 0;
+    // Only a 200 means the category is already what the row should show. A 202
+    // is a job that has not moved a byte yet and can still fail, so painting
+    // the row now would state a result that does not exist.
+    const relabelled = [];
     const errors = [];
     const needConsent = [];
 
@@ -2850,7 +2854,7 @@ async function _changeCategorySelected(catName, move) {
                 errors.push(`${hash.slice(0, 8)}: ${(j && j.error) || ("HTTP " + r.status)}`);
                 continue;
             }
-            if (r.status === 202) movingCount++; else okCount++;
+            if (r.status === 202) { movingCount++; } else { okCount++; relabelled.push(hash); }
         } catch (err) {
             errors.push(`${hash.slice(0, 8)}: ${err.message}`);
         }
@@ -2878,6 +2882,7 @@ async function _changeCategorySelected(catName, move) {
                         movingCount++;
                     } else {
                         okCount++;
+                        relabelled.push(hash);
                     }
                 } catch (err) {
                     errors.push(`${hash.slice(0, 8)}: ${err.message}`);
@@ -2897,12 +2902,13 @@ async function _changeCategorySelected(catName, move) {
             { n: movingCount, cat: catName }));
     }
 
-    // Optimistic: reflect the new category in the held hoard rows immediately,
-    // so it shows without waiting for the next full refresh. Race rows are
-    // rendered from freshly fetched data, so they need no such nudge.
+    // Optimistic, but only for the rows that really were relabelled (HTTP 200).
+    // A row whose payload is being moved in the background keeps its current
+    // category until the job has actually finished: the move can fail hours
+    // later, and a row repainted at click time would have been lying the whole
+    // time. Race rows are rendered from freshly fetched data and need no nudge.
     if (Array.isArray(_hoardAllTorrents)) {
-        for (const [, sel] of entries) {
-            const hash = _selHash(sel);
+        for (const hash of relabelled) {
             const t = _hoardAllTorrents.find(x => x.info_hash === hash);
             if (t) t.category = catName;
         }

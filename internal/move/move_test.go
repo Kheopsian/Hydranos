@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -271,5 +272,93 @@ func TestExecuteRefusesWhenTargetExists(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(src, "video.mkv")); err != nil {
 		t.Fatal("source must be untouched after a refusal")
+	}
+}
+
+// The production failure this guards against: a cross-filesystem move copied
+// 450 MB and only then discovered the target was occupied. The refusal has to
+// come from Check, before a single byte is written.
+func TestCheckRefusesOccupiedTargetBeforeAnyCopying(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	release(t, src)
+	writeFile(t, filepath.Join(dst, "something"), 1)
+
+	p, err := Inspect(src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.TargetExists || p.TargetEmpty {
+		t.Fatalf("Inspect must report an occupied target: exists=%v empty=%v", p.TargetExists, p.TargetEmpty)
+	}
+	p.SameFS = false // the case that used to copy first and refuse afterwards
+	if err := p.Check(true); !errors.Is(err, ErrTargetExists) {
+		t.Fatalf("Check error = %v, want ErrTargetExists", err)
+	}
+	if _, err := os.Stat(dst + stagingSuffix); !os.IsNotExist(err) {
+		t.Fatal("nothing may be staged when the plan is refused")
+	}
+}
+
+// The empty directory an *arr grab leaves at the save path is not an obstacle:
+// refusing it would block the ordinary case for nothing.
+func TestEmptyTargetDirectoryIsReused(t *testing.T) {
+	for _, sameFS := range []bool{true, false} {
+		base := t.TempDir()
+		src := filepath.Join(base, "src")
+		dst := filepath.Join(base, "dst")
+		release(t, src)
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		p, err := Inspect(src, dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.TargetExists || !p.TargetEmpty {
+			t.Fatalf("empty target: exists=%v empty=%v", p.TargetExists, p.TargetEmpty)
+		}
+		if err := p.Check(true); err != nil {
+			t.Fatalf("an empty target must not block the move: %v", err)
+		}
+		p.SameFS = sameFS
+		if err := Execute(context.Background(), p, Options{}); err != nil {
+			t.Fatalf("same_fs=%v: %v", sameFS, err)
+		}
+		got, err := os.ReadFile(filepath.Join(dst, "video.mkv"))
+		if err != nil {
+			t.Fatalf("same_fs=%v: payload missing from target: %v", sameFS, err)
+		}
+		if len(got) != 4096 {
+			t.Fatalf("same_fs=%v: payload is %d bytes, want 4096", sameFS, len(got))
+		}
+	}
+}
+
+// A target that turned up after Inspect looked is a different story from one
+// that was there all along, and the message has to say which.
+func TestRefusalSaysWhetherTheTargetWasThereFromTheStart(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	release(t, src)
+
+	p, err := Inspect(src, dst) // target absent at inspection time
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dst, "something"), 1) // ... and occupied afterwards
+	err = clearTarget(p)
+	if !errors.Is(err, ErrTargetExists) {
+		t.Fatalf("error = %v, want ErrTargetExists", err)
+	}
+	if !strings.Contains(err.Error(), "appeared while") {
+		t.Fatalf("error must name the race: %v", err)
+	}
+	p.TargetExists = true
+	if err := clearTarget(p); !strings.Contains(err.Error(), "already there") {
+		t.Fatalf("error must not blame a race for a pre-existing target: %v", err)
 	}
 }

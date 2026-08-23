@@ -190,6 +190,9 @@ func (s *Server) submitMoveJob(c *gin.Context, hash, category string, allowBreak
 			body["hardlinked_bytes"] = plan.HardlinkedBytes
 			body["hardlink_examples"] = plan.HardlinkExamples
 			body["retry_with"] = "allow_breaking_hardlinks"
+		case errors.Is(err, move.ErrTargetExists):
+			body["reason"] = "target_exists"
+			body["target"] = plan.Target
 		case errors.Is(err, move.ErrNotEnoughSpace):
 			body["reason"] = "no_space"
 			body["needed_bytes"] = plan.TotalBytes
