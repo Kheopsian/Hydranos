@@ -497,7 +497,17 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 		if err := unmarshal(&p); err != nil {
 			return nil, badParams(err)
 		}
-		return reply(c.GetTrackers(p.InfoHash))
+		// Answered with this node's own announce observations folded in. The
+		// engine's tracker state is a placeholder that reads as "Success" for a
+		// tracker it has never contacted (see engine.TrackerRows), and the
+		// front has no way to tell one from the other -- so every tracker on
+		// every agent-held torrent showed a green OK, including the ones we
+		// were failing to reach.
+		trks, err := c.GetTrackers(p.InfoHash)
+		if err != nil {
+			return reply(trks, err)
+		}
+		return reply(engine.EncodeTrackerRows(trks, engine.TrackerRowsWithObs(p.InfoHash, trks)), nil)
 
 	case agentwire.MethodStartTorrent:
 		var p agentwire.InfoHashParams

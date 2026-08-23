@@ -1454,14 +1454,19 @@ func bdecodeString(data []byte) (interface{}, int, error) {
 // Tracker URL extraction from .torrent files
 // ---------------------------------------------------------------------------
 
-// trackerURLsFromTorrentFile extracts every tracker a .torrent declares: the
-// "announce" key first, then the tiers of "announce-list" (BEP 12) in order,
-// deduplicated.
+// trackerURLsFromTorrentFile extracts every tracker a .torrent declares that we
+// can speak to: the "announce" key first, then the tiers of "announce-list"
+// (BEP 12) in order, deduplicated.
 //
 // Only "announce" used to be read, so a multi-tracker torrent was announced to
 // exactly one tracker and was invisible on the others, and a torrent carrying
 // only "announce-list" -- which BEP 12 permits and modern clients emit -- got
 // no announce at all.
+//
+// Schemes we have no client for (tcp://, wss://) are dropped here rather than
+// downstream: kept in, each one costs a failed announce on every pass of the
+// loop, and every one of those failures counts against the circuit breaker for
+// a host whose http:// and udp:// URLs are answering perfectly well.
 func trackerURLsFromTorrentFile(data []byte) []string {
 	dict, err := bdecodeDict(data)
 	if err != nil {
@@ -1471,7 +1476,7 @@ func trackerURLsFromTorrentFile(data []byte) []string {
 	seen := map[string]bool{}
 	add := func(u string) {
 		u = strings.TrimSpace(u)
-		if u == "" || seen[u] {
+		if u == "" || seen[u] || !isSupportedTrackerScheme(u) {
 			return
 		}
 		seen[u] = true
@@ -1622,19 +1627,36 @@ func (e *RaceEngine) doAnnounceAndInject(infoHash, trackerURL string, totalSize 
 		// Only a transport error means the tracker is not answering; a
 		// failure reason below is an answer, so it does not trip the breaker.
 		e.breaker.record(overrideHost(trackerURL), false, time.Now())
-		slog.Debug("race: announce failed",
-			"info_hash", infoHash[:minStr(len(infoHash), 8)],
-			"error", err)
+		recordTrackerObs(infoHash, trackerURL, TrackerObservation{ErrorMsg: err.Error()})
+		// Warn, not Debug: a torrent that announces to nobody looks exactly
+		// like a healthy one -- it is started, it has a tracker list, it just
+		// never gets a peer. This line was the only place the truth existed
+		// and nothing at the default level printed it. Throttled per host so a
+		// tracker that is down for a day cannot bury the log.
+		if announceFailureIsWorthLogging(overrideHost(trackerURL)) {
+			slog.Warn("race: announce failed",
+				"info_hash", infoHash[:minStr(len(infoHash), 8)],
+				"tracker", trackerURL,
+				"error", err)
+		}
 		return false // retry
 	}
 	e.breaker.record(overrideHost(trackerURL), true, time.Now())
 
 	if result.FailureReason != "" {
+		recordTrackerObs(infoHash, trackerURL, TrackerObservation{ErrorMsg: result.FailureReason})
 		slog.Warn("race: tracker failure",
 			"info_hash", infoHash[:minStr(len(infoHash), 8)],
+			"tracker", trackerURL,
 			"reason", result.FailureReason)
 		return false
 	}
+
+	obs := TrackerObservation{OK: true, Seeds: result.Complete, Leechers: result.Incomplete, LastAt: time.Now()}
+	if result.Interval > 0 {
+		obs.NextAt = obs.LastAt.Add(time.Duration(result.Interval) * time.Second)
+	}
+	recordTrackerObs(infoHash, trackerURL, obs)
 
 	// Fire announce event.
 	if e.onEvent != nil {
