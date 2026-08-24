@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.131.0 - 2026-08-24
+
+### Added
+- **Placement strategies that look at the disk, not at a torrent count.**
+  A category could only fan out to every agent or pick the one with the fewest
+  torrents, and a torrent count is a poor proxy for anything: ten thousand
+  small torrents and ten remuxes are the same number and nowhere near the same
+  disk. Three strategies join it, all measured at the CATEGORY'S OWN PATH on
+  each agent (categories already carry a per-agent path, and two agents can
+  point the same category at very different filesystems):
+  `most_free_space` (most room), `least_load` (fewest bytes/s moving right
+  now) and `fill_then_next` (fill each agent in written order until it hits
+  its reserve, so a collection stays on one node instead of being striped
+  across all of them).
+- **A free-space reserve per category (`min_free_bytes`).** An agent with less
+  than that left at the category path gets no new torrents whatever the
+  strategy, `all` included, and an add whose every candidate is below the
+  reserve is refused rather than quietly sent to the fullest disk.
+
+### Fixed
+- **`least_load` was documented but never implemented.** Selecting it fell
+  through to the default, which is fan-out: instead of balancing load it
+  multi-homed every torrent onto every agent, silently.
+
 ## v3.130.3 - 2026-08-24
 
 ### Fixed
