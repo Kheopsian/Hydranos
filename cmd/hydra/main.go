@@ -1801,6 +1801,40 @@ func timeToUnix(t time.Time) int64 {
 // Benchmark snapshot collection
 // ---------------------------------------------------------------------------
 
+// announceTick is the previous read of one engine's cumulative announce
+// counters, kept so the bench tick can turn them into a per-second rate.
+type announceTick struct {
+	sent, failed uint64
+	at           time.Time
+}
+
+// benchAnnounceLast holds the last read per engine scope. Only the bench
+// ticker touches it, one goroutine, so no lock.
+var benchAnnounceLast = map[string]announceTick{}
+
+// addAnnounceRates fills the announce rate columns from the delta since the
+// previous tick. A scope with no previous read is skipped entirely (0 in the
+// row) instead of reporting the since-boot total over one interval.
+func addAnnounceRates(snap map[string]interface{}) {
+	now := time.Now()
+	for _, scope := range []string{"race", "hoard"} {
+		sent, failed, _ := engine.AnnounceStats(scope)
+		prev, seen := benchAnnounceLast[scope]
+		benchAnnounceLast[scope] = announceTick{sent: sent, failed: failed, at: now}
+		if !seen {
+			continue
+		}
+		dt := now.Sub(prev.at).Seconds()
+		// Counters are monotone; a lower read would mean a restart, which
+		// cannot happen in-process, but guard rather than emit a negative rate.
+		if dt <= 0 || sent < prev.sent || failed < prev.failed {
+			continue
+		}
+		snap[scope+"_announce_rate"] = float64(sent-prev.sent) / dt
+		snap[scope+"_announce_fail_rate"] = float64(failed-prev.failed) / dt
+	}
+}
+
 func collectBenchSnapshot(race *engine.RaceEngine, hoard *engine.HoardEngine) map[string]interface{} {
 	snap := map[string]interface{}{
 		"ts": float64(time.Now().Unix()),
@@ -1852,6 +1886,10 @@ func collectBenchSnapshot(race *engine.RaceEngine, hoard *engine.HoardEngine) ma
 	globalUL, globalDL := api.GetGlobalTotals()
 	snap["global_uploaded"] = globalUL
 	snap["global_downloaded"] = globalDL
+	// Announce cadence: the counters are cumulative, the graph wants a rate.
+	// First tick after a start has no previous read, so it emits nothing
+	// rather than a spike of "everything since boot divided by one interval".
+	addAnnounceRates(snap)
 
 	sysStats := system.Collect()
 	for _, key := range []string{"iowait_pct", "arc_size_bytes", "arc_hit_rate_pct", "arc_demand_hit_rate_pct", "arc_miss_per_sec", "arc_demand_data_miss_per_sec", "arc_ghost_hits_per_sec", "open_fds"} {

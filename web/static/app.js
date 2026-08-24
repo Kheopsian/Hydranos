@@ -4163,6 +4163,15 @@ function _mkDualChart(id, label1, color1, label2, color2, yFormatter) {
     });
 }
 
+// _fmtAnnRate renders an announces/second figure: sub-1 rates keep two
+// decimals (a small instance announces a few times a minute), larger ones
+// round, since 87.4/s and 87/s say the same thing.
+function _fmtAnnRate(v) {
+    v = v ?? 0;
+    if (v > 0 && v < 1) return v.toFixed(2) + "/s";
+    return (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + "/s";
+}
+
 function _updateDualChart(chart, history, key1, key2) {
     chart.data.labels = history.map(p => _bmLabel(p.ts));
     chart.data.datasets[0].data = history.map(p => p[key1] ?? 0);
@@ -4239,6 +4248,34 @@ function _initBmCharts() {
                 scales: {
                     x: { display: true, ticks: { color: "#7a90a8", maxTicksLimit: 6, maxRotation: 0 }, grid: { display: false } },
                     y: { beginAtZero: true, grid: { color: "#1a2233" }, ticks: { color: "#7a90a8" } },
+                },
+            },
+        }),
+        announce: new Chart(document.getElementById("chart-announce"), {
+            type: "line",
+            data: {
+                labels: [],
+                datasets: [
+                    { label: t("Race announces/s"), data: [], borderColor: "#f0883e", backgroundColor: "#f0883e18", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
+                    { label: t("Hoard announces/s"), data: [], borderColor: "#3fb950", backgroundColor: "#3fb95018", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
+                    { label: t("Race failed/s"), data: [], borderColor: "#f85149", backgroundColor: "#f8514918", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
+                    { label: t("Hoard failed/s"), data: [], borderColor: "#d29922", backgroundColor: "#d2992218", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
+                ],
+            },
+            plugins: [crosshairPlugin],
+            options: {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: { display: true, labels: { color: "#7a90a8", boxWidth: 12 } },
+                    tooltip: {
+                        mode: "index", intersect: false,
+                        callbacks: { label: ctx => `${ctx.dataset.label}: ${_fmtAnnRate(ctx.parsed.y)}` },
+                    },
+                },
+                scales: {
+                    x: { display: true, ticks: { color: "#7a90a8", maxTicksLimit: 6, maxRotation: 0 }, grid: { display: false } },
+                    y: { beginAtZero: true, grid: { color: "#1a2233" }, ticks: { color: "#7a90a8", callback: v => _fmtAnnRate(v) } },
                 },
             },
         }),
@@ -4423,6 +4460,16 @@ async function updateBenchmark() {
             c.data.datasets[1].data = history.map(p => p.hoard_uploading ?? 0);
             c.data.datasets[2].data = history.map(p => p.race_peers ?? 0);
             c.data.datasets[3].data = history.map(p => p.hoard_peers ?? 0);
+            c.update("none");
+        }
+        // Announce rate (4 datasets: per-engine cadence + failures)
+        {
+            const c = _bmCharts.announce;
+            c.data.labels = history.map(p => _bmLabel(p.ts));
+            c.data.datasets[0].data = history.map(p => p.race_announce_rate ?? 0);
+            c.data.datasets[1].data = history.map(p => p.hoard_announce_rate ?? 0);
+            c.data.datasets[2].data = history.map(p => p.race_announce_fail_rate ?? 0);
+            c.data.datasets[3].data = history.map(p => p.hoard_announce_fail_rate ?? 0);
             c.update("none");
         }
         // Race Events, 20 stacked bars (added, completed, first_upload)
