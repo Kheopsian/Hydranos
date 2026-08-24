@@ -788,6 +788,16 @@ func main() {
 						"imported", r.Imported, "missing_file", r.MissingFile, "errors", r.Errors)
 				}
 			}
+			// Re-seed the seed clock from the durable copy. Has to happen
+			// before storeReady opens the sync gate: a sync that ran first
+			// would write this process's fresh zeros over the history with
+			// nothing to MAX() against in memory.
+			if saved, serr := torStore.AllSeedTimes(); serr != nil {
+				slog.Warn("store: cannot load seed times, counters restart from zero", "error", serr)
+			} else if len(saved) > 0 {
+				engine.SeedTimeSeed(saved)
+				slog.Info("store: seed time counters restored", "torrents", len(saved))
+			}
 			storeReady.Store(true)
 		}()
 	}
@@ -1761,6 +1771,9 @@ func saveState(stateMgr *state.Manager, race *engine.RaceEngine, hoard *engine.H
 }
 
 func syncStore(st *store.Store, raceMetas, hoardMetas map[string]*engine.TorrentMeta, raceTotals, hoardTotals map[string][2]int64) {
+	// One snapshot for the whole batch: the clock is a single map behind one
+	// mutex, and a per-torrent lookup here would take it 200k times a tick.
+	seedTimes := engine.SeedTimeAll()
 	items := make([]store.SyncItem, 0, len(raceMetas)+len(hoardMetas))
 	add := func(sess store.Session, metas map[string]*engine.TorrentMeta, totals map[string][2]int64) {
 		for ih, m := range metas {
@@ -1769,6 +1782,7 @@ func syncStore(st *store.Store, raceMetas, hoardMetas map[string]*engine.Torrent
 				InfoHash:        ih,
 				TotalUploaded:   t[0],
 				TotalDownloaded: t[1],
+				SeedingTime:     seedTimes[ih],
 				Session:         sess,
 				Paused:          m.UserPaused,
 				Tags:            m.Tags,

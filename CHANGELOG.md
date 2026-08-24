@@ -3,6 +3,32 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.130.0 - 2026-08-24
+
+### Added
+- **A real cumulative seed time.** `seeding_time` was `now - completed_time`:
+  a torrent stopped for a month still reported a month of seeding, and so did
+  one whose machine had been off. It is now a counter that only advances while
+  the torrent is actually available to seed -- complete, and not stopped by
+  the user. A torrent held by a scheduler or force-choked by the disk slot
+  manager still counts, because a tracker sees no difference. The counter
+  lives in the store, keyed by info_hash alone, so it survives restarts and
+  follows a torrent handed between the race and hoard engines.
+- **`seeding_time` in the torrent list.** It used to exist only on the detail
+  endpoint, so evaluating it over a catalogue meant one RPC per torrent.
+
+### Fixed
+- **The qBittorrent shim reported `seeding_time: 0` for everything.** Every
+  external retention script -- \*arr, cross-seed, anything reading the shim --
+  concluded "never seeded" about the entire catalogue. It now reports the real
+  counter.
+
+### Note
+- Existing torrents have no history, so the upgrade seeds them **once** from
+  the old formula as a documented upper bound; starting the whole catalogue at
+  zero would have meant no retention rule could fire for weeks. Everything
+  accumulated after the upgrade is really observed.
+
 ## v3.129.0 - 2026-08-24
 
 ### Added

@@ -1170,7 +1170,6 @@ func (e *HoardEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 		Peers:        peers,
 		NumPieces:    s.NumPieces,
 		PieceLength:  s.PieceLength,
-		SeedingTime:  s.SeedingTime,
 		ActiveTime:   s.ActiveTime,
 	}
 
@@ -1371,6 +1370,10 @@ func (e *HoardEngine) refreshStats() {
 
 		newStats[ih] = &stats
 	}
+
+	// Advance the seed clock and stamp the running total into the map before
+	// it is published, so no consumer ever sees a zeroed counter.
+	accrueSeedTime(newStats)
 
 	e.cachedStatsMu.Lock()
 	// Preserve announce-derived fields (populated by HoardAnnouncer.ObserveAnnounce)
