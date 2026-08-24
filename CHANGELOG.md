@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.131.1 - 2026-08-24
+
+### Fixed
+- **The free-space reserve computed a refusal nobody read.** The add path
+  called the variant that drops the error, so a category whose every agent sat
+  below its reserve went on placing torrents on the fullest disk instead of
+  refusing. The native add now answers 507 and says which category and which
+  reserve.
+
 ## v3.131.0 - 2026-08-24
 
 ### Added
