@@ -1104,7 +1104,14 @@ func (s *Server) handleAddTorrent(c *gin.Context) {
 	}
 
 	cat := s.categoryByName(req.Category)
-	targets := s.addTargets(req.Category)
+	targets, perr := s.addTargetsErr(req.Category)
+	if perr != nil {
+		// Every candidate is under the category's free-space reserve. This is
+		// the one placement failure worth refusing an add over: accepting it
+		// means writing to the disk the operator asked us to stop writing to.
+		c.JSON(http.StatusInsufficientStorage, gin.H{"error": perr.Error()})
+		return
+	}
 
 	type addResult struct {
 		Agent    string `json:"agent"`
