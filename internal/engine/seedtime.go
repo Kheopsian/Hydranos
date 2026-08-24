@@ -110,8 +110,14 @@ func SeedTimeAll() map[string]int64 {
 // seedTimeEligible reports whether a torrent is available to seed right now:
 // complete, and not stopped by the user. StateQueued (a scheduler holds it)
 // and a serving-suspended torrent both still count -- see the file header.
+//
+// UserPaused is checked SEPARATELY from the state string and is not redundant
+// with it: the race engine reports a user-stopped torrent as StateQueued (the
+// intent lives in the flag, and DeriveState is applied on the way out, not in
+// the cached stats), so testing the state alone kept the clock running through
+// a pause -- measured on staging, +308s over a 307s pause.
 func seedTimeEligible(s *TorrentStats) bool {
-	return s != nil && s.Progress >= 1.0 && s.State != StateStopped
+	return s != nil && s.Progress >= 1.0 && s.State != StateStopped && !s.UserPaused
 }
 
 // accrueSeedTime advances the clock over a freshly built stats map and stamps
