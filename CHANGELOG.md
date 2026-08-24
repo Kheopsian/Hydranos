@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.130.2 - 2026-08-24
+
+### Fixed
+- **A paused torrent kept accumulating seed time.** The eligibility test read
+  the state string alone, but the race engine reports a user-stopped torrent as
+  `queued` -- the intent lives in `user_paused` -- and `queued` is a state that
+  legitimately counts (a scheduler holding a seed is still seeding). Measured
+  on staging: 308 seconds credited over a 307 second pause. The counter now
+  reads the intent flag as well.
+
 ## v3.130.1 - 2026-08-24
 
 ### Fixed

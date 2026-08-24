@@ -70,6 +70,24 @@ func TestSeedTimeStoppedDoesNotAccrue(t *testing.T) {
 	}
 }
 
+// The race engine reports a user-stopped torrent as StateQueued and carries
+// the intent in UserPaused instead. Testing the state alone let the clock run
+// straight through a pause; this is that regression, pinned.
+func TestSeedTimeUserPausedDoesNotAccrue(t *testing.T) {
+	resetSeedClock()
+	accrueSeedTime(seeding("pp"))
+	backdate("pp", 60)
+	accrueSeedTime(seeding("pp")) // 60s banked
+
+	paused := map[string]*TorrentStats{"pp": {InfoHash: "pp", Progress: 1.0, State: StateQueued, UserPaused: true}}
+	accrueSeedTime(paused)
+	backdate("pp", 300)
+	accrueSeedTime(seeding("pp"))
+	if got := SeedTimeFor("pp"); got != 60 {
+		t.Fatalf("seed time = %d, want 60 (a user pause must stop the clock whatever the state string says)", got)
+	}
+}
+
 // A scheduler hold (queued) and the disk slot manager's serving-suspend both
 // keep the torrent available as far as a tracker is concerned, so the clock
 // keeps running -- disk_slots.go promises "seedtime preserved".
