@@ -94,6 +94,10 @@ var MetricCols = []string{
 	"race_session_uploaded",
 	"global_uploaded",
 	"global_downloaded",
+	"race_announce_rate",
+	"hoard_announce_rate",
+	"race_announce_fail_rate",
+	"hoard_announce_fail_rate",
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +128,11 @@ CREATE TABLE IF NOT EXISTS bench_samples (
     hoard_session_uploaded  INTEGER DEFAULT 0,
     race_session_uploaded   INTEGER DEFAULT 0,
     global_uploaded         INTEGER DEFAULT 0,
-    global_downloaded       INTEGER DEFAULT 0
+    global_downloaded       INTEGER DEFAULT 0,
+    race_announce_rate      REAL DEFAULT 0,
+    hoard_announce_rate     REAL DEFAULT 0,
+    race_announce_fail_rate REAL DEFAULT 0,
+    hoard_announce_fail_rate REAL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_bench_ts ON bench_samples(ts);
 `
@@ -277,6 +285,10 @@ func (b *BenchDB) Open() error {
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN race_session_uploaded INTEGER DEFAULT 0")
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN global_uploaded INTEGER DEFAULT 0")
 	db.Exec("ALTER TABLE bench_samples ADD COLUMN global_downloaded INTEGER DEFAULT 0")
+	db.Exec("ALTER TABLE bench_samples ADD COLUMN race_announce_rate REAL DEFAULT 0")
+	db.Exec("ALTER TABLE bench_samples ADD COLUMN hoard_announce_rate REAL DEFAULT 0")
+	db.Exec("ALTER TABLE bench_samples ADD COLUMN race_announce_fail_rate REAL DEFAULT 0")
+	db.Exec("ALTER TABLE bench_samples ADD COLUMN hoard_announce_fail_rate REAL DEFAULT 0")
 	db.Exec("ALTER TABLE vpn_speedtest ADD COLUMN ul_torrent_mbps REAL DEFAULT 0")
 	db.Exec("ALTER TABLE vpn_speedtest ADD COLUMN dl_torrent_mbps REAL DEFAULT 0")
 

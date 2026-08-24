@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/version"
@@ -87,6 +88,11 @@ type trackerAnnouncer struct {
 	// gate holds every announce while the engine is in its startup pause.
 	// Shared per engine scope, never nil (an unheld gate is a no-op).
 	gate *startupGate
+	// scope names the engine this announcer speaks for ("hoard"/"race"). Only
+	// used to book the announce in the per-engine counters the bench graph
+	// reads; the counters themselves are package-level, since race builds one
+	// announcer per torrent.
+	scope string
 }
 
 // newTrackerAnnouncerForBinding builds an announcer wired to a specific
@@ -311,6 +317,7 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		proxied:         announceProxy != nil,
 		enableIPv6:      b.EnableIPv6,
 		limiter:         announceLimiterFor(b.AnnounceScope+"#"+strconv.Itoa(b.ID), b.AnnounceRateLimit),
+		scope:           b.AnnounceScope,
 		gate:            startupGateFor(b.AnnounceScope),
 	}
 }
@@ -1022,7 +1029,28 @@ func generateQBitPeerID() string {
 // engine status: total_upload/total_download). Reporting them lets ratio-based
 // private trackers credit our upload — historically these were hardcoded to 0,
 // which froze tracker-side stats despite real transfer.
+// announce books the attempt in the per-engine counters and delegates the work
+// to announceOnce. Every announce goes through here — http:// and udp://, hoard
+// and race, primary and secondary — so the bench tick can read one cumulative
+// number per engine and difference it into announces/second.
 func (ta *trackerAnnouncer) announce(trackerURL, infoHash string, uploaded, downloaded, left int64, event string) (*TrackerAnnounceResult, error) {
+	res, err := ta.announceOnce(trackerURL, infoHash, uploaded, downloaded, left, event)
+	c := announceCounterFor(ta.scope)
+	switch {
+	case errors.Is(err, ErrStartupPaused):
+		// Held before anything left the process: not an announce at all.
+	case errors.Is(err, errAnnounceRateLimited):
+		c.limited.Add(1)
+	case err != nil:
+		c.sent.Add(1)
+		c.failed.Add(1)
+	default:
+		c.sent.Add(1)
+	}
+	return res, err
+}
+
+func (ta *trackerAnnouncer) announceOnce(trackerURL, infoHash string, uploaded, downloaded, left int64, event string) (*TrackerAnnounceResult, error) {
 	// Startup pause first: while held, nothing leaves at all, and there is no
 	// point queueing on the rate limiter for something we will not send.
 	if ta.gate.blocked() {

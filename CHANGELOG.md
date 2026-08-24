@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.129.0 - 2026-08-24
+
+### Added
+- **The announce cadence is now graphed in the Benchmark tab.** Every number
+  on that page described bytes; how often we actually talk to trackers, the
+  one thing a tracker sees and rate-limits on, was visible only as a rolled-up
+  log line when `announce_rate_limit` happened to bite. The engine now counts
+  announces at the single point they all pass through (http:// and udp://,
+  hoard and race, primary and secondary), the bench tick differences those
+  counters into announces/second, and a new chart plots the per-engine cadence
+  with failures as a dashed subset of it. Sizing a rate limit stops being an
+  arithmetic guess from the torrent count.
+
 ## v3.128.0 - 2026-08-23
 
 ### Fixed
