@@ -3695,6 +3695,7 @@ async function showCategoryForm(name = null) {
     document.getElementById("cat-mode").value = "race";
     document.getElementById("cat-save-path").value = "";
     document.getElementById("cat-strategy").value = "all";
+    document.getElementById("cat-min-free").value = "";
     document.getElementById("cat-result").style.display = "none";
     document.getElementById("category-form").style.display = "block";
 
@@ -3705,6 +3706,10 @@ async function showCategoryForm(name = null) {
         document.getElementById("cat-mode").value = cat.mode;
         document.getElementById("cat-save-path").value = cat.save_path;
         document.getElementById("cat-strategy").value = cat.strategy || "all";
+        // Stored in bytes, shown in GiB: nobody types a reserve in bytes.
+        document.getElementById("cat-min-free").value = cat.min_free_bytes
+            ? Math.round(cat.min_free_bytes / (1024 * 1024 * 1024))
+            : "";
     }
     _populateGraduateSelect(allCats, cat ? cat.graduate_to : "", name);
     _catModeChanged();
@@ -3943,8 +3948,10 @@ async function saveCategory() {
             if (v) agents[inp.dataset.agent] = v;
         });
         const strategy = document.getElementById("cat-strategy").value;
+        const minFreeGiB = parseFloat(document.getElementById("cat-min-free").value) || 0;
+        const min_free_bytes = Math.max(0, Math.round(minFreeGiB * 1024 * 1024 * 1024));
         const graduate_to = mode === "race" ? (document.getElementById("cat-graduate-to").value || "") : "";
-        const payload = { name, save_path, mode, placement, agents, strategy, graduate_to };
+        const payload = { name, save_path, mode, placement, agents, strategy, graduate_to, min_free_bytes };
         if (_editingCategory) {
             await api(`/api/categories/${encodeURIComponent(_editingCategory)}`, {
                 method: "PUT",

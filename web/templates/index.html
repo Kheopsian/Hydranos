@@ -587,7 +587,16 @@
                             <select id="cat-strategy">
                                 <option value="all">all, fan-out to every placement agent (multi-home)</option>
                                 <option value="least_torrents">least_torrents, pick the agent with fewest torrents</option>
+                                <option value="most_free_space">most_free_space, pick the agent with the most room at this category&#39;s path</option>
+                                <option value="least_load">least_load, pick the agent moving the fewest bytes right now</option>
+                                <option value="fill_then_next">fill_then_next, fill each agent in order until it hits its reserve</option>
                             </select>
+                            <div class="sr-desc">Every strategy except "all" places the torrent on ONE agent. Space and load are measured at this category&#39;s own path on each agent, not on the agent as a whole.</div>
+                        </div>
+                        <div class="form-group" style="grid-column:1/-1">
+                            <label>Free space reserve (GiB)</label>
+                            <input type="number" id="cat-min-free" min="0" step="1" placeholder="0" style="width:100%" autocomplete="off">
+                            <div class="sr-desc">An agent with less than this left at the category path gets no new torrents, whatever the strategy, "all" included. 0 or blank = no reserve.</div>
                         </div>
                         <div class="form-group" style="grid-column:1/-1">
                             <label>Placement &amp; per-agent save path</label>
@@ -1175,6 +1184,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.3.114"></script>
+    <script src="/static/app.js?v=1.3.115"></script>
 </body>
 </html>

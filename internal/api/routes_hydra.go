@@ -329,7 +329,13 @@ type category struct {
 	GraduateTo string            `json:"graduate_to,omitempty"` // race only: target hoard category for graduation
 	Agents     map[string]string `json:"agents,omitempty"`      // per-agent save_path override; empty = flat SavePath (local agent)
 	Placement  []string          `json:"placement,omitempty"`   // agent names hosting new torrents; empty = ["local"]
-	Strategy   string            `json:"strategy,omitempty"`    // pick among Placement: all|least_torrents|least_load (default all)
+	// Strategy picks among Placement: all | least_torrents | most_free_space |
+	// least_load | fill_then_next (default all). See internal/api/placement.go.
+	Strategy string `json:"strategy,omitempty"`
+	// MinFreeBytes is a free-space reserve at this category's path. An agent
+	// with less than this left is not given new torrents, whatever the
+	// strategy -- including "all", where the fan-out simply skips it. 0 = off.
+	MinFreeBytes int64 `json:"min_free_bytes,omitempty"`
 }
 
 // SavePathFor returns the save_path for the given agent, falling back to the flat
@@ -343,12 +349,13 @@ func (cat category) SavePathFor(agent string) string {
 
 // categoryJSON is the on-disk format: {"save_path": "...", "mode": "..."}.
 type categoryJSON struct {
-	SavePath   string            `json:"save_path"`
-	Mode       string            `json:"mode"`
-	GraduateTo string            `json:"graduate_to,omitempty"`
-	Agents     map[string]string `json:"agents,omitempty"`
-	Placement  []string          `json:"placement,omitempty"`
-	Strategy   string            `json:"strategy,omitempty"`
+	SavePath     string            `json:"save_path"`
+	Mode         string            `json:"mode"`
+	GraduateTo   string            `json:"graduate_to,omitempty"`
+	Agents       map[string]string `json:"agents,omitempty"`
+	Placement    []string          `json:"placement,omitempty"`
+	Strategy     string            `json:"strategy,omitempty"`
+	MinFreeBytes int64             `json:"min_free_bytes,omitempty"`
 }
 
 func categoriesFile(dataDir string) string {
@@ -370,7 +377,7 @@ func loadCategories(dataDir string) []category {
 	}
 	cats := make([]category, 0, len(catMap))
 	for name, cj := range catMap {
-		cats = append(cats, category{Name: name, SavePath: cj.SavePath, Mode: cj.Mode, GraduateTo: cj.GraduateTo, Agents: cj.Agents, Placement: cj.Placement, Strategy: cj.Strategy})
+		cats = append(cats, category{Name: name, SavePath: cj.SavePath, Mode: cj.Mode, GraduateTo: cj.GraduateTo, Agents: cj.Agents, Placement: cj.Placement, Strategy: cj.Strategy, MinFreeBytes: cj.MinFreeBytes})
 	}
 	sort.Slice(cats, func(i, j int) bool { return cats[i].Name < cats[j].Name })
 	return cats
@@ -379,7 +386,7 @@ func loadCategories(dataDir string) []category {
 func saveCategories(dataDir string, cats []category) error {
 	catMap := make(map[string]categoryJSON, len(cats))
 	for _, cat := range cats {
-		catMap[cat.Name] = categoryJSON{SavePath: cat.SavePath, Mode: cat.Mode, GraduateTo: cat.GraduateTo, Agents: cat.Agents, Placement: cat.Placement, Strategy: cat.Strategy}
+		catMap[cat.Name] = categoryJSON{SavePath: cat.SavePath, Mode: cat.Mode, GraduateTo: cat.GraduateTo, Agents: cat.Agents, Placement: cat.Placement, Strategy: cat.Strategy, MinFreeBytes: cat.MinFreeBytes}
 	}
 	data, err := json.MarshalIndent(catMap, "", "  ")
 	if err != nil {
@@ -892,21 +899,57 @@ func ltStatusToRow(t ltclient.TorrentStatus, agent string, cats map[string]strin
 // new torrent lands on. Empty category or empty placement => ["local"] (the
 // unchanged monolith behavior).
 func (s *Server) addTargets(catName string) []string {
+	t, _ := s.addTargetsErr(catName)
+	return t
+}
+
+// addTargetsErr is addTargets with the one failure it can have: every agent
+// sitting below the category's free-space reserve. Callers that can refuse an
+// add report it; the rest fall back to the placement list unfiltered, since
+// dropping the torrent silently would be worse than a tight disk.
+func (s *Server) addTargetsErr(catName string) ([]string, error) {
 	cat := s.categoryByName(catName)
 	if cat == nil || len(cat.Placement) == 0 {
-		return []string{s.defaultAgent()}
+		return []string{s.defaultAgent()}, nil
+	}
+	targets := s.eligibleTargets(cat, cat.Placement)
+	if len(targets) == 0 {
+		// Nothing has room. Say so rather than silently picking the fullest
+		// disk -- the reserve exists precisely to make this loud.
+		return cat.Placement, &placementError{category: cat.Name, reserve: cat.MinFreeBytes}
 	}
 	switch cat.Strategy {
-	case "least_torrents":
-		best, bestN := cat.Placement[0], int(^uint(0)>>1)
-		for _, t := range cat.Placement {
-			if n := s.agentTorrentCount(t); n < bestN {
-				bestN, best = n, t
+	case strategyLeastTorrents:
+		return []string{s.pickBest(cat, targets, func(_ placementMetric, agent string) int64 {
+			return int64(s.agentTorrentCount(agent))
+		})}, nil
+	case strategyMostFree:
+		// Most free space = lowest negated free space. An agent whose disk we
+		// could not read scores worst, so a reachable node always wins over a
+		// node we know nothing about.
+		return []string{s.pickBest(cat, targets, func(m placementMetric, _ string) int64 {
+			if !m.ok {
+				return 0
 			}
-		}
-		return []string{best}
+			return -m.freeBytes
+		})}, nil
+	case strategyLeastLoad:
+		// Bytes/s currently moving on that agent. This is the strategy the
+		// struct comment has advertised since multi-agent landed while the
+		// switch ignored it -- picking it fanned out to EVERY agent instead,
+		// which is multi-homing every torrent, not load balancing.
+		return []string{s.pickBest(cat, targets, func(m placementMetric, _ string) int64 {
+			return m.rate
+		})}, nil
+	case strategyFillThenNext:
+		// Waterfall: keep using the first agent in the written order while it
+		// is above its reserve. Striping a collection across nodes makes every
+		// later move and every cross-seed a cross-host problem; filling one
+		// node at a time keeps things together, which is usually what someone
+		// listing agents in a deliberate order meant.
+		return []string{targets[0]}, nil
 	default: // "" | "all" => fan-out (multi-home)
-		return cat.Placement
+		return targets, nil
 	}
 }
 
@@ -1970,6 +2013,10 @@ func (s *Server) handleCategoryUpdate(c *gin.Context) {
 				cats[i].Strategy = update.Strategy
 			}
 			cats[i].GraduateTo = update.GraduateTo
+			// Assigned unconditionally, like GraduateTo above: a reserve has
+			// to be clearable, and 0 is the only way to say "no reserve".
+			// This route takes the whole form, not a patch of one field.
+			cats[i].MinFreeBytes = update.MinFreeBytes
 			found = true
 			break
 		}
