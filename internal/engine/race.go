@@ -1048,6 +1048,16 @@ func (e *RaceEngine) refreshStats() {
 		}
 
 		stats := LtStatusToTorrentStats(s, category, savePath, addedTime, completedTime)
+		// Carry the user's pause intent across the refresh. Typhon knows
+		// nothing about it, so rebuilding the map from its snapshot dropped
+		// the flag markUserPaused had just stamped: within one tick a torrent
+		// the user stopped read back as `queued`, user_paused false -- the
+		// scheduler's own word for a hold it may undo. The hoard engine
+		// preserves its announce-derived fields here for the same reason.
+		if info != nil && info.UserPaused {
+			stats.UserPaused = true
+			stats.State = DeriveState(stats.State, true)
+		}
 
 		// Track completion.
 		if stats.Progress >= 1.0 && completedTime.IsZero() && info != nil {
