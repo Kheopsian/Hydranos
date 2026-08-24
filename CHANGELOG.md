@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.130.1 - 2026-08-24
+
+### Fixed
+- **`seeding_time` was missing from the native list endpoints.** The field was
+  on the struct, but the list rows are built by a hand-written projection that
+  did not carry it, so `/api/hoard/torrents` and `/api/race/torrents` answered
+  without it -- the exact endpoint a retention rule would read.
+
 ## v3.130.0 - 2026-08-24
 
 ### Added
