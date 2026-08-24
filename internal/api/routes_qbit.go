@@ -431,7 +431,7 @@ func (s *Server) qbitTorrentsProperties(c *gin.Context) {
 		"up_limit":                 -1,
 		"dl_limit":                 -1,
 		"time_elapsed":             time.Now().Unix() - getInt64(detail, "added_time"),
-		"seeding_time":             0,
+		"seeding_time":             getInt64(detail, "seeding_time"),
 		"nb_connections":           getInt64(detail, "num_peers"),
 		"share_ratio":              getRatio(detail),
 		"addition_date":            getInt64(detail, "added_time"),

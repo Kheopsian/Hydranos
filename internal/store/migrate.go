@@ -90,6 +90,22 @@ var migrationsMonolith = []string{
 	`
 	CREATE INDEX IF NOT EXISTS idx_torrents_category ON torrents(category, session, save_path);
 	`,
+	// v7: the cumulative seed time, in seconds. Until now `seeding_time` was
+	// now-minus-completion, which counts every stop, every restart and every
+	// hour the machine was off as seeding -- the one number retention rules
+	// need, and the one that was wrong.
+	//
+	// The UPDATE is a ONE-SHOT BACKFILL, and it is deliberately optimistic:
+	// existing torrents have no history at all, so starting them at zero would
+	// mean no retention rule could fire on the whole catalogue for weeks. It
+	// seeds them from the OLD formula once, as a documented upper bound, and
+	// everything after that is really observed. Wrong in the same direction as
+	// before, but bounded and dated, instead of wrong forever.
+	`
+	ALTER TABLE torrents ADD COLUMN seeding_time INTEGER NOT NULL DEFAULT 0;
+	UPDATE torrents SET seeding_time = CAST(MAX(0, strftime('%s','now') - completed_time) AS INTEGER)
+	 WHERE completed_time > 0;
+	`,
 }
 
 // migrationsAgent evolves the per-agent store (store_agent.go). Kept as its own

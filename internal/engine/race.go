@@ -854,7 +854,6 @@ func (e *RaceEngine) GetTorrentDetail(infoHash string) map[string]interface{} {
 		Peers:        peers,
 		NumPieces:    s.NumPieces,
 		PieceLength:  s.PieceLength,
-		SeedingTime:  s.SeedingTime,
 	}
 
 	if swarm != nil {
@@ -1097,6 +1096,8 @@ func (e *RaceEngine) refreshStats() {
 
 		newStats[ih] = &stats
 	}
+
+	accrueSeedTime(newStats)
 
 	e.cachedStatsMu.Lock()
 	e.cachedStats = newStats

@@ -125,12 +125,12 @@ func buildRemoteTorrentDetail(agentName string, cl *grpcclient.Client, hash, cat
 		peers = append(peers, engine.LtPeerToPeerInfo(p))
 	}
 
+	stats.SeedingTime = engine.SeedTimeFor(hash)
 	detail := &engine.TorrentDetail{
 		TorrentStats: stats,
 		Peers:        peers,
 		NumPieces:    st.NumPieces,
 		PieceLength:  st.PieceLength,
-		SeedingTime:  st.SeedingTime,
 		ActiveTime:   st.ActiveTime,
 	}
 	m := detail.ToMap()

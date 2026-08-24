@@ -30,24 +30,28 @@ type TorrentInfo struct {
 
 // TorrentStats contains the stats fields exposed by the qBittorrent-compatible API.
 type TorrentStats struct {
-	InfoHash        string   `json:"info_hash"`
-	Name            string   `json:"name"`
-	State           string   `json:"state"`
-	Progress        float64  `json:"progress"`
-	UploadRate      int64    `json:"upload_rate"`
-	DownloadRate    int64    `json:"download_rate"`
-	TotalUpload     int64    `json:"total_upload"`
-	TotalDownload   int64    `json:"total_download"`
-	NumPeers        int      `json:"num_peers"`
-	NumSeeds        int      `json:"num_seeds"`
-	TotalSize       int64    `json:"total_size"`
-	Ratio           float64  `json:"ratio"`
-	SavePath        string   `json:"save_path"`
-	EngineSavePath  string   `json:"engine_save_path,omitempty"`
-	MultiFile       bool     `json:"multi_file"`
-	Category        string   `json:"category"`
-	AddedTime       int64    `json:"added_time"`
-	CompletedTime   int64    `json:"completed_time"`
+	InfoHash       string  `json:"info_hash"`
+	Name           string  `json:"name"`
+	State          string  `json:"state"`
+	Progress       float64 `json:"progress"`
+	UploadRate     int64   `json:"upload_rate"`
+	DownloadRate   int64   `json:"download_rate"`
+	TotalUpload    int64   `json:"total_upload"`
+	TotalDownload  int64   `json:"total_download"`
+	NumPeers       int     `json:"num_peers"`
+	NumSeeds       int     `json:"num_seeds"`
+	TotalSize      int64   `json:"total_size"`
+	Ratio          float64 `json:"ratio"`
+	SavePath       string  `json:"save_path"`
+	EngineSavePath string  `json:"engine_save_path,omitempty"`
+	MultiFile      bool    `json:"multi_file"`
+	Category       string  `json:"category"`
+	AddedTime      int64   `json:"added_time"`
+	CompletedTime  int64   `json:"completed_time"`
+	// SeedingTime is the CUMULATIVE availability counter in seconds, stamped
+	// from the package seed clock -- not the engine's now-minus-completion
+	// figure, which counted every stop and every shutdown as seeding.
+	SeedingTime     int64    `json:"seeding_time"`
 	SwarmSeeds      int      `json:"swarm_seeds"`
 	SwarmLeechers   int      `json:"swarm_leechers"`
 	TrackerError    bool     `json:"tracker_error"`
@@ -104,8 +108,10 @@ type TorrentDetail struct {
 	NumPieces   int   `json:"num_pieces"`
 	PieceLength int   `json:"piece_length"`
 
-	ActiveTime  int `json:"active_time"`
-	SeedingTime int `json:"seeding_time"`
+	ActiveTime int `json:"active_time"`
+	// SeedingTime deliberately absent: it is on the embedded TorrentStats now,
+	// as a cumulative counter. Keeping a second field with the same json tag
+	// here would silently shadow it with the engine's derived value.
 
 	AvgUploadRate   float64 `json:"avg_upload_rate"`
 	AvgDownloadRate float64 `json:"avg_download_rate"`
