@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.130.3 - 2026-08-24
+
+### Fixed
+- **A race torrent stopped by the user read back as `queued` one tick later.**
+  Stopping it stamped the intent on the cached row, but the periodic refresh
+  rebuilds that row from the engine snapshot, and the engine has never heard of
+  a user pause -- so the flag was dropped and the row reverted to the
+  scheduler's own word for a hold it may undo. Visible in the UI, in
+  `/api/race/torrents` (`user_paused: false`), and to anything reading either.
+
 ## v3.130.2 - 2026-08-24
 
 ### Fixed
