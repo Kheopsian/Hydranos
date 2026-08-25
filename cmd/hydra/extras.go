@@ -50,17 +50,18 @@ func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs 
 			continue
 		}
 		le.proc = proc
+		le.ref = engine.NewEngineRef(proc.Client())
 		if ec.Role == "race" {
 			var ck engine.ChokingEngineInterface
 			if le.cfg.CustomChoking != nil && le.cfg.CustomChoking.Enabled {
 				ck = choking.NewChokingEngine(le.cfg.CustomChoking)
 			}
 			re := engine.NewRaceEngine(&le.cfg, ck, nil, eDir)
-			re.SetClient(proc.Client())
+			re.SetClient(le.ref)
 			le.race, le.rich = re, re
 		} else {
 			he := engine.NewHoardEngine(&le.cfg, eDir)
-			he.SetClient(proc.Client())
+			he.SetClient(le.ref)
 			le.hoard, le.rich = he, he
 		}
 		if st, serr := store.OpenAgent(filepath.Join(eDir, "store.db")); serr != nil {
@@ -83,7 +84,7 @@ func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs 
 			}
 		}
 
-		ann := engine.NewHoardAnnouncer(proc.Client(), engine.ApplyAnnounceEgress(
+		ann := engine.NewHoardAnnouncer(le.ref, engine.ApplyAnnounceEgress(
 			engine.DefaultSingleBinding(le.cfg.ListenPort, le.cfg.EnableIPv6, "hoard", le.cfg.AnnounceRateLimit),
 			le.cfg.AnnounceProxy, le.cfg.AnnounceIP, le.cfg.Socks5OutboundHost, le.cfg.BindInterface, "hoard"))
 		if le.hoard != nil {
@@ -137,7 +138,7 @@ func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs 
 	// fail; the front reaches these engines by calling into them.
 	engines := make(map[string]engine.EngineClient, len(lives))
 	for _, le := range lives {
-		engines[le.id] = le.proc.Client()
+		engines[le.id] = le.ref
 	}
 	srv := agent.NewServer(engines, cfg.Daemon.DataDir, "")
 	srv.SetOwnEvents(true)

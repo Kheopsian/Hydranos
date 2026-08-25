@@ -32,10 +32,14 @@ const agentEngineBasePort = 9510
 // arbitrary set of engines, each with an id + role). cfg is the session config
 // it was started on, kept so a later push can be compared against it.
 type liveEngine struct {
-	id       string
-	role     string
-	cfg      config.SessionConfig
-	proc     *engine.EngineProcess
+	id   string
+	role string
+	cfg  config.SessionConfig
+	proc *engine.EngineProcess
+	// ref is the stable handle everything else takes. proc changes on every
+	// restart and its client dies with it; the ref survives, so a holder does
+	// not have to be found and updated one by one.
+	ref      *engine.EngineRef
 	race     *engine.RaceEngine  // set when role == race
 	hoard    *engine.HoardEngine // set when role == hoard
 	rich     engine.RichEngine
