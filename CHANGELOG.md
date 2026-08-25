@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.136.2 - 2026-08-25
+
+### Changed
+- Internal: the row cache can now apply an agent's event stream instead of
+  re-listing. Nothing subscribes yet, so no behaviour change. A stats delta
+  updates rows in place and may never create one; adds ask for a refresh
+  because they do not carry enough to build a row.
+
 ## v3.136.1 - 2026-08-25
 
 ### Changed
