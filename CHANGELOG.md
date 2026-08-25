@@ -3,6 +3,18 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.142.1 - 2026-08-25
+
+### Fixed
+- **The watchdog undid every hot config apply.** It held the engine process it
+  was handed at boot, so when a settings change replaced that process the
+  watchdog polled the retired pid thirty seconds later, called it dead and
+  restarted the whole daemon -- exactly what applying the config without a
+  restart was for. It now asks which process is current on each tick.
+- This node's engines were left out of the config push entirely: it iterated the
+  snapshot that deliberately hides them, the one that exists so the counters do
+  not double. Pushing a config is not counting, so it uses the full list.
+
 ## v3.142.0 - 2026-08-25
 
 ### Added

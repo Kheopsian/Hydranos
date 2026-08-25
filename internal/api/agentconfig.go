@@ -311,7 +311,13 @@ func (s *Server) pushLegacyAnnounce(ra *remoteAgent, ann agentwire.AnnounceConfi
 func (s *Server) PushConfigToAgents() (int, int) {
 	cfg := s.liveConfig()
 	pushed, failed := 0, 0
-	for _, ra := range s.agentsSnapshot() {
+	// allAgentsSnapshot, deliberately: this node's own engines take a pushed
+	// config like any other node's since they became agents. agentsSnapshot
+	// hides them, and rightly so -- it feeds the counters, where including them
+	// double-counts every torrent. Pushing a config is not counting anything,
+	// so the exclusion does not apply and using it here left the local engines
+	// as the only ones still waiting for a full restart to pick up an edit.
+	for _, ra := range s.allAgentsSnapshot() {
 		if s.syncAgentConfig(cfg, ra) {
 			pushed++
 		} else {
@@ -326,7 +332,7 @@ func (s *Server) PushConfigToAgents() (int, int) {
 // a session field restarts engines on every node it touches, and making the
 // browser hold the save request open for that is how a save looks hung.
 func (s *Server) pushConfigToAgentsAsync() int {
-	n := len(s.agentsSnapshot())
+	n := len(s.allAgentsSnapshot())
 	if n == 0 {
 		return 0
 	}

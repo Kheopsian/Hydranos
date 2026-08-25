@@ -22,8 +22,11 @@ func (ep *EngineProcess) Pid() int {
 }
 
 type watchdogTarget struct {
-	name     string // "race" | "hoard"
-	proc     *EngineProcess
+	name string // "race" | "hoard"
+	// proc RESOLVES the current process rather than being one. A config change
+	// replaces the process in place, and a captured pointer would have the
+	// watchdog polling a pid that died on purpose.
+	proc     func() *EngineProcess
 	rssLimit int64 // bytes; 0 disables the RSS check for this engine
 }
 
@@ -43,6 +46,22 @@ type watchdogTarget struct {
 // magnitude (race ~2 GB for ~100 torrents vs hoard ~24 GB for ~24k torrents on
 // a 125 GB box).
 func StartEngineWatchdog(ctx context.Context, alert WatchdogAlerter, dumpDir string, race, hoard *EngineProcess, raceRSSLimit, hoardRSSLimit int64) {
+	StartEngineWatchdogFunc(ctx, alert, dumpDir,
+		func() *EngineProcess { return race },
+		func() *EngineProcess { return hoard },
+		raceRSSLimit, hoardRSSLimit)
+}
+
+// StartEngineWatchdogFunc watches whatever process is CURRENTLY behind each
+// engine, asking for it on every tick instead of holding the one it was handed.
+//
+// Holding it was fine while an engine process lived exactly as long as the
+// daemon. It stopped being fine when a config change started replacing that
+// process in place: the watchdog kept polling the pid it captured at boot, saw
+// it dead thirty seconds later, and restarted the whole daemon -- undoing the
+// very reload that had just succeeded. The hot apply worked and the watchdog
+// bounced it, each doing exactly its job.
+func StartEngineWatchdogFunc(ctx context.Context, alert WatchdogAlerter, dumpDir string, race, hoard func() *EngineProcess, raceRSSLimit, hoardRSSLimit int64) {
 	watchdogDumpDir = dumpDir
 	targets := []watchdogTarget{
 		{name: "race", proc: race, rssLimit: raceRSSLimit},
@@ -60,7 +79,11 @@ func StartEngineWatchdog(ctx context.Context, alert WatchdogAlerter, dumpDir str
 					if tg.proc == nil {
 						continue
 					}
-					pid := tg.proc.Pid()
+					proc := tg.proc()
+					if proc == nil {
+						continue
+					}
+					pid := proc.Pid()
 					if pid <= 0 {
 						continue
 					}

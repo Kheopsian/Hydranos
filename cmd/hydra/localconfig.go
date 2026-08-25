@@ -112,6 +112,19 @@ func (m *localConfigManager) restart(slot *localEngineSlot, next config.SessionC
 	return nil
 }
 
+// ProcFor returns the process currently behind an engine, for anything that
+// must follow a replacement rather than hold the one it was handed at boot --
+// the watchdog above all, which otherwise sees a deliberately retired pid and
+// restarts the daemon.
+func (m *localConfigManager) ProcFor(id string) *engine.EngineProcess {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s := m.slots[id]; s != nil {
+		return s.proc
+	}
+	return nil
+}
+
 // ConfigState reports what this node is running.
 func (m *localConfigManager) ConfigState() agentwire.ConfigState {
 	m.mu.Lock()
