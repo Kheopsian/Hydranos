@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.141.0 - 2026-08-25
+
+### Changed
+- Internal: everything that talks to an engine now holds a stable handle
+  (`EngineRef`) instead of a copy of its client. No behaviour change today; it
+  is what makes restarting an engine without restarting Hydra possible at all.
+
+  A client does not survive its process: `ltclient` dials its two sockets once
+  and never redials, and `EngineProcess` holds exactly one client created with
+  it. Twenty-two places took a copy -- including both tracker announcers, which
+  would have gone on announcing into a closed socket while the engine ran fine
+  beside them, with no error and no log.
+
 ## v3.140.1 - 2026-08-25
 
 ### Added

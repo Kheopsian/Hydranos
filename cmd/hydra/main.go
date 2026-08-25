@@ -863,7 +863,17 @@ func main() {
 
 	api.InitAnnounceOverrides(cfg)
 	raceEngine := engine.NewRaceEngine(raceCfg, chokingEngine, nil, raceDataDir)
-	raceEngine.SetClient(raceProc.Client())
+	// One stable handle per engine, taken by everything that needs to talk to
+	// it. A client does not survive its process -- ltclient dials once and
+	// never redials -- so anything holding a copy across a reload writes into a
+	// closed socket while believing it is connected. The announcers are among
+	// those holders, which is how a reload could leave us announcing to nobody
+	// with nothing in the logs. Holders take the ref; a reload swaps what is
+	// inside it and they all follow.
+	raceRef := engine.NewEngineRef(raceProc.Client())
+	hoardRef := engine.NewEngineRef(hoardProc.Client())
+
+	raceEngine.SetClient(raceRef)
 
 	hoardEngine := engine.NewHoardEngine(hoardCfg, hoardDataDir)
 
@@ -891,7 +901,7 @@ func main() {
 		})
 	}
 	hoardEngine.CreateTorrentFolder = cfg.Daemon.CreateTorrentFolder
-	hoardEngine.SetClient(hoardProc.Client())
+	hoardEngine.SetClient(hoardRef)
 
 	// ---- Optional: HydraAgent gRPC data-plane (pivot 25/07) ----
 	// Additive: only when --agent-addr is set. Exposes this machine's engine
@@ -903,8 +913,8 @@ func main() {
 			slog.Warn("HydraAgent served WITHOUT a token: set --agent-token, $" + agentwire.TokenEnv + " or [daemon] agent_token before exposing it off-LAN")
 		}
 		agentSrv := agent.NewServer(map[string]engine.EngineClient{
-			agentwire.EngineRace:  raceProc.Client(),
-			agentwire.EngineHoard: hoardProc.Client(),
+			agentwire.EngineRace:  raceRef,
+			agentwire.EngineHoard: hoardRef,
 		}, cfg.Daemon.DataDir, agentSecret)
 		agentSrv.SetTLS(*agentTLSCert, *agentTLSKey)
 		agentSrv.SetRichEngines(raceEngine, hoardEngine)
@@ -1019,8 +1029,8 @@ func main() {
 	// runs, reached in process. The hot path does not come through it: at this
 	// node's scale a list through that encoding costs about a gigabyte.
 	localAgentSrv := agent.NewServer(map[string]engine.EngineClient{
-		agentwire.EngineRace:  raceProc.Client(),
-		agentwire.EngineHoard: hoardProc.Client(),
+		agentwire.EngineRace:  raceRef,
+		agentwire.EngineHoard: hoardRef,
 	}, cfg.Daemon.DataDir, "")
 	localAgentSrv.SetRichEngines(raceEngine, hoardEngine)
 	localAgentSrv.SetIPv6Wanted(raceCfg.EnableIPv6 || hoardCfg.EnableIPv6)
@@ -1032,8 +1042,8 @@ func main() {
 		id, role string
 		cl       engine.EngineClient
 	}{
-		{agentwire.EngineRace, "race", raceProc.Client()},
-		{agentwire.EngineHoard, "hoard", hoardProc.Client()},
+		{agentwire.EngineRace, "race", raceRef},
+		{agentwire.EngineHoard, "hoard", hoardRef},
 	} {
 		// One agent per engine: the race engine and the hoard engine are two
 		// separate nodes as far as placement is concerned, which is what lets a
@@ -1091,9 +1101,9 @@ func main() {
 		// common case, since the front is usually where the library lives.
 		isLocal := func(agent string) bool { return agent == "" || agent == api.LocalAgentName }
 		localFor := func(engineID, category string) *localEndpoint {
-			client := hoardProc.Client()
+			client := hoardRef
 			if engineID == agentwire.EngineRace {
-				client = raceProc.Client()
+				client = raceRef
 			}
 			le := &localEndpoint{client: client, dataDir: cfg.Daemon.DataDir}
 			// Only the hoard has an adopt path that registers Go-side metadata;
@@ -1336,8 +1346,8 @@ func main() {
 		paused bool
 		client engine.EngineClient
 	}{
-		{"hoard", hoardCfg.StartPaused, hoardProc.Client()},
-		{"race", raceCfg.StartPaused, raceProc.Client()},
+		{"hoard", hoardCfg.StartPaused, hoardRef},
+		{"race", raceCfg.StartPaused, raceRef},
 	} {
 		if !sp.paused {
 			continue
@@ -1357,7 +1367,7 @@ func main() {
 	// refusing to dial, and they would be dropped rather than queued.
 	apiServer.SetStartupPauseRelease(func() []string {
 		for scope, client := range map[string]engine.EngineClient{
-			"hoard": hoardProc.Client(), "race": raceProc.Client(),
+			"hoard": hoardRef, "race": raceRef,
 		} {
 			if err := engine.SetEngineDialsPaused(client, false); err != nil {
 				slog.Error("startup pause: engine refused to resume its dial queue",
@@ -1380,7 +1390,7 @@ func main() {
 		slog.Warn("announces are pinned to IPv4 because enable_ipv6 is off, but this host has no IPv4 address")
 		slog.Warn("  set enable_ipv6 = true under [race] and [hoard] if this host is IPv6-only")
 	}
-	hoardAnnouncer := engine.NewHoardAnnouncer(hoardProc.Client(), hoardAnnounceBindings)
+	hoardAnnouncer := engine.NewHoardAnnouncer(hoardRef, hoardAnnounceBindings)
 	hoardAnnouncer.OnObservation = hoardEngine.ObserveAnnounce
 	hoardAnnouncer.SetLivePort(hoardEngine.LivePort())
 	// On-add bootstrap announce: a freshly-added download announces once
@@ -1396,7 +1406,7 @@ func main() {
 	// [anti-dual removed 2026-08-01] no race-gate / no announce-offset:
 	// race and hoard both announce + seed the same infohash (legit multi-seed).
 	hoardAnnouncer.Start(ctx)
-	raceAnnouncer := engine.NewHoardAnnouncer(raceProc.Client(), raceAnnounceBindings)
+	raceAnnouncer := engine.NewHoardAnnouncer(raceRef, raceAnnounceBindings)
 	raceAnnouncer.OnObservation = raceEngine.ObserveAnnounce
 	raceAnnouncer.SetLivePort(raceEngine.LivePort())
 	raceAnnouncer.Start(ctx)
