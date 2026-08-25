@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.139.2 - 2026-08-25
+
+### Changed
+- Internal: the TOML editor can now edit and delete `[[array]]` blocks, selected
+  by a key inside them. Nothing uses it yet. It is the missing brick for moving
+  every node -- local or remote -- into a single `[[agent]]` array, which is
+  where the config is heading now that one agent means one engine.
+
 ## v3.139.1 - 2026-08-25
 
 ### Fixed
