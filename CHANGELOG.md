@@ -3,6 +3,25 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.136.0 - 2026-08-25
+
+### Added
+- **One agent per engine on this node.** The race engine and the hoard engine
+  are now two separate agents, `local-race` and `local-hoard`, so a category can
+  send race torrents out of one tunnel and hoard torrents out of another on the
+  same machine. Naming one of them in a placement list pins that engine even if
+  the category's mode says otherwise.
+
+### Changed
+- The agents list shows two entries for this node instead of one.
+- `local-race` and `local-hoard` join `local` as names a dialled agent may not
+  take, so a remote node cannot claim one and have every action meant for it run
+  here instead.
+
+`local` keeps working and means exactly what it always did: this node, with the
+engine chosen by the mode. It stays valid in categories, save-path overrides and
+job params, so nothing needs migrating.
+
 ## v3.135.2 - 2026-08-25
 
 ### Fixed

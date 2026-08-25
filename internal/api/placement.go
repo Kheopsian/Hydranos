@@ -83,7 +83,7 @@ func (s *Server) agentMetric(agent string, cat *category) placementMetric {
 		return v
 	}
 	m := placementMetric{}
-	if agent == "local" {
+	if isLocalAgentName(agent) {
 		if _, free, err := drain.TotalFree(path); err == nil {
 			m.freeBytes, m.ok = free, true
 		}

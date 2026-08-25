@@ -854,7 +854,7 @@ func (s *Server) categoryByName(name string) *category {
 // Unknown/unreachable agents return maxInt so they are never chosen.
 func (s *Server) agentTorrentCount(name string) int {
 	const maxInt = int(^uint(0) >> 1)
-	if name == "local" {
+	if isLocalAgentName(name) {
 		n := 0
 		if s.raceEngine != nil {
 			n += len(s.raceEngine.GetAllStatus())
@@ -1017,7 +1017,16 @@ func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, catego
 	if torrentPath == "" && magnetURI != "" {
 		return s.startMagnetResolve(target, mode, magnetURI, savePath, category, trackers, cat)
 	}
-	if target == "local" {
+	if isLocalAgentName(target) {
+		// Naming a specific local engine pins the role: "local-race" means the
+		// race engine even if the category's mode says otherwise. The bare
+		// "local" pins nothing and leaves the mode alone, which is how every
+		// existing config behaves. Without this, listing local-race in a hoard
+		// category would silently place on the hoard engine and the operator
+		// would have no way to tell.
+		if role, pinned := roleOfLocalAgent(target); pinned {
+			mode = role
+		}
 		return s.localAdd(mode, torrentPath, magnetURI, savePath, trackers, category)
 	}
 	ra := s.remoteAgentByName(target)

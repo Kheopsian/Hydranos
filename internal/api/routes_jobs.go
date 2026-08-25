@@ -240,7 +240,7 @@ func (s *Server) CategorySavePathFor(agent, name string) (string, error) {
 	if cat == nil {
 		return "", fmt.Errorf("no category named %q", name)
 	}
-	if agent == "" || agent == LocalAgentName {
+	if agent == "" || isLocalAgentName(agent) {
 		if cat.SavePath == "" {
 			return "", fmt.Errorf("category %q has no save path", name)
 		}
@@ -318,7 +318,7 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 		return
 	}
 	for label, agent := range map[string]string{"source": req.SourceAgent, "target": req.TargetAgent} {
-		if agent == "" || agent == LocalAgentName {
+		if agent == "" || isLocalAgentName(agent) {
 			continue
 		}
 		if _, err := s.RemoteAgentEngineClient(agent, req.Engine); err != nil {

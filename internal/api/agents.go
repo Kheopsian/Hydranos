@@ -165,7 +165,7 @@ func (s *Server) handleAgentCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name and addr are required"})
 		return
 	}
-	if req.Name == "local" {
+	if isReservedAgentName(req.Name) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": `"local" is reserved`})
 		return
 	}
