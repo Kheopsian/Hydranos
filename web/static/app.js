@@ -5773,9 +5773,38 @@ function showAgentForm(name = null, addr = "") {
     document.getElementById("ag-token").value = "";
     document.getElementById("ag-tlsca").value = "";
     document.getElementById("ag-result").style.display = "none";
+    // Editing only ever applies to a dialled node: a local engine's identity is
+    // its id, and renaming it would orphan every placement naming it.
+    const kind = document.getElementById("ag-kind");
+    if (kind) { kind.value = "remote"; kind.disabled = !!name; }
+    agentKindChanged();
     document.getElementById("agent-form").style.display = "block";
 }
 function hideAgentForm() { document.getElementById("agent-form").style.display = "none"; _editingAgent = null; }
+
+// One form, two kinds of node. "This machine" starts an engine here; "another
+// machine" registers one that is already running elsewhere. They were two
+// separate screens -- an Agents form that could only ever be remote because it
+// demanded an address, and an Add engine form that never said the word agent --
+// which left no way to create a local agent at all, and no hint that an engine
+// and an agent are now the same thing.
+function agentKindChanged() {
+    const local = document.getElementById("ag-kind").value === "local";
+    document.querySelectorAll(".ag-local-only").forEach(function (el) { el.style.display = local ? "" : "none"; });
+    document.querySelectorAll(".ag-remote-only").forEach(function (el) { el.style.display = local ? "none" : ""; });
+    const n = document.getElementById("ag-name");
+    n.placeholder = local ? "vpn7" : "seedbox-de";
+    const hint = document.getElementById("ag-name-hint");
+    if (hint) {
+        // Say the resulting agent name outright: the engine id is what the user
+        // types, but the name a category has to reference is the prefixed one.
+        hint.textContent = local
+            ? t("engine id — the agent will be called local-<id>")
+            : t("how this node is referenced in a placement");
+    }
+    const testBtn = document.getElementById("ag-test-btn");
+    if (testBtn) testBtn.style.display = local ? "none" : ""; // nothing to dial
+}
 function editAgent(name, addr) { showAgentForm(name, addr); }
 function _agentPayload() {
     return {
@@ -5801,6 +5830,24 @@ async function testAgent() {
     } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 async function saveAgent() {
+    const kindEl = document.getElementById("ag-kind");
+    if (kindEl && kindEl.value === "local" && !_editingAgent) {
+        const id = document.getElementById("ag-name").value.trim();
+        if (!id) { _agResult(t("Engine id required"), false); return; }
+        const role = document.getElementById("ag-role").value;
+        const port = parseInt(document.getElementById("ag-port").value) || 0;
+        try {
+            await api("/api/engines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, role: role, listen_port: port }) });
+            hideAgentForm();
+            // Starting an engine needs a restart; say so rather than leaving a
+            // row that will not appear until something else happens to restart.
+            const banner = document.getElementById("restart-banner");
+            if (banner) banner.style.display = "block";
+            await updateAgents();
+            if (typeof updateEngines === "function") await updateEngines();
+        } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
+        return;
+    }
     const p = _agentPayload();
     if (!p.name || !p.addr) { _agResult(t("Name and address required"), false); return; }
     try {
@@ -6050,8 +6097,10 @@ async function clearTrackerPasskey() {
 
 // --- Local engines (shards) ---
 
-function showEngineForm(){ document.getElementById("engine-form").style.display="block"; }
-function hideEngineForm(){ document.getElementById("engine-form").style.display="none"; }
+// showEngineForm/hideEngineForm/addEngine are gone with the separate Add engine
+// form: creating a local engine is now "+ New" with kind = this machine, which
+// is the same act as adding an agent. Keeping them would have left three
+// functions reaching for DOM ids that no longer exist.
 async function updateEngines(){
     try{
         // port-forward carries the live listen port of the base engines; it is
@@ -6096,19 +6145,6 @@ async function updateEngines(){
         });
         tb.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4" class="empty">' + t("No engines") + '</td></tr>';
     }catch(err){ console.error("updateEngines", err); }
-}
-async function addEngine(){
-    const id = document.getElementById("eng-id").value.trim();
-    const role = document.getElementById("eng-role").value;
-    const port = parseInt(document.getElementById("eng-port").value) || 0;
-    if(!id){ hydraNotify(t("id required")); return; }
-    try{
-        await api("/api/engines", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({id:id, role:role, listen_port:port})});
-        hideEngineForm();
-        document.getElementById("eng-id").value="";
-        document.getElementById("restart-banner").style.display="block";
-        updateEngines();
-    }catch(err){ hydraNotify(t("Add engine failed: {err}", { err: err })); }
 }
 async function deleteEngine(id){
     if(!await hydraConfirm(t("Delete engine {id}? Its torrents stop seeding after restart.", { id: id }))) return;
