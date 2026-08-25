@@ -86,7 +86,7 @@ func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs 
 
 		ann := engine.NewHoardAnnouncer(proc.Client(), engine.ApplyAnnounceEgress(
 			engine.DefaultSingleBinding(le.cfg.ListenPort, le.cfg.EnableIPv6, "hoard", le.cfg.AnnounceRateLimit),
-			le.cfg.AnnounceProxy, le.cfg.AnnounceIP, le.cfg.Socks5OutboundHost, "hoard"))
+			le.cfg.AnnounceProxy, le.cfg.AnnounceIP, le.cfg.Socks5OutboundHost, le.cfg.BindInterface, "hoard"))
 		if le.hoard != nil {
 			ann.OnObservation = le.hoard.ObserveAnnounce
 			le.hoard.SetBootstrapAnnounce(ann.BootstrapAnnounce)

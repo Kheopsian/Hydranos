@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
@@ -220,9 +221,12 @@ func TestApplyAnnounceEgressStampsEveryBinding(t *testing.T) {
 	t.Setenv("TYPHON_ANNOUNCE_PROXY", "")
 	bs := ApplyAnnounceEgress(
 		DefaultSingleBinding(16172, false, "hoard", 0),
-		"  socks5h://u:p@10.0.0.1:1080  ", "203.0.113.9", "10.0.0.1", "hoard")
+		"  socks5h://u:p@10.0.0.1:1080  ", "203.0.113.9", "10.0.0.1", "  wg0  ", "hoard")
 	if bs[0].AnnounceProxy != "socks5h://u:p@10.0.0.1:1080" {
 		t.Errorf("AnnounceProxy = %q (untrimmed?)", bs[0].AnnounceProxy)
+	}
+	if bs[0].BindInterface != "wg0" {
+		t.Errorf("BindInterface = %q (untrimmed, or not stamped at all?)", bs[0].BindInterface)
 	}
 	if bs[0].PublicIP != "203.0.113.9" {
 		t.Errorf("PublicIP = %q, want the configured announce_ip", bs[0].PublicIP)
@@ -230,12 +234,84 @@ func TestApplyAnnounceEgressStampsEveryBinding(t *testing.T) {
 
 	// Empty announce_ip must leave PublicIP empty so the BEP-7 ip= param stays
 	// omitted and the tracker keeps observing the source address.
-	bs = ApplyAnnounceEgress(DefaultSingleBinding(16172, false, "hoard", 0), "", "  ", "", "hoard")
+	bs = ApplyAnnounceEgress(DefaultSingleBinding(16172, false, "hoard", 0), "", "  ", "", "", "hoard")
 	if bs[0].PublicIP != "" {
 		t.Errorf("PublicIP = %q, want empty", bs[0].PublicIP)
 	}
 	if bs[0].AnnounceProxy != "" {
 		t.Errorf("AnnounceProxy = %q, want empty", bs[0].AnnounceProxy)
+	}
+	if bs[0].BindInterface != "" {
+		t.Errorf("BindInterface = %q, want empty", bs[0].BindInterface)
+	}
+}
+
+// TestUnresolvableBindInterfaceFailsRatherThanLeavingByTheDefaultRoute is the
+// guard for the whole feature. An interface name that does not resolve must
+// make the announce FAIL. The tempting alternative -- log it and dial anyway --
+// publishes this host's own address to the tracker with every indicator green,
+// which is the exact leak the binding exists to prevent.
+//
+// Proved by breaking it: point the binding at a name no host has, and require
+// an error. Delete the bindErr guard in newTrackerAnnouncerForBinding and this
+// test goes red.
+func TestUnresolvableBindInterfaceFailsRatherThanLeavingByTheDefaultRoute(t *testing.T) {
+	t.Setenv("TYPHON_ANNOUNCE_PROXY", "")
+	b := ApplyAnnounceEgress(DefaultSingleBinding(16172, false, "hoard", 0),
+		"", "", "", "definitely-not-an-interface", "hoard")[0]
+	ta := newTrackerAnnouncerForBinding(b)
+	_, err := ta.httpClient.Transport.(*http.Transport).DialContext(
+		context.Background(), "tcp", "203.0.113.1:80")
+	if err == nil {
+		t.Fatal("an unresolvable bind_interface dialled anyway: the announce would leave by the default route and hand the tracker this host's own address")
+	}
+	if !strings.Contains(err.Error(), "definitely-not-an-interface") {
+		t.Errorf("error does not name the interface, so nobody can act on it: %v", err)
+	}
+}
+
+// A resolvable interface must pin the SOURCE address, not merely be recorded.
+// Checked on loopback, which every host has.
+func TestBindInterfacePinsTheAnnounceSourceAddress(t *testing.T) {
+	t.Setenv("TYPHON_ANNOUNCE_PROXY", "")
+	if _, err := net.InterfaceByName("lo"); err != nil {
+		t.Skip("no loopback interface named lo on this host")
+	}
+	b := ApplyAnnounceEgress(DefaultSingleBinding(16172, true, "hoard", 0),
+		"", "", "", "lo", "hoard")[0]
+	ta := newTrackerAnnouncerForBinding(b)
+	tr := ta.httpClient.Transport.(*http.Transport)
+	// The dial must refuse a v6-pinned tracker: the source we hold is that
+	// interface's IPv4, so a v6 dial could only leave from somewhere else.
+	SetAnnounceIPMode("v6only.example.net", AnnounceIPModeV6)
+	defer SetAnnounceIPMode("v6only.example.net", "")
+	if _, err := tr.DialContext(context.Background(), "tcp", "v6only.example.net:80"); err == nil {
+		t.Error("a v6-pinned tracker was dialled from a v4-bound interface without complaint")
+	}
+	_ = ta
+}
+
+// TestPinnedBindingGetsNoIPv6AnnounceClient tests the DECISION, not the
+// builder. Asserting on the built announcer passes vacuously on any host
+// without IPv6 -- every CI container -- so it would stay green with the rule
+// deleted. Proved by breaking it: drop the !pinnedToInterface term and the
+// third case below goes red.
+func TestPinnedBindingGetsNoIPv6AnnounceClient(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		proxied, pinned, hasV4, hasV6 bool
+		wantV4, wantV6                bool
+	}{
+		{"dual-stack, unpinned", false, false, true, true, true, true},
+		{"v4-only host", false, false, true, false, true, false},
+		{"pinned to an interface kills v6", false, true, true, true, true, false},
+		{"behind a proxy, neither", true, false, true, true, false, false},
+		{"behind a proxy AND pinned, still neither", true, true, true, true, false, false},
+	} {
+		v4, v6 := wantFamilyClients(tc.proxied, tc.pinned, tc.hasV4, tc.hasV6)
+		if v4 != tc.wantV4 || v6 != tc.wantV6 {
+			t.Errorf("%s: got v4=%v v6=%v, want v4=%v v6=%v", tc.name, v4, v6, tc.wantV4, tc.wantV6)
+		}
 	}
 }
 

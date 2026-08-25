@@ -27,31 +27,44 @@ import (
 
 const (
 	netModeDirect  = "direct"
-	netModeVPN     = "vpn"
+	netModeGluetun = "gluetun"
 	netModeSocks5  = "socks5"
 	netModeProxyV2 = "proxy_v2"
 )
+
+// The mode formerly called "vpn" is now "gluetun", and the interface binding it
+// owned moved down into "direct". The rename is not cosmetic: nothing in that
+// mode was ever about VPNs in general. What separated it from direct was the
+// presence of bind_interface, and what it uniquely knows how to do is read a
+// forwarded port off a gluetun control server. A bare-metal WireGuard host has
+// an interface and no gluetun, and had no honest mode to sit in.
+//
+// Direct now carries a bind_interface PER ENGINE, which is the setup people
+// actually asked for: one tunnel per engine, each engine's peers AND announces
+// leaving by its own interface. Empty means the kernel default route, so a
+// no-VPN host is the same direct mode with nothing filled in.
 
 // netModeFields is the union of every mode's inputs. Each mode reads the few it
 // needs and the handler blanks the rest, so a field left over from another mode
 // can never survive a save.
 type netModeFields struct {
-	RaceListenPort   int      `json:"race_listen_port"`
-	HoardListenPort  int      `json:"hoard_listen_port"`
-	EnableIPv6       bool     `json:"enable_ipv6"`
-	BindInterface    string   `json:"bind_interface"`
-	Socks5Host       string   `json:"socks5_host"`
-	Socks5Port       int      `json:"socks5_port"`
-	Socks5User       string   `json:"socks5_user"`
-	Socks5Pass       string   `json:"socks5_pass"`
-	RaceProxyV2Port  int      `json:"race_proxy_v2_port"`
-	HoardProxyV2Port int      `json:"hoard_proxy_v2_port"`
-	ProxyV2Addr      string   `json:"proxy_v2_listen_addr"`
-	ProxyV2Trusted   []string `json:"proxy_v2_trusted_sources"`
-	GluetunPort      bool     `json:"gluetun_port_forward"`
-	GluetunURL       string   `json:"gluetun_url"`
-	GluetunAPIKey    string   `json:"gluetun_api_key"`
-	GluetunEngine    string   `json:"gluetun_port_engine"`
+	RaceListenPort     int      `json:"race_listen_port"`
+	HoardListenPort    int      `json:"hoard_listen_port"`
+	EnableIPv6         bool     `json:"enable_ipv6"`
+	RaceBindInterface  string   `json:"race_bind_interface"`
+	HoardBindInterface string   `json:"hoard_bind_interface"`
+	Socks5Host         string   `json:"socks5_host"`
+	Socks5Port         int      `json:"socks5_port"`
+	Socks5User         string   `json:"socks5_user"`
+	Socks5Pass         string   `json:"socks5_pass"`
+	RaceProxyV2Port    int      `json:"race_proxy_v2_port"`
+	HoardProxyV2Port   int      `json:"hoard_proxy_v2_port"`
+	ProxyV2Addr        string   `json:"proxy_v2_listen_addr"`
+	ProxyV2Trusted     []string `json:"proxy_v2_trusted_sources"`
+	GluetunPort        bool     `json:"gluetun_port_forward"`
+	GluetunURL         string   `json:"gluetun_url"`
+	GluetunAPIKey      string   `json:"gluetun_api_key"`
+	GluetunEngine      string   `json:"gluetun_port_engine"`
 }
 
 // envOverride names an environment variable that silently outranks a field on
@@ -128,10 +141,27 @@ func detectNetMode(race, hoard map[string]interface{}) string {
 			return netModeSocks5
 		}
 	}
-	if tomlStr(race, "bind_interface") != "" || tomlStr(hoard, "bind_interface") != "" {
-		return netModeVPN
+	// bind_interface deliberately does NOT appear here any more. It used to be
+	// what told vpn mode from direct, but now both modes carry it, so keying on
+	// it would read every bare-metal WireGuard setup as gluetun and the tab
+	// would offer a control-server URL to a host that has no gluetun. What is
+	// unique to this mode is talking to gluetun, so that is what identifies it.
+	for _, sec := range []map[string]interface{}{race, hoard} {
+		if tomlBool(sec, "gluetun_port_forward") || tomlStr(sec, "gluetun_url") != "" {
+			return netModeGluetun
+		}
 	}
 	return netModeDirect
+}
+
+// bindInterfaceFor is the interface one engine leaves by. Per-engine because
+// that is the whole point of the change: a monolith can hold several tunnels,
+// one per engine, and a single shared field cannot express that.
+func bindInterfaceFor(f netModeFields, scope string) string {
+	if scope == "race" {
+		return strings.TrimSpace(f.RaceBindInterface)
+	}
+	return strings.TrimSpace(f.HoardBindInterface)
 }
 
 // looksLikeTunnel is a naming heuristic, deliberately advisory: the set of VPN
@@ -211,12 +241,30 @@ func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 	if proxied {
 		w = append(w, "UDP trackers are skipped in this mode: SOCKS5 carries TCP only, and a direct datagram would hand the tracker the address you are hiding.")
 	}
-	if mode == netModeVPN && f.GluetunPort {
+	if mode == netModeGluetun && f.GluetunPort {
 		eng := gluetunEngineOf(f)
 		w = append(w, "The "+eng+" engine takes its listen port from gluetun and holds its announces until it has one. A provider forwards a single port, so the "+otherEngine(eng)+" engine keeps its own and stays unreachable.")
 	}
-	if mode == netModeVPN && f.BindInterface != "" && !looksLikeTunnel(f.BindInterface) {
-		w = append(w, "\""+f.BindInterface+"\" does not look like a VPN tunnel (those are usually named tun0, wg0 or similar). Peer connections bound to an ordinary interface leave outside the tunnel, or do not leave at all.")
+	race, hoard := bindInterfaceFor(f, "race"), bindInterfaceFor(f, "hoard")
+	if mode == netModeGluetun {
+		for _, e := range []struct{ scope, name string }{{"race", race}, {"hoard", hoard}} {
+			if e.name != "" && !looksLikeTunnel(e.name) {
+				w = append(w, "The "+e.scope+" engine is bound to \""+e.name+"\", which does not look like a VPN tunnel (those are usually named tun0, wg0 or similar). Its traffic leaves outside the tunnel, or does not leave at all.")
+			}
+			if e.name == "" {
+				w = append(w, "The "+e.scope+" engine is bound to no interface, so its peers and its announces leave by the host's default route: outside the tunnel, under the address the tunnel exists to hide.")
+			}
+		}
+	}
+	// The half-configured case is the dangerous one, and it only exists now that
+	// the two engines can differ. One engine inside a tunnel and the other on
+	// the default route looks entirely healthy on the page that shows a tunnel.
+	if mode == netModeDirect && (race == "") != (hoard == "") {
+		bound, bare := "race", "hoard"
+		if race == "" {
+			bound, bare = "hoard", "race"
+		}
+		w = append(w, "Only the "+bound+" engine is bound to an interface. The "+bare+" engine leaves by the host's default route, so its peers and its announces publish this host's own address.")
 	}
 	if mode == netModeProxyV2 && len(f.ProxyV2Trusted) == 0 {
 		w = append(w, "No trusted source for the PROXY-v2 listener: anyone who reaches that port could forge any peer address. List your relay's address.")
@@ -257,8 +305,12 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 		RaceListenPort:  tomlInt(race, "listen_port"),
 		HoardListenPort: tomlInt(hoard, "listen_port"),
 		EnableIPv6:      tomlBool(race, "enable_ipv6") || tomlBool(hoard, "enable_ipv6"),
-		BindInterface:   firstNonEmpty(tomlStr(hoard, "bind_interface"), tomlStr(race, "bind_interface")),
-		GluetunPort:     tomlBool(race, "gluetun_port_forward") || tomlBool(hoard, "gluetun_port_forward"),
+		// Read per engine, never collapsed. The TOML has always held one key
+		// per section; it was this page that flattened the two into a single
+		// field with firstNonEmpty and made a split setup unrepresentable.
+		RaceBindInterface:  tomlStr(race, "bind_interface"),
+		HoardBindInterface: tomlStr(hoard, "bind_interface"),
+		GluetunPort:        tomlBool(race, "gluetun_port_forward") || tomlBool(hoard, "gluetun_port_forward"),
 		// The section the flag is true in IS the choice: a separate "which
 		// engine" key would be a second source of truth, wrong the first time
 		// someone edits the file by hand.
@@ -330,15 +382,24 @@ func validateNetMode(mode string, f netModeFields) error {
 	if f.RaceListenPort == f.HoardListenPort {
 		return fmt.Errorf("the two engines cannot share listen port %d: the second one to start would fail to bind", f.RaceListenPort)
 	}
-	switch mode {
-	case netModeDirect:
-	case netModeVPN:
-		name := strings.TrimSpace(f.BindInterface)
+	// An interface that does not exist is refused in EVERY mode that can carry
+	// one. Accepting it would leave the engine on the default route at runtime,
+	// which is the failure the binding exists to prevent and the one nothing
+	// downstream can report.
+	for _, scope := range []string{"race", "hoard"} {
+		name := bindInterfaceFor(f, scope)
 		if name == "" {
-			return fmt.Errorf("VPN mode needs the interface name the tunnel creates (wg0, tun0, …)")
+			continue
 		}
 		if _, err := net.InterfaceByName(name); err != nil {
-			return fmt.Errorf("no interface named %q on this host. Peer sockets would fall back to the default route and leave outside the tunnel", name)
+			return fmt.Errorf("no interface named %q on this host for the %s engine: its sockets would fall back to the default route", name, scope)
+		}
+	}
+	switch mode {
+	case netModeDirect:
+	case netModeGluetun:
+		if bindInterfaceFor(f, "race") == "" && bindInterfaceFor(f, "hoard") == "" {
+			return fmt.Errorf("gluetun mode needs the interface name the tunnel creates (wg0, tun0, …) on at least one engine, otherwise nothing is inside the tunnel")
 		}
 		if f.GluetunPort {
 			switch strings.TrimSpace(f.GluetunEngine) {
@@ -403,9 +464,14 @@ func netModeKeys(mode string, f netModeFields, listenPort, proxyV2Port int, scop
 	bindIface := ""
 	pv2Addr, pv2Trusted := "", []string(nil)
 
+	// Direct and gluetun both carry the binding, and each engine gets its own.
+	// The proxy modes blank it: there the egress decision is the proxy's, and a
+	// leftover interface would pin the hop that reaches it to a tunnel that the
+	// operator no longer believes is in play.
+	if mode == netModeDirect || mode == netModeGluetun {
+		bindIface = bindInterfaceFor(f, scope)
+	}
 	switch mode {
-	case netModeVPN:
-		bindIface = strings.TrimSpace(f.BindInterface)
 	case netModeSocks5, netModeProxyV2:
 		socksHost, socksPort = strings.TrimSpace(f.Socks5Host), f.Socks5Port
 		socksUser, socksPass = f.Socks5User, f.Socks5Pass
@@ -434,7 +500,7 @@ func netModeKeys(mode string, f netModeFields, listenPort, proxyV2Port int, scop
 	// which: a provider hands out one port, so pointing both at it would have
 	// the second fail to bind. The other scope gets the flag written false on
 	// the same save, so switching engines can never leave both of them on it.
-	if mode == netModeVPN && f.GluetunPort && scope == gluetunEngineOf(f) {
+	if mode == netModeGluetun && f.GluetunPort && scope == gluetunEngineOf(f) {
 		gluetunOn = true
 		gluetunURL = strings.TrimSpace(f.GluetunURL)
 		gluetunKey = f.GluetunAPIKey
@@ -564,7 +630,7 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		b := engine.ApplyAnnounceEgress(
 			engine.DefaultSingleBinding(tomlInt(e.sec, "listen_port"), tomlBool(e.sec, "enable_ipv6"), e.name, 0),
 			tomlStr(e.sec, "announce_proxy"), tomlStr(e.sec, "announce_ip"),
-			tomlStr(e.sec, "socks5_outbound_host"), e.name)[0]
+			tomlStr(e.sec, "socks5_outbound_host"), tomlStr(e.sec, "bind_interface"), e.name)[0]
 		ip, err := engine.AnnounceEgressIP(ctx, b, echo)
 		if err != nil {
 			add("announce_"+e.name, "Address trackers see ("+e.name+")", "fail", err.Error())
@@ -574,22 +640,35 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		add("announce_"+e.name, "Address trackers see ("+e.name+")", "ok", ip)
 	}
 
-	// 2. What a peer sees. Reconstructed, and labelled as such.
-	peerIP, peerErr := engine.PeerEgressIP(ctx,
-		tomlStr(hoard, "socks5_outbound_host"), tomlInt(hoard, "socks5_outbound_port"),
-		tomlStr(hoard, "socks5_outbound_user"), tomlStr(hoard, "socks5_outbound_pass"),
-		tomlStr(hoard, "bind_interface"), echo)
-	if peerErr != nil {
-		detail := peerErr.Error()
-		if bi := tomlStr(hoard, "bind_interface"); bi != "" {
-			detail += ". Peer connections are bound to \"" + bi + "\""
-			if !looksLikeTunnel(bi) {
-				detail += ", which does not look like a VPN tunnel: that is the usual reason they go nowhere"
+	// 2. What a peer sees, PER ENGINE. It used to be measured on the hoard
+	// alone and labelled as though it spoke for both, which held only while a
+	// single shared interface was the one thing this tab could express. With a
+	// tunnel per engine, a hoard-only reading reports the hoard's address as the
+	// race engine's and hides exactly the split this feature makes possible.
+	peerIPs, peerErrs := map[string]string{}, map[string]error{}
+	for _, e := range []struct {
+		name string
+		sec  map[string]interface{}
+	}{{"race", race}, {"hoard", hoard}} {
+		ip, err := engine.PeerEgressIP(ctx,
+			tomlStr(e.sec, "socks5_outbound_host"), tomlInt(e.sec, "socks5_outbound_port"),
+			tomlStr(e.sec, "socks5_outbound_user"), tomlStr(e.sec, "socks5_outbound_pass"),
+			tomlStr(e.sec, "bind_interface"), echo)
+		peerErrs[e.name] = err
+		label := "Address peers see (" + e.name + ")"
+		if err != nil {
+			detail := err.Error()
+			if bi := tomlStr(e.sec, "bind_interface"); bi != "" {
+				detail += ". Peer connections are bound to \"" + bi + "\""
+				if !looksLikeTunnel(bi) {
+					detail += ", which does not look like a VPN tunnel: that is the usual reason they go nowhere"
+				}
 			}
+			add("peer_egress_"+e.name, label, "fail", detail)
+			continue
 		}
-		add("peer_egress", "Address peers see", "fail", detail)
-	} else {
-		add("peer_egress", "Address peers see", "ok", peerIP)
+		peerIPs[e.name] = ip
+		add("peer_egress_"+e.name, label, "ok", ip)
 	}
 
 	// 3. Where the daemon's other requests go. NOT "the host's own address":
@@ -608,20 +687,45 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 	// own address instead would call a working VPN a leak, since inside the
 	// tunnel every path shares one address, and that is correct rather than
 	// suspicious.
-	if mode != netModeDirect {
-		for name, ip := range announceIPs {
-			switch {
-			case peerErr != nil:
-				add("paths_"+name, "Announce path ("+name+")", "warn",
-					"trackers see "+ip+", but the peer path could not be measured, so the two cannot be compared")
-			case ip != peerIP:
-				add("paths_"+name, "Announce path ("+name+")", "fail",
-					"trackers see "+ip+" while peers are dialled from "+peerIP+". The address that identifies you is the one the tracker records")
-			default:
-				add("paths_"+name, "Announce path ("+name+")", "ok",
-					"announces and peer connections both leave from "+ip)
-			}
+	// The gate is now PER ENGINE and keys on that engine having an egress of its
+	// own, rather than on the mode. Under the old rule the whole comparison was
+	// skipped in direct mode -- which is exactly where a per-engine interface
+	// now lives, so the one setup that most needs the check would have been the
+	// one setup never checked.
+	compared := false
+	for _, e := range []struct {
+		name string
+		sec  map[string]interface{}
+	}{{"race", race}, {"hoard", hoard}} {
+		if tomlStr(e.sec, "bind_interface") == "" &&
+			tomlStr(e.sec, "socks5_outbound_host") == "" && tomlStr(e.sec, "announce_proxy") == "" {
+			continue // nothing configured to leave by: both paths are the WAN, and agreeing proves nothing
 		}
+		compared = true
+		ip, ok := announceIPs[e.name]
+		if !ok {
+			continue
+		}
+		switch {
+		case peerErrs[e.name] != nil:
+			add("paths_"+e.name, "Announce path ("+e.name+")", "warn",
+				"trackers see "+ip+", but the peer path could not be measured, so the two cannot be compared")
+		case ip != peerIPs[e.name]:
+			add("paths_"+e.name, "Announce path ("+e.name+")", "fail",
+				"trackers see "+ip+" while peers are dialled from "+peerIPs[e.name]+". The address that identifies you is the one the tracker records")
+		default:
+			add("paths_"+e.name, "Announce path ("+e.name+")", "ok",
+				"announces and peer connections both leave from "+ip)
+		}
+	}
+	// Two engines pinned to two interfaces SHOULD disagree with each other.
+	// Said out loud, because a page that has spent years reporting a mismatch as
+	// a leak would otherwise teach the reader to distrust a correct setup.
+	if a, b := announceIPs["race"], announceIPs["hoard"]; a != "" && b != "" && a != b {
+		add("engines_differ", "The two engines", "ok",
+			"race announces from "+a+" and hoard from "+b+". Two different addresses is what a per-engine interface is for, not a fault")
+	}
+	if compared {
 		add("scope", "Scope of this check", "warn",
 			"measured from inside this daemon's own network namespace: it can tell the announce path from the peer path, but an address that exists outside both is invisible to it")
 	}
@@ -669,7 +773,7 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		// it in the first.
 		viaProxy := tomlStr(e.sec, "socks5_outbound_host") != ""
 		turnaround := "your own router"
-		if mode == netModeVPN {
+		if mode == netModeGluetun || tomlStr(e.sec, "bind_interface") != "" {
 			turnaround = "your VPN provider"
 		}
 		switch {

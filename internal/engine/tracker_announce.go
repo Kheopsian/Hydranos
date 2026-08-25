@@ -176,6 +176,36 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	}
 	applyFwmark(dialer, int(b.Fwmark))
 
+	// bind_interface names the interface every socket of this engine leaves by.
+	// The engine already honours it for peer dials (applyBindInterface sets the
+	// Rust side's outgoing_interfaces); without the same pin here the announce
+	// followed the kernel default route instead, so peers travelled inside the
+	// tunnel while the tracker recorded the host's own address -- no error, no
+	// log, every indicator green. That is the leak this pin closes.
+	//
+	// A name that does not resolve therefore FAILS the announce rather than
+	// falling back to the default route. A failed announce is visible; a silent
+	// fallback is precisely the state nobody can see, and it publishes the
+	// address the tunnel exists to hide.
+	var bindErr error
+	if name := strings.TrimSpace(b.BindInterface); name != "" {
+		ip, err := resolveInterfaceIP(name)
+		if err != nil {
+			bindErr = fmt.Errorf("bind_interface %q does not resolve, refusing to announce from the default route: %w", name, err)
+			slog.Error("tracker_announce: bind_interface does not resolve. Announces on this engine FAIL rather than leave by the default route, which would publish this host's own address",
+				"engine", b.AnnounceScope, "binding", b.ID, "interface", name, "error", err)
+		} else {
+			dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(ip)}
+			slog.Info("tracker_announce: announces pinned to the engine's bind_interface",
+				"engine", b.AnnounceScope, "binding", b.ID, "interface", name, "ip", ip)
+		}
+	}
+	// The pinned source address is IPv4 (resolveInterfaceIP returns the
+	// interface's v4). A v6 dial from a v4 source cannot work, so a pinned
+	// binding announces v4 only, and a per-tracker v6 pin is refused out loud
+	// instead of quietly dialling from somewhere else.
+	pinned := dialer.LocalAddr != nil
+
 	// enable_ipv6 governed the listener, the tracker's peers6 list and the
 	// self-dial filter, but never this: a plain "tcp" dial follows RFC 6724 and
 	// prefers IPv6 wherever the host has it, so the announce left over v6 and
@@ -192,13 +222,19 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	// family is decided per request rather than per client.
 	base := dialer
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if bindErr != nil {
+			return nil, bindErr
+		}
 		switch announceIPModeFor(addr) {
 		case AnnounceIPModeV4:
 			return base.DialContext(ctx, ipv4Network(network), addr)
 		case AnnounceIPModeV6:
+			if pinned {
+				return nil, fmt.Errorf("tracker %s is pinned to IPv6 but this engine announces from %q, whose IPv4 address is the source: unpin the tracker or drop bind_interface", addr, b.BindInterface)
+			}
 			return base.DialContext(ctx, ipv6Network(network), addr)
 		}
-		if !b.EnableIPv6 {
+		if pinned || !b.EnableIPv6 {
 			return base.DialContext(ctx, ipv4Network(network), addr)
 		}
 		return base.DialContext(ctx, network, addr)
@@ -224,6 +260,12 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		socksPass, _ := pu.User.Password()
 		baseDialer := dialer
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Same fail-closed rule as the direct path: an unresolvable
+			// bind_interface must not become a dial from wherever the kernel
+			// feels like, not even on the hop that reaches the proxy.
+			if bindErr != nil {
+				return nil, bindErr
+			}
 			host, portStr, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
@@ -241,8 +283,9 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 	// reachable over one family. Skipped for a family this host does not have,
 	// so we never fire an announce that cannot connect.
 	var clientV4, clientV6 *http.Client
+	wantV4, wantV6 := wantFamilyClients(announceProxy != nil, pinned, HostHasIPv4(), HostHasIPv6())
 	if announceProxy == nil {
-		pinned := func(narrow func(string) string) *http.Client {
+		pinnedClient := func(narrow func(string) string) *http.Client {
 			base := dialer
 			return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
 				TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
@@ -254,11 +297,11 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 				ResponseHeaderTimeout: announceResponseHeaderTimeout,
 			}}
 		}
-		if HostHasIPv4() {
-			clientV4 = pinned(ipv4Network)
+		if wantV4 {
+			clientV4 = pinnedClient(ipv4Network)
 		}
-		if HostHasIPv6() {
-			clientV6 = pinned(ipv6Network)
+		if wantV6 {
+			clientV6 = pinnedClient(ipv6Network)
 		}
 	}
 
@@ -320,6 +363,26 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		scope:           b.AnnounceScope,
 		gate:            startupGateFor(b.AnnounceScope),
 	}
+}
+
+// wantFamilyClients decides which of the two family-pinned announce clients a
+// binding gets. It is a free function, taking the host's capabilities as
+// arguments rather than reading them, for one reason: HostHasIPv4/HostHasIPv6
+// read the real interfaces, so a test written against the builder passes
+// vacuously on any host that happens to lack the family under test -- which is
+// every CI container. A guard that cannot go red is not a guard.
+//
+// pinnedToInterface kills the v6 client: the source address a bind_interface
+// yields is that interface's IPv4, so a v6 announce from it could only fail,
+// and the dual-family report would show a dead path as a live one.
+func wantFamilyClients(proxied, pinnedToInterface, hasV4, hasV6 bool) (v4, v6 bool) {
+	if proxied {
+		// Behind a proxy the tracker sees the proxy's address, so pinning the
+		// local family changes nothing and would break a proxy reachable over
+		// one family only.
+		return false, false
+	}
+	return hasV4, hasV6 && !pinnedToInterface
 }
 
 // announceProxyForBinding resolves the SOCKS5 proxy this binding's announces go
@@ -1008,7 +1071,7 @@ func loadSecondaryAnnounceProxy() *url.URL {
 func newTrackerAnnouncerForSession(port int, cfg *config.SessionConfig, scope string) *trackerAnnouncer {
 	bs := ApplyAnnounceEgress(
 		DefaultSingleBinding(port, cfg.EnableIPv6, scope, cfg.AnnounceRateLimit),
-		cfg.AnnounceProxy, cfg.AnnounceIP, cfg.Socks5OutboundHost, scope)
+		cfg.AnnounceProxy, cfg.AnnounceIP, cfg.Socks5OutboundHost, cfg.BindInterface, scope)
 	return newTrackerAnnouncerForBinding(bs[0])
 }
 

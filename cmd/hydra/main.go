@@ -1263,10 +1263,10 @@ func main() {
 	// single-binding for the FOU/wstunnel path.
 	hoardAnnounceBindings := engine.ApplyAnnounceEgress(
 		engine.DefaultSingleBinding(hoardCfg.ListenPort, hoardCfg.EnableIPv6, "hoard", hoardCfg.AnnounceRateLimit),
-		hoardCfg.AnnounceProxy, hoardCfg.AnnounceIP, hoardCfg.Socks5OutboundHost, "hoard")
+		hoardCfg.AnnounceProxy, hoardCfg.AnnounceIP, hoardCfg.Socks5OutboundHost, hoardCfg.BindInterface, "hoard")
 	raceAnnounceBindings := engine.ApplyAnnounceEgress(
 		engine.DefaultSingleBinding(raceCfg.ListenPort, raceCfg.EnableIPv6, "race", raceCfg.AnnounceRateLimit),
-		raceCfg.AnnounceProxy, raceCfg.AnnounceIP, raceCfg.Socks5OutboundHost, "race")
+		raceCfg.AnnounceProxy, raceCfg.AnnounceIP, raceCfg.Socks5OutboundHost, raceCfg.BindInterface, "race")
 
 	// Sessions following gluetun's forwarded port hold their announces from
 	// here: the port is not known yet, and announcing the configured one would
