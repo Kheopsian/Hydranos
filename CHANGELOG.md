@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.137.2 - 2026-08-25
+
+### Fixed
+- **A per-agent save path set for `local` stopped being applied in 3.136.0.**
+  Splitting this node into `local-race` and `local-hoard` made that key match no
+  agent, so the override was silently ignored and the category fell back to its
+  flat `save_path` -- torrents landing on the disk the operator had deliberately
+  moved them off, with nothing logged. The legacy key is honoured again for both
+  engines, and an exact per-engine key still wins over it.
+
 ## v3.137.1 - 2026-08-25
 
 ### Added
