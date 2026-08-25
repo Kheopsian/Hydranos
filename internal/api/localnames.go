@@ -13,9 +13,13 @@ import "strings"
 // engine, so a category can send race torrents to one tunnel and hoard torrents
 // to another on the same machine.
 const (
-	LocalAgentName  = "local"
-	LocalAgentRace  = "local-race"
-	LocalAgentHoard = "local-hoard"
+	LocalAgentName = "local"
+	// LocalAgentPrefix marks every name this node answers to beyond the bare
+	// alias. Reserved against dialled agents, so it can be trusted as proof
+	// that a name is ours.
+	LocalAgentPrefix = "local-"
+	LocalAgentRace   = "local-race"
+	LocalAgentHoard  = "local-hoard"
 )
 
 // isLocalAgentName reports whether a name refers to an engine of this process.
@@ -25,11 +29,27 @@ const (
 // answer must not change with the rename. Missing one would send a local add,
 // pause or bulk action looking for an agent that was never dialled.
 func isLocalAgentName(n string) bool {
-	switch n {
-	case LocalAgentName, LocalAgentRace, LocalAgentHoard:
+	if n == LocalAgentName {
 		return true
 	}
-	return false
+	// Any "local-" name is one of this node's engines. The two primaries are
+	// local-race and local-hoard; an extra engine created from the UI takes its
+	// own id, so a shard called "race-2" is the agent "local-race-2".
+	//
+	// A prefix rather than a fixed list because those ids are chosen by the
+	// operator and cannot be enumerated here. It is safe precisely because the
+	// same prefix is refused to dialled agents (isReservedAgentName): nothing
+	// remote can ever claim a name that would make its actions run here.
+	return strings.HasPrefix(n, LocalAgentPrefix)
+}
+
+// LocalAgentNameFor builds the agent name of one of this node's engines.
+func LocalAgentNameFor(engineID string) string {
+	switch engineID {
+	case "race", "hoard":
+		return LocalAgentPrefix + engineID
+	}
+	return LocalAgentPrefix + strings.TrimSpace(engineID)
 }
 
 // localAgentForRole names the engine of this node that serves a role.
@@ -60,4 +80,22 @@ func roleOfLocalAgent(n string) (string, bool) {
 // the wrong machine.
 func isReservedAgentName(n string) bool {
 	return isLocalAgentName(strings.TrimSpace(n))
+}
+
+// roleOfLocalAgentIn resolves the engine role a local agent name pins, using
+// the registry for names this file cannot decode on its own -- an extra engine
+// carries an operator-chosen id, so "local-seedbox-2" says nothing about its
+// role until the registry is asked.
+func (s *Server) roleOfLocalAgentIn(name string) (string, bool) {
+	if role, ok := roleOfLocalAgent(name); ok {
+		return role, true
+	}
+	if !isLocalAgentName(name) || name == LocalAgentName {
+		return "", false
+	}
+	ra := s.remoteAgentByName(name)
+	if ra == nil || len(ra.engines) == 0 {
+		return "", false
+	}
+	return ra.engines[0].role, true
 }

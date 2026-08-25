@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/Kheopsian/hydra/internal/agent"
+	"github.com/Kheopsian/hydra/internal/agentwire"
 	"github.com/Kheopsian/hydra/internal/choking"
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
@@ -31,7 +30,7 @@ const extraShardAddr = "127.0.0.1:19190"
 // SessionConfig pointers raceCfg/hoardCfg (which point into engineCfgs) and
 // skipped. A legacy default.toml has no extras, so this is a no-op there.
 func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs []config.EngineConfig,
-	raceCfg, hoardCfg *config.SessionConfig, raceGate func(string) bool) ([]*liveEngine, string, string) {
+	raceCfg, hoardCfg *config.SessionConfig, raceGate func(string) bool) ([]*liveEngine, *agent.Server) {
 
 	uploadsDir := filepath.Join(cfg.Daemon.DataDir, "uploads")
 	var lives []*liveEngine
@@ -111,7 +110,7 @@ func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs 
 	}
 
 	if len(lives) == 0 {
-		return lives, "", ""
+		return lives, nil
 	}
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
@@ -128,28 +127,28 @@ func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs 
 		}
 	}()
 
-	// Serve the extras as an agent (ownEvents) so the front aggregates + routes
-	// them via the same remote-agent path (main registers this loopback as the
-	// "local-shards" agent). Reuses the whole multi-engine agent machinery.
-	tok := make([]byte, 16)
-	_, _ = rand.Read(tok)
-	token := hex.EncodeToString(tok)
+	// The extras used to be SERVED on a loopback port and dialled back by the
+	// front as one agent called "local-shards" -- N engines behind a single
+	// name, which is exactly the shape "one agent per engine" removes. Now the
+	// server is built but never listened on: it is only the cold-path backend
+	// for the in-process clients main.go registers, one agent per engine.
+	//
+	// Dropping the listener also drops a port, a token and a dial that could
+	// fail; the front reaches these engines by calling into them.
 	engines := make(map[string]engine.EngineClient, len(lives))
 	for _, le := range lives {
 		engines[le.id] = le.proc.Client()
 	}
-	srv := agent.NewServer(engines, cfg.Daemon.DataDir, token)
+	srv := agent.NewServer(engines, cfg.Daemon.DataDir, "")
 	srv.SetOwnEvents(true)
 	v6 := false
+	descs := make([]agentwire.EngineDescriptor, 0, len(lives))
 	for _, le := range lives {
 		srv.AddRichEngine(le.id, le.rich)
+		descs = append(descs, agentwire.EngineDescriptor{ID: le.id, Role: le.role})
 		v6 = v6 || le.cfg.EnableIPv6
 	}
 	srv.SetIPv6Wanted(v6)
-	go func() {
-		if serr := srv.Serve(ctx, extraShardAddr); serr != nil {
-			slog.Error("extra engines: agent serve failed", "error", serr)
-		}
-	}()
-	return lives, extraShardAddr, token
+	srv.DeclareEngines(descs)
+	return lives, srv
 }
