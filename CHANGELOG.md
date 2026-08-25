@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.137.1 - 2026-08-25
+
+### Added
+- `hydra_agent_row_deltas_total` in `/metrics`: rows updated from an agent's
+  event stream rather than from a full re-listing. A stream that dies quietly,
+  with the poll covering for it, looks exactly like a working one -- the only
+  way to tell is that this stops climbing. It has to be visible before the
+  polling cadence is relaxed on the strength of it.
+
 ## v3.137.0 - 2026-08-25
 
 ### Added
