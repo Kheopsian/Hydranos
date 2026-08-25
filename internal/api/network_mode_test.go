@@ -396,3 +396,69 @@ func TestCheckWarningsSeeTheSameFieldsAsThePage(t *testing.T) {
 		}
 	}
 }
+
+// TestExtraEnginesGetTheSameEgressAsTheirRole is the anti-drift guard between
+// the two writers of one decision: netModeKeys writes the TOML sections,
+// applyEgressToSession writes engines.json. They must agree field by field, or
+// a shard quietly leaves by a different path than the engine it shadows -- with
+// the page showing the primary's setting for both.
+//
+// Compared through netModeKeys rather than against hand-written expectations on
+// purpose: hard-coding the answer twice is how the two drifted in the first
+// place.
+func TestExtraEnginesGetTheSameEgressAsTheirRole(t *testing.T) {
+	cases := []struct {
+		mode string
+		f    netModeFields
+	}{
+		{netModeDirect, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172,
+			RaceBindInterface: "wg-race", HoardBindInterface: "wg-hoard"}},
+		{netModeGluetun, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172,
+			RaceBindInterface: "tun0", HoardBindInterface: "tun0", GluetunPort: true}},
+		{netModeSocks5, socksFields()},
+		{netModeDirect, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172}},
+	}
+	for _, tc := range cases {
+		for _, role := range []string{"race", "hoard"} {
+			var sc config.SessionConfig
+			applyEgressToSession(tc.mode, tc.f, role, &sc)
+
+			toml := map[string]string{}
+			for _, kv := range netModeKeys(tc.mode, tc.f, 16171, 0, role) {
+				toml[kv[0]] = kv[1]
+			}
+			for _, chk := range []struct {
+				key string
+				got string
+			}{
+				{"bind_interface", strconv.Quote(sc.BindInterface)},
+				{"announce_proxy", strconv.Quote(sc.AnnounceProxy)},
+				{"socks5_outbound_host", strconv.Quote(sc.Socks5OutboundHost)},
+				{"socks5_outbound_port", strconv.Itoa(sc.Socks5OutboundPort)},
+				{"socks5_outbound_user", strconv.Quote(sc.Socks5OutboundUser)},
+				{"socks5_outbound_pass", strconv.Quote(sc.Socks5OutboundPass)},
+				{"enable_ipv6", strconv.FormatBool(sc.EnableIPv6)},
+			} {
+				if toml[chk.key] != chk.got {
+					t.Errorf("mode=%s role=%s: %s is %s in the TOML but %s on the extra engine",
+						tc.mode, role, chk.key, toml[chk.key], chk.got)
+				}
+			}
+		}
+	}
+}
+
+// A shard must NOT inherit the primary's listen port: two engines on one port
+// leaves the second dead at boot, and the page would look correct.
+func TestExtraEngineKeepsItsOwnListenPort(t *testing.T) {
+	sc := config.SessionConfig{ListenPort: 26171}
+	applyEgressToSession(netModeDirect, netModeFields{
+		RaceListenPort: 16171, HoardListenPort: 16172, RaceBindInterface: "wg-race",
+	}, "race", &sc)
+	if sc.ListenPort != 26171 {
+		t.Errorf("listen port overwritten to %d: the shard would fight the primary for the port", sc.ListenPort)
+	}
+	if sc.BindInterface != "wg-race" {
+		t.Errorf("bind_interface = %q, want the role primary's", sc.BindInterface)
+	}
+}
