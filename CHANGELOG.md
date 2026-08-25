@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.140.1 - 2026-08-25
+
+### Added
+- Internal: `MigrateSidecars` folds `engines.json` into `[[agent]]` entries.
+  **Deliberately not run automatically.** Rewriting someone's `default.toml` at
+  boot is the riskiest thing this codebase could do, and the reader added in
+  3.140.0 already accepts the new shape, so the array can be adopted by hand at
+  no risk. The function is tested and callable; wiring it to a boot path is a
+  decision on its own.
+
 ## v3.140.0 - 2026-08-25
 
 ### Added
