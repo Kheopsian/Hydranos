@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.134.3 - 2026-08-25
+
+### Changed
+- Internal: this process can now address its own agent server without a
+  listener, a port or a token (`agent.InProcessStub` +
+  `grpcclient.NewWithStub`). Nothing uses it yet, so no behaviour change. The
+  local path runs the same handlers and the same encodings as the remote one,
+  which is what stops a local engine from ever answering differently.
+
 ## v3.134.2 - 2026-08-25
 
 ### Changed

@@ -576,3 +576,17 @@ func (c *Client) pumpEvents(stream grpc.ServerStreamingClient[agentpb.EventFrame
 		}
 	}
 }
+
+// NewWithStub builds a Client over an already-made transport instead of
+// dialling one. It exists for the in-process case: an engine running in the
+// front's own process is reachable through agent.InProcessStub, and this
+// constructor lets it reuse every method on this type -- all the param
+// envelopes, all the result decoding -- rather than growing a second,
+// hand-written implementation that would drift from the remote one.
+//
+// conn stays nil, so Close on such a client closes nothing. That is correct:
+// there is no connection to release, and the engine it speaks to belongs to the
+// process, not to this client.
+func NewWithStub(stub agentpb.HydraAgentClient, engine string) *Client {
+	return &Client{stub: stub, engine: engine}
+}
