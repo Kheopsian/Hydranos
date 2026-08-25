@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // EngineConfig describes one engine a node hosts (Option A: a node runs an
 // arbitrary set of engines). It embeds SessionConfig so a [[engine]] block
@@ -10,6 +13,40 @@ type EngineConfig struct {
 	ID   string `toml:"id" json:"id"`
 	Role string `toml:"role" json:"role"` // "race" | "hoard"
 	SessionConfig
+}
+
+// localAgentEngines returns the engines declared as [[agent]] entries that run
+// HERE -- the ones with no addr.
+//
+// This is where the config is going now that one agent means one engine: a
+// single [[agent]] array holding every node, with addr present meaning "reached
+// over the network" and absent meaning "started here". [race] and [hoard]
+// become what they already half were, fleet-wide profiles per role.
+//
+// ADDITIVE on purpose, unlike [[engine]] blocks. Those replace [race]/[hoard]
+// the moment one exists, which is a rule nothing states and that silently
+// disabled half a config -- the trap this array is meant to replace, not
+// inherit. An entry whose id matches an engine already resolved replaces that
+// one instead of colliding with it, so a node can override its own race engine
+// without restating the rest.
+//
+// A role is required. Without it an [[agent]] entry that simply forgot its addr
+// would be started as an engine here, which is a remote node quietly turned
+// into a local one.
+func (c *HydraConfig) localAgentEngines() []EngineConfig {
+	var out []EngineConfig
+	for i := range c.Agents {
+		ag := &c.Agents[i]
+		if strings.TrimSpace(ag.Addr) != "" || strings.TrimSpace(ag.Role) == "" {
+			continue
+		}
+		id := strings.TrimSpace(ag.EngineID)
+		if id == "" {
+			id = strings.TrimSpace(ag.Name)
+		}
+		out = append(out, EngineConfig{ID: id, Role: ag.Role, SessionConfig: ag.Session})
+	}
+	return out
 }
 
 // ResolveEngines is the single source of truth for the engines a process runs.
@@ -25,6 +62,19 @@ func (c *HydraConfig) ResolveEngines() ([]EngineConfig, error) {
 		engines = []EngineConfig{
 			{ID: "race", Role: "race", SessionConfig: c.Race},
 			{ID: "hoard", Role: "hoard", SessionConfig: c.Hoard},
+		}
+	}
+	for _, le := range c.localAgentEngines() {
+		replaced := false
+		for i := range engines {
+			if engines[i].ID == le.ID {
+				engines[i] = le
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			engines = append(engines, le)
 		}
 	}
 
