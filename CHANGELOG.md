@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.139.1 - 2026-08-25
+
+### Fixed
+- **The Network tab silently wrote into a section the daemon ignores.** A config
+  using `[[engine]]` blocks never reads `[race]` or `[hoard]` -- the blocks
+  replace them entirely -- but this page only ever wrote those two sections. On
+  such a node every save reported success and changed nothing, before or after a
+  restart. The page now says so, and refuses the save instead of pretending.
+
 ## v3.139.0 - 2026-08-25
 
 ### Changed

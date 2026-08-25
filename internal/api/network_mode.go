@@ -280,6 +280,23 @@ func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 	return w
 }
 
+// usesEngineBlocks reports whether the config declares [[engine]] blocks.
+//
+// It matters because ResolveEngines treats them as EXCLUSIVE: the moment one
+// exists, [race] and [hoard] are ignored entirely. This page writes only those
+// two sections, so on such a node every save lands in a part of the file the
+// daemon never reads -- the form accepts the change, reports success, and
+// nothing happens, not now and not after a restart.
+func usesEngineBlocks(m map[string]interface{}) bool {
+	switch v := m["engine"].(type) {
+	case []map[string]interface{}:
+		return len(v) > 0
+	case []interface{}:
+		return len(v) > 0
+	}
+	return false
+}
+
 func (s *Server) readNetworkConfig() (map[string]interface{}, error) {
 	data, err := os.ReadFile(s.settingsFilePath())
 	if err != nil {
@@ -301,6 +318,9 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 
 	env := collectEnvOverrides()
 	warn := modeWarnings(mode, f, env)
+	if usesEngineBlocks(m) {
+		warn = append(warn, "This node declares its engines with [[engine]] blocks, which replace [race] and [hoard] entirely. This page reads and writes those two sections, so what it shows is not what the daemon runs and saving here would change nothing. Edit the [[engine]] blocks instead.")
+	}
 	if tomlStr(race, "socks5_outbound_host") != tomlStr(hoard, "socks5_outbound_host") {
 		warn = append(warn, "The two engines have different SOCKS5 hosts in the config file. Saving here sets both to the same value.")
 	}
@@ -611,6 +631,15 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Refuse rather than write into a part of the file the daemon ignores.
+	// With [[engine]] blocks present, ResolveEngines never reads [race] or
+	// [hoard], so every key written below would be dead on arrival -- and the
+	// form would report success. An error the operator can act on beats a save
+	// that appears to work and changes nothing.
+	if parsed, perr := config.ParseTOMLMap(data); perr == nil && usesEngineBlocks(parsed) {
+		c.JSON(http.StatusConflict, gin.H{"error": "this node declares its engines with [[engine]] blocks, which replace [race] and [hoard]: saving here would write keys the daemon never reads. Edit the [[engine]] blocks instead."})
 		return
 	}
 	doc := string(data)
