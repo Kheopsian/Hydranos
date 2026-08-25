@@ -435,6 +435,43 @@ func (s *Server) AddRemoteAgent(name, addr, token, tlsCa string) error {
 	return nil
 }
 
+// AddLocalAgent registers an engine of THIS process under an agent name, so it
+// is addressed exactly like one on another machine. No dialling, no token, no
+// discovery round-trip: the caller already holds the engine, and asking it over
+// a socket what engines it has would be asking ourselves.
+//
+// Repeated calls with the same name ADD engines to that agent rather than
+// replacing it, which is how a node ends up hosting more than one. The remote
+// path cannot do this -- it learns an agent's engines in one ListEngines -- so
+// it replaces instead. Getting that backwards here would mean registering the
+// hoard engine silently dropped the race one.
+func (s *Server) AddLocalAgent(name, id, role string, cl AgentClient) error {
+	if name == "" || id == "" || cl == nil {
+		return fmt.Errorf("local agent needs a name, an engine id and a client")
+	}
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	for _, ra := range s.remoteAgents {
+		if ra.name != name {
+			continue
+		}
+		for i, e := range ra.engines {
+			if e.id == id {
+				ra.engines[i] = remoteEngine{id: id, role: role, client: cl}
+				return nil
+			}
+		}
+		ra.engines = append(ra.engines, remoteEngine{id: id, role: role, client: cl})
+		return nil
+	}
+	// addr stays empty: there is no address, and inventing a loopback one would
+	// show up in the UI as a node reachable at a port nothing listens on.
+	s.remoteAgents = append(s.remoteAgents, &remoteAgent{
+		name: name, engines: []remoteEngine{{id: id, role: role, client: cl}},
+	})
+	return nil
+}
+
 // remoteAgentByName returns the dialed agent or nil.
 func (s *Server) remoteAgentByName(name string) *remoteAgent {
 	s.agentsMu.RLock()

@@ -45,6 +45,14 @@ func newLocalAgentClient(id string, eng engine.EngineClient, agent AgentClient) 
 	return &localAgentClient{eng: eng, agent: agent, id: id}
 }
 
+// NewLocalAgentClient exposes the constructor to the process that owns the
+// engines. Assembly lives there, not here, so this package never has to import
+// internal/agent: the caller builds the cold-path client from
+// agent.InProcessStub + grpcclient.NewWithStub and hands it in.
+func NewLocalAgentClient(id string, eng engine.EngineClient, cold AgentClient) AgentClient {
+	return newLocalAgentClient(id, eng, cold)
+}
+
 // ---- hot path: straight to the engine, no encoding ----
 
 func (l *localAgentClient) ListTorrents() (*ltclient.ListTorrentsResult, error) {
