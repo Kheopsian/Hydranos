@@ -3,6 +3,18 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.133.0 - 2026-08-25
+
+### Changed
+- **Renumbered to vacate 3.132.x.** Behaviour is identical to v3.132.1; this
+  release exists only to clear a version collision. Three different binaries
+  were calling themselves `3.132.0` on 2026-08-25: this branch, an unpushed
+  automation-engine branch, and the image that happened to be running on
+  staging, which was neither. Two of them were local, but a version number that
+  identifies more than one binary is worth nothing precisely when it matters
+  most -- reading it off a running instance to find out what is deployed.
+  Everything above 3.132.x is unambiguous again.
+
 ## v3.132.1 - 2026-08-25
 
 ### Fixed
