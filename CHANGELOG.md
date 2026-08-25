@@ -3,6 +3,18 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.139.0 - 2026-08-25
+
+### Changed
+- **One form to add a node, wherever it runs.** "+ New" in Agents now asks
+  whether it runs on this machine or another one. "This machine" starts an
+  engine here and it becomes the agent `local-<id>`; "another machine"
+  registers one already running elsewhere. There was previously no way to
+  create a local agent at all: the Agents form demanded an address, and the
+  separate "Add engine" form never said the word agent.
+- The separate "Add engine" form is gone. The engines table stays, and now shows
+  which agent carries each engine, since that is the name a category references.
+
 ## v3.138.1 - 2026-08-25
 
 ### Fixed

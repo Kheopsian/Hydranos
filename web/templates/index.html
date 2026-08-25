@@ -641,24 +641,40 @@
                 <div class="card-body">
                     <div class="cat-form-grid">
                         <div class="form-group">
-                            <label>Name</label>
-                            <input type="text" id="ag-name" placeholder="seedbox-de" autocomplete="off">
+                            <label>Where it runs</label>
+                            <select id="ag-kind" onchange="agentKindChanged()">
+                                <option value="remote">Another machine</option>
+                                <option value="local">This machine</option>
+                            </select>
                         </div>
                         <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" id="ag-name" placeholder="seedbox-de" autocomplete="off">
+                            <span class="sr-desc" id="ag-name-hint"></span>
+                        </div>
+                        <div class="form-group ag-remote-only">
                             <label>Address (host:port)</label>
                             <input type="text" id="ag-addr" placeholder="10.0.0.2:9090" autocomplete="off">
                         </div>
-                        <div class="form-group">
+                        <div class="form-group ag-local-only" style="display:none">
+                            <label>Role</label>
+                            <select id="ag-role"><option value="hoard">hoard</option><option value="race">race</option></select>
+                        </div>
+                        <div class="form-group ag-local-only" style="display:none">
+                            <label>Listen port <span class="sr-desc">empty = pick one</span></label>
+                            <input type="number" id="ag-port" placeholder="auto" style="width:110px">
+                        </div>
+                        <div class="form-group ag-remote-only">
                             <label>Token <span class="sr-desc">bearer, optional</span></label>
                             <input type="text" id="ag-token" placeholder="(none)" autocomplete="off">
                         </div>
-                        <div class="form-group">
+                        <div class="form-group ag-remote-only">
                             <label>TLS CA path <span class="sr-desc">on the front, optional</span></label>
                             <input type="text" id="ag-tlsca" placeholder="(plaintext)" autocomplete="off">
                         </div>
                     </div>
                     <div class="cat-form-actions">
-                        <button class="btn-small" onclick="testAgent()">Test</button>
+                        <button class="btn-small" id="ag-test-btn" onclick="testAgent()">Test</button>
                         <button class="btn-primary" onclick="saveAgent()">Save</button>
                         <button class="btn-cancel" onclick="hideAgentForm()">Cancel</button>
                     </div>
@@ -675,16 +691,9 @@
             </table>
             <div id="agents-removed" class="agents-removed"></div>
             <div class="section-header" style="margin-top:24px">
-                <h2>Local engines</h2>
-                <button class="btn-small" onclick="showEngineForm()">+ Add engine</button>
+                <h2>Engines on this machine</h2>
             </div>
-            <div id="engine-form" style="display:none;margin-bottom:8px">
-                <input type="text" id="eng-id" placeholder="hoard2" autocomplete="off">
-                <select id="eng-role"><option value="hoard">hoard</option><option value="race">race</option></select>
-                <input type="number" id="eng-port" placeholder="port (auto)" style="width:110px">
-                <button class="btn-small" onclick="addEngine()">Add</button>
-                <button class="btn-small" onclick="hideEngineForm()">Cancel</button>
-            </div>
+            <p class="sr-desc" style="margin:0 0 12px">Each one is an agent of its own, so a category can send torrents to a particular engine -- and therefore out of a particular tunnel. Add one with <b>+ New</b> above, choosing "This machine".</p>
             <table id="engines-table"><thead><tr><th>ID</th><th>Role</th><th>Port</th><th>Actions</th></tr></thead>
                 <tbody id="engines-tbody"><tr><td colspan="4" class="empty">No extra engines</td></tr></tbody></table>
             <div id="restart-banner" style="display:none;margin-top:8px;padding:8px;background:#3a2a00;border-radius:4px">
