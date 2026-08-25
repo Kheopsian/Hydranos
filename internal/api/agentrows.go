@@ -78,6 +78,24 @@ func (s *Server) pollAgentHoardRows(force bool) []map[string]interface{} {
 
 	next := map[string][]map[string]interface{}{}
 	for _, ra := range s.agentsSnapshot() {
+		// This node's own engines are NOT collected here, even though they are
+		// registered agents now. Everything below is added ON TOP of the local
+		// counters (see the add() in agentStatusInto), so collecting them would
+		// count every local torrent twice: once directly, once as an agent.
+		//
+		// That is not hypothetical. 3.135.0 shipped without this line and
+		// /api/status reported exactly double -- 396592 torrents for the 198296
+		// the database holds -- because making "local" a registered agent
+		// silently enrolled it here. Rolled back within minutes; nothing was
+		// written, info_hash is a primary key so the rows could not duplicate,
+		// but every count and every listing was wrong.
+		//
+		// The lasting fix is for the local path to stop contributing and let
+		// everything come from agent rows, which is where this is heading. Until
+		// then, exactly one of the two must feed the totals.
+		if ra.local {
+			continue
+		}
 		engines := ra.byRole("hoard")
 		if len(engines) == 0 {
 			continue
