@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.134.2 - 2026-08-25
+
+### Changed
+- Internal: an engine running in this process can now present itself as an
+  agent (`localAgentClient`). Not yet wired to anything, so no behaviour
+  change. Listing, stats and per-torrent reads go straight to the engine, while
+  node-level calls reuse the agent server that already carries the shard
+  traffic: performance where it was measured to matter, proven code elsewhere.
+
 ## v3.134.1 - 2026-08-25
 
 ### Changed
