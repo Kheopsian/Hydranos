@@ -289,6 +289,14 @@ type AgentConfig struct {
 	Addr  string `toml:"addr"`
 	Token string `toml:"token"`
 	TLSCa string `toml:"tls_ca"`
+	// Role, EngineID and Session describe an agent that runs HERE: no addr, so
+	// nothing is dialled and this process starts the engine itself. They are
+	// the shape the config is converging on -- one [[agent]] array for every
+	// node, local or remote -- and they are ignored on an entry that has an
+	// addr, where the engine's settings live on the far side.
+	Role     string        `toml:"role"`
+	EngineID string        `toml:"engine_id"`
+	Session  SessionConfig `toml:"session"`
 	// EngineOverrides are sparse per-engine exceptions to the [race]/[hoard]
 	// fleet profile, written as [[agent.engine]] blocks keyed by engine id.
 	// Kept as raw maps rather than a typed SessionConfig so "absent" and "set

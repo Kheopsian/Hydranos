@@ -3,6 +3,31 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.140.0 - 2026-08-25
+
+### Added
+- **An `[[agent]]` entry with no `addr` now describes an engine that runs here.**
+  One array for every node: `addr` present means reached over the network,
+  absent means started by this process. It is the shape the config converges on
+  now that one agent means one engine, and it makes `[race]`/`[hoard]` what they
+  already half were -- fleet-wide profiles per role.
+
+  ```toml
+  [[agent]]
+  name = "local-vpn7"
+  role = "race"
+    [agent.session]
+    listen_port = 26991
+    bind_interface = "wg7"
+  ```
+
+  Additive, unlike `[[engine]]` blocks: the primaries are not displaced. Reusing
+  a primary's id overrides that engine instead of colliding with it. A `role` is
+  required, so an entry that merely forgot its `addr` is not silently started
+  here.
+
+Nothing writes these yet; existing configs are unaffected.
+
 ## v3.139.2 - 2026-08-25
 
 ### Changed
