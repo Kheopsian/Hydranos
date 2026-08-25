@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.135.1 - 2026-08-25
+
+### Fixed
+- **Every torrent was counted twice.** 3.135.0 made this node's engines a
+  registered agent, which silently enrolled them in the agent-row collector --
+  whose totals are added ON TOP of the local counters. `/api/status` reported
+  396592 torrents for the 198296 the database holds, and every listing doubled
+  with it. Nothing was written and nothing could be: `info_hash` is a primary
+  key. Rolled back in production within minutes of the reading; anyone who ran
+  3.135.0 should upgrade rather than trust any count it showed.
+
+**Do not run v3.135.0.**
+
 ## v3.135.0 - 2026-08-25
 
 ### Changed

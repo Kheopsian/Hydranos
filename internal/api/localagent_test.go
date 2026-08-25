@@ -21,6 +21,14 @@ func (c *countingAgent) NodeInfo() (agentwire.NodeInfo, error) {
 }
 func (c *countingAgent) DiskFree(string) (int64, error) { c.calls++; return 0, nil }
 
+// TorrentCategories is stubbed because the row collector calls it for every
+// agent it lists. Left to the nil embedded interface it panics, which says
+// nothing about the code under test.
+func (c *countingAgent) TorrentCategories(string) (map[string]string, error) {
+	c.calls++
+	return map[string]string{}, nil
+}
+
 // fakeEngine answers the hot path and counts too, so a test cannot pass by
 // nobody being called at all.
 type fakeEngine struct {
