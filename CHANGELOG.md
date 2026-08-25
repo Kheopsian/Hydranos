@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.142.0 - 2026-08-25
+
+### Added
+- **This node applies a settings change without restarting Hydra.** Its engines
+  took a pushed config like any other node's now: the ones whose settings
+  actually changed are restarted, the rest are left alone. Remote agents have
+  worked this way for a while; the monolith waited for a full restart, so a
+  fleet ran two different configurations with nothing on screen saying so.
+- A push never overwrites this node's `listen_port` or `enable_ipv6`. They are
+  zeroed on the wire because on a remote node they belong to the agent; here the
+  front is the agent, so applying them verbatim would have set the listen port
+  to zero on the first reload and taken the node off the swarm.
+
 ## v3.141.0 - 2026-08-25
 
 ### Changed

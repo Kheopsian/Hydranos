@@ -1034,6 +1034,24 @@ func main() {
 	}, cfg.Daemon.DataDir, "")
 	localAgentSrv.SetRichEngines(raceEngine, hoardEngine)
 	localAgentSrv.SetIPv6Wanted(raceCfg.EnableIPv6 || hoardCfg.EnableIPv6)
+	// This node can now take a pushed config like any other. It declined until
+	// now -- SetConfigManager left nil, "it configures itself from its own
+	// file" -- which was true while the monolith and an agent were different
+	// things. Since its engines became agents they are not, and the asymmetry
+	// showed: a settings change reached every remote node in seconds while this
+	// one waited for a restart, with nothing saying the fleet was split.
+	localAgentSrv.SetConfigManager(newLocalConfigManager(
+		&localEngineSlot{
+			id: agentwire.EngineRace, role: "race", isRace: true,
+			dataDir: raceDataDir, socket: raceSocketPath,
+			cfg: raceCfg, ref: raceRef, proc: raceProc,
+		},
+		&localEngineSlot{
+			id: agentwire.EngineHoard, role: "hoard",
+			dataDir: hoardDataDir, socket: hoardSocketPath,
+			cfg: hoardCfg, ref: hoardRef, proc: hoardProc,
+		},
+	))
 	localAgentSrv.DeclareEngines([]agentwire.EngineDescriptor{
 		{ID: agentwire.EngineRace, Role: "race"},
 		{ID: agentwire.EngineHoard, Role: "hoard"},
