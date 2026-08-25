@@ -756,6 +756,13 @@ func (s *Server) handleMetrics(c *gin.Context) {
 	lines = append(lines, fmt.Sprintf("hydra_up 1"))
 	lines = append(lines, fmt.Sprintf("hydra_uptime_seconds %.0f", time.Since(startTime).Seconds()))
 
+	// Rows updated from an agent's event stream rather than from a full
+	// re-listing. Exposed because a stream that dies quietly, with the poll
+	// covering for it, looks exactly like a working one: the only way to tell
+	// is that this stops climbing. It has to be visible before the polling
+	// cadence is relaxed on the strength of it.
+	lines = append(lines, fmt.Sprintf("hydra_agent_row_deltas_total %d", DeltasApplied()))
+
 	// Race engine metrics
 	if s.raceEngine != nil {
 		torrents := s.raceEngine.GetAllStatus()
