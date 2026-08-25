@@ -3,6 +3,17 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.138.1 - 2026-08-25
+
+### Fixed
+- **The Engines screen lost its built-in engines.** It looked for an agent
+  literally named `local`, which stopped existing in 3.136.0 when this node
+  became one agent per engine, so the table silently dropped the race and hoard
+  rows and showed only the extra engines.
+- The move menu would have offered this node's own engines as if they were other
+  machines. A move to "another node" that is in fact this one is not a move;
+  intra-node moves are a real feature but not that menu.
+
 ## v3.138.0 - 2026-08-25
 
 ### Changed

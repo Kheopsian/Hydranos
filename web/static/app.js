@@ -2568,7 +2568,12 @@ function _applyCtxGroups() {
     // The Agent group only exists when there is somewhere to send a torrent.
     // On a single-node install it is not greyed out, it is absent: an action
     // that can never apply is noise in a menu this size.
-    const remotes = _ctxAgents.filter(a => a.name && a.name !== "local");
+    // Filtered on kind, not on the name "local". Since 3.136.0 this node is
+    // one agent per engine (local-race, local-hoard, local-<id>), so a name
+    // test would have offered them here as if they were other machines --
+    // and a move to "another node" that is in fact this one is not a move.
+    // Intra-node moves are a real feature, but they are not this menu.
+    const remotes = _ctxAgents.filter(a => a.name && a.kind !== "local");
     const showAgent = remotes.length > 0;
     const agentGrp = document.getElementById("ctx-grp-agent");
     const agentSep = document.getElementById("ctx-sep-agent");
@@ -6063,10 +6068,15 @@ async function updateEngines(){
         const tb = document.getElementById("engines-tbody");
         if(!tb) return;
         const rows = [];
-        // Base engines (the built-in local race/hoard), shown but not deletable.
-        const local = agents.find(function(a){ return a.name === "local"; });
-        if(local && local.engines){
-            local.engines.forEach(function(e){
+        // Every engine of this node, whichever agent carries it. Matched on
+        // kind, not on the name "local": this node stopped being a single agent
+        // called "local" in 3.136.0 and is now one agent per engine
+        // (local-race, local-hoard, local-<id>), so a name lookup silently
+        // matched nothing and the table lost its base engines entirely.
+        const extraIds = new Set(extras.map(function(e){ return e.id; }));
+        agents.filter(function(a){ return a.kind === "local"; }).forEach(function(a){
+            (a.engines || []).forEach(function(e){
+                if(extraIds.has(e.id)) return; // listed below, with its delete button
                 var livePort = 0;
                 if(pf){
                     if(e.role === "race") livePort = pf.race_port;
@@ -6074,13 +6084,15 @@ async function updateEngines(){
                 }
                 var portCell = livePort ? String(livePort) : "base";
                 rows.push("<tr><td><strong>" + esc(e.id) + "</strong></td><td>" + esc(e.role) +
-                          "</td><td>" + esc(portCell) + "</td><td><span class=\"sr-desc\">built-in</span></td></tr>");
+                          "</td><td>" + esc(portCell) + "</td><td><span class=\"sr-desc\">" +
+                          esc(a.name) + " &middot; built-in</span></td></tr>");
             });
-        }
-        // Extra engines (shards), deletable.
+        });
+        // Extra engines: each is its own agent since 3.138.0, and deletable.
         extras.forEach(function(e){
             rows.push("<tr><td><strong>" + esc(e.id) + "</strong></td><td>" + esc(e.role) + "</td><td>" + e.listen_port +
-                      "</td><td><button class=\"btn-small btn-danger\" onclick=\"deleteEngine('" + esc(e.id) + "')\">Delete</button></td></tr>");
+                      "</td><td><span class=\"sr-desc\">local-" + esc(e.id) + "</span> " +
+                      "<button class=\"btn-small btn-danger\" onclick=\"deleteEngine('" + esc(e.id) + "')\">Delete</button></td></tr>");
         });
         tb.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4" class="empty">' + t("No engines") + '</td></tr>';
     }catch(err){ console.error("updateEngines", err); }
@@ -7060,7 +7072,7 @@ const AGENT_POLL_INTERVAL = 5000;
 let _agentPollTimer = null;
 
 async function _pollAgentRows() {
-    if (!_ctxAgents.some(a => a.name && a.name !== "local")) return;
+    if (!_ctxAgents.some(a => a.name && a.kind !== "local")) return;
     if (document.hidden) return;
     let rows;
     try {
