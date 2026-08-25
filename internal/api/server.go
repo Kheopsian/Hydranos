@@ -356,6 +356,12 @@ type remoteAgent struct {
 	name    string
 	addr    string
 	engines []remoteEngine
+	// local marks an agent whose engines run in this process. The only thing
+	// that still depends on it is what the UI is told ("local" vs "grpc"), and
+	// the fact that there is no address to show. Everything else -- resolving
+	// an engine, listing, placement, actions -- goes through the same code as a
+	// remote agent, which is the entire point.
+	local bool
 }
 
 // anyClient returns any connected engine client. Routed add/action dispatch
@@ -467,7 +473,7 @@ func (s *Server) AddLocalAgent(name, id, role string, cl AgentClient) error {
 	// addr stays empty: there is no address, and inventing a loopback one would
 	// show up in the UI as a node reachable at a port nothing listens on.
 	s.remoteAgents = append(s.remoteAgents, &remoteAgent{
-		name: name, engines: []remoteEngine{{id: id, role: role, client: cl}},
+		name: name, local: true, engines: []remoteEngine{{id: id, role: role, client: cl}},
 	})
 	return nil
 }

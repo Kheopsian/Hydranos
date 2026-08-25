@@ -3,6 +3,27 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.135.0 - 2026-08-25
+
+### Changed
+- **This node's own engines are now a registered agent instead of a special
+  case.** They were previously synthesised into the agents list and hardcoded
+  as the name "local" in the placement. One code path now addresses every
+  engine, local or remote, which is what one agent per engine needs.
+- **"Online" for a local engine now means it answered.** The synthesised entry
+  reported an engine online from a non-nil pointer alone and never pinged it,
+  so a wedged local engine showed green here while every action against it
+  hung. It is pinged like any other now.
+
+- The local node's exit IP no longer goes blank. `internal/agent` keeps its own
+  public-IP cache, which is cold at that point and holds a retry backoff after
+  its first failure, so the field a synthesised entry used to fill came back
+  empty and stayed empty. A local node's egress is this daemon's egress, so it
+  falls back to the value this package already tracks.
+
+Nothing is renamed: the agent is still called `local` and still hosts both
+engines, so existing categories, placements and save paths are untouched.
+
 ## v3.134.4 - 2026-08-25
 
 ### Changed

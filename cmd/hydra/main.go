@@ -35,6 +35,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/drain"
 	"github.com/Kheopsian/hydra/internal/engine"
+	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 	"github.com/Kheopsian/hydra/internal/fsinfo"
 	"github.com/Kheopsian/hydra/internal/health"
@@ -1004,6 +1005,46 @@ func main() {
 	// the port for as long as the daemon runs.
 	apiServer.StartGluetunPortSync(map[string]*config.SessionConfig{"race": raceCfg, "hoard": hoardCfg})
 	apiServer.SetStateManager(stateMgr)
+
+	// ---- This node's own engines, registered as an agent ----
+	//
+	// Until now "local" was not an agent: it was a name hardcoded in the
+	// placement, an entry synthesised into /api/agents, and a special case in
+	// half a dozen call sites. Registering it means one code path addresses
+	// every engine, local or not -- and it is the prerequisite for one agent
+	// per engine, which is what multi-VPN needs.
+	//
+	// The agent server here is never Served. It exists only so the cold calls
+	// (node info, config, routed actions) run the same handlers a remote node
+	// runs, reached in process. The hot path does not come through it: at this
+	// node's scale a list through that encoding costs about a gigabyte.
+	localAgentSrv := agent.NewServer(map[string]engine.EngineClient{
+		agentwire.EngineRace:  raceProc.Client(),
+		agentwire.EngineHoard: hoardProc.Client(),
+	}, cfg.Daemon.DataDir, "")
+	localAgentSrv.SetRichEngines(raceEngine, hoardEngine)
+	localAgentSrv.SetIPv6Wanted(raceCfg.EnableIPv6 || hoardCfg.EnableIPv6)
+	localAgentSrv.DeclareEngines([]agentwire.EngineDescriptor{
+		{ID: agentwire.EngineRace, Role: "race"},
+		{ID: agentwire.EngineHoard, Role: "hoard"},
+	})
+	for _, le := range []struct {
+		id, role string
+		cl       engine.EngineClient
+	}{
+		{agentwire.EngineRace, "race", raceProc.Client()},
+		{agentwire.EngineHoard, "hoard", hoardProc.Client()},
+	} {
+		cold := grpcclient.NewWithStub(agent.InProcessStub(localAgentSrv), le.id)
+		if err := apiServer.AddLocalAgent(api.LocalAgentName, le.id, le.role,
+			api.NewLocalAgentClient(le.id, le.cl, cold)); err != nil {
+			// Not fatal, but it must be loud: without this the node hosts no
+			// engines as far as placement is concerned, and every add fails
+			// looking for somewhere to put the torrent.
+			slog.Error("failed to register this node's engine as an agent",
+				"engine", le.id, "error", err)
+		}
+	}
 
 	// ---- Background jobs ----
 	//
