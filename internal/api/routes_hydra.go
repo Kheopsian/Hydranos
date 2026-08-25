@@ -344,6 +344,21 @@ func (cat category) SavePathFor(agent string) string {
 	if pth, ok := cat.Agents[agent]; ok && pth != "" {
 		return pth
 	}
+	// Fall back to the legacy "local" key when the caller names one of this
+	// node's engines. Overrides were written when this node WAS a single agent
+	// called "local"; splitting it into local-race and local-hoard (3.136.0)
+	// made those keys match nothing, so the override was silently ignored and
+	// the category quietly fell back to its flat save_path -- torrents landing
+	// somewhere the operator had deliberately moved them away from, with
+	// nothing logged.
+	//
+	// The exact key still wins, so an operator can give one engine its own path
+	// while the other keeps the shared one.
+	if isLocalAgentName(agent) {
+		if pth, ok := cat.Agents[LocalAgentName]; ok && pth != "" {
+			return pth
+		}
+	}
 	return cat.SavePath
 }
 
