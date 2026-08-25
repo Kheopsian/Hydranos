@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.137.0 - 2026-08-25
+
+### Added
+- **Remote agents' rows now follow their event stream.** Their torrents' rates
+  and peer counts update from the delta the engine already emits every second
+  instead of waiting for the next full re-listing, so the table is live between
+  polls rather than only at them.
+
+The polling cadence is unchanged on purpose. This release only makes the cache
+fresher; relaxing the polling is a separate step, taken once a live deployment
+shows the streams are really carrying the traffic. An agent whose stream cannot
+be opened keeps being polled exactly as before.
+
 ## v3.136.2 - 2026-08-25
 
 ### Changed

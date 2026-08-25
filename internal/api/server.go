@@ -436,8 +436,14 @@ func (s *Server) AddRemoteAgent(name, addr, token, tlsCa string) error {
 	}
 	s.agentsMu.Lock()
 	s.removeRemoteAgentLocked(name) // replace an existing same-name agent (re-dial)
-	s.remoteAgents = append(s.remoteAgents, &remoteAgent{name: name, addr: addr, engines: engines})
+	ra := &remoteAgent{name: name, addr: addr, engines: engines}
+	s.remoteAgents = append(s.remoteAgents, ra)
 	s.agentsMu.Unlock()
+	// Follow this agent's event stream, so its rows are kept fresh by deltas
+	// instead of only by the next full re-listing. Outside the lock: opening a
+	// stream dials, and holding the registry while a slow node is contacted
+	// would stall every reader of the agents list.
+	s.subscribeAgentRows(ra)
 	return nil
 }
 
