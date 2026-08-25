@@ -3,6 +3,24 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.134.0 - 2026-08-25
+
+### Fixed
+- **Extra local engines kept the tunnel they were born with.** A shard created
+  from the Agents menu stores its own copy of the egress settings in
+  `engines.json`, frozen at creation. Every later save on the Network tab
+  rewrote `[race]`/`[hoard]` and left the shards pointed at the old interface
+  or the old proxy: nothing failed, the page showed the new setting, and the
+  shard went on announcing from the old address. Saving the network settings
+  now carries the same egress decision to every extra engine of that role. Its
+  own listen port, id and role are left alone -- two engines sharing a port
+  leaves the second dead at boot.
+- **The network check could not see extra engines at all.** A shard on a stale
+  or broken tunnel was invisible while every line above it reported green. Each
+  one is now measured through its own announce client, and a shard whose
+  interface disagrees with its role's engine is reported as a failure with both
+  names side by side.
+
 ## v3.133.0 - 2026-08-25
 
 ### Changed

@@ -538,6 +538,59 @@ func netModeKeys(mode string, f netModeFields, listenPort, proxyV2Port int, scop
 	}
 }
 
+// applyEgressToSession stamps a mode's egress decision onto one engine's
+// config struct. It exists for the extra engines: those live in engines.json as
+// a FROZEN COPY of their role's primary, taken once at creation time, so every
+// later save on this page rewrote [race]/[hoard] and left the shards pointed at
+// the old tunnel. Nothing failed, and the page showed the new interface -- the
+// shard just kept announcing from the old one. Same silent class as the
+// announce leak, one level down.
+//
+// Only EGRESS fields are touched. listen_port belongs to the shard (they must
+// differ or the second one fails to bind), and so does its id and role.
+//
+// Kept in step with netModeKeys by TestExtraEnginesGetTheSameEgressAsTheirRole,
+// which compares the two field by field: two writers of the same decision drift
+// the moment someone adds a key to one of them.
+func applyEgressToSession(mode string, f netModeFields, role string, sc *config.SessionConfig) {
+	sc.BindInterface = ""
+	if mode == netModeDirect || mode == netModeGluetun {
+		sc.BindInterface = bindInterfaceFor(f, role)
+	}
+	sc.EnableIPv6 = f.EnableIPv6
+	sc.Socks5OutboundHost, sc.Socks5OutboundPort = "", 0
+	sc.Socks5OutboundUser, sc.Socks5OutboundPass = "", ""
+	sc.AnnounceProxy = ""
+	if mode == netModeSocks5 || mode == netModeProxyV2 {
+		sc.Socks5OutboundHost, sc.Socks5OutboundPort = strings.TrimSpace(f.Socks5Host), f.Socks5Port
+		sc.Socks5OutboundUser, sc.Socks5OutboundPass = f.Socks5User, f.Socks5Pass
+		u := &url.URL{Scheme: "socks5h", Host: net.JoinHostPort(sc.Socks5OutboundHost, strconv.Itoa(sc.Socks5OutboundPort))}
+		if sc.Socks5OutboundUser != "" {
+			u.User = url.UserPassword(sc.Socks5OutboundUser, sc.Socks5OutboundPass)
+		}
+		sc.AnnounceProxy = u.String()
+	}
+}
+
+// syncExtraEnginesEgress carries this page's decision to every extra engine.
+// A shard follows its ROLE: a race shard leaves by whatever the race engine
+// leaves by. Giving a shard a tunnel of its own is a bigger feature; silently
+// leaving it on last month's tunnel is a bug, and that is what this fixes.
+func (s *Server) syncExtraEnginesEgress(mode string, f netModeFields) (int, error) {
+	dataDir := s.config.Daemon.DataDir
+	extras, err := config.LoadExtraEngines(dataDir)
+	if err != nil || len(extras) == 0 {
+		return 0, err
+	}
+	for i := range extras {
+		applyEgressToSession(mode, f, extras[i].Role, &extras[i].SessionConfig)
+	}
+	if err := config.SaveExtraEngines(dataDir, extras); err != nil {
+		return 0, err
+	}
+	return len(extras), nil
+}
+
 func (s *Server) handleNetworkModePost(c *gin.Context) {
 	var req struct {
 		Mode   string        `json:"mode"`
@@ -593,11 +646,20 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	warnings := modeWarnings(req.Mode, req.Fields, collectEnvOverrides())
+	// The extra engines are written AFTER the TOML is safely in place: if this
+	// fails the primaries are already correct, and the shards are reported as
+	// stale rather than the whole save being rolled back into an unknown state.
+	synced, serr := s.syncExtraEnginesEgress(req.Mode, req.Fields)
+	if serr != nil {
+		warnings = append(warnings, "The extra engines could not be updated ("+serr.Error()+"), so they keep their previous network settings. Until that is fixed they may announce from a different address than the one shown here.")
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"mode":             req.Mode,
-		"restart_required": true,
-		"agents_notified":  s.pushConfigToAgentsAsync(),
-		"warnings":         modeWarnings(req.Mode, req.Fields, collectEnvOverrides()),
+		"mode":                  req.Mode,
+		"restart_required":      true,
+		"agents_notified":       s.pushConfigToAgentsAsync(),
+		"extra_engines_updated": synced,
+		"warnings":              warnings,
 	})
 }
 
@@ -805,5 +867,63 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		}
 	}
 
+	// Extra engines last, and only when there are any. They are shards created
+	// from the Agents menu, they carry their own copy of the egress settings in
+	// engines.json, and until now nothing on this page could see them: a shard
+	// left on a stale tunnel announced from the wrong address while every line
+	// above reported green. Measured through the same announce client as the
+	// primaries, so this says what the shard DOES, not what its config claims.
+	s.addExtraEngineChecks(ctx, echo, race, hoard, add)
+
 	c.JSON(http.StatusOK, gin.H{"mode": mode, "results": results})
+}
+
+// addExtraEngineChecks measures every UI-managed extra engine and compares it
+// with the primary of its role, which is the address the page displays.
+func (s *Server) addExtraEngineChecks(ctx context.Context, echo string,
+	race, hoard map[string]interface{}, add func(id, label, status, detail string)) {
+
+	extras, err := config.LoadExtraEngines(s.config.Daemon.DataDir)
+	if err != nil {
+		add("extra_engines", "Extra engines", "warn", "could not be read ("+err.Error()+"), so their network settings are unverified")
+		return
+	}
+	if len(extras) == 0 {
+		return
+	}
+	for _, e := range extras {
+		sec := hoard
+		if e.Role == "race" {
+			sec = race
+		}
+		label := "Extra engine " + e.ID + " (" + e.Role + ")"
+		// The config drift is worth naming on its own, before any measurement:
+		// it is the thing that goes wrong silently, and it is readable without
+		// touching the network.
+		if want := tomlStr(sec, "bind_interface"); want != e.BindInterface {
+			add("extra_drift_"+e.ID, label, "fail",
+				"leaves by "+quoteOrDefaultRoute(e.BindInterface)+" while the "+e.Role+
+					" engine leaves by "+quoteOrDefaultRoute(want)+
+					". Save the network settings again to bring it back in step")
+		}
+		b := engine.ApplyAnnounceEgress(
+			engine.DefaultSingleBinding(e.ListenPort, e.EnableIPv6, e.Role, 0),
+			e.AnnounceProxy, e.AnnounceIP, e.Socks5OutboundHost, e.BindInterface, e.Role)[0]
+		ip, aerr := engine.AnnounceEgressIP(ctx, b, echo)
+		if aerr != nil {
+			add("extra_announce_"+e.ID, label, "fail", "announce path: "+aerr.Error())
+			continue
+		}
+		add("extra_announce_"+e.ID, label, "ok", "announces from "+ip)
+	}
+}
+
+// quoteOrDefaultRoute names an interface, or says plainly what an empty one
+// means. Printing "" in a warning about egress is how an operator reads "not
+// set" as "fine".
+func quoteOrDefaultRoute(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "the host's default route"
+	}
+	return strconv.Quote(name)
 }
