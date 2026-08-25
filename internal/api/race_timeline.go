@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/Kheopsian/hydra/internal/bench"
-	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 )
 
@@ -179,7 +178,7 @@ func raceEvent(kind string, t ltclient.TorrentStatus, category string, ts, dlTim
 
 // snapshot builds one sample, or reports false for a torrent doing nothing --
 // an idle seed would otherwise write a row every 5 seconds forever.
-func (r *raceRecorder) snapshot(cl *grpcclient.Client, t ltclient.TorrentStatus, now float64) (bench.RaceSnapshot, bool) {
+func (r *raceRecorder) snapshot(cl AgentClient, t ltclient.TorrentStatus, now float64) (bench.RaceSnapshot, bool) {
 	active := t.DownloadRate > 0 || t.UploadRate > 0 || t.NumPeers > 0 || t.Progress < 1.0
 	if !active {
 		return bench.RaceSnapshot{}, false

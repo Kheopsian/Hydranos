@@ -35,7 +35,6 @@ import (
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/drain"
 	"github.com/Kheopsian/hydra/internal/engine"
-	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 	"github.com/Kheopsian/hydra/internal/fsinfo"
 	"github.com/Kheopsian/hydra/internal/health"
@@ -2585,7 +2584,7 @@ func startFrontOnlyJobs(ctx context.Context, cfg *config.HydraConfig, apiServer 
 	// Both ends are named agents, resolved at RUN time: a resumed job must
 	// find the agent as it is now, not as it was when the job was created.
 	// "local" is not a node here, and saying so beats dialing nothing.
-	dial := func(agent, engineID string) (*grpcclient.Client, error) {
+	dial := func(agent, engineID string) (api.AgentClient, error) {
 		if agent == "" || agent == api.LocalAgentName {
 			return nil, fmt.Errorf("this node is a controller and hosts no torrents: name the agent instead of %q", api.LocalAgentName)
 		}

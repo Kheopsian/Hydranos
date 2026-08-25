@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.134.1 - 2026-08-25
+
+### Changed
+- Internal: the agent registry now holds an `AgentClient` interface instead of
+  a concrete gRPC client. No behaviour change. This is the first step toward
+  one engine per agent, which needs an engine running in this process to be
+  registrable exactly like a remote one. The compiler checked the whole
+  surface: 27 methods, 43 call sites, and four methods that were being used
+  without anyone having listed them.
+
 ## v3.134.0 - 2026-08-25
 
 ### Fixed

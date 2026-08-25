@@ -342,9 +342,14 @@ func NewServer(cfg *config.HydraConfig) *Server {
 // a later step.
 // remoteEngine is one engine of a remote agent node, dialled by engine-id.
 type remoteEngine struct {
-	id     string
-	role   string
-	client *grpcclient.Client
+	id   string
+	role string
+	// client is the interface, not *grpcclient.Client, so that an engine
+	// running in THIS process can be registered exactly like a remote one.
+	// That is the whole of "1 agent = 1 engine": an addressing change, with no
+	// caller able to tell the two apart. See agentclient.go for why a local
+	// implementation must not go through the wire.
+	client AgentClient
 }
 
 type remoteAgent struct {
@@ -355,7 +360,7 @@ type remoteAgent struct {
 
 // anyClient returns any connected engine client. Routed add/action dispatch
 // on the agent by the engine-id param, not by which client carries the call.
-func (ra *remoteAgent) anyClient() *grpcclient.Client {
+func (ra *remoteAgent) anyClient() AgentClient {
 	if len(ra.engines) > 0 {
 		return ra.engines[0].client
 	}
@@ -367,7 +372,7 @@ func (ra *remoteAgent) anyClient() *grpcclient.Client {
 // agent indexes its rich engines by config id, so sending a role straight
 // through misses whenever the id is not literally "race"/"hoard". Returns a
 // nil client when the agent hosts nothing matching.
-func (ra *remoteAgent) resolveEngine(sel string) (*grpcclient.Client, string) {
+func (ra *remoteAgent) resolveEngine(sel string) (AgentClient, string) {
 	for _, e := range ra.engines {
 		if e.id == sel {
 			return e.client, e.id
@@ -568,7 +573,7 @@ func (s *Server) SetJobManager(m *jobs.Manager) { s.jobs = m }
 // "hoard" as a role resolve the way a caller would expect.
 //
 // The returned client is the shared, long-lived one: callers must not close it.
-func (s *Server) RemoteAgentEngineClient(agent, engine string) (*grpcclient.Client, error) {
+func (s *Server) RemoteAgentEngineClient(agent, engine string) (AgentClient, error) {
 	ra := s.remoteAgentByName(agent)
 	if ra == nil {
 		return nil, fmt.Errorf("no agent named %q is registered", agent)

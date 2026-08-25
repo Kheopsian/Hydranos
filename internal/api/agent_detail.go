@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/Kheopsian/hydra/internal/engine"
-	"github.com/Kheopsian/hydra/internal/engine/grpcclient"
 )
 
 // agentHoardRowMeta returns cached list-row metadata for one agent hoard torrent.
@@ -105,7 +104,7 @@ func (s *Server) remoteTorrentDetail(ra *remoteAgent, engineID, hash, category s
 	return buildRemoteTorrentDetail(ra.name, cl, hash, category)
 }
 
-func buildRemoteTorrentDetail(agentName string, cl *grpcclient.Client, hash, category string) map[string]interface{} {
+func buildRemoteTorrentDetail(agentName string, cl AgentClient, hash, category string) map[string]interface{} {
 	st, err := cl.GetStatus(hash)
 	if err != nil || st == nil || st.InfoHash == "" {
 		return nil
@@ -164,7 +163,7 @@ func buildRemoteTorrentDetail(agentName string, cl *grpcclient.Client, hash, cat
 	return m
 }
 
-func remoteTorrentFiles(cl *grpcclient.Client, hash string) (files []map[string]interface{}, avail map[string]interface{}) {
+func remoteTorrentFiles(cl AgentClient, hash string) (files []map[string]interface{}, avail map[string]interface{}) {
 	ltFiles, err := cl.GetFiles(hash)
 	if err == nil && len(ltFiles) > 0 {
 		files = make([]map[string]interface{}, 0, len(ltFiles))
