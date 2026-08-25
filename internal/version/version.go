@@ -3,7 +3,7 @@ package version
 import "strings"
 
 // Version is the single source of truth.
-var Version = "3.131.1-typhon"
+var Version = "3.132.0-typhon"
 
 // b62 is digits, then upper case, then lower case. It is the alphabet
 // Transmission's clients.cc decodes with base62str, and a strict superset of

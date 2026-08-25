@@ -3,6 +3,50 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.132.0 - 2026-08-25
+
+### Added
+- **One network interface per engine.** The Direct mode of the Network tab now
+  takes a `bind_interface` for the race engine and another for the hoard
+  engine, instead of one value shared by both. Give them two WireGuard tunnels
+  to spread the two engines across two exit addresses, give them the same one
+  to keep them together, or leave both empty on a host with no VPN. The TOML
+  always had one key per section; it was this page that flattened them.
+
+### Fixed
+- **Announces ignored `bind_interface` and left by the default route.** The
+  engine bound its peer sockets to the configured interface, but the tracker
+  announce is dialled from the Go side and had no such pin, so peers travelled
+  inside the tunnel while the tracker recorded this host's own address. No
+  error, no log, and the network check reported green. Announces are now bound
+  to the same interface as the peers, and an interface name that does not
+  resolve makes the announce **fail** rather than fall back to the default
+  route: a failed announce is visible, a silent fallback is not.
+- A binding pinned to an interface no longer builds an IPv6 announce client.
+  The pinned source address is that interface's IPv4, so every v6 announce on
+  it could only fail while the dual-family report counted it as a live path.
+  A tracker explicitly pinned to IPv6 on such an engine is now refused out
+  loud instead of dialled from somewhere else.
+- The network check measured the peer path on the hoard engine alone and
+  labelled it as though it spoke for both. With one tunnel per engine that
+  reported the hoard's address as the race engine's. Both paths are now
+  measured, compared, and reported per engine — and the check no longer skips
+  the announce/peer comparison in Direct mode, which is exactly where a
+  per-engine interface now lives.
+- A setup with one engine bound and the other on the default route is called
+  out. It is the healthiest-looking failure available: the page shows a real
+  tunnel, for half the traffic.
+
+### Changed
+- **The `vpn` network mode is now called `gluetun`.** Nothing in it was ever
+  about VPNs in general: what separated it from Direct was the presence of
+  `bind_interface`, and what it uniquely does is read a forwarded port off a
+  gluetun control server. Interface binding moved down into Direct, where a
+  bare-metal WireGuard host can finally sit. The mode is now deduced from the
+  gluetun keys instead. **No config is rewritten**: an existing install with
+  `bind_interface` set and no gluetun keys keeps working exactly as before and
+  simply displays as Direct.
+
 ## v3.131.1 - 2026-08-24
 
 ### Fixed

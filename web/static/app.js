@@ -6614,9 +6614,9 @@ window.addEventListener("DOMContentLoaded", refreshStartupPause);
 // only its fields, and saving clears the others.
 const NET_MODES = [
     { id: "direct", label: "Direct",
-      blurb: "No tunnel, no proxy. Peers and trackers see this host's own address." },
-    { id: "vpn", label: "VPN",
-      blurb: "A VPN client already runs on this host or container. Peer sockets are pinned to its interface." },
+      blurb: "No proxy. Each engine leaves by the interface you give it, or by the host's default route when you give it none. This is where a bare-metal WireGuard tunnel goes, one per engine if you want." },
+    { id: "gluetun", label: "Gluetun",
+      blurb: "A gluetun container holds the tunnel and hands out a forwarded port. Hydra reads that port and follows it." },
     { id: "socks5", label: "SOCKS5 proxy",
       blurb: "Outgoing connections go through a SOCKS5 proxy: peer dials and tracker announces both. Nobody can connect to you from outside." },
     { id: "proxy_v2", label: "SOCKS5 + PROXY-v2 relay",
@@ -6725,13 +6725,20 @@ function netModeRender() {
     }
 
     let fields = "";
-    if (mode === "vpn") {
+    if (mode === "direct" || mode === "gluetun") {
+        // One interface per engine. The two engines are independent network
+        // identities, and a single shared field could not say so: it put both
+        // on one tunnel while the page implied otherwise.
         const list = (_detectedIfaces || []).map(i => (i.name || i));
-        fields += `<div class="settings-section"><div class="settings-section-title">${t("Tunnel")}</div>
-            ${_netSelect("net-bind-iface", "VPN interface name", f.bind_interface, list, "The interface the VPN client creates, for example wg0 or tun0. Peer sockets are bound to it, so they cannot leave outside the tunnel.")}
-            <p class="sr-desc">${t("Set the listen port below to the port your VPN provider forwards to you, otherwise nobody can connect to you.")}</p>
-        </div>
-        <div class="settings-section"><div class="settings-section-title">${t("Gluetun")}</div>
+        const hint = "The interface this engine leaves by. Peer connections AND tracker announces are both bound to it, so neither can travel outside it. Empty means the host's default route.";
+        fields += `<div class="settings-section"><div class="settings-section-title">${t("Interface per engine")}</div>
+            ${_netSelect("net-race-iface", "Race engine interface", f.race_bind_interface, list, hint)}
+            ${_netSelect("net-hoard-iface", "Hoard engine interface", f.hoard_bind_interface, list, hint)}
+            <p class="sr-desc">${t("Give the two engines different tunnels to spread them across two exit addresses, or the same one to keep them together. Leave both empty on a host with no VPN.")}</p>
+        </div>`;
+    }
+    if (mode === "gluetun") {
+        fields += `<div class="settings-section"><div class="settings-section-title">${t("Gluetun")}</div>
             ${_netCheckbox("net-gluetun", "Take the listen port from gluetun", f.gluetun_port_forward, "Gluetun asks your provider for a forwarded port and that port changes with the lease. Hydra reads it, listens there, and follows it. Announces are held at startup until it knows the port, so no tracker is ever handed the wrong one.")}
             ${_netField("net-gluetun-url", "Gluetun control server", "text", f.gluetun_url, "Empty means http://127.0.0.1:8000, which is right when Hydra shares gluetun's network.")}
             ${_netField("net-gluetun-key", "Gluetun API key", "password", f.gluetun_api_key, "Recent gluetun versions refuse every request without one. The role needs the route GET /v1/portforward.")}
@@ -6785,7 +6792,8 @@ function netModeCollect() {
         race_listen_port: num("net-race-port"),
         hoard_listen_port: num("net-hoard-port"),
         enable_ipv6: bool("net-ipv6"),
-        bind_interface: document.getElementById("net-bind-iface") ? str("net-bind-iface") : (prev.bind_interface || ""),
+        race_bind_interface: document.getElementById("net-race-iface") ? str("net-race-iface") : (prev.race_bind_interface || ""),
+        hoard_bind_interface: document.getElementById("net-hoard-iface") ? str("net-hoard-iface") : (prev.hoard_bind_interface || ""),
         socks5_host: document.getElementById("net-socks-host") ? str("net-socks-host") : (prev.socks5_host || ""),
         socks5_port: document.getElementById("net-socks-port") ? num("net-socks-port") : (prev.socks5_port || 0),
         socks5_user: document.getElementById("net-socks-user") ? str("net-socks-user") : (prev.socks5_user || ""),

@@ -1,10 +1,10 @@
 package api
 
 import (
+	"github.com/Kheopsian/hydra/internal/config"
+	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/Kheopsian/hydra/internal/config"
 )
 
 const netSample = `[daemon]
@@ -172,7 +172,8 @@ func TestValidateRefusesBrokenSetups(t *testing.T) {
 		{"proxy-v2 with no trusted source", netModeProxyV2, pv2NoTrust},
 		{"proxy-v2 port already a listen port", netModeProxyV2, pv2ClashingPort},
 		{"proxy-v2 trusted source is not an address", netModeProxyV2, pv2BadSource},
-		{"vpn without an interface", netModeVPN, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172}},
+		{"gluetun with no interface on either engine", netModeGluetun, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172}},
+		{"an interface no host has", netModeDirect, netModeFields{RaceListenPort: 16171, HoardListenPort: 16172, RaceBindInterface: "definitely-not-an-interface"}},
 		{"unknown mode", "tunnelvision", base},
 	} {
 		if err := validateNetMode(tc.mode, tc.f); err == nil {
@@ -237,22 +238,91 @@ func TestSocks5ModeSaysItIsNotReachable(t *testing.T) {
 // host, so the ordinary one is often the first that looks plausible. Bound to
 // it, peer connections leave outside the tunnel or go nowhere.
 func TestVPNModeFlagsANonTunnelInterface(t *testing.T) {
-	f := netModeFields{RaceListenPort: 16171, HoardListenPort: 16172, BindInterface: "eth0"}
-	joined := strings.Join(modeWarnings(netModeVPN, f, nil), " ")
+	f := netModeFields{RaceListenPort: 16171, HoardListenPort: 16172, RaceBindInterface: "eth0", HoardBindInterface: "eth0"}
+	joined := strings.Join(modeWarnings(netModeGluetun, f, nil), " ")
 	if !strings.Contains(joined, "eth0") || !strings.Contains(joined, "does not look like a VPN tunnel") {
-		t.Errorf("eth0 accepted silently in VPN mode: %q", joined)
+		t.Errorf("eth0 accepted silently in gluetun mode: %q", joined)
 	}
 	for _, name := range []string{"tun1", "wg0", "tap0", "tailscale0", "ppp0"} {
-		f.BindInterface = name
-		if got := strings.Join(modeWarnings(netModeVPN, f, nil), " "); strings.Contains(got, "does not look like") {
+		f.RaceBindInterface, f.HoardBindInterface = name, name
+		if got := strings.Join(modeWarnings(netModeGluetun, f, nil), " "); strings.Contains(got, "does not look like") {
 			t.Errorf("%s wrongly flagged: %q", name, got)
 		}
 	}
 	// Advisory only: a name we do not recognise must still be saveable, since
-	// the set of VPN clients is open-ended.
-	f.BindInterface = "eth0"
-	if err := validateNetMode(netModeVPN, f); err != nil && strings.Contains(err.Error(), "tunnel") {
+	// the set of VPN clients is open-ended. "lo" is used because validation now
+	// insists the interface EXISTS, which is a separate rule from the heuristic.
+	f.RaceBindInterface, f.HoardBindInterface = "lo", "lo"
+	if err := validateNetMode(netModeGluetun, f); err != nil && strings.Contains(err.Error(), "tunnel") {
 		t.Errorf("the naming heuristic blocks a save: %v", err)
+	}
+}
+
+// TestDirectModeCarriesOneInterfacePerEngine — the point of the whole change.
+// Two engines, two tunnels, and each engine's keys written into its own
+// section. A single shared value here would silently put both engines on one
+// tunnel while the page showed two.
+func TestDirectModeCarriesOneInterfacePerEngine(t *testing.T) {
+	f := netModeFields{
+		RaceListenPort: 16171, HoardListenPort: 16172,
+		RaceBindInterface: "wg-race", HoardBindInterface: "wg-hoard",
+	}
+	for _, tc := range []struct{ scope, want string }{{"race", "wg-race"}, {"hoard", "wg-hoard"}} {
+		got := ""
+		for _, kv := range netModeKeys(netModeDirect, f, 16171, 0, tc.scope) {
+			if kv[0] == "bind_interface" {
+				got = kv[1]
+			}
+		}
+		if got != strconv.Quote(tc.want) {
+			t.Errorf("[%s] bind_interface = %s, want %q", tc.scope, got, tc.want)
+		}
+	}
+}
+
+// TestModeIsDeducedFromGluetunNotFromAnInterface — bind_interface used to BE
+// the mode. Now that direct carries it too, keying on it would read every
+// bare-metal WireGuard host as gluetun and offer it a control-server URL it has
+// no use for.
+func TestModeIsDeducedFromGluetunNotFromAnInterface(t *testing.T) {
+	iface := map[string]interface{}{"bind_interface": "wg0"}
+	if got := detectNetMode(iface, map[string]interface{}{}); got != netModeDirect {
+		t.Errorf("a bare interface reads as %q, want %q", got, netModeDirect)
+	}
+	glue := map[string]interface{}{"bind_interface": "tun0", "gluetun_port_forward": true}
+	if got := detectNetMode(glue, map[string]interface{}{}); got != netModeGluetun {
+		t.Errorf("a gluetun setup reads as %q, want %q", got, netModeGluetun)
+	}
+	// A control-server URL alone is enough: the flag can be off while the
+	// operator is still pointed at gluetun.
+	url := map[string]interface{}{"gluetun_url": "http://127.0.0.1:8000"}
+	if got := detectNetMode(map[string]interface{}{}, url); got != netModeGluetun {
+		t.Errorf("a gluetun URL reads as %q, want %q", got, netModeGluetun)
+	}
+	// And a proxy still outranks both, or the announce leak comes back.
+	socks := map[string]interface{}{"socks5_outbound_host": "10.0.0.1", "bind_interface": "wg0"}
+	if got := detectNetMode(socks, map[string]interface{}{}); got != netModeSocks5 {
+		t.Errorf("a proxy setup reads as %q, want %q", got, netModeSocks5)
+	}
+}
+
+// TestHalfBoundDirectSetupIsCalledOut — one engine in a tunnel and the other on
+// the default route is the new failure this feature makes reachable, and the
+// one that looks healthiest: the page shows a tunnel, and it is real, for half
+// the traffic.
+func TestHalfBoundDirectSetupIsCalledOut(t *testing.T) {
+	f := netModeFields{RaceListenPort: 16171, HoardListenPort: 16172, RaceBindInterface: "wg0"}
+	joined := strings.Join(modeWarnings(netModeDirect, f, nil), " ")
+	if !strings.Contains(joined, "hoard") || !strings.Contains(joined, "default route") {
+		t.Errorf("a half-bound setup passes without comment: %q", joined)
+	}
+	// Both bound, or neither, is a deliberate setup and must stay quiet.
+	f.HoardBindInterface = "wg1"
+	if got := modeWarnings(netModeDirect, f, nil); len(got) != 0 {
+		t.Errorf("two bound engines warned about %v, want nothing", got)
+	}
+	if got := modeWarnings(netModeDirect, netModeFields{}, nil); len(got) != 0 {
+		t.Errorf("an unbound direct setup warned about %v, want nothing", got)
 	}
 }
 
@@ -262,11 +332,12 @@ func TestVPNModeFlagsANonTunnelInterface(t *testing.T) {
 // fail to bind, and the tab would still look correctly configured.
 func TestGluetunPortGoesToOneEngineOnly(t *testing.T) {
 	base := netModeFields{
-		RaceListenPort:  16171,
-		HoardListenPort: 16172,
-		BindInterface:   "lo",
-		GluetunPort:     true,
-		GluetunURL:      "http://127.0.0.1:8000",
+		RaceListenPort:     16171,
+		HoardListenPort:    16172,
+		RaceBindInterface:  "lo",
+		HoardBindInterface: "lo",
+		GluetunPort:        true,
+		GluetunURL:         "http://127.0.0.1:8000",
 	}
 	for _, tc := range []struct{ pick, on, off string }{
 		{"", "hoard", "race"}, // configs written before the choice existed
@@ -275,7 +346,7 @@ func TestGluetunPortGoesToOneEngineOnly(t *testing.T) {
 	} {
 		f := base
 		f.GluetunEngine = tc.pick
-		m, _ := apply(t, netSample, netModeVPN, f)
+		m, _ := apply(t, netSample, netModeGluetun, f)
 		if !tomlBool(sectionOf(m, tc.on), "gluetun_port_forward") {
 			t.Fatalf("pick %q: %s does not follow the forwarded port", tc.pick, tc.on)
 		}
@@ -296,7 +367,7 @@ func TestGluetunPortGoesToOneEngineOnly(t *testing.T) {
 // becomes a lie the moment the operator picks race.
 func TestGluetunWarningNamesTheEngineLeftOut(t *testing.T) {
 	f := netModeFields{GluetunPort: true, GluetunEngine: "race"}
-	got := strings.Join(modeWarnings(netModeVPN, f, nil), " ")
+	got := strings.Join(modeWarnings(netModeGluetun, f, nil), " ")
 	if !strings.Contains(got, "The race engine takes its listen port") {
 		t.Fatalf("warning does not say race takes the port: %q", got)
 	}

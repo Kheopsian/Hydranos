@@ -62,6 +62,17 @@ type Binding struct {
 	// through ("socks5h://user:pass@host:port"). Empty falls back to the
 	// process-wide TYPHON_ANNOUNCE_PROXY env, then to a direct announce.
 	AnnounceProxy string
+	// BindInterface is the NAME of the interface every socket of this binding
+	// must leave by ("wg0", "tun0", "eth1"). Resolved to its current IPv4 at
+	// announcer build time rather than stored as an IP, so it survives the
+	// tunnel address rotating on reconnect.
+	//
+	// It exists on the binding, and not only in the engine config, because the
+	// engine and the announce path are two different processes: Typhon binds
+	// its peer sockets from the Rust side, and the tracker announce is dialled
+	// here in Go. Setting it in one place only produced peers inside the tunnel
+	// and announces outside it, which no green indicator can show.
+	BindInterface string
 	// Fwmark is the netfilter mark applied to outbound sockets bound to
 	// this binding so the kernel routes them through the right WG tunnel
 	// (matched by `ip rule fwmark X lookup tableX`). 0 = no fwmark
@@ -94,17 +105,23 @@ func DefaultSingleBinding(listenPort int, enableIPv6 bool, scope string, announc
 // ApplyAnnounceEgress stamps a session's announce-egress settings onto every
 // one of its bindings, and shouts when they contradict the peer-dial settings.
 //
+// bindInterface is stamped here for the same reason the proxy is: it is an
+// egress decision, and the announce path has to make the same one the engine
+// makes or the tracker records an address the peers never use.
+//
 // The warning is the point of this function as much as the wiring is. The two
 // proxies are independent by design — one for peer dials in the engine, one for
 // announces here — and an operator who configures only the first gets a working
 // relay whose transport is hidden while the tracker still records the host's own
 // address. Nothing fails, nothing is logged, and the setup looks correct from
 // every angle they can check. So say it out loud at startup instead.
-func ApplyAnnounceEgress(bs []Binding, announceProxy, announceIP, socks5OutboundHost, scope string) []Binding {
+func ApplyAnnounceEgress(bs []Binding, announceProxy, announceIP, socks5OutboundHost, bindInterface, scope string) []Binding {
 	proxy := strings.TrimSpace(announceProxy)
 	ip := strings.TrimSpace(announceIP)
+	iface := strings.TrimSpace(bindInterface)
 	for i := range bs {
 		bs[i].AnnounceProxy = proxy
+		bs[i].BindInterface = iface
 		if ip != "" {
 			bs[i].PublicIP = ip
 		}
