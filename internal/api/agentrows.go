@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,13 +32,57 @@ const (
 	agentRowBackstop = 30 * time.Second
 )
 
+// rowKey identifies one row inside an agent.
+//
+// Keyed on the ENGINE as well as the hash, not the hash alone. An agent can
+// host several hoard engines and the same torrent can legitimately sit on two
+// of them; keying on the hash would silently collapse those into one row and
+// change what the table shows and what the header counts. This refactor is
+// meant to change the storage shape and nothing else, so the duplicates are
+// kept exactly as the slice kept them.
+//
+// The hash is lower-cased because it arrives in whichever case the engine used,
+// and lookups elsewhere already compare case-insensitively. A key on the raw
+// value would miss on an engine that reports uppercase, and a miss here looks
+// exactly like a torrent that is not there.
+func rowKey(engineID, infoHash string) string {
+	return engineID + "\x00" + strings.ToLower(infoHash)
+}
+
+// rowSet is one agent's rows, keyed by rowKey.
+//
+// A map rather than a slice because the cache is about to stop being rebuilt.
+// The engine already emits a delta-filtered stats_snapshot every second, and
+// the agent wire already streams it; the only reason this is re-listed in full
+// is that a slice gives nowhere to apply a single torrent's update. Rebuilding
+// costs 209 ms and 271 MB at 198k torrents, 1.23 s and 1.37 GB at a million
+// (see rowcache_bench_test.go) -- all of it to learn what the stream would have
+// said for free.
+//
+// Iteration order is lost, which is fine and checked: the front sorts the table
+// itself and treats these frames as upserts.
+type rowSet map[string]map[string]interface{}
+
 // agentRowCache holds the last poll, keyed by agent name so an agent that goes
 // quiet keeps its rows instead of having them deleted out from under the user.
 type agentRowCache struct {
 	mu      sync.RWMutex
-	byAgent map[string][]map[string]interface{}
+	byAgent map[string]rowSet
 	at      time.Time
 	pollMu  sync.Mutex // serialises the polls themselves
+}
+
+// rows flattens a set. Nil-safe: an agent with no entry yields nothing rather
+// than panicking on a cache that has never been filled.
+func (rs rowSet) rows() []map[string]interface{} {
+	if len(rs) == 0 {
+		return nil
+	}
+	out := make([]map[string]interface{}, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r)
+	}
+	return out
 }
 
 // refreshAgentHoardRows polls every agent's hoard engines and replaces the
@@ -76,7 +121,7 @@ func (s *Server) pollAgentHoardRows(force bool) []map[string]interface{} {
 		return s.allAgentRows()
 	}
 
-	next := map[string][]map[string]interface{}{}
+	next := map[string]rowSet{}
 	for _, ra := range s.agentsSnapshot() {
 		// This node's own engines are NOT collected here, even though they are
 		// registered agents now. Everything below is added ON TOP of the local
@@ -97,7 +142,7 @@ func (s *Server) pollAgentHoardRows(force bool) []map[string]interface{} {
 		if len(engines) == 0 {
 			continue
 		}
-		var got []map[string]interface{}
+		got := rowSet{}
 		ok := true
 		for _, e := range engines {
 			lst, err := e.client.ListTorrentsTimeout(4 * time.Second)
@@ -112,13 +157,16 @@ func (s *Server) pollAgentHoardRows(force bool) []map[string]interface{} {
 				// several hoard engines, and a routed action has to name the
 				// right one rather than defaulting to the id "hoard".
 				row["agent_engine"] = e.id
-				got = append(got, row)
+				got[rowKey(e.id, t.InfoHash)] = row
 			}
 		}
 		if !ok {
 			// Unreachable or slow this tick: keep what we already had for it.
 			// A blip must not empty the table and fire a remove per torrent.
-			if prev := s.agentRowsFor(ra.name); prev != nil {
+			s.agentRows.mu.RLock()
+			prev := s.agentRows.byAgent[ra.name]
+			s.agentRows.mu.RUnlock()
+			if prev != nil {
 				next[ra.name] = prev
 			}
 			continue
@@ -132,8 +180,8 @@ func (s *Server) pollAgentHoardRows(force bool) []map[string]interface{} {
 	s.agentRows.mu.Unlock()
 
 	var rows []map[string]interface{}
-	for _, list := range next {
-		rows = append(rows, list...)
+	for _, set := range next {
+		rows = append(rows, set.rows()...)
 	}
 	return rows
 }
@@ -143,8 +191,8 @@ func (s *Server) allAgentRows() []map[string]interface{} {
 	s.agentRows.mu.RLock()
 	defer s.agentRows.mu.RUnlock()
 	var rows []map[string]interface{}
-	for _, list := range s.agentRows.byAgent {
-		rows = append(rows, list...)
+	for _, set := range s.agentRows.byAgent {
+		rows = append(rows, set.rows()...)
 	}
 	return rows
 }
@@ -153,6 +201,12 @@ func (s *Server) allAgentRows() []map[string]interface{} {
 func (s *Server) agentRowsFor(name string) []map[string]interface{} {
 	s.agentRows.mu.RLock()
 	defer s.agentRows.mu.RUnlock()
+	return s.agentRows.byAgent[name].rows()
+}
+
+// agentRowSetFor returns one agent's set for in-place update. Callers hold the
+// cache lock themselves.
+func (s *Server) agentRowSetFor(name string) rowSet {
 	return s.agentRows.byAgent[name]
 }
 

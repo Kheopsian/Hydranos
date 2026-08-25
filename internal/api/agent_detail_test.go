@@ -6,9 +6,9 @@ import (
 
 func TestAgentHoardRowMeta(t *testing.T) {
 	s := &Server{}
-	s.agentRows.byAgent = map[string][]map[string]interface{}{
+	s.agentRows.byAgent = map[string]rowSet{
 		"seedbox": {
-			{"info_hash": "AA", "agent_engine": "hoard-0", "category": "movies"},
+			"aa": {"info_hash": "AA", "agent_engine": "hoard-0", "category": "movies"},
 		},
 	}
 	engineID, cat, ok := s.agentHoardRowMeta("seedbox", "aa")
@@ -22,9 +22,9 @@ func TestAgentHoardRowMeta(t *testing.T) {
 
 func TestResolveHoardDetailTargetFromCache(t *testing.T) {
 	s := &Server{}
-	s.agentRows.byAgent = map[string][]map[string]interface{}{
+	s.agentRows.byAgent = map[string]rowSet{
 		"seedbox": {
-			{"info_hash": "aa", "agent_engine": "hoard-0", "category": "movies"},
+			"aa": {"info_hash": "aa", "agent_engine": "hoard-0", "category": "movies"},
 		},
 	}
 	s.remoteAgents = []*remoteAgent{{name: "seedbox", engines: []remoteEngine{{id: "hoard-0"}}}}
@@ -37,9 +37,9 @@ func TestResolveHoardDetailTargetFromCache(t *testing.T) {
 
 func TestResolveHoardDetailTargetWithAgentHint(t *testing.T) {
 	s := &Server{}
-	s.agentRows.byAgent = map[string][]map[string]interface{}{
+	s.agentRows.byAgent = map[string]rowSet{
 		"seedbox": {
-			{"info_hash": "aa", "agent_engine": "hoard-0", "category": "tv"},
+			"aa": {"info_hash": "aa", "agent_engine": "hoard-0", "category": "tv"},
 		},
 	}
 	s.remoteAgents = []*remoteAgent{{name: "seedbox", engines: []remoteEngine{{id: "hoard-0"}}}}

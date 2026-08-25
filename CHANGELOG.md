@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.136.1 - 2026-08-25
+
+### Changed
+- Internal: the agent row cache is keyed per row instead of being a flat list.
+  No behaviour change. It is the shape a single torrent's update needs, and the
+  step before the cache stops being rebuilt from a full re-listing on every
+  refresh -- which costs 209 ms and 271 MB at 198k torrents.
+
 ## v3.136.0 - 2026-08-25
 
 ### Added

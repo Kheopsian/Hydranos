@@ -7,12 +7,12 @@ import (
 
 func seededServer() *Server {
 	s := &Server{}
-	s.agentRows.byAgent = map[string][]map[string]interface{}{
+	s.agentRows.byAgent = map[string]rowSet{
 		"seedbox": {
-			{"info_hash": "aa", "agent": "seedbox", "agent_engine": "hoard",
+			"aa": {"info_hash": "aa", "agent": "seedbox", "agent_engine": "hoard",
 				"num_peers": 3, "upload_rate": int64(120), "download_rate": int64(0),
 				"swarm_leechers": 10, "tracker_error": false},
-			{"info_hash": "bb", "agent": "seedbox", "agent_engine": "hoard2",
+			"bb": {"info_hash": "bb", "agent": "seedbox", "agent_engine": "hoard2",
 				"num_peers": 0, "upload_rate": int64(0), "download_rate": int64(50),
 				"swarm_leechers": 4, "tracker_error": true},
 		},
