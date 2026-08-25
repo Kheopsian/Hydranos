@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.134.4 - 2026-08-25
+
+### Changed
+- Internal: `AddLocalAgent` registers an engine of this process under an agent
+  name, with no dialling and no discovery round-trip. Still unused, so no
+  behaviour change. Unlike the remote path it accumulates engines under one
+  name instead of replacing them, because it is called once per engine.
+
 ## v3.134.3 - 2026-08-25
 
 ### Changed
