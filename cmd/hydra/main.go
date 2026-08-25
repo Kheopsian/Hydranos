@@ -1402,18 +1402,24 @@ func main() {
 	raceAnnouncer.Start(ctx)
 
 	// ---- Option A: extra engines beyond primary race+hoard (sharding) ----
-	extraEngines, shardAddr, shardToken := startExtraEngines(ctx, cfg, engineCfgs, raceCfg, hoardCfg, raceEngine.HasTorrent)
-	if shardAddr != "" {
-		go func() {
-			for i := 0; i < 12; i++ {
-				time.Sleep(300 * time.Millisecond)
-				if err := apiServer.AddRemoteAgent("local-shards", shardAddr, shardToken, ""); err == nil {
-					slog.Info("local shard engines registered as agent", "addr", shardAddr, "count", len(extraEngines))
-					return
-				}
-			}
-			slog.Warn("failed to register local shard engines")
-		}()
+	extraEngines, extraSrv := startExtraEngines(ctx, cfg, engineCfgs, raceCfg, hoardCfg, raceEngine.HasTorrent)
+	// One agent per extra engine, exactly like the two primaries. They used to
+	// be dialled back over loopback as a single agent named "local-shards" --
+	// N engines behind one name, which is the shape this whole series removes:
+	// a category could target "the shards" but never a particular tunnel.
+	//
+	// No goroutine, no retry loop, no dial that can fail: the engines are right
+	// here.
+	for _, le := range extraEngines {
+		cold := grpcclient.NewWithStub(agent.InProcessStub(extraSrv), le.id)
+		name := api.LocalAgentNameFor(le.id)
+		if err := apiServer.AddLocalAgent(name, le.id, le.role,
+			api.NewLocalAgentClient(le.id, le.proc.Client(), cold)); err != nil {
+			slog.Error("failed to register an extra engine as an agent",
+				"engine", le.id, "agent", name, "error", err)
+			continue
+		}
+		slog.Info("extra engine registered as its own agent", "engine", le.id, "role", le.role, "agent", name)
 	}
 	if len(extraEngines) > 0 {
 		go func() {

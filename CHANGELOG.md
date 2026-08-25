@@ -3,6 +3,22 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.138.0 - 2026-08-25
+
+### Changed
+- **Every extra engine is now its own agent.** They were dialled back over a
+  loopback port as a single agent called `local-shards` -- N engines behind one
+  name, so a category could target "the shards" but never a particular one. An
+  engine with id `vpn7` is now the agent `local-vpn7`, nameable in a placement
+  list like any other. Naming one pins its engine, whatever the category's mode
+  says.
+- The loopback listener, its port and its generated token are gone: the front
+  calls into these engines instead of dialling itself.
+
+### Removed
+- The `local-shards` agent. Any placement list naming it must be updated to the
+  per-engine names.
+
 ## v3.137.2 - 2026-08-25
 
 ### Fixed

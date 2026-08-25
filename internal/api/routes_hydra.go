@@ -1046,7 +1046,11 @@ func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, catego
 		// existing config behaves. Without this, listing local-race in a hoard
 		// category would silently place on the hoard engine and the operator
 		// would have no way to tell.
-		if role, pinned := roleOfLocalAgent(target); pinned {
+		// Registry-aware: an extra engine carries an operator-chosen id, so
+		// "local-seedbox-2" says nothing about its role until the registry is
+		// asked. Without this a shard named in a placement would fall back to
+		// the category's mode and land on the wrong engine of the right node.
+		if role, pinned := s.roleOfLocalAgentIn(target); pinned {
 			mode = role
 		}
 		return s.localAdd(mode, torrentPath, magnetURI, savePath, trackers, category)
