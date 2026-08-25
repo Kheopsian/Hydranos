@@ -297,10 +297,31 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 	race, hoard := sectionOf(m, "race"), sectionOf(m, "hoard")
 	mode := detectNetMode(race, hoard)
 
-	// The proxy credentials are one setting shown once, even though they live
-	// under both engines: a per-engine proxy is exactly the split that let the
-	// announce leak hide. Hoard wins when the two disagree, and the mismatch is
-	// reported rather than quietly flattened.
+	f := netFieldsFromTOML(race, hoard)
+
+	env := collectEnvOverrides()
+	warn := modeWarnings(mode, f, env)
+	if tomlStr(race, "socks5_outbound_host") != tomlStr(hoard, "socks5_outbound_host") {
+		warn = append(warn, "The two engines have different SOCKS5 hosts in the config file. Saving here sets both to the same value.")
+	}
+	c.JSON(http.StatusOK, netModeResponse{Mode: mode, Fields: f, Env: env, Warnings: warn})
+}
+
+// netFieldsFromTOML reads the whole page out of the config, once.
+//
+// It is a function and not two hand-written literals because it used to be two:
+// this handler filled every field, and the check endpoint filled the three it
+// happened to need. Adding a warning that reads a fourth made the check report
+// "bound to no interface" about two engines that were both bound to tun1 -- a
+// confident, specific, entirely false statement, produced by a struct nobody
+// had finished filling in. One reader, so a field added later cannot reach only
+// half of its callers.
+//
+// The proxy credentials are one setting shown once, even though they live under
+// both engines: a per-engine proxy is exactly the split that let the announce
+// leak hide. Hoard wins when the two disagree, and the mismatch is reported
+// rather than quietly flattened.
+func netFieldsFromTOML(race, hoard map[string]interface{}) netModeFields {
 	f := netModeFields{
 		RaceListenPort:  tomlInt(race, "listen_port"),
 		HoardListenPort: tomlInt(hoard, "listen_port"),
@@ -334,13 +355,7 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 	} else {
 		f.ProxyV2Trusted = tomlStrList(race, "proxy_v2_trusted_sources")
 	}
-
-	env := collectEnvOverrides()
-	warn := modeWarnings(mode, f, env)
-	if tomlStr(race, "socks5_outbound_host") != tomlStr(hoard, "socks5_outbound_host") {
-		warn = append(warn, "The two engines have different SOCKS5 hosts in the config file. Saving here sets both to the same value.")
-	}
-	c.JSON(http.StatusOK, netModeResponse{Mode: mode, Fields: f, Env: env, Warnings: warn})
+	return f
 }
 
 // gluetunEngineFromTOML reports "race" only when the race section is the one
@@ -730,11 +745,7 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 			"measured from inside this daemon's own network namespace: it can tell the announce path from the peer path, but an address that exists outside both is invisible to it")
 	}
 
-	for _, w := range modeWarnings(mode, netModeFields{
-		ProxyV2Trusted:   tomlStrList(hoard, "proxy_v2_trusted_sources"),
-		RaceProxyV2Port:  tomlInt(race, "listen_port_proxy_v2"),
-		HoardProxyV2Port: tomlInt(hoard, "listen_port_proxy_v2"),
-	}, collectEnvOverrides()) {
+	for _, w := range modeWarnings(mode, netFieldsFromTOML(race, hoard), collectEnvOverrides()) {
 		add("note", "Worth knowing", "warn", w)
 	}
 

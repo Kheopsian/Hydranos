@@ -3,6 +3,15 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.132.1 - 2026-08-25
+
+### Fixed
+- The network check built its own copy of the page fields and filled three of
+  them, so the new per-engine warnings read zero values and reported *the race
+  engine is bound to no interface* about two engines both bound to tun1. Caught
+  on staging. There is now one reader of the config for both the page and the
+  check, so a field added later cannot reach only half of its callers.
+
 ## v3.132.0 - 2026-08-25
 
 ### Added

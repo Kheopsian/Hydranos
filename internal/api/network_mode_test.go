@@ -375,3 +375,24 @@ func TestGluetunWarningNamesTheEngineLeftOut(t *testing.T) {
 		t.Fatalf("warning does not say hoard is the one left out: %q", got)
 	}
 }
+
+// TestCheckWarningsSeeTheSameFieldsAsThePage — caught on staging, where the
+// check confidently reported "the race engine is bound to no interface" about
+// two engines both bound to tun1. The check built its own netModeFields literal
+// and filled three of them, so any warning reading a fourth read a zero value.
+// The fix was one reader for both callers; this is the guard on it.
+func TestCheckWarningsSeeTheSameFieldsAsThePage(t *testing.T) {
+	race := map[string]interface{}{"listen_port": int64(16171), "bind_interface": "tun1"}
+	hoard := map[string]interface{}{"listen_port": int64(16172), "bind_interface": "tun1"}
+	f := netFieldsFromTOML(race, hoard)
+	if f.RaceBindInterface != "tun1" || f.HoardBindInterface != "tun1" {
+		t.Fatalf("interfaces lost on the way out of the config: race=%q hoard=%q", f.RaceBindInterface, f.HoardBindInterface)
+	}
+	// Both bound: nothing to warn about. A zero-valued struct would produce the
+	// "bound to no interface" line twice, which is the bug this guards.
+	for _, w := range modeWarnings(netModeGluetun, f, nil) {
+		if strings.Contains(w, "bound to no interface") {
+			t.Errorf("warned that a bound engine is unbound: %q", w)
+		}
+	}
+}
