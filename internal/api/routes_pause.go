@@ -136,7 +136,7 @@ func (s *Server) pauseOne(c *gin.Context, paused, race bool) {
 	}
 	// Only a local torrent has a row in this node's store; an agent persists
 	// the intent on its own side.
-	if agent == "local" {
+	if isLocalAgentName(agent) {
 		persistPaused([]string{hash}, paused)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "info_hash": hash, "paused": paused, "agent": agent})
@@ -163,7 +163,7 @@ func (s *Server) pauseBulk(c *gin.Context, race bool) {
 			continue
 		}
 		applied++
-		if agent == "local" {
+		if isLocalAgentName(agent) {
 			localApplied = append(localApplied, h)
 		}
 	}

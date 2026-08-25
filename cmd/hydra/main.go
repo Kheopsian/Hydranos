@@ -1035,8 +1035,21 @@ func main() {
 		{agentwire.EngineRace, "race", raceProc.Client()},
 		{agentwire.EngineHoard, "hoard", hoardProc.Client()},
 	} {
+		// One agent per engine: the race engine and the hoard engine are two
+		// separate nodes as far as placement is concerned, which is what lets a
+		// category send race torrents out of one tunnel and hoard torrents out
+		// of another on this same machine.
+		//
+		// The bare name "local" is NOT registered. It stays a valid alias
+		// meaning "this node, whichever engine the mode picks" -- every existing
+		// category, save-path override and job param keeps working -- and it is
+		// resolved before any registry lookup, in isLocalAgentName.
 		cold := grpcclient.NewWithStub(agent.InProcessStub(localAgentSrv), le.id)
-		if err := apiServer.AddLocalAgent(api.LocalAgentName, le.id, le.role,
+		name := api.LocalAgentHoard
+		if le.role == "race" {
+			name = api.LocalAgentRace
+		}
+		if err := apiServer.AddLocalAgent(name, le.id, le.role,
 			api.NewLocalAgentClient(le.id, le.cl, cold)); err != nil {
 			// Not fatal, but it must be loud: without this the node hosts no
 			// engines as far as placement is concerned, and every add fails

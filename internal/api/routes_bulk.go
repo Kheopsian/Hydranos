@@ -89,7 +89,7 @@ func (s *Server) bulkAction(c *gin.Context, race bool) {
 			continue
 		}
 		applied++
-		if agent == "local" {
+		if isLocalAgentName(agent) {
 			localApplied = append(localApplied, h)
 		}
 	}

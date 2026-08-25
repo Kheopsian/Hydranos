@@ -605,9 +605,7 @@ func (s *Server) Router() http.Handler {
 }
 
 // SetJobManager wires the background job runner. Called once at startup.
-// LocalAgentName is how the node running the front refers to itself, matching
-// the "local" default already used by category placement.
-const LocalAgentName = "local"
+// LocalAgentName and its per-role siblings live in localnames.go.
 
 func (s *Server) SetJobManager(m *jobs.Manager) { s.jobs = m }
 
