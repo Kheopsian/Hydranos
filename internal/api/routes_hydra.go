@@ -441,23 +441,13 @@ type agentInfo struct {
 // only "local"; the categories UI reads this to populate placement checkboxes
 // and per-agent save-path rows.
 func (s *Server) handleAgentsGet(c *gin.Context) {
+	// The local node used to be synthesised here, because it was not a
+	// registered agent and there was nothing to iterate. Now it is one, so it
+	// comes out of the same loop as every other node -- which is what stops the
+	// two from drifting, the way the synthesised entry did: it reported an
+	// engine "online" from a non-nil pointer alone, never pinging it, so a
+	// wedged local engine showed green here while every action against it hung.
 	var agents []agentInfo
-	if !s.frontOnly {
-		var engs []engineInfo
-		if s.raceEngine != nil {
-			engs = append(engs, engineInfo{ID: "race", Role: "race", Online: true})
-		}
-		if s.hoardEngine != nil {
-			engs = append(engs, engineInfo{ID: "hoard", Role: "hoard", Online: true})
-		}
-		localV6Wanted := s.config != nil && (s.config.Race.EnableIPv6 || s.config.Hoard.EnableIPv6)
-		localV6 := ""
-		if localV6Wanted { // no v6 lookup unless an engine listens on it (see PublicIPs)
-			localV6 = getPublicIPv6()
-		}
-		agents = append(agents, agentInfo{Name: "local", Kind: "local", Online: len(engs) > 0, Engines: engs,
-			ExitIP: getPublicIP(), ExitIPv6: localV6, IPv6Wanted: localV6Wanted, Interfaces: localNICs()})
-	}
 	for _, ra := range s.agentsSnapshot() {
 		// The reconciler refreshes this every tick; reading its cache keeps
 		// this poll from adding a config round-trip per agent.
@@ -479,7 +469,28 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 				exitIP, exitIPv6, v6Wanted, ifaces = ni.PublicIP, ni.PublicIPv6, ni.IPv6Wanted, ni.Interfaces
 			}
 		}
-		agents = append(agents, agentInfo{Name: ra.name, Kind: "grpc", Addr: ra.addr, Online: online,
+		if ra.local {
+			// A local node's egress IS this daemon's egress, and this package
+			// already tracks it. Without this the exit IP silently went blank
+			// when the local node stopped being synthesised: internal/agent
+			// keeps its OWN public-IP cache, cold at that point and holding a
+			// retry backoff after its first failure, so it answered "" and kept
+			// answering "" -- a field that used to be filled, now empty, with
+			// nothing logged. Caught by diffing /api/agents before and after.
+			if exitIP == "" {
+				exitIP = getPublicIP()
+			}
+			if exitIPv6 == "" && v6Wanted {
+				exitIPv6 = getPublicIPv6()
+			}
+		}
+		kind := "grpc"
+		if ra.local {
+			// No address is shown for a local node: there is none, and printing
+			// a loopback one would advertise a port nothing listens on.
+			kind = "local"
+		}
+		agents = append(agents, agentInfo{Name: ra.name, Kind: kind, Addr: ra.addr, Online: online,
 			Engines: engs, ExitIP: exitIP, ExitIPv6: exitIPv6, IPv6Wanted: v6Wanted, Interfaces: ifaces,
 			ConfigRevision: cfgState.Revision, ConfigSource: cfgState.Source})
 	}
