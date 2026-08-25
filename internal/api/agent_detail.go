@@ -77,7 +77,7 @@ func (s *Server) resolveRemoteDetailTarget(hash, agentHint, role string) (*remot
 		}
 	}
 
-	for _, ra := range s.agentsSnapshot() {
+	for _, ra := range s.allAgentsSnapshot() {
 		if r, eid, cat, ok := probeRole(ra); ok {
 			return r, eid, cat, true
 		}

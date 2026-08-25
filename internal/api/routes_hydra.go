@@ -448,7 +448,7 @@ func (s *Server) handleAgentsGet(c *gin.Context) {
 	// engine "online" from a non-nil pointer alone, never pinging it, so a
 	// wedged local engine showed green here while every action against it hung.
 	var agents []agentInfo
-	for _, ra := range s.agentsSnapshot() {
+	for _, ra := range s.allAgentsSnapshot() {
 		// The reconciler refreshes this every tick; reading its cache keeps
 		// this poll from adding a config round-trip per agent.
 		cfgState, _ := s.AgentConfigState(ra.name)

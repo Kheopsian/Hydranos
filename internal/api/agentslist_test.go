@@ -14,7 +14,12 @@ func TestLocalAgentIsListedLikeAnyOther(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snap := s.agentsSnapshot()
+	// allAgentsSnapshot, not agentsSnapshot: the latter deliberately hides this
+	// node so the dozen aggregating callers cannot count it twice.
+	snap := s.allAgentsSnapshot()
+	if len(s.agentsSnapshot()) != 0 {
+		t.Error("the local agent leaked into the aggregating snapshot; every total that adds agents on top of the local counters would double")
+	}
 	if len(snap) != 1 {
 		t.Fatalf("%d agent(s) in the snapshot, want 1", len(snap))
 	}
@@ -34,7 +39,7 @@ func TestLocalAgentIsListedLikeAnyOther(t *testing.T) {
 func TestRemoteAgentIsNotFlaggedLocal(t *testing.T) {
 	s := &Server{}
 	s.remoteAgents = append(s.remoteAgents, &remoteAgent{name: "hydra2", addr: "10.0.0.2:9099"})
-	if s.agentsSnapshot()[0].local {
+	if s.allAgentsSnapshot()[0].local {
 		t.Error("a dialled agent came back flagged local")
 	}
 }

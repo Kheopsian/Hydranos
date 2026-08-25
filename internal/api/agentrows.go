@@ -93,9 +93,6 @@ func (s *Server) pollAgentHoardRows(force bool) []map[string]interface{} {
 		// The lasting fix is for the local path to stop contributing and let
 		// everything come from agent rows, which is where this is heading. Until
 		// then, exactly one of the two must feed the totals.
-		if ra.local {
-			continue
-		}
 		engines := ra.byRole("hoard")
 		if len(engines) == 0 {
 			continue

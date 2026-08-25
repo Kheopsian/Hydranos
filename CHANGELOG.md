@@ -3,6 +3,19 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.135.2 - 2026-08-25
+
+### Fixed
+- **The double counting was only half fixed in 3.135.1.** That release excluded
+  this node from the hoard row collector, but three more places combine the
+  local contribution with the agent list the same way, so the race engine still
+  reported 28 torrents for 14. `agentsSnapshot` now excludes this node by
+  default -- which is what all twelve of its callers were written to assume --
+  and the two views that present agents by name ask for the full list
+  explicitly.
+
+**Do not run v3.135.0 or v3.135.1.**
+
 ## v3.135.1 - 2026-08-25
 
 ### Fixed
