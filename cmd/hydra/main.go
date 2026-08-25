@@ -1040,7 +1040,7 @@ func main() {
 	// things. Since its engines became agents they are not, and the asymmetry
 	// showed: a settings change reached every remote node in seconds while this
 	// one waited for a restart, with nothing saying the fleet was split.
-	localAgentSrv.SetConfigManager(newLocalConfigManager(
+	localCfgMgr := newLocalConfigManager(
 		&localEngineSlot{
 			id: agentwire.EngineRace, role: "race", isRace: true,
 			dataDir: raceDataDir, socket: raceSocketPath,
@@ -1051,7 +1051,8 @@ func main() {
 			dataDir: hoardDataDir, socket: hoardSocketPath,
 			cfg: hoardCfg, ref: hoardRef, proc: hoardProc,
 		},
-	))
+	)
+	localAgentSrv.SetConfigManager(localCfgMgr)
 	localAgentSrv.DeclareEngines([]agentwire.EngineDescriptor{
 		{ID: agentwire.EngineRace, Role: "race"},
 		{ID: agentwire.EngineHoard, Role: "hoard"},
@@ -1224,7 +1225,14 @@ func main() {
 	// 2026-07-09 gap where the race engine OOM'd to 85GB and stayed dead 3h with
 	// no alert. Limits: race 24GiB (~12x its ~2GB normal), hoard 48GiB (~2x its
 	// ~24GB) on a 125GB box.
-	engine.StartEngineWatchdog(ctx, healthNtfy.Send, cfg.Daemon.DataDir, raceProc, hoardProc, 24<<30, 48<<30)
+	// Resolvers, not the processes themselves: a config change replaces them in
+	// place, and a captured pointer had the watchdog polling a pid that died on
+	// purpose -- it then restarted the daemon and undid the reload that had just
+	// succeeded.
+	engine.StartEngineWatchdogFunc(ctx, healthNtfy.Send, cfg.Daemon.DataDir,
+		func() *engine.EngineProcess { return localCfgMgr.ProcFor(agentwire.EngineRace) },
+		func() *engine.EngineProcess { return localCfgMgr.ProcFor(agentwire.EngineHoard) },
+		24<<30, 48<<30)
 
 	go func() {
 		if err := apiServer.Run(); err != nil {
