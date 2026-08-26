@@ -2576,15 +2576,18 @@ function _showCtxMenu(x, y) {
 // _applyCtxGroups decides which groups the current selection can act on.
 function _applyCtxGroups() {
     // The Agent group only exists when there is somewhere to send a torrent.
-    // On a single-node install it is not greyed out, it is absent: an action
+    // On a single-engine install it is not greyed out, it is absent: an action
     // that can never apply is noise in a menu this size.
-    // Filtered on kind, not on the name "local". Since 3.136.0 this node is
-    // one agent per engine (local-race, local-hoard, local-<id>), so a name
-    // test would have offered them here as if they were other machines --
-    // and a move to "another node" that is in fact this one is not a move.
-    // Intra-node moves are a real feature, but they are not this menu.
-    const remotes = _ctxAgents.filter(a => a.name && a.kind !== "local");
-    const showAgent = remotes.length > 0;
+    //
+    // "Somewhere" now includes this machine's other engines. One agent is one
+    // engine, so sending a torrent from local-hoard to local-vpn7 is a real
+    // move -- it changes which tunnel that torrent seeds through -- and it was
+    // the whole point of adding engines. This used to filter on kind and hid
+    // the group entirely on a node with no remote agent, which is every node
+    // that runs several engines and nothing else.
+    const sources = new Set([..._selected.values()].map(v => _selAgent(v)));
+    const showAgent = _ctxAgents.some(a =>
+        a.name && !(sources.size === 1 && sources.has(a.name)));
     const agentGrp = document.getElementById("ctx-grp-agent");
     const agentSep = document.getElementById("ctx-sep-agent");
     if (agentGrp) agentGrp.style.display = showAgent ? "" : "none";
@@ -2625,12 +2628,19 @@ async function _showAgentPicker(ev, mode) {
     await _refreshCtxAgents();
 
     const sources = new Set([..._selected.values()].map(v => _selAgent(v)));
-    // "local" is a legitimate destination too: a torrent can come back from an
-    // agent. Only the node it already sits on is excluded, and only when the
-    // whole selection agrees on one source.
+    // An engine of this machine is a legitimate destination too: a torrent can
+    // come back from an agent, or move between two local engines to leave by
+    // another tunnel. Only the agent it already sits on is excluded, and only
+    // when the whole selection agrees on one source.
+    //
+    // Duplicating onto this machine is refused, not offered and then rejected:
+    // two local engines share a filesystem, so a "copy" would be the same files
+    // twice -- two writers on the same bytes the first time either repairs a
+    // piece. The daemon refuses it as well; this only keeps the menu honest.
     const targets = _ctxAgents
         .filter(a => a.name)
-        .filter(a => !(sources.size === 1 && sources.has(a.name)));
+        .filter(a => !(sources.size === 1 && sources.has(a.name)))
+        .filter(a => !(mode === "duplicate" && a.kind === "local" && [...sources].every(_isLocalAgent)));
 
     const esc = s => String(s).replace(/[&<>"\']/g, ch =>
         ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\'":"&#39;"}[ch]));
@@ -2642,7 +2652,11 @@ async function _showAgentPicker(ev, mode) {
         items = targets.map(a => {
             const jsName = String(a.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
             const off = a.online === false ? ` <span class="sr-desc">(${t("offline")})</span>` : "";
-            return `<div class="ctx-item" onclick="_sendToAgentSelected(\'${jsName}\', \'${mode}\')">${esc(a.name)}${off}</div>`;
+            // Say which ones cost nothing: between two engines of this machine
+            // the payload never moves, the torrent changes hands where it lies.
+            const here = a.kind === "local" && [...sources].every(_isLocalAgent)
+                ? ` <span class="sr-desc">(${t("here, no copy")})</span>` : "";
+            return `<div class="ctx-item" onclick="_sendToAgentSelected(\'${jsName}\', \'${mode}\')">${esc(a.name)}${off}${here}</div>`;
         }).join("");
     }
     const verb = mode === "move" ? t("Move to agent") : t("Duplicate to agent");
