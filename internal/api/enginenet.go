@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -121,10 +122,11 @@ func (s *Server) measureEngineNet(ctx context.Context) {
 		b := engine.ApplyAnnounceEgress(
 			engine.DefaultSingleBinding(r.Port, sess.EnableIPv6, r.Role, 0),
 			sess.AnnounceProxy, sess.AnnounceIP, sess.Socks5OutboundHost, r.Iface, r.Role)[0]
+		exitErr := ""
 		if ip, aErr := engine.AnnounceEgressIP(ctx, b, ""); aErr == nil {
 			r.ExitIP = ip
 		} else {
-			r.Detail = "exit address unknown: " + aErr.Error()
+			exitErr = "exit address unknown: " + aErr.Error()
 		}
 		if sess.EnableIPv6 {
 			if ip6, aErr := engine.AnnounceEgressIP(ctx, b, echoURLv6); aErr == nil {
@@ -138,7 +140,10 @@ func (s *Server) measureEngineNet(ctx context.Context) {
 		switch r.Engine {
 		case agentwire.EngineRace, agentwire.EngineHoard:
 			st := reachabilityOf(r.Role)
-			r.Detail = st.Detail
+			// The address failure is kept in front of the reachability detail,
+			// never overwritten by it: an engine whose exit could not be
+			// measured is the more urgent of the two things to say.
+			r.Detail = joinDetail(exitErr, st.Detail)
 			switch st.State {
 			case "reachable":
 				r.State = "ok"
@@ -149,9 +154,7 @@ func (s *Server) measureEngineNet(ctx context.Context) {
 			}
 		default:
 			r.State = "warn"
-			if r.Detail == "" {
-				r.Detail = "no reachability probe for extra engines yet"
-			}
+			r.Detail = joinDetail(exitErr, "no reachability probe for extra engines yet")
 		}
 	}
 	// Agents on other machines, as they already report themselves: one exit
@@ -175,6 +178,26 @@ func (s *Server) measureEngineNet(ctx context.Context) {
 		}
 	}
 	setEngineNet(rows)
+}
+
+// measuredAtUnix reports 0 for "never", not the year 1 in seconds -- which is
+// what a zero time marshals to, and what a client would render as a date.
+func measuredAtUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// joinDetail puts the more urgent sentence first and drops the empty ones.
+func joinDetail(parts ...string) string {
+	out := parts[:0]
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, " · ")
 }
 
 // agentNodeInfo asks one agent for its exit address, tolerating a node that is
@@ -258,6 +281,6 @@ func (s *Server) handleEngineNet(c *gin.Context) {
 		"engines":     rows,
 		"exits":       exits,
 		"exit_ip_v6":  v6,
-		"measured_at": at.Unix(),
+		"measured_at": measuredAtUnix(at),
 	})
 }
