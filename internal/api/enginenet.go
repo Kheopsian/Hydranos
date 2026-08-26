@@ -51,6 +51,11 @@ type engineNet struct {
 // so this is a background timer and never a per-request measurement.
 const engineNetInterval = 3 * time.Minute
 
+// engineNetAttempt bounds ONE measurement. Two attempts per family per engine,
+// so the whole pass stays well inside its own budget however many engines a
+// node runs.
+const engineNetAttempt = 6 * time.Second
+
 var (
 	engineNetMu   sync.RWMutex
 	engineNetRows []engineNet
@@ -233,17 +238,26 @@ func joinDetail(parts ...string) string {
 // name through its own tunnel, several of them within the same second, and a
 // resolver behind a VPN drops one of those often enough that a single attempt
 // reports "unknown" for an engine that is working perfectly.
-func measureExit(ctx context.Context, b engine.Binding, echoURL string) (string, error) {
-	ip, err := engine.AnnounceEgressIP(ctx, b, echoURL)
+func measureExit(parent context.Context, b engine.Binding, echoURL string) (string, error) {
+	// A deadline per ATTEMPT, not one shared by the whole pass. With a single
+	// budget the first engine to sit on a dead IPv6 route spent it all and the
+	// engines after it were reported unmeasured -- the measurement starving the
+	// thing it was measuring.
+	try := func() (string, error) {
+		ctx, cancel := context.WithTimeout(parent, engineNetAttempt)
+		defer cancel()
+		return engine.AnnounceEgressIP(ctx, b, echoURL)
+	}
+	ip, err := try()
 	if err == nil {
 		return ip, nil
 	}
 	select {
-	case <-ctx.Done():
+	case <-parent.Done():
 		return "", err
 	case <-time.After(700 * time.Millisecond):
 	}
-	return engine.AnnounceEgressIP(ctx, b, echoURL)
+	return try()
 }
 
 // agentNodeInfo asks one agent for its exit address, tolerating a node that is
@@ -270,7 +284,7 @@ func (s *Server) StartEngineNetProbe() {
 	go func() {
 		time.Sleep(20 * time.Second)
 		for {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			s.measureEngineNet(ctx)
 			cancel()
 			time.Sleep(engineNetInterval)
@@ -292,7 +306,7 @@ func (s *Server) handleEngineNet(c *gin.Context) {
 	// click that asked for it is a header button.
 	if c.Query("refresh") != "" {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
 			s.measureEngineNet(ctx)
 		}()
