@@ -488,7 +488,7 @@
   "Save failed: {msg}": "Échec de l'enregistrement : {msg}",
   "Save settings": "Enregistrer les réglages",
   "Save this mode": "Enregistrer ce mode",
-  "Saved. The engines need a restart to pick it up.": "Enregistré. Les moteurs doivent redémarrer pour le prendre en compte.",
+  "Saved. The engines need a restart to pick up the new listen port.": "Enregistré. Les moteurs doivent redémarrer pour prendre le nouveau port d'écoute.",
   "Scope of this check": "Portée de cette vérification",
   "Scrape": "Scrape",
   "Search a setting…": "Rechercher un réglage…",
@@ -750,5 +750,10 @@
   "Starting...": "Démarrage...",
   "Starting the engine, this takes a few seconds...": "Démarrage du moteur, cela prend quelques secondes...",
   "Engine {id} is running, as agent {agent}.": "Le moteur {id} tourne, sous l'agent {agent}.",
-  "Stopping engine {id}...": "Arrêt du moteur {id}..."
+  "Stopping engine {id}...": "Arrêt du moteur {id}...",
+  "Give the engines different tunnels to spread them across several exit addresses, or the same one to keep them together. Leave them empty on a host with no VPN.": "Donner aux moteurs des tunnels différents pour les répartir sur plusieurs adresses de sortie, ou le même pour les garder ensemble. Les laisser vides sur un hôte sans VPN.",
+  "Saved and applied, no restart needed.": "Enregistré et appliqué, pas de redémarrage.",
+  "{id} listen port": "Port d'écoute de {id}",
+  "Port this engine accepts peers on. It has to differ from every other engine's.": "Port sur lequel ce moteur accepte les pairs. Il doit différer de celui de tous les autres moteurs.",
+  "{id} engine interface ({role})": "Interface du moteur {id} ({role})"
 }

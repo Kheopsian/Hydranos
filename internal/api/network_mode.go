@@ -81,6 +81,21 @@ type netModeResponse struct {
 	Fields   netModeFields `json:"fields"`
 	Env      []envOverride `json:"env_overrides"`
 	Warnings []string      `json:"warnings"`
+	// Extras are this node's engines beyond the two primaries, each with its
+	// own interface and port. The page used to show exactly two rows, so an
+	// engine added from the Agents menu had nowhere to be configured: it was
+	// handed a copy of its role's primary and could never leave it. One tunnel
+	// per engine was the whole point of the per-engine interface, and it
+	// stopped at the second engine.
+	Extras []extraEngineNet `json:"extra_engines"`
+}
+
+// extraEngineNet is one non-primary engine's network row.
+type extraEngineNet struct {
+	ID            string `json:"id"`
+	Role          string `json:"role"`
+	BindInterface string `json:"bind_interface"`
+	ListenPort    int    `json:"listen_port"`
 }
 
 func sectionOf(m map[string]interface{}, name string) map[string]interface{} {
@@ -324,7 +339,8 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 	if tomlStr(race, "socks5_outbound_host") != tomlStr(hoard, "socks5_outbound_host") {
 		warn = append(warn, "The two engines have different SOCKS5 hosts in the config file. Saving here sets both to the same value.")
 	}
-	c.JSON(http.StatusOK, netModeResponse{Mode: mode, Fields: f, Env: env, Warnings: warn})
+	c.JSON(http.StatusOK, netModeResponse{Mode: mode, Fields: f, Env: env, Warnings: warn,
+		Extras: s.extraEngineRows()})
 }
 
 // netFieldsFromTOML reads the whole page out of the config, once.
@@ -592,29 +608,104 @@ func applyEgressToSession(mode string, f netModeFields, role string, sc *config.
 	}
 }
 
-// syncExtraEnginesEgress carries this page's decision to every extra engine.
-// A shard follows its ROLE: a race shard leaves by whatever the race engine
-// leaves by. Giving a shard a tunnel of its own is a bigger feature; silently
-// leaving it on last month's tunnel is a bug, and that is what this fixes.
-func (s *Server) syncExtraEnginesEgress(mode string, f netModeFields) (int, error) {
-	dataDir := s.config.Daemon.DataDir
-	extras, err := config.LoadExtraEngines(dataDir)
-	if err != nil || len(extras) == 0 {
-		return 0, err
+// listenPortsChanged reports whether this save moves any engine's listen port.
+//
+// It decides the restart banner. A listen port is the one setting a running
+// engine keeps across a config apply -- it belongs to the agent, which is why
+// the push zeroes it on the way out -- so it is also the only one on this page
+// that still needs a restart. Everything else reaches the engines within
+// seconds, and a banner that appears anyway teaches people to restart for
+// changes that were already live, at the cost of every peer connection.
+func (s *Server) listenPortsChanged(data []byte, f netModeFields, extras []extraEngineNet) bool {
+	m, err := config.ParseTOMLMap(data)
+	if err != nil {
+		return true // cannot tell: say the safe thing
 	}
-	for i := range extras {
-		applyEgressToSession(mode, f, extras[i].Role, &extras[i].SessionConfig)
+	race, hoard := sectionOf(m, "race"), sectionOf(m, "hoard")
+	if tomlInt(race, "listen_port") != f.RaceListenPort || tomlInt(hoard, "listen_port") != f.HoardListenPort {
+		return true
 	}
-	if err := config.SaveExtraEngines(dataDir, extras); err != nil {
-		return 0, err
+	if tomlBool(race, "enable_ipv6") != f.EnableIPv6 || tomlBool(hoard, "enable_ipv6") != f.EnableIPv6 {
+		return true
 	}
-	return len(extras), nil
+	if s.engineHost == nil {
+		return len(extras) > 0
+	}
+	running := map[string]int{}
+	for _, e := range s.engineHost.Engines() {
+		running[e.ID] = e.ListenPort
+	}
+	for _, r := range extras {
+		if have, ok := running[strings.TrimSpace(r.ID)]; ok && r.ListenPort > 0 && have != r.ListenPort {
+			return true
+		}
+	}
+	return false
+}
+
+// extraEngineRows lists this node's non-primary engines for the page.
+//
+// From what RUNS when there is an engine host, because that is the question the
+// page answers -- "what is each engine doing" -- and a config file cannot
+// answer it for an engine that failed to start.
+func (s *Server) extraEngineRows() []extraEngineNet {
+	if s.engineHost == nil {
+		return []extraEngineNet{}
+	}
+	live := s.engineHost.Engines()
+	out := make([]extraEngineNet, 0, len(live))
+	for _, e := range live {
+		out = append(out, extraEngineNet{ID: e.ID, Role: e.Role,
+			BindInterface: e.BindInterface, ListenPort: e.ListenPort})
+	}
+	return out
+}
+
+// writeExtraEngineNet records each extra engine's own network keys in its
+// [[agent]] entry.
+//
+// Only its OWN keys. Everything shared -- the proxy, the gluetun URL, the
+// announce settings -- is inherited from the [race]/[hoard] profile at compose
+// time, so there is nothing to copy and nothing to keep in step. This replaces
+// a sync that copied the primary's whole egress onto every shard on each save,
+// which is what made a shard's own tunnel impossible to express.
+func (s *Server) writeExtraEngineNet(mode string, rows []extraEngineNet) (int, error) {
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	n := 0
+	for _, r := range rows {
+		id := strings.TrimSpace(r.ID)
+		if id == "" {
+			continue
+		}
+		iface := strings.TrimSpace(r.BindInterface)
+		// Outside direct mode the interface is not the lever -- the tunnel is
+		// the proxy or the gluetun container -- so a value left over from a
+		// previous mode is cleared rather than silently kept, exactly as
+		// netModeKeys does for the primaries.
+		if mode != netModeDirect {
+			iface = ""
+		}
+		kv := [][2]string{{"session.bind_interface", strconv.Quote(iface)}}
+		if r.ListenPort > 0 {
+			kv = append(kv, [2]string{"session.listen_port", strconv.Itoa(r.ListenPort)})
+		}
+		if err := s.editConfigFile(func(doc string) (string, error) {
+			return config.SetTOMLArrayTable(doc, "agent", "name", LocalAgentNameFor(id), kv)
+		}); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 func (s *Server) handleNetworkModePost(c *gin.Context) {
 	var req struct {
-		Mode   string        `json:"mode"`
-		Fields netModeFields `json:"fields"`
+		Mode   string           `json:"mode"`
+		Fields netModeFields    `json:"fields"`
+		Extras []extraEngineNet `json:"extra_engines"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -642,6 +733,9 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "this node declares its engines with [[engine]] blocks, which replace [race] and [hoard]: saving here would write keys the daemon never reads. Edit the [[engine]] blocks instead."})
 		return
 	}
+	// Measured against the file BEFORE it is rewritten: afterwards every value
+	// on disk is the one just submitted and nothing has changed by definition.
+	portsChanged := s.listenPortsChanged(data, req.Fields, req.Extras)
 	doc := string(data)
 	for _, e := range []struct {
 		section     string
@@ -679,13 +773,18 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 	// The extra engines are written AFTER the TOML is safely in place: if this
 	// fails the primaries are already correct, and the shards are reported as
 	// stale rather than the whole save being rolled back into an unknown state.
-	synced, serr := s.syncExtraEnginesEgress(req.Mode, req.Fields)
+	synced, serr := s.writeExtraEngineNet(req.Mode, req.Extras)
 	if serr != nil {
 		warnings = append(warnings, "The extra engines could not be updated ("+serr.Error()+"), so they keep their previous network settings. Until that is fixed they may announce from a different address than the one shown here.")
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"mode":                  req.Mode,
-		"restart_required":      true,
+		"mode": req.Mode,
+		// A listen port is the one thing a running engine keeps across a config
+		// apply -- it belongs to the agent, which is why the push zeroes it --
+		// so only a port change still needs a restart. Everything else on this
+		// page reaches the engines through the push, and claiming otherwise
+		// trained people to restart for changes that were already live.
+		"restart_required":      portsChanged,
 		"agents_notified":       s.pushConfigToAgentsAsync(),
 		"extra_engines_updated": synced,
 		"warnings":              warnings,
@@ -907,43 +1006,42 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"mode": mode, "results": results})
 }
 
-// addExtraEngineChecks measures every UI-managed extra engine and compares it
-// with the primary of its role, which is the address the page displays.
+// addExtraEngineChecks measures every extra engine's announce path.
+//
+// It reads the RUNNING engines and composes what each one is configured with,
+// rather than a sidecar file. The drift check that used to lead this section is
+// gone with the thing it detected: an extra engine no longer holds a copy of
+// its role's egress that can fall out of step, it inherits the profile at
+// compose time. What is left is the measurement, which is the part a config
+// file cannot answer.
 func (s *Server) addExtraEngineChecks(ctx context.Context, echo string,
 	race, hoard map[string]interface{}, add func(id, label, status, detail string)) {
 
-	extras, err := config.LoadExtraEngines(s.config.Daemon.DataDir)
-	if err != nil {
-		add("extra_engines", "Extra engines", "warn", "could not be read ("+err.Error()+"), so their network settings are unverified")
+	if s.engineHost == nil {
 		return
 	}
-	if len(extras) == 0 {
+	live := s.engineHost.Engines()
+	if len(live) == 0 {
 		return
 	}
-	for _, e := range extras {
-		sec := hoard
-		if e.Role == "race" {
-			sec = race
-		}
-		label := "Extra engine " + e.ID + " (" + e.Role + ")"
-		// The config drift is worth naming on its own, before any measurement:
-		// it is the thing that goes wrong silently, and it is readable without
-		// touching the network.
-		if want := tomlStr(sec, "bind_interface"); want != e.BindInterface {
-			add("extra_drift_"+e.ID, label, "fail",
-				"leaves by "+quoteOrDefaultRoute(e.BindInterface)+" while the "+e.Role+
-					" engine leaves by "+quoteOrDefaultRoute(want)+
-					". Save the network settings again to bring it back in step")
-		}
-		b := engine.ApplyAnnounceEgress(
-			engine.DefaultSingleBinding(e.ListenPort, e.EnableIPv6, e.Role, 0),
-			e.AnnounceProxy, e.AnnounceIP, e.Socks5OutboundHost, e.BindInterface, e.Role)[0]
-		ip, aerr := engine.AnnounceEgressIP(ctx, b, echo)
-		if aerr != nil {
-			add("extra_announce_"+e.ID, label, "fail", "announce path: "+aerr.Error())
+	cfg := s.liveConfig()
+	for _, r := range live {
+		label := "Extra engine " + r.ID + " (" + r.Role + ")"
+		sess, cerr := cfg.ComposeSession(LocalAgentNameFor(r.ID), r.ID, r.Role)
+		if cerr != nil {
+			add("extra_announce_"+r.ID, label, "warn",
+				"its configuration could not be composed ("+cerr.Error()+"), so its announce path is unverified")
 			continue
 		}
-		add("extra_announce_"+e.ID, label, "ok", "announces from "+ip)
+		b := engine.ApplyAnnounceEgress(
+			engine.DefaultSingleBinding(r.ListenPort, sess.EnableIPv6, r.Role, 0),
+			sess.AnnounceProxy, sess.AnnounceIP, sess.Socks5OutboundHost, r.BindInterface, r.Role)[0]
+		ip, aerr := engine.AnnounceEgressIP(ctx, b, echo)
+		if aerr != nil {
+			add("extra_announce_"+r.ID, label, "fail", "announce path: "+aerr.Error())
+			continue
+		}
+		add("extra_announce_"+r.ID, label, "ok", "announces from "+ip+" via "+quoteOrDefaultRoute(r.BindInterface))
 	}
 }
 

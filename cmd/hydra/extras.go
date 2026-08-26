@@ -50,15 +50,14 @@ func startExtraEngines(ctx context.Context, cfg *config.HydraConfig, engineCfgs 
 //
 // It does NOT publish the engine anywhere -- that is the manager's job -- so a
 // failure part-way through leaves nothing half-registered for callers to find.
-func startOneExtraEngine(ctx context.Context, cfg *config.HydraConfig, ec config.EngineConfig,
-	raceGate func(string) bool) (*liveEngine, error) {
+func startOneExtraEngine(ctx context.Context, cfg *config.HydraConfig, ec config.EngineConfig) (*liveEngine, error) {
 
 	uploadsDir := filepath.Join(cfg.Daemon.DataDir, "uploads")
-	eDir := filepath.Join(cfg.Daemon.DataDir, ec.ID)
+	eDir := engineDirFor(cfg, ec.ID)
 	if err := os.MkdirAll(eDir, 0755); err != nil {
 		return nil, fmt.Errorf("engine dir: %w", err)
 	}
-	sock := filepath.Join(cfg.Daemon.DataDir, ec.ID+".sock")
+	sock := engineSocketFor(cfg, ec.ID)
 	le := &liveEngine{id: ec.ID, role: ec.Role, cfg: ec.SessionConfig}
 	proc, perr := engine.StartSessionEngine(&le.cfg, eDir, sock, ec.Role == "race")
 	if perr != nil {
@@ -99,19 +98,6 @@ func startOneExtraEngine(ctx context.Context, cfg *config.HydraConfig, ec config
 		return nil, serr
 	}
 
-	ann := engine.NewHoardAnnouncer(le.ref, engine.ApplyAnnounceEgress(
-		engine.DefaultSingleBinding(le.cfg.ListenPort, le.cfg.EnableIPv6, "hoard", le.cfg.AnnounceRateLimit),
-		le.cfg.AnnounceProxy, le.cfg.AnnounceIP, le.cfg.Socks5OutboundHost, le.cfg.BindInterface, "hoard"))
-	if le.hoard != nil {
-		ann.OnObservation = le.hoard.ObserveAnnounce
-		le.hoard.SetBootstrapAnnounce(ann.BootstrapAnnounce)
-		le.hoard.SetReAnnounce(ann.ReAnnounce)
-		ann.SetRaceGate(raceGate)
-		ann.SetOffsetFn(le.hoard.AnnounceOffset)
-	}
-	ann.Start(ctx)
-	le.ann = ann
-
 	if le.store != nil {
 		var imp, errs int
 		if le.race != nil {
@@ -123,6 +109,18 @@ func startOneExtraEngine(ctx context.Context, cfg *config.HydraConfig, ec config
 	}
 	slog.Info("extra engine: started", "id", ec.ID, "role", ec.Role, "port", le.cfg.ListenPort)
 	return le, nil
+}
+
+// engineDirFor and engineSocketFor are where an engine's own state lives. Both
+// a first start and a restart on new settings have to land on the same paths,
+// or a reloaded engine would come back with an empty resume directory and its
+// torrents would be gone.
+func engineDirFor(cfg *config.HydraConfig, id string) string {
+	return filepath.Join(cfg.Daemon.DataDir, id)
+}
+
+func engineSocketFor(cfg *config.HydraConfig, id string) string {
+	return filepath.Join(cfg.Daemon.DataDir, id+".sock")
 }
 
 // stop tears one extra engine down, in the order that keeps the swarm honest:

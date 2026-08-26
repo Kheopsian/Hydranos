@@ -60,5 +60,11 @@
  "Starting...": "Starten...",
  "Starting the engine, this takes a few seconds...": "Engine wordt gestart, dit duurt enkele seconden...",
  "Engine {id} is running, as agent {agent}.": "Engine {id} draait, als agent {agent}.",
- "Stopping engine {id}...": "Engine {id} wordt gestopt..."
+ "Stopping engine {id}...": "Engine {id} wordt gestopt...",
+ "Give the engines different tunnels to spread them across several exit addresses, or the same one to keep them together. Leave them empty on a host with no VPN.": "Geef de engines verschillende tunnels om ze over meerdere uitgaande adressen te spreiden, of dezelfde om ze samen te houden. Laat ze leeg op een host zonder VPN.",
+ "Saved. The engines need a restart to pick up the new listen port.": "Opgeslagen. De engines moeten herstarten om de nieuwe luisterpoort over te nemen.",
+ "Saved and applied, no restart needed.": "Opgeslagen en toegepast, geen herstart nodig.",
+ "{id} listen port": "Luisterpoort van {id}",
+ "Port this engine accepts peers on. It has to differ from every other engine's.": "Poort waarop deze engine peers accepteert. Die moet verschillen van die van elke andere engine.",
+ "{id} engine interface ({role})": "Interface van engine {id} ({role})"
 }

@@ -6733,9 +6733,23 @@ function _netCheckbox(id, label, checked, hint) {
 }
 
 function _netPortsHTML(f) {
+    let extras = "";
+    for (const e of _netExtras()) {
+        extras += _netField("net-extra-port-" + e.id, t("{id} listen port", { id: e.id }), "number", e.listen_port,
+            t("Port this engine accepts peers on. It has to differ from every other engine's."));
+    }
     return _netField("net-race-port", "Race listen port", "number", f.race_listen_port, "Port the race engine accepts peers on.")
          + _netField("net-hoard-port", "Hoard listen port", "number", f.hoard_listen_port, "Port the hoard engine accepts peers on. It has to differ from the race one.")
+         + extras
          + _netCheckbox("net-ipv6", "Listen over IPv6 too", f.enable_ipv6, "Only if this host really has working IPv6. Announcing an address nobody can reach costs you peers.");
+}
+
+// _netExtras are this node's engines beyond the two primaries. The page showed
+// exactly two rows, so an engine added from the Agents menu had nowhere to be
+// configured: it ran on a copy of its role's primary and could never be given a
+// tunnel of its own, which was the whole point of a per-engine interface.
+function _netExtras() {
+    return (_netState && _netState.extra_engines) || [];
 }
 
 function _netSocksHTML(f) {
@@ -6798,7 +6812,9 @@ function netModeRender() {
         fields += `<div class="settings-section"><div class="settings-section-title">${t("Interface per engine")}</div>
             ${_netSelect("net-race-iface", "Race engine interface", f.race_bind_interface, list, hint)}
             ${_netSelect("net-hoard-iface", "Hoard engine interface", f.hoard_bind_interface, list, hint)}
-            <p class="sr-desc">${t("Give the two engines different tunnels to spread them across two exit addresses, or the same one to keep them together. Leave both empty on a host with no VPN.")}</p>
+            ${_netExtras().map(e => _netSelect("net-extra-iface-" + e.id,
+                t("{id} engine interface ({role})", { id: e.id, role: e.role }), e.bind_interface, list, hint)).join("")}
+            <p class="sr-desc">${t("Give the engines different tunnels to spread them across several exit addresses, or the same one to keep them together. Leave them empty on a host with no VPN.")}</p>
         </div>`;
     }
     if (mode === "gluetun") {
@@ -6875,23 +6891,47 @@ function netModeCollect() {
     };
 }
 
+// netModeCollectExtras reads the per-engine rows back. Absent inputs mean the
+// mode does not show them, so the engine keeps what it has rather than being
+// silently blanked by a save made from another mode.
+function netModeCollectExtras() {
+    return _netExtras().map(function (e) {
+        const iface = document.getElementById("net-extra-iface-" + e.id);
+        const port = document.getElementById("net-extra-port-" + e.id);
+        return {
+            id: e.id,
+            role: e.role,
+            bind_interface: iface ? iface.value.trim() : (e.bind_interface || ""),
+            listen_port: port ? Number(port.value || 0) : (e.listen_port || 0),
+        };
+    });
+}
+
 async function netModeSave() {
     const out = document.getElementById("net-mode-result");
     const fields = netModeCollect();
     if (!fields) return;
     _netState.fields = fields;
+    const extra_engines = netModeCollectExtras();
+    _netState.extra_engines = extra_engines;
     try {
         const r = await api("/api/network/mode", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ mode: _netState.mode, fields }),
+            body: JSON.stringify({ mode: _netState.mode, fields, extra_engines }),
         });
         let extra = "";
         for (const w of (r.warnings || [])) extra += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
-        // Same banner as every other tab, so the restart is always announced in
-        // the same place whichever panel wrote the setting.
         _netOrig = JSON.stringify({ mode: _netState.mode, fields: fields });
-        _setRestartBanner(t("Saved. The engines need a restart to pick it up.") +
-            ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`);
+        // Only a listen port still needs a restart -- it is the one setting a
+        // running engine keeps across a config apply. Everything else on this
+        // page reaches the engines in seconds, and a banner shown anyway taught
+        // people to restart for changes that were already live.
+        if (r.restart_required) {
+            _setRestartBanner(t("Saved. The engines need a restart to pick up the new listen port.") +
+                ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`);
+        } else {
+            extra = `<div class="result-msg success" style="margin:.3em 0">${esc(t("Saved and applied, no restart needed."))}</div>` + extra;
+        }
         out.innerHTML = extra;
     } catch (e) {
         out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;

@@ -33,7 +33,7 @@ type EngineConfig struct {
 // A role is required. Without it an [[agent]] entry that simply forgot its addr
 // would be started as an engine here, which is a remote node quietly turned
 // into a local one.
-func (c *HydraConfig) localAgentEngines() []EngineConfig {
+func (c *HydraConfig) localAgentEngines() ([]EngineConfig, error) {
 	var out []EngineConfig
 	for i := range c.Agents {
 		ag := &c.Agents[i]
@@ -44,9 +44,44 @@ func (c *HydraConfig) localAgentEngines() []EngineConfig {
 		if id == "" {
 			id = strings.TrimSpace(ag.Name)
 		}
-		out = append(out, EngineConfig{ID: id, Role: ag.Role, SessionConfig: ag.Session})
+		sess, err := c.LocalEngineSession(ag)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: %w", ag.Name, err)
+		}
+		out = append(out, EngineConfig{ID: id, Role: ag.Role, SessionConfig: sess})
 	}
-	return out
+	return out, nil
+}
+
+// LocalEngineSession builds what one locally-hosted [[agent]] entry actually
+// runs: the fleet profile for its role, with the entry's own session keys
+// merged over it.
+//
+// The merge is the point. The entry holds what is TRUE OF THIS ENGINE -- its
+// port, its interface -- and nothing else; everything shared comes from
+// [race]/[hoard], which is where a change to it is made once. Taking the
+// entry's session verbatim, as this did, meant a three-key entry ran with every
+// other field at its zero value: no connection limit, no peer timeout, a
+// configuration nobody wrote and no page displays.
+//
+// Same merge as a remote agent's [[agent.engine]] override, deliberately: a
+// local engine and a remote one differ in where they run, not in how they are
+// configured.
+func (c *HydraConfig) LocalEngineSession(ag *AgentConfig) (SessionConfig, error) {
+	profile, err := c.ProfileForRole(ag.Role)
+	if err != nil {
+		return SessionConfig{}, err
+	}
+	if ag.Role != "race" {
+		profile.CustomChoking = nil
+	}
+	if ag.Role != "hoard" {
+		profile.DiskSlots = nil
+	}
+	if len(ag.Session) == 0 {
+		return profile, nil
+	}
+	return applySessionOverride(profile, ag.Session)
 }
 
 // ResolveEngines is the single source of truth for the engines a process runs.
@@ -64,7 +99,11 @@ func (c *HydraConfig) ResolveEngines() ([]EngineConfig, error) {
 			{ID: "hoard", Role: "hoard", SessionConfig: c.Hoard},
 		}
 	}
-	for _, le := range c.localAgentEngines() {
+	locals, lerr := c.localAgentEngines()
+	if lerr != nil {
+		return nil, lerr
+	}
+	for _, le := range locals {
 		replaced := false
 		for i := range engines {
 			if engines[i].ID == le.ID {

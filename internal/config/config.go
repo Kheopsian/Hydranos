@@ -294,9 +294,14 @@ type AgentConfig struct {
 	// the shape the config is converging on -- one [[agent]] array for every
 	// node, local or remote -- and they are ignored on an entry that has an
 	// addr, where the engine's settings live on the far side.
-	Role     string        `toml:"role"`
-	EngineID string        `toml:"engine_id"`
-	Session  SessionConfig `toml:"session"`
+	Role     string `toml:"role"`
+	EngineID string `toml:"engine_id"`
+	// Session is a SPARSE override of the role profile, not a whole config.
+	// Kept as a raw map for the same reason EngineOverrides is: decoded into a
+	// SessionConfig, "absent" and "written as zero" become the same thing, and
+	// an entry carrying three keys would run with max_connections = 0 and
+	// peer_timeout = 0 -- a config nobody wrote and nothing reports.
+	Session map[string]interface{} `toml:"session"`
 	// EngineOverrides are sparse per-engine exceptions to the [race]/[hoard]
 	// fleet profile, written as [[agent.engine]] blocks keyed by engine id.
 	// Kept as raw maps rather than a typed SessionConfig so "absent" and "set
