@@ -76,24 +76,25 @@ func saveAgentStore(dataDir string, m map[string]agentStore) error {
 // agentsSnapshot returns the REMOTE agents only, copied under RLock so
 // iterating callers never race a runtime add/remove.
 //
-// Excluding this node's own agent is the safe default, and it is deliberate.
-// Every one of the dozen callers was written when "local" was not an agent, so
-// each one that wants the local contribution already adds it separately.
-// Registering the local engines (3.135.0) made this function return them too,
-// and every such caller started counting them twice: /api/status reported
-// 396592 torrents for 198296 rows, and the race listing doubled as well. It was
-// fixed at one collector first, which was whack-a-mole -- three more sites had
-// exactly the same shape.
+// What it excludes is exactly the two agents whose torrents are ALREADY in
+// every aggregate: local-race and local-hoard, which the list handlers, the
+// counters and the timeline read straight from raceEngine/hoardEngine. Include
+// them and everything they hold is counted twice -- 3.135.0 shipped that and
+// /api/status reported 396592 torrents for the 198296 the database held.
 //
-// So the default is what every existing caller already assumes, and the two
-// places that genuinely want this node in the list ask for it by name.
+// Every OTHER engine of this node is in no aggregate at all: nothing reads it
+// directly, so excluding it here made its torrents invisible everywhere --
+// absent from the lists, uncounted in the totals, unreachable by a per-torrent
+// action. Handing a torrent to such an engine looked exactly like losing it.
+// So they are collected here, like the agents they are.
 func (s *Server) agentsSnapshot() []*remoteAgent {
 	all := s.allAgentsSnapshot()
 	out := all[:0]
 	for _, ra := range all {
-		if !ra.local {
-			out = append(out, ra)
+		if ra.local && isPrimaryLocalAgent(ra.name) {
+			continue
 		}
+		out = append(out, ra)
 	}
 	return out
 }
