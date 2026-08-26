@@ -3,6 +3,32 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.149.0 - 2026-08-26
+
+### Added
+- **The header shows one polygon, one vertex per engine.** Two labelled dots
+  said "Race" and "Hoard" because a node was those two engines; an engine added
+  from the Agents page had no dot at all. The shape grows instead: a point, a
+  segment, a triangle, an octagon. The ring joining the vertices is deliberately
+  neutral -- a coloured edge would suggest a link between engines that does not
+  exist -- so only the vertices carry state. Clicking it opens a panel that
+  grows out of the polygon, with each engine's interface, port and exit address.
+- **Each engine's exit address is measured through its own binding**, the way
+  the Network tab's check measures it. `getPublicIP()` asks an echo service from
+  the process, so it reports the DEFAULT ROUTE: give three engines three tunnels
+  and the header, and every Exit IP line on the Agents page, showed the same
+  address for all of them -- and an engine leaking outside its tunnel looked
+  exactly like one inside it.
+- The header prints an address only when there is ONE. Several engines behind
+  several tunnels have several exits; naming one of them would name an address
+  most of the traffic does not leave by. It says how many instead, and the panel
+  lists them.
+
+### Note
+- An extra engine has no reachability probe of its own yet, so its vertex stays
+  amber with "no reachability probe for extra engines yet" rather than claiming
+  a green nobody measured.
+
 ## v3.148.1 - 2026-08-26
 
 ### Fixed

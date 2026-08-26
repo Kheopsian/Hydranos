@@ -51,11 +51,10 @@ async function fetchPortForward() {
         }
 
         if (dot) dot.className = "health-dot " + cls;
-        _paintHealthDot("health-dot-race", d.race_reach, d.race_port, d.race_peers, warnings, "Race");
-        _paintHealthDot("health-dot-hoard", d.hoard_reach, d.hoard_port, d.hoard_peers, warnings, "Hoard");
-
         _ipv6Wanted = !!d.ipv6_wanted;
-        _renderHeaderIP(d.public_ip, d.public_ip_v6);
+        // The header address is written by the per-engine measurement now (see
+        // updateNetPoly). This one is the whole process's default route, which
+        // is not any engine's exit as soon as one is bound to a tunnel.
     } catch {}
 }
 
@@ -94,6 +93,10 @@ function _renderHeaderIP(v4, v6) {
     el.title = m.title;
 }
 
+// Filled by updateNetPoly (below). Declared here because fetchPublicIp, which
+// runs first, has to know whether the per-engine measurement owns the header.
+let _netEngines = [];
+
 let ipScrambleTimer = null;
 // Slot-machine scramble on the exit-IP text while a manual refresh is in flight.
 function startIpScramble(el) {
@@ -123,7 +126,10 @@ async function fetchPublicIp(force) {
         const d = await api("/api/public-ip" + (force ? "?refresh=1" : ""));
         if (d.ip && d.ip !== "unknown") {
             if (force) stopIpScramble();
-            _renderHeaderIP(d.ip, d.ip_v6);
+            // This is the PROCESS's exit -- its default route -- which is not
+            // any engine's as soon as one is bound to a tunnel. It only writes
+            // the header while the per-engine measurement has nothing to say.
+            if (!_netEngines.some(e => e.exit_ip)) _renderHeaderIP(d.ip, d.ip_v6);
             ipUpdated = true;
             // Leak detection: any IP that is NOT our home WAN means we're
             // properly behind a tunnel. Avoids hardcoding takehost IPs which
@@ -145,6 +151,11 @@ async function fetchPublicIp(force) {
             stopIpScramble();
             if (rbtn) rbtn.classList.remove("spin");
             if (!ipUpdated && hdrScr) hdrScr.textContent = prevHdr;
+            // A manual refresh means "measure again", which for the engines
+            // happens on the node: ask for it, then read the result once it has
+            // had time to land rather than holding the click open for it.
+            try { await api("/api/network/engines?refresh=1"); } catch (_) {}
+            setTimeout(updateNetPoly, 4000);
         }
     }
 }
@@ -4923,6 +4934,10 @@ function _startNormalPolling() {
     poll();
     // Front-only drops the header stat, and with it the reason to ask a
     // controller for an egress address it never announces from.
+    if (document.getElementById("net-poly")) {
+        updateNetPoly();
+        setInterval(updateNetPoly, 30 * 1000);
+    }
     if (document.getElementById("header-exit-ip")) {
         fetchPublicIp();
         setInterval(fetchPublicIp, 2 * 60 * 1000);
@@ -7240,3 +7255,115 @@ window.addEventListener("DOMContentLoaded", () => {
     if (_agentPollTimer) clearInterval(_agentPollTimer);
     _agentPollTimer = setInterval(_pollAgentRows, AGENT_POLL_INTERVAL);
 });
+
+
+// ── The engines' network: one polygon, one vertex per engine ────────────────
+//
+// Two labelled dots said "Race" and "Hoard" because a node was those two
+// engines. It is now one agent per engine, each with its own interface and its
+// own exit address, so the shape has to grow: N vertices on a circle, joined by
+// a neutral ring. The ring is deliberately neutral -- an edge coloured like a
+// link would suggest the engines talk to each other, and they do not.
+const NET_STATE_COLOR = { ok: "#3ddc84", warn: "#f5a524", bad: "#f2555a", off: "#4a5568" };
+
+function _netPolyMarkup(engines, size) {
+    const n = engines.length;
+    if (!n) return "";
+    const r = size / 2 - 4, cx = size / 2, cy = size / 2;
+    const pts = engines.map((e, i) => {
+        // First vertex at the top, so the same fleet always draws the same way.
+        const a = -Math.PI / 2 + i * 2 * Math.PI / n;
+        return n === 1 ? [cx, cy] : [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+    });
+    const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ") + (n > 2 ? " Z" : "");
+    const ring = n > 1 ? `<path class="np-edge" d="${d}"/>` : "";
+    const rr = n <= 3 ? 4.6 : (n <= 6 ? 4 : 3.4);
+    const dots = pts.map((p, i) => {
+        const e = engines[i];
+        const cls = e.state === "warn" ? "np-node np-warn" : "np-node";
+        return `<g class="${cls}"><title>${esc(e.agent + " — " + _netStateWord(e.state))}</title>` +
+            `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${rr}" fill="${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}"/></g>`;
+    }).join("");
+    return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${ring}${dots}</svg>`;
+}
+
+function _netStateWord(s) {
+    return s === "ok" ? t("reachable")
+        : s === "bad" ? t("unreachable")
+        : s === "off" ? t("offline")
+        : t("not established yet");
+}
+
+async function updateNetPoly() {
+    const el = document.getElementById("net-poly");
+    if (!el) return;
+    let d;
+    try { d = await api("/api/network/engines"); } catch (e) { return; }
+    _netEngines = (d && d.engines) || [];
+    if (!_netEngines.length) return;
+    el.innerHTML = _netPolyMarkup(_netEngines, 30);
+    const worst = _netEngines.some(e => e.state === "bad") ? "bad"
+        : _netEngines.some(e => e.state === "off") ? "off"
+        : _netEngines.some(e => e.state === "warn") ? "warn" : "ok";
+    el.title = tp(_netEngines.length, "{n} engine", "{n} engines", { n: _netEngines.length })
+        + " — " + _netStateWord(worst);
+
+    // The address only when there is ONE. Several engines behind several
+    // tunnels have several exits, and printing one of them would name an
+    // address most of the traffic does not leave by.
+    const exits = (d && d.exits) || [];
+    if (exits.length === 1) {
+        _renderHeaderIP(exits[0], d.exit_ip_v6 || "");
+    } else if (exits.length > 1) {
+        const hdr = document.getElementById("header-exit-ip");
+        if (hdr) {
+            hdr.textContent = tp(exits.length, "{n} exit", "{n} exits", { n: exits.length });
+            hdr.title = exits.join("\n");
+        }
+    }
+}
+
+// The panel grows out of the polygon: same object, one opening it, the other
+// being it. transform-origin is the polygon's centre expressed in the panel's
+// own box, so the animation starts exactly where the click landed.
+function openNetPanel(from) {
+    const panel = document.getElementById("net-panel");
+    const scrim = document.getElementById("net-panel-scrim");
+    if (!panel || !from) return;
+    const rows = document.getElementById("net-panel-rows");
+    rows.innerHTML = _netEngines.map(e => {
+        const where = e.bind_interface
+            ? `<span class="nr-iface">${esc(e.bind_interface)}</span>`
+            : t("default route");
+        const port = e.listen_port ? " · " + t("port {port}", { port: e.listen_port }) : "";
+        const ip = e.exit_ip ? esc(incoExitIP(e.exit_ip)) : "\u2014";
+        const ip6 = e.exit_ip_v6 ? "<br>" + esc(incoExitIP(e.exit_ip_v6)) : "";
+        return `<div class="net-row">
+            <div class="nr-dot" style="background:${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}"></div>
+            <div><div class="nr-name">${esc(e.agent)}</div>
+                 <div class="nr-sub">${esc(e.role)} · ${where}${port}${e.detail ? " · " + esc(e.detail) : ""}</div></div>
+            <div class="nr-ip">${ip}${ip6}</div>
+        </div>`;
+    }).join("") || `<div class="net-row"><div></div><div class="nr-sub">${t("No engine measured yet")}</div><div></div></div>`;
+
+    const r = from.getBoundingClientRect();
+    panel.style.visibility = "hidden";
+    panel.classList.add("open");
+    const h = panel.offsetHeight, w = panel.offsetWidth;
+    panel.classList.remove("open");
+    panel.style.visibility = "";
+    const top = Math.min(r.bottom + 10, window.innerHeight - h - 12);
+    const left = Math.min(Math.max(12, r.right - w), window.innerWidth - w - 12);
+    panel.style.top = top + "px";
+    panel.style.left = left + "px";
+    panel.style.transformOrigin = `${(r.left + r.width / 2 - left).toFixed(0)}px ${(r.top + r.height / 2 - top).toFixed(0)}px`;
+    requestAnimationFrame(() => { panel.classList.add("open"); scrim.classList.add("open"); });
+}
+
+function closeNetPanel() {
+    const panel = document.getElementById("net-panel");
+    const scrim = document.getElementById("net-panel-scrim");
+    if (panel) panel.classList.remove("open");
+    if (scrim) scrim.classList.remove("open");
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeNetPanel(); });

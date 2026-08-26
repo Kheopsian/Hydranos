@@ -746,6 +746,7 @@ func (s *Server) registerHydraRoutes() {
 		api.GET("/network/mode", s.handleNetworkModeGet)
 		api.POST("/network/mode", s.handleNetworkModePost)
 		api.POST("/network/check", s.handleNetworkCheck)
+		api.GET("/network/engines", s.handleEngineNet)
 
 		// System
 		api.GET("/public-ip", s.handlePublicIP)
