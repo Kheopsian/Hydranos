@@ -3,6 +3,14 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.150.2 - 2026-08-26
+
+### Fixed
+- The network panel was see-through. It took `--bg-secondary`, which is 75%
+  opaque because the cards that use it sit on a quiet background; this one opens
+  over the torrent table and lists addresses, and the rows underneath came
+  straight through the text.
+
 ## v3.150.1 - 2026-08-26
 
 ### Fixed
