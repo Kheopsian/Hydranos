@@ -1151,15 +1151,15 @@ func main() {
 		jobMgr.Register(&jobs.RemoteMoveRunner{
 			DialSource: func(p jobs.RemoteMoveParams) (jobs.PieceSource, error) {
 				if isLocal(p.SourceAgent) {
-					return localFor(p.Engine, p.Category), nil
+					return localFor(p.SourceEngineID(), p.Category), nil
 				}
-				return apiServer.RemoteAgentEngineClient(p.SourceAgent, p.Engine)
+				return apiServer.RemoteAgentEngineClient(p.SourceAgent, p.SourceEngineID())
 			},
 			DialSink: func(p jobs.RemoteMoveParams) (jobs.PieceSink, error) {
 				if isLocal(p.TargetAgent) {
-					return localFor(p.Engine, p.Category), nil
+					return localFor(p.TargetEngineID(), p.Category), nil
 				}
-				return apiServer.RemoteAgentEngineClient(p.TargetAgent, p.Engine)
+				return apiServer.RemoteAgentEngineClient(p.TargetAgent, p.TargetEngineID())
 			},
 			ResolveSavePath: apiServer.CategorySavePathFor,
 			// Both ends on disk before the job reports success. The primaries
@@ -1179,7 +1179,7 @@ func main() {
 					}
 					return hoardEngine.SetCategoryLabel(infoHash, p.Category)
 				}
-				cl, err := apiServer.RemoteAgentEngineClient(p.TargetAgent, p.Engine)
+				cl, err := apiServer.RemoteAgentEngineClient(p.TargetAgent, p.TargetEngineID())
 				if err != nil {
 					return err
 				}

@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.147.4 - 2026-08-26
+
+### Fixed
+- **A move named one engine for both ends.** That was true while a move meant
+  "the same engine on another machine"; handing a torrent from `local-hoard` to
+  `local-vpn7` asks for a different engine on each side, and the single field
+  sent whichever was resolved first to both -- `agent "local-hoard" has no
+  engine "movetest"`, after the job had been accepted. Each end names its own
+  engine now, and a job written by an older version still reads.
+
 ## v3.147.3 - 2026-08-26
 
 ### Fixed
