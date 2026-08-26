@@ -4016,6 +4016,16 @@ func (s *Server) setCategoryOnAgentWithMove(c *gin.Context, ra *remoteAgent, cl 
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
+	// The loose layout, refused here exactly as it is for this node's own
+	// engines: the payload sits directly in the category directory, so the
+	// content root IS that directory and moving it moves every other torrent in
+	// the category with it. The agent cannot see this -- categories live here --
+	// so the check has to be made against the paths this side knows for it.
+	if why := s.looseInCategoryDir(ra.name, plan.Source); why != "" {
+		c.JSON(http.StatusConflict, gin.H{"error": why, "reason": "loose_layout",
+			"agent": ra.name, "source": plan.Source})
+		return
+	}
 	if plan.Blocked != "" {
 		body := gin.H{"error": plan.Blocked, "agent": ra.name,
 			"source": plan.Source, "target": plan.Target}
@@ -4071,4 +4081,29 @@ func (s *Server) setCategoryOnAgentWithMove(c *gin.Context, ra *remoteAgent, cl 
 		"source": plan.Source, "target": plan.Target,
 		"total_bytes": plan.TotalBytes, "same_fs": plan.SameFilesystem,
 	})
+}
+
+// looseInCategoryDir reports why a payload cannot be moved when its content
+// root IS a category directory on that agent, or "" when it can.
+//
+// Measured against the paths THAT agent uses -- its per-category mapping, or
+// the plain save path when the agent is an engine of this machine. Comparing
+// with our own paths would clear a Windows agent every time and refuse nothing.
+func (s *Server) looseInCategoryDir(agent, source string) string {
+	src := filepath.Clean(source)
+	for _, cat := range loadCategories(s.config.Daemon.DataDir) {
+		dir := cat.SavePath
+		if !isLocalAgentName(agent) {
+			dir = cat.Agents[agent]
+		}
+		if dir == "" {
+			continue
+		}
+		if filepath.Clean(dir) == src {
+			return "this torrent has no folder of its own on " + agent +
+				": its data sits loose in the category directory " + dir +
+				", so moving it would move every other torrent in that category with it"
+		}
+	}
+	return ""
 }
