@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.148.1 - 2026-08-26
+
+### Fixed
+- **A move on an agent could move a whole category.** When a payload sits loose
+  in the category directory, its content root IS that directory, so relocating
+  it takes every other torrent in the category along. This node's own engines
+  have refused that for a while; the agent path did not, because only this side
+  knows what a category directory is over there. Measured on staging, where a
+  category change moved the entire `movies` folder into `series`.
+
 ## v3.148.0 - 2026-08-26
 
 ### Added
