@@ -3,6 +3,17 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.147.2 - 2026-08-26
+
+### Fixed
+- **A move was only durable five minutes later.** Each engine writes its torrent
+  set to its database on a timer, and nothing flushed either end when a move
+  finished: a restart inside that window brought the torrent back on the source,
+  which still had a row saying it held it, and lost it on the target, which had
+  none -- two engines pointing at one set of files, the exact outcome the
+  handoff ordering exists to prevent. Both ends are now written before the job
+  reports success. Found by restarting staging a minute after a handoff.
+
 ## v3.147.1 - 2026-08-26
 
 ### Fixed
