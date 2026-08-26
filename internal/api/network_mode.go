@@ -680,11 +680,12 @@ func (s *Server) writeExtraEngineNet(mode string, rows []extraEngineNet) (int, e
 			continue
 		}
 		iface := strings.TrimSpace(r.BindInterface)
-		// Outside direct mode the interface is not the lever -- the tunnel is
-		// the proxy or the gluetun container -- so a value left over from a
-		// previous mode is cleared rather than silently kept, exactly as
-		// netModeKeys does for the primaries.
-		if mode != netModeDirect {
+		// The same rule netModeKeys applies to the primaries, deliberately
+		// written as the same condition: direct and gluetun both carry a
+		// per-engine binding, the proxy modes blank it because there the egress
+		// decision is the proxy's and a leftover interface would pin the hop
+		// that reaches it to a tunnel nobody believes is in play.
+		if mode != netModeDirect && mode != netModeGluetun {
 			iface = ""
 		}
 		kv := [][2]string{{"session.bind_interface", strconv.Quote(iface)}}
