@@ -128,6 +128,27 @@ func (l *localAgentClient) SetAnnounceOverride(p agentwire.AnnounceOverrideParam
 	return l.agent.SetAnnounceOverride(p)
 }
 func (l *localAgentClient) DiskFree(path string) (int64, error) { return l.agent.DiskFree(path) }
+
+// The move verbs go through this process's own agent server, like every other
+// cold call. That is what makes an engine of this machine behave exactly like
+// one on another: the same code plans it, moves it and reports it.
+func (l *localAgentClient) MovePlan(engineID, infoHash, targetDir string) (agentwire.MovePlan, error) {
+	if engineID == "" {
+		engineID = l.id
+	}
+	return l.agent.MovePlan(engineID, infoHash, targetDir)
+}
+
+func (l *localAgentClient) MovePayload(p agentwire.MovePayloadParams) (agentwire.MoveStatus, error) {
+	if p.Engine == "" {
+		p.Engine = l.id
+	}
+	return l.agent.MovePayload(p)
+}
+
+func (l *localAgentClient) MoveStatus(infoHash string) (agentwire.MoveStatus, error) {
+	return l.agent.MoveStatus(infoHash)
+}
 func (l *localAgentClient) TrackerSnapshot() ([]agentwire.TrackerStatWire, error) {
 	return l.agent.TrackerSnapshot()
 }

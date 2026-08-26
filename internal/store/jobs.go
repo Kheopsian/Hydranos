@@ -44,6 +44,12 @@ const JobTypeMoveData = "move_data"
 // a remote one from the destination's bitfield.
 const JobTypeMoveDataRemote = "move_data_remote"
 
+// JobTypeMoveDataAgent relocates a payload ON the node that holds it, driven
+// from here. Separate from JobTypeMoveData because this side owns no files: it
+// starts the move over the wire and follows it, and every failure it can report
+// is somebody else's filesystem.
+const JobTypeMoveDataAgent = "move_data_agent"
+
 // Job is one unit of durable background work.
 type Job struct {
 	ID       string

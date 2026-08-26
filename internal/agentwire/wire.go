@@ -81,8 +81,15 @@ const (
 	MethodTrackerSnapshot      = "tracker_snapshot"       // node-level: per-host announce aggregate
 	MethodFetchMetadata        = "fetch_metadata"         // magnet: start resolving an info dict from the swarm
 	MethodGetMetadata          = "get_metadata"           // magnet: poll a resolution started by fetch_metadata
-	MethodApplyConfig          = "apply_config"           // node-level: the front pushes this node's whole composed config
-	MethodGetConfigState       = "get_config_state"       // node-level: which config revision the node is running, and how each engine took it
+	// Relocating a payload ON the node that holds it. The front owns the job
+	// and the decision; only the node that can see the files can plan or move
+	// them, which is why a category change never moved an agent's data before
+	// these existed -- it measured that node's paths against this one's.
+	MethodMovePlan       = "move_plan"        // what a move would involve: same filesystem, room, hardlinks
+	MethodMovePayload    = "move_payload"     // start one, in the background, and return its id
+	MethodMoveStatus     = "move_status"      // how far that move got
+	MethodApplyConfig    = "apply_config"     // node-level: the front pushes this node's whole composed config
+	MethodGetConfigState = "get_config_state" // node-level: which config revision the node is running, and how each engine took it
 )
 
 // FetchMetadataParams starts a magnet resolution on the agent's own engine.
@@ -259,6 +266,61 @@ type ActionRoutedParams struct {
 	DeleteFiles bool   `json:"delete_files,omitempty"`
 	Category    string `json:"category,omitempty"`
 	SavePath    string `json:"save_path,omitempty"`
+}
+
+// MovePlanParams asks what relocating a torrent's payload to a directory would
+// involve, on the node that holds it.
+type MovePlanParams struct {
+	Engine   string `json:"engine,omitempty"`
+	InfoHash string `json:"info_hash"`
+	// TargetDir is the category's save path AS THAT NODE SEES IT. The front
+	// never invents it: it comes from the category's per-agent mapping, because
+	// a path typed for one host means nothing on another.
+	TargetDir string `json:"target_dir"`
+}
+
+// MovePlan is the reply: what the node found, in its own filesystem.
+type MovePlan struct {
+	Source          string   `json:"source"`
+	Target          string   `json:"target"`
+	TotalBytes      int64    `json:"total_bytes"`
+	FreeBytes       int64    `json:"free_bytes"`
+	SameFilesystem  bool     `json:"same_filesystem"`
+	HardlinkedFiles int      `json:"hardlinked_files"`
+	HardlinkedBytes int64    `json:"hardlinked_bytes"`
+	HardlinkExample []string `json:"hardlink_examples,omitempty"`
+	// Blocked is the refusal in the node's own words, empty when it would go
+	// ahead. Reported rather than turned into an error so the front can show
+	// the reason and offer the one answer that unblocks it.
+	Blocked string `json:"blocked,omitempty"`
+	// NothingToDo is true when the payload is already where it was asked to be.
+	NothingToDo bool `json:"nothing_to_do,omitempty"`
+}
+
+// MovePayloadParams starts the move the plan described.
+type MovePayloadParams struct {
+	Engine                 string `json:"engine,omitempty"`
+	InfoHash               string `json:"info_hash"`
+	TargetDir              string `json:"target_dir"`
+	Category               string `json:"category,omitempty"`
+	AllowBreakingHardlinks bool   `json:"allow_breaking_hardlinks,omitempty"`
+	BytesPerSecond         int64  `json:"bytes_per_second,omitempty"`
+}
+
+// MoveStatusParams polls one.
+type MoveStatusParams struct {
+	InfoHash string `json:"info_hash"`
+}
+
+// MoveStatus is how far a move got. A move outlives the call that started it --
+// hours, for a cross-filesystem copy -- so it is polled rather than awaited.
+type MoveStatus struct {
+	Running  bool   `json:"running"`
+	Done     int64  `json:"done"`
+	Total    int64  `json:"total"`
+	Finished bool   `json:"finished"`
+	Error    string `json:"error,omitempty"`
+	Target   string `json:"target,omitempty"`
 }
 
 // NICInfo is one host network interface (non-loopback IPv4).

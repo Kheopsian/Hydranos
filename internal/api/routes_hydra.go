@@ -25,6 +25,7 @@ import (
 	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
+	"github.com/Kheopsian/hydra/internal/jobs"
 	"github.com/Kheopsian/hydra/internal/store"
 	"github.com/Kheopsian/hydra/internal/tagstore"
 	"github.com/gin-gonic/gin"
@@ -1709,16 +1710,13 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 		return
 	}
 
-	// A torrent living on an agent is not ours to relocate. Everything below
-	// drives the LOCAL engine and resolves the category's LOCAL save_path, so
-	// running it for a remote torrent compares that node's path against ours
-	// and reports a cross-filesystem move nobody asked for -- which is exactly
-	// what a plain category change produced: an agent's Windows path measured
-	// against a local one, refused over hardlinks that were never involved.
-	//
-	// Relabel it where it lives instead. Moving its payload between nodes is a
-	// separate, explicit action (Move to agent), never a side effect of naming
-	// a category.
+	// A torrent living on an agent is relabelled -- and, when asked, MOVED --
+	// where it lives. Everything below this block drives the local engine and
+	// resolves the category's LOCAL save path, so running it for a torrent on
+	// another node compared that node's paths with ours and refused a
+	// cross-filesystem move nobody had asked for. Until 3.148.0 the answer was
+	// to relabel and move nothing, which left the payload in the old category's
+	// directory on that node, silently and forever.
 	if ra, engineID, ok := s.findRemoteOwner(hash); ok && ra != nil {
 		cl := ra.anyClient()
 		for _, e := range ra.byRole("hoard") {
@@ -1728,6 +1726,10 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 		}
 		if cl == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "agent " + ra.name + " is not reachable"})
+			return
+		}
+		if body.MoveFiles {
+			s.setCategoryOnAgentWithMove(c, ra, cl, engineID, hash, body.Category, body.AllowBreakingHardlinks)
 			return
 		}
 		if err := cl.SetCategoryLabel(engineID, hash, body.Category); err != nil {
@@ -3988,4 +3990,85 @@ func (s *Server) handleAgentTorrents(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// setCategoryOnAgentWithMove relabels a torrent on the node holding it AND
+// relocates its payload there, which is what the same action does for this
+// node's own engines.
+//
+// The destination is the category's path FOR THAT AGENT: a path typed for one
+// host means nothing on another, which is why an agent with no mapping is an
+// error and never a fallback to ours.
+func (s *Server) setCategoryOnAgentWithMove(c *gin.Context, ra *remoteAgent, cl AgentClient,
+	engineID, hash, category string, allowBreakingHardlinks bool) {
+
+	if s.jobs == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "background jobs are not running on this node"})
+		return
+	}
+	targetDir, err := s.CategorySavePathFor(ra.name, category)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	plan, err := cl.MovePlan(engineID, hash, targetDir)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if plan.Blocked != "" {
+		body := gin.H{"error": plan.Blocked, "agent": ra.name,
+			"source": plan.Source, "target": plan.Target}
+		status := http.StatusConflict
+		switch {
+		case strings.Contains(plan.Blocked, "hardlink"):
+			body["reason"] = "hardlinks"
+			body["hardlinked_files"] = plan.HardlinkedFiles
+			body["hardlinked_bytes"] = plan.HardlinkedBytes
+			body["hardlink_examples"] = plan.HardlinkExample
+			body["retry_with"] = "allow_breaking_hardlinks"
+		case strings.Contains(plan.Blocked, "already exists"):
+			body["reason"] = "target_exists"
+		case strings.Contains(plan.Blocked, "space") || strings.Contains(plan.Blocked, "free"):
+			body["reason"] = "no_space"
+			body["needed_bytes"] = plan.TotalBytes
+			body["free_bytes"] = plan.FreeBytes
+			status = http.StatusInsufficientStorage
+		}
+		// A refusal the operator can answer, in the node's own words: only that
+		// node can see the files it is talking about.
+		if !allowBreakingHardlinks || body["reason"] != "hardlinks" {
+			c.JSON(status, body)
+			return
+		}
+	}
+	if plan.NothingToDo {
+		if lErr := cl.SetCategoryLabel(engineID, hash, category); lErr != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": lErr.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "info_hash": hash,
+			"category": category, "agent": ra.name, "moved": false})
+		return
+	}
+
+	job, err := s.jobs.Submit(store.JobTypeMoveDataAgent, hash, jobs.AgentMoveParams{
+		Agent:                  ra.name,
+		Engine:                 engineID,
+		TargetDir:              targetDir,
+		Category:               category,
+		Name:                   s.torrentName(hash),
+		AllowBreakingHardlinks: allowBreakingHardlinks,
+		BytesPerSecond:         s.config.Daemon.MoveBytesPerSecond(),
+	})
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"status": "moving", "job_id": job.ID, "info_hash": hash,
+		"category": category, "agent": ra.name,
+		"source": plan.Source, "target": plan.Target,
+		"total_bytes": plan.TotalBytes, "same_fs": plan.SameFilesystem,
+	})
 }

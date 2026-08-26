@@ -1148,6 +1148,17 @@ func main() {
 			}
 			return le
 		}
+		// Moving a payload that lives on another node -- or on another engine of
+		// this one. The node does the work; this side starts it and follows it.
+		jobMgr.Register(&jobs.AgentMoveRunner{
+			Dial: func(agent, engine string) (jobs.AgentMover, error) {
+				cl, err := apiServer.RemoteAgentEngineClient(agent, engine)
+				if err != nil {
+					return nil, err
+				}
+				return cl, nil
+			},
+		})
 		jobMgr.Register(&jobs.RemoteMoveRunner{
 			DialSource: func(p jobs.RemoteMoveParams) (jobs.PieceSource, error) {
 				if isLocal(p.SourceAgent) {

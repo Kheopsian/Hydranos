@@ -84,6 +84,11 @@ type Server struct {
 	rich map[string]engine.RichEngine
 
 	ipv6Wanted bool // enable_ipv6 on any engine here; set at boot
+
+	// moves tracks payload relocations running on this node (agentmove.go).
+	// They outlive the call that starts them: a cross-filesystem copy runs for
+	// hours, so the front polls instead of waiting.
+	moves moveTracker
 }
 
 // NewServer builds an agent over the given named EngineClients (e.g.
@@ -679,6 +684,29 @@ func (s *Server) Call(ctx context.Context, req *agentpb.CallRequest) (*agentpb.C
 			return reply(nil, wErr)
 		}
 		return reply(map[string]int{"piece": p.Piece}, nil)
+
+	case agentwire.MethodMovePlan:
+		var p agentwire.MovePlanParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		plan, mErr := s.handleMovePlan(p)
+		return reply(plan, mErr)
+
+	case agentwire.MethodMovePayload:
+		var p agentwire.MovePayloadParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		st, mErr := s.handleMovePayload(p)
+		return reply(st, mErr)
+
+	case agentwire.MethodMoveStatus:
+		var p agentwire.MoveStatusParams
+		if err := unmarshal(&p); err != nil {
+			return nil, badParams(err)
+		}
+		return reply(s.handleMoveStatus(p), nil)
 
 	case agentwire.MethodSetSavePath:
 		var p agentwire.SetSavePathParams
