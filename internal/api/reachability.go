@@ -179,15 +179,17 @@ func (s *Server) reachTargets() []reachTarget {
 	}
 	var out []reachTarget
 	add := func(key, id, role string, port int, inbound func() (int64, error), sample func() string) {
-		sess, err := cfg.ComposeSession(LocalAgentNameFor(id), id, role)
-		if err != nil {
+		// The RESOLVED engine, not a composed push: the composer zeroes the
+		// keys that belong to the node, and this probe is the node.
+		ec, ok := resolvedEngine(cfg, id)
+		if !ok {
 			return
 		}
 		out = append(out, reachTarget{
 			Name: key, Port: port, PublicIP: exitOf(LocalAgentNameFor(id)),
-			Iface:     sess.BindInterface,
-			SocksHost: sess.Socks5OutboundHost, SocksPort: sess.Socks5OutboundPort,
-			SocksUser: sess.Socks5OutboundUser, SocksPass: sess.Socks5OutboundPass,
+			Iface:     ec.BindInterface,
+			SocksHost: ec.Socks5OutboundHost, SocksPort: ec.Socks5OutboundPort,
+			SocksUser: ec.Socks5OutboundUser, SocksPass: ec.Socks5OutboundPass,
 			Inbound: inbound, Sample: sample,
 		})
 	}
