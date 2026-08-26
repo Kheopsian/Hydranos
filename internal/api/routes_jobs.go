@@ -462,6 +462,13 @@ func (s *Server) torrentName(infoHash string) string {
 // engineOfAgent names the engine an agent hosts, when it hosts exactly one --
 // which is every agent since one agent became one engine. Empty for the bare
 // "local" alias, which pins no engine, and for an agent hosting several.
+//
+// The ID, not the role. Both reach the client, which matches on id first and
+// falls back to role -- but the routed calls on the far side resolve by ID
+// alone, so a role got as far as the agent and was refused there: "engine
+// \"hoard\" not wired". That is how a handed-over torrent arrived with no
+// category, which then made it unmovable, since the destination path of a move
+// comes from the category.
 func (s *Server) engineOfAgent(name string) string {
 	if name == "" || name == LocalAgentName {
 		return ""
@@ -475,5 +482,5 @@ func (s *Server) engineOfAgent(name string) string {
 	if len(ra.engines) != 1 {
 		return ""
 	}
-	return ra.engines[0].role
+	return ra.engines[0].id
 }
