@@ -1375,8 +1375,8 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
     let files, avail;
     try {
         const params = new URLSearchParams();
-        if (agent && agent !== "local") params.set("agent", agent);
-        if (mode && agent && agent !== "local") params.set("mode", mode);
+        if (agent && !_isLocalAgent(agent)) params.set("agent", agent);
+        if (mode && agent && !_isLocalAgent(agent)) params.set("mode", mode);
         const q = params.toString() ? `?${params.toString()}` : "";
         const d = await api(`/api/torrents/${infoHash}/files${q}`);
         files = d.files || [];
@@ -1815,7 +1815,7 @@ function displayRatio(d) {
 async function refreshDetail() {
     if (!selectedTorrent) return;
     try {
-        const q = selectedTorrentAgent && selectedTorrentAgent !== "local"
+        const q = selectedTorrentAgent && !_isLocalAgent(selectedTorrentAgent)
             ? `?agent=${encodeURIComponent(selectedTorrentAgent)}` : "";
         const d = await api(`/api/race/torrents/${selectedTorrent}${q}`);
 
@@ -2327,11 +2327,21 @@ function closeHoardDetail() {
 const _selected = new Map();
 
 function _selMode(v) { return (v && v.mode !== undefined) ? v.mode : v; }
+// _isLocalAgent mirrors isLocalAgentName on the server: this node answers to
+// the bare "local" and to every "local-" name. The list rows carry their real
+// agent since 3.146.0 -- local-race, local-hoard, local-<id> -- and every place
+// that used to compare against the literal "local" would otherwise treat its
+// own torrents as somebody else's: live stats skipped, removals ignored, a
+// per-row action dialled at an agent that was never registered.
+function _isLocalAgent(name) {
+    if (!name) return true;
+    return name === "local" || name.indexOf("local-") === 0;
+}
 function _selAgent(v) { return (v && v.agent) ? v.agent : "local"; }
 function _selHash(v) { return (v && v.hash) ? v.hash : v; }
 
 // Key of a selection entry: the row, never the hash on its own.
-function _selKeyOf(hash, agent) { return (agent || "local") + "|" + hash; }
+function _selKeyOf(hash, agent) { return _agentKey(agent) + "|" + hash; }
 function _rowSelKey(row) { return _selKeyOf(row.dataset.hash, row.dataset.agent); }
 function _selEntry(row) {
     return { hash: row.dataset.hash, mode: row.dataset.mode, agent: row.dataset.agent || "local" };
@@ -2955,7 +2965,7 @@ async function _reannounceSelected() {
     for (const [, sel] of entries) {
         const hash = _selHash(sel);
         try {
-            if (_selAgent(sel) !== "local") {
+            if (!_isLocalAgent(_selAgent(sel))) {
                 await _agentAction(_selAgent(sel), _selMode(sel), "reannounce", hash);
                 continue;
             }
@@ -3076,7 +3086,7 @@ async function _pauseSelected(paused) {
         const hash = _selHash(sel);
         const mode = _selMode(sel);
         const agent = _selAgent(sel);
-        if (agent !== "local") { remote.push({ hash, mode, agent }); continue; }
+        if (!_isLocalAgent(agent)) { remote.push({ hash, mode, agent }); continue; }
         (byEngine[mode] || byEngine.hoard).push(hash);
     }
     // The bulk endpoint below is this node's own; an agent's copy would
@@ -3126,7 +3136,7 @@ async function _recheckSelected() {
         if (mode !== "hoard") continue;
         const agent = _selAgent(sel);
         try {
-            if (agent !== "local") {
+            if (!_isLocalAgent(agent)) {
                 await _agentAction(agent, mode, "verify", hash);
                 continue;
             }
@@ -3167,7 +3177,7 @@ async function _removeSelected(deleteFiles) {
 async function refreshHoardDetail() {
     if (!selectedHoardTorrent) return;
     try {
-        const q = selectedHoardTorrentAgent && selectedHoardTorrentAgent !== "local"
+        const q = selectedHoardTorrentAgent && !_isLocalAgent(selectedHoardTorrentAgent)
             ? `?agent=${encodeURIComponent(selectedHoardTorrentAgent)}` : "";
         const d = await api(`/api/hoard/torrents/${selectedHoardTorrent}${q}`);
 
@@ -4961,7 +4971,13 @@ let _hydMap = null; // persistent upsert map during a hydration stream (avoids O
 // A row is identified by node AND hash. The same torrent on two nodes is two
 // rows, which is the whole point of duplicating one; keyed by hash alone the
 // second simply replaced the first.
-function _rowKey(t) { return (t.agent || "local") + "|" + t.info_hash; }
+function _rowKey(t) { return _agentKey(t.agent) + "|" + t.info_hash; }
+
+// _agentKey folds every name this node answers to onto one key. Hydration rows
+// carry "local-hoard" while a live torrent_added frame carries nothing: keyed
+// literally, the same torrent would appear twice in the table, once per frame
+// that mentioned it.
+function _agentKey(name) { return _isLocalAgent(name) ? "local" : name; }
 
 function setupHoardSSE() {
     if (_sseConn) return;
@@ -5073,7 +5089,7 @@ function setupHoardSSE() {
         }
         if (type === "torrent_added" && data.info_hash) {
             if (_hoardAllTorrents && !_hoardAllTorrents.some(
-                    t => t.info_hash === data.info_hash && (t.agent || "local") === "local")) {
+                    t => t.info_hash === data.info_hash && _isLocalAgent(t.agent))) {
                 _hoardAllTorrents.unshift(data); // newest first; dynamic fields fill via stats_snapshot
                 _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
                 _scheduleHoardRender();
@@ -5087,7 +5103,7 @@ function setupHoardSSE() {
                 const row = _hoardAllTorrents[i];
                 // Local-engine stats: an agent's copy of the same hash keeps its
                 // own figures, which arrive with the next hydration.
-                if ((row.agent || "local") !== "local") continue;
+                if (!_isLocalAgent(row.agent)) continue;
                 byHash.set(row.info_hash, row);
             }
             let touched = 0;
@@ -5110,7 +5126,7 @@ function setupHoardSSE() {
         } else if (type === "torrent_removed" && data.info_hash) {
             if (_hoardAllTorrents) {
                 _hoardAllTorrents = _hoardAllTorrents.filter(
-                    t => !(t.info_hash === data.info_hash && (t.agent || "local") === "local"));
+                    t => !(t.info_hash === data.info_hash && _isLocalAgent(t.agent)));
                 _scheduleHoardRender();
             }
         }
@@ -7194,7 +7210,7 @@ async function _pollAgentRows() {
     }
     // A torrent removed on an agent has to leave the list too.
     for (const [k, t] of byKey) {
-        if ((t.agent || "local") === "local") continue;
+        if (_isLocalAgent(t.agent)) continue;
         if (!seen.has(k)) {
             _hoardAllTorrents = _hoardAllTorrents.filter(x => _rowKey(x) !== k);
             changed = true;

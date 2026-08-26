@@ -3,6 +3,26 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.146.0 - 2026-08-26
+
+### Fixed
+- **The Agent column said "local" for every torrent on this node.** The race
+  list wrote that literal into each row and the hoard list wrote nothing at all,
+  so the UI filled in the same word. It stopped being a name in 3.138.0: this
+  node is `local-race`, `local-hoard` and one agent per extra engine. Rows now
+  carry the agent that actually holds them.
+- Every "is this row mine" test now accepts those names, on both sides. The
+  daemon compared against the literal `"local"` in six places -- torrent detail,
+  files, availability, pause -- and the browser in ten, including the live SSE
+  path: a row whose agent read `local-hoard` would have had its stats updates
+  skipped, its removal ignored, and a per-row action dialled at an agent nobody
+  registered. The two rules are now the same rule, `isLocalAgentName` and
+  `_isLocalAgent`, and a test pins them together.
+- A detail request that names this node stops searching there instead of falling
+  through to "which agent owns this hash". With the same torrent seeded here and
+  on an agent -- the normal case after a cross-seed -- the page could answer with
+  the other machine's figures under this node's name.
+
 ## v3.145.0 - 2026-08-26
 
 ### Changed

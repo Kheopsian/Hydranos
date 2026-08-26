@@ -51,7 +51,13 @@ type TorrentStats struct {
 	// SeedingTime is the CUMULATIVE availability counter in seconds, stamped
 	// from the package seed clock -- not the engine's now-minus-completion
 	// figure, which counted every stop and every shutdown as seeding.
-	SeedingTime     int64    `json:"seeding_time"`
+	SeedingTime int64 `json:"seeding_time"`
+	// Agent is the name of the agent this row belongs to. Empty in the engine
+	// itself -- an engine does not know what it is called -- and filled by the
+	// adapter that serves it, which does. Without it the UI fell back to the
+	// literal "local", which stopped being a name in 3.138.0: this node is
+	// local-race, local-hoard and one agent per extra engine.
+	Agent           string   `json:"agent,omitempty"`
 	SwarmSeeds      int      `json:"swarm_seeds"`
 	SwarmLeechers   int      `json:"swarm_leechers"`
 	TrackerError    bool     `json:"tracker_error"`

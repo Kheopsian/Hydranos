@@ -127,7 +127,7 @@ func (s *Server) pauseOne(c *gin.Context, paused, race bool) {
 	case errors.Is(err, errNoEngine):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": engineName(race) + " engine not available"})
 		return
-	case err != nil && agent != "" && agent != "local":
+	case err != nil && agent != "" && !isLocalAgentName(agent):
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "agent": agent})
 		return
 	case err != nil:

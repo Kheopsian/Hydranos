@@ -2200,8 +2200,9 @@ func (a *raceAPIAdapter) SampleServedInfoHash() string { return a.engine.SampleS
 func (a *raceAPIAdapter) GetAllStatus() []map[string]interface{} {
 	list := a.engine.GetTorrentList()
 	result := make([]map[string]interface{}, 0, len(list))
-	for _, s := range list {
-		result = append(result, torrentStatsToMap(&s))
+	for i := range list {
+		list[i].Agent = api.LocalAgentRace
+		result = append(result, torrentStatsToMap(&list[i]))
 	}
 	return result
 }
@@ -2210,6 +2211,9 @@ func (a *raceAPIAdapter) GetAllStatusJSON() []json.RawMessage {
 	sort.Slice(list, func(i, j int) bool { return list[i].AddedTime > list[j].AddedTime })
 	out := make([]json.RawMessage, 0, len(list))
 	for i := range list {
+		// On the copy, not in the engine: GetTorrentList returns values, and
+		// the engine has no business knowing the name the front gave it.
+		list[i].Agent = api.LocalAgentRace
 		if b, err := json.Marshal(&list[i]); err == nil {
 			out = append(out, b)
 		}
@@ -2306,8 +2310,9 @@ func (a *hoardAPIAdapter) EventHub() *engine.EventHub           { return a.engin
 func (a *hoardAPIAdapter) GetTorrentList() []map[string]interface{} {
 	list := a.engine.GetTorrentList()
 	result := make([]map[string]interface{}, 0, len(list))
-	for _, s := range list {
-		result = append(result, torrentStatsToMap(&s))
+	for i := range list {
+		list[i].Agent = api.LocalAgentHoard
+		result = append(result, torrentStatsToMap(&list[i]))
 	}
 	return result
 }
@@ -2327,6 +2332,7 @@ func (a *hoardAPIAdapter) GetTorrentListJSON() []json.RawMessage {
 	sort.Slice(list, func(i, j int) bool { return list[i].AddedTime > list[j].AddedTime })
 	out := make([]json.RawMessage, 0, len(list))
 	for i := range list {
+		list[i].Agent = api.LocalAgentHoard
 		if b, err := json.Marshal(&list[i]); err == nil {
 			out = append(out, b)
 		}
@@ -2581,6 +2587,7 @@ func torrentStatsToMap(s *engine.TorrentStats) map[string]interface{} {
 		"injected_peers": s.InjectedPeers, "injection_hit": s.InjectionHit,
 		"content_folder": s.ContentFolder, "tags": s.Tags, "user_paused": s.UserPaused,
 		"tracker_host": s.TrackerHost, "seeding_time": s.SeedingTime,
+		"agent": s.Agent,
 	}
 }
 
