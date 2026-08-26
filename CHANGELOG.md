@@ -3,6 +3,16 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.147.3 - 2026-08-26
+
+### Fixed
+- **A torrent handed to another engine arrived without its category**, which
+  then made it unmovable, since the destination path of a move comes from the
+  category. The move named the target engine by ROLE; the routed calls on the
+  far side resolve by engine id alone and refused it with "engine not wired",
+  and labelling is deliberately never fatal, so the failure was a log line and a
+  torrent that looked fine until the next move refused to start.
+
 ## v3.147.2 - 2026-08-26
 
 ### Fixed
