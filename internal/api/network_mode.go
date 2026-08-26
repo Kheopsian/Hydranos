@@ -661,6 +661,35 @@ func (s *Server) extraEngineRows() []extraEngineNet {
 	return out
 }
 
+// validateExtraEngineNet applies the primaries' guards to the other engines.
+func validateExtraEngineNet(mode string, f netModeFields, rows []extraEngineNet) error {
+	seen := map[int]string{f.RaceListenPort: "race", f.HoardListenPort: "hoard"}
+	for _, r := range rows {
+		id := strings.TrimSpace(r.ID)
+		if id == "" {
+			continue
+		}
+		if r.ListenPort < 0 || r.ListenPort > 65535 {
+			return fmt.Errorf("the %s engine's listen port must be between 1 and 65535", id)
+		}
+		if r.ListenPort > 0 {
+			if other, clash := seen[r.ListenPort]; clash {
+				return fmt.Errorf("the %s and %s engines cannot share listen port %d: the second one to start would fail to bind", id, other, r.ListenPort)
+			}
+			seen[r.ListenPort] = id
+		}
+		if mode != netModeDirect && mode != netModeGluetun {
+			continue // the interface is not written in the proxy modes
+		}
+		if name := strings.TrimSpace(r.BindInterface); name != "" {
+			if _, err := net.InterfaceByName(name); err != nil {
+				return fmt.Errorf("no interface named %q on this host for the %s engine: its sockets would fall back to the default route", name, id)
+			}
+		}
+	}
+	return nil
+}
+
 // writeExtraEngineNet records each extra engine's own network keys in its
 // [[agent]] entry.
 //
@@ -692,7 +721,10 @@ func (s *Server) writeExtraEngineNet(mode string, rows []extraEngineNet) (int, e
 		if r.ListenPort > 0 {
 			kv = append(kv, [2]string{"session.listen_port", strconv.Itoa(r.ListenPort)})
 		}
-		if err := s.editConfigFile(func(doc string) (string, error) {
+		// The locked variant: this runs inside the network save, which already
+		// holds configWriteMu. Taking it again would deadlock the handler
+		// against itself and leave every later config write queued behind it.
+		if err := s.editConfigFileLocked(func(doc string) (string, error) {
 			return config.SetTOMLArrayTable(doc, "agent", "name", LocalAgentNameFor(id), kv)
 		}); err != nil {
 			return n, err
@@ -713,6 +745,14 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 		return
 	}
 	if err := validateNetMode(req.Mode, req.Fields); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// The extra engines get the same guards as the primaries. An interface that
+	// does not exist leaves the engine on the default route at runtime, and a
+	// shared listen port leaves the second engine to start unable to bind --
+	// neither is any less true for the third engine than for the first.
+	if err := validateExtraEngineNet(req.Mode, req.Fields, req.Extras); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

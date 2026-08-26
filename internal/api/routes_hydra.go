@@ -3444,6 +3444,17 @@ var configWriteMu sync.Mutex
 func (s *Server) editConfigFile(edit func(string) (string, error)) error {
 	configWriteMu.Lock()
 	defer configWriteMu.Unlock()
+	return s.editConfigFileLocked(edit)
+}
+
+// editConfigFileLocked is the body, for a caller that already holds
+// configWriteMu -- the network tab, which reads, rewrites and validates the
+// whole document before handing the per-engine keys over.
+//
+// The split is not cosmetic. configWriteMu is a plain Mutex, so a handler
+// holding it that called editConfigFile deadlocked on itself: the request never
+// answered, and every later config write queued behind it forever.
+func (s *Server) editConfigFileLocked(edit func(string) (string, error)) error {
 	path := s.settingsFilePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
