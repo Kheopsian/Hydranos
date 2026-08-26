@@ -55,5 +55,10 @@
  "Username": "Benutzername",
  "Welcome to Hydra": "Willkommen bei Hydra",
  "Skip": "Uberspringen",
- "Import failed": "Import fehlgeschlagen"
+ "Import failed": "Import fehlgeschlagen",
+ "Delete engine {id}? Its torrents stop seeding right away.": "Engine {id} loschen? Ihre Torrents horen sofort auf zu seeden.",
+ "Starting...": "Startet...",
+ "Starting the engine, this takes a few seconds...": "Engine wird gestartet, das dauert einige Sekunden...",
+ "Engine {id} is running, as agent {agent}.": "Engine {id} lauft, als Agent {agent}.",
+ "Stopping engine {id}...": "Engine {id} wird gestoppt..."
 }

@@ -261,6 +261,10 @@ type Server struct {
 	// frontOnly hides the local agent (controller node with no local engine).
 	frontOnly bool
 
+	// engineHost runs this node's extra engines; nil on a front-only node.
+	// Set by main.go, read by the engine endpoints (enginehost.go).
+	engineHost EngineHost
+
 	// agentsMu guards remoteAgents for runtime add/remove via the Agents menu.
 	agentsMu sync.RWMutex
 

@@ -11,8 +11,8 @@ import (
 )
 
 // UI-managed extra local engines (Option A sharding from the Agents menu). The
-// base [race]/[hoard] are fixed; these are additive shards persisted to
-// engines.json and spawned on the next restart.
+// base [race]/[hoard] are fixed; these are additive, persisted to engines.json
+// and -- since the engine host owns them -- started and stopped on the spot.
 
 func (s *Server) handleEnginesGet(c *gin.Context) {
 	engs, err := config.LoadExtraEngines(s.config.Daemon.DataDir)
@@ -74,18 +74,40 @@ func (s *Server) handleEnginesPost(c *gin.Context) {
 		base.ListenPort = s.nextFreePort()
 	}
 	ec := config.EngineConfig{ID: req.ID, Role: req.Role, SessionConfig: base}
-	extras = append(extras, ec)
 
 	full, _ := s.config.ResolveEngines()
-	if verr := config.ValidateEngines(append(full, extras...)); verr != nil {
+	if verr := config.ValidateEngines(append(append(full, extras...), ec)); verr != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": verr.Error()})
 		return
 	}
-	if err := config.SaveExtraEngines(dataDir, extras); err != nil {
+
+	// Start BEFORE persisting. An engine that cannot come up -- a port already
+	// taken by something outside Hydra, a data_dir that will not hold a store --
+	// would otherwise be written down and fail identically at every boot from
+	// here on, with the failure buried in the startup log instead of being the
+	// answer to this request.
+	started := false
+	if s.engineHost != nil {
+		if err := s.engineHost.AddEngine(ec); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		started = true
+	}
+	if err := config.SaveExtraEngines(dataDir, append(extras, ec)); err != nil {
+		if started {
+			// It runs but nothing recorded it: it would vanish at the next
+			// restart, which is a worse state than the add simply failing.
+			if rerr := s.engineHost.RemoveEngine(ec.ID); rerr != nil {
+				slog.Error("engine add: rolling back the started engine failed",
+					"engine", ec.ID, "error", rerr)
+			}
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "restart_required": true,
+	c.JSON(http.StatusOK, gin.H{"ok": true, "restart_required": !started, "started": started,
+		"agent":  LocalAgentNameFor(ec.ID),
 		"engine": gin.H{"id": ec.ID, "role": ec.Role, "listen_port": ec.ListenPort}})
 }
 
@@ -106,11 +128,25 @@ func (s *Server) handleEnginesDelete(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown engine"})
 		return
 	}
+	// Persist first here, the opposite of the add, and for the same reason: if
+	// the file write fails after the engine is down, the engine comes back at
+	// the next restart and the delete silently undoes itself.
 	if err := config.SaveExtraEngines(dataDir, out); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "restart_required": true})
+	stopped := false
+	if s.engineHost != nil {
+		if err := s.engineHost.RemoveEngine(id); err != nil {
+			// The config no longer has it, so a restart finishes the job; say
+			// so rather than reporting a failure for a delete that did happen.
+			slog.Warn("engine delete: removed from the config but not stopped",
+				"engine", id, "error", err)
+		} else {
+			stopped = true
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "restart_required": !stopped, "stopped": stopped})
 }
 
 // handleRestart exits the process; the container's restart policy brings it back
