@@ -681,21 +681,16 @@
                     <div id="ag-result" class="result-msg"></div>
                 </div>
             </div>
+            <p class="sr-desc" style="margin:0 0 12px">One agent is one engine. The ones on this machine are started here and each can leave by its own tunnel; the others run somewhere else and are reached over the network. A category sends its torrents to whichever ones you name.</p>
             <table id="agents-table">
                 <thead>
-                    <tr><th>Name</th><th>Address</th><th>Kind</th><th>Exit IP</th><th>Status</th><th>Actions</th></tr>
+                    <tr><th>Name</th><th>Engine</th><th>Where</th><th>Exit IP</th><th>Status</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="agents-tbody">
-                    <tr><td colspan="5" class="empty">No agents</td></tr>
+                    <tr><td colspan="6" class="empty">No agents</td></tr>
                 </tbody>
             </table>
             <div id="agents-removed" class="agents-removed"></div>
-            <div class="section-header" style="margin-top:24px">
-                <h2>Engines on this machine</h2>
-            </div>
-            <p class="sr-desc" style="margin:0 0 12px">Each one is an agent of its own, so a category can send torrents to a particular engine -- and therefore out of a particular tunnel. Add one with <b>+ New</b> above, choosing "This machine".</p>
-            <table id="engines-table"><thead><tr><th>ID</th><th>Role</th><th>Port</th><th>Actions</th></tr></thead>
-                <tbody id="engines-tbody"><tr><td colspan="4" class="empty">No extra engines</td></tr></tbody></table>
             <div id="restart-banner" style="display:none;margin-top:8px;padding:8px;background:#3a2a00;border-radius:4px">
                 Config changed, restart to apply. <button class="btn-small" onclick="restartHydra()">Restart now</button>
             </div>
@@ -1193,6 +1188,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.3.117"></script>
+    <script src="/static/app.js?v=1.3.118"></script>
 </body>
 </html>

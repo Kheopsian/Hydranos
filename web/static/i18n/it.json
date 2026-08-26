@@ -56,7 +56,7 @@
  "Welcome to Hydra": "Benvenuto in Hydra",
  "Skip": "Salta",
  "Import failed": "Importazione fallita",
- "Delete engine {id}? Its torrents stop seeding right away.": "Eliminare il motore {id}? I suoi torrent smettono subito di seedare.",
+ "Delete agent local-{id}? Its engine stops seeding right away.": "Eliminare l'agente local-{id}? Il suo motore smette subito di seedare.",
  "Starting...": "Avvio...",
  "Starting the engine, this takes a few seconds...": "Avvio del motore, richiede qualche secondo...",
  "Engine {id} is running, as agent {agent}.": "Il motore {id} e attivo, come agente {agent}.",
@@ -66,5 +66,10 @@
  "Saved and applied, no restart needed.": "Salvato e applicato, nessun riavvio.",
  "{id} listen port": "Porta di ascolto di {id}",
  "Port this engine accepts peers on. It has to differ from every other engine's.": "Porta su cui questo motore accetta i peer. Deve differire da quella di ogni altro motore.",
- "{id} engine interface ({role})": "Interfaccia del motore {id} ({role})"
+ "{id} engine interface ({role})": "Interfaccia del motore {id} ({role})",
+ "Engine": "Motore",
+ "Where": "Dove",
+ "this machine": "questa macchina",
+ "no engine": "nessun motore",
+ "One agent is one engine. The ones on this machine are started here and each can leave by its own tunnel; the others run somewhere else and are reached over the network. A category sends its torrents to whichever ones you name.": "Un agente e un motore. Quelli di questa macchina sono avviati qui e ognuno puo uscire dal proprio tunnel; gli altri girano altrove e si raggiungono in rete. Una categoria manda i suoi torrent a quelli che indichi."
 }
