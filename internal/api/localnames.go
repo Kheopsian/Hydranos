@@ -43,6 +43,19 @@ func isLocalAgentName(n string) bool {
 	return strings.HasPrefix(n, LocalAgentPrefix)
 }
 
+// isPrimaryLocalAgent names the two engines this daemon is built around, whose
+// torrents the LOCAL path already reports -- the list handlers read them
+// straight from raceEngine/hoardEngine. Every other engine of this node is
+// reported by nobody else, so it has to be collected like an agent.
+//
+// This is the whole of the double-counting rule, in one place. 3.135.0 shipped
+// without it and /api/status reported 396592 torrents for the 198296 the
+// database held, because registering the local engines enrolled them in the
+// aggregate they were already part of.
+func isPrimaryLocalAgent(n string) bool {
+	return n == LocalAgentRace || n == LocalAgentHoard || n == LocalAgentName
+}
+
 // LocalAgentNameFor builds the agent name of one of this node's engines.
 func LocalAgentNameFor(engineID string) string {
 	switch engineID {

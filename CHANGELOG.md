@@ -3,6 +3,17 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.147.1 - 2026-08-26
+
+### Fixed
+- **A torrent on an extra engine was invisible everywhere.** The aggregate
+  deliberately skips this node's own agents -- the local path already reports
+  them, and including them counted every torrent twice in 3.135.0 -- but that
+  is only true of the two primaries. Every other engine of this node was read by
+  nobody: absent from both lists, uncounted in the totals, out of reach of a
+  per-torrent action. Handing a torrent to such an engine looked exactly like
+  losing it. The exclusion now names the two engines it is actually about.
+
 ## v3.147.0 - 2026-08-26
 
 ### Added
