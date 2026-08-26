@@ -282,7 +282,12 @@ func (e errorString) Error() string { return string(e) }
 // a fault.
 func (s *Server) StartEngineNetProbe() {
 	go func() {
-		time.Sleep(20 * time.Second)
+		// Sixty seconds, for the same reason the reachability probe waits: at
+		// boot the tunnel may not be up and the resolver is cold. Measured on
+		// staging -- the first pass at 20s reported "exit address unknown" for
+		// the first engine it tried, and the pass three minutes later measured
+		// all three correctly.
+		time.Sleep(60 * time.Second)
 		for {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			s.measureEngineNet(ctx)
