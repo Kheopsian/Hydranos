@@ -164,7 +164,7 @@
   "Delete": "Supprimer",
   "Delete agent \"{name}\"?": "Supprimer l'agent « {name} » ?",
   "Delete category \"{name}\"?": "Supprimer la catégorie « {name} » ?",
-  "Delete engine {id}? Its torrents stop seeding after restart.": "Supprimer le moteur {id} ? Ses torrents cessent de partager après redémarrage.",
+  "Delete engine {id}? Its torrents stop seeding right away.": "Supprimer le moteur {id} ? Ses torrents cessent de partager immédiatement.",
   "Delete failed: {err}": "Échec de la suppression : {err}",
   "Destination": "Destination",
   "Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.": "Détectées sur cet hôte. Pour fixer un moteur sur l'une d'elles, indiquez son <b>nom</b> dans <code>bind_interface</code> (résiste aux changements d'IP du VPN) sous [race]/[hoard], ou un <code>ip:port</code> dans <code>listen_interfaces</code>.",
@@ -746,5 +746,9 @@
   "Δ avg": "Δ moy",
   "▶ Run now": "▶ Lancer maintenant",
   "✓ reachable": "✓ joignable",
-  "✗ unreachable: {err}": "✗ injoignable : {err}"
+  "✗ unreachable: {err}": "✗ injoignable : {err}",
+  "Starting...": "Démarrage...",
+  "Starting the engine, this takes a few seconds...": "Démarrage du moteur, cela prend quelques secondes...",
+  "Engine {id} is running, as agent {agent}.": "Le moteur {id} tourne, sous l'agent {agent}.",
+  "Stopping engine {id}...": "Arrêt du moteur {id}..."
 }

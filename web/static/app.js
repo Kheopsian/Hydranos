@@ -5836,16 +5836,29 @@ async function saveAgent() {
         if (!id) { _agResult(t("Engine id required"), false); return; }
         const role = document.getElementById("ag-role").value;
         const port = parseInt(document.getElementById("ag-port").value) || 0;
+        // Starting an engine takes a few seconds -- a Typhon process, a store
+        // to open, torrents to reload -- so say what is happening instead of
+        // leaving a dead-looking button, and refuse a second click meanwhile.
+        const btn = document.getElementById("ag-save-btn");
+        const btnLabel = btn ? btn.textContent : "";
+        if (btn) { btn.disabled = true; btn.textContent = t("Starting..."); }
+        _agResult(t("Starting the engine, this takes a few seconds..."), true);
         try {
-            await api("/api/engines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, role: role, listen_port: port }) });
+            const res = await api("/api/engines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, role: role, listen_port: port }) });
             hideAgentForm();
-            // Starting an engine needs a restart; say so rather than leaving a
-            // row that will not appear until something else happens to restart.
-            const banner = document.getElementById("restart-banner");
-            if (banner) banner.style.display = "block";
+            // No restart any more: the daemon starts the engine and registers
+            // it as its own agent before answering. A node with no engine host
+            // (front-only) still answers restart_required, so honour it.
+            if (res && res.restart_required) {
+                const banner = document.getElementById("restart-banner");
+                if (banner) banner.style.display = "block";
+            } else {
+                hydraNotify(t("Engine {id} is running, as agent {agent}.", { id: id, agent: (res && res.agent) || ("local-" + id) }));
+            }
             await updateAgents();
             if (typeof updateEngines === "function") await updateEngines();
         } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
+        finally { if (btn) { btn.disabled = false; btn.textContent = btnLabel; } }
         return;
     }
     const p = _agentPayload();
@@ -6147,11 +6160,14 @@ async function updateEngines(){
     }catch(err){ console.error("updateEngines", err); }
 }
 async function deleteEngine(id){
-    if(!await hydraConfirm(t("Delete engine {id}? Its torrents stop seeding after restart.", { id: id }))) return;
+    if(!await hydraConfirm(t("Delete engine {id}? Its torrents stop seeding right away.", { id: id }))) return;
+    hydraNotify(t("Stopping engine {id}...", { id: id }));
     try{
-        await api("/api/engines/" + encodeURIComponent(id), {method:"DELETE"});
-        document.getElementById("restart-banner").style.display="block";
-        updateEngines();
+        const res = await api("/api/engines/" + encodeURIComponent(id), {method:"DELETE"});
+        // Only a node that could not stop it asks for a restart now.
+        if(res && res.restart_required) document.getElementById("restart-banner").style.display="block";
+        await updateAgents();
+        await updateEngines();
     }catch(err){ hydraNotify(t("Delete failed: {err}", { err: err })); }
 }
 async function restartHydra(){

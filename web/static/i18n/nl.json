@@ -55,5 +55,10 @@
  "Username": "Gebruikersnaam",
  "Welcome to Hydra": "Welkom bij Hydra",
  "Skip": "Overslaan",
- "Import failed": "Import mislukt"
+ "Import failed": "Import mislukt",
+ "Delete engine {id}? Its torrents stop seeding right away.": "Engine {id} verwijderen? De torrents stoppen meteen met seeden.",
+ "Starting...": "Starten...",
+ "Starting the engine, this takes a few seconds...": "Engine wordt gestart, dit duurt enkele seconden...",
+ "Engine {id} is running, as agent {agent}.": "Engine {id} draait, als agent {agent}.",
+ "Stopping engine {id}...": "Engine {id} wordt gestopt..."
 }

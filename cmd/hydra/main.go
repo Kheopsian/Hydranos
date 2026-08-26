@@ -1438,40 +1438,17 @@ func main() {
 	raceAnnouncer.Start(ctx)
 
 	// ---- Option A: extra engines beyond primary race+hoard (sharding) ----
-	extraEngines, extraSrv := startExtraEngines(ctx, cfg, engineCfgs, raceCfg, hoardCfg, raceEngine.HasTorrent)
 	// One agent per extra engine, exactly like the two primaries. They used to
 	// be dialled back over loopback as a single agent named "local-shards" --
 	// N engines behind one name, which is the shape this whole series removes:
 	// a category could target "the shards" but never a particular tunnel.
 	//
-	// No goroutine, no retry loop, no dial that can fail: the engines are right
-	// here.
-	for _, le := range extraEngines {
-		cold := grpcclient.NewWithStub(agent.InProcessStub(extraSrv), le.id)
-		name := api.LocalAgentNameFor(le.id)
-		if err := apiServer.AddLocalAgent(name, le.id, le.role,
-			api.NewLocalAgentClient(le.id, le.proc.Client(), cold)); err != nil {
-			slog.Error("failed to register an extra engine as an agent",
-				"engine", le.id, "agent", name, "error", err)
-			continue
-		}
-		slog.Info("extra engine registered as its own agent", "engine", le.id, "role", le.role, "agent", name)
-	}
-	if len(extraEngines) > 0 {
-		go func() {
-			<-ctx.Done()
-			for _, le := range extraEngines {
-				if le.ann != nil {
-					le.ann.Stop()
-				}
-				if le.store != nil {
-					reconcileAgentStore(le.id, le.store, le.metas())
-					le.store.Close()
-				}
-				le.proc.Stop()
-			}
-		}()
-	}
+	// The manager registers them itself, at boot and on a later add alike, and
+	// stops them when ctx ends. It is handed to the API as this node's engine
+	// host, which is what makes "+ New / this machine" start an engine now
+	// instead of writing a config file and asking for a restart.
+	extras := startExtraEngines(ctx, cfg, engineCfgs, raceCfg, hoardCfg, raceEngine.HasTorrent, apiServer)
+	apiServer.SetEngineHost(extras)
 
 	go func() {
 		hoardEngine.WaitStaggerDone()

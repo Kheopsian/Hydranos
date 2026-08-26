@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.143.0 - 2026-08-26
+
+### Added
+- **Adding an engine starts it, no restart.** "+ New / this machine" on the
+  Agents page now spawns the engine, opens its store, starts its announcer and
+  registers it as its own agent (`local-<id>`) before answering the request --
+  where it used to write `engines.json` and put up a restart banner. Deleting one
+  stops it the same way, in the order that keeps the swarm honest: announcer
+  first, then the engine, then a last store reconcile, then the process.
+- The hot config apply that landed in 3.142.0 could only restart engines it had
+  been handed at boot, so a brand new one had nothing to bring it into existence
+  and was skipped in silence. The engines of this node are now owned by one
+  manager for the life of the process, and a boot and a hot add go through the
+  same spawn, the same registration and the same teardown.
+
+### Fixed
+- An engine that fails to start is no longer written to `engines.json`. It would
+  have failed identically at every boot from then on, with the reason buried in
+  the startup log instead of being the answer to the request that asked for it.
+- Extra engines were registered with a copy of their process's client rather
+  than the stable handle. A later settings change replaces the process, and
+  every holder of such a copy keeps writing into a socket that closed with it --
+  the failure mode 3.142.0 removed for the two primaries, still open here.
+
 ## v3.142.1 - 2026-08-25
 
 ### Fixed
