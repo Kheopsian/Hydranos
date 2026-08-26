@@ -326,6 +326,31 @@ func (c *Client) DiskFree(path string) (int64, error) {
 	return res.Free, nil
 }
 
+// MovePlan asks what relocating a payload would involve, in the agent's own
+// filesystem. Nothing is touched.
+func (c *Client) MovePlan(engineID, infoHash, targetDir string) (agentwire.MovePlan, error) {
+	var res agentwire.MovePlan
+	err := c.call(agentwire.MethodMovePlan, agentwire.MovePlanParams{
+		Engine: engineID, InfoHash: infoHash, TargetDir: targetDir}, &res)
+	return res, err
+}
+
+// MovePayload starts one and returns straight away: a cross-filesystem copy
+// runs for hours, and holding the call open for it would time out on every
+// layer in between.
+func (c *Client) MovePayload(p agentwire.MovePayloadParams) (agentwire.MoveStatus, error) {
+	var res agentwire.MoveStatus
+	err := c.call(agentwire.MethodMovePayload, p, &res)
+	return res, err
+}
+
+// MoveStatus polls one.
+func (c *Client) MoveStatus(infoHash string) (agentwire.MoveStatus, error) {
+	var res agentwire.MoveStatus
+	err := c.call(agentwire.MethodMoveStatus, agentwire.MoveStatusParams{InfoHash: infoHash}, &res)
+	return res, err
+}
+
 // ReadPiece fetches one whole piece from the agent holding the payload.
 // Cross-host only, like GetTorrentFile: not part of engine.EngineClient.
 func (c *Client) ReadPiece(infoHash string, piece int) ([]byte, error) {

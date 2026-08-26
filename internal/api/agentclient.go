@@ -36,6 +36,13 @@ type AgentClient interface {
 	GetConfigState() (agentwire.ConfigState, error)
 	SetAnnounceOverride(p agentwire.AnnounceOverrideParams) error
 	DiskFree(path string) (int64, error)
+
+	// Relocating a payload where it lives. Only the node holding the files can
+	// plan or move them: planning from here measured an agent's paths against
+	// this host's, which is why a category change never moved an agent's data.
+	MovePlan(engineID, infoHash, targetDir string) (agentwire.MovePlan, error)
+	MovePayload(p agentwire.MovePayloadParams) (agentwire.MoveStatus, error)
+	MoveStatus(infoHash string) (agentwire.MoveStatus, error)
 	Close() error
 
 	// Listing and stats.
