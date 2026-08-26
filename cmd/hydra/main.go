@@ -1109,6 +1109,10 @@ func main() {
 	// makes every one of them slower and the seeding worse.
 	// Set when a job manager exists; called once agents are registered.
 	var resumeJobs func()
+	// The extra engines are started further down, long after the job runner is
+	// registered. The runner's hook reads this variable at RUN time, which is
+	// always after that point.
+	var extrasRef *extrasManager
 	if torStore != nil {
 		jobMgr := jobs.NewManager(ctx, torStore, 1)
 		jobMgr.Register(&jobs.MoveRunner{
@@ -1158,6 +1162,16 @@ func main() {
 				return apiServer.RemoteAgentEngineClient(p.TargetAgent, p.Engine)
 			},
 			ResolveSavePath: apiServer.CategorySavePathFor,
+			// Both ends on disk before the job reports success. The primaries
+			// go through the same flush the periodic save uses -- SyncAll drops
+			// the row of a torrent the engines no longer hold -- and the extra
+			// engines write their own stores.
+			AfterMove: func(_ jobs.RemoteMoveParams, _ string) {
+				saveState(stateMgr, raceEngine, hoardEngine, torStore, &storeReady, &storeImported)
+				if extrasRef != nil {
+					extrasRef.ReconcileNow()
+				}
+			},
 			SetTargetCategory: func(p jobs.RemoteMoveParams, infoHash string) error {
 				if isLocal(p.TargetAgent) {
 					if hoardEngine == nil {
@@ -1459,6 +1473,7 @@ func main() {
 	// instead of writing a config file and asking for a restart.
 	extras := startExtraEngines(ctx, cfg, engineCfgs, raceCfg, hoardCfg, raceEngine.HasTorrent, apiServer)
 	apiServer.SetEngineHost(extras)
+	extrasRef = extras
 
 	go func() {
 		hoardEngine.WaitStaggerDone()

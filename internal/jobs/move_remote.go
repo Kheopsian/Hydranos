@@ -101,6 +101,15 @@ type RemoteMoveRunner struct {
 	// which reads as data loss even though nothing was lost. Supplied by the
 	// front, which knows how to reach a local engine or a remote one; nil skips.
 	SetTargetCategory func(p RemoteMoveParams, infoHash string) error
+	// AfterMove makes the new arrangement durable straight away, on both ends.
+	//
+	// Every engine writes its torrent set to a database on a timer -- five
+	// minutes for an extra engine. A restart inside that window resurrects the
+	// torrent on the source, which still has a row saying it holds it, and
+	// loses it on the target, which has none: two engines pointing at one set
+	// of files, which is the exact outcome the handoff ordering exists to
+	// prevent. Measured on staging, not reasoned about. nil skips.
+	AfterMove func(p RemoteMoveParams, infoHash string)
 	// FreeSpace reports the bytes available at a path on an agent, for the
 	// preflight. Returning an error skips the check rather than failing the
 	// job: not knowing is not the same as knowing there is no room.
@@ -287,6 +296,9 @@ func (r *RemoteMoveRunner) Run(ctx context.Context, j *store.Job, report func(do
 	if err := src.RemoveTorrent(j.InfoHash, p.KeepSourceData); err != nil {
 		return fmt.Errorf("remote move: target is live but the source could not be released: %w", err)
 	}
+	if r.AfterMove != nil {
+		r.AfterMove(p, j.InfoHash)
+	}
 	slog.Info("remote move: moved, source released",
 		"info_hash", j.InfoHash, "bytes", layout.TotalSize,
 		"target", p.TargetAgent, "kept_source_data", p.KeepSourceData)
@@ -364,6 +376,9 @@ func (r *RemoteMoveRunner) handoff(j *store.Job, p RemoteMoveParams,
 	// payload it was asked to move.
 	if err := src.RemoveTorrent(j.InfoHash, true); err != nil {
 		return fmt.Errorf("remote move: handoff: the target holds it but the source could not be released: %w", err)
+	}
+	if r.AfterMove != nil {
+		r.AfterMove(p, j.InfoHash)
 	}
 	report(totalSize, totalSize)
 	slog.Info("remote move: handed over in place, no bytes moved",

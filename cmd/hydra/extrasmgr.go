@@ -214,6 +214,15 @@ func (m *extrasManager) snapshot() []*liveEngine {
 	return out
 }
 
+// ReconcileNow writes every extra engine's torrent set to its store right away,
+// instead of at the next five-minute tick. A move is exactly the moment that
+// matters: until both ends are on disk, a restart in between undoes it.
+func (m *extrasManager) ReconcileNow() {
+	for _, le := range m.snapshot() {
+		reconcileAgentStore(le.id, le.store, le.metas())
+	}
+}
+
 func (m *extrasManager) reconcileLoop() {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
