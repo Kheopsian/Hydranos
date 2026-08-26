@@ -164,7 +164,7 @@
   "Delete": "Supprimer",
   "Delete agent \"{name}\"?": "Supprimer l'agent « {name} » ?",
   "Delete category \"{name}\"?": "Supprimer la catégorie « {name} » ?",
-  "Delete engine {id}? Its torrents stop seeding right away.": "Supprimer le moteur {id} ? Ses torrents cessent de partager immédiatement.",
+  "Delete agent local-{id}? Its engine stops seeding right away.": "Supprimer l'agent local-{id} ? Son moteur cesse de partager immédiatement.",
   "Delete failed: {err}": "Échec de la suppression : {err}",
   "Destination": "Destination",
   "Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.": "Détectées sur cet hôte. Pour fixer un moteur sur l'une d'elles, indiquez son <b>nom</b> dans <code>bind_interface</code> (résiste aux changements d'IP du VPN) sous [race]/[hoard], ou un <code>ip:port</code> dans <code>listen_interfaces</code>.",
@@ -755,5 +755,9 @@
   "Saved and applied, no restart needed.": "Enregistré et appliqué, pas de redémarrage.",
   "{id} listen port": "Port d'écoute de {id}",
   "Port this engine accepts peers on. It has to differ from every other engine's.": "Port sur lequel ce moteur accepte les pairs. Il doit différer de celui de tous les autres moteurs.",
-  "{id} engine interface ({role})": "Interface du moteur {id} ({role})"
+  "{id} engine interface ({role})": "Interface du moteur {id} ({role})",
+  "Where": "Où",
+  "this machine": "cette machine",
+  "no engine": "aucun moteur",
+  "One agent is one engine. The ones on this machine are started here and each can leave by its own tunnel; the others run somewhere else and are reached over the network. A category sends its torrents to whichever ones you name.": "Un agent, c'est un moteur. Ceux de cette machine sont démarrés ici et chacun peut sortir par son propre tunnel ; les autres tournent ailleurs et sont joints par le réseau. Une catégorie envoie ses torrents à ceux que vous nommez."
 }

@@ -811,7 +811,7 @@ function _activateTabNow(name) {
     if (name === "config") updateSettings();
     else if (name === "add") refreshCategoryOptions();
     else if (name === "changelog") loadChangelog();
-    else if (name === "agents") { updateAgents(); updateEngines(); }
+    else if (name === "agents") { updateAgents(); }
     else if (name === "trackers") { updateTrackers(); loadTrackerStats(); }
     else if (name === "logs") loadLogs();
     else if (name === "jobs") startJobsPolling();
@@ -835,7 +835,7 @@ window.addEventListener("DOMContentLoaded", () => {
         if (_hashTab === "race") await updateRaceTorrents();
         else if (_hashTab === "hoard") await updateHoardStats();
         else if (_hashTab === "categories") await updateCategories();
-        else if (_hashTab === "agents") { await updateAgents(); updateEngines(); }
+        else if (_hashTab === "agents") { await updateAgents(); }
         else if (_hashTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
         else if (_hashTab === "benchmark") await updateBenchmark();
         else if (_hashTab === "jobs") startJobsPolling();
@@ -5742,26 +5742,71 @@ if (API_KEY) maybeOfferImport();
 
 // ─── Agents ─────────────────────────────────────────
 let _editingAgent = null;
+// One table, because there is one thing.
+//
+// This page used to show an Agents table and an "Engines on this machine"
+// table, which listed the SAME rows twice with different columns -- and the two
+// disagreed on what could be done to them: an agent could not be deleted, the
+// engine behind it could. Since one agent is one engine, that split described a
+// distinction that no longer exists. The row carries the engine's role and
+// port, and its delete button removes the thing itself.
 async function updateAgents() {
     updateRemovedAgents();
     try {
-        const agents = await api("/api/agents");
+        // The ports are the reason for the extra calls: /api/agents names the
+        // engines, /api/engines carries the live port of the ones started here,
+        // and port-forward carries the primaries' -- which move on their own in
+        // gluetun mode, so the config would be the wrong place to read them.
+        const results = await Promise.all([
+            api("/api/agents"),
+            api("/api/engines").catch(function () { return []; }),
+            api("/api/port-forward").catch(function () { return null; }),
+        ]);
+        const agents = results[0] || [];
+        const extras = results[1] || [];
+        const pf = results[2];
         const tbody = document.getElementById("agents-tbody");
-        if (!agents || !agents.length) {
+        if (!agents.length) {
             tbody.innerHTML = '<tr><td colspan="6" class="empty">' + t("No agents") + '</td></tr>';
             return;
         }
+        const extraById = {};
+        extras.forEach(function (e) { extraById[e.id] = e; });
+
         tbody.innerHTML = agents.map(a => {
             const dot = a.online
                 ? '<span class="mode-tag mode-hoard">' + t("online") + '</span>'
                 : '<span class="mode-tag mode-race">' + t("offline") + '</span>';
-            const actions = a.kind === "local"
-                ? '<span class="sr-desc">' + t("built-in") + '</span>'
-                : `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">${t("Edit")}</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">${t("Delete")}</button>`;
+            const local = a.kind === "local";
+            const engines = a.engines || [];
+            const deletable = local && engines.length === 1 && !!extraById[engines[0].id];
+            let actions;
+            if (deletable) {
+                actions = `<button class="btn-small btn-danger" onclick="deleteEngine('${esc(engines[0].id)}')">${t("Delete")}</button>`;
+            } else if (local) {
+                // The two engines this daemon is built around. Removing one is
+                // not an Agents-page action: it is a different daemon.
+                actions = '<span class="sr-desc">' + t("built-in") + '</span>';
+            } else {
+                actions = `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">${t("Edit")}</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">${t("Delete")}</button>`;
+            }
+            const engineCell = engines.map(function (e) {
+                let port = 0;
+                if (extraById[e.id]) port = extraById[e.id].listen_port;
+                else if (pf && local) port = e.role === "race" ? pf.race_port : (e.role === "hoard" ? pf.hoard_port : 0);
+                const iface = extraById[e.id] && extraById[e.id].bind_interface;
+                const bits = [esc(e.role || "")];
+                if (port) bits.push('<span class="mono">' + port + "</span>");
+                if (iface) bits.push('<span class="mono">' + esc(iface) + "</span>");
+                return "<strong>" + esc(e.id) + "</strong> <span class=\"sr-desc\">" + bits.join(" &middot; ") + "</span>" + (e.online ? "" : " \u26a0");
+            }).join("<br>") || '<span class="sr-desc">' + t("no engine") + "</span>";
+            const where = local
+                ? '<span class="sr-desc">' + t("this machine") + "</span>"
+                : '<span class="mono" style="font-size:12px">' + esc(a.addr || "\u2014") + "</span>";
             const ifTip = (a.interfaces||[]).map(i=>i.name+": "+incoIP(i.ip)+(i.up?"":" " + t("(down)"))).join("\n");
             const exit = _exitIPMarkup(a.exit_ip, a.exit_ip_v6, !!a.ipv6_wanted);
             const exitTip = [exit.title, ifTip].filter(Boolean).join("\n");
-            return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:12px">${esc(a.addr || "\u2014")}</td><td>${esc(a.kind)}${(a.engines||[]).length ? ' <span class="sr-desc">('+(a.engines||[]).map(e=>esc(e.id)+(e.online?'':' \u26a0')).join(', ')+')</span>' : ''}</td><td class="mono exit-ip-cell" style="font-size:12px" title="${esc(exitTip)}">${exit.html}</td><td>${dot}</td><td>${actions}</td></tr>`;
+            return `<tr><td><strong>${esc(a.name)}</strong></td><td>${engineCell}</td><td>${where}</td><td class="mono exit-ip-cell" style="font-size:12px" title="${esc(exitTip)}">${exit.html}</td><td>${dot}</td><td>${actions}</td></tr>`;
         }).join("");
     } catch (e) { console.error("Failed to update agents:", e); }
 }
@@ -5856,7 +5901,6 @@ async function saveAgent() {
                 hydraNotify(t("Engine {id} is running, as agent {agent}.", { id: id, agent: (res && res.agent) || ("local-" + id) }));
             }
             await updateAgents();
-            if (typeof updateEngines === "function") await updateEngines();
         } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
         finally { if (btn) { btn.disabled = false; btn.textContent = btnLabel; } }
         return;
@@ -6108,66 +6152,23 @@ async function clearTrackerPasskey() {
     catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 
-// --- Local engines (shards) ---
+// --- Local engines ---
 
-// showEngineForm/hideEngineForm/addEngine are gone with the separate Add engine
-// form: creating a local engine is now "+ New" with kind = this machine, which
-// is the same act as adding an agent. Keeping them would have left three
-// functions reaching for DOM ids that no longer exist.
-async function updateEngines(){
-    try{
-        // port-forward carries the live listen port of the base engines; it is
-        // optional here, so a failure degrades the port cell rather than
-        // blanking the whole table.
-        const results = await Promise.all([
-            api("/api/agents"),
-            api("/api/engines"),
-            api("/api/port-forward").catch(function(){ return null; })
-        ]);
-        const agents = results[0] || [];
-        const extras = results[1] || [];
-        const pf = results[2];
-        const tb = document.getElementById("engines-tbody");
-        if(!tb) return;
-        const rows = [];
-        // Every engine of this node, whichever agent carries it. Matched on
-        // kind, not on the name "local": this node stopped being a single agent
-        // called "local" in 3.136.0 and is now one agent per engine
-        // (local-race, local-hoard, local-<id>), so a name lookup silently
-        // matched nothing and the table lost its base engines entirely.
-        const extraIds = new Set(extras.map(function(e){ return e.id; }));
-        agents.filter(function(a){ return a.kind === "local"; }).forEach(function(a){
-            (a.engines || []).forEach(function(e){
-                if(extraIds.has(e.id)) return; // listed below, with its delete button
-                var livePort = 0;
-                if(pf){
-                    if(e.role === "race") livePort = pf.race_port;
-                    else if(e.role === "hoard") livePort = pf.hoard_port;
-                }
-                var portCell = livePort ? String(livePort) : "base";
-                rows.push("<tr><td><strong>" + esc(e.id) + "</strong></td><td>" + esc(e.role) +
-                          "</td><td>" + esc(portCell) + "</td><td><span class=\"sr-desc\">" +
-                          esc(a.name) + " &middot; built-in</span></td></tr>");
-            });
-        });
-        // Extra engines: each is its own agent since 3.138.0, and deletable.
-        extras.forEach(function(e){
-            rows.push("<tr><td><strong>" + esc(e.id) + "</strong></td><td>" + esc(e.role) + "</td><td>" + e.listen_port +
-                      "</td><td><span class=\"sr-desc\">local-" + esc(e.id) + "</span> " +
-                      "<button class=\"btn-small btn-danger\" onclick=\"deleteEngine('" + esc(e.id) + "')\">Delete</button></td></tr>");
-        });
-        tb.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4" class="empty">' + t("No engines") + '</td></tr>';
-    }catch(err){ console.error("updateEngines", err); }
-}
+// updateEngines and its table are gone: the Agents table above lists these
+// engines, because each one IS an agent. Two tables for one thing is what made
+// the page read as a distinction between agents and engines that the daemon
+// stopped making in 3.138.0.
+
 async function deleteEngine(id){
-    if(!await hydraConfirm(t("Delete engine {id}? Its torrents stop seeding right away.", { id: id }))) return;
+    // Named as the agent, because that is the row the button sits in and the
+    // name every category placement refers to.
+    if(!await hydraConfirm(t("Delete agent local-{id}? Its engine stops seeding right away.", { id: id }))) return;
     hydraNotify(t("Stopping engine {id}...", { id: id }));
     try{
         const res = await api("/api/engines/" + encodeURIComponent(id), {method:"DELETE"});
         // Only a node that could not stop it asks for a restart now.
         if(res && res.restart_required) document.getElementById("restart-banner").style.display="block";
         await updateAgents();
-        await updateEngines();
     }catch(err){ hydraNotify(t("Delete failed: {err}", { err: err })); }
 }
 async function restartHydra(){

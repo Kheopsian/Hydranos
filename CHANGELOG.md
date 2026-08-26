@@ -3,6 +3,17 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.145.0 - 2026-08-26
+
+### Changed
+- **One table on the Agents page, because there is one thing.** It listed the
+  agents, then listed "Engines on this machine" -- the same rows again, with
+  different columns and a different verdict on what could be done to them: an
+  agent could not be deleted, the engine behind it could. One agent has been one
+  engine since 3.138.0, so the split described a distinction the daemon no
+  longer makes. Each row now carries its engine's role, live port and interface,
+  and its delete button removes the thing itself.
+
 ## v3.144.0 - 2026-08-26
 
 ### Added

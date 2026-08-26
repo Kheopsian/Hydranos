@@ -56,7 +56,7 @@
  "Welcome to Hydra": "Welkom bij Hydra",
  "Skip": "Overslaan",
  "Import failed": "Import mislukt",
- "Delete engine {id}? Its torrents stop seeding right away.": "Engine {id} verwijderen? De torrents stoppen meteen met seeden.",
+ "Delete agent local-{id}? Its engine stops seeding right away.": "Agent local-{id} verwijderen? De engine stopt meteen met seeden.",
  "Starting...": "Starten...",
  "Starting the engine, this takes a few seconds...": "Engine wordt gestart, dit duurt enkele seconden...",
  "Engine {id} is running, as agent {agent}.": "Engine {id} draait, als agent {agent}.",
@@ -66,5 +66,10 @@
  "Saved and applied, no restart needed.": "Opgeslagen en toegepast, geen herstart nodig.",
  "{id} listen port": "Luisterpoort van {id}",
  "Port this engine accepts peers on. It has to differ from every other engine's.": "Poort waarop deze engine peers accepteert. Die moet verschillen van die van elke andere engine.",
- "{id} engine interface ({role})": "Interface van engine {id} ({role})"
+ "{id} engine interface ({role})": "Interface van engine {id} ({role})",
+ "Engine": "Engine",
+ "Where": "Waar",
+ "this machine": "deze machine",
+ "no engine": "geen engine",
+ "One agent is one engine. The ones on this machine are started here and each can leave by its own tunnel; the others run somewhere else and are reached over the network. A category sends its torrents to whichever ones you name.": "Een agent is een engine. Die op deze machine worden hier gestart en elk kan via zijn eigen tunnel naar buiten; de andere draaien elders en worden over het netwerk bereikt. Een categorie stuurt zijn torrents naar degene die je noemt."
 }
