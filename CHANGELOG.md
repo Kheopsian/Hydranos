@@ -3,6 +3,18 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.150.1 - 2026-08-26
+
+### Fixed
+- **The header stopped showing the IPv6 address.** The v6 measurement added in
+  3.149.0 was gated on `enable_ipv6` read from `ComposeSession`, which zeroes
+  that key and `listen_port` deliberately -- it composes what the front PUSHES
+  to an agent, where both belong to the agent. The flag was therefore always
+  false and no v6 address was ever measured, on a node whose config says true.
+  The address was never lost; the display had stopped looking for it. Both this
+  and the reachability probe now read the RESOLVED engine config, which is what
+  the engine actually runs.
+
 ## v3.150.0 - 2026-08-26
 
 ### Added

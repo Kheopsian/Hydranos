@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Kheopsian/hydra/internal/agentwire"
+	"github.com/Kheopsian/hydra/internal/config"
 	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/gin-gonic/gin"
 )
@@ -78,6 +79,29 @@ func setEngineNet(rows []engineNet) {
 	engineNetMu.Unlock()
 }
 
+// resolvedEngine returns what an engine actually RUNS: the role profile with
+// this node's own [[agent]] overrides already merged, listen port and IPv6
+// included.
+//
+// Not ComposeSession, which answers a different question. That one composes
+// what the front PUSHES to an agent, and it deliberately zeroes listen_port and
+// enable_ipv6 on the way out because on a remote node those belong to the agent.
+// Reading enable_ipv6 from it is therefore always false -- which is exactly how
+// the header lost its IPv6 address: the v6 measurement was gated on a flag that
+// this function had just set to false, on a node whose config says true.
+func resolvedEngine(cfg *config.HydraConfig, id string) (config.EngineConfig, bool) {
+	engines, err := cfg.ResolveEngines()
+	if err != nil {
+		return config.EngineConfig{}, false
+	}
+	for _, e := range engines {
+		if e.ID == id {
+			return e, true
+		}
+	}
+	return config.EngineConfig{}, false
+}
+
 // localEngineRows lists the engines this process runs: the two primaries plus
 // every extra one. Config for each comes from the same composer the config push
 // uses, so what is measured is what the engine was told to be.
@@ -88,11 +112,11 @@ func (s *Server) localEngineRows() []engineNet {
 	cfg := s.liveConfig()
 	var rows []engineNet
 	add := func(id, role string, port int) {
-		sess, err := cfg.ComposeSession(LocalAgentNameFor(id), id, role)
-		if err != nil {
+		ec, ok := resolvedEngine(cfg, id)
+		if !ok {
 			return
 		}
-		iface := sess.BindInterface
+		iface := ec.BindInterface
 		rows = append(rows, engineNet{
 			Agent: LocalAgentNameFor(id), Engine: id, Role: role,
 			Iface: iface, Port: port, Local: true, State: "warn",
@@ -135,21 +159,21 @@ func (s *Server) measureEngineNet(ctx context.Context) {
 			}
 		}
 		r := &rows[i]
-		sess, err := cfg.ComposeSession(r.Agent, r.Engine, r.Role)
-		if err != nil {
-			r.State, r.Detail = "off", err.Error()
+		ec, ok := resolvedEngine(cfg, r.Engine)
+		if !ok {
+			r.State, r.Detail = "off", "this engine is not in the resolved config"
 			continue
 		}
 		b := engine.ApplyAnnounceEgress(
-			engine.DefaultSingleBinding(r.Port, sess.EnableIPv6, r.Role, 0),
-			sess.AnnounceProxy, sess.AnnounceIP, sess.Socks5OutboundHost, r.Iface, r.Role)[0]
+			engine.DefaultSingleBinding(r.Port, ec.EnableIPv6, r.Role, 0),
+			ec.AnnounceProxy, ec.AnnounceIP, ec.Socks5OutboundHost, r.Iface, r.Role)[0]
 		exitErr := ""
 		if ip, aErr := measureExit(ctx, b, ""); aErr == nil {
 			r.ExitIP = ip
 		} else {
 			exitErr = "exit address unknown: " + aErr.Error()
 		}
-		if sess.EnableIPv6 {
+		if ec.EnableIPv6 {
 			if ip6, aErr := measureExit(ctx, b, echoURLv6); aErr == nil {
 				r.ExitIPv6 = ip6
 			}
