@@ -62,23 +62,46 @@ func setReachability(name string, st reachState) {
 // differs from its announce proxy. The Network tab keeps the rigorous version,
 // which asks the announce client itself; this one has to stay cheap enough to
 // run unattended.
-func (s *Server) probeReachability(ctx context.Context, name string, sec map[string]interface{}) {
-	port := tomlInt(sec, "listen_port")
-	ip := getPublicIP()
+// reachTarget is one engine to test: where it listens, how it leaves, and how
+// to ask it whether anyone has already arrived.
+//
+// It exists because this probe named "race" and "hoard" in six places. Those
+// two are engines like any other since 3.138.0, and an engine added from the
+// Agents page had no probe at all -- its vertex in the header stayed amber
+// saying so, which is honest but useless.
+type reachTarget struct {
+	// Name is the key the state is stored under: the ROLE for the two
+	// primaries, because /api/port-forward reads them that way, and the engine
+	// id for everything else.
+	Name      string
+	Port      int
+	PublicIP  string
+	Iface     string
+	SocksHost string
+	SocksPort int
+	SocksUser string
+	SocksPass string
+	// Inbound and Sample come from the engine itself; nil where the engine
+	// cannot be reached from here, which turns the probe into "unknown" rather
+	// than a guess.
+	Inbound func() (int64, error)
+	Sample  func() string
+}
+
+func (s *Server) probeReachability(ctx context.Context, t reachTarget) {
+	name, port := t.Name, t.Port
+	ip := t.PublicIP
+	if ip == "" {
+		ip = getPublicIP()
+	}
 	if ip == "" || port == 0 {
 		setReachability(name, reachState{State: "unknown", Detail: "no public address or listen port yet", At: time.Now()})
 		return
 	}
 	// Checked first: a peer that reached us settles the question outright, in
 	// every mode, including inside a tunnel where our own probe is blind.
-	var eng interface{ InboundAccepted() (int64, error) }
-	if name == "race" && s.raceEngine != nil {
-		eng = s.raceEngine
-	} else if name == "hoard" && s.hoardEngine != nil {
-		eng = s.hoardEngine
-	}
-	if eng != nil {
-		if n, err := eng.InboundAccepted(); err == nil && n > 0 {
+	if t.Inbound != nil {
+		if n, err := t.Inbound(); err == nil && n > 0 {
 			setReachability(name, reachState{
 				State:  "reachable",
 				Detail: fmt.Sprintf("%d peers have connected to you since start", n),
@@ -89,10 +112,8 @@ func (s *Server) probeReachability(ctx context.Context, name string, sec map[str
 	}
 
 	var sample string
-	if name == "race" && s.raceEngine != nil {
-		sample = s.raceEngine.SampleServedInfoHash()
-	} else if name == "hoard" && s.hoardEngine != nil {
-		sample = s.hoardEngine.SampleServedInfoHash()
+	if t.Sample != nil {
+		sample = t.Sample()
 	}
 	if sample == "" {
 		// With no torrent to name, a handshake cannot be demanded, and a bare
@@ -102,9 +123,7 @@ func (s *Server) probeReachability(ctx context.Context, name string, sec map[str
 		return
 	}
 	peerID, err := engine.InboundReachable(ctx, ip, port,
-		tomlStr(sec, "socks5_outbound_host"), tomlInt(sec, "socks5_outbound_port"),
-		tomlStr(sec, "socks5_outbound_user"), tomlStr(sec, "socks5_outbound_pass"),
-		tomlStr(sec, "bind_interface"), sample)
+		t.SocksHost, t.SocksPort, t.SocksUser, t.SocksPass, t.Iface, sample)
 	if err != nil {
 		// A failure only means "closed" when the probe genuinely came from
 		// outside, which is the case through a proxy. Inside a tunnel it goes
@@ -114,7 +133,7 @@ func (s *Server) probeReachability(ctx context.Context, name string, sec map[str
 		// from within the tunnel. On a direct setup the same turnaround happens
 		// at the router. Calling either of those unreachable would have the dot
 		// contradict a node that works.
-		viaProxy := strings.TrimSpace(tomlStr(sec, "socks5_outbound_host")) != ""
+		viaProxy := strings.TrimSpace(t.SocksHost) != ""
 		if viaProxy {
 			setReachability(name, reachState{State: "unreachable", Detail: err.Error(), At: time.Now()})
 			return
@@ -130,14 +149,65 @@ func (s *Server) probeReachability(ctx context.Context, name string, sec map[str
 }
 
 func (s *Server) probeReachabilityOnce() {
-	m, err := s.readNetworkConfig()
-	if err != nil {
-		return
+	for _, t := range s.reachTargets() {
+		// One deadline per engine, not one for the pass: a node with five
+		// engines would otherwise have the last of them share what the first
+		// left, and a probe that times out is indistinguishable from a port
+		// that is closed.
+		ctx, cancel := context.WithTimeout(context.Background(), reachProbeTimeout)
+		s.probeReachability(ctx, t)
+		cancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), reachProbeTimeout)
-	defer cancel()
-	s.probeReachability(ctx, "race", sectionOf(m, "race"))
-	s.probeReachability(ctx, "hoard", sectionOf(m, "hoard"))
+}
+
+// reachTargets lists every engine of this node with what the probe needs.
+//
+// Each one is measured at ITS OWN exit address when that has been measured
+// (enginenet.go), not at the process's default route. On a node whose engines
+// leave by different tunnels those are different addresses, and probing the
+// wrong one answers a question about somebody else's port.
+func (s *Server) reachTargets() []reachTarget {
+	cfg := s.liveConfig()
+	rows, _ := EngineNetSnapshot()
+	exitOf := func(agent string) string {
+		for _, r := range rows {
+			if r.Agent == agent {
+				return r.ExitIP
+			}
+		}
+		return ""
+	}
+	var out []reachTarget
+	add := func(key, id, role string, port int, inbound func() (int64, error), sample func() string) {
+		sess, err := cfg.ComposeSession(LocalAgentNameFor(id), id, role)
+		if err != nil {
+			return
+		}
+		out = append(out, reachTarget{
+			Name: key, Port: port, PublicIP: exitOf(LocalAgentNameFor(id)),
+			Iface:     sess.BindInterface,
+			SocksHost: sess.Socks5OutboundHost, SocksPort: sess.Socks5OutboundPort,
+			SocksUser: sess.Socks5OutboundUser, SocksPass: sess.Socks5OutboundPass,
+			Inbound: inbound, Sample: sample,
+		})
+	}
+	if s.raceEngine != nil {
+		add("race", "race", "race", s.raceEngine.ListenPort(),
+			s.raceEngine.InboundAccepted, s.raceEngine.SampleServedInfoHash)
+	}
+	if s.hoardEngine != nil {
+		add("hoard", "hoard", "hoard", s.hoardEngine.ListenPort(),
+			s.hoardEngine.InboundAccepted, s.hoardEngine.SampleServedInfoHash)
+	}
+	if s.engineHost != nil {
+		for _, e := range s.engineHost.Engines() {
+			id := e.ID
+			add(id, id, e.Role, e.ListenPort,
+				func() (int64, error) { return s.engineHost.InboundAccepted(id) },
+				func() string { return s.engineHost.SampleServedInfoHash(id) })
+		}
+	}
+	return out
 }
 
 // StartReachabilityProbe runs the check in the background for as long as the

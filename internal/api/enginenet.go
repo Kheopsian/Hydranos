@@ -168,24 +168,25 @@ func (s *Server) measureEngineNet(ctx context.Context) {
 		// have none yet, and saying "reachable" for something nobody tested is
 		// the one answer that misleads -- so they stay amber until they have
 		// their own probe.
-		switch r.Engine {
-		case agentwire.EngineRace, agentwire.EngineHoard:
-			st := reachabilityOf(r.Role)
-			// The address failure is kept in front of the reachability detail,
-			// never overwritten by it: an engine whose exit could not be
-			// measured is the more urgent of the two things to say.
-			r.Detail = joinDetail(exitErr, st.Detail)
-			switch st.State {
-			case "reachable":
-				r.State = "ok"
-			case "unreachable":
-				r.State = "bad"
-			default:
-				r.State = "warn"
-			}
+		// Every engine is probed under its own key: the two primaries by role,
+		// because /api/port-forward has always read them that way, and every
+		// other engine by its id.
+		key := r.Engine
+		if r.Engine == agentwire.EngineRace || r.Engine == agentwire.EngineHoard {
+			key = r.Role
+		}
+		st := reachabilityOf(key)
+		// The address failure is kept in front of the reachability detail,
+		// never overwritten by it: an engine whose exit could not be measured
+		// is the more urgent of the two things to say.
+		r.Detail = joinDetail(exitErr, st.Detail)
+		switch st.State {
+		case "reachable":
+			r.State = "ok"
+		case "unreachable":
+			r.State = "bad"
 		default:
 			r.State = "warn"
-			r.Detail = joinDetail(exitErr, "no reachability probe for extra engines yet")
 		}
 	}
 	// Agents on other machines, as they already report themselves: one exit
