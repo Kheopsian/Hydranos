@@ -51,8 +51,19 @@ type RemoteMoveParams struct {
 	// resolved against the running agent registry at execution time instead.
 	SourceAgent string `json:"source_agent"`
 	TargetAgent string `json:"target_agent"`
-	// Engine is the engine id on both ends (e.g. "hoard").
+	// Engine is the engine id, when both ends run the same one (e.g. "hoard").
+	// Kept for jobs written before the two ends could differ.
 	Engine string `json:"engine"`
+	// SourceEngine and TargetEngine name the engine at each END.
+	//
+	// One field for both was true while a move meant "the same engine on
+	// another machine". It stopped being true the moment one agent became one
+	// engine: handing a torrent from local-hoard to local-vpn7 asks for engine
+	// "hoard" on one side and "vpn7" on the other, and a single field sent
+	// whichever was resolved first to both -- "agent local-hoard has no engine
+	// vpn7", after the job was accepted.
+	SourceEngine string `json:"source_engine,omitempty"`
+	TargetEngine string `json:"target_engine,omitempty"`
 	// Category is where the payload lands: the target's save path is the one
 	// that category defines FOR THAT AGENT. Deliberately not a free-text path
 	// -- a path typed for one host is meaningless on another, and the category
@@ -77,6 +88,22 @@ type RemoteMoveParams struct {
 	// would have the target write the very files the source is reading, and the
 	// release at the end would delete the payload the target now points at.
 	Handoff bool `json:"handoff,omitempty"`
+}
+
+// SourceEngineID and TargetEngineID name each end's engine, falling back to the
+// single Engine field for jobs written before the two could differ.
+func (p RemoteMoveParams) SourceEngineID() string {
+	if p.SourceEngine != "" {
+		return p.SourceEngine
+	}
+	return p.Engine
+}
+
+func (p RemoteMoveParams) TargetEngineID() string {
+	if p.TargetEngine != "" {
+		return p.TargetEngine
+	}
+	return p.Engine
 }
 
 // RemoteMoveRunner carries a torrent and its bytes to another node.

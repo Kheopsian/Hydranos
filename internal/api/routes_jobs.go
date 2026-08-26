@@ -294,15 +294,23 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": `mode must be "move" or "duplicate"`})
 		return
 	}
+	// One engine id per END. A single field was true while a move meant "the
+	// same engine on another machine"; handing a torrent from local-hoard to
+	// local-vpn7 asks for a different engine on each side, and one field sent
+	// whichever was resolved first to both.
+	sourceEngine := s.engineOfAgent(req.SourceAgent)
+	targetEngine := s.engineOfAgent(req.TargetAgent)
 	if req.Engine == "" {
-		// From the SOURCE agent, not a constant. One agent is one engine, so
-		// the agent name already says which one -- and a race torrent moved
-		// with the old "hoard" default resolved to an engine that does not hold
-		// it, or to none at all on a node whose engines are both race.
-		req.Engine = s.engineOfAgent(req.SourceAgent)
+		req.Engine = sourceEngine
 	}
 	if req.Engine == "" {
 		req.Engine = "hoard"
+	}
+	if sourceEngine == "" {
+		sourceEngine = req.Engine
+	}
+	if targetEngine == "" {
+		targetEngine = req.Engine
 	}
 	// The destination is the path THIS torrent's category defines on the target
 	// agent, so the category is read from the torrent rather than passed in.
@@ -342,11 +350,14 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 			"error": "these two engines share a filesystem, so the torrent can be handed over but not duplicated: both copies would be the same files"})
 		return
 	}
-	for label, agent := range map[string]string{"source": req.SourceAgent, "target": req.TargetAgent} {
-		if agent == "" || isLocalAgentName(agent) {
+	for label, end := range map[string][2]string{
+		"source": {req.SourceAgent, sourceEngine},
+		"target": {req.TargetAgent, targetEngine},
+	} {
+		if end[0] == "" || isLocalAgentName(end[0]) {
 			continue
 		}
-		if _, err := s.RemoteAgentEngineClient(agent, req.Engine); err != nil {
+		if _, err := s.RemoteAgentEngineClient(end[0], end[1]); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": label + ": " + err.Error()})
 			return
 		}
@@ -363,6 +374,8 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 		SourceAgent:    req.SourceAgent,
 		TargetAgent:    req.TargetAgent,
 		Engine:         req.Engine,
+		SourceEngine:   sourceEngine,
+		TargetEngine:   targetEngine,
 		Category:       req.Category,
 		ReleaseSource:  req.Mode == "move",
 		KeepSourceData: req.KeepSourceData,
