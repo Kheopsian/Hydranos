@@ -112,7 +112,23 @@ func (s *Server) localEngineRows() []engineNet {
 func (s *Server) measureEngineNet(ctx context.Context) {
 	rows := s.localEngineRows()
 	cfg := s.liveConfig()
+	// Last known addresses, kept when a measurement fails.
+	prevRows, _ := EngineNetSnapshot()
+	previous := make(map[string]engineNet, len(prevRows))
+	for _, p := range prevRows {
+		if p.ExitIP != "" {
+			previous[p.Agent] = p
+		}
+	}
 	for i := range rows {
+		if i > 0 {
+			// Spread the passes: three engines resolving the same name through
+			// the same tunnel in the same instant is how the timeouts started.
+			select {
+			case <-ctx.Done():
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
 		r := &rows[i]
 		sess, err := cfg.ComposeSession(r.Agent, r.Engine, r.Role)
 		if err != nil {
@@ -123,14 +139,24 @@ func (s *Server) measureEngineNet(ctx context.Context) {
 			engine.DefaultSingleBinding(r.Port, sess.EnableIPv6, r.Role, 0),
 			sess.AnnounceProxy, sess.AnnounceIP, sess.Socks5OutboundHost, r.Iface, r.Role)[0]
 		exitErr := ""
-		if ip, aErr := engine.AnnounceEgressIP(ctx, b, ""); aErr == nil {
+		if ip, aErr := measureExit(ctx, b, ""); aErr == nil {
 			r.ExitIP = ip
 		} else {
 			exitErr = "exit address unknown: " + aErr.Error()
 		}
 		if sess.EnableIPv6 {
-			if ip6, aErr := engine.AnnounceEgressIP(ctx, b, echoURLv6); aErr == nil {
+			if ip6, aErr := measureExit(ctx, b, echoURLv6); aErr == nil {
 				r.ExitIPv6 = ip6
+			}
+		}
+		// Keep what was measured before rather than blanking the line. A DNS
+		// lookup that leaves through a tunnel times out often enough that a
+		// strict reading would empty the panel every few passes, and an address
+		// from three minutes ago is far more useful than none -- the panel says
+		// when it was taken.
+		if r.ExitIP == "" {
+			if prev, ok := previous[r.Agent]; ok {
+				r.ExitIP, r.ExitIPv6 = prev.ExitIP, prev.ExitIPv6
 			}
 		}
 		// Reachability: the primaries have a probe already. The extra engines
@@ -198,6 +224,26 @@ func joinDetail(parts ...string) string {
 		}
 	}
 	return strings.Join(out, " · ")
+}
+
+// measureExit asks the echo service through one engine's binding, once more if
+// the first attempt fails.
+//
+// The retry is not politeness. Every engine measured here resolves the echo's
+// name through its own tunnel, several of them within the same second, and a
+// resolver behind a VPN drops one of those often enough that a single attempt
+// reports "unknown" for an engine that is working perfectly.
+func measureExit(ctx context.Context, b engine.Binding, echoURL string) (string, error) {
+	ip, err := engine.AnnounceEgressIP(ctx, b, echoURL)
+	if err == nil {
+		return ip, nil
+	}
+	select {
+	case <-ctx.Done():
+		return "", err
+	case <-time.After(700 * time.Millisecond):
+	}
+	return engine.AnnounceEgressIP(ctx, b, echoURL)
 }
 
 // agentNodeInfo asks one agent for its exit address, tolerating a node that is
