@@ -2870,10 +2870,13 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .net-poly .np-node.np-warn circle { animation: npPulse 1.6s ease-in-out infinite; }
 @keyframes npPulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
 
-.net-panel-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.5); opacity: 0; pointer-events: none;
+.net-panel-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.62); opacity: 0; pointer-events: none;
     transition: opacity .18s ease; z-index: 900; }
 .net-panel-scrim.open { opacity: 1; pointer-events: auto; }
-.net-panel { position: fixed; z-index: 901; width: min(560px, 92vw); background: var(--bg-secondary, #0d1220);
+/* Opaque, not the translucent --bg-secondary the cards use. This one sits over
+   a busy table and lists addresses: a 75% background put the rows underneath
+   straight through the text. */
+.net-panel { position: fixed; z-index: 901; width: min(560px, 92vw); background: #0e1424;
     border: 1px solid var(--border, #1b2436); border-radius: 14px; box-shadow: 0 24px 60px rgba(0,0,0,.66);
     transform: scale(.12); opacity: 0; pointer-events: none;
     transition: transform .2s cubic-bezier(.2,.9,.25,1.1), opacity .16s ease; }
