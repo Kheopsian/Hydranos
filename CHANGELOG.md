@@ -3,6 +3,21 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.150.0 - 2026-08-26
+
+### Added
+- **Every engine has a reachability probe, not just the two primaries.** The
+  probe named "race" and "hoard" in six places, so an engine added from the
+  Agents page had none at all: its vertex in the header stayed amber saying so.
+  Each engine is now probed under its own key, asked its own engine whether a
+  peer has already arrived, and given its own deadline -- with one budget for
+  the pass, the last engine of a large node inherited whatever the first left,
+  and a probe that runs out of time is indistinguishable from a closed port.
+- Each engine is probed **at its own exit address**, the one measured through
+  its own binding, instead of the process's default route. On a node whose
+  engines leave by different tunnels those are different addresses, and probing
+  the wrong one answers a question about somebody else's port.
+
 ## v3.149.0 - 2026-08-26
 
 ### Added

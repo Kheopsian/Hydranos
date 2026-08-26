@@ -42,6 +42,11 @@ func (f *fakeEngineHost) RemoveEngine(id string) error {
 }
 func (f *fakeEngineHost) Engines() []RunningEngine { return f.running }
 
+// The reachability probe asks the engine itself; a fake that holds no torrent
+// answers "nothing here", which the probe reads as unknown rather than closed.
+func (f *fakeEngineHost) InboundAccepted(string) (int64, error) { return 0, nil }
+func (f *fakeEngineHost) SampleServedInfoHash(string) string    { return "" }
+
 const engineTestTOML = `[daemon]
 data_dir = "%DIR%"
 

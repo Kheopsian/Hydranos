@@ -14,6 +14,13 @@ type EngineHost interface {
 	AddEngine(ec config.EngineConfig) error
 	// RemoveEngine stops one and unregisters it.
 	RemoveEngine(id string) error
+	// InboundAccepted counts peers that connected TO one of these engines, and
+	// SampleServedInfoHash names a torrent it holds. Both are what the
+	// reachability probe needs, and neither can be answered from the front: the
+	// engine is the only thing that knows. Without them an extra engine had no
+	// probe at all and its vertex stayed amber forever.
+	InboundAccepted(id string) (int64, error)
+	SampleServedInfoHash(id string) string
 	// Engines reports what is RUNNING, which is not the same question as what
 	// a config file says. Listing the file was how a failed start still showed
 	// up as an engine, and how an engine started from a hand-written [[agent]]

@@ -376,3 +376,39 @@ func (m *extrasManager) Engines() []api.RunningEngine {
 	}
 	return out
 }
+
+// InboundAccepted counts the peers that connected to one of these engines. It
+// is the cheapest proof of reachability there is: a peer that arrived settles
+// the question outright, including inside a tunnel where our own probe is blind.
+func (m *extrasManager) InboundAccepted(id string) (int64, error) {
+	for _, le := range m.snapshot() {
+		if le.id != id {
+			continue
+		}
+		if le.hoard != nil {
+			return le.hoard.InboundAccepted()
+		}
+		if le.race != nil {
+			return le.race.InboundAccepted()
+		}
+	}
+	return 0, fmt.Errorf("engine %q does not run here", id)
+}
+
+// SampleServedInfoHash names one torrent the engine holds, so the probe can
+// demand a handshake only our own client can answer. Empty means the engine has
+// nothing loaded yet, which the probe reports as unknown rather than closed.
+func (m *extrasManager) SampleServedInfoHash(id string) string {
+	for _, le := range m.snapshot() {
+		if le.id != id {
+			continue
+		}
+		if le.hoard != nil {
+			return le.hoard.SampleServedInfoHash()
+		}
+		if le.race != nil {
+			return le.race.SampleServedInfoHash()
+		}
+	}
+	return ""
+}
