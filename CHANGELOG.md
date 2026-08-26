@@ -6,6 +6,10 @@ All notable changes to Hydra are documented here. This project follows
 ## v3.147.4 - 2026-08-26
 
 ### Fixed
+- The engine id inside the label call, the free-space probe and the front-only
+  dialers followed the same rule as the rest: each end names its own. Missing
+  one of them was how a delivered torrent still lost its category, with the
+  reason in a warning nobody reads.
 - **A move named one engine for both ends.** That was true while a move meant
   "the same engine on another machine"; handing a torrent from `local-hoard` to
   `local-vpn7` asks for a different engine on each side, and the single field

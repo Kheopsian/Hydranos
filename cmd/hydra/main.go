@@ -1183,7 +1183,7 @@ func main() {
 				if err != nil {
 					return err
 				}
-				return cl.SetCategoryLabel(p.Engine, infoHash, p.Category)
+				return cl.SetCategoryLabel(p.TargetEngineID(), infoHash, p.Category)
 			},
 			FreeSpace: func(agent, path string) (int64, error) {
 				if isLocal(agent) {
@@ -2699,14 +2699,14 @@ func startFrontOnlyJobs(ctx context.Context, cfg *config.HydraConfig, apiServer 
 	jobMgr := jobs.NewManager(ctx, st, 1)
 	jobMgr.Register(&jobs.RemoteMoveRunner{
 		DialSource: func(p jobs.RemoteMoveParams) (jobs.PieceSource, error) {
-			cl, derr := dial(p.SourceAgent, p.Engine)
+			cl, derr := dial(p.SourceAgent, p.SourceEngineID())
 			if derr != nil {
 				return nil, derr
 			}
 			return cl, nil
 		},
 		DialSink: func(p jobs.RemoteMoveParams) (jobs.PieceSink, error) {
-			cl, derr := dial(p.TargetAgent, p.Engine)
+			cl, derr := dial(p.TargetAgent, p.TargetEngineID())
 			if derr != nil {
 				return nil, derr
 			}
@@ -2714,11 +2714,11 @@ func startFrontOnlyJobs(ctx context.Context, cfg *config.HydraConfig, apiServer 
 		},
 		ResolveSavePath: apiServer.CategorySavePathFor,
 		SetTargetCategory: func(p jobs.RemoteMoveParams, infoHash string) error {
-			cl, derr := dial(p.TargetAgent, p.Engine)
+			cl, derr := dial(p.TargetAgent, p.TargetEngineID())
 			if derr != nil {
 				return derr
 			}
-			return cl.SetCategoryLabel(p.Engine, infoHash, p.Category)
+			return cl.SetCategoryLabel(p.TargetEngineID(), infoHash, p.Category)
 		},
 		FreeSpace: func(agent, path string) (int64, error) {
 			cl, derr := dial(agent, agentwire.EngineHoard)
