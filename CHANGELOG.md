@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.148.0 - 2026-08-26
+
+### Added
+- **Moving to a category now moves the files, wherever the torrent lives.** On
+  this node's primaries it always did; on an agent -- or on any other engine of
+  this machine -- it relabelled the torrent and moved nothing, leaving the
+  payload in the old category's directory for good. Planning from here compared
+  that node's paths with this host's, so the honest answer at the time was to do
+  nothing.
+- The node holding the files does the work: it plans in its own filesystem,
+  moves in the background (a copy across filesystems runs for hours) and reports
+  how far it got. This side keeps the decision, the durable job and the
+  progress; the torrent is stopped for the move and restarted whatever happens.
+- Its refusals are the ones the local move already gives -- hardlinks, no room,
+  target exists -- so the existing "this would break N hardlinks, do it anyway?"
+  prompt covers an agent's torrents without a line of UI change.
+
+## v3.147.5 - 2026-08-26
+
+### Fixed
+- The engine id inside the label call, the free-space probe and the front-only
+  dialers now follow the same rule as the rest: each end of a move names its
+  own. Missing one of them was how a delivered torrent still lost its category.
+
 ## v3.147.4 - 2026-08-26
 
 ### Fixed
