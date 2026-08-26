@@ -3,6 +3,29 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.147.0 - 2026-08-26
+
+### Added
+- **Send a torrent to another engine of this machine, from the right-click
+  menu.** The Agent group was hidden whenever no REMOTE agent existed, which is
+  every node that runs several engines and nothing else -- so the one thing
+  extra engines are for, moving a torrent onto another tunnel, could not be
+  asked for. Engines of this node are offered as destinations now.
+- Between two engines of one machine the payload never moves: they share a
+  filesystem and the files are already where the target expects them, so the
+  torrent changes hands where it lies -- seconds, whatever its size. The source
+  stops before the target adopts, so the same files are never open for writing
+  twice, and the source is always released with its data kept.
+- A handoff cannot duplicate, and the menu no longer offers it: two engines
+  seeding one set of files are two writers on the same bytes the first time
+  either repairs a piece.
+
+### Fixed
+- A move submitted without an engine assumed `hoard`. The engine now comes from
+  the source agent, which names exactly one since one agent became one engine --
+  a race torrent would otherwise have resolved to an engine that does not hold
+  it.
+
 ## v3.146.0 - 2026-08-26
 
 ### Fixed

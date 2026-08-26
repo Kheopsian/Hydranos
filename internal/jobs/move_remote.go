@@ -20,6 +20,10 @@ type PieceSource interface {
 	ReadPiece(infoHash string, piece int) ([]byte, error)
 	// Release is what turns a duplicate into a move.
 	StopTorrent(infoHash string) error
+	// StartTorrent puts the source back the way it was. Only a handoff needs
+	// it: that is the one path that stops the source BEFORE the target holds
+	// anything, so a failure in between has to be undone.
+	StartTorrent(infoHash string) error
 	RemoveTorrent(infoHash string, keepData bool) error
 }
 
@@ -65,6 +69,14 @@ type RemoteMoveParams struct {
 	Name string `json:"name,omitempty"`
 	// BytesPerSecond caps the transfer. Zero is uncapped.
 	BytesPerSecond int64 `json:"bytes_per_second,omitempty"`
+	// Handoff means both ends are engines of the SAME node and the payload is
+	// already at the path the target expects, so there is nothing to transfer:
+	// the torrent changes hands where it lies.
+	//
+	// This is not an optimisation, it is a correctness requirement. Copying
+	// would have the target write the very files the source is reading, and the
+	// release at the end would delete the payload the target now points at.
+	Handoff bool `json:"handoff,omitempty"`
 }
 
 // RemoteMoveRunner carries a torrent and its bytes to another node.
@@ -145,6 +157,10 @@ func (r *RemoteMoveRunner) Run(ctx context.Context, j *store.Job, report func(do
 		return fmt.Errorf("remote move: %w", err)
 	}
 	report(0, layout.TotalSize)
+
+	if p.Handoff {
+		return r.handoff(j, p, src, dst, rec, blob, targetSavePath, layout.TotalSize, report)
+	}
 
 	// Preflight: refuse for lack of room BEFORE moving a byte, not at piece
 	// 40,000. Only the bytes still missing are needed, so a resumed job is not
@@ -274,6 +290,84 @@ func (r *RemoteMoveRunner) Run(ctx context.Context, j *store.Job, report func(do
 	slog.Info("remote move: moved, source released",
 		"info_hash", j.InfoHash, "bytes", layout.TotalSize,
 		"target", p.TargetAgent, "kept_source_data", p.KeepSourceData)
+	return nil
+}
+
+// handoff gives a torrent to another engine of this node without moving a byte.
+//
+// The two engines share a filesystem and the payload is already at the path the
+// target expects, so the transfer path is not merely wasteful here, it is
+// destructive: the target would write the files the source is reading, and the
+// release at the end would delete what the target now points at.
+//
+// The order is the whole safety argument. The source stops FIRST, so the files
+// are never open for writing by two engines at once -- the opposite of the copy
+// path, where the source keeps seeding until the target is proven good. That
+// costs a window where nobody is seeding, seconds long, and it is the only
+// ordering that cannot corrupt the payload.
+//
+// The source's bitfield is carried over rather than rechecked. It describes the
+// same bytes on the same disk, hash-checked when they were written; rechecking
+// would read the whole payload to learn what the record already says.
+func (r *RemoteMoveRunner) handoff(j *store.Job, p RemoteMoveParams,
+	src PieceSource, dst PieceSink, rec *ltclient.ResumeRecord, blob []byte,
+	targetSavePath string, totalSize int64, report func(done, total int64)) error {
+
+	// A handoff is only safe when the payload really is where the target will
+	// look. If the two paths differ, this is a copy, and calling it a handoff
+	// would hand the target an empty directory it believes is complete.
+	if rec.SavePath != targetSavePath {
+		return fmt.Errorf("remote move: handoff needs one path, source is at %q and the target expects %q",
+			rec.SavePath, targetSavePath)
+	}
+	if !p.ReleaseSource {
+		// Two engines seeding one set of files is not a duplicate, it is two
+		// writers on the same bytes the first time either repairs a piece.
+		return fmt.Errorf("remote move: a handoff cannot duplicate -- both engines would hold the same files")
+	}
+	if _, gErr := dst.ExportState(j.InfoHash); gErr == nil {
+		return fmt.Errorf("remote move: the target engine already holds this torrent")
+	}
+
+	if err := src.StopTorrent(j.InfoHash); err != nil {
+		return fmt.Errorf("remote move: handoff: stopping the source: %w", err)
+	}
+	restoreSource := func(cause error) error {
+		if sErr := src.StartTorrent(j.InfoHash); sErr != nil {
+			slog.Error("remote move: handoff failed and the source could not be restarted, it is stopped",
+				"info_hash", j.InfoHash, "source", p.SourceAgent, "err", sErr)
+		}
+		return cause
+	}
+
+	adopt := *rec
+	adopt.SavePath = targetSavePath
+	adopt.Paused = true
+	if _, aErr := dst.ImportStateWithFile(&adopt, blob); aErr != nil {
+		return restoreSource(fmt.Errorf("remote move: handoff: adopt on target: %w", aErr))
+	}
+	if sErr := dst.StartTorrent(j.InfoHash); sErr != nil {
+		if rErr := dst.RemoveTorrent(j.InfoHash, true); rErr != nil {
+			slog.Warn("remote move: handoff: the target shell could not be removed",
+				"info_hash", j.InfoHash, "target", p.TargetAgent, "err", rErr)
+		}
+		return restoreSource(fmt.Errorf("remote move: handoff: starting on target: %w", sErr))
+	}
+	if r.SetTargetCategory != nil {
+		if cErr := r.SetTargetCategory(p, j.InfoHash); cErr != nil {
+			slog.Warn("remote move: handoff: delivered but the category could not be set",
+				"info_hash", j.InfoHash, "category", p.Category, "target", p.TargetAgent, "err", cErr)
+		}
+	}
+	// keepData is TRUE and not a choice: the files are the target's now. This
+	// is the one call in this file where the wrong argument destroys the
+	// payload it was asked to move.
+	if err := src.RemoveTorrent(j.InfoHash, true); err != nil {
+		return fmt.Errorf("remote move: handoff: the target holds it but the source could not be released: %w", err)
+	}
+	report(totalSize, totalSize)
+	slog.Info("remote move: handed over in place, no bytes moved",
+		"info_hash", j.InfoHash, "source", p.SourceAgent, "target", p.TargetAgent, "save_path", targetSavePath)
 	return nil
 }
 

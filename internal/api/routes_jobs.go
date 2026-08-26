@@ -295,6 +295,13 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 		return
 	}
 	if req.Engine == "" {
+		// From the SOURCE agent, not a constant. One agent is one engine, so
+		// the agent name already says which one -- and a race torrent moved
+		// with the old "hoard" default resolved to an engine that does not hold
+		// it, or to none at all on a node whose engines are both race.
+		req.Engine = s.engineOfAgent(req.SourceAgent)
+	}
+	if req.Engine == "" {
 		req.Engine = "hoard"
 	}
 	// The destination is the path THIS torrent's category defines on the target
@@ -313,8 +320,26 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 	// Resolve everything the job will need NOW, so a bad category or an
 	// unknown agent is a 400 on this request instead of a job that fails a
 	// second later somewhere the user is not looking.
-	if _, err := s.CategorySavePathFor(req.TargetAgent, req.Category); err != nil {
+	targetPath, err := s.CategorySavePathFor(req.TargetAgent, req.Category)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Between two engines of THIS node the payload is already where the target
+	// expects it, so the torrent changes hands where it lies. Deciding it here
+	// rather than in the runner keeps the refusal in the request: a handoff
+	// cannot duplicate, because two engines seeding one set of files are two
+	// writers on the same bytes the first time either repairs a piece.
+	handoff := false
+	if isLocalAgentName(req.SourceAgent) && isLocalAgentName(req.TargetAgent) {
+		srcPath, perr := s.CategorySavePathFor(req.SourceAgent, req.Category)
+		if perr == nil && srcPath == targetPath {
+			handoff = true
+		}
+	}
+	if handoff && req.Mode != "move" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "these two engines share a filesystem, so the torrent can be handed over but not duplicated: both copies would be the same files"})
 		return
 	}
 	for label, agent := range map[string]string{"source": req.SourceAgent, "target": req.TargetAgent} {
@@ -343,12 +368,13 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 		KeepSourceData: req.KeepSourceData,
 		Name:           req.Name,
 		BytesPerSecond: req.BytesPerSecond,
+		Handoff:        handoff,
 	})
 	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"status": "ok", "job_id": job.ID, "mode": req.Mode})
+	c.JSON(http.StatusAccepted, gin.H{"status": "ok", "job_id": job.ID, "mode": req.Mode, "handoff": handoff})
 }
 
 // torrentCategory reads a torrent's current category from whichever engine
@@ -431,4 +457,23 @@ func (s *Server) torrentName(infoHash string) string {
 		}
 	}
 	return ""
+}
+
+// engineOfAgent names the engine an agent hosts, when it hosts exactly one --
+// which is every agent since one agent became one engine. Empty for the bare
+// "local" alias, which pins no engine, and for an agent hosting several.
+func (s *Server) engineOfAgent(name string) string {
+	if name == "" || name == LocalAgentName {
+		return ""
+	}
+	ra := s.remoteAgentByName(name)
+	if ra == nil {
+		return ""
+	}
+	s.agentsMu.RLock()
+	defer s.agentsMu.RUnlock()
+	if len(ra.engines) != 1 {
+		return ""
+	}
+	return ra.engines[0].role
 }
