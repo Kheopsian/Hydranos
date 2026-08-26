@@ -3,6 +3,55 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.144.0 - 2026-08-26
+
+### Added
+- **Every engine is configurable, not just the first two.** The Network tab
+  showed exactly two interface rows and two port fields -- race and hoard, in
+  the code as much as on screen -- so an engine added from the Agents menu had
+  nowhere to be configured. It ran on a copy of its role's primary and could
+  never be given a tunnel of its own, which was the entire point of a per-engine
+  interface. The page now has one row per engine this node runs.
+- **An extra engine takes a pushed config like every other agent.** Its server
+  was left without a config manager, so `apply_config` answered "this node
+  configures itself locally" -- and nothing did. A settings change reached every
+  other node in seconds and stopped there, silently, while the Agents page
+  reported the engine online and current. Its announcer is rebuilt on the way
+  through: the bindings are computed once, so an engine moved to another tunnel
+  would otherwise have kept announcing through the old one.
+- The `[[agent]]` fold now runs at boot. `MigrateSidecars` had done the
+  rewriting since it was written and nothing ever called it, so `engines.json`
+  stayed the live source and the array stayed a plan. It is additive and
+  reversible: the previous config is kept as `.bak-migrate` and the sidecar is
+  renamed rather than deleted.
+
+### Changed
+- An engine entry holds what is true of THAT engine -- its port, its interface
+  -- and inherits everything else from the `[race]`/`[hoard]` profile for its
+  role. The sidecar it replaces froze a copy of the primary's entire config at
+  creation and went stale the moment anything changed, which is how an extra
+  engine ended up announcing through last month's tunnel while every page
+  reported green. The sync that copied the primary's egress onto every shard on
+  each save is gone with the drift it was patching over.
+- Saving the Network tab only asks for a restart when a listen port actually
+  changes. A port is the one setting a running engine keeps across a config
+  apply; everything else on that page reaches the engines within seconds, and a
+  banner shown anyway taught people to restart -- dropping every peer connection
+  -- for changes that were already live.
+- `/api/engines` reports what is RUNNING rather than what a file says. The file
+  listing showed an engine that had failed to start and hid one a restart had
+  picked up from a hand-written entry; both read as "everything is fine".
+
+### Fixed
+- A locally-hosted `[[agent]]` entry ran with every field it did not mention set
+  to zero -- no connection limit, no peer timeout -- because its session was
+  decoded into a typed struct where "absent" and "written as zero" are the same
+  thing. It is merged over the role profile now, the same way a remote agent's
+  `[[agent.engine]]` override always was.
+- A config push to such an engine composed the fleet profile without the entry's
+  own keys, so the first apply would have moved the engine back onto the
+  profile's interface -- announcing from an address nobody chose.
+
 ## v3.143.0 - 2026-08-26
 
 ### Added

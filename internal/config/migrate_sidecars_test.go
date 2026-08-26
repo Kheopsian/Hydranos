@@ -57,8 +57,8 @@ func TestMigrationKeepsEachEngineInItsOwnEntry(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s missing:\n%s", name, out)
 		}
-		if a.Session.ListenPort != wantPort {
-			t.Errorf("%s listen_port = %d, want %d: a session landed in the wrong entry", name, a.Session.ListenPort, wantPort)
+		if got := sessionInt(a.Session, "listen_port"); got != wantPort {
+			t.Errorf("%s listen_port = %d, want %d: a session landed in the wrong entry", name, got, wantPort)
 		}
 	}
 }
@@ -116,4 +116,20 @@ func TestMigrationWithoutSidecarsChangesNothing(t *testing.T) {
 	if err != nil || len(done) != 0 || out != baseDoc {
 		t.Errorf("empty migration changed something: err=%v done=%v", err, done)
 	}
+}
+
+// sessionInt reads one key of an entry's sparse session override. The override
+// is a raw map on purpose -- decoded into a SessionConfig, "absent" and "zero"
+// stop being distinguishable and a three-key entry runs with every other field
+// at zero.
+func sessionInt(sess map[string]interface{}, key string) int {
+	switch v := sess[key].(type) {
+	case int64:
+		return int(v)
+	case int:
+		return v
+	case float64:
+		return int(v)
+	}
+	return 0
 }

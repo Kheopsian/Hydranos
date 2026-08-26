@@ -73,6 +73,18 @@ func (c *HydraConfig) ComposeSession(agentName, engineID, role string) (SessionC
 		profile.DiskSlots = nil
 	}
 
+	// A locally-hosted entry keeps its own settings in [[agent]] session keys
+	// rather than in an [[agent.engine]] block. Both are sparse overrides of
+	// the same profile, so both are applied here: composing without this one
+	// would push a config that silently reverts the engine's own interface to
+	// whatever the fleet profile says, which is exactly the leak this series
+	// exists to prevent.
+	if ag := c.AgentByName(agentName); ag != nil && len(ag.Session) > 0 {
+		profile, err = applySessionOverride(profile, ag.Session)
+		if err != nil {
+			return SessionConfig{}, fmt.Errorf("agent %q: %w", agentName, err)
+		}
+	}
 	if ov := c.engineOverride(agentName, engineID); ov != nil {
 		profile, err = applySessionOverride(profile, ov)
 		if err != nil {

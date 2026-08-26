@@ -60,5 +60,11 @@
  "Starting...": "Startet...",
  "Starting the engine, this takes a few seconds...": "Engine wird gestartet, das dauert einige Sekunden...",
  "Engine {id} is running, as agent {agent}.": "Engine {id} lauft, als Agent {agent}.",
- "Stopping engine {id}...": "Engine {id} wird gestoppt..."
+ "Stopping engine {id}...": "Engine {id} wird gestoppt...",
+ "Give the engines different tunnels to spread them across several exit addresses, or the same one to keep them together. Leave them empty on a host with no VPN.": "Den Engines verschiedene Tunnel geben, um sie auf mehrere Ausgangsadressen zu verteilen, oder denselben, um sie zusammenzuhalten. Auf einem Host ohne VPN leer lassen.",
+ "Saved. The engines need a restart to pick up the new listen port.": "Gespeichert. Die Engines mussen neu starten, um den neuen Listen-Port zu ubernehmen.",
+ "Saved and applied, no restart needed.": "Gespeichert und angewendet, kein Neustart notig.",
+ "{id} listen port": "Listen-Port von {id}",
+ "Port this engine accepts peers on. It has to differ from every other engine's.": "Port, auf dem diese Engine Peers annimmt. Er muss sich von dem jeder anderen Engine unterscheiden.",
+ "{id} engine interface ({role})": "Interface der Engine {id} ({role})"
 }

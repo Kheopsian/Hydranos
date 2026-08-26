@@ -657,11 +657,20 @@ func main() {
 		slog.Warn("  for full speed and safety, point data_dir at local disk; your downloads can stay on the share")
 	}
 
+	// One shape for the engines this node hosts: [[agent]] entries. The UI's
+	// engines.json is folded in here and renamed aside, so everything below
+	// reads a single source instead of merging a sidecar over the file.
+	cfg = foldSidecars(cfg)
+
 	engineCfgs, engErr := cfg.ResolveEngines()
 	if engErr != nil {
 		slog.Error("invalid engine config", "error", engErr)
 		os.Exit(1)
 	}
+	// engines.json is read only when the fold above could not run (an
+	// unreadable or unwritable config): its engines still have to start, and a
+	// node that silently drops half its engines because a migration failed is
+	// the outcome this whole change is meant to avoid.
 	if extras, xerr := config.LoadExtraEngines(cfg.Daemon.DataDir); xerr != nil {
 		slog.Warn("extra engines: load failed", "error", xerr)
 	} else if len(extras) > 0 {
@@ -670,7 +679,8 @@ func main() {
 			slog.Error("extra engines: invalid, ignoring engines.json", "error", verr)
 		} else {
 			engineCfgs = merged
-			slog.Info("extra engines loaded", "count", len(extras))
+			slog.Warn("extra engines: still read from engines.json, the fold into [[agent]] did not happen",
+				"count", len(extras))
 		}
 	}
 	var raceCfg, hoardCfg *config.SessionConfig
