@@ -1268,7 +1268,7 @@ func (s *Server) handleRemoveTorrent(c *gin.Context) {
 	// With duplicates, "which torrent" is ambiguous: the same info hash can be
 	// held by this node AND by an agent. Trying local first silently acted on
 	// the wrong copy, so the caller can name the node it means.
-	if want := c.Query("agent"); want != "" && want != "local" {
+	if want := c.Query("agent"); want != "" && !isLocalAgentName(want) {
 		ra, mode, ok := s.findRemoteOwner(infoHash)
 		if !ok || ra == nil || ra.name != want {
 			c.JSON(http.StatusNotFound, gin.H{"error": "agent " + want + " does not hold this torrent"})
@@ -1458,7 +1458,11 @@ func (s *Server) handleRaceTorrents(c *gin.Context) {
 	}
 	if s.raceEngine != nil {
 		for _, row := range s.raceEngine.GetAllStatus() {
-			row["agent"] = "local"
+			// The engine's own name, not the bare alias. "local" stopped being
+			// a name in 3.138.0 -- this node is local-race, local-hoard and one
+			// agent per extra engine -- and a row that claims otherwise sends
+			// every per-row action looking for an agent nobody registered.
+			row["agent"] = LocalAgentRace
 			out = append(out, row)
 		}
 	}
@@ -1481,7 +1485,7 @@ func (s *Server) handleRaceTorrentDetail(c *gin.Context) {
 	infoHash := strings.ToLower(c.Param("info_hash"))
 	agentHint := c.Query("agent")
 
-	if want := agentHint; want != "" && want != "local" {
+	if want := agentHint; want != "" && !isLocalAgentName(want) {
 		if detail := s.raceDetailFromRemote(want, infoHash); detail != nil {
 			c.JSON(http.StatusOK, detail)
 			return
@@ -1603,7 +1607,7 @@ func (s *Server) handleHoardTorrentDetail(c *gin.Context) {
 	infoHash := strings.ToLower(c.Param("info_hash"))
 	agentHint := c.Query("agent")
 
-	if want := agentHint; want != "" && want != "local" {
+	if want := agentHint; want != "" && !isLocalAgentName(want) {
 		if detail := s.hoardDetailFromRemote(want, infoHash); detail != nil {
 			c.JSON(http.StatusOK, detail)
 			return
@@ -3834,7 +3838,7 @@ func (s *Server) handleTorrentFiles(c *gin.Context) {
 	var files []map[string]interface{}
 	var avail map[string]interface{}
 
-	if want := agentHint; want != "" && want != "local" {
+	if want := agentHint; want != "" && !isLocalAgentName(want) {
 		var ok bool
 		files, avail, ok = s.filesFromRemote(want, hash, mode)
 		if !ok {

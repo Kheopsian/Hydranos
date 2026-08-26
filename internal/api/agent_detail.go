@@ -30,6 +30,14 @@ func (s *Server) agentHoardRowMeta(agentName, hash string) (engineID, category s
 // when the same hash exists locally and on an agent.
 func (s *Server) resolveRemoteDetailTarget(hash, agentHint, role string) (*remoteAgent, string, string, bool) {
 	hash = strings.ToLower(hash)
+	// A hint naming this node ends the search here, rather than falling through
+	// to "which agent owns this hash". The caller asked for OUR copy: with the
+	// same torrent seeded here and on an agent -- the normal case after a
+	// cross-seed -- searching on would answer with the agent's row and the page
+	// would show another machine's figures under this node's name.
+	if want := strings.TrimSpace(agentHint); want != "" && isLocalAgentName(want) {
+		return nil, "", "", false
+	}
 	probeRole := func(ra *remoteAgent) (*remoteAgent, string, string, bool) {
 		for _, e := range ra.byRole(role) {
 			if e.client == nil {
@@ -55,7 +63,7 @@ func (s *Server) resolveRemoteDetailTarget(hash, agentHint, role string) (*remot
 		return nil, "", "", false
 	}
 
-	if want := strings.TrimSpace(agentHint); want != "" && want != "local" {
+	if want := strings.TrimSpace(agentHint); want != "" {
 		ra := s.remoteAgentByName(want)
 		if ra == nil {
 			return nil, "", "", false
