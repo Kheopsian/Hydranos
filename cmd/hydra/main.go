@@ -1538,6 +1538,7 @@ func main() {
 		return extras.PortSetter(engineID)
 	})
 	apiServer.SetWireGuardStates(wgSup.States)
+	apiServer.SetTunnelDevices(wgSup.Devices)
 
 	go func() {
 		hoardEngine.WaitStaggerDone()

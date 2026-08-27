@@ -183,3 +183,35 @@ func TestOneSpellingForAnEnginesTunnel(t *testing.T) {
 		t.Error("the mode detector cannot see the tunnel the assignment endpoint wrote")
 	}
 }
+
+// The header measured with no interface and reported the host's own address
+// while the announces were leaving through the tunnel. The page was wrong in
+// the harmless direction that day; the same blind spot reports a tunnel
+// address for an agent that has fallen back to the default route.
+func TestResolvedEngineSeesTheTunnelTheSupervisorCreated(t *testing.T) {
+	cfg := &config.HydraConfig{}
+	cfg.Race.ListenPort = 16171
+	cfg.Race.WireGuard = &config.WireGuardConfig{Enabled: true, ConfigFile: "a.conf", Provider: "proton"}
+	cfg.Hoard.ListenPort = 16172
+
+	// Nothing published yet: the file is the only source, and it says nothing.
+	if ec, ok := resolvedEngine(cfg, "race"); !ok || ec.BindInterface != "" {
+		t.Fatalf("unexpected starting point: ok=%v iface=%q", ok, ec.BindInterface)
+	}
+	s := &Server{config: cfg}
+	s.SetTunnelDevices(func() map[string]string { return map[string]string{"race": "hy-race"} })
+	t.Cleanup(func() { s.SetTunnelDevices(nil) })
+
+	ec, ok := resolvedEngine(cfg, "race")
+	if !ok {
+		t.Fatal("race disappeared")
+	}
+	if ec.BindInterface != "hy-race" {
+		t.Errorf("bind interface = %q, want hy-race: the measurement would dial unpinned and report the host address", ec.BindInterface)
+	}
+	// An agent with no managed tunnel keeps whatever the file says, empty
+	// included: inventing an interface there would hide a real fallback.
+	if hc, _ := resolvedEngine(cfg, "hoard"); hc.BindInterface != "" {
+		t.Errorf("hoard gained an interface it never had: %q", hc.BindInterface)
+	}
+}
