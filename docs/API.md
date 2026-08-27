@@ -20,6 +20,10 @@ Auth = `X-API-Key`.
 **Torrents**
 - `POST /api/torrents/upload` — **ajoute un NOUVEAU torrent à DL+seed**. multipart : `mode=hoard|race`, `save_path`, `category`, fichier `.torrent`. (Le farm sw_fill l'utilise en `mode=hoard`.)
 - `POST /api/torrents` — add (magnet/url).
+- Options par-add, communes à `POST /api/torrents` (JSON) et `POST /api/torrents/upload` (multipart) :
+  - `create_subfolder` (bool, **absent = défaut daemon `create_torrent_folder`**) : met la charge dans son propre sous-dossier. Sans effet sur un multi-file, qui porte déjà son dossier ; hoard seulement (race est un répertoire de staging plat).
+  - `skip_recheck` (bool, défaut `false`) : ajoute en seed mode. ⚠️ **L'add est REFUSÉ** si un fichier déclaré manque ou n'a pas la bonne taille sous `<engine save_path>/<info.name si multi-file>/<chemin BEP-3>` — le seed mode ne retombe PAS sur un téléchargement.
+- `GET /api/torrents/add-defaults` — `{"create_subfolder":bool,"skip_recheck":false}`, ce que le formulaire d'ajout pré-coche.
 - `DELETE /api/torrents/:info_hash` — **retire des DEUX moteurs** (≠ purge race-only).
 - `POST /api/torrents/:info_hash/reannounce`
 - `POST /api/torrents/:info_hash/add-tracker` — ajoute UN tracker. ⚠️ Jusqu'à cette version la route répondait 200 **sans rien faire** (no-op dans les deux moteurs) ; elle passe désormais par le même chemin que `POST /trackers` avec `op=add`.
