@@ -230,7 +230,7 @@ func (s *Server) handleWireGuardDelete(c *gin.Context) {
 		w := ec.SessionConfig.WireGuard
 		if w != nil && w.Enabled && filepath.Base(w.ConfigFile) == name {
 			c.JSON(http.StatusConflict, gin.H{
-				"error": fmt.Sprintf("agent %q uses this configuration; turn its tunnel off first", ec.ID)})
+				"error": fmt.Sprintf("agent %q uses this configuration; turn its tunnel off first", LocalAgentNameFor(ec.ID))})
 			return
 		}
 	}
@@ -282,7 +282,7 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 			Device: e.Device, PortForward: e.PortForward, ManualPort: e.ManualPort,
 		}
 		if err := w.Validate(); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %v", e.EngineID, err)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %v", LocalAgentNameFor(e.EngineID), err)})
 			return
 		}
 		// Checked here, at save time, because the alternative is a config that
@@ -291,11 +291,11 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 		path := filepath.Join(dir, filepath.Base(e.ConfigFile))
 		raw, rerr := os.ReadFile(path)
 		if rerr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %v", e.EngineID, rerr)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %v", LocalAgentNameFor(e.EngineID), rerr)})
 			return
 		}
 		if _, perr := wgtun.ParseConf(string(raw)); perr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %s does not parse: %v", e.EngineID, e.ConfigFile, perr)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %s does not parse: %v", LocalAgentNameFor(e.EngineID), e.ConfigFile, perr)})
 			return
 		}
 		// Two engines on one .conf is one tunnel, one exit address and one
@@ -308,7 +308,7 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 				filepath.Base(other.ConfigFile) == filepath.Base(e.ConfigFile) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
 					"agents %s and %s are both set to %s: one configuration is one tunnel, so both would leave by the same address with the same forwarded port",
-					e.EngineID, other.EngineID, e.ConfigFile)})
+					LocalAgentNameFor(e.EngineID), LocalAgentNameFor(other.EngineID), e.ConfigFile)})
 				return
 			}
 		}
@@ -360,10 +360,10 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 		if prov, _ := wgtun.LookupProvider(e.Provider); prov.PortForward == wgtun.PortForwardManual {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s assigns its forwarded port on its own website, so agent %s will take no incoming peers until you type that port here.",
-				prov.Label, e.EngineID))
+				prov.Label, LocalAgentNameFor(e.EngineID)))
 		} else if prov.PortForward == wgtun.PortForwardNone {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s forwards no port at all, so agent %s will take no incoming peers.", prov.Label, e.EngineID))
+				"%s forwards no port at all, so agent %s will take no incoming peers.", prov.Label, LocalAgentNameFor(e.EngineID)))
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
