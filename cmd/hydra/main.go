@@ -2283,6 +2283,9 @@ func (a *raceAPIAdapter) GetTorrentStatus(infoHash string) map[string]interface{
 func (a *raceAPIAdapter) AddTorrent(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error) {
 	return a.engine.AddTorrent(torrentPath, magnetURI, savePath, trackers, category)
 }
+func (a *raceAPIAdapter) AddTorrentOpts(torrentPath, magnetURI, savePath string, trackers []string, category string, opts engine.AddOptions) (string, error) {
+	return a.engine.AddTorrentOpts(torrentPath, magnetURI, savePath, trackers, category, opts)
+}
 func (a *raceAPIAdapter) AddTorrentSeedMode(torrentPath, savePath, category string) (string, error) {
 	return a.engine.AddTorrentSeedMode(torrentPath, savePath, category)
 }
@@ -2391,6 +2394,9 @@ func (a *hoardAPIAdapter) AddTorrentSeedMode(torrentPath, savePath, category str
 }
 func (a *hoardAPIAdapter) AddTorrent(torrentPath, savePath, category string) (string, error) {
 	return a.engine.AddTorrent(torrentPath, savePath, category)
+}
+func (a *hoardAPIAdapter) AddTorrentOpts(torrentPath, savePath, category string, opts engine.AddOptions) (string, error) {
+	return a.engine.AddTorrentOpts(torrentPath, savePath, category, opts)
 }
 func (a *hoardAPIAdapter) RemoveTorrent(infoHash string, deleteFiles bool) error {
 	a.engine.RemoveTorrent(infoHash, deleteFiles)

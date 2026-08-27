@@ -538,12 +538,13 @@ func (c *Client) ActionRouted(mode, action, infoHash string, deleteFiles bool, c
 // AddRouted performs a rich placement add on the remote agent (its own engine
 // logic runs; announce stays agent-side). Not part of EngineClient — callers
 // hold the concrete *Client for this.
-func (c *Client) AddRouted(mode, torrentPath, savePath, category string) (*ltclient.AddTorrentResult, error) {
+func (c *Client) AddRouted(mode, torrentPath, savePath, category string, createFolder *bool, skipRecheck bool) (*ltclient.AddTorrentResult, error) {
 	data, err := os.ReadFile(torrentPath)
 	if err != nil {
 		return nil, fmt.Errorf("grpcclient: read torrent %s: %w", torrentPath, err)
 	}
-	p := agentwire.AddRoutedParams{Mode: mode, Torrent: data, SavePath: savePath, Category: category}
+	p := agentwire.AddRoutedParams{Mode: mode, Torrent: data, SavePath: savePath, Category: category,
+		CreateFolder: createFolder, SkipRecheck: skipRecheck}
 	var res ltclient.AddTorrentResult
 	if err := c.call(agentwire.MethodAddRouted, p, &res); err != nil {
 		return nil, err
