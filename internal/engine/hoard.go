@@ -585,6 +585,12 @@ func (e *HoardEngine) AddTorrent(torrentPath, savePath, category string) (string
 	return e.addTorrentInternal(torrentPath, savePath, category, false)
 }
 
+// AddTorrentOpts is AddTorrent with the per-add overrides of the Add form:
+// wrap-in-a-subfolder-or-not, and skip-the-hash-check-over-existing-data.
+func (e *HoardEngine) AddTorrentOpts(torrentPath, savePath, category string, opts AddOptions) (string, error) {
+	return e.addTorrentInternalWithOpts(torrentPath, savePath, category, false, opts.SkipRecheck, opts)
+}
+
 // AddTorrentSeedMode loads a .torrent file with seed_mode=true: the engine
 // trusts the on-disk payload, skips the hash check, and begins seeding
 // immediately. Used by the qBit shim when callers (cross-seed) request
@@ -594,14 +600,14 @@ func (e *HoardEngine) AddTorrentSeedMode(torrentPath, savePath, category string)
 }
 
 func (e *HoardEngine) addTorrentInternal(torrentPath, savePath, category string, silent bool) (string, error) {
-	return e.addTorrentInternalWithOpts(torrentPath, savePath, category, silent, false)
+	return e.addTorrentInternalWithOpts(torrentPath, savePath, category, silent, false, AddOptions{})
 }
 
 func (e *HoardEngine) addTorrentSeedMode(torrentPath, savePath, category string) (string, error) {
-	return e.addTorrentInternalWithOpts(torrentPath, savePath, category, true, true)
+	return e.addTorrentInternalWithOpts(torrentPath, savePath, category, true, true, AddOptions{})
 }
 
-func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category string, silent, seedMode bool) (string, error) {
+func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category string, silent, seedMode bool, opts AddOptions) (string, error) {
 	if !e.running {
 		return "", fmt.Errorf("hoard: engine not running")
 	}
@@ -616,8 +622,10 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 		return "", fmt.Errorf("hoard: parse info_hash: %w", err)
 	}
 
-	// Build save_path with torrent name subfolder.
+	// Build save_path with torrent name subfolder. The per-add choice wins over
+	// the daemon-wide default when the caller made one.
 	multiFile := isMultiFileTorrent(torrentBytes)
+	wrapFolder := opts.WrapFolder(e.CreateTorrentFolder)
 	savePathIsContentRoot := false
 	if savePath != "" {
 		if name := nameFromTorrentFile(torrentBytes); name != "" {
@@ -628,7 +636,16 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 				".iso", ".img", ".nfo", ".srt", ".sub", ".idx", ".rar", ".zip":
 				cleanName = strings.TrimSuffix(name, filepath.Ext(name))
 			}
-			if !seedMode && (multiFile || e.CreateTorrentFolder) && !strings.HasSuffix(savePath, cleanName) && !strings.HasSuffix(savePath, name) {
+			// A seed-mode add normally skips the join: cross-seed hands us the
+			// directory that CONTAINS the content root, not the root itself.
+			// An explicit per-add choice overrides that, which is what makes
+			// "skip the recheck" usable on data that already sits in its own
+			// subfolder.
+			join := multiFile || wrapFolder
+			if seedMode && opts.CreateFolder == nil {
+				join = false
+			}
+			if join && !strings.HasSuffix(savePath, cleanName) && !strings.HasSuffix(savePath, name) {
 				savePath = filepath.Join(savePath, cleanName)
 			}
 			base := filepath.Base(savePath)
@@ -655,15 +672,27 @@ func (e *HoardEngine) addTorrentInternalWithOpts(torrentPath, savePath, category
 		os.MkdirAll(engineSavePath, 0755)
 	}
 
+	// Skipping the hash check only makes sense over data that is really there.
+	// Refuse the add otherwise: seed_mode does NOT fall back to downloading, it
+	// registers a torrent that claims to be complete and cannot serve a byte.
+	if opts.SkipRecheck {
+		if err := verifyPayloadPresent(torrentBytes, engineSavePath); err != nil {
+			return "", fmt.Errorf("hoard: %w", err)
+		}
+	}
+
 	// Add to engine via IPC.
 	result, err := e.client.AddTorrentWithOptions(torrentPath, engineSavePath, false, seedMode)
 	if err != nil {
 		return "", fmt.Errorf("hoard: add torrent: %w", err)
 	}
 
+	// The on-disk shape is remembered per torrent, so a later category move
+	// renames the right thing whatever the daemon default becomes. A seed-mode
+	// add leaves it unknown unless the caller stated the shape itself.
 	var cf *bool
-	if !seedMode {
-		v := multiFile || e.CreateTorrentFolder
+	if !seedMode || opts.CreateFolder != nil {
+		v := multiFile || wrapFolder
 		cf = &v
 	}
 	info := &TorrentInfo{

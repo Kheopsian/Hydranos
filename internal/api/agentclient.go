@@ -69,7 +69,7 @@ type AgentClient interface {
 	SetTrackers(infoHash string, tiers [][]string) ([][]string, error)
 	SetCategoryLabel(engineID, infoHash, category string) error
 	ActionRouted(mode, action, infoHash string, deleteFiles bool, category, savePath string) error
-	AddRouted(mode, torrentPath, savePath, category string) (*ltclient.AddTorrentResult, error)
+	AddRouted(mode, torrentPath, savePath, category string, createFolder *bool, skipRecheck bool) (*ltclient.AddTorrentResult, error)
 	RemoveTorrent(infoHash string, keepData bool) error
 
 	// Piece transfer. Present so that jobs.PieceSource and jobs.PieceSink are

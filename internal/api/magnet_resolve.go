@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/engine/ltclient"
 	"github.com/Kheopsian/hydra/internal/magnet"
 )
@@ -124,7 +125,7 @@ func (s *Server) metadataSourceFor(target, mode string) (metadataSource, error) 
 // startMagnetResolve kicks off resolution and returns the info hash straight
 // away. Blocking the add would time out every *arr and autobrr grab, since a
 // magnet can take minutes to resolve.
-func (s *Server) startMagnetResolve(target, mode, magnetURI, savePath, category string, trackers []string, cat *category) (string, error) {
+func (s *Server) startMagnetResolve(target, mode, magnetURI, savePath, category string, trackers []string, cat *category, opts engine.AddOptions) (string, error) {
 	link, err := magnet.Parse(magnetURI)
 	if err != nil {
 		return "", err
@@ -140,13 +141,13 @@ func (s *Server) startMagnetResolve(target, mode, magnetURI, savePath, category 
 		return "", fmt.Errorf("magnet: start resolution: %w", err)
 	}
 	magnetBegin(link.InfoHash, link.DisplayName, mode, target)
-	go s.completeMagnetResolve(src, link, all, target, mode, savePath, category, cat)
+	go s.completeMagnetResolve(src, link, all, target, mode, savePath, category, cat, opts)
 	return link.InfoHash, nil
 }
 
 // completeMagnetResolve polls until the dict lands, then feeds a real .torrent
 // back through the normal add path.
-func (s *Server) completeMagnetResolve(src metadataSource, link *magnet.Link, trackers []string, target, mode, savePath, category string, cat *category) {
+func (s *Server) completeMagnetResolve(src metadataSource, link *magnet.Link, trackers []string, target, mode, savePath, category string, cat *category, opts engine.AddOptions) {
 	deadline := time.Now().Add(magnetResolveTimeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(magnetPollInterval)
@@ -166,7 +167,7 @@ func (s *Server) completeMagnetResolve(src metadataSource, link *magnet.Link, tr
 			magnetFailed(link.InfoHash, fmt.Errorf("engine has no job for this magnet"))
 			return
 		case "done":
-			if err := s.addResolvedMagnet(link, res.Info, trackers, target, mode, savePath, category, cat); err != nil {
+			if err := s.addResolvedMagnet(link, res.Info, trackers, target, mode, savePath, category, cat, opts); err != nil {
 				magnetFailed(link.InfoHash, err)
 				return
 			}
@@ -183,7 +184,7 @@ func (s *Server) completeMagnetResolve(src metadataSource, link *magnet.Link, tr
 // addResolvedMagnet turns the fetched dict into a .torrent and adds it exactly
 // like any other .torrent -- same placement, same save_path rules, same shim
 // behaviour. That reuse is the whole design: no second add path to keep in sync.
-func (s *Server) addResolvedMagnet(link *magnet.Link, hexInfo string, trackers []string, target, mode, savePath, category string, cat *category) error {
+func (s *Server) addResolvedMagnet(link *magnet.Link, hexInfo string, trackers []string, target, mode, savePath, category string, cat *category, opts engine.AddOptions) error {
 	dict, err := hex.DecodeString(hexInfo)
 	if err != nil {
 		return fmt.Errorf("magnet: decode info dict: %w", err)
@@ -207,7 +208,7 @@ func (s *Server) addResolvedMagnet(link *magnet.Link, hexInfo string, trackers [
 		return fmt.Errorf("magnet: write torrent: %w", err)
 	}
 
-	if _, err := s.routeAdd(target, mode, path, "", savePath, category, trackers, cat); err != nil {
+	if _, err := s.routeAdd(target, mode, path, "", savePath, category, trackers, cat, opts); err != nil {
 		return fmt.Errorf("magnet: add resolved torrent: %w", err)
 	}
 	return nil

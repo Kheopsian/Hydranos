@@ -161,8 +161,8 @@ func (l *localAgentClient) SetCategoryLabel(engineID, h, category string) error 
 func (l *localAgentClient) ActionRouted(mode, action, h string, del bool, cat, save string) error {
 	return l.agent.ActionRouted(mode, action, h, del, cat, save)
 }
-func (l *localAgentClient) AddRouted(mode, torrentPath, savePath, category string) (*ltclient.AddTorrentResult, error) {
-	return l.agent.AddRouted(mode, torrentPath, savePath, category)
+func (l *localAgentClient) AddRouted(mode, torrentPath, savePath, category string, createFolder *bool, skipRecheck bool) (*ltclient.AddTorrentResult, error) {
+	return l.agent.AddRouted(mode, torrentPath, savePath, category, createFolder, skipRecheck)
 }
 func (l *localAgentClient) GetTorrentFile(h string) ([]byte, error) {
 	return l.agent.GetTorrentFile(h)

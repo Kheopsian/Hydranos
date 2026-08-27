@@ -255,6 +255,12 @@ type AddRoutedParams struct {
 	Torrent  []byte `json:"torrent"` // raw .torrent bytes
 	SavePath string `json:"save_path"`
 	Category string `json:"category"`
+	// CreateFolder overrides the agent's create_torrent_folder for this add;
+	// absent (nil) keeps the agent's own default, so an older controller
+	// talking to a newer agent behaves exactly as before.
+	CreateFolder *bool `json:"create_folder,omitempty"`
+	// SkipRecheck adds in seed_mode after checking the payload is on disk.
+	SkipRecheck bool `json:"skip_recheck,omitempty"`
 }
 
 // ActionRoutedParams is the params envelope for MethodActionRouted — a rich

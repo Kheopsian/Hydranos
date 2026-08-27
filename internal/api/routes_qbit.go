@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/store"
 	"github.com/Kheopsian/hydra/internal/tagstore"
 )
@@ -645,7 +646,10 @@ func (s *Server) qbitTorrentsAdd(c *gin.Context) {
 			// grab must not block on a swarm), and hoard gets magnets too --
 			// the old hoard branch dropped the URI on the floor and added
 			// nothing.
-			if _, err := s.startMagnetResolve("local", mode, magnetURI, savePath, category, nil, nil); err != nil {
+			// No per-add overrides here: the shim's own skip_checking is
+			// handled on the .torrent branch below, and cross-seed's contract
+			// with it predates these options.
+			if _, err := s.startMagnetResolve("local", mode, magnetURI, savePath, category, nil, nil, engine.AddOptions{}); err != nil {
 				c.String(http.StatusInternalServerError, "Fails.")
 				return
 			}

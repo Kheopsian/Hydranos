@@ -891,7 +891,8 @@ func (s *Server) handleAddRouted(p agentwire.AddRoutedParams) (*agentpb.CallRepl
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	ih, err := e.AddRouted(path, "", p.SavePath, nil, p.Category)
+	ih, err := e.AddRoutedOpts(path, "", p.SavePath, nil, p.Category,
+		engine.AddOptions{CreateFolder: p.CreateFolder, SkipRecheck: p.SkipRecheck})
 	return reply(&ltclient.AddTorrentResult{InfoHash: ih}, err)
 }
 

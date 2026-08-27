@@ -376,7 +376,18 @@ func (e *RaceEngine) AddTorrentSeedMode(torrentPath, savePath, category string) 
 	return e.addTorrentInternal(torrentPath, "", savePath, nil, category, true)
 }
 
+// AddTorrentOpts is AddTorrent with the per-add overrides of the Add form. The
+// race engine keeps a flat staging directory, so create_torrent_folder does not
+// apply here; only skip-the-hash-check does.
+func (e *RaceEngine) AddTorrentOpts(torrentPath, magnetURI, savePath string, trackers []string, category string, opts AddOptions) (string, error) {
+	return e.addTorrentInternalWithOpts(torrentPath, magnetURI, savePath, trackers, category, opts.SkipRecheck, opts)
+}
+
 func (e *RaceEngine) addTorrentInternal(torrentPath, magnetURI, savePath string, trackers []string, category string, seedMode bool) (string, error) {
+	return e.addTorrentInternalWithOpts(torrentPath, magnetURI, savePath, trackers, category, seedMode, AddOptions{})
+}
+
+func (e *RaceEngine) addTorrentInternalWithOpts(torrentPath, magnetURI, savePath string, trackers []string, category string, seedMode bool, opts AddOptions) (string, error) {
 	if !e.running {
 		return "", fmt.Errorf("race: engine not running")
 	}
@@ -401,6 +412,14 @@ func (e *RaceEngine) addTorrentInternal(torrentPath, magnetURI, savePath string,
 		// Ensure save_path exists.
 		if savePath != "" {
 			os.MkdirAll(savePath, 0755)
+		}
+
+		// See the hoard path: trusting data that is not there is worse than
+		// the recheck the caller wanted to avoid.
+		if opts.SkipRecheck {
+			if verr := verifyPayloadPresent(torrentBytes, savePath); verr != nil {
+				return "", fmt.Errorf("race: %w", verr)
+			}
 		}
 
 		// Add to engine via IPC.

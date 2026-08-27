@@ -44,6 +44,9 @@ func (emptyRaceEngine) GetTorrentStatus(string) map[string]interface{} { return 
 func (emptyRaceEngine) AddTorrent(string, string, string, []string, string) (string, error) {
 	return "", errNoLocalEngine
 }
+func (emptyRaceEngine) AddTorrentOpts(string, string, string, []string, string, engine.AddOptions) (string, error) {
+	return "", errNoLocalEngine
+}
 func (emptyRaceEngine) AddTorrentSeedMode(string, string, string) (string, error) {
 	return "", errNoLocalEngine
 }
@@ -92,6 +95,9 @@ func (emptyHoardEngine) EngineOptFlags() (map[string]interface{}, error) {
 	return nil, errNoLocalEngine
 }
 func (emptyHoardEngine) AddTorrent(string, string, string) (string, error) {
+	return "", errNoLocalEngine
+}
+func (emptyHoardEngine) AddTorrentOpts(string, string, string, engine.AddOptions) (string, error) {
 	return "", errNoLocalEngine
 }
 func (emptyHoardEngine) AddTorrentSeedMode(string, string, string) (string, error) {

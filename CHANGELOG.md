@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.151.0 - 2026-08-27
+
+### Added
+- **The Add form now decides the on-disk shape and the hash check per add.**
+  Two checkboxes under Advanced: *put the payload in its own subfolder*, which
+  starts on the daemon's `create_torrent_folder` and overrides it for that add
+  only, and *skip the hash check*, which adds in seed mode over data already on
+  disk. Both travel through the whole add path: JSON `/api/torrents`, the
+  multipart upload, the magnet resolution that re-enters it, and the routed add
+  to a remote agent (`create_folder` / `skip_recheck` in `AddRoutedParams`, both
+  omitempty, so an older controller keeps its old behaviour).
+- `GET /api/torrents/add-defaults` reports the daemon's defaults so the form
+  states what will happen instead of guessing. Until it answers, the form sends
+  no override at all rather than an unchecked box that would silently turn
+  `create_torrent_folder` off for that add.
+- **Skipping the hash check now verifies the payload instead of trusting it.**
+  Every file the torrent declares is stat-ed under the layout Typhon writes,
+  `<engine save_path>/<info.name if multi-file>/<BEP-3 path>`, and the add is
+  refused, naming the missing or wrong-sized files, when they are not there.
+  Seed mode does not fall back to downloading: without this check a wrong save
+  path produced a torrent stuck at 100% that could not serve a byte.
+  The qBittorrent shim's own `skip_checking` path is untouched, cross-seed's
+  contract with it predates these options.
+
 ## v3.150.2 - 2026-08-26
 
 ### Fixed

@@ -548,6 +548,7 @@ func (s *Server) registerHydraRoutes() {
 	{
 		// Torrent management
 		api.POST("/torrents", s.handleAddTorrent)
+		api.GET("/torrents/add-defaults", s.handleAddDefaults)
 		api.POST("/torrents/upload", s.handleUploadTorrent)
 		api.DELETE("/torrents/:info_hash", s.handleRemoveTorrent)
 		api.POST("/torrents/:info_hash/reannounce", s.handleReannounce)
@@ -1011,7 +1012,7 @@ func ensureSavePathWritable(savePath string) error {
 }
 
 // localAdd performs the rich local add for a mode (today's monolith path).
-func (s *Server) localAdd(mode, torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error) {
+func (s *Server) localAdd(mode, torrentPath, magnetURI, savePath string, trackers []string, category string, opts engine.AddOptions) (string, error) {
 	if err := ensureSavePathWritable(savePath); err != nil {
 		return "", err
 	}
@@ -1020,26 +1021,41 @@ func (s *Server) localAdd(mode, torrentPath, magnetURI, savePath string, tracker
 		if s.raceEngine == nil {
 			return "", fmt.Errorf("race engine not available")
 		}
-		return s.raceEngine.AddTorrent(torrentPath, magnetURI, savePath, trackers, category)
+		return s.raceEngine.AddTorrentOpts(torrentPath, magnetURI, savePath, trackers, category, opts)
 	case "hoard":
 		if s.hoardEngine == nil {
 			return "", fmt.Errorf("hoard engine not available")
 		}
-		return s.hoardEngine.AddTorrent(torrentPath, savePath, category)
+		return s.hoardEngine.AddTorrentOpts(torrentPath, savePath, category, opts)
 	default:
 		return "", fmt.Errorf("invalid mode %q", mode)
 	}
 }
 
+// addDefaults is what the Add form pre-checks its two per-add options with, so
+// the UI states the daemon's own default instead of guessing one.
+func (s *Server) handleAddDefaults(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"create_subfolder": s.config.Daemon.CreateTorrentFolder,
+		"skip_recheck":     false,
+	})
+}
+
+// addOptionsFrom reads the two per-add overrides. Both are absent-by-default:
+// an API client that never heard of them gets the previous behaviour.
+func addOptionsFrom(createSubfolder *bool, skipRecheck bool) engine.AddOptions {
+	return engine.AddOptions{CreateFolder: createSubfolder, SkipRecheck: skipRecheck}
+}
+
 // routeAdd dispatches one add to a single target agent (local rich engine, or a
 // remote agent's rich AddRouted). Remote requires a .torrent path (no magnet).
-func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, category string, trackers []string, cat *category) (string, error) {
+func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, category string, trackers []string, cat *category, opts engine.AddOptions) (string, error) {
 	// A magnet has no metadata yet, so there is nothing to place: resolve it
 	// first, then come back through here with a real .torrent. This is the only
 	// magnet-aware branch in the add path -- race, hoard and remote agents all
 	// keep taking the same road they already took.
 	if torrentPath == "" && magnetURI != "" {
-		return s.startMagnetResolve(target, mode, magnetURI, savePath, category, trackers, cat)
+		return s.startMagnetResolve(target, mode, magnetURI, savePath, category, trackers, cat, opts)
 	}
 	if isLocalAgentName(target) {
 		// Naming a specific local engine pins the role: "local-race" means the
@@ -1055,7 +1071,7 @@ func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, catego
 		if role, pinned := s.roleOfLocalAgentIn(target); pinned {
 			mode = role
 		}
-		return s.localAdd(mode, torrentPath, magnetURI, savePath, trackers, category)
+		return s.localAdd(mode, torrentPath, magnetURI, savePath, trackers, category, opts)
 	}
 	ra := s.remoteAgentByName(target)
 	if ra == nil {
@@ -1073,7 +1089,7 @@ func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, catego
 		return "", fmt.Errorf("agent %q hosts no %s engine", target, mode)
 	}
 	var r *ltclient.AddTorrentResult
-	r, err := cl.AddRouted(engineID, torrentPath, sp, category)
+	r, err := cl.AddRouted(engineID, torrentPath, sp, category, opts.CreateFolder, opts.SkipRecheck)
 	if err != nil {
 		return "", err
 	}
@@ -1135,6 +1151,10 @@ func (s *Server) handleAddTorrent(c *gin.Context) {
 		Mode        string   `json:"mode"`
 		Category    string   `json:"category"`
 		Trackers    []string `json:"trackers"`
+		// Per-add overrides of the Add form. Absent = daemon default (subfolder)
+		// and full hash check (recheck).
+		CreateSubfolder *bool `json:"create_subfolder"`
+		SkipRecheck     bool  `json:"skip_recheck"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1170,7 +1190,8 @@ func (s *Server) handleAddTorrent(c *gin.Context) {
 	var firstHash string
 	var firstErr error
 	for _, t := range targets {
-		ih, aerr := s.routeAdd(t, mode, req.TorrentPath, req.MagnetURI, req.SavePath, req.Category, req.Trackers, cat)
+		ih, aerr := s.routeAdd(t, mode, req.TorrentPath, req.MagnetURI, req.SavePath, req.Category, req.Trackers, cat,
+			addOptionsFrom(req.CreateSubfolder, req.SkipRecheck))
 		r := addResult{Agent: t, InfoHash: ih}
 		if aerr != nil {
 			r.Error = aerr.Error()
@@ -1224,6 +1245,13 @@ func (s *Server) handleUploadTorrent(c *gin.Context) {
 	savePath := c.PostForm("save_path")
 	mode := c.PostForm("mode")
 	category := c.PostForm("category")
+	// Unsent = daemon default, exactly like the JSON add.
+	var createSubfolder *bool
+	if v := c.PostForm("create_subfolder"); v != "" {
+		b := v == "true" || v == "1"
+		createSubfolder = &b
+	}
+	skipRecheck := c.PostForm("skip_recheck") == "true" || c.PostForm("skip_recheck") == "1"
 	savePath, mode = s.resolveCategory(category, savePath, mode)
 	if mode == "" {
 		mode = "race"
@@ -1236,7 +1264,8 @@ func (s *Server) handleUploadTorrent(c *gin.Context) {
 	var infoHash string
 	err = nil
 	for _, t := range s.addTargets(category) {
-		ih, aerr := s.routeAdd(t, mode, tmpPath, "", savePath, category, nil, cat)
+		ih, aerr := s.routeAdd(t, mode, tmpPath, "", savePath, category, nil, cat,
+			addOptionsFrom(createSubfolder, skipRecheck))
 		if aerr != nil && err == nil {
 			err = aerr
 		}

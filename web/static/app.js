@@ -3502,6 +3502,34 @@ async function renderTorrentPreview() {
 })();
 
 
+// The two per-add overrides of the Add form. They start on the daemon's own
+// defaults so the form states what is going to happen instead of guessing it.
+(async function initAddOptions() {
+    const sub = document.getElementById("add-create-subfolder");
+    const skip = document.getElementById("add-skip-recheck");
+    if (!sub || !skip) return;
+    try {
+        const d = await api("/api/torrents/add-defaults");
+        sub.checked = !!d.create_subfolder;
+        skip.checked = !!d.skip_recheck;
+        sub.dataset.ready = "1";
+    } catch (_) {
+        // Defaults unknown: send nothing rather than a guess (see below).
+    }
+})();
+
+// A checkbox only overrides the daemon once the form knows what the daemon
+// default is. Before that, sending its unchecked state would silently turn the
+// setting off for that add.
+function _addOverrides() {
+    const sub = document.getElementById("add-create-subfolder");
+    const skip = document.getElementById("add-skip-recheck");
+    return {
+        create_subfolder: (sub && sub.dataset.ready) ? sub.checked : undefined,
+        skip_recheck: !!(skip && skip.checked),
+    };
+}
+
 let _addMsgTimer = null;
 document.getElementById("add-torrent-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -3533,6 +3561,9 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                 formData.append("mode", mode);
                 formData.append("save_path", savePath);
                 if (category) formData.append("category", category);
+                const ov = _addOverrides();
+                if (ov.create_subfolder !== undefined) formData.append("create_subfolder", String(ov.create_subfolder));
+                if (ov.skip_recheck) formData.append("skip_recheck", "true");
                 const res = await fetch("/api/torrents/upload", {
                     method: "POST",
                     headers: { "X-Api-Key": API_KEY },
@@ -3553,6 +3584,9 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                         formData.append("mode", mode);
                         formData.append("save_path", savePath);
                         if (category) formData.append("category", category);
+                        const ov = _addOverrides();
+                        if (ov.create_subfolder !== undefined) formData.append("create_subfolder", String(ov.create_subfolder));
+                        if (ov.skip_recheck) formData.append("skip_recheck", "true");
                         const res = await fetch("/api/torrents/upload", {
                             method: "POST",
                             headers: { "X-Api-Key": API_KEY },
@@ -3583,10 +3617,13 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
             }
         } else {
             // Path or magnet mode
+            const ov = _addOverrides();
             const body = {
                 mode: mode,
                 save_path: document.getElementById("save-path").value,
                 category: category || undefined,
+                create_subfolder: ov.create_subfolder,
+                skip_recheck: ov.skip_recheck,
             };
 
             const torrentPath = document.getElementById("torrent-path").value.trim();

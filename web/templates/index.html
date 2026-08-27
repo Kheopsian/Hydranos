@@ -1031,6 +1031,22 @@
                             <label for="save-path">Save Path</label>
                             <input type="text" id="save-path" placeholder="Auto-filled from category, or set a path">
                         </div>
+
+                        <div class="form-group">
+                            <label class="preview-toggle">
+                                <input type="checkbox" id="add-create-subfolder">
+                                <span>Put the payload in its own subfolder</span>
+                            </label>
+                            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Starts on the daemon setting (create_torrent_folder). A multi-file torrent always brings its own folder, so this only changes single-file ones, on the hoard engine.</div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="preview-toggle">
+                                <input type="checkbox" id="add-skip-recheck">
+                                <span>Skip the hash check, the data is already on disk</span>
+                            </label>
+                            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Seeds straight away instead of hashing the payload. The add is refused if a file is missing or the wrong size: it never falls back to downloading it.</div>
+                        </div>
                     </details>
 
                     <button type="submit" class="btn-primary" id="add-btn">Add Torrent</button>

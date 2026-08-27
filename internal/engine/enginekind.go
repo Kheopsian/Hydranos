@@ -23,6 +23,8 @@ type RichEngine interface {
 	RawEventHub() *EventHub
 	HasTorrent(infoHash string) bool
 	AddRouted(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error)
+	// AddRoutedOpts is AddRouted carrying the Add form's per-add overrides.
+	AddRoutedOpts(torrentPath, magnetURI, savePath string, trackers []string, category string, opts AddOptions) (string, error)
 	RemoveRouted(infoHash string, deleteFiles bool) error
 	// SetUserPaused records the operator's stop/start intent. Routed rather
 	// than served by a thin StopTorrent because the intent is what the slot
@@ -44,6 +46,10 @@ func (e *RaceEngine) Role() Role { return RoleRace }
 // AddRouted adapts the race add signature (which carries magnet/trackers).
 func (e *RaceEngine) AddRouted(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error) {
 	return e.AddTorrent(torrentPath, magnetURI, savePath, trackers, category)
+}
+
+func (e *RaceEngine) AddRoutedOpts(torrentPath, magnetURI, savePath string, trackers []string, category string, opts AddOptions) (string, error) {
+	return e.AddTorrentOpts(torrentPath, magnetURI, savePath, trackers, category, opts)
 }
 
 func (e *RaceEngine) RemoveRouted(infoHash string, deleteFiles bool) error {
@@ -68,6 +74,10 @@ func (e *HoardEngine) Role() Role { return RoleHoard }
 // seeds existing data — no magnet fetch, no injected trackers).
 func (e *HoardEngine) AddRouted(torrentPath, magnetURI, savePath string, trackers []string, category string) (string, error) {
 	return e.AddTorrent(torrentPath, savePath, category)
+}
+
+func (e *HoardEngine) AddRoutedOpts(torrentPath, magnetURI, savePath string, trackers []string, category string, opts AddOptions) (string, error) {
+	return e.AddTorrentOpts(torrentPath, savePath, category, opts)
 }
 
 // RemoveRouted wraps the hoard's void RemoveTorrent into the error-returning
