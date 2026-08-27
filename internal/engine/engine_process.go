@@ -52,11 +52,15 @@ type EngineBinding struct {
 
 // EngineConfig is the JSON config passed to hydra-engine.
 type EngineConfig struct {
-	DataDir            string `json:"data_dir"`
-	ResumeDir          string `json:"resume_dir"`
-	ListenPort         int    `json:"listen_port"`
-	ListenInterfaces   string `json:"listen_interfaces,omitempty"`
-	OutgoingInterfaces string `json:"outgoing_interfaces,omitempty"`
+	DataDir          string `json:"data_dir"`
+	ResumeDir        string `json:"resume_dir"`
+	ListenPort       int    `json:"listen_port"`
+	ListenInterfaces string `json:"listen_interfaces,omitempty"`
+	// BindDevice is the interface NAME every socket of the engine is pinned to
+	// (SO_BINDTODEVICE). It replaces outgoing_interfaces, which carried a
+	// resolved IP under a key the Rust config never declared: it was received
+	// and dropped, so the peer sockets were never pinned at all.
+	BindDevice string `json:"bind_device,omitempty"`
 	// Optional extra TCP listener expecting HAProxy PROXY protocol v2.
 	// Set from SessionConfig.ListenPortProxyV2 (0 = disabled). Enables the
 	// v6 bypass path : peer → VPS haproxy → the router rdr → the seedbox host [::]:N.
@@ -183,7 +187,7 @@ func applyBindInterface(ec *EngineConfig, cfg *config.SessionConfig) {
 		return
 	}
 	ec.ListenInterfaces = fmt.Sprintf("%s:%d", ip, ec.ListenPort)
-	ec.OutgoingInterfaces = ip
+	ec.BindDevice = cfg.BindInterface
 	slog.Info("bind_interface resolved", "interface", cfg.BindInterface, "ip", ip, "listen_port", ec.ListenPort)
 }
 
@@ -277,16 +281,6 @@ func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 	// Dual-tunnel ECMP: listen on both tunnel IPs if available.
 	if cfg.ListenInterfaces != "" {
 		ec.ListenInterfaces = cfg.ListenInterfaces
-		parts := strings.Split(cfg.ListenInterfaces, ",")
-		var ips []string
-		for _, p := range parts {
-			if idx := strings.LastIndex(p, ":"); idx > 0 {
-				ips = append(ips, strings.TrimSpace(p[:idx]))
-			}
-		}
-		if len(ips) > 1 {
-			ec.OutgoingInterfaces = strings.Join(ips, ",")
-		}
 	}
 	applyBindInterface(&ec, cfg)
 	return ec

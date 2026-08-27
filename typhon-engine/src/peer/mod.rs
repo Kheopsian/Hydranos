@@ -122,6 +122,22 @@ pub async fn listen(
             } else {
                 TcpSocket::new_v6()?
             };
+            // Pin the LISTENER, not just the dials: a socket accepted on it
+            // inherits the device, so the reply to a peer that arrived on the
+            // second tunnel leaves by that tunnel too. Without it the reply
+            // follows the default route, reaches the peer from an address it
+            // never dialled, and the connection dies silently.
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                if let Err(e) = crate::netpin::pin_fd(socket.as_raw_fd()) {
+                    return Err(format!(
+                        "cannot pin the peer listener to bind_device: {} — refusing to listen on the default route",
+                        e
+                    )
+                    .into());
+                }
+            }
             // IPV6_V6ONLY for the `enable_ipv6` listener: it sits beside the v4
             // one, so it must not also swallow v4. A dual-stack wildcard would
             // hand us v4 peers as `::ffff:a.b.c.d` and every address compared
