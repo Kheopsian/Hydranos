@@ -106,15 +106,20 @@ func proberFor(t reachTarget, peers []reachTarget) *reachTarget {
 	return nil
 }
 
-// crossProbePort is the port a real peer would dial, which is the forwarded one
-// when the provider hands us a NAT-PMP mapping. The engine's own listen port is
-// the internal side of that mapping and testing it would measure the tunnel's
-// inside, not the door peers knock on.
-func crossProbePort(t reachTarget) int {
+// crossProbePort is the port a real peer would dial, and whether we actually
+// KNOW that: true only when the provider told us its mapping.
+//
+// The distinction decides what a failure is allowed to mean. Behind a VPN doing
+// NAT-PMP, the engine's listen port is the internal side of a mapping whose
+// external port is chosen by the provider and is not the same number. Dialling
+// the internal one from outside reaches a port nobody forwards, so it fails
+// whatever the state of the real forwarding -- and reporting "unreachable" from
+// that is a confident lie about a node that may well be reachable.
+func crossProbePort(t reachTarget) (int, bool) {
 	if gport, _, active := GluetunStatus(t.Name); active && gport > 0 {
-		return gport
+		return gport, true
 	}
-	return t.Port
+	return t.Port, false
 }
 
 // probeReachability tests one engine and records the verdict.
@@ -166,6 +171,9 @@ func (s *Server) probeReachability(ctx context.Context, t reachTarget, peers []r
 	// after the passive check, never before it.
 	crossTried := false
 	crossDetail := ""
+	// Set when a cross probe failed on a port we were not sure about. It
+	// becomes the detail of an "unknown", never of a verdict.
+	crossUnknown := ""
 
 	// Strongest evidence first, when this node can produce it: another engine
 	// leaving by another tunnel dials this one's forwarded port and is answered
@@ -174,7 +182,7 @@ func (s *Server) probeReachability(ctx context.Context, t reachTarget, peers []r
 	if prober := proberFor(t, peers); prober != nil {
 		if sample := targetSample(t); sample != "" {
 			noteCrossProbe(name)
-			dialPort := crossProbePort(t)
+			dialPort, portKnown := crossProbePort(t)
 			peerID, err := engine.InboundReachable(ctx, ip, dialPort,
 				prober.SocksHost, prober.SocksPort, prober.SocksUser, prober.SocksPass,
 				prober.Iface, sample)
@@ -193,9 +201,20 @@ func (s *Server) probeReachability(ctx context.Context, t reachTarget, peers []r
 			// straight away -- a peer that actually arrived outranks a probe
 			// that did not get through, so the passive check gets to speak
 			// first.
-			crossTried = true
+			crossTried = portKnown
 			crossDetail = fmt.Sprintf("%s (exit %s) could not reach port %d: %v",
 				prober.Name, prober.PublicIP, dialPort, err)
+			if !portKnown {
+				// We dialled the engine's own listen port because nothing
+				// told us the forwarded one. Behind a provider that maps a
+				// different external port, that dial was always going to
+				// fail, so it says nothing about the forwarding. Left for
+				// the evidence chain below rather than turned into a red
+				// dot the operator cannot act on.
+				crossUnknown = fmt.Sprintf(
+					"%s (exit %s) could not reach port %d, but that is this engine's own listen port: no forwarded port is known for it, so nothing here says whether peers can get in",
+					prober.Name, prober.PublicIP, dialPort)
+			}
 		}
 	}
 
@@ -217,6 +236,10 @@ func (s *Server) probeReachability(ctx context.Context, t reachTarget, peers []r
 
 	if crossTried {
 		setReachability(name, reachState{State: "unreachable", Detail: crossDetail, At: time.Now()})
+		return
+	}
+	if crossUnknown != "" {
+		setReachability(name, reachState{State: "unknown", Detail: crossUnknown, At: time.Now()})
 		return
 	}
 

@@ -3,6 +3,20 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.155.1 - 2026-08-27
+
+### Fixed
+- **The new cross-engine probe reported a confident `unreachable` for a port it
+  had not actually tested.** With no gluetun to publish the forwarded port, it
+  fell back to the engine's own listen port -- which behind a NAT-PMP provider
+  is the INTERNAL side of a mapping whose external port is a different number
+  chosen by the provider. Dialling it from outside was always going to fail,
+  whatever the state of the real forwarding, so the red dot said something the
+  probe never measured.
+  A failure is now only a verdict when the port dialled is one the provider told
+  us about. Otherwise it stays `unknown` and says why, naming the port it tried
+  and that no forwarded port is known for that engine.
+
 ## v3.155.0 - 2026-08-27
 
 ### Added
