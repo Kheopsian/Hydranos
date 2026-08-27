@@ -83,9 +83,14 @@ type SessionConfig struct {
 	// GluetunAPIKey authenticates against that control server. Recent gluetun
 	// versions refuse every request without one; the role needs the route
 	// GET /v1/portforward.
-	GluetunAPIKey        string `toml:"gluetun_api_key" json:"gluetun_api_key"`
-	MaxConnections       int    `toml:"max_connections" json:"max_connections"`
-	MaxUploadsPerTorrent int    `toml:"max_uploads_per_torrent" json:"max_uploads_per_torrent"`
+	GluetunAPIKey string `toml:"gluetun_api_key" json:"gluetun_api_key"`
+	// WireGuard makes this engine bring its own tunnel up rather than expecting
+	// one to already exist. When it is on, bind_interface is DERIVED from it
+	// and any hand-written value is overridden: two writers for one decision is
+	// how an engine ends up pinned to a tunnel it does not own.
+	WireGuard            *WireGuardConfig `toml:"wireguard,omitempty" json:"wireguard,omitempty"`
+	MaxConnections       int              `toml:"max_connections" json:"max_connections"`
+	MaxUploadsPerTorrent int              `toml:"max_uploads_per_torrent" json:"max_uploads_per_torrent"`
 
 	// AnnounceRateLimit caps outbound tracker announces for this session, in
 	// announces per second. 0 = unlimited (the historical behaviour). A large

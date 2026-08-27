@@ -6943,6 +6943,15 @@ function netModeRender() {
             <button class="btn-small" id="net-check-btn" onclick="netModeCheck()">${t("Check what actually happens")}</button>
         </div>
         <div id="net-mode-result"></div>`;
+    // The WireGuard half loads on its own: it asks the daemon what the tunnels
+    // are doing right now, which is a different question from what the config
+    // file says, and the two are worth seeing side by side.
+    if (mode === "direct") {
+        const host = document.createElement("div");
+        host.id = "net-wg-body";
+        body.appendChild(host);
+        netWgLoad();
+    }
 }
 
 function netModeCollect() {
@@ -7404,3 +7413,200 @@ function closeNetPanel() {
     if (scrim) scrim.classList.remove("open");
 }
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeNetPanel(); });
+
+// --- WireGuard, managed by Hydra ------------------------------------------
+//
+// One engine, one configuration file, one tunnel. The page is built around
+// that: there is no global tunnel to turn on, only a row per engine, because
+// two engines sharing a tunnel leave by the same address with the same
+// forwarded port, which is the arrangement this feature exists to replace.
+//
+// The .conf files are uploaded, never displayed. They hold a private key, and
+// nothing here asks the API for their contents.
+
+let _wgState = null;
+
+async function netWgLoad() {
+    const body = document.getElementById("net-wg-body");
+    if (!body) return;
+    try {
+        _wgState = await api("/api/network/wireguard");
+    } catch (e) {
+        body.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+        return;
+    }
+    netWgRender();
+}
+
+function _wgEngineRows() {
+    const rows = [{ id: "race", role: "race" }, { id: "hoard", role: "hoard" }];
+    for (const e of _netExtras()) rows.push({ id: e.id, role: e.role });
+    return rows;
+}
+
+function _wgTunnelFor(engineId) {
+    return ((_wgState && _wgState.tunnels) || []).find(x => x.engine === engineId) || null;
+}
+
+function _wgAge(seconds) {
+    if (!seconds && seconds !== 0) return t("never");
+    if (seconds < 90) return t("{n}s ago", { n: Math.round(seconds) });
+    return t("{n} min ago", { n: Math.round(seconds / 60) });
+}
+
+function netWgRender() {
+    const body = document.getElementById("net-wg-body");
+    if (!body || !_wgState) return;
+    if (!_wgState.supported) {
+        body.innerHTML = `<p class="sr-desc">${esc(t(_wgState.unsupported_reason || ""))}</p>`;
+        return;
+    }
+    const files = _wgState.configs || [];
+    const providers = _wgState.providers || [];
+
+    let status = "";
+    if ((_wgState.tunnels || []).length) {
+        let rows = "";
+        for (const tn of _wgState.tunnels) {
+            const cls = tn.up ? "net-ok" : "net-fail";
+            const port = tn.forwarded_port ? t("port {p}", { p: tn.forwarded_port }) : t("no incoming port");
+            rows += `<div class="settings-row">
+                <div class="sr-label"><span class="sr-key ${cls}">${esc(tn.engine)}</span>
+                <span class="sr-desc">${esc(tn.device)} via ${esc(tn.provider_label || tn.provider || "")}</span></div>
+                <div class="sr-field"><span class="${cls}">${esc(tn.up ? t("carrying traffic") : t("no recent handshake"))}</span>
+                <span class="sr-desc">${esc(t("last handshake {age}", { age: _wgAge(tn.handshake_age_seconds) }))}, ${esc(port)}${tn.endpoint ? ", " + esc(tn.endpoint) : ""}</span>
+                ${tn.note ? `<span class="sr-desc">${esc(t(tn.note))}</span>` : ""}
+                ${tn.last_error ? `<span class="sr-desc net-fail">${esc(tn.last_error)}</span>` : ""}</div>
+            </div>`;
+        }
+        status = `<div class="settings-section"><div class="settings-section-title">${t("Live tunnels")}</div>${rows}</div>`;
+    }
+
+    let fileRows = "";
+    for (const f of files) {
+        fileRows += `<div class="settings-row">
+            <div class="sr-label"><span class="sr-key">${esc(f.name)}</span>
+            <span class="sr-desc">${f.error ? esc(f.error) : esc((f.address || "") + (f.endpoint ? " to " + f.endpoint : ""))}</span></div>
+            <div class="sr-field"><button class="btn-small btn-danger" onclick="netWgDeleteConfig('${esc(f.name)}')">${t("Remove")}</button></div>
+        </div>`;
+    }
+    if (!fileRows) fileRows = `<p class="sr-desc">${t("No configuration file yet. Download one from your provider and add it here.")}</p>`;
+
+    let engineRows = "";
+    for (const e of _wgEngineRows()) {
+        const cur = _wgCurrentFor(e.id);
+        const fileOpts = [`<option value="">${t("none")}</option>`].concat(
+            files.map(f => `<option value="${esc(f.name)}"${cur.config_file === f.name ? " selected" : ""}>${esc(f.name)}</option>`)).join("");
+        const provOpts = providers.map(p =>
+            `<option value="${esc(p.ID || p.id)}"${cur.provider === (p.ID || p.id) ? " selected" : ""}>${esc(p.Label || p.label)}</option>`).join("");
+        const note = (providers.find(p => (p.ID || p.id) === cur.provider) || {});
+        engineRows += `<div class="settings-row">
+            <div class="sr-label"><span class="sr-key">${esc(e.id)}</span><span class="sr-desc">${esc(e.role)}</span></div>
+            <div class="sr-field" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                <label><input type="checkbox" id="wg-en-${esc(e.id)}"${cur.enabled ? " checked" : ""}> ${t("tunnel")}</label>
+                <select id="wg-file-${esc(e.id)}">${fileOpts}</select>
+                <select id="wg-prov-${esc(e.id)}" onchange="netWgRenderNote('${esc(e.id)}')">${provOpts}</select>
+                <input type="number" id="wg-port-${esc(e.id)}" placeholder="${t("port by hand")}" value="${cur.manual_port || ""}" style="width:8em">
+                <span class="sr-desc" id="wg-note-${esc(e.id)}">${esc(t(note.Note || note.note || ""))}</span>
+            </div>
+        </div>`;
+    }
+
+    body.innerHTML = `${status}
+        <div class="settings-section"><div class="settings-section-title">${t("Configuration files")}</div>
+            <p class="sr-desc" style="margin:.2em 0 .8em">${t("A file is stored on this node and never shown again: it carries the tunnel's private key. Hydra reads the address, the peer and the keys from it, and decides the routing itself, so your host keeps its own default route.")}</p>
+            ${fileRows}
+            <div class="settings-row"><div class="sr-label"><span class="sr-key">${t("Add a file")}</span></div>
+            <div class="sr-field"><input type="file" id="wg-upload" accept=".conf"> <button class="btn-small" onclick="netWgUpload()">${t("Upload")}</button></div></div>
+        </div>
+        <div class="settings-section"><div class="settings-section-title">${t("Tunnel per engine")}</div>
+            <p class="sr-desc" style="margin:.2em 0 .8em">${t("Each engine gets its own file, so each leaves by its own address with its own forwarded port. Two engines cannot share one file.")}</p>
+            ${engineRows}
+            <div style="margin:.6em 0"><button class="btn-primary" onclick="netWgSave()">${t("Save the tunnels")}</button></div>
+        </div>
+        <div id="net-wg-result"></div>`;
+}
+
+// _wgCurrentFor reads what an engine runs today. The live tunnel is the truth
+// when there is one: the config file may have been edited since.
+function _wgCurrentFor(engineId) {
+    const tn = _wgTunnelFor(engineId);
+    const cfg = ((_wgState && _wgState.engines) || {})[engineId] || {};
+    return {
+        enabled: !!tn || !!cfg.enabled,
+        provider: (tn && tn.provider) || cfg.provider || "proton",
+        config_file: cfg.config_file || "",
+        manual_port: cfg.manual_port || 0,
+    };
+}
+
+function netWgRenderNote(engineId) {
+    const sel = document.getElementById("wg-prov-" + engineId);
+    const el = document.getElementById("wg-note-" + engineId);
+    if (!sel || !el) return;
+    const p = ((_wgState && _wgState.providers) || []).find(x => (x.ID || x.id) === sel.value) || {};
+    el.textContent = t(p.Note || p.note || "");
+}
+
+async function netWgUpload() {
+    const out = document.getElementById("net-wg-result");
+    const input = document.getElementById("wg-upload");
+    if (!input || !input.files || !input.files[0]) {
+        out.innerHTML = `<div class="result-msg error">${t("Pick a .conf file first.")}</div>`;
+        return;
+    }
+    const fd = new FormData();
+    fd.append("file", input.files[0]);
+    try {
+        const r = await api("/api/network/wireguard/configs", { method: "POST", body: fd });
+        out.innerHTML = `<div class="result-msg success">${esc(t(r.note || "Stored."))}</div>`;
+        await netWgLoad();
+    } catch (e) {
+        out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+    }
+}
+
+async function netWgDeleteConfig(name) {
+    const out = document.getElementById("net-wg-result");
+    if (!confirm(t("Remove {name}? The engine using it will not come up until another file is chosen.", { name }))) return;
+    try {
+        await api("/api/network/wireguard/configs/" + encodeURIComponent(name), { method: "DELETE" });
+        await netWgLoad();
+    } catch (e) {
+        out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+    }
+}
+
+async function netWgSave() {
+    const out = document.getElementById("net-wg-result");
+    const engines = _wgEngineRows().map(function (e) {
+        const en = document.getElementById("wg-en-" + e.id);
+        const file = document.getElementById("wg-file-" + e.id);
+        const prov = document.getElementById("wg-prov-" + e.id);
+        const port = document.getElementById("wg-port-" + e.id);
+        return {
+            engine_id: e.id,
+            enabled: en ? !!en.checked : false,
+            config_file: file ? file.value : "",
+            provider: prov ? prov.value : "",
+            manual_port: port ? Number(port.value || 0) : 0,
+            // The mode is derived from the provider unless a port was typed in
+            // by hand, which is the only case where the operator knows better
+            // than the provider table.
+            port_forward: (port && Number(port.value || 0) > 0) ? "manual" : "",
+        };
+    });
+    try {
+        const r = await api("/api/network/wireguard/engines", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ engines }),
+        });
+        out.innerHTML = `<div class="result-msg success">${esc(t(r.note || "Saved."))}</div>`;
+        if (r.restart_required) {
+            _setRestartBanner(t("Saved. The tunnels come up at the next restart, before the engines start.") +
+                ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply and restart")}</button>`);
+        }
+    } catch (e) {
+        out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+    }
+}

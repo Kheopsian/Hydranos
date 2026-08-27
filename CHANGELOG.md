@@ -3,6 +3,60 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.156.0 - 2026-08-27
+
+### Added
+- **Hydra brings its own WireGuard tunnels up, one per engine.** Give an engine
+  a provider `.conf` and say which provider it came from; Hydra creates the
+  interface, loads the keys, routes it, and asks for a forwarded port. The
+  engine is then born already correct: it binds the port the provider granted
+  and announces it once, instead of announcing a guess and being unreachable
+  for a full announce cycle while trackers hold on to it.
+
+  `wg-quick` is never used, and that is the point. A provider config carries
+  `AllowedIPs = 0.0.0.0/0`, which `wg-quick` reads as "make this the machine's
+  default route" -- on a host that also serves a library or has to stay
+  reachable, that is a change with no undo. The file is parsed, not executed:
+  every route Hydra installs goes into a routing table of its own, consulted
+  only for sockets explicitly bound to that tunnel device. Measured on the
+  production host: `ip route` and `ip rule` are byte-for-byte identical before
+  and after two tunnels come up and go down.
+
+  Two tunnels on one host now genuinely leave by two addresses, which is the
+  whole reason for per-engine tunnels: measured `203.0.113.21` and
+  `203.0.113.22` from two Proton configs on the same machine, with each
+  engine's NAT-PMP mapping landing on its own port (45243 and 61219).
+
+- **Port forwarding is asked for, and then followed.** The provider dropdown is
+  not decoration: it is how Hydra knows whether there is a port to ask for at
+  all. Proton and other NAT-PMP gateways are asked directly; AirVPN, PIA and
+  Windscribe assign a port out of band, so the field is yours to fill; Mullvad
+  removed forwarding in 2023, and the UI says so rather than leaving an engine
+  silently unable to take incoming peers.
+
+  A NAT-PMP lease is sixty seconds and nothing announces its expiry -- the port
+  simply stops answering while the engine keeps advertising it. So it is renewed
+  at half the lease, and a port that comes back different moves the engine's
+  listener. Both TCP and UDP are mapped: forwarding only TCP works well enough
+  to look correct and quietly loses every uTP and DHT peer.
+
+- **Every engine is followed, not just the first two.** The gluetun follower
+  only ever knew `race` and `hoard`, so an extra engine added from the Agents
+  menu sat on a stale port behind its tunnel with a green page. The WireGuard
+  follower reaches any engine this node runs.
+
+### Notes
+- The tunnel's private key never enters the config tree, an `apply_config` push
+  or an API response. The `.conf` stays in `<data_dir>/wireguard` at 0600 and is
+  referenced by name; the file is stored and listed, never served back.
+- Linux only. The Windows agent keeps naming an interface it manages itself.
+- Needs `NET_ADMIN` (the container ships `iproute2` and `wireguard-tools`
+  already). Missing it is reported at startup, naming the flag to add, rather
+  than surfacing three layers away as an engine that announces nothing.
+- A host that defaults IPv6 off on new interfaces -- Unraid does -- keeps the
+  v4 half of a dual-stack provider config instead of losing the whole tunnel,
+  and says which half it lost.
+
 ## v3.155.1 - 2026-08-27
 
 ### Fixed
