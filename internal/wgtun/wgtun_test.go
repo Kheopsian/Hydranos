@@ -196,7 +196,7 @@ func TestDeviceNameFor(t *testing.T) {
 		"race":                          "hy-race",
 		"hoard":                         "hy-hoard",
 		"Race_Extra 2":                  "hy-race-extra-2",
-		"an-engine-with-a-very-long-id": "hy-an-engine-wi",
+		"an-engine-with-a-very-long-id": "hy-an-engi-94fe", // truncated ids get a digest, never a shared prefix
 	}
 	for in, want := range cases {
 		if got := DeviceNameFor(in); got != want {
@@ -491,5 +491,39 @@ func TestReadOnlyProcExplainsWhichFlagToAdd(t *testing.T) {
 	other := explainWriteFailure("/proc/sys/net/ipv6/conf/hy-race/disable_ipv6", errors.New("no such file"))
 	if strings.Contains(other, "--sysctl") {
 		t.Errorf("an unrelated error was reported as a read-only mount: %s", other)
+	}
+}
+
+// Two agents must never land on one interface. Up deletes the device before
+// creating it, so a collision does not fail: the second agent takes the
+// first's tunnel and both look healthy while sharing one exit address.
+func TestDeviceNamesAreUniquePerAgent(t *testing.T) {
+	ids := []string{
+		"race", "hoard", "vpn7", "vpn8",
+		"proton-france-1", "proton-france-2",
+		"seedbox-nl-01", "seedbox-nl-02",
+		"a-very-long-agent-name-one", "a-very-long-agent-name-two",
+	}
+	seen := map[string]string{}
+	for _, id := range ids {
+		dev := DeviceNameFor(id)
+		if len(dev) > 15 {
+			t.Errorf("DeviceNameFor(%q) = %q, over the 15 characters Linux allows", id, dev)
+		}
+		if other, dup := seen[dev]; dup {
+			t.Errorf("%q and %q both map to interface %q: one would take the other's tunnel", other, id, dev)
+		}
+		seen[dev] = id
+	}
+	// Stable across calls: the device has to keep its name across restarts, or
+	// every reboot leaves a stale rule behind and the config points nowhere.
+	for _, id := range ids {
+		if DeviceNameFor(id) != DeviceNameFor(id) {
+			t.Errorf("DeviceNameFor(%q) is not deterministic", id)
+		}
+	}
+	// The short, common names stay readable: hy-race, not a hash.
+	if DeviceNameFor("race") != "hy-race" {
+		t.Errorf("the ordinary case got mangled: %q", DeviceNameFor("race"))
 	}
 }
