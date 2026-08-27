@@ -283,12 +283,27 @@ func (s *wgSupervisor) StartPortFollowers(ctx context.Context, resolve func(engi
 	}
 }
 
+// retryAfterFailure is how long to wait before asking again when a renewal
+// did not get through.
+//
+// Not the usual half-lease: measured on a live Proton tunnel, the gateway goes
+// quiet for a few seconds at a time while the tunnel itself keeps carrying
+// traffic. Waiting another thirty seconds after such a blip spends most of the
+// remaining lease doing nothing, and two blips in a row would drop the mapping
+// -- at which point the engine announces a port that answers nobody and no
+// error is ever produced, by anyone.
+const retryAfterFailure = 5 * time.Second
+
 func (s *wgSupervisor) follow(ctx context.Context, e *wgEngine, resolve func(string) portSetter) {
+	failures := 0
 	for {
 		s.mu.RLock()
 		lease, cur := e.lease, e.port
 		s.mu.RUnlock()
 		wait := portfwd.RenewInterval(lease)
+		if failures > 0 {
+			wait = retryAfterFailure
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -296,9 +311,24 @@ func (s *wgSupervisor) follow(ctx context.Context, e *wgEngine, resolve func(str
 		}
 		port, err := s.acquire(ctx, e, cur)
 		if err != nil {
-			s.note(e.engineID, fmt.Sprintf("could not renew the forwarded port: %v", err))
-			slog.Warn("wireguard: port renewal failed", "engine", e.engineID, "error", err)
+			failures++
+			s.note(e.engineID, fmt.Sprintf("could not renew the forwarded port (attempt %d): %v", failures, err))
+			// One miss is the tunnel breathing; several in a row means the
+			// mapping is about to lapse, which is the thing nothing else
+			// reports.
+			if failures >= 3 {
+				slog.Error("wireguard: the forwarded port has not been renewed and the lease is lapsing",
+					"engine", e.engineID, "attempts", failures, "error", err)
+			} else {
+				slog.Warn("wireguard: port renewal failed, retrying shortly",
+					"engine", e.engineID, "retry_in", retryAfterFailure.String(), "error", err)
+			}
 			continue
+		}
+		if failures > 0 {
+			slog.Info("wireguard: the forwarded port was renewed again",
+				"engine", e.engineID, "after_failures", failures, "port", port)
+			failures = 0
 		}
 		if port == cur || port == 0 {
 			continue
