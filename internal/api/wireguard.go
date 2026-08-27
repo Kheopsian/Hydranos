@@ -56,7 +56,7 @@ func (s *Server) handleWireGuardStatus(c *gin.Context) {
 	// config edited since the last restart is invisible otherwise, and that is
 	// exactly the state where an operator thinks a change took effect.
 	engines := map[string]*config.WireGuardConfig{}
-	for _, ec := range s.config.Engines {
+	for _, ec := range s.resolvedEngines() {
 		if w := ec.SessionConfig.WireGuard; w != nil {
 			engines[ec.ID] = w
 		}
@@ -226,7 +226,7 @@ func (s *Server) handleWireGuardDelete(c *gin.Context) {
 	// would succeed, everything would look fine, and the engine would fail to
 	// come up at the next restart -- possibly weeks later, with nothing
 	// linking the two events.
-	for _, ec := range s.config.Engines {
+	for _, ec := range s.resolvedEngines() {
 		w := ec.SessionConfig.WireGuard
 		if w != nil && w.Enabled && filepath.Base(w.ConfigFile) == name {
 			c.JSON(http.StatusConflict, gin.H{
@@ -373,4 +373,25 @@ func wireGuardKeys(e wgEngineReq) [][2]string {
 		return kv
 	}
 	return kv
+}
+
+// resolvedEngines is every engine this node runs, however the config spells
+// them.
+//
+// NOT s.config.Engines, which holds only the explicit [[engine]] blocks: an
+// install using the classic [race] and [hoard] sections has that slice EMPTY.
+// Reading it directly made the page report no tunnel on a node whose tunnels
+// were up, and -- worse -- let the delete endpoint remove a .conf that [race]
+// was using, because the loop guarding against exactly that iterated nothing.
+// The engine that came back missing its tunnel would have done so at the next
+// restart, with nothing connecting the two events.
+func (s *Server) resolvedEngines() []config.EngineConfig {
+	if s.config == nil {
+		return nil
+	}
+	engines, err := s.config.ResolveEngines()
+	if err != nil {
+		return s.config.Engines
+	}
+	return engines
 }

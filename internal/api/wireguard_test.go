@@ -80,3 +80,26 @@ func TestValidateRejectsManualWithoutAPort(t *testing.T) {
 		t.Errorf("a valid manual setup was refused: %v", err)
 	}
 }
+
+// The bug this catches was live: a config using the classic [race]/[hoard]
+// sections has s.config.Engines EMPTY, so a guard that walks it protects
+// nothing while looking like it does.
+func TestResolvedEnginesSeesClassicRaceAndHoardSections(t *testing.T) {
+	cfg := &config.HydraConfig{}
+	cfg.Race.ListenPort = 16171
+	cfg.Race.WireGuard = &config.WireGuardConfig{Enabled: true, ConfigFile: "proton-a.conf", Provider: "proton"}
+	cfg.Hoard.ListenPort = 16172
+	if len(cfg.Engines) != 0 {
+		t.Fatal("this test is pointless unless [[engine]] blocks are absent")
+	}
+	s := &Server{config: cfg}
+	found := ""
+	for _, ec := range s.resolvedEngines() {
+		if w := ec.SessionConfig.WireGuard; w != nil && w.Enabled {
+			found = w.ConfigFile
+		}
+	}
+	if found != "proton-a.conf" {
+		t.Errorf("the race engine's tunnel is invisible to the API (found %q): its .conf could be deleted while in use", found)
+	}
+}
