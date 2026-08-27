@@ -6810,6 +6810,19 @@ function _netEngineSelect(id, label, value, hint) {
     </div>`;
 }
 
+// _netOptionSelect is _netSelect for lists whose value is not its label: a
+// provider id is "proton", what the operator reads is "Proton VPN".
+function _netOptionSelect(id, label, value, options, hint, onchange) {
+    let html = "";
+    for (const o of options) {
+        html += `<option value="${esc(o.value)}"${o.value === value ? " selected" : ""}>${esc(t(o.label))}</option>`;
+    }
+    return `<div class="settings-row">
+        <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
+        <div class="sr-field"><select class="sr-input" id="${id}"${onchange ? ` onchange="${onchange}"` : ""}>${html}</select></div>
+    </div>`;
+}
+
 function _netCheckbox(id, label, checked, hint) {
     return `<div class="settings-row">
         <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
@@ -6817,16 +6830,48 @@ function _netCheckbox(id, label, checked, hint) {
     </div>`;
 }
 
-function _netPortsHTML(f) {
-    let extras = "";
+function _netPortsHTML(f, skip) {
+    // skip names the agents whose listen port is not the operator's to choose:
+    // behind a provider that forwards one, the number in this box is replaced
+    // at every boot by the one the provider grants. Showing it anyway was the
+    // first thing anyone asked about -- a field that looks like a setting and
+    // is really a leftover.
+    const hidden = skip || {};
+    let out = "";
+    if (!hidden["race"]) {
+        out += _netField("net-race-port", "Race listen port", "number", f.race_listen_port, "Port the race agent accepts peers on.");
+    }
+    if (!hidden["hoard"]) {
+        out += _netField("net-hoard-port", "Hoard listen port", "number", f.hoard_listen_port, "Port the hoard agent accepts peers on. It has to differ from the race one.");
+    }
     for (const e of _netExtras()) {
-        extras += _netField("net-extra-port-" + e.id, t("{id} listen port", { id: e.id }), "number", e.listen_port,
+        if (hidden[e.id]) continue;
+        out += _netField("net-extra-port-" + e.id, t("{id} listen port", { id: e.id }), "number", e.listen_port,
             t("Port this agent accepts peers on. It has to differ from every other agent's."));
     }
-    return _netField("net-race-port", "Race listen port", "number", f.race_listen_port, "Port the race agent accepts peers on.")
-         + _netField("net-hoard-port", "Hoard listen port", "number", f.hoard_listen_port, "Port the hoard agent accepts peers on. It has to differ from the race one.")
-         + extras
-         + _netCheckbox("net-ipv6", "Listen over IPv6 too", f.enable_ipv6, "Only if this host really has working IPv6. Announcing an address nobody can reach costs you peers.");
+    // IPv6 is never hidden: it is the operator's choice in every mode.
+    return out + _netCheckbox("net-ipv6", "Listen over IPv6 too", f.enable_ipv6, "Only if this host really has working IPv6. Announcing an address nobody can reach costs you peers.");
+}
+
+// _wgProviderPorts maps each agent to whether its port comes from the provider.
+// Read from the live tunnels first and the saved config second, because an
+// agent can be configured for a provider whose tunnel is not up yet.
+function _wgAgentsWithProviderPort() {
+    const out = {};
+    if (!_wgState) return out;
+    const provs = {};
+    for (const p of (_wgState.providers || [])) provs[p.ID || p.id] = p.PortForward || p.port_forward;
+    for (const [id, cfg] of Object.entries(_wgState.engines || {})) {
+        if (!cfg || !cfg.enabled) continue;
+        const mode = (cfg.port_forward || "").toLowerCase();
+        if (mode === "manual" || mode === "off") continue;
+        const kind = provs[cfg.provider];
+        if (kind === "natpmp" || kind === "gluetun") out[id] = true;
+    }
+    for (const tn of (_wgState.tunnels || [])) {
+        if (tn.forwarded_port > 0) out[tn.engine] = true;
+    }
+    return out;
 }
 
 // _netExtras are this node's engines beyond the two primaries. The page showed
@@ -6927,9 +6972,11 @@ function netModeRender() {
             ${_netField("net-pv2-trusted", "Trusted sources", "text", (f.proxy_v2_trusted_sources || []).join(", "), "Addresses allowed to send PROXY-v2 headers, comma separated. Required: with none, whoever reaches that port can claim to be any peer.")}
         </div>`;
     }
-    fields += `<div class="settings-section"><div class="settings-section-title">${t("Ports")}</div>${_netPortsHTML(f)}${
-        mode === "wireguard"
-            ? `<p class="sr-desc">${t("An agent whose provider forwards a port listens on the one it is given, and follows it when the lease rotates. These values are only used by an agent whose provider forwards nothing.")}</p>`
+    const wgAuto = mode === "wireguard" ? _wgAgentsWithProviderPort() : {};
+    const portsBody = _netPortsHTML(f, wgAuto);
+    fields += `<div class="settings-section"><div class="settings-section-title">${t("Ports")}</div>${portsBody}${
+        mode === "wireguard" && Object.keys(wgAuto).length
+            ? `<p class="sr-desc">${t("The agents not listed here take their port from their provider and follow it when the lease rotates; it is shown with their tunnel above.")}</p>`
             : ""
     }</div>`;
 
@@ -7436,10 +7483,18 @@ let _wgState = null;
 async function netWgLoad() {
     const body = document.getElementById("net-wg-body");
     if (!body) return;
+    const first = !_wgState;
     try {
         _wgState = await api("/api/network/wireguard");
     } catch (e) {
         body.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+        return;
+    }
+    // The first answer decides which listen ports are the operator's to set,
+    // and that section is drawn outside this one. Redraw the panel once --
+    // only once, since the second pass finds _wgState already there.
+    if (first) {
+        netModeRender();
         return;
     }
     netWgRender();
@@ -7469,22 +7524,34 @@ function netWgRender() {
         return;
     }
     const files = _wgState.configs || [];
-    const providers = _wgState.providers || [];
+    const providers = (_wgState.providers || []).map(p => ({
+        value: p.ID || p.id, label: p.Label || p.label,
+        note: p.Note || p.note, kind: p.PortForward || p.port_forward,
+    }));
 
     let status = "";
     if ((_wgState.tunnels || []).length) {
         let rows = "";
         for (const tn of _wgState.tunnels) {
             const cls = tn.up ? "net-ok" : "net-fail";
-            const port = tn.forwarded_port ? t("port {p}", { p: tn.forwarded_port }) : t("no incoming port");
+            const facts = [
+                tn.forwarded_port ? t("port {p}", { p: tn.forwarded_port }) : t("no incoming port"),
+                tn.endpoint || "",
+                t("handshake {age}", { age: _wgAge(tn.handshake_age_seconds) }),
+            ].filter(Boolean).join(" · ");
+            // The degradation is one word with the explanation behind it. It
+            // is permanent on this platform, and four lines of it per row
+            // buried everything that actually changes.
+            const degraded = tn.degraded
+                ? ` <span class="net-warn" title="${esc(tn.degraded)}">${esc(t("IPv4 only"))}</span>` : "";
             rows += `<div class="settings-row">
-                <div class="sr-label"><span class="sr-key ${cls}">${esc(tn.engine)}</span>
-                <span class="sr-desc">${esc(tn.device)} via ${esc(tn.provider_label || tn.provider || "")}</span></div>
-                <div class="sr-field"><span class="${cls}">${esc(tn.up ? t("carrying traffic") : t("no recent handshake"))}</span>
-                <span class="sr-desc">${esc(t("last handshake {age}", { age: _wgAge(tn.handshake_age_seconds) }))}, ${esc(port)}${tn.endpoint ? ", " + esc(tn.endpoint) : ""}</span>
-                ${tn.note ? `<span class="sr-desc">${esc(t(tn.note))}</span>` : ""}
-                ${tn.degraded ? `<span class="sr-desc net-warn">${esc(tn.degraded)}</span>` : ""}
-                ${tn.last_error ? `<span class="sr-desc net-fail">${esc(tn.last_error)}</span>` : ""}</div>
+                <div class="sr-label"><span class="sr-key">${esc(tn.engine)}</span>
+                <span class="sr-desc">${esc(tn.device)} · ${esc(tn.provider_label || tn.provider || "")}</span></div>
+                <div class="sr-field" style="flex-direction:column;align-items:flex-end;gap:2px">
+                    <span class="${cls}">${esc(tn.up ? t("carrying traffic") : t("no recent handshake"))}${degraded}</span>
+                    <span class="sr-desc">${esc(facts)}</span>
+                    ${tn.last_error ? `<span class="sr-desc net-fail" title="${esc(tn.last_error)}">${esc(t("last attempt failed"))}</span>` : ""}
+                </div>
             </div>`;
         }
         status = `<div class="settings-section"><div class="settings-section-title">${t("Live tunnels")}</div>${rows}</div>`;
@@ -7500,22 +7567,28 @@ function netWgRender() {
     }
     if (!fileRows) fileRows = `<p class="sr-desc">${t("No configuration file yet. Download one from your provider and add it here.")}</p>`;
 
-    let engineRows = "";
+    // One labelled block per agent. The controls used to sit on a single line
+    // with no labels at all, and the provider menu -- the field that decides
+    // whether an incoming port can be had -- was indistinguishable from the
+    // rest of the row.
+    let agentBlocks = "";
     for (const e of _wgEngineRows()) {
         const cur = _wgCurrentFor(e.id);
-        const fileOpts = [`<option value="">${t("none")}</option>`].concat(
-            files.map(f => `<option value="${esc(f.name)}"${cur.config_file === f.name ? " selected" : ""}>${esc(f.name)}</option>`)).join("");
-        const provOpts = providers.map(p =>
-            `<option value="${esc(p.ID || p.id)}"${cur.provider === (p.ID || p.id) ? " selected" : ""}>${esc(p.Label || p.label)}</option>`).join("");
-        const note = (providers.find(p => (p.ID || p.id) === cur.provider) || {});
-        engineRows += `<div class="settings-row">
-            <div class="sr-label"><span class="sr-key">${esc(e.id)}</span><span class="sr-desc">${esc(e.role)}</span></div>
-            <div class="sr-field" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-                <label><input type="checkbox" id="wg-en-${esc(e.id)}"${cur.enabled ? " checked" : ""}> ${t("tunnel")}</label>
-                <select id="wg-file-${esc(e.id)}">${fileOpts}</select>
-                <select id="wg-prov-${esc(e.id)}" onchange="netWgRenderNote('${esc(e.id)}')">${provOpts}</select>
-                <input type="number" id="wg-port-${esc(e.id)}" placeholder="${t("port by hand")}" value="${cur.manual_port || ""}" style="width:8em">
-                <span class="sr-desc" id="wg-note-${esc(e.id)}">${esc(t(note.Note || note.note || ""))}</span>
+        const fileOpts = [{ value: "", label: "none" }].concat(files.map(f => ({ value: f.name, label: f.name })));
+        const prov = providers.find(p => p.value === cur.provider) || {};
+        const manual = prov.kind === "manual" || (cur.port_forward || "").toLowerCase() === "manual";
+        agentBlocks += `<div class="settings-section">
+            <div class="settings-section-title">${esc(e.id)} · ${esc(e.role)}</div>
+            ${_netCheckbox("wg-en-" + e.id, "Bring up a tunnel for this agent", cur.enabled,
+                "Off, this agent leaves by whatever the host does.")}
+            ${_netOptionSelect("wg-file-" + e.id, "Configuration file", cur.config_file, fileOpts,
+                "The .conf from your provider. One file per agent: two agents on one file share one address and one port.")}
+            ${_netOptionSelect("wg-prov-" + e.id, "Provider", cur.provider, providers,
+                prov.note || "Who the configuration comes from. This is what says whether an incoming port can be asked for at all.",
+                "netWgProviderChanged('" + esc(e.id) + "')")}
+            <div id="wg-manual-${esc(e.id)}" style="${manual ? "" : "display:none"}">
+                ${_netField("wg-port-" + e.id, "Port given by the provider", "number", cur.manual_port || "",
+                    "This provider assigns the port on its own website, so Hydra cannot ask for it. Type the one you were given.")}
             </div>
         </div>`;
     }
@@ -7527,12 +7600,23 @@ function netWgRender() {
             <div class="settings-row"><div class="sr-label"><span class="sr-key">${t("Add a file")}</span></div>
             <div class="sr-field"><input type="file" id="wg-upload" accept=".conf"> <button class="btn-small" onclick="netWgUpload()">${t("Upload")}</button></div></div>
         </div>
-        <div class="settings-section"><div class="settings-section-title">${t("Tunnel per agent")}</div>
-            <p class="sr-desc" style="margin:.2em 0 .8em">${t("Each agent gets its own file, so each leaves by its own address with its own forwarded port. Two agents cannot share one file.")}</p>
-            ${engineRows}
-            <div style="margin:.6em 0"><button class="btn-primary" onclick="netWgSave()">${t("Save the tunnels")}</button></div>
-        </div>
+        ${agentBlocks}
+        <div style="margin:.6em 0"><button class="btn-primary" onclick="netWgSave()">${t("Save the tunnels")}</button></div>
         <div id="net-wg-result"></div>`;
+}
+
+// netWgProviderChanged swaps the hint and shows the manual port box only for
+// the providers that need one. A number box on a NAT-PMP provider is an
+// invitation to type a port that will be replaced within the minute.
+function netWgProviderChanged(agentId) {
+    const sel = document.getElementById("wg-prov-" + agentId);
+    if (!sel) return;
+    const p = ((_wgState && _wgState.providers) || []).find(x => (x.ID || x.id) === sel.value) || {};
+    const row = sel.closest(".settings-row");
+    const desc = row ? row.querySelector(".sr-desc") : null;
+    if (desc) desc.textContent = t(p.Note || p.note || "");
+    const box = document.getElementById("wg-manual-" + agentId);
+    if (box) box.style.display = ((p.PortForward || p.port_forward) === "manual") ? "" : "none";
 }
 
 // _wgCurrentFor reads what an engine runs today. The live tunnel is the truth
@@ -7548,13 +7632,6 @@ function _wgCurrentFor(engineId) {
     };
 }
 
-function netWgRenderNote(engineId) {
-    const sel = document.getElementById("wg-prov-" + engineId);
-    const el = document.getElementById("wg-note-" + engineId);
-    if (!sel || !el) return;
-    const p = ((_wgState && _wgState.providers) || []).find(x => (x.ID || x.id) === sel.value) || {};
-    el.textContent = t(p.Note || p.note || "");
-}
 
 async function netWgUpload() {
     const out = document.getElementById("net-wg-result");
@@ -7598,10 +7675,10 @@ async function netWgSave() {
             config_file: file ? file.value : "",
             provider: prov ? prov.value : "",
             manual_port: port ? Number(port.value || 0) : 0,
-            // The mode is derived from the provider unless a port was typed in
-            // by hand, which is the only case where the operator knows better
-            // than the provider table.
-            port_forward: (port && Number(port.value || 0) > 0) ? "manual" : "",
+            // Empty means "whatever this provider does", which is the honest
+            // default: the provider table is what knows, and a mode written
+            // here would freeze today's answer into the config.
+            port_forward: "",
         };
     });
     try {
@@ -7609,7 +7686,9 @@ async function netWgSave() {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ engines }),
         });
-        out.innerHTML = `<div class="result-msg success">${esc(t(r.note || "Saved."))}</div>`;
+        let extra = "";
+        for (const w of (r.warnings || [])) extra += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
+        out.innerHTML = extra + `<div class="result-msg success">${esc(t(r.note || "Saved."))}</div>`;
         if (r.restart_required) {
             _setRestartBanner(t("Saved. The tunnels come up at the next restart, before the agents start.") +
                 ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply and restart")}</button>`);

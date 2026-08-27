@@ -348,9 +348,28 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 		}
 		changed++
 	}
+	// A provider that assigns ports on its own website, with no port typed in,
+	// is a tunnel that will come up and take no incoming peers. It is a valid
+	// choice, so it is a warning and not a refusal -- but an unsaid one is
+	// indistinguishable from a broken setup a week later.
+	var warnings []string
+	for _, e := range req.Engines {
+		if !e.Enabled || e.ManualPort > 0 {
+			continue
+		}
+		if prov, _ := wgtun.LookupProvider(e.Provider); prov.PortForward == wgtun.PortForwardManual {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s assigns its forwarded port on its own website, so agent %s will take no incoming peers until you type that port here.",
+				prov.Label, e.EngineID))
+		} else if prov.PortForward == wgtun.PortForwardNone {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s forwards no port at all, so agent %s will take no incoming peers.", prov.Label, e.EngineID))
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"engines_updated":  changed,
 		"restart_required": true,
+		"warnings":         warnings,
 		"note":             "the tunnels come up at the next restart, before the agents start",
 	})
 }
