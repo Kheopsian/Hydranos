@@ -623,7 +623,7 @@ func PrintHeader(version string) {
 	if art != "" {
 		fmt.Fprint(os.Stdout, art)
 	}
-	line := fmt.Sprintf("H Y D R A   -   Typhon engine   -   v%s", version)
+	line := fmt.Sprintf("H Y D R A   -   v%s", version)
 	fmt.Fprintf(os.Stdout, "%s\n\n", centered(line, w))
 }
 
