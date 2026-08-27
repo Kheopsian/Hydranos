@@ -3,6 +3,21 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.152.0 - 2026-08-27
+
+### Changed
+- **An import no longer re-downloads what the source said it already had.**
+  A torrent qBittorrent or Transmission reported as complete is adopted with the
+  same per-file check the Add form's "skip the hash check" uses: every declared
+  file is stat-ed, sizes included, under the layout Typhon writes. When they are
+  not there the torrent is refused, naming the path we looked at, and the import
+  carries on with the next one.
+  The qBit import used to fall back to a plain add when the content path was
+  missing, which turned a path-mapping mistake into a re-fetch of the whole
+  library; Transmission's complete branch trusted the resume file with no check
+  at all and would announce us as a seeder holding nothing. Both are gone. A
+  torrent the source reported as INCOMPLETE still downloads, as it should.
+
 ## v3.151.0 - 2026-08-27
 
 ### Added

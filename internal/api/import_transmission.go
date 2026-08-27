@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/Kheopsian/hydra/internal/engine"
 )
 
 // Importing from Transmission means reading its config folder: it has no way to
@@ -313,8 +315,14 @@ func (s *Server) runTransmissionImport(job *importJob, req transmissionReq) {
 
 		var ih string
 		var addErr error
+		// A torrent Transmission had finished is adopted, never re-downloaded:
+		// the add checks every declared file against the disk and is refused
+		// with the path it looked at when they are not there. A path map that
+		// is one level off then costs an error line, not a re-fetch of the
+		// whole library.
 		if complete {
-			ih, addErr = s.hoardEngine.AddTorrentSeedMode(t.TorrentPath, sp, cat)
+			ih, addErr = s.hoardEngine.AddTorrentOpts(t.TorrentPath, sp, cat,
+				engine.AddOptions{SkipRecheck: true})
 		} else {
 			ih, addErr = s.hoardEngine.AddTorrent(t.TorrentPath, sp, cat)
 		}

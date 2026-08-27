@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Kheopsian/hydra/internal/engine"
 	"github.com/Kheopsian/hydra/internal/store"
 	"github.com/gin-gonic/gin"
 )
@@ -640,9 +641,13 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 				var addErr error
 				// Is the payload actually where the mapping says? A seed-mode add
 				// on absent data is worse than a slow one: it announces us as a
-				// seeder holding nothing, so every peer request fails. When the
-				// data is missing we add normally instead -- a recheck can then
-				// pick it up if it ever appears -- and we count the miss.
+				// seeder holding nothing, so every peer request fails.
+				//
+				// A torrent the source reported as complete is NEVER turned into
+				// a download here: the operator moved a seeding client over, and
+				// silently re-fetching terabytes because a path map is one level
+				// off is the worst possible reading of that. Such a torrent is
+				// refused, with the path we looked at, and the import goes on.
 				var cpStat os.FileInfo
 				cp := remapPath(it.t.ContentPath, req.PathMap)
 				if cp != "" {
@@ -653,7 +658,21 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 				if cpStat == nil {
 					job.update(func(sn *importSnapshot) { sn.DataMissing++ })
 				}
-				if it.seed && cpStat != nil {
+				if it.seed && cpStat == nil {
+					where := cp
+					if where == "" {
+						where = sp
+					}
+					tallyFail("add", "data missing")
+					job.update(func(sn *importSnapshot) {
+						sn.Failed++
+						sn.Done++
+						appendErr(sn, name+": reported complete but no data at "+where+
+							" (check the path mapping; nothing was downloaded)")
+					})
+					continue
+				}
+				if it.seed {
 					// Replicate qBit exact on-disk layout from content_path: stat tells multi
 					// (a dir) from single (the file); derive the content dir + whether the
 					// torrent has its own subfolder so shim/move behave correctly.
@@ -665,7 +684,11 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 						resolvedSave = filepath.Dir(cp)
 						v = filepath.Dir(cp) != sp
 					}
-					ih, addErr = s.hoardEngine.AddTorrentSeedMode(it.tmp, resolvedSave, cn)
+					// Same contract as the Add form's "skip the hash check":
+					// every declared file is checked against the disk first, and
+					// the add is refused rather than trusted, or downloaded.
+					ih, addErr = s.hoardEngine.AddTorrentOpts(it.tmp, resolvedSave, cn,
+						engine.AddOptions{SkipRecheck: true})
 					if addErr == nil {
 						s.hoardEngine.SetContentFolder(ih, &v)
 					}
