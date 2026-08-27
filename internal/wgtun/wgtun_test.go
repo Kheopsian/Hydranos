@@ -414,8 +414,14 @@ func TestUpSurvivesAHostWithIPv6Disabled(t *testing.T) {
 		t.Error("the v6 route was attempted after the v6 address was refused")
 	}
 	st := m.States(context.Background())
-	if len(st) != 1 || !strings.Contains(st[0].LastError, "IPv6") {
+	if len(st) != 1 || !strings.Contains(st[0].Degraded, "IPv6") {
 		t.Errorf("the degradation is not reported anywhere: %+v", st)
+	}
+	// And NOT as an error. A tunnel carrying traffic over IPv4 is not broken;
+	// filing this under last_error paints it red forever and teaches the
+	// operator that red means nothing.
+	if st[0].LastError != "" {
+		t.Errorf("a working tunnel reports an error: %q", st[0].LastError)
 	}
 }
 
