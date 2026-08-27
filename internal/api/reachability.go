@@ -39,6 +39,32 @@ var (
 	reachByName    = map[string]reachState{}
 )
 
+// crossProbeAttempts counts the connections this node made to its OWN engines
+// while probing them from another engine.
+//
+// Without it the two halves of this file would confirm each other: the cross
+// probe opens a real peer connection to the target, the target counts it in
+// InboundAccepted, and the next pass reads that counter and reports "someone
+// connected to you" -- naming our own probe as the visitor. A green dot backed
+// by nothing but itself is worse than the honest "unknown" it replaced, so the
+// passive evidence below only counts arrivals BEYOND the ones we caused.
+var (
+	crossProbeMu       sync.Mutex
+	crossProbeAttempts = map[string]int64{}
+)
+
+func noteCrossProbe(name string) {
+	crossProbeMu.Lock()
+	crossProbeAttempts[name]++
+	crossProbeMu.Unlock()
+}
+
+func crossProbesFor(name string) int64 {
+	crossProbeMu.Lock()
+	defer crossProbeMu.Unlock()
+	return crossProbeAttempts[name]
+}
+
 func reachabilityOf(name string) reachState {
 	reachMu.RLock()
 	defer reachMu.RUnlock()
@@ -52,6 +78,43 @@ func setReachability(name string, st reachState) {
 	reachMu.Lock()
 	reachByName[name] = st
 	reachMu.Unlock()
+}
+
+// proberFor picks another engine of this node that can dial `t` from a
+// genuinely different place on the network.
+//
+// "Different" means a different MEASURED exit address. Two engines behind one
+// tunnel share the provider's turnaround, so one probing the other learns
+// exactly what the self-probe already fails to learn: the provider is under no
+// obligation to send a connection back to its own client. With no such peer the
+// caller keeps the previous evidence chain rather than inventing a verdict.
+//
+// This is the one vantage point a single-homed node cannot buy: a second engine
+// on a second tunnel IS somebody else as far as the first engine's port
+// forwarding is concerned.
+func proberFor(t reachTarget, peers []reachTarget) *reachTarget {
+	if t.PublicIP == "" {
+		return nil
+	}
+	for i := range peers {
+		p := &peers[i]
+		if p.Name == t.Name || p.PublicIP == "" || p.PublicIP == t.PublicIP {
+			continue
+		}
+		return p
+	}
+	return nil
+}
+
+// crossProbePort is the port a real peer would dial, which is the forwarded one
+// when the provider hands us a NAT-PMP mapping. The engine's own listen port is
+// the internal side of that mapping and testing it would measure the tunnel's
+// inside, not the door peers knock on.
+func crossProbePort(t reachTarget) int {
+	if gport, _, active := GluetunStatus(t.Name); active && gport > 0 {
+		return gport
+	}
+	return t.Port
 }
 
 // probeReachability tests one engine and records the verdict.
@@ -88,7 +151,7 @@ type reachTarget struct {
 	Sample  func() string
 }
 
-func (s *Server) probeReachability(ctx context.Context, t reachTarget) {
+func (s *Server) probeReachability(ctx context.Context, t reachTarget, peers []reachTarget) {
 	name, port := t.Name, t.Port
 	ip := t.PublicIP
 	if ip == "" {
@@ -98,23 +161,66 @@ func (s *Server) probeReachability(ctx context.Context, t reachTarget) {
 		setReachability(name, reachState{State: "unknown", Detail: "no public address or listen port yet", At: time.Now()})
 		return
 	}
-	// Checked first: a peer that reached us settles the question outright, in
-	// every mode, including inside a tunnel where our own probe is blind.
-	if t.Inbound != nil {
-		if n, err := t.Inbound(); err == nil && n > 0 {
-			setReachability(name, reachState{
-				State:  "reachable",
-				Detail: fmt.Sprintf("%d peers have connected to you since start", n),
-				At:     time.Now(),
-			})
-			return
+
+	// Set when a cross-engine probe ran and failed. Its verdict is applied
+	// after the passive check, never before it.
+	crossTried := false
+	crossDetail := ""
+
+	// Strongest evidence first, when this node can produce it: another engine
+	// leaving by another tunnel dials this one's forwarded port and is answered
+	// by its peer_id. That is a real peer arriving from elsewhere, which is the
+	// exact thing the self-probe cannot be.
+	if prober := proberFor(t, peers); prober != nil {
+		if sample := targetSample(t); sample != "" {
+			noteCrossProbe(name)
+			dialPort := crossProbePort(t)
+			peerID, err := engine.InboundReachable(ctx, ip, dialPort,
+				prober.SocksHost, prober.SocksPort, prober.SocksUser, prober.SocksPass,
+				prober.Iface, sample)
+			if err == nil {
+				setReachability(name, reachState{
+					State: "reachable",
+					Detail: fmt.Sprintf("answered as %s, dialled on port %d from %s (exit %s)",
+						peerID, dialPort, prober.Name, prober.PublicIP),
+					At: time.Now(),
+				})
+				return
+			}
+			// This failure means something the self-probe's never did: the
+			// dial genuinely came from another exit address, so our own
+			// tunnel's turnaround cannot explain it. Held rather than acted on
+			// straight away -- a peer that actually arrived outranks a probe
+			// that did not get through, so the passive check gets to speak
+			// first.
+			crossTried = true
+			crossDetail = fmt.Sprintf("%s (exit %s) could not reach port %d: %v",
+				prober.Name, prober.PublicIP, dialPort, err)
 		}
 	}
 
-	var sample string
-	if t.Sample != nil {
-		sample = t.Sample()
+	// A peer that reached us settles the question outright, in every mode,
+	// including inside a tunnel where our own probe is blind. Arrivals we
+	// caused ourselves are discounted: see crossProbeAttempts.
+	if t.Inbound != nil {
+		if n, err := t.Inbound(); err == nil {
+			if mine := crossProbesFor(name); n > mine {
+				setReachability(name, reachState{
+					State:  "reachable",
+					Detail: fmt.Sprintf("%d peers have connected to you since start", n-mine),
+					At:     time.Now(),
+				})
+				return
+			}
+		}
 	}
+
+	if crossTried {
+		setReachability(name, reachState{State: "unreachable", Detail: crossDetail, At: time.Now()})
+		return
+	}
+
+	sample := targetSample(t)
 	if sample == "" {
 		// With no torrent to name, a handshake cannot be demanded, and a bare
 		// connect is not evidence: a VPN provider accepts every port from
@@ -148,14 +254,25 @@ func (s *Server) probeReachability(ctx context.Context, t reachTarget) {
 	setReachability(name, reachState{State: "reachable", Detail: "answered as " + peerID, At: time.Now()})
 }
 
+// targetSample names a torrent the engine serves, which is what turns a bare
+// connect into proof: a provider accepts every port from inside its own tunnel,
+// only a completed handshake says the answer came from us.
+func targetSample(t reachTarget) string {
+	if t.Sample == nil {
+		return ""
+	}
+	return t.Sample()
+}
+
 func (s *Server) probeReachabilityOnce() {
-	for _, t := range s.reachTargets() {
+	targets := s.reachTargets()
+	for _, t := range targets {
 		// One deadline per engine, not one for the pass: a node with five
 		// engines would otherwise have the last of them share what the first
 		// left, and a probe that times out is indistinguishable from a port
 		// that is closed.
 		ctx, cancel := context.WithTimeout(context.Background(), reachProbeTimeout)
-		s.probeReachability(ctx, t)
+		s.probeReachability(ctx, t, targets)
 		cancel()
 	}
 }
