@@ -65,12 +65,10 @@ func PeerEgressIP(ctx context.Context, socksHost string, socksPort int, socksUse
 		echoURL = DefaultEchoURL
 	}
 	dialer := &net.Dialer{Timeout: 8 * time.Second}
-	if strings.TrimSpace(socksHost) == "" && strings.TrimSpace(bindInterface) != "" {
-		ip, err := resolveInterfaceIP(bindInterface)
-		if err != nil {
-			return "", fmt.Errorf("bind_interface %q: %w", bindInterface, err)
+	if strings.TrimSpace(socksHost) == "" {
+		if _, err := pinDialerToInterface(dialer, bindInterface, 0); err != nil {
+			return "", err
 		}
-		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(ip)}
 	}
 	transport := &http.Transport{
 		DisableKeepAlives:     true,
@@ -132,12 +130,10 @@ func InboundReachable(ctx context.Context, host string, port int, socksHost stri
 		return "", fmt.Errorf("no address to test")
 	}
 	dialer := &net.Dialer{Timeout: 6 * time.Second}
-	if strings.TrimSpace(socksHost) == "" && strings.TrimSpace(bindInterface) != "" {
-		ip, err := resolveInterfaceIP(bindInterface)
-		if err != nil {
-			return "", fmt.Errorf("bind_interface %q: %w", bindInterface, err)
+	if strings.TrimSpace(socksHost) == "" {
+		if _, err := pinDialerToInterface(dialer, bindInterface, 0); err != nil {
+			return "", err
 		}
-		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(ip)}
 	}
 	var conn net.Conn
 	var err error

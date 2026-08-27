@@ -33,6 +33,13 @@ func statDev(p string) (uint64, error) {
 // client (whole-network / per-app), not per-socket fwmark (no netfilter).
 func applyFwmark(d *net.Dialer, fwmark int) {}
 
+// bindToDeviceSupported is false here: Windows has no SO_BINDTODEVICE, so a
+// bind_interface is honoured by pinning the source address only.
+const bindToDeviceSupported = false
+
+// applyEgressControl is a no-op on Windows for the same reason applyFwmark is.
+func applyEgressControl(d *net.Dialer, iface string, fwmark int) {}
+
 // signalHeapDump is a no-op on Windows (no jemalloc SIGUSR1 handler).
 func signalHeapDump(pid int) {}
 

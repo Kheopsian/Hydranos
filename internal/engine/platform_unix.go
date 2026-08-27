@@ -27,22 +27,45 @@ func statDev(p string) (uint64, error) {
 	return uint64(st.Dev), nil
 }
 
-// applyFwmark makes the dialer tag outbound packets with SO_MARK so policy
-// routing can steer per-tunnel (multi-tunnel Proton). No-op when fwmark==0.
-func applyFwmark(d *net.Dialer, fwmark int) {
-	if fwmark == 0 {
+// bindToDeviceSupported reports whether a socket can be pinned to an interface
+// by NAME on this platform. Linux can (SO_BINDTODEVICE); Windows cannot, and
+// falls back to pinning the source address.
+const bindToDeviceSupported = true
+
+// applyEgressControl pins the dialer's sockets to an interface by name and
+// marks them, in ONE Control hook: net.Dialer has a single Control, so the two
+// have to be composed rather than assigned one after the other -- which is how
+// a second setting would silently drop the first.
+//
+// Binding by name is what actually steers the egress; see pinDialerToInterface
+// for the measurement that made this necessary.
+func applyEgressControl(d *net.Dialer, iface string, fwmark int) {
+	iface = strings.TrimSpace(iface)
+	if iface == "" && fwmark == 0 {
 		return
 	}
 	d.Control = func(network, address string, c syscall.RawConn) error {
 		var sockErr error
 		if err := c.Control(func(fd uintptr) {
-			sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soMark, fwmark)
+			if iface != "" {
+				sockErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, iface)
+				if sockErr != nil {
+					return
+				}
+			}
+			if fwmark != 0 {
+				sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soMark, fwmark)
+			}
 		}); err != nil {
 			return err
 		}
 		return sockErr
 	}
 }
+
+// applyFwmark makes the dialer tag outbound packets with SO_MARK so policy
+// routing can steer per-tunnel (multi-tunnel Proton). No-op when fwmark==0.
+func applyFwmark(d *net.Dialer, fwmark int) { applyEgressControl(d, "", fwmark) }
 
 // signalHeapDump asks the engine's jemalloc (SIGUSR1 handler in main.rs) to
 // dump a heap profile before the watchdog kills it.

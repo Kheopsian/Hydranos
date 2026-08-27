@@ -3,6 +3,36 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.153.0 - 2026-08-27
+
+### Fixed
+- **`bind_interface` pinned nothing on a multi-tunnel VPN, and every engine
+  announced through one tunnel.** The pin resolved the interface to its IPv4 and
+  set that as the dial's source address. ProtonVPN hands EVERY tunnel the same
+  `10.2.0.2`, so the two engines asked for the same source, and a source address
+  does not choose a route: the kernel sent both out whichever tunnel held the
+  default route. No error, no log, and the header showed one exit address for
+  every engine, which is how the report came in.
+  Measured on two Proton servers (FR#173, FR#373) in a dedicated netns:
+  source-IP bind gave `203.0.113.21` for wg0 AND wg1; `SO_BINDTODEVICE` gives
+  `203.0.113.21` and `203.0.113.22`. The announce path, the exit-address
+  probe and the reachability probe now pin by DEVICE, with the source address
+  kept as well when the interface carries an IPv4 (Windows, which has no
+  `SO_BINDTODEVICE`, still pins the source address only).
+- **A `udp://` tracker announce ignored `bind_interface` entirely.** The
+  announcer never carried the interface name to its UDP twin, so those announces
+  left by the default route however the engine was configured, while the
+  `http://` ones were pinned. They now take the same pin, and refuse to announce
+  rather than fall back when the interface does not resolve.
+
+### Known gap
+- Typhon's own peer sockets are still pinned by source address
+  (`bindings[].listen_addr`), and the `outgoing_interfaces` key Go sends it does
+  not exist in the engine's config at all: it is received and dropped. So on a
+  Proton-style setup the PEER traffic of two engines can still share one tunnel.
+  Announces are what a tracker records, and they are fixed here; the peer side
+  needs the same device pin on the Rust listener and is not done.
+
 ## v3.152.0 - 2026-08-27
 
 ### Changed
