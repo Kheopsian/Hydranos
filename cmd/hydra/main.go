@@ -409,7 +409,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "read config", cfgPath, ":", err)
 			os.Exit(1)
 		}
-		doc, err := config.SetTOMLValue(string(data), "auth", "password_hash", fmt.Sprintf("%q", string(h)))
+		// The section is CREATED when absent. This command is what every
+		// lockout message points at, and it used to fail with `key
+		// "password_hash" not found in section "auth"` on any config that had
+		// never carried an [auth] block -- so the documented way back in did
+		// not work precisely when it was needed.
+		doc, err := config.SetTOMLTable(string(data), "auth", [][2]string{
+			{"password_hash", fmt.Sprintf("%q", string(h))},
+		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "set password_hash:", err)
 			os.Exit(1)

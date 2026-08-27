@@ -51,8 +51,12 @@ func (s *Server) handleSetupPassword(c *gin.Context) {
 		return
 	}
 	if !isLocalRequest(c.ClientIP()) {
+		// Naming the address turns a puzzling refusal into a fact. The one
+		// that prompted this was a tailnet address the user reasonably read
+		// as private, and without seeing it there is nothing to argue with.
 		c.JSON(http.StatusForbidden, gin.H{
-			"error": "first-run setup is only allowed from localhost or a private network; " +
+			"error": "first-run setup is only allowed from localhost, a private network or shared address space, " +
+				"and this request came from " + c.ClientIP() + "; " +
 				"set the password on the host with: hydra reset-password <new>",
 		})
 		return
@@ -89,13 +93,16 @@ func (s *Server) handleSetupPassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	doc, err := config.SetTOMLValue(string(data), "auth", "username", fmt.Sprintf("%q", req.Username))
+	// SetTOMLTable, not SetTOMLValue: a config that has never had an [auth]
+	// section -- every hand-written and minimal one -- has no line to update,
+	// and the old code refused rather than adding it. On first run that is the
+	// only path in, so refusing meant no way in at all.
+	doc, err := config.SetTOMLTable(string(data), "auth", [][2]string{
+		{"username", fmt.Sprintf("%q", req.Username)},
+		{"password_hash", fmt.Sprintf("%q", string(h))},
+	})
 	if err != nil {
-		doc = string(data) // no username line to update: keep the configured one
-	}
-	doc, err = config.SetTOMLValue(doc, "auth", "password_hash", fmt.Sprintf("%q", string(h)))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "config has no [auth] password_hash line to update: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not write the [auth] section: " + err.Error()})
 		return
 	}
 	if err := os.WriteFile(path, []byte(doc), 0644); err != nil {
@@ -107,12 +114,31 @@ func (s *Server) handleSetupPassword(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "api_key": s.config.Daemon.APIKey})
 }
 
-// isLocalRequest reports whether the caller is on the loopback or a private
-// network (RFC1918 / RFC4193 / link-local).
+// cgnat is RFC 6598 shared address space, 100.64.0.0/10.
+//
+// It is where Tailscale puts every node, and net.IP.IsPrivate() does not
+// cover it -- that method is RFC1918 and RFC4193, nothing else. So a user
+// reaching a brand new instance over their own tailnet was told, in as many
+// words, that they were not on a private network. The advice in the same
+// message was to run a command on the host, which is exactly what somebody
+// using Tailscale is trying to avoid having to do.
+//
+// Allowing it does not open the instance to the internet: a 100.64/10 address
+// is not routable there. The narrow case it does admit is another customer
+// behind the same carrier NAT, who would also need the port to be reachable
+// across it. That is a far smaller risk than the certainty of locking out
+// every tailnet user on first run.
+var cgnat = net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// isLocalRequest reports whether the caller is on the loopback, a private
+// network (RFC1918 / RFC4193 / link-local), or shared address space.
 func isLocalRequest(ip string) bool {
 	addr := net.ParseIP(ip)
 	if addr == nil {
 		return false
 	}
-	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
+	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() {
+		return true
+	}
+	return cgnat.Contains(addr)
 }
