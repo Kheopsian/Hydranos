@@ -55,7 +55,7 @@ func startOneExtraEngine(ctx context.Context, cfg *config.HydraConfig, ec config
 	uploadsDir := filepath.Join(cfg.Daemon.DataDir, "uploads")
 	eDir := engineDirFor(cfg, ec.ID)
 	if err := os.MkdirAll(eDir, 0755); err != nil {
-		return nil, fmt.Errorf("engine dir: %w", err)
+		return nil, fmt.Errorf("agent dir: %w", err)
 	}
 	sock := engineSocketFor(cfg, ec.ID)
 	le := &liveEngine{id: ec.ID, role: ec.Role, cfg: ec.SessionConfig}

@@ -36,12 +36,12 @@ func (g gzFlusher) Flush() {
 // Heartbeat comment every 30s to keep reverse-proxies from dropping idle.
 func (s *Server) handleSSE(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not ready"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not ready"})
 		return
 	}
 	hub := s.hoardEngine.EventHub()
 	if hub == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "event hub not available (engine doesn't support push)"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "event hub not available (agent doesn't support push)"})
 		return
 	}
 

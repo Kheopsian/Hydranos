@@ -157,7 +157,7 @@ func (s *Server) writeEngineEntry(ag config.AgentConfig) error {
 		case string:
 			kv = append(kv, [2]string{"session." + k, strconv.Quote(tv)})
 		default:
-			return fmt.Errorf("engine key %q has an unexpected type %T", k, v)
+			return fmt.Errorf("agent key %q has an unexpected type %T", k, v)
 		}
 	}
 	return s.editConfigFile(func(doc string) (string, error) {
@@ -178,7 +178,7 @@ func (s *Server) handleEnginesDelete(c *gin.Context) {
 		}
 	}
 	if !known && s.liveConfig().AgentByName(name) == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "unknown engine"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown agent"})
 		return
 	}
 	// Persist first here, the opposite of the add, and for the same reason: if

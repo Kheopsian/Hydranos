@@ -347,7 +347,7 @@ func (s *Server) handleMoveRemote(c *gin.Context) {
 	}
 	if handoff && req.Mode != "move" {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "these two engines share a filesystem, so the torrent can be handed over but not duplicated: both copies would be the same files"})
+			"error": "these two agents share a filesystem, so the torrent can be handed over but not duplicated: both copies would be the same files"})
 		return
 	}
 	for label, end := range map[string][2]string{

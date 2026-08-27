@@ -18,7 +18,7 @@ import (
 func (s *Server) resolveMovePaths(infoHash, targetCategory string) (src, dst, engineSavePath, name string, host engineHost, err error) {
 	host = s.hostHolding(infoHash)
 	if host == nil {
-		return "", "", "", "", nil, fmt.Errorf("no engine on this node holds %s", infoHash)
+		return "", "", "", "", nil, fmt.Errorf("no agent on this node holds %s", infoHash)
 	}
 
 	var detail map[string]interface{}

@@ -261,7 +261,7 @@ func collectEnvOverrides() []envOverride {
 			out = append(out, envOverride{Name: name, Value: maskProxyURL(v), Effect: effect})
 		}
 	}
-	add("TYPHON_ANNOUNCE_PROXY", "Announces go through this proxy for every engine that has no announce_proxy of its own.")
+	add("TYPHON_ANNOUNCE_PROXY", "Announces go through this proxy for every agent that has no announce_proxy of its own.")
 	add("TYPHON_ANNOUNCE_V6_PROXY", "Fires a second announce through this proxy.")
 	add("TYPHON_SELF_IPS", "Addresses treated as our own, so we never dial ourselves.")
 	add("TYPHON_DISABLE_UTP", "uTP is off: peers are reached over TCP only.")
@@ -287,23 +287,23 @@ func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 	}
 	if mode == netModeGluetun && f.GluetunPort {
 		eng := gluetunEngineOf(f)
-		w = append(w, "The "+eng+" engine takes its listen port from gluetun and holds its announces until it has one. A provider forwards a single port, so the "+otherEngine(eng)+" engine keeps its own and stays unreachable.")
+		w = append(w, "The "+eng+" agent takes its listen port from gluetun and holds its announces until it has one. A provider forwards a single port, so the "+otherEngine(eng)+" agent keeps its own and stays unreachable.")
 	}
 	if mode == netModeWireGuard {
 		// Said on the page rather than discovered at the next restart. Both of
 		// these fields exist on this tab in every other mode, so their absence
 		// here needs a reason attached to it.
-		w = append(w, "Hydra creates the interfaces and names them, so there is no interface to pick here: each engine is pinned to its own tunnel.")
-		w = append(w, "Where the provider forwards a port, the engine listens on the one it is given and follows it when the lease rotates. The listen port below is only used by an engine whose provider forwards nothing.")
+		w = append(w, "Hydra creates the interfaces and names them, so there is no interface to pick here: each agent is pinned to its own tunnel.")
+		w = append(w, "Where the provider forwards a port, the agent listens on the one it is given and follows it when the lease rotates. The listen port below is only used by an agent whose provider forwards nothing.")
 	}
 	race, hoard := bindInterfaceFor(f, "race"), bindInterfaceFor(f, "hoard")
 	if mode == netModeGluetun {
 		for _, e := range []struct{ scope, name string }{{"race", race}, {"hoard", hoard}} {
 			if e.name != "" && !looksLikeTunnel(e.name) {
-				w = append(w, "The "+e.scope+" engine is bound to \""+e.name+"\", which does not look like a VPN tunnel (those are usually named tun0, wg0 or similar). Its traffic leaves outside the tunnel, or does not leave at all.")
+				w = append(w, "The "+e.scope+" agent is bound to \""+e.name+"\", which does not look like a VPN tunnel (those are usually named tun0, wg0 or similar). Its traffic leaves outside the tunnel, or does not leave at all.")
 			}
 			if e.name == "" {
-				w = append(w, "The "+e.scope+" engine is bound to no interface, so its peers and its announces leave by the host's default route: outside the tunnel, under the address the tunnel exists to hide.")
+				w = append(w, "The "+e.scope+" agent is bound to no interface, so its peers and its announces leave by the host's default route: outside the tunnel, under the address the tunnel exists to hide.")
 			}
 		}
 	}
@@ -315,13 +315,13 @@ func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 		if race == "" {
 			bound, bare = "hoard", "race"
 		}
-		w = append(w, "Only the "+bound+" engine is bound to an interface. The "+bare+" engine leaves by the host's default route, so its peers and its announces publish this host's own address.")
+		w = append(w, "Only the "+bound+" agent is bound to an interface. The "+bare+" agent leaves by the host's default route, so its peers and its announces publish this host's own address.")
 	}
 	if mode == netModeProxyV2 && len(f.ProxyV2Trusted) == 0 {
 		w = append(w, "No trusted source for the PROXY-v2 listener: anyone who reaches that port could forge any peer address. List your relay's address.")
 	}
 	if mode == netModeProxyV2 && f.RaceProxyV2Port == 0 && f.HoardProxyV2Port == 0 {
-		w = append(w, "PROXY-v2 mode with no PROXY-v2 port on either engine: inbound peers still arrive on the plain listener.")
+		w = append(w, "PROXY-v2 mode with no PROXY-v2 port on either agent: inbound peers still arrive on the plain listener.")
 	}
 	for _, e := range env {
 		if e.Name == "TYPHON_ANNOUNCE_PROXY" && !proxied {
@@ -370,10 +370,10 @@ func (s *Server) handleNetworkModeGet(c *gin.Context) {
 	env := collectEnvOverrides()
 	warn := modeWarnings(mode, f, env)
 	if usesEngineBlocks(m) {
-		warn = append(warn, "This node declares its engines with [[engine]] blocks, which replace [race] and [hoard] entirely. This page reads and writes those two sections, so what it shows is not what the daemon runs and saving here would change nothing. Edit the [[engine]] blocks instead.")
+		warn = append(warn, "This node declares its agents with [[agent]] blocks, which replace [race] and [hoard] entirely. This page reads and writes those two sections, so what it shows is not what the daemon runs and saving here would change nothing. Edit the [[agent]] blocks instead.")
 	}
 	if tomlStr(race, "socks5_outbound_host") != tomlStr(hoard, "socks5_outbound_host") {
-		warn = append(warn, "The two engines have different SOCKS5 hosts in the config file. Saving here sets both to the same value.")
+		warn = append(warn, "The two agents have different SOCKS5 hosts in the config file. Saving here sets both to the same value.")
 	}
 	c.JSON(http.StatusOK, netModeResponse{Mode: mode, Fields: f, Env: env, Warnings: warn,
 		Extras: s.extraEngineRows()})
@@ -467,7 +467,7 @@ func validateNetMode(mode string, f netModeFields) error {
 		return err
 	}
 	if f.RaceListenPort == f.HoardListenPort {
-		return fmt.Errorf("the two engines cannot share listen port %d: the second one to start would fail to bind", f.RaceListenPort)
+		return fmt.Errorf("the two agents cannot share listen port %d: the second one to start would fail to bind", f.RaceListenPort)
 	}
 	// An interface that does not exist is refused in EVERY mode that can carry
 	// one. Accepting it would leave the engine on the default route at runtime,
@@ -479,7 +479,7 @@ func validateNetMode(mode string, f netModeFields) error {
 			continue
 		}
 		if _, err := net.InterfaceByName(name); err != nil {
-			return fmt.Errorf("no interface named %q on this host for the %s engine: its sockets would fall back to the default route", name, scope)
+			return fmt.Errorf("no interface named %q on this host for the %s agent: its sockets would fall back to the default route", name, scope)
 		}
 	}
 	switch mode {
@@ -493,13 +493,13 @@ func validateNetMode(mode string, f netModeFields) error {
 		// disagree.
 	case netModeGluetun:
 		if bindInterfaceFor(f, "race") == "" && bindInterfaceFor(f, "hoard") == "" {
-			return fmt.Errorf("gluetun mode needs the interface name the tunnel creates (wg0, tun0, …) on at least one engine, otherwise nothing is inside the tunnel")
+			return fmt.Errorf("gluetun mode needs the interface name the tunnel creates (wg0, tun0, …) on at least one agent, otherwise nothing is inside the tunnel")
 		}
 		if f.GluetunPort {
 			switch strings.TrimSpace(f.GluetunEngine) {
 			case "", "race", "hoard":
 			default:
-				return fmt.Errorf("the forwarded port goes to the race or the hoard engine, not %q", f.GluetunEngine)
+				return fmt.Errorf("the forwarded port goes to the race or the hoard agent, not %q", f.GluetunEngine)
 			}
 		}
 	case netModeSocks5, netModeProxyV2:
@@ -528,7 +528,7 @@ func validateNetMode(mode string, f netModeFields) error {
 				}
 			}
 			if f.RaceProxyV2Port != 0 && f.RaceProxyV2Port == f.HoardProxyV2Port {
-				return fmt.Errorf("the two engines cannot share PROXY-v2 port %d", f.RaceProxyV2Port)
+				return fmt.Errorf("the two agents cannot share PROXY-v2 port %d", f.RaceProxyV2Port)
 			}
 			if len(f.ProxyV2Trusted) == 0 {
 				return fmt.Errorf("list the addresses allowed to send PROXY-v2 headers: with none, anyone reaching that port can claim to be any peer")
@@ -717,11 +717,11 @@ func validateExtraEngineNet(mode string, f netModeFields, rows []extraEngineNet)
 			continue
 		}
 		if r.ListenPort < 0 || r.ListenPort > 65535 {
-			return fmt.Errorf("the %s engine's listen port must be between 1 and 65535", id)
+			return fmt.Errorf("the %s agent's listen port must be between 1 and 65535", id)
 		}
 		if r.ListenPort > 0 {
 			if other, clash := seen[r.ListenPort]; clash {
-				return fmt.Errorf("the %s and %s engines cannot share listen port %d: the second one to start would fail to bind", id, other, r.ListenPort)
+				return fmt.Errorf("the %s and %s agents cannot share listen port %d: the second one to start would fail to bind", id, other, r.ListenPort)
 			}
 			seen[r.ListenPort] = id
 		}
@@ -730,7 +730,7 @@ func validateExtraEngineNet(mode string, f netModeFields, rows []extraEngineNet)
 		}
 		if name := strings.TrimSpace(r.BindInterface); name != "" {
 			if _, err := net.InterfaceByName(name); err != nil {
-				return fmt.Errorf("no interface named %q on this host for the %s engine: its sockets would fall back to the default route", name, id)
+				return fmt.Errorf("no interface named %q on this host for the %s agent: its sockets would fall back to the default route", name, id)
 			}
 		}
 	}
@@ -818,7 +818,7 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 	// form would report success. An error the operator can act on beats a save
 	// that appears to work and changes nothing.
 	if parsed, perr := config.ParseTOMLMap(data); perr == nil && usesEngineBlocks(parsed) {
-		c.JSON(http.StatusConflict, gin.H{"error": "this node declares its engines with [[engine]] blocks, which replace [race] and [hoard]: saving here would write keys the daemon never reads. Edit the [[engine]] blocks instead."})
+		c.JSON(http.StatusConflict, gin.H{"error": "this node declares its agents with [[agent]] blocks, which replace [race] and [hoard]: saving here would write keys the daemon never reads. Edit the [[agent]] blocks instead."})
 		return
 	}
 	// Measured against the file BEFORE it is rewritten: afterwards every value
@@ -877,7 +877,7 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 	// stale rather than the whole save being rolled back into an unknown state.
 	synced, serr := s.writeExtraEngineNet(req.Mode, req.Extras)
 	if serr != nil {
-		warnings = append(warnings, "The extra engines could not be updated ("+serr.Error()+"), so they keep their previous network settings. Until that is fixed they may announce from a different address than the one shown here.")
+		warnings = append(warnings, "The extra agents could not be updated ("+serr.Error()+"), so they keep their previous network settings. Until that is fixed they may announce from a different address than the one shown here.")
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"mode": req.Mode,
@@ -1029,8 +1029,8 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 	// Said out loud, because a page that has spent years reporting a mismatch as
 	// a leak would otherwise teach the reader to distrust a correct setup.
 	if a, b := announceIPs["race"], announceIPs["hoard"]; a != "" && b != "" && a != b {
-		add("engines_differ", "The two engines", "ok",
-			"race announces from "+a+" and hoard from "+b+". Two different addresses is what a per-engine interface is for, not a fault")
+		add("engines_differ", "The two agents", "ok",
+			"race announces from "+a+" and hoard from "+b+". Two different addresses is what a per-agent interface is for, not a fault")
 	}
 	if compared {
 		add("scope", "Scope of this check", "warn",
@@ -1085,7 +1085,7 @@ func (s *Server) handleNetworkCheck(c *gin.Context) {
 		case err == nil:
 			add("inbound_"+e.name, label, "ok", "your client answered on "+target+" (peer "+peerID+"): the port is open")
 		case errors.Is(err, engine.ErrNotUs) && sample == "":
-			add("inbound_"+e.name, label, "warn", target+" accepted the connection, but this engine holds no torrent to prove with, so there is no telling whether the answer came from your client")
+			add("inbound_"+e.name, label, "warn", target+" accepted the connection, but this agent holds no torrent to prove with, so there is no telling whether the answer came from your client")
 		case errors.Is(err, engine.ErrNotUs):
 			add("inbound_"+e.name, label, "fail", target+" accepted the connection but did not answer as your client, so peers are not reaching you. Beware that some VPN providers accept every port from inside their own tunnel, forwarded or not, which looks exactly like this")
 		case mode == netModeSocks5:
@@ -1128,7 +1128,7 @@ func (s *Server) addExtraEngineChecks(ctx context.Context, echo string,
 	}
 	cfg := s.liveConfig()
 	for _, r := range live {
-		label := "Extra engine " + r.ID + " (" + r.Role + ")"
+		label := "Extra agent " + r.ID + " (" + r.Role + ")"
 		sess, cerr := cfg.ComposeSession(LocalAgentNameFor(r.ID), r.ID, r.Role)
 		if cerr != nil {
 			add("extra_announce_"+r.ID, label, "warn",

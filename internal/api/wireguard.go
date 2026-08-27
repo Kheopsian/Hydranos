@@ -204,7 +204,7 @@ func (s *Server) handleWireGuardUpload(c *gin.Context) {
 		// Said in the response because it is the next thing the operator has
 		// to do, and nothing else in the UI would say it: a stored file is
 		// inert until an engine names it, and the engine restarts to take it.
-		"note": "stored. Assign it to an engine in the Network tab; the engine restarts to bring the tunnel up.",
+		"note": "stored. Assign it to an agent in the Network tab; the agent restarts to bring the tunnel up.",
 	})
 }
 
@@ -230,7 +230,7 @@ func (s *Server) handleWireGuardDelete(c *gin.Context) {
 		w := ec.SessionConfig.WireGuard
 		if w != nil && w.Enabled && filepath.Base(w.ConfigFile) == name {
 			c.JSON(http.StatusConflict, gin.H{
-				"error": fmt.Sprintf("engine %q uses this configuration; turn its tunnel off first", ec.ID)})
+				"error": fmt.Sprintf("agent %q uses this configuration; turn its tunnel off first", ec.ID)})
 			return
 		}
 	}
@@ -269,7 +269,7 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 		return
 	}
 	if len(req.Engines) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no engines in the request"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no agents in the request"})
 		return
 	}
 	dir := config.WireGuardDir(s.config.Daemon.DataDir)
@@ -282,7 +282,7 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 			Device: e.Device, PortForward: e.PortForward, ManualPort: e.ManualPort,
 		}
 		if err := w.Validate(); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("engine %s: %v", e.EngineID, err)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %v", e.EngineID, err)})
 			return
 		}
 		// Checked here, at save time, because the alternative is a config that
@@ -291,11 +291,11 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 		path := filepath.Join(dir, filepath.Base(e.ConfigFile))
 		raw, rerr := os.ReadFile(path)
 		if rerr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("engine %s: %v", e.EngineID, rerr)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %v", e.EngineID, rerr)})
 			return
 		}
 		if _, perr := wgtun.ParseConf(string(raw)); perr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("engine %s: %s does not parse: %v", e.EngineID, e.ConfigFile, perr)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("agent %s: %s does not parse: %v", e.EngineID, e.ConfigFile, perr)})
 			return
 		}
 		// Two engines on one .conf is one tunnel, one exit address and one
@@ -307,7 +307,7 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 			if other.EngineID != e.EngineID && other.Enabled &&
 				filepath.Base(other.ConfigFile) == filepath.Base(e.ConfigFile) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
-					"engines %s and %s are both set to %s: one configuration is one tunnel, so both would leave by the same address with the same forwarded port",
+					"agents %s and %s are both set to %s: one configuration is one tunnel, so both would leave by the same address with the same forwarded port",
 					e.EngineID, other.EngineID, e.ConfigFile)})
 				return
 			}
@@ -343,7 +343,7 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 			})
 		}
 		if werr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("engine %s: %v", id, werr)})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("agent %s: %v", id, werr)})
 			return
 		}
 		changed++
@@ -351,7 +351,7 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"engines_updated":  changed,
 		"restart_required": true,
-		"note":             "the tunnels come up at the next restart, before the engines start",
+		"note":             "the tunnels come up at the next restart, before the agents start",
 	})
 }
 

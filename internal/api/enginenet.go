@@ -161,7 +161,7 @@ func (s *Server) measureEngineNet(ctx context.Context) {
 		r := &rows[i]
 		ec, ok := resolvedEngine(cfg, r.Engine)
 		if !ok {
-			r.State, r.Detail = "off", "this engine is not in the resolved config"
+			r.State, r.Detail = "off", "this agent is not in the resolved config"
 			continue
 		}
 		b := engine.ApplyAnnounceEgress(

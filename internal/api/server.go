@@ -465,7 +465,7 @@ func (s *Server) AddRemoteAgent(name, addr, token, tlsCa string) error {
 // hoard engine silently dropped the race one.
 func (s *Server) AddLocalAgent(name, id, role string, cl AgentClient) error {
 	if name == "" || id == "" || cl == nil {
-		return fmt.Errorf("local agent needs a name, an engine id and a client")
+		return fmt.Errorf("local agent needs a name, an agent id and a client")
 	}
 	s.agentsMu.Lock()
 	defer s.agentsMu.Unlock()
@@ -646,5 +646,5 @@ func (s *Server) RemoteAgentEngineClient(agent, engine string) (AgentClient, err
 	if c := ra.anyClient(); c != nil && engine == "" {
 		return c, nil
 	}
-	return nil, fmt.Errorf("agent %q has no engine %q", agent, engine)
+	return nil, fmt.Errorf("agent %q has no agent %q", agent, engine)
 }

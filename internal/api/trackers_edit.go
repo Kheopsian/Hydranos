@@ -202,7 +202,7 @@ func applyTrackerOp(tiers [][]string, op string, urls []string, from, to string)
 func checkPersistable(infoHash string) error {
 	st := durable()
 	if st == nil {
-		return errors.New("no durable store: an edit could not be saved, so it is refused rather than applied to the running engine only")
+		return errors.New("no durable store: an edit could not be saved, so it is refused rather than applied to the running agent only")
 	}
 	rec, ok, err := st.Get(infoHash)
 	if err != nil {
@@ -458,8 +458,8 @@ func (s *Server) editTrackersOne(infoHash string, req trackerEditRequest) ([][]s
 		// ends never disagree, and say plainly which of the two happened.
 		if _, rbErr := eng.SetTrackerTiers(infoHash, current); rbErr != nil {
 			return applied, true, fmt.Errorf(
-				"could not save the change (%v) AND could not undo it on the running engine (%v): "+
-					"the engine is announcing the new list but the stored .torrent still holds the old one", err, rbErr)
+				"could not save the change (%v) AND could not undo it on the running agent (%v): "+
+					"the agent is announcing the new list but the stored .torrent still holds the old one", err, rbErr)
 		}
 		return current, false, fmt.Errorf("could not save the change, so it was undone: %w", err)
 	}

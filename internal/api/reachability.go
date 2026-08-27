@@ -212,7 +212,7 @@ func (s *Server) probeReachability(ctx context.Context, t reachTarget, peers []r
 				// the evidence chain below rather than turned into a red
 				// dot the operator cannot act on.
 				crossUnknown = fmt.Sprintf(
-					"%s (exit %s) could not reach port %d, but that is this engine's own listen port: no forwarded port is known for it, so nothing here says whether peers can get in",
+					"%s (exit %s) could not reach port %d, but that is this agent's own listen port: no forwarded port is known for it, so nothing here says whether peers can get in",
 					prober.Name, prober.PublicIP, dialPort)
 			}
 		}

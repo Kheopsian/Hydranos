@@ -74,7 +74,7 @@ func startUpdater() {
 		slog.Error("update: hydra-update.exe is missing", "path", updater, "error", err)
 		messageBox("hydra-update.exe was not found next to Hydra.\n\n" +
 			"It ships in the same archive; download the release again, or update by " +
-			"replacing hydra.exe and hydra-engine.exe by hand.")
+			"replacing hydra.exe and hydra-agent.exe by hand.")
 		return
 	}
 
