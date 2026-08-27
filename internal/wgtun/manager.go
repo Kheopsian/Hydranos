@@ -165,6 +165,20 @@ func (m *Manager) Up(ctx context.Context, engineID, provider string, spec Spec) 
 		if st.Family != "" && skipFamily[st.Family] {
 			continue
 		}
+		if st.WriteFile != "" {
+			if err := os.WriteFile(st.WriteFile, []byte(st.WriteData), 0o644); err != nil {
+				if st.SoftFail {
+					skipFamily[st.Family] = true
+					m.note(spec.Device, fmt.Sprintf("IPv%s is not available on this tunnel (%s): %v", st.Family, st.Desc, err))
+					slog.Warn("wireguard: tunnel is up without one address family",
+						"engine", engineID, "device", spec.Device, "family", "IPv"+st.Family, "error", err)
+					continue
+				}
+				m.note(spec.Device, err.Error())
+				return fmt.Errorf("bringing up %s (%s): %w", spec.Device, st.Desc, err)
+			}
+			continue
+		}
 		args := make([]string, len(st.Args))
 		copy(args, st.Args)
 		for i := range args {

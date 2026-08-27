@@ -23,6 +23,15 @@ const ConfPathPlaceholder = "@CONF@"
 // needing root, a network namespace, or a real tunnel.
 type Step struct {
 	Args []string
+	// WriteFile and WriteData replace Args for a step that pokes /proc
+	// directly. It exists because the obvious spelling -- shelling out to
+	// sysctl -- fails on a slim image that ships iproute2 and wireguard-tools
+	// but not procps, which is exactly what the Hydra container is. Writing
+	// the file is the same operation with no dependency, and it is the kind of
+	// difference no unit test would have caught: the plan was right, the
+	// binary was missing.
+	WriteFile string
+	WriteData string
 	// IgnoreError marks a step whose failure is not a failure of the plan:
 	// deleting something that was already gone, mostly. Kept explicit so that
 	// every OTHER step is fatal by default, rather than the reverse.
@@ -41,7 +50,12 @@ type Step struct {
 	Desc     string
 }
 
-func (s Step) String() string { return strings.Join(s.Args, " ") }
+func (s Step) String() string {
+	if s.WriteFile != "" {
+		return "write " + s.WriteData + " to " + s.WriteFile
+	}
+	return strings.Join(s.Args, " ")
+}
 
 // Spec is one tunnel to bring up.
 type Spec struct {
@@ -183,8 +197,9 @@ func UpPlan(s Spec) ([]Step, error) {
 		// sysctl. Turn it on for OUR device only: it is one we created, and
 		// nothing else on the host is touched.
 		steps = append(steps, Step{
-			Args:   []string{"sysctl", "-w", "net.ipv6.conf." + sysctlName(dev) + ".disable_ipv6=0"},
-			Family: "6", SoftFail: true,
+			WriteFile: "/proc/sys/net/ipv6/conf/" + dev + "/disable_ipv6",
+			WriteData: "0",
+			Family:    "6", SoftFail: true,
 			Desc: "allow IPv6 on the tunnel device",
 		})
 	}
@@ -278,7 +293,3 @@ func DeviceNameFor(engineID string) string {
 
 // GatewayFor is Gateway over a spec, for callers that already hold one.
 func (s Spec) GatewayFor() (netip.Addr, error) { return Gateway(s.Conf.Addresses) }
-
-// sysctlName escapes an interface name for a sysctl key. Dots in an interface
-// name (VLAN devices carry them) would otherwise split the key.
-func sysctlName(dev string) string { return strings.ReplaceAll(dev, ".", "/") }

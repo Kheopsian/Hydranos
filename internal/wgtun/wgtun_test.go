@@ -351,8 +351,8 @@ func TestDualStackPlanEnablesIPv6OnItsOwnDevice(t *testing.T) {
 	var sysctlAt, addrAt = -1, -1
 	for i, s := range steps {
 		line := s.String()
-		if strings.Contains(line, "disable_ipv6=0") {
-			if !strings.Contains(line, "net.ipv6.conf.hy-race.") {
+		if strings.Contains(line, "disable_ipv6") {
+			if !strings.Contains(line, "/proc/sys/net/ipv6/conf/hy-race/") {
 				t.Errorf("the sysctl is not scoped to our own device: %q", line)
 			}
 			sysctlAt = i
