@@ -6761,7 +6761,9 @@ window.addEventListener("DOMContentLoaded", refreshStartupPause);
 // only its fields, and saving clears the others.
 const NET_MODES = [
     { id: "direct", label: "Direct",
-      blurb: "No proxy. Each engine leaves by the interface you give it, or by the host's default route when you give it none. This is where a bare-metal WireGuard tunnel goes, one per engine if you want." },
+      blurb: "No proxy. Each engine leaves by the interface you give it, or by the host's default route when you give it none. Use this when you build the tunnels yourself." },
+    { id: "wireguard", label: "WireGuard, managed by Hydra",
+      blurb: "Give each engine a provider .conf. Hydra creates the tunnel, pins the engine to it and asks the provider for an incoming port. Nothing to set up on the host." },
     { id: "gluetun", label: "Gluetun",
       blurb: "A gluetun container holds the tunnel and hands out a forwarded port. Hydra reads that port and follows it." },
     { id: "socks5", label: "SOCKS5 proxy",
@@ -6886,6 +6888,12 @@ function netModeRender() {
     }
 
     let fields = "";
+    if (mode === "wireguard") {
+        // Deliberately no interface picker and no gluetun block. The interface
+        // is created by Hydra and named by Hydra; offering a box to type one
+        // in would offer a value that is overwritten at the next boot.
+        fields += `<div id="net-wg-body"><p class="sr-desc">${t("Loading…")}</p></div>`;
+    }
     if (mode === "direct" || mode === "gluetun") {
         // One interface per engine. The two engines are independent network
         // identities, and a single shared field could not say so: it put both
@@ -6919,7 +6927,11 @@ function netModeRender() {
             ${_netField("net-pv2-trusted", "Trusted sources", "text", (f.proxy_v2_trusted_sources || []).join(", "), "Addresses allowed to send PROXY-v2 headers, comma separated. Required: with none, whoever reaches that port can claim to be any peer.")}
         </div>`;
     }
-    fields += `<div class="settings-section"><div class="settings-section-title">${t("Ports")}</div>${_netPortsHTML(f)}</div>`;
+    fields += `<div class="settings-section"><div class="settings-section-title">${t("Ports")}</div>${_netPortsHTML(f)}${
+        mode === "wireguard"
+            ? `<p class="sr-desc">${t("An engine whose provider forwards a port listens on the one it is given, and follows it when the lease rotates. These values are only used by an engine whose provider forwards nothing.")}</p>`
+            : ""
+    }</div>`;
 
     let warn = "";
     for (const w of (_netState.warnings || [])) warn += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
@@ -6946,12 +6958,7 @@ function netModeRender() {
     // The WireGuard half loads on its own: it asks the daemon what the tunnels
     // are doing right now, which is a different question from what the config
     // file says, and the two are worth seeing side by side.
-    if (mode === "direct") {
-        const host = document.createElement("div");
-        host.id = "net-wg-body";
-        body.appendChild(host);
-        netWgLoad();
-    }
+    if (mode === "wireguard") netWgLoad();
 }
 
 function netModeCollect() {
