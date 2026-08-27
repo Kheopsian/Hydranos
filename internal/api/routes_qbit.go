@@ -190,7 +190,7 @@ func (s *Server) qbitSetPreferences(c *gin.Context) {
 		return
 	}
 	if s.raceEngine == nil {
-		c.String(http.StatusServiceUnavailable, "engine unavailable")
+		c.String(http.StatusServiceUnavailable, "agent unavailable")
 		return
 	}
 	// Reported rather than swallowed: a port-forward script that believes a

@@ -107,7 +107,7 @@ func (m *extrasManager) RemoveEngine(id string) error {
 	le := m.lives[id]
 	if le == nil {
 		m.mu.Unlock()
-		return fmt.Errorf("engine %q does not run here", id)
+		return fmt.Errorf("agent %q does not run here", id)
 	}
 	delete(m.lives, id)
 	for i, v := range m.order {
@@ -138,7 +138,7 @@ func (m *extrasManager) spawn(ec config.EngineConfig) error {
 	m.mu.Lock()
 	if _, dup := m.lives[ec.ID]; dup {
 		m.mu.Unlock()
-		return fmt.Errorf("engine %q already runs here", ec.ID)
+		return fmt.Errorf("agent %q already runs here", ec.ID)
 	}
 	m.mu.Unlock()
 
@@ -152,7 +152,7 @@ func (m *extrasManager) spawn(ec config.EngineConfig) error {
 	if _, dup := m.lives[ec.ID]; dup { // lost a race with a concurrent add
 		m.mu.Unlock()
 		le.stop()
-		return fmt.Errorf("engine %q already runs here", ec.ID)
+		return fmt.Errorf("agent %q already runs here", ec.ID)
 	}
 	// The ref, not the process's client: a client dies with its process, and
 	// the ref is what a later config apply swaps. Handing the raw client out
@@ -392,7 +392,7 @@ func (m *extrasManager) InboundAccepted(id string) (int64, error) {
 			return le.race.InboundAccepted()
 		}
 	}
-	return 0, fmt.Errorf("engine %q does not run here", id)
+	return 0, fmt.Errorf("agent %q does not run here", id)
 }
 
 // SampleServedInfoHash names one torrent the engine holds, so the probe can

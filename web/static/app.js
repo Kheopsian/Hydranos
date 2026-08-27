@@ -229,7 +229,7 @@ function _interfacesCardHTML(list) {
         : `<div class="settings-row"><div class="sr-desc">${t("No non-loopback interfaces detected.")}</div></div>`;
     return `<div class="settings-section" style="margin-bottom:18px">
         <div class="settings-section-title">${t("Network interfaces")}</div>
-        <div class="sr-desc" style="padding:0 0 8px">${t("Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.")}</div>
+        <div class="sr-desc" style="padding:0 0 8px">${t("Detected on this host. To pin an agent to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.")}</div>
         ${rows}
     </div>`;
 }
@@ -886,7 +886,7 @@ async function showStoreRepairModal() {
     ov.innerHTML = `<div class="modal-box">
         <h3>${t("Hydra cannot open its database")}</h3>
         <p class="modal-desc">${t("Your data_dir now points at {kind} storage. The database was created on a local disk, so it uses a write-ahead log, and a network share cannot host one.", { kind: esc(st.filesystem || "network") })}</p>
-        <p class="modal-desc">${t("Nothing has been lost. Hydra has deliberately not started its engines: carrying on without the database is what would destroy your lifetime upload counters.")}</p>
+        <p class="modal-desc">${t("Nothing has been lost. Hydra has deliberately not started its agents: carrying on without the database is what would destroy your lifetime upload counters.")}</p>
         <p class="modal-desc">${t("Affected: {list}", { list: esc(targets.map(x => x.name).join(", ") || "-") })}</p>
         ${hot.length ? `<p class="modal-desc" style="color:var(--accent-orange)">${t("{list} still holds changes that were never written back. Start Hydra once on the machine it came from, stop it cleanly, then move it here.", { list: esc(hot.map(x => x.name).join(", ")) })}</p>` : ""}
         <p class="modal-desc">${t("Hydra can convert the database to the journal a share can host. Every file is copied to a .bak alongside it first, so the originals stay recoverable whatever happens.")}</p>
@@ -901,7 +901,7 @@ async function showStoreRepairModal() {
     let btn = ov.querySelector("#repair-go");
 
     // Second half of the flow: the databases are converted, but this process
-    // registered its routes at boot and has no engines behind them. Only a
+    // registered its routes at boot and has no agents behind them. Only a
     // restart finishes the job, so that is the only thing left to offer.
     const offerRestart = (results) => {
         msg.style.color = "var(--accent-green, #3a9)";
@@ -979,7 +979,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         setup = (await (await fetch("/api/setup")).json()) || {};
     } catch (_) { return; }
     // The daemon came up unable to open its database. Nothing else in the UI
-    // has anything to show: there are no engines behind it. Explain, offer the
+    // has anything to show: there are no agents behind it. Explain, offer the
     // repair, and go no further.
     if (setup.store_repair) return showStoreRepairModal();
     const kind = setup.network_storage || "";
@@ -4986,7 +4986,7 @@ function _startNormalPolling() {
 }
 
 async function _checkStartup() {
-    // In store-repair mode there are no engines behind the API and /api/startup
+    // In store-repair mode there are no agents behind the API and /api/startup
     // is not registered at all. Retrying it forever would spin, and the overlay
     // it drives would sit on top of the explanation the user needs.
     if (STORE_REPAIR_MODE) return;
@@ -5751,7 +5751,7 @@ async function saveSettings() {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ port: Number(ch.value) }),
                     });
-                    hotApplied.push(t("{engine} listen port", { engine: ch.section }));
+                    hotApplied.push(t("{agent} listen port", { agent: ch.section }));
                 } catch (e) { if (tier === "hot") tier = "engine"; } // fall back to restart
             }
         }
@@ -5763,7 +5763,7 @@ async function saveSettings() {
         } else {
             const what = (tier === "full")
                 ? t("Daemon/auth settings changed, a full restart is required.")
-                : t("Engine settings changed, restart the torrent engines to apply.");
+                : t("Settings changed, restart the agents to apply.");
             banner.innerHTML = `${base} ${what} ` +
                 `<button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`;
             if (_kc) banner.innerHTML += ' <span style="color:var(--text-secondary)">' + t("(API key updated for this browser)") + '</span>';
@@ -5782,7 +5782,7 @@ async function resetSettings() {
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
         <h3>${t("Reset to defaults")}</h3>
-        <p class="modal-desc">${esc(t("Every setting goes back to what a fresh install ships: ports, network mode, tracker passkeys, client spoofs, engine tuning."))}</p>
+        <p class="modal-desc">${esc(t("Every setting goes back to what a fresh install ships: ports, network mode, tracker passkeys, client spoofs, agent tuning."))}</p>
         <p class="modal-desc">${esc(t("Your login, your API key and your data directory are kept, so you do not lock yourself out. A copy of the current config is saved next to it first."))}</p>
         <div class="modal-actions">
             <button class="btn-small" id="reset-cancel">${t("Cancel")}</button>
@@ -5826,7 +5826,7 @@ if (API_KEY) maybeOfferImport();
 let _editingAgent = null;
 // One table, because there is one thing.
 //
-// This page used to show an Agents table and an "Engines on this machine"
+// This page used to show an Agents table and an "Agents on this machine"
 // table, which listed the SAME rows twice with different columns -- and the two
 // disagreed on what could be done to them: an agent could not be deleted, the
 // engine behind it could. Since one agent is one engine, that split described a
@@ -5881,7 +5881,7 @@ async function updateAgents() {
                 if (port) bits.push('<span class="mono">' + port + "</span>");
                 if (iface) bits.push('<span class="mono">' + esc(iface) + "</span>");
                 return "<strong>" + esc(e.id) + "</strong> <span class=\"sr-desc\">" + bits.join(" &middot; ") + "</span>" + (e.online ? "" : " \u26a0");
-            }).join("<br>") || '<span class="sr-desc">' + t("no engine") + "</span>";
+            }).join("<br>") || '<span class="sr-desc">' + t("no agent") + "</span>";
             const where = local
                 ? '<span class="sr-desc">' + t("this machine") + "</span>"
                 : '<span class="mono" style="font-size:12px">' + esc(a.addr || "\u2014") + "</span>";
@@ -5926,7 +5926,7 @@ function agentKindChanged() {
         // Say the resulting agent name outright: the engine id is what the user
         // types, but the name a category has to reference is the prefixed one.
         hint.textContent = local
-            ? t("engine id — the agent will be called local-<id>")
+            ? t("agent id — it will be listed as local-<id>")
             : t("how this node is referenced in a placement");
     }
     const testBtn = document.getElementById("ag-test-btn");
@@ -5960,7 +5960,7 @@ async function saveAgent() {
     const kindEl = document.getElementById("ag-kind");
     if (kindEl && kindEl.value === "local" && !_editingAgent) {
         const id = document.getElementById("ag-name").value.trim();
-        if (!id) { _agResult(t("Engine id required"), false); return; }
+        if (!id) { _agResult(t("Agent id required"), false); return; }
         const role = document.getElementById("ag-role").value;
         const port = parseInt(document.getElementById("ag-port").value) || 0;
         // Starting an engine takes a few seconds -- a Typhon process, a store
@@ -5969,18 +5969,18 @@ async function saveAgent() {
         const btn = document.getElementById("ag-save-btn");
         const btnLabel = btn ? btn.textContent : "";
         if (btn) { btn.disabled = true; btn.textContent = t("Starting..."); }
-        _agResult(t("Starting the engine, this takes a few seconds..."), true);
+        _agResult(t("Starting the agent, this takes a few seconds..."), true);
         try {
             const res = await api("/api/engines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, role: role, listen_port: port }) });
             hideAgentForm();
             // No restart any more: the daemon starts the engine and registers
-            // it as its own agent before answering. A node with no engine host
+            // it as its own agent before answering. A node with no agent host
             // (front-only) still answers restart_required, so honour it.
             if (res && res.restart_required) {
                 const banner = document.getElementById("restart-banner");
                 if (banner) banner.style.display = "block";
             } else {
-                hydraNotify(t("Engine {id} is running, as agent {agent}.", { id: id, agent: (res && res.agent) || ("local-" + id) }));
+                hydraNotify(t("Agent {agent} is running.", { id: id, agent: (res && res.agent) || ("local-" + id) }));
             }
             await updateAgents();
         } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
@@ -6244,8 +6244,8 @@ async function clearTrackerPasskey() {
 async function deleteEngine(id){
     // Named as the agent, because that is the row the button sits in and the
     // name every category placement refers to.
-    if(!await hydraConfirm(t("Delete agent local-{id}? Its engine stops seeding right away.", { id: id }))) return;
-    hydraNotify(t("Stopping engine {id}...", { id: id }));
+    if(!await hydraConfirm(t("Delete agent local-{id}? It stops seeding right away.", { id: id }))) return;
+    hydraNotify(t("Stopping agent {id}...", { id: id }));
     try{
         const res = await api("/api/engines/" + encodeURIComponent(id), {method:"DELETE"});
         // Only a node that could not stop it asks for a restart now.
@@ -6254,7 +6254,7 @@ async function deleteEngine(id){
     }catch(err){ hydraNotify(t("Delete failed: {err}", { err: err })); }
 }
 async function restartHydra(){
-    if(!await hydraConfirm(t("Restart Hydra to apply engine changes? (~40s)"))) return;
+    if(!await hydraConfirm(t("Restart Hydra to apply the changes? (~40s)"))) return;
     try{ await api("/api/restart", {method:"POST"}); }catch(err){}
     hydraNotify(t("Restarting, reconnect in ~40s."));
 }
@@ -6728,7 +6728,7 @@ async function refreshStartupPause() {
     const engines = (st.held || []).join(", ");
     // textContent, so no esc(): escaping here would put the entities on screen.
     document.getElementById("startup-pause-title").textContent =
-        window.t("Startup pause: {engines} not announcing", { engines });
+        window.t("Startup pause: {agents} not announcing", { agents: engines });
     document.getElementById("startup-pause-text").textContent =
         window.t("No announces or peer connections are leaving Hydra. Adjust your rate limits now if you need to, then start. Torrents you paused yourself stay paused.");
     el.style.display = "block";
@@ -6761,9 +6761,9 @@ window.addEventListener("DOMContentLoaded", refreshStartupPause);
 // only its fields, and saving clears the others.
 const NET_MODES = [
     { id: "direct", label: "Direct",
-      blurb: "No proxy. Each engine leaves by the interface you give it, or by the host's default route when you give it none. Use this when you build the tunnels yourself." },
+      blurb: "No proxy. Each agent leaves by the interface you give it, or by the host's default route when you give it none. Use this when you build the tunnels yourself." },
     { id: "wireguard", label: "WireGuard, managed by Hydra",
-      blurb: "Give each engine a provider .conf. Hydra creates the tunnel, pins the engine to it and asks the provider for an incoming port. Nothing to set up on the host." },
+      blurb: "Give each agent a provider .conf. Hydra creates the tunnel, pins the agent to it and asks the provider for an incoming port. Nothing to set up on the host." },
     { id: "gluetun", label: "Gluetun",
       blurb: "A gluetun container holds the tunnel and hands out a forwarded port. Hydra reads that port and follows it." },
     { id: "socks5", label: "SOCKS5 proxy",
@@ -6798,7 +6798,7 @@ function _netSelect(id, label, value, options, hint) {
 
 function _netEngineSelect(id, label, value, hint) {
     // Two fixed choices, so no empty option: there is no such thing as
-    // "no engine" once the forwarded port is being followed.
+    // "no agent" once the forwarded port is being followed.
     const cur = value === "race" ? "race" : "hoard";
     let html = "";
     for (const o of [["hoard", "Hoard"], ["race", "Race"]]) {
@@ -6821,10 +6821,10 @@ function _netPortsHTML(f) {
     let extras = "";
     for (const e of _netExtras()) {
         extras += _netField("net-extra-port-" + e.id, t("{id} listen port", { id: e.id }), "number", e.listen_port,
-            t("Port this engine accepts peers on. It has to differ from every other engine's."));
+            t("Port this agent accepts peers on. It has to differ from every other agent's."));
     }
-    return _netField("net-race-port", "Race listen port", "number", f.race_listen_port, "Port the race engine accepts peers on.")
-         + _netField("net-hoard-port", "Hoard listen port", "number", f.hoard_listen_port, "Port the hoard engine accepts peers on. It has to differ from the race one.")
+    return _netField("net-race-port", "Race listen port", "number", f.race_listen_port, "Port the race agent accepts peers on.")
+         + _netField("net-hoard-port", "Hoard listen port", "number", f.hoard_listen_port, "Port the hoard agent accepts peers on. It has to differ from the race one.")
          + extras
          + _netCheckbox("net-ipv6", "Listen over IPv6 too", f.enable_ipv6, "Only if this host really has working IPv6. Announcing an address nobody can reach costs you peers.");
 }
@@ -6899,13 +6899,13 @@ function netModeRender() {
         // identities, and a single shared field could not say so: it put both
         // on one tunnel while the page implied otherwise.
         const list = (_detectedIfaces || []).map(i => (i.name || i));
-        const hint = "The interface this engine leaves by. Peer connections AND tracker announces are both bound to it, so neither can travel outside it. Empty means the host's default route.";
-        fields += `<div class="settings-section"><div class="settings-section-title">${t("Interface per engine")}</div>
-            ${_netSelect("net-race-iface", "Race engine interface", f.race_bind_interface, list, hint)}
-            ${_netSelect("net-hoard-iface", "Hoard engine interface", f.hoard_bind_interface, list, hint)}
+        const hint = "The interface this agent leaves by. Peer connections AND tracker announces are both bound to it, so neither can travel outside it. Empty means the host's default route.";
+        fields += `<div class="settings-section"><div class="settings-section-title">${t("Interface per agent")}</div>
+            ${_netSelect("net-race-iface", "Race agent interface", f.race_bind_interface, list, hint)}
+            ${_netSelect("net-hoard-iface", "Hoard agent interface", f.hoard_bind_interface, list, hint)}
             ${_netExtras().map(e => _netSelect("net-extra-iface-" + e.id,
-                t("{id} engine interface ({role})", { id: e.id, role: e.role }), e.bind_interface, list, hint)).join("")}
-            <p class="sr-desc">${t("Give the engines different tunnels to spread them across several exit addresses, or the same one to keep them together. Leave them empty on a host with no VPN.")}</p>
+                t("{id} agent interface ({role})", { id: e.id, role: e.role }), e.bind_interface, list, hint)).join("")}
+            <p class="sr-desc">${t("Give the agents different tunnels to spread them across several exit addresses, or the same one to keep them together. Leave them empty on a host with no VPN.")}</p>
         </div>`;
     }
     if (mode === "gluetun") {
@@ -6913,15 +6913,15 @@ function netModeRender() {
             ${_netCheckbox("net-gluetun", "Take the listen port from gluetun", f.gluetun_port_forward, "Gluetun asks your provider for a forwarded port and that port changes with the lease. Hydra reads it, listens there, and follows it. Announces are held at startup until it knows the port, so no tracker is ever handed the wrong one.")}
             ${_netField("net-gluetun-url", "Gluetun control server", "text", f.gluetun_url, "Empty means http://127.0.0.1:8000, which is right when Hydra shares gluetun's network.")}
             ${_netField("net-gluetun-key", "Gluetun API key", "password", f.gluetun_api_key, "Recent gluetun versions refuse every request without one. The role needs the route GET /v1/portforward.")}
-            ${_netEngineSelect("net-gluetun-engine", "Engine that takes the port", f.gluetun_port_engine, "A provider forwards a single port, so one engine gets it. Hoard seeds around the clock, so being reachable pays off continuously; race needs peers fast on a fresh torrent.")}
-            <p class="sr-desc">${t("The other engine keeps its own listen port and stays unreachable.")}</p>
+            ${_netEngineSelect("net-gluetun-engine", "Agent that takes the port", f.gluetun_port_engine, "A provider forwards a single port, so one agent gets it. Hoard seeds around the clock, so being reachable pays off continuously; race needs peers fast on a fresh torrent.")}
+            <p class="sr-desc">${t("The other agent keeps its own listen port and stays unreachable.")}</p>
         </div>`;
     }
     if (mode === "socks5" || mode === "proxy_v2") fields += _netSocksHTML(f);
     if (mode === "proxy_v2") {
         fields += `<div class="settings-section"><div class="settings-section-title">${t("Incoming relay")}</div>
             <p class="sr-desc" style="margin:.2em 0 .8em">${t("Your relay forwards peers to these ports with a PROXY-v2 header, so the real peer address survives the hop.")}</p>
-            ${_netField("net-race-pv2", "Race PROXY-v2 port", "number", f.race_proxy_v2_port || "", "0 to leave this engine without a PROXY-v2 listener.")}
+            ${_netField("net-race-pv2", "Race PROXY-v2 port", "number", f.race_proxy_v2_port || "", "0 to leave this agent without a PROXY-v2 listener.")}
             ${_netField("net-hoard-pv2", "Hoard PROXY-v2 port", "number", f.hoard_proxy_v2_port || "", "")}
             ${_netField("net-pv2-addr", "Bind address", "text", f.proxy_v2_listen_addr, "Empty means every address.")}
             ${_netField("net-pv2-trusted", "Trusted sources", "text", (f.proxy_v2_trusted_sources || []).join(", "), "Addresses allowed to send PROXY-v2 headers, comma separated. Required: with none, whoever reaches that port can claim to be any peer.")}
@@ -6929,7 +6929,7 @@ function netModeRender() {
     }
     fields += `<div class="settings-section"><div class="settings-section-title">${t("Ports")}</div>${_netPortsHTML(f)}${
         mode === "wireguard"
-            ? `<p class="sr-desc">${t("An engine whose provider forwards a port listens on the one it is given, and follows it when the lease rotates. These values are only used by an engine whose provider forwards nothing.")}</p>`
+            ? `<p class="sr-desc">${t("An agent whose provider forwards a port listens on the one it is given, and follows it when the lease rotates. These values are only used by an agent whose provider forwards nothing.")}</p>`
             : ""
     }</div>`;
 
@@ -7026,7 +7026,7 @@ async function netModeSave() {
         // page reaches the engines in seconds, and a banner shown anyway taught
         // people to restart for changes that were already live.
         if (r.restart_required) {
-            _setRestartBanner(t("Saved. The engines need a restart to pick up the new listen port.") +
+            _setRestartBanner(t("Saved. The agents need a restart to pick up the new listen port.") +
                 ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`);
         } else {
             extra = `<div class="result-msg success" style="margin:.3em 0">${esc(t("Saved and applied, no restart needed."))}</div>` + extra;
@@ -7358,7 +7358,7 @@ async function updateNetPoly() {
     const worst = _netEngines.some(e => e.state === "bad") ? "bad"
         : _netEngines.some(e => e.state === "off") ? "off"
         : _netEngines.some(e => e.state === "warn") ? "warn" : "ok";
-    el.title = tp(_netEngines.length, "{n} engine", "{n} engines", { n: _netEngines.length })
+    el.title = tp(_netEngines.length, "{n} agent", "{n} agents", { n: _netEngines.length })
         + " — " + _netStateWord(worst);
 
     // The address only when there is ONE. Several engines behind several
@@ -7397,7 +7397,7 @@ function openNetPanel(from) {
                  <div class="nr-sub">${esc(e.role)} · ${where}${port}${e.detail ? " · " + esc(e.detail) : ""}</div></div>
             <div class="nr-ip">${ip}${ip6}</div>
         </div>`;
-    }).join("") || `<div class="net-row"><div></div><div class="nr-sub">${t("No engine measured yet")}</div><div></div></div>`;
+    }).join("") || `<div class="net-row"><div></div><div class="nr-sub">${t("No agent measured yet")}</div><div></div></div>`;
 
     const r = from.getBoundingClientRect();
     panel.style.visibility = "hidden";
@@ -7527,8 +7527,8 @@ function netWgRender() {
             <div class="settings-row"><div class="sr-label"><span class="sr-key">${t("Add a file")}</span></div>
             <div class="sr-field"><input type="file" id="wg-upload" accept=".conf"> <button class="btn-small" onclick="netWgUpload()">${t("Upload")}</button></div></div>
         </div>
-        <div class="settings-section"><div class="settings-section-title">${t("Tunnel per engine")}</div>
-            <p class="sr-desc" style="margin:.2em 0 .8em">${t("Each engine gets its own file, so each leaves by its own address with its own forwarded port. Two engines cannot share one file.")}</p>
+        <div class="settings-section"><div class="settings-section-title">${t("Tunnel per agent")}</div>
+            <p class="sr-desc" style="margin:.2em 0 .8em">${t("Each agent gets its own file, so each leaves by its own address with its own forwarded port. Two agents cannot share one file.")}</p>
             ${engineRows}
             <div style="margin:.6em 0"><button class="btn-primary" onclick="netWgSave()">${t("Save the tunnels")}</button></div>
         </div>
@@ -7576,7 +7576,7 @@ async function netWgUpload() {
 
 async function netWgDeleteConfig(name) {
     const out = document.getElementById("net-wg-result");
-    if (!confirm(t("Remove {name}? The engine using it will not come up until another file is chosen.", { name }))) return;
+    if (!confirm(t("Remove {name}? The agent using it will not come up until another file is chosen.", { name }))) return;
     try {
         await api("/api/network/wireguard/configs/" + encodeURIComponent(name), { method: "DELETE" });
         await netWgLoad();
@@ -7611,7 +7611,7 @@ async function netWgSave() {
         });
         out.innerHTML = `<div class="result-msg success">${esc(t(r.note || "Saved."))}</div>`;
         if (r.restart_required) {
-            _setRestartBanner(t("Saved. The tunnels come up at the next restart, before the engines start.") +
+            _setRestartBanner(t("Saved. The tunnels come up at the next restart, before the agents start.") +
                 ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply and restart")}</button>`);
         }
     } catch (e) {

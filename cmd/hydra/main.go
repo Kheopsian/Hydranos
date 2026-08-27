@@ -436,7 +436,7 @@ func main() {
 	// where there is no api.Server to POST to. Works for any engine socket.
 	if len(os.Args) > 1 && os.Args[1] == "set-listen-port" {
 		if len(os.Args) < 4 {
-			fmt.Fprintln(os.Stderr, "usage: hydra set-listen-port <engine-socket> <port>")
+			fmt.Fprintln(os.Stderr, "usage: hydra set-listen-port <agent-socket> <port>")
 			os.Exit(2)
 		}
 		sock := os.Args[2]
@@ -477,15 +477,15 @@ func main() {
 
 	configPath := flag.String("config", "/config/default.toml", "Path to TOML config file")
 	showVersion := flag.Bool("version", false, "Show version and exit")
-	frontOnly := flag.Bool("front-only", false, "run as a controller node: no local engine, drive remote [[agent]]s only")
+	frontOnly := flag.Bool("front-only", false, "run as a controller node: no local agent, drive remote [[agent]]s only")
 	agentAddr := flag.String("agent-addr", "", "if set, also serve the HydraAgent gRPC data-plane on this addr (e.g. :9090)")
 	agentToken := flag.String("agent-token", "", "shared bearer token required by the HydraAgent gRPC API; overrides $"+agentwire.TokenEnv+" and [daemon] agent_token (empty everywhere = no auth)")
 	agentTLSCert := flag.String("agent-tls-cert", "", "TLS cert file for the HydraAgent gRPC API (with --agent-tls-key)")
 	agentTLSKey := flag.String("agent-tls-key", "", "TLS key file for the HydraAgent gRPC API")
-	agentOnly := flag.Bool("agent-only", false, "run as a dedicated agent: engines + gRPC data-plane, no api.Server, owns events")
+	agentOnly := flag.Bool("agent-only", false, "run as a dedicated agent: agents + gRPC data-plane, no api.Server, owns events")
 	healthAddr := flag.String("health-addr", "", "agent-only: serve GET /health on this addr for an orchestrator's container probe; empty = [daemon] api_host:api_port, \"off\" = no HTTP listener at all")
 	var engineSpecs engineSpecFlag
-	flag.Var(&engineSpecs, "engine", "agent-only: declare one engine this node hosts, as id=race-0,role=race,port=12314,ipv6=true. Repeatable. Overrides $"+envEngines+" / $"+envEngineID+" and the config file; everything else about the engine comes from the front")
+	flag.Var(&engineSpecs, "engine", "agent-only: declare one agent this node hosts, as id=race-0,role=race,port=12314,ipv6=true. Repeatable. Overrides $"+envEngines+" / $"+envEngineID+" and the config file; everything else about the agent comes from the front")
 	listenPortHook := flag.Int("listen-port-hook", 0, "agent-only: serve a loopback-only (127.0.0.1) HTTP POST /listen-port hook on this port so a co-netns gluetun UP_COMMAND can push the forwarded BT port; 0 = disabled (also $"+envListenPortHook+")")
 	bootFromStore := flag.Bool("boot-from-store", true, "load torrents from the SQLite store (content-addressed, durable); state.json runs as an overlay/fallback. Default on since v2.9.x; disable with --boot-from-store=false")
 	flag.Parse()

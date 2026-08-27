@@ -113,12 +113,12 @@ func TestValidateAgentBoot(t *testing.T) {
 		engines []agentBootEngine
 		want    string
 	}{
-		{"nothing declared", nil, "no engine declared"},
+		{"nothing declared", nil, "no agent declared"},
 		{"empty id", []agentBootEngine{{Role: "race"}}, "empty id"},
 		{"bad role", []agentBootEngine{{ID: "a", Role: "seedbox"}}, "role must be"},
 		{"duplicate id", []agentBootEngine{
 			{ID: "a", Role: "race"}, {ID: "a", Role: "hoard"},
-		}, "duplicate engine id"},
+		}, "duplicate agent id"},
 		{"duplicate port leaves one engine dead", []agentBootEngine{
 			{ID: "a", Role: "race", ListenPort: 1234}, {ID: "b", Role: "hoard", ListenPort: 1234},
 		}, "already used"},

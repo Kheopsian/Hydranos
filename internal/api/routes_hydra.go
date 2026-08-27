@@ -1023,12 +1023,12 @@ func (s *Server) localAdd(mode, torrentPath, magnetURI, savePath string, tracker
 	switch mode {
 	case "race":
 		if s.raceEngine == nil {
-			return "", fmt.Errorf("race engine not available")
+			return "", fmt.Errorf("race agent not available")
 		}
 		return s.raceEngine.AddTorrentOpts(torrentPath, magnetURI, savePath, trackers, category, opts)
 	case "hoard":
 		if s.hoardEngine == nil {
-			return "", fmt.Errorf("hoard engine not available")
+			return "", fmt.Errorf("hoard agent not available")
 		}
 		return s.hoardEngine.AddTorrentOpts(torrentPath, savePath, category, opts)
 	default:
@@ -1090,7 +1090,7 @@ func (s *Server) routeAdd(target, mode, torrentPath, magnetURI, savePath, catego
 	}
 	cl, engineID := ra.resolveEngine(mode)
 	if cl == nil {
-		return "", fmt.Errorf("agent %q hosts no %s engine", target, mode)
+		return "", fmt.Errorf("agent %q hosts no %s agent", target, mode)
 	}
 	var r *ltclient.AddTorrentResult
 	r, err := cl.AddRouted(engineID, torrentPath, sp, category, opts.CreateFolder, opts.SkipRecheck)
@@ -1549,7 +1549,7 @@ func (s *Server) handleRaceTorrentDetail(c *gin.Context) {
 // d'offset d'annonce vers le hoard. Outil ops + test du handoff race->hoard.
 func (s *Server) handleRacePurge(c *gin.Context) {
 	if s.raceEngine == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "race engine not available"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "race agent not available"})
 		return
 	}
 	infoHash := strings.ToLower(c.Param("info_hash"))
@@ -1583,7 +1583,7 @@ func (s *Server) handleRaceSettingsGet(c *gin.Context) {
 
 func (s *Server) handleRaceSettingsPost(c *gin.Context) {
 	if s.raceEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "race engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "race agent not available"})
 		return
 	}
 	var settings map[string]interface{}
@@ -1668,7 +1668,7 @@ func (s *Server) handleHoardTorrentDetail(c *gin.Context) {
 
 func (s *Server) handleHoardPauseAll(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	count := s.hoardEngine.PauseAll()
@@ -1680,7 +1680,7 @@ func (s *Server) handleHoardPauseAll(c *gin.Context) {
 
 func (s *Server) handleHoardResumeAll(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	count := s.hoardEngine.ResumeAll()
@@ -1691,7 +1691,7 @@ func (s *Server) handleHoardResumeAll(c *gin.Context) {
 
 func (s *Server) handleHoardRestartStuck(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	count := s.hoardEngine.RestartStuckVerifying()
@@ -1818,7 +1818,7 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 		}
 		if src != nil {
 			if dst == nil {
-				c.JSON(http.StatusConflict, gin.H{"error": "target engine is not running on this node"})
+				c.JSON(http.StatusConflict, gin.H{"error": "target agent is not running on this node"})
 				return
 			}
 			if err := engine.MoveTorrent(src, dst, hash, body.Category); err != nil {
@@ -1909,7 +1909,7 @@ func (s *Server) handleHoardSetCategory(c *gin.Context) {
 
 func (s *Server) handleHoardVerifyDownloading(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	count := s.hoardEngine.VerifyDownloading()
@@ -1922,7 +1922,7 @@ func (s *Server) handleHoardVerifyDownloading(c *gin.Context) {
 
 func (s *Server) handleHoardDownloadSlotsGet(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	c.JSON(http.StatusOK, s.hoardEngine.GetDownloadSlotStatus())
@@ -1930,7 +1930,7 @@ func (s *Server) handleHoardDownloadSlotsGet(c *gin.Context) {
 
 func (s *Server) handleHoardDownloadSlotsSet(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	var req struct {
@@ -1950,7 +1950,7 @@ func (s *Server) handleHoardDownloadSlotsSet(c *gin.Context) {
 
 func (s *Server) handleHoardDownloadSlotsClear(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	s.hoardEngine.ClearDownloadSlotsOverride()
@@ -1962,7 +1962,7 @@ func (s *Server) handleHoardDownloadSlotsClear(c *gin.Context) {
 // source grabs (BDMV, rarities) we want regardless of swarm health.
 func (s *Server) handleHoardPin(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	hash := c.Param("info_hash")
@@ -1987,7 +1987,7 @@ func (s *Server) handleHoardPin(c *gin.Context) {
 // handleHoardUnpin removes a pin.
 func (s *Server) handleHoardUnpin(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	hash := c.Param("info_hash")
@@ -1998,7 +1998,7 @@ func (s *Server) handleHoardUnpin(c *gin.Context) {
 // handleHoardPinnedList returns all pinned info_hashes.
 func (s *Server) handleHoardPinnedList(c *gin.Context) {
 	if s.hoardEngine == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"pinned": s.hoardEngine.PinnedList()})
@@ -3005,7 +3005,7 @@ func (s *Server) setListenPort(c *gin.Context, role string, setter interface{ Se
 		return
 	}
 	if setter == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "engine unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "agent unavailable"})
 		return
 	}
 	// A failed rebind used to still answer 200 ok, so a caller had no way to
@@ -3213,7 +3213,7 @@ func (s *Server) handleSetOptFlag(c *gin.Context) {
 			applied[name] = f
 		}
 		if len(applied) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "no local engine to set " + req.Flag + " on"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no local agent to set " + req.Flag + " on"})
 			return
 		}
 		slog.Info("engine opt flag set", "flag", req.Flag, "on", req.On, "value", req.Value)

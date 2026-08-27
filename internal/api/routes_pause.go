@@ -18,7 +18,7 @@ import (
 
 // errNoEngine means this node has no engine of that kind at all — distinct
 // from "no engine here holds it", which routes to an agent instead.
-var errNoEngine = errors.New("engine not available")
+var errNoEngine = errors.New("agent not available")
 
 func engineName(race bool) string {
 	if race {
@@ -114,7 +114,7 @@ func (s *Server) setPausedOne(hash string, paused, race bool) (string, error) {
 		// The "local engine" here is the front-only stub: it answers nil to
 		// everything, so falling through would report ok having done nothing —
 		// the exact silent no-op this path exists to remove.
-		return "", fmt.Errorf("no engine or agent holds %s", hash)
+		return "", fmt.Errorf("no agent or agent holds %s", hash)
 	}
 	// Claimed by nobody: let the local engine raise the not-found it always did.
 	return "local", local.SetUserPaused(hash, paused)
@@ -125,7 +125,7 @@ func (s *Server) pauseOne(c *gin.Context, paused, race bool) {
 	agent, err := s.setPausedOne(hash, paused, race)
 	switch {
 	case errors.Is(err, errNoEngine):
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": engineName(race) + " engine not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": engineName(race) + " agent not available"})
 		return
 	case err != nil && agent != "" && !isLocalAgentName(agent):
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "agent": agent})

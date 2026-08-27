@@ -107,7 +107,7 @@ func parseEngineSpecs(specs []string) ([]agentBootEngine, error) {
 			}
 			e, err := parseEngineSpec(spec)
 			if err != nil {
-				return nil, fmt.Errorf("engine spec %q: %w", spec, err)
+				return nil, fmt.Errorf("agent spec %q: %w", spec, err)
 			}
 			out = append(out, e)
 		}
@@ -172,27 +172,27 @@ func resolveAgentBoot(flagSpecs []string, cfg *config.HydraConfig) ([]agentBootE
 // implementation, and two engines on one port leave the second one dead.
 func validateAgentBoot(engines []agentBootEngine) error {
 	if len(engines) == 0 {
-		return fmt.Errorf("no engine declared: pass --engine id=...,role=... or set $%s / $%s", envEngineID, envEngines)
+		return fmt.Errorf("no agent declared: pass --agent id=...,role=... or set $%s / $%s", envEngineID, envEngines)
 	}
 	seenID := make(map[string]bool, len(engines))
 	seenPort := make(map[int]string, len(engines))
 	for i, e := range engines {
 		if e.ID == "" {
-			return fmt.Errorf("engine %d: empty id", i)
+			return fmt.Errorf("agent %d: empty id", i)
 		}
 		if e.Role != "race" && e.Role != "hoard" {
-			return fmt.Errorf("engine %q: role must be \"race\" or \"hoard\", got %q", e.ID, e.Role)
+			return fmt.Errorf("agent %q: role must be \"race\" or \"hoard\", got %q", e.ID, e.Role)
 		}
 		if seenID[e.ID] {
-			return fmt.Errorf("duplicate engine id %q", e.ID)
+			return fmt.Errorf("duplicate agent id %q", e.ID)
 		}
 		seenID[e.ID] = true
 		if e.ListenPort < 0 || e.ListenPort > 65535 {
-			return fmt.Errorf("engine %q: listen port %d out of range (1-65535)", e.ID, e.ListenPort)
+			return fmt.Errorf("agent %q: listen port %d out of range (1-65535)", e.ID, e.ListenPort)
 		}
 		if e.ListenPort != 0 {
 			if other, dup := seenPort[e.ListenPort]; dup {
-				return fmt.Errorf("engine %q: listen port %d already used by engine %q", e.ID, e.ListenPort, other)
+				return fmt.Errorf("agent %q: listen port %d already used by agent %q", e.ID, e.ListenPort, other)
 			}
 			seenPort[e.ListenPort] = e.ID
 		}

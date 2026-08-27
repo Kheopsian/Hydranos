@@ -527,7 +527,7 @@ func (s *Server) runQbitImport(job *importJob, req qbitCreds) {
 	slog.Info("qbit import: torrent list fetched", "total", len(ts))
 
 	if s.hoardEngine == nil {
-		fail("hoard engine not available")
+		fail("hoard agent not available")
 		return
 	}
 

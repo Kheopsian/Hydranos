@@ -122,7 +122,7 @@ func (g *gluetunSync) note(format string, args ...interface{}) {
 // written down as if it were live.
 func (g *gluetunSync) apply(port int) error {
 	if g.setter == nil {
-		return errors.New("engine unavailable")
+		return errors.New("agent unavailable")
 	}
 	if err := g.setter.SetListenPort(port); err != nil {
 		return err

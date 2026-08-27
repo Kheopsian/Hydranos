@@ -365,13 +365,13 @@ func TestGluetunPortGoesToOneEngineOnly(t *testing.T) {
 // The warning has to name the engine actually left behind. The first version of
 // this page said "hoard takes it, race stays unreachable" as a constant, which
 // becomes a lie the moment the operator picks race.
-func TestGluetunWarningNamesTheEngineLeftOut(t *testing.T) {
+func TestGluetunWarningNamesTheAgentLeftOut(t *testing.T) {
 	f := netModeFields{GluetunPort: true, GluetunEngine: "race"}
 	got := strings.Join(modeWarnings(netModeGluetun, f, nil), " ")
-	if !strings.Contains(got, "The race engine takes its listen port") {
+	if !strings.Contains(got, "The race agent takes its listen port") {
 		t.Fatalf("warning does not say race takes the port: %q", got)
 	}
-	if !strings.Contains(got, "the hoard engine keeps its own") {
+	if !strings.Contains(got, "the hoard agent keeps its own") {
 		t.Fatalf("warning does not say hoard is the one left out: %q", got)
 	}
 }

@@ -212,7 +212,7 @@ func (s *engineSupervisor) apply(p agentwire.ApplyConfigParams, source string) b
 				slog.Warn("agent: no config for this engine in the push, stopping it", "id", b.ID)
 				s.stopEngine(b.ID)
 			}
-			s.lastErr[b.ID] = "the front sent no configuration for this engine"
+			s.lastErr[b.ID] = "the front sent no configuration for this agent"
 			continue
 		}
 		live := s.lives[b.ID]
@@ -308,7 +308,7 @@ func applyAnnounceOverrides(a agentwire.AnnounceConfigWire) {
 func (s *engineSupervisor) startEngine(b agentBootEngine, session config.SessionConfig) error {
 	eDir := filepath.Join(s.dataDir, b.ID)
 	if err := os.MkdirAll(eDir, 0755); err != nil {
-		return fmt.Errorf("engine dir: %w", err)
+		return fmt.Errorf("agent dir: %w", err)
 	}
 	// Same endpoint selection as the monolith: a hardcoded .sock path here
 	// would hand Typhon a unix path on Windows, where its listener is a stub

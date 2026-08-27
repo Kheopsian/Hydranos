@@ -253,7 +253,7 @@ func (s *Server) runTransmissionImport(job *importJob, req transmissionReq) {
 		job.update(func(sn *importSnapshot) { sn.Phase = "error"; sn.Error = msg })
 	}
 	if s.hoardEngine == nil {
-		fail("hoard engine not available")
+		fail("hoard agent not available")
 		return
 	}
 	p, err := s.planTransmission(req)

@@ -57,13 +57,13 @@ func (s *Server) bulkAction(c *gin.Context, race bool) {
 	if len(hashes) == 0 {
 		if race {
 			if s.raceEngine == nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "race engine not available"})
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "race agent not available"})
 				return
 			}
 			hashes = s.raceEngine.MatchHashes(body.Filter, exclude)
 		} else {
 			if s.hoardEngine == nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard engine not available"})
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "hoard agent not available"})
 				return
 			}
 			hashes = s.hoardEngine.MatchHashes(body.Filter, exclude)

@@ -20,7 +20,7 @@ import (
 // write cannot interleave and lose each other's edits.
 func (s *Server) persistListenPort(role string, port int) error {
 	if role != "race" && role != "hoard" {
-		return fmt.Errorf("unknown engine role %q", role)
+		return fmt.Errorf("unknown agent role %q", role)
 	}
 	if port <= 0 || port > 65535 {
 		return fmt.Errorf("listen port %d out of range (1-65535)", port)

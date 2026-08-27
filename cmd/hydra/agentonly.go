@@ -254,7 +254,7 @@ func startListenPortHook(ctx context.Context, port int, token string, sup *engin
 		// success — otherwise the node sits on a port the VPN no longer
 		// forwards and nothing ever corrects it.
 		if n == 0 && failed > 0 {
-			http.Error(w, "listen-port rebind failed on every engine", http.StatusInternalServerError)
+			http.Error(w, "listen-port rebind failed on every agent", http.StatusInternalServerError)
 			return
 		}
 		slog.Info("agent-only: listen-port hook applied", "port", req.Port, "engines", n, "failed", failed)
@@ -389,7 +389,7 @@ func agentHealthHandler(sup *engineSupervisor) http.HandlerFunc {
 // its own goroutine instead of holding the response.
 func pingEngine(le *liveEngine) error {
 	if le.proc == nil || le.proc.Client() == nil {
-		return fmt.Errorf("engine not started")
+		return fmt.Errorf("agent not started")
 	}
 	done := make(chan error, 1)
 	go func() { done <- le.proc.Client().Ping() }()

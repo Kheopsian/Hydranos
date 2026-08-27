@@ -80,7 +80,7 @@
                  right while a node was race + hoard; they cannot grow, and an
                  engine added from the Agents page had no dot at all. -->
             <button id="net-poly" class="net-poly" type="button" onclick="openNetPanel(this)"
-                    aria-label="Network of the engines" title="Network"></button>
+                    aria-label="Network of the agents" title="Network"></button>
         </div>
     </header>
 
@@ -149,7 +149,7 @@
 
                 <!-- Race Engine -->
                 <div class="card">
-                    <h3>Race Engine <span class="tag" style="color:var(--accent-race)">burst</span></h3>
+                    <h3>Race agent <span class="tag" style="color:var(--accent-race)">burst</span></h3>
                     <div class="card-body">
                         <div class="metric"><span>Torrents</span><span id="race-count">0</span></div>
                         <div class="metric"><span>With peers</span><span id="race-with-peers">0</span></div>
@@ -162,7 +162,7 @@
 
                 <!-- Hoard Engine -->
                 <div class="card">
-                    <h3>Hoard Engine <span class="tag" style="color:var(--accent-hoard)">long-term</span></h3>
+                    <h3>Hoard agent <span class="tag" style="color:var(--accent-hoard)">long-term</span></h3>
                     <div class="card-body">
                         <div class="metric"><span>Torrents</span><span id="hoard-total">0</span></div>
                         <div class="metric"><span>With peers</span><span id="hoard-with-peers">0</span></div>
@@ -690,10 +690,10 @@
                     <div id="ag-result" class="result-msg"></div>
                 </div>
             </div>
-            <p class="sr-desc" style="margin:0 0 12px">One agent is one engine. The ones on this machine are started here and each can leave by its own tunnel; the others run somewhere else and are reached over the network. A category sends its torrents to whichever ones you name.</p>
+            <p class="sr-desc" style="margin:0 0 12px">One agent runs one torrent process. The ones on this machine are started here and each can leave by its own tunnel; the others run somewhere else and are reached over the network. A category sends its torrents to whichever ones you name.</p>
             <table id="agents-table">
                 <thead>
-                    <tr><th>Name</th><th>Engine</th><th>Where</th><th>Exit IP</th><th>Status</th><th>Actions</th></tr>
+                    <tr><th>Name</th><th>Agent</th><th>Where</th><th>Exit IP</th><th>Status</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="agents-tbody">
                     <tr><td colspan="6" class="empty">No agents</td></tr>
@@ -774,10 +774,10 @@
 
             <div class="card" style="margin-top:20px">
                 <h3>Per-tracker stats</h3>
-                <p class="sr-desc" style="margin:0 0 12px">Upload/download split by tracker across both engines. Sampled every few seconds; cumulative totals are lifetime.</p>
+                <p class="sr-desc" style="margin:0 0 12px">Upload/download split by tracker across both agents. Sampled every few seconds; cumulative totals are lifetime.</p>
                 <table id="trkstats-table">
                     <thead>
-                        <tr><th>Tracker</th><th>Engine</th><th>&#8593; rate</th><th>&#8595; rate</th><th>Peers</th><th>Active/Total</th><th>&#8593; total</th><th>&#8595; total</th><th>Ratio</th></tr>
+                        <tr><th>Tracker</th><th>Agent</th><th>&#8593; rate</th><th>&#8595; rate</th><th>Peers</th><th>Active/Total</th><th>&#8593; total</th><th>&#8595; total</th><th>Ratio</th></tr>
                     </thead>
                     <tbody id="trkstats-tbody">
                         <tr><td colspan="9" class="empty">No tracker stats yet</td></tr>
@@ -1037,7 +1037,7 @@
                                 <input type="checkbox" id="add-create-subfolder">
                                 <span>Put the payload in its own subfolder</span>
                             </label>
-                            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Starts on the daemon setting (create_torrent_folder). A multi-file torrent always brings its own folder, so this only changes single-file ones, on the hoard engine.</div>
+                            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Starts on the daemon setting (create_torrent_folder). A multi-file torrent always brings its own folder, so this only changes single-file ones, on the hoard agent.</div>
                         </div>
 
                         <div class="form-group">
@@ -1213,6 +1213,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.3.123"></script>
+    <script src="/static/app.js?v=1.3.124"></script>
 </body>
 </html>

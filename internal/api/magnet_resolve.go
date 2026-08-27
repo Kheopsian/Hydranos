@@ -103,19 +103,19 @@ func (s *Server) metadataSourceFor(target, mode string) (metadataSource, error) 
 		// address peers see -- out of the wrong tunnel.
 		engines := ra.byRole(mode)
 		if len(engines) == 0 {
-			return nil, fmt.Errorf("agent %q hosts no %s engine", target, mode)
+			return nil, fmt.Errorf("agent %q hosts no %s agent", target, mode)
 		}
 		return engines[0].client, nil
 	}
 	switch mode {
 	case "race":
 		if s.raceEngine == nil {
-			return nil, fmt.Errorf("race engine not available")
+			return nil, fmt.Errorf("race agent not available")
 		}
 		return s.raceEngine, nil
 	case "hoard":
 		if s.hoardEngine == nil {
-			return nil, fmt.Errorf("hoard engine not available")
+			return nil, fmt.Errorf("hoard agent not available")
 		}
 		return s.hoardEngine, nil
 	}
@@ -164,7 +164,7 @@ func (s *Server) completeMagnetResolve(src metadataSource, link *magnet.Link, tr
 			magnetFailed(link.InfoHash, fmt.Errorf("%s", res.Error))
 			return
 		case "unknown":
-			magnetFailed(link.InfoHash, fmt.Errorf("engine has no job for this magnet"))
+			magnetFailed(link.InfoHash, fmt.Errorf("agent has no job for this magnet"))
 			return
 		case "done":
 			if err := s.addResolvedMagnet(link, res.Info, trackers, target, mode, savePath, category, cat, opts); err != nil {
