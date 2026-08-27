@@ -396,25 +396,34 @@ async fn try_tcp(
         // the right WG interface. Source IP becomes 10.2.0.2 automatically
         // (the only address bound on every wg-hy* iface, per Proton's
         // shared-Address scheme).
+        // A device pin and/or a fwmark both need the socket before connect().
+        // The device is what steers a Proton-style setup, where every tunnel
+        // shares 10.2.0.2 and a source address decides nothing.
         #[cfg(unix)]
-        if source_fwmark != 0 {
+        if source_fwmark != 0 || crate::netpin::bind_device().is_some() {
             let socket = if addr.is_ipv4() {
                 TcpSocket::new_v4().ok()?
             } else {
                 TcpSocket::new_v6().ok()?
             };
-            let mark_val: libc::c_int = source_fwmark as libc::c_int;
-            let rc = unsafe {
-                libc::setsockopt(
-                    socket.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_MARK,
-                    &mark_val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                )
-            };
-            if rc != 0 {
+            if crate::netpin::pin_fd(socket.as_raw_fd()).is_err() {
+                // Fail the dial rather than let it leave by the default route.
                 return None;
+            }
+            if source_fwmark != 0 {
+                let mark_val: libc::c_int = source_fwmark as libc::c_int;
+                let rc = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_MARK,
+                        &mark_val as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                };
+                if rc != 0 {
+                    return None;
+                }
             }
             return socket.connect(addr).await.ok();
         }

@@ -57,6 +57,11 @@ pub struct EngineConfig {
     pub listen_port: u16,
     #[serde(default)]
     pub listen_interfaces: String,
+    /// Interface NAME every socket of this engine must leave by ("wg0").
+    /// Applied with SO_BINDTODEVICE, which is what actually steers the egress:
+    /// see crate::netpin for why the source-address pin it replaces did not.
+    #[serde(default)]
+    pub bind_device: String,
     /// Optional extra TCP listener that expects HAProxy PROXY protocol v2
     /// header at the start of each connection (real peer IP carried in header).
     /// Bind addr taken from `listen_addr_proxy_v2` (default [::]). None = disabled.

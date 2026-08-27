@@ -185,6 +185,11 @@ async fn main() {
     // thousands of peers — new uTP dials get rejected with TooManyActiveConnections.
     // Bumped to 4096 (2026-04-17 investigation: 70% of uTP fails were "error"=saturated).
     let listen_port = config.listen_port;
+    // Before ANY socket is opened: every one of them is pinned to this device.
+    typhon_engine::netpin::set_bind_device(&config.bind_device);
+    if let Some(dev) = typhon_engine::netpin::bind_device() {
+        info!("[engine] every socket is pinned to device {}", dev);
+    }
     // TYPHON_DISABLE_UTP=1 skips uTP entirely. uTP is raw UDP, cannot route via
     // SOCKS5_OUTBOUND, and so leaks the netns default-route source IP to peers.
     // Set this when SOCKS5_OUTBOUND is the only sanctioned egress (no FOU/WG L3 tunnel).
@@ -195,7 +200,21 @@ async fn main() {
         let utp_bind: std::net::SocketAddr = format!("0.0.0.0:{}", listen_port).parse().unwrap();
         let mut utp_opts = librqbit_utp::SocketOpts::default();
         utp_opts.max_live_vsocks = std::num::NonZeroUsize::new(4096);
-        match librqbit_utp::UtpSocketUdp::new_udp_with_opts(utp_bind, utp_opts, Default::default()).await {
+        // uTP is raw UDP and gets the same device pin as everything else.
+        // Without it the tunnel steering would hold for TCP and leak for uTP,
+        // which is the shape of leak nobody notices: it is the same swarm.
+        let utp_dev = typhon_engine::netpin::bind_device()
+            .map(|d| d.parse::<librqbit_utp::BindDevice>())
+            .transpose();
+        let utp_dev = match utp_dev {
+            Ok(d) => d,
+            Err(e) => {
+                error!("[engine] bind_device is not usable for the uTP socket: {} — refusing to open it rather than leak the default route", e);
+                None
+            }
+        };
+        let udp_opts = librqbit_utp::UtpSocketUdpOpts { bind_device: utp_dev.as_ref() };
+        match librqbit_utp::UtpSocketUdp::new_udp_with_opts(utp_bind, utp_opts, udp_opts).await {
             Ok(s) => {
                 info!("[engine] uTP socket bound on {}", utp_bind);
                 Some(s)

@@ -3,6 +3,32 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.154.0 - 2026-08-27
+
+### Fixed
+- **Typhon's own sockets are pinned to the interface too, so `bind_interface`
+  now holds for peers as well as announces.** Go was sending the resolved IP as
+  `outgoing_interfaces`, a key that does not exist in the engine's config: it
+  was received and dropped, and the peer sockets were pinned by source address
+  only, which steers nothing when every tunnel shares `10.2.0.2`. The engine
+  now takes `bind_device` (the interface NAME) and applies `SO_BINDTODEVICE` to
+  the peer listener, the outbound peer dials and the uTP UDP socket.
+- **Inbound on a second tunnel could not answer.** The listener accepted a peer
+  arriving on the non-default tunnel, because both interfaces carry the same
+  address, and the reply then left by the default route with a different public
+  address; the peer dropped it and the connection died with nothing logged.
+  Pinning the listener makes every accepted socket inherit the device, so the
+  reply goes back the way the peer came.
+- A socket that cannot be pinned now fails: the listener refuses to bind and a
+  dial is abandoned, rather than falling back to the default route. Failing is
+  visible, and a silent fallback publishes the address the tunnel exists to hide.
+
+### Not measured
+- The outbound half rests on the same `SO_BINDTODEVICE` call proven on the bench
+  for the announce path in 3.153.0. The inbound half (an accepted socket
+  inheriting the device) is deduced from how Linux routes a reply, not observed:
+  measuring it needs an external initiator hitting each tunnel's forwarded port.
+
 ## v3.153.0 - 2026-08-27
 
 ### Fixed
