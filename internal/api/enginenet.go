@@ -96,10 +96,47 @@ func resolvedEngine(cfg *config.HydraConfig, id string) (config.EngineConfig, bo
 	}
 	for _, e := range engines {
 		if e.ID == id {
+			// A managed tunnel is NOT in the file. Its interface is created at
+			// boot and named by the supervisor, which writes it into the config
+			// the engines start from -- a copy this function never sees, since
+			// ResolveEngines rebuilds from the document every call.
+			//
+			// Left uncorrected, every measurement here dialled unpinned and
+			// reported the host's own address, so the header claimed the node
+			// was leaving by its home IP while the announces were going through
+			// the tunnel. The reverse is what makes it worth fixing: the same
+			// blind spot would show a tunnel address for an agent that had
+			// quietly fallen back to the default route.
+			if dev := tunnelDeviceFor(id); dev != "" {
+				e.BindInterface = dev
+			}
 			return e, true
 		}
 	}
 	return config.EngineConfig{}, false
+}
+
+var (
+	tunnelDevicesMu sync.RWMutex
+	tunnelDevicesFn func() map[string]string
+)
+
+// SetTunnelDevices wires in the supervisor that owns the managed tunnels. Nil
+// on a node that manages none.
+func (s *Server) SetTunnelDevices(fn func() map[string]string) {
+	tunnelDevicesMu.Lock()
+	tunnelDevicesFn = fn
+	tunnelDevicesMu.Unlock()
+}
+
+func tunnelDeviceFor(engineID string) string {
+	tunnelDevicesMu.RLock()
+	fn := tunnelDevicesFn
+	tunnelDevicesMu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn()[engineID]
 }
 
 // localEngineRows lists the engines this process runs: the two primaries plus

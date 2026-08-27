@@ -349,6 +349,27 @@ func (s *wgSupervisor) follow(ctx context.Context, e *wgEngine, resolve func(str
 	}
 }
 
+// Devices names the interface each agent was actually given.
+//
+// The supervisor is the only thing that knows: the device is created at boot
+// and written into the config the engines were started from, not into the file
+// on disk. Anything re-reading the file sees an empty bind_interface and
+// concludes the agent leaves by the host's default route.
+func (s *wgSupervisor) Devices() map[string]string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.engines))
+	for id, e := range s.engines {
+		if e != nil && e.device != "" {
+			out[id] = e.device
+		}
+	}
+	return out
+}
+
 // Stop tears every tunnel down. Called on shutdown: a tunnel left behind keeps
 // its routing rule, and the next start finds the priority taken by an
 // interface that no longer exists.
