@@ -45,6 +45,21 @@ All notable changes to Hydra are documented here. This project follows
   menu sat on a stale port behind its tunnel with a green page. The WireGuard
   follower reaches any engine this node runs.
 
+### Fixed
+- **First-run setup refused anyone arriving over Tailscale**, telling them they
+  were not on a private network. They were: `net.IP.IsPrivate()` covers RFC1918
+  and RFC4193 and nothing else, while every tailnet node sits in 100.64.0.0/10,
+  which is RFC 6598 shared address space. The refusal now covers that range too
+  -- it is not routable from the internet, so the guard still does its job --
+  and it names the address it saw, because a refusal you cannot argue with is
+  the hard part.
+- **And the way out it recommended did not work.** `hydra reset-password` wrote
+  through a helper that updates an existing line and refuses when there is
+  none, so on any config that had never carried an `[auth]` section -- every
+  hand-written one, and every first run -- it failed with `key "password_hash"
+  not found`. The section is created when absent, in the CLI and in the API
+  path alike.
+
 ### Notes
 - The tunnel's private key never enters the config tree, an `apply_config` push
   or an API response. The `.conf` stays in `<data_dir>/wireguard` at 0600 and is
