@@ -7506,6 +7506,11 @@ function _wgEngineRows() {
     return rows;
 }
 
+// _wgAgentName is what the operator calls this thing everywhere else in the
+// UI. The block header used to print "id . role", which on the two primaries
+// is "race . race": twice the same word, neither of them the name.
+function _wgAgentName(id) { return "local-" + id; }
+
 function _wgTunnelFor(engineId) {
     return ((_wgState && _wgState.tunnels) || []).find(x => x.engine === engineId) || null;
 }
@@ -7545,7 +7550,7 @@ function netWgRender() {
             const degraded = tn.degraded
                 ? ` <span class="net-warn" title="${esc(tn.degraded)}">${esc(t("IPv4 only"))}</span>` : "";
             rows += `<div class="settings-row">
-                <div class="sr-label"><span class="sr-key">${esc(tn.engine)}</span>
+                <div class="sr-label"><span class="sr-key">${esc(_wgAgentName(tn.engine))}</span>
                 <span class="sr-desc">${esc(tn.device)} · ${esc(tn.provider_label || tn.provider || "")}</span></div>
                 <div class="sr-field" style="flex-direction:column;align-items:flex-end;gap:2px">
                     <span class="${cls}">${esc(tn.up ? t("carrying traffic") : t("no recent handshake"))}${degraded}</span>
@@ -7578,7 +7583,7 @@ function netWgRender() {
         const prov = providers.find(p => p.value === cur.provider) || {};
         const manual = prov.kind === "manual" || (cur.port_forward || "").toLowerCase() === "manual";
         agentBlocks += `<div class="settings-section">
-            <div class="settings-section-title">${esc(e.id)} · ${esc(e.role)}</div>
+            <div class="settings-section-title">${esc(_wgAgentName(e.id))}${e.role && e.role !== e.id ? " · " + esc(e.role) : ""}</div>
             ${_netCheckbox("wg-en-" + e.id, "Bring up a tunnel for this agent", cur.enabled,
                 "Off, this agent leaves by whatever the host does.")}
             ${_netOptionSelect("wg-file-" + e.id, "Configuration file", cur.config_file, fileOpts,
