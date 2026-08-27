@@ -3,6 +3,35 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.155.0 - 2026-08-27
+
+### Added
+- **One engine now checks another engine's port forwarding.** A node whose
+  engines leave by different tunnels can produce the one thing a single-homed
+  node cannot buy: a peer arriving from somewhere else. The probe dials the
+  target's forwarded port from another engine's exit and demands a BitTorrent
+  handshake on a torrent the target serves, so only that engine's own peer_id
+  can answer it.
+  This replaces the apologetic `unknown` the self-probe had to return inside a
+  tunnel, where the dial leaves and comes back to the provider's own address and
+  the provider is under no obligation to return it. A failure now means the port
+  really is shut, because the dial genuinely came from elsewhere.
+  The prober is only used when its MEASURED exit address differs from the
+  target's; two engines behind one tunnel learn nothing from each other, and the
+  node falls back to the previous evidence chain.
+- The cross probe dials the **forwarded** port when the provider reports a
+  NAT-PMP mapping, which is the door peers actually knock on, rather than the
+  engine's internal listen port.
+
+### Fixed
+- **The reachability check could confirm itself.** The cross probe opens a real
+  peer connection to the target, the target counts it in `InboundAccepted`, and
+  the passive branch reads that counter and reports "peers have connected to
+  you" -- naming our own probe as the visitor. Arrivals this node caused are now
+  discounted, so the passive evidence only counts peers we did not send
+  ourselves. A green dot backed by nothing but itself is worse than the honest
+  `unknown` it would have replaced.
+
 ## v3.154.0 - 2026-08-27
 
 ### Fixed
