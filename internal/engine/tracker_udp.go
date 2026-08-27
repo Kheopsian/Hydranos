@@ -121,7 +121,15 @@ func (ta *trackerAnnouncer) udpAnnounce(u *url.URL, infoHash string, uploaded, d
 	key := fmt.Sprintf("%s|%d", host, ta.fwmark)
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	applyFwmark(dialer, ta.fwmark)
+	// Device pin, not source pin, and no LocalAddr: this dial is UDP, so a
+	// *net.TCPAddr source would be the wrong type entirely. The device is what
+	// steers the egress anyway.
+	applyEgressControl(dialer, ta.bindInterface, ta.fwmark)
+	if name := ta.bindInterface; name != "" {
+		if _, ierr := net.InterfaceByName(name); ierr != nil {
+			return nil, fmt.Errorf("udp announce: bind_interface %q does not resolve, refusing to announce from the default route: %w", name, ierr)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	conn, err := dialer.DialContext(ctx, "udp", host)

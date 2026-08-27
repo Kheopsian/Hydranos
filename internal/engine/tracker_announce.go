@@ -78,6 +78,11 @@ type trackerAnnouncer struct {
 	bindingID int
 	livePort  *atomic.Int64 // runtime port override (nil/0 = use static port)
 	fwmark    int           // SO_MARK for this binding's egress; also used by the udp:// path
+	// bindInterface is the device the udp:// announce path pins its socket to.
+	// It was missing here, so a tracker reached over UDP announced from the
+	// default route however the engine was configured -- the http:// path had
+	// the pin, its udp:// twin did not.
+	bindInterface string
 	// proxied reports that announces leave through a SOCKS5 proxy. The udp://
 	// path reads it to refuse rather than fall back to a direct datagram.
 	proxied    bool
@@ -174,37 +179,30 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		Timeout:   5 * time.Second,
 		KeepAlive: -1,
 	}
-	applyFwmark(dialer, int(b.Fwmark))
-
-	// bind_interface names the interface every socket of this engine leaves by.
-	// The engine already honours it for peer dials (applyBindInterface sets the
-	// Rust side's outgoing_interfaces); without the same pin here the announce
-	// followed the kernel default route instead, so peers travelled inside the
-	// tunnel while the tracker recorded the host's own address -- no error, no
-	// log, every indicator green. That is the leak this pin closes.
+	// bind_interface names the interface every socket of this engine leaves by,
+	// and the pin is by DEVICE, not by source address: Proton gives every
+	// tunnel the same 10.2.0.2, so a source-IP bind pinned nothing and every
+	// engine announced through whichever tunnel held the default route -- no
+	// error, no log, every indicator green. See pinDialerToInterface.
 	//
 	// A name that does not resolve therefore FAILS the announce rather than
 	// falling back to the default route. A failed announce is visible; a silent
 	// fallback is precisely the state nobody can see, and it publishes the
 	// address the tunnel exists to hide.
+	pinned, perr := pinDialerToInterface(dialer, b.BindInterface, int(b.Fwmark))
 	var bindErr error
-	if name := strings.TrimSpace(b.BindInterface); name != "" {
-		ip, err := resolveInterfaceIP(name)
-		if err != nil {
-			bindErr = fmt.Errorf("bind_interface %q does not resolve, refusing to announce from the default route: %w", name, err)
-			slog.Error("tracker_announce: bind_interface does not resolve. Announces on this engine FAIL rather than leave by the default route, which would publish this host's own address",
-				"engine", b.AnnounceScope, "binding", b.ID, "interface", name, "error", err)
-		} else {
-			dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(ip)}
-			slog.Info("tracker_announce: announces pinned to the engine's bind_interface",
-				"engine", b.AnnounceScope, "binding", b.ID, "interface", name, "ip", ip)
-		}
+	if perr != nil {
+		bindErr = fmt.Errorf("%w, refusing to announce from the default route", perr)
+		slog.Error("tracker_announce: bind_interface cannot be honoured. Announces on this engine FAIL rather than leave by the default route, which would publish this host's own address",
+			"engine", b.AnnounceScope, "binding", b.ID, "interface", b.BindInterface, "error", perr)
+	} else if pinned {
+		slog.Info("tracker_announce: announces pinned to the engine's bind_interface",
+			"engine", b.AnnounceScope, "binding", b.ID, "interface", b.BindInterface)
 	}
-	// The pinned source address is IPv4 (resolveInterfaceIP returns the
-	// interface's v4). A v6 dial from a v4 source cannot work, so a pinned
-	// binding announces v4 only, and a per-tracker v6 pin is refused out loud
-	// instead of quietly dialling from somewhere else.
-	pinned := dialer.LocalAddr != nil
+	// A pinned binding announces IPv4 only: the source address it carries is
+	// the interface's v4, and a v6 dial from a v4 source cannot work. So a
+	// per-tracker v6 pin is refused out loud instead of quietly dialling from
+	// somewhere else.
 
 	// enable_ipv6 governed the listener, the tracker's peers6 list and the
 	// self-dial filter, but never this: a plain "tcp" dial follows RFC 6724 and
@@ -357,6 +355,7 @@ func newTrackerAnnouncerForBinding(b Binding) *trackerAnnouncer {
 		userAgent:       version.UserAgent(),
 		bindingID:       b.ID,
 		fwmark:          int(b.Fwmark),
+		bindInterface:   strings.TrimSpace(b.BindInterface),
 		proxied:         announceProxy != nil,
 		enableIPv6:      b.EnableIPv6,
 		limiter:         announceLimiterFor(b.AnnounceScope+"#"+strconv.Itoa(b.ID), b.AnnounceRateLimit),
