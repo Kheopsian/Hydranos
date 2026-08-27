@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,11 +27,21 @@ import (
 // what the file says is what the operator chose.
 
 const (
-	netModeDirect  = "direct"
-	netModeGluetun = "gluetun"
-	netModeSocks5  = "socks5"
-	netModeProxyV2 = "proxy_v2"
+	netModeDirect    = "direct"
+	netModeWireGuard = "wireguard"
+	netModeGluetun   = "gluetun"
+	netModeSocks5    = "socks5"
+	netModeProxyV2   = "proxy_v2"
 )
+
+// WireGuard is a mode of its own rather than a corner of direct, and the
+// difference is not presentation. In every other mode the operator DECIDES the
+// egress -- picks an interface, types a proxy -- and the page is a form. Here
+// the operator hands over a provider file and the egress is a CONSEQUENCE: the
+// interface is created by Hydra and named by Hydra, the listen port is chosen
+// by the provider and rotates on its own. Showing those two as editable fields
+// under direct meant showing two boxes whose contents are overwritten at every
+// boot, which is a page that lies politely.
 
 // The mode formerly called "vpn" is now "gluetun", and the interface binding it
 // owned moved down into "direct". The rename is not cosmetic: nothing in that
@@ -148,6 +159,14 @@ func tomlStrList(sec map[string]interface{}, key string) []string {
 // edits the TOML by hand it would start lying — which is the failure this whole
 // tab is meant to remove, not reproduce.
 func detectNetMode(race, hoard map[string]interface{}) string {
+	// First, because it outranks everything else on the page: if Hydra brings
+	// the tunnel up, the interface and the port are its own doing and no other
+	// mode can describe what is happening.
+	for _, sec := range []map[string]interface{}{race, hoard} {
+		if wireGuardEnabledIn(sec) {
+			return netModeWireGuard
+		}
+	}
 	if tomlInt(race, "listen_port_proxy_v2") > 0 || tomlInt(hoard, "listen_port_proxy_v2") > 0 {
 		return netModeProxyV2
 	}
@@ -167,6 +186,16 @@ func detectNetMode(race, hoard map[string]interface{}) string {
 		}
 	}
 	return netModeDirect
+}
+
+// wireGuardEnabledIn reports whether a session section carries a managed
+// tunnel that is switched on.
+func wireGuardEnabledIn(sec map[string]interface{}) bool {
+	if sec == nil {
+		return false
+	}
+	sub, _ := sec["wireguard"].(map[string]interface{})
+	return tomlBool(sub, "enabled")
 }
 
 // bindInterfaceFor is the interface one engine leaves by. Per-engine because
@@ -259,6 +288,13 @@ func modeWarnings(mode string, f netModeFields, env []envOverride) []string {
 	if mode == netModeGluetun && f.GluetunPort {
 		eng := gluetunEngineOf(f)
 		w = append(w, "The "+eng+" engine takes its listen port from gluetun and holds its announces until it has one. A provider forwards a single port, so the "+otherEngine(eng)+" engine keeps its own and stays unreachable.")
+	}
+	if mode == netModeWireGuard {
+		// Said on the page rather than discovered at the next restart. Both of
+		// these fields exist on this tab in every other mode, so their absence
+		// here needs a reason attached to it.
+		w = append(w, "Hydra creates the interfaces and names them, so there is no interface to pick here: each engine is pinned to its own tunnel.")
+		w = append(w, "Where the provider forwards a port, the engine listens on the one it is given and follows it when the lease rotates. The listen port below is only used by an engine whose provider forwards nothing.")
 	}
 	race, hoard := bindInterfaceFor(f, "race"), bindInterfaceFor(f, "hoard")
 	if mode == netModeGluetun {
@@ -448,6 +484,13 @@ func validateNetMode(mode string, f netModeFields) error {
 	}
 	switch mode {
 	case netModeDirect:
+	case netModeWireGuard:
+		// Nothing to validate here on purpose. What could be wrong in this
+		// mode -- a missing .conf, a provider that forwards nothing, two
+		// engines pointed at one file -- is checked where those choices are
+		// made, and checked against the files on disk rather than against a
+		// form. Repeating a weaker version of it here would let the two
+		// disagree.
 	case netModeGluetun:
 		if bindInterfaceFor(f, "race") == "" && bindInterfaceFor(f, "hoard") == "" {
 			return fmt.Errorf("gluetun mode needs the interface name the tunnel creates (wg0, tun0, …) on at least one engine, otherwise nothing is inside the tunnel")
@@ -522,6 +565,10 @@ func netModeKeys(mode string, f netModeFields, listenPort, proxyV2Port int, scop
 	if mode == netModeDirect || mode == netModeGluetun {
 		bindIface = bindInterfaceFor(f, scope)
 	}
+	// Not in wireguard mode: there the interface is the tunnel Hydra created,
+	// and the supervisor writes it at boot from the device it actually made.
+	// Persisting a second copy here is how two writers for one decision drift
+	// apart -- and this file has been bitten by that twice already.
 	switch mode {
 	case netModeSocks5, netModeProxyV2:
 		socksHost, socksPort = strings.TrimSpace(f.Socks5Host), f.Socks5Port
@@ -809,6 +856,20 @@ func (s *Server) handleNetworkModePost(c *gin.Context) {
 	if err := os.Rename(tmp, path); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	// Leaving WireGuard mode turns the tunnels off. The picker promises that
+	// choosing a mode clears the others, and a tunnel left enabled would keep
+	// being built at every boot under a page that says the node is direct.
+	if req.Mode != netModeWireGuard {
+		ids := []string{"race", "hoard"}
+		for _, r := range req.Extras {
+			ids = append(ids, r.ID)
+		}
+		if derr := s.editConfigFileLocked(func(doc string) (string, error) {
+			return DisableWireGuardTunnels(doc, ids)
+		}); derr != nil {
+			slog.Warn("network mode: could not switch the managed tunnels off", "error", derr)
+		}
 	}
 	warnings := modeWarnings(req.Mode, req.Fields, collectEnvOverrides())
 	// The extra engines are written AFTER the TOML is safely in place: if this

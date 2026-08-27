@@ -27,6 +27,17 @@ All notable changes to Hydra are documented here. This project follows
   `203.0.113.22` from two Proton configs on the same machine, with each
   engine's NAT-PMP mapping landing on its own port (45243 and 61219).
 
+- **It is a network mode of its own, the fifth**, not a corner of Direct. In
+  every other mode the operator decides the egress: picks an interface, types a
+  proxy address, and the page is a form. Here the operator hands over a
+  provider file and the egress is a consequence -- the interface is created and
+  named by Hydra, the listen port is chosen by the provider and rotates on its
+  own. Leaving those two on screen as editable boxes under Direct meant showing
+  fields whose contents are overwritten at every boot.
+  Picking any other mode switches the tunnels off, the way picking a mode has
+  always cleared the previous one's keys: a tunnel left enabled would keep
+  being built at each boot under a page claiming the node is direct.
+
 - **Port forwarding is asked for, and then followed.** The provider dropdown is
   not decoration: it is how Hydra knows whether there is a port to ask for at
   all. Proton and other NAT-PMP gateways are asked directly; AirVPN, PIA and

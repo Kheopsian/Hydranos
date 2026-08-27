@@ -326,8 +326,12 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 		var werr error
 		switch id {
 		case "race", "hoard":
+			// [race.wireguard], not dotted keys inside [race]. TOML accepts
+			// both spellings and REJECTS a file carrying both, so the one
+			// thing that must not happen is two writers each picking their
+			// own. The sub-table is what a person writes by hand, so it wins.
 			werr = s.editConfigFileLocked(func(doc string) (string, error) {
-				return config.SetTOMLTable(doc, id, kv)
+				return config.SetTOMLTable(doc, id+".wireguard", plainKeys(kv))
 			})
 		default:
 			prefixed := make([][2]string, 0, len(kv))
@@ -349,6 +353,43 @@ func (s *Server) handleWireGuardEngines(c *gin.Context) {
 		"restart_required": true,
 		"note":             "the tunnels come up at the next restart, before the engines start",
 	})
+}
+
+// plainKeys strips the "wireguard." prefix for the sub-table spelling. The
+// prefixed form is kept for the [[agent]] entries, where a sub-table of one
+// array element cannot be addressed as cleanly.
+func plainKeys(kv [][2]string) [][2]string {
+	out := make([][2]string, 0, len(kv))
+	for _, p := range kv {
+		out = append(out, [2]string{strings.TrimPrefix(p[0], "wireguard."), p[1]})
+	}
+	return out
+}
+
+// DisableWireGuardTunnels switches every managed tunnel off in a config
+// document.
+//
+// Called when the operator picks any OTHER network mode. The mode picker
+// promises that choosing a mode clears the others, and a tunnel left enabled
+// would keep being created at every boot while the page says the node is
+// direct -- the engine pinned to an interface the page does not mention, which
+// is the exact shape of every leak in this file's history.
+func DisableWireGuardTunnels(doc string, engineIDs []string) (string, error) {
+	out := doc
+	for _, id := range engineIDs {
+		var err error
+		switch id {
+		case "race", "hoard":
+			out, err = config.SetTOMLTable(out, id+".wireguard", [][2]string{{"enabled", "false"}})
+		default:
+			out, err = config.SetTOMLArrayTable(out, "agent", "name", LocalAgentNameFor(id),
+				[][2]string{{"session.wireguard.enabled", "false"}})
+		}
+		if err != nil {
+			return doc, err
+		}
+	}
+	return out, nil
 }
 
 // wireGuardKeys is the ONE place a tunnel's settings become TOML.

@@ -103,3 +103,83 @@ func TestResolvedEnginesSeesClassicRaceAndHoardSections(t *testing.T) {
 		t.Errorf("the race engine's tunnel is invisible to the API (found %q): its .conf could be deleted while in use", found)
 	}
 }
+
+// A managed tunnel is a mode of its own. Reading it as "direct" put the
+// interface and the port on screen as editable fields, when both are written
+// by Hydra at every boot.
+func TestManagedTunnelIsItsOwnMode(t *testing.T) {
+	race := map[string]interface{}{
+		"listen_port": int64(16171),
+		"wireguard":   map[string]interface{}{"enabled": true, "provider": "proton"},
+	}
+	hoard := map[string]interface{}{"listen_port": int64(16172)}
+	if got := detectNetMode(race, hoard); got != netModeWireGuard {
+		t.Errorf("mode = %q, want %q", got, netModeWireGuard)
+	}
+	// Off, it is direct again and nothing else changes.
+	race["wireguard"] = map[string]interface{}{"enabled": false}
+	if got := detectNetMode(race, hoard); got != netModeDirect {
+		t.Errorf("with the tunnel off, mode = %q, want %q", got, netModeDirect)
+	}
+	// And a node with no wireguard key at all is untouched by any of this.
+	if got := detectNetMode(map[string]interface{}{}, map[string]interface{}{}); got != netModeDirect {
+		t.Errorf("a plain node reads as %q", got)
+	}
+}
+
+// The mode picker promises that choosing one clears the others. A tunnel left
+// enabled would keep being built at every boot while the page says direct.
+func TestLeavingTheModeSwitchesTheTunnelsOff(t *testing.T) {
+	doc := "[race]\nlisten_port = 16171\n\n[race.wireguard]\nenabled = true\nprovider = \"proton\"\n\n[hoard]\nlisten_port = 16172\n"
+	out, err := DisableWireGuardTunnels(doc, []string{"race", "hoard"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg config.HydraConfig
+	if err := toml.Unmarshal([]byte(out), &cfg); err != nil {
+		t.Fatalf("the edited config no longer parses: %v\n%s", err, out)
+	}
+	if cfg.Race.WireGuard == nil || cfg.Race.WireGuard.Enabled {
+		t.Errorf("the race tunnel is still on: %+v\n%s", cfg.Race.WireGuard, out)
+	}
+	if cfg.Race.ListenPort != 16171 {
+		t.Errorf("the edit clobbered the rest of the section: %d", cfg.Race.ListenPort)
+	}
+	// The provider is left where it is: turning a tunnel off is not the same
+	// as forgetting which provider it was, and the operator may turn it back on.
+	if cfg.Race.WireGuard.Provider != "proton" {
+		t.Errorf("switching off also erased the provider: %+v", cfg.Race.WireGuard)
+	}
+}
+
+// TOML accepts [race.wireguard] and dotted wireguard.x keys inside [race], and
+// REJECTS a file carrying both. Two writers each picking a spelling is how a
+// config stops parsing, so the assignment endpoint must write the same table
+// the mode save reads.
+func TestOneSpellingForAnEnginesTunnel(t *testing.T) {
+	doc := "[race]\nlisten_port = 16171\n"
+	out, err := config.SetTOMLTable(doc, "race.wireguard", plainKeys(wireGuardKeys(wgEngineReq{
+		EngineID: "race", Enabled: true, Provider: "proton", ConfigFile: "a.conf",
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "wireguard.enabled") {
+		t.Errorf("the dotted spelling leaked into the file beside the table:\n%s", out)
+	}
+	var cfg config.HydraConfig
+	if err := toml.Unmarshal([]byte(out), &cfg); err != nil {
+		t.Fatalf("does not parse: %v\n%s", err, out)
+	}
+	if cfg.Race.WireGuard == nil || !cfg.Race.WireGuard.Enabled {
+		t.Errorf("read back %+v\n%s", cfg.Race.WireGuard, out)
+	}
+	// And what the mode detector reads must agree with what was written.
+	m, err := config.ParseTOMLMap([]byte(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wireGuardEnabledIn(sectionOf(m, "race")) {
+		t.Error("the mode detector cannot see the tunnel the assignment endpoint wrote")
+	}
+}
