@@ -36,19 +36,24 @@ func (execRunner) Run(ctx context.Context, args ...string) (string, error) {
 
 // State is what a tunnel is doing, for the Network tab.
 type State struct {
-	Device       string    `json:"device"`
-	Engine       string    `json:"engine"`
-	Provider     string    `json:"provider"`
-	Up           bool      `json:"up"`
-	Handshake    time.Time `json:"handshake,omitempty"`
-	Endpoint     string    `json:"endpoint,omitempty"`
-	Address      string    `json:"address,omitempty"`
-	Table        int       `json:"table"`
-	RxBytes      int64     `json:"rx_bytes"`
-	TxBytes      int64     `json:"tx_bytes"`
-	LastError    string    `json:"last_error,omitempty"`
-	ManagedBy    string    `json:"managed_by"`
-	HandshakeAge float64   `json:"handshake_age_seconds,omitempty"`
+	Device    string    `json:"device"`
+	Engine    string    `json:"engine"`
+	Provider  string    `json:"provider"`
+	Up        bool      `json:"up"`
+	Handshake time.Time `json:"handshake,omitempty"`
+	Endpoint  string    `json:"endpoint,omitempty"`
+	Address   string    `json:"address,omitempty"`
+	Table     int       `json:"table"`
+	RxBytes   int64     `json:"rx_bytes"`
+	TxBytes   int64     `json:"tx_bytes"`
+	LastError string    `json:"last_error,omitempty"`
+	// Degraded is a limitation, not a failure: the tunnel works, one address
+	// family does not. Kept apart from LastError because the UI paints that
+	// red, and a permanent red dot on a tunnel that is carrying traffic
+	// teaches an operator to ignore the colour.
+	Degraded     string  `json:"degraded,omitempty"`
+	ManagedBy    string  `json:"managed_by"`
+	HandshakeAge float64 `json:"handshake_age_seconds,omitempty"`
 }
 
 // Manager owns every tunnel Hydra brought up in this process.
@@ -70,6 +75,7 @@ type tunnel struct {
 	engine   string
 	provider string
 	lastErr  string
+	degraded string
 }
 
 // ErrUnsupported is returned on platforms where this cannot work at all.
@@ -155,7 +161,7 @@ func (m *Manager) Up(ctx context.Context, engineID, provider string, spec Spec) 
 		m.live[spec.Device] = t
 		m.order = append(m.order, spec.Device)
 	}
-	t.spec, t.engine, t.provider, t.lastErr = spec, engineID, provider, ""
+	t.spec, t.engine, t.provider, t.lastErr, t.degraded = spec, engineID, provider, "", ""
 	m.mu.Unlock()
 
 	// A family that fails takes the rest of its own steps with it, and nothing
@@ -170,7 +176,7 @@ func (m *Manager) Up(ctx context.Context, engineID, provider string, spec Spec) 
 			if err := os.WriteFile(st.WriteFile, []byte(st.WriteData), 0o644); err != nil {
 				if st.SoftFail {
 					skipFamily[st.Family] = true
-					m.note(spec.Device, fmt.Sprintf("IPv%s is not available on this tunnel (%s): %s", st.Family, st.Desc, explainWriteFailure(st.WriteFile, err)))
+					m.degrade(spec.Device, fmt.Sprintf("IPv%s is not available on this tunnel (%s): %s", st.Family, st.Desc, explainWriteFailure(st.WriteFile, err)))
 					slog.Warn("wireguard: tunnel is up without one address family",
 						"engine", engineID, "device", spec.Device, "family", "IPv"+st.Family,
 						"error", explainWriteFailure(st.WriteFile, err))
@@ -194,8 +200,7 @@ func (m *Manager) Up(ctx context.Context, engineID, provider string, spec Spec) 
 			}
 			if st.SoftFail {
 				skipFamily[st.Family] = true
-				msg := fmt.Sprintf("IPv%s is not available on this tunnel (%s): %v", st.Family, st.Desc, err)
-				m.note(spec.Device, msg)
+				m.degrade(spec.Device, fmt.Sprintf("IPv%s is not available on this tunnel (%s): %v", st.Family, st.Desc, err))
 				slog.Warn("wireguard: tunnel is up without one address family",
 					"engine", engineID, "device", spec.Device, "family", "IPv"+st.Family, "error", err)
 				continue
@@ -297,6 +302,16 @@ func (m *Manager) DownAll(ctx context.Context) {
 	}
 }
 
+// degrade records a limitation the tunnel is running with. Separate from note,
+// which records something that went wrong.
+func (m *Manager) degrade(device, msg string) {
+	m.mu.Lock()
+	if t := m.live[device]; t != nil {
+		t.degraded = msg
+	}
+	m.mu.Unlock()
+}
+
 func (m *Manager) note(device, msg string) {
 	m.mu.Lock()
 	if t := m.live[device]; t != nil {
@@ -322,7 +337,7 @@ func (m *Manager) States(ctx context.Context) []State {
 		t := snap[d]
 		st := State{
 			Device: d, Engine: t.engine, Provider: t.provider,
-			Table: t.spec.Table, LastError: t.lastErr, ManagedBy: "hydra",
+			Table: t.spec.Table, LastError: t.lastErr, Degraded: t.degraded, ManagedBy: "hydra",
 		}
 		if len(t.spec.Conf.Addresses) > 0 {
 			st.Address = t.spec.Conf.Addresses[0].String()

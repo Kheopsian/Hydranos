@@ -7476,6 +7476,7 @@ function netWgRender() {
                 <div class="sr-field"><span class="${cls}">${esc(tn.up ? t("carrying traffic") : t("no recent handshake"))}</span>
                 <span class="sr-desc">${esc(t("last handshake {age}", { age: _wgAge(tn.handshake_age_seconds) }))}, ${esc(port)}${tn.endpoint ? ", " + esc(tn.endpoint) : ""}</span>
                 ${tn.note ? `<span class="sr-desc">${esc(t(tn.note))}</span>` : ""}
+                ${tn.degraded ? `<span class="sr-desc net-warn">${esc(tn.degraded)}</span>` : ""}
                 ${tn.last_error ? `<span class="sr-desc net-fail">${esc(tn.last_error)}</span>` : ""}</div>
             </div>`;
         }
