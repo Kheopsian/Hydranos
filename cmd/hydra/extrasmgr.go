@@ -412,3 +412,23 @@ func (m *extrasManager) SampleServedInfoHash(id string) string {
 	}
 	return ""
 }
+
+// PortSetter exposes an extra engine's listener for the WireGuard port
+// follower.
+//
+// It exists because the follower must reach EVERY engine, not just the two the
+// monolith names. A tunnel belongs to one engine, so an extra engine on its own
+// tunnel has its own lease and its own rotation; without this it would keep the
+// port it was born with and stop taking peers within the minute.
+//
+// Returns a nil interface, not a nil *HoardEngine, when there is nothing to
+// hand back: a typed nil in an interface is not nil, and the caller's guard
+// would not fire.
+func (m *extrasManager) PortSetter(id string) portSetter {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if le := m.lives[id]; le != nil && le.hoard != nil {
+		return le.hoard
+	}
+	return nil
+}

@@ -748,6 +748,10 @@ func (s *Server) registerHydraRoutes() {
 		api.POST("/network/mode", s.handleNetworkModePost)
 		api.POST("/network/check", s.handleNetworkCheck)
 		api.GET("/network/engines", s.handleEngineNet)
+		api.GET("/network/wireguard", s.handleWireGuardStatus)
+		api.POST("/network/wireguard/configs", s.handleWireGuardUpload)
+		api.DELETE("/network/wireguard/configs/:name", s.handleWireGuardDelete)
+		api.POST("/network/wireguard/engines", s.handleWireGuardEngines)
 
 		// System
 		api.GET("/public-ip", s.handlePublicIP)

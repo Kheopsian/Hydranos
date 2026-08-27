@@ -820,6 +820,18 @@ func main() {
 		return
 	}
 	if *agentOnly {
+		// An agent node takes its engine identity from flags or the
+		// environment, not from the [[agent]] entries this process would read,
+		// so the tunnel manager below has nothing reliable to attach a device
+		// to. Rather than bring a tunnel up and leave the engine pinned to
+		// whatever the pushed config says -- a tunnel that exists and carries
+		// nobody -- say so and let the operator manage the interface.
+		for i := range engineCfgs {
+			if w := engineCfgs[i].SessionConfig.WireGuard; w != nil && w.Enabled {
+				slog.Warn("wireguard: tunnels are not managed in agent-only mode; bring the interface up yourself and name it in bind_interface",
+					"engine", engineCfgs[i].ID)
+			}
+		}
 		boot, identitySource, berr := resolveAgentBoot(engineSpecs, cfg)
 		if berr != nil {
 			slog.Error("agent-only: could not resolve the engine identity", "source", identitySource, "error", berr)
@@ -838,6 +850,21 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	// ---- WireGuard tunnels, before anything that could speak ----
+	//
+	// Below the front-only and agent-only returns on purpose: neither reaches
+	// the engines started here, and neither was verified with a managed
+	// tunnel.
+	//
+	// Every engine that owns a tunnel gets it here, and gets its forwarded
+	// port here too, so the config the engines start from is already the right
+	// one. Doing it after would mean binding a port the provider has not
+	// granted and announcing it: trackers keep what they are told for a full
+	// cycle, so a wrong first announce costs an hour of unreachability that no
+	// log mentions.
+	wgSup := startWireGuard(ctx, cfg, engineCfgs)
+	defer wgSup.Stop(context.Background())
 
 	// ---- Start C++ engine processes ----
 	raceDataDir := filepath.Join(cfg.Daemon.DataDir, "race")
@@ -1485,6 +1512,25 @@ func main() {
 	extras := startExtraEngines(ctx, cfg, engineCfgs, raceCfg, hoardCfg, raceEngine.HasTorrent, apiServer)
 	apiServer.SetEngineHost(extras)
 	extrasRef = extras
+
+	// The forwarded port is a 60-second lease. Following it is not a nicety:
+	// when it lapses the engine keeps announcing a port that answers nobody,
+	// and nothing anywhere reports it -- the swarm just drains over the next
+	// hour.
+	//
+	// Every engine is followed, race, hoard and any extra alike. The gluetun
+	// follower that came before only ever knew the first two, so an extra
+	// engine behind a tunnel sat on a stale port with a green page.
+	wgSup.StartPortFollowers(ctx, func(engineID string) portSetter {
+		switch engineID {
+		case agentwire.EngineRace:
+			return raceEngine
+		case agentwire.EngineHoard:
+			return hoardEngine
+		}
+		return extras.PortSetter(engineID)
+	})
+	apiServer.SetWireGuardStates(wgSup.States)
 
 	go func() {
 		hoardEngine.WaitStaggerDone()
