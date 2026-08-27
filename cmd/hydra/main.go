@@ -527,7 +527,7 @@ func main() {
 	raiseNofileLimit(1000000)
 
 	slog.Info("============================================================")
-	slog.Info("  HYDRA TORRENT DAEMON — Typhon engine")
+	slog.Info("  HYDRA TORRENT DAEMON")
 	slog.Info("============================================================")
 	slog.Info("Hydra starting", "version", version)
 	api.Version = version
@@ -1783,7 +1783,7 @@ func main() {
 
 	api.SetStartupReady(true)
 	slog.Info("============================================================")
-	slog.Info("  All systems GO (Typhon engine)")
+	slog.Info("  All systems GO")
 	slog.Info("============================================================")
 
 	logs.PrintReady(cfg.Daemon.APIHost, cfg.Daemon.APIPort, firstRun)
