@@ -2,9 +2,11 @@ package wgtun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -463,5 +465,25 @@ func TestDownRemovesTheRuleAndTheDevice(t *testing.T) {
 	}
 	if !strings.Contains(joined, "ip link del dev hy-race") {
 		t.Errorf("the device was left behind:\n%s", joined)
+	}
+}
+
+// The message an operator gets when IPv6 cannot be enabled has to name the
+// flag to add. Without it the visible symptom -- a tunnel with no v6 -- points
+// at the kernel, the provider or the config, none of which are the cause.
+func TestReadOnlyProcExplainsWhichFlagToAdd(t *testing.T) {
+	msg := explainWriteFailure("/proc/sys/net/ipv6/conf/hy-race/disable_ipv6", syscall.EROFS)
+	for _, want := range []string{"read-only", "--sysctl", "disable_ipv6=0"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the message does not mention %q: %s", want, msg)
+		}
+	}
+	if !strings.Contains(msg, "IPv4") {
+		t.Errorf("the message does not say the tunnel still works over IPv4: %s", msg)
+	}
+	// An unrelated failure must not be dressed up as this one.
+	other := explainWriteFailure("/proc/sys/net/ipv6/conf/hy-race/disable_ipv6", errors.New("no such file"))
+	if strings.Contains(other, "--sysctl") {
+		t.Errorf("an unrelated error was reported as a read-only mount: %s", other)
 	}
 }

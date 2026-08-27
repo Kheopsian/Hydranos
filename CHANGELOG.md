@@ -55,7 +55,13 @@ All notable changes to Hydra are documented here. This project follows
   than surfacing three layers away as an engine that announces nothing.
 - A host that defaults IPv6 off on new interfaces -- Unraid does -- keeps the
   v4 half of a dual-stack provider config instead of losing the whole tunnel,
-  and says which half it lost.
+  and says which half it lost. Inside a container that half cannot be recovered
+  from within: Docker mounts /proc/sys read-only whatever capabilities are
+  granted, so enabling IPv6 on a freshly created device is not something the
+  process can do. Measured, not assumed. The message names the fix
+  (--sysctl net.ipv6.conf.default.disable_ipv6=0 on the container, or the same
+  sysctl on the host under --network host) instead of leaving an operator
+  looking for a missing kernel module.
 
 ## v3.155.1 - 2026-08-27
 

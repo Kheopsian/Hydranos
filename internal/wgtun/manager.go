@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -169,9 +170,10 @@ func (m *Manager) Up(ctx context.Context, engineID, provider string, spec Spec) 
 			if err := os.WriteFile(st.WriteFile, []byte(st.WriteData), 0o644); err != nil {
 				if st.SoftFail {
 					skipFamily[st.Family] = true
-					m.note(spec.Device, fmt.Sprintf("IPv%s is not available on this tunnel (%s): %v", st.Family, st.Desc, err))
+					m.note(spec.Device, fmt.Sprintf("IPv%s is not available on this tunnel (%s): %s", st.Family, st.Desc, explainWriteFailure(st.WriteFile, err)))
 					slog.Warn("wireguard: tunnel is up without one address family",
-						"engine", engineID, "device", spec.Device, "family", "IPv"+st.Family, "error", err)
+						"engine", engineID, "device", spec.Device, "family", "IPv"+st.Family,
+						"error", explainWriteFailure(st.WriteFile, err))
 					continue
 				}
 				m.note(spec.Device, err.Error())
@@ -396,4 +398,21 @@ func (m *Manager) writeSetconf(spec Spec) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// explainWriteFailure turns a refused /proc write into the thing to change.
+//
+// Measured, not guessed: Docker mounts /proc/sys read-only in every
+// unprivileged container, NET_ADMIN or not, so nothing running inside one can
+// turn IPv6 on for a device it just created -- not through this write, and not
+// through sysctl either, which is the same file. The knob has to be set where
+// the namespace is made. Saying "IPv6 is disabled" without saying that sends
+// an operator hunting through kernel modules for an afternoon.
+func explainWriteFailure(path string, err error) string {
+	if errors.Is(err, syscall.EROFS) && strings.HasPrefix(path, "/proc/sys/") {
+		return "Docker mounts /proc/sys read-only, so IPv6 cannot be enabled from inside the container: " +
+			"add --sysctl net.ipv6.conf.default.disable_ipv6=0 to the container, or set that sysctl on the host " +
+			"when running with --network host. The tunnel carries IPv4 either way (" + err.Error() + ")"
+	}
+	return err.Error()
 }
