@@ -1,6 +1,8 @@
 package wgtun
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -285,10 +287,22 @@ func DeviceNameFor(engineID string) string {
 		}
 	}, strings.TrimSpace(engineID))
 	name := "hy-" + clean
-	if len(name) > 15 {
-		name = name[:15]
+	if len(name) <= 15 {
+		return strings.TrimRight(name, "-")
 	}
-	return strings.TrimRight(name, "-")
+	// Over IFNAMSIZ, a plain truncation is not merely ugly: two agents named
+	// proton-france-1 and proton-france-2 both become hy-proton-franc, and Up
+	// DELETES the device before creating it. The second agent would take the
+	// first one's interface away and both would believe they owned it, with
+	// every indicator green and one of them silently sharing the other's exit
+	// address -- the precise failure per-agent tunnels exist to prevent.
+	//
+	// So the tail is replaced by a short digest of the FULL id. Deterministic,
+	// so the device keeps its name across restarts, and distinct for distinct
+	// agents.
+	sum := sha256.Sum256([]byte(engineID))
+	suffix := hex.EncodeToString(sum[:])[:4]
+	return strings.TrimRight(name[:10], "-") + "-" + suffix
 }
 
 // GatewayFor is Gateway over a spec, for callers that already hold one.
