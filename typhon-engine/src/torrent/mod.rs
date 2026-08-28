@@ -886,7 +886,11 @@ impl TorrentManager {
             }
             t.status
                 .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            // The recheck was the only reader; a seeder needs no hashes.
+            t.release_piece_hashes();
         } else {
+            // Still incomplete: the download path is about to verify every
+            // piece it pulls, so the table stays loaded.
             t.status
                 .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         }

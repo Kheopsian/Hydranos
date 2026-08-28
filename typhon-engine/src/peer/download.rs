@@ -214,6 +214,9 @@ impl DownloadState {
                         if is_complete {
                             info!("[download] {} complete!", crate::torrent::hex_encode(&self.torrent.info_hash)[..8].to_string());
                             self.torrent.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                            // Nothing will verify this torrent again unless the
+                            // user asks for a recheck, so give the hash table back.
+                            self.torrent.release_piece_hashes();
                             self.torrent.completed_time.store(
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
