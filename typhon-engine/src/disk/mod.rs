@@ -217,7 +217,14 @@ impl DiskManager {
             }
         }
 
-        let expected_hash = torrent.meta.pieces[piece as usize];
+        // A piece we cannot check is a piece we refuse, not one we accept.
+        let expected_hash = match torrent.piece_hash(piece) {
+            Some(h) => h,
+            None => return Err(format!(
+                "no piece hashes for {}; refusing to accept piece {}",
+                torrent.torrent_file_path, piece
+            )),
+        };
         let ops = torrent.meta.map_block(piece, 0, data.len() as u32);
         let save_path = torrent.save_path.read().clone();
         let name = torrent.meta.name.clone();
