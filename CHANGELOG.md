@@ -3,6 +3,18 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.156.3 - 2026-08-28
+
+### Fixed
+- **A torrent that finished downloading kept its piece hashes for good.**
+  v3.156.2 stopped loading the hash table until something needed to verify a
+  piece, but once loaded it stayed for the life of the torrent. On a seedbox
+  that is forever, so a recheck or a completed download quietly handed back the
+  20 bytes per piece -- 20.1 KiB for the average torrent -- that the change
+  existed to save. The table is now dropped the moment a torrent reaches
+  Seeding, by either route, and reloaded from the `.torrent` if a later recheck
+  needs it. A verification already running keeps the copy it started with.
+
 ## v3.156.2 - 2026-08-28
 
 ### Fixed

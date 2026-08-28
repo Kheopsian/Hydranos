@@ -278,10 +278,14 @@ pub struct TorrentState {
     /// write_piece (create=true) re-creates the files we just deleted.
     pub is_removed: AtomicBool,
 
-    /// The torrent's 20-byte piece hashes, loaded from `torrent_file_path` the
-    /// first time something needs to verify data, and never at all for a
-    /// torrent that only seeds. See `piece_hash`.
-    piece_hashes: OnceLock<Vec<[u8; 20]>>,
+    /// The torrent's 20-byte piece hashes: loaded from `torrent_file_path` the
+    /// first time something needs to verify data, dropped again the moment the
+    /// torrent goes back to seeding, and never loaded at all for a torrent that
+    /// only ever seeds. See `piece_hash` and `release_piece_hashes`.
+    ///
+    /// Behind an `Arc` so a verification already in flight keeps the table it
+    /// is reading even if another thread releases it mid-check.
+    piece_hashes: Mutex<Option<Arc<Vec<[u8; 20]>>>>,
 
     // Download mode
     pub picker: OnceLock<Arc<Mutex<PiecePicker>>>,
@@ -331,9 +335,12 @@ impl TorrentState {
     /// "verified": the two call sites compare against the returned hash, so a
     /// `None` has to fail the piece rather than pass it.
     pub fn piece_hash(&self, piece: u32) -> Option<[u8; 20]> {
-        let table = match self.piece_hashes.get() {
-            Some(t) => t,
-            None => {
+        let table = {
+            let mut slot = match self.piece_hashes.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if slot.is_none() {
                 match crate::torrent::metainfo::piece_hashes_from_file(&self.torrent_file_path) {
                     Ok(h) => {
                         if h.len() as u32 != self.meta.num_pieces {
@@ -343,17 +350,38 @@ impl TorrentState {
                             );
                             return None;
                         }
-                        let _ = self.piece_hashes.set(h);
+                        *slot = Some(Arc::new(h));
                     }
                     Err(e) => {
                         tracing::error!("cannot load piece hashes: {}", e);
                         return None;
                     }
                 }
-                self.piece_hashes.get()?
             }
+            // Clone the Arc, not the table, and drop the lock before indexing.
+            slot.clone()?
         };
         table.get(piece as usize).copied()
+    }
+
+    /// Drop the piece hash table.
+    ///
+    /// Called when a torrent reaches Seeding, by download completion or by a
+    /// recheck that found everything. A seeder never verifies: it reads a piece
+    /// off disk and sends it. Keeping the table would hand back the 20 bytes
+    /// per piece this whole scheme exists to avoid -- 20.1 KiB for the average
+    /// production torrent -- for the entire remaining life of the torrent,
+    /// which for a seedbox is forever.
+    ///
+    /// Safe to call at any time and from any thread: a verification in flight
+    /// holds its own `Arc` and finishes against the table it started with, and
+    /// anything that needs the hashes again just reloads them.
+    pub fn release_piece_hashes(&self) {
+        let mut slot = match self.piece_hashes.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = None;
     }
 
 
@@ -409,7 +437,7 @@ impl TorrentState {
             is_paused: AtomicBool::new(false),
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
-            piece_hashes: OnceLock::new(),
+            piece_hashes: Mutex::new(None),
             picker,
             have_tx,
             upload_rate: RateTracker::new(),
@@ -537,11 +565,54 @@ mod tests {
     #[test]
     fn piece_hash_loads_on_demand_and_matches() {
         let (st, hashes, path) = state_for("ondemand", 4);
-        assert!(st.piece_hashes.get().is_none(), "hashes were loaded eagerly");
+        assert!(st.piece_hashes.lock().unwrap().is_none(), "hashes were loaded eagerly");
         assert_eq!(st.piece_hash(0), Some(hashes[0]));
         assert_eq!(st.piece_hash(3), Some(hashes[3]));
-        assert!(st.piece_hashes.get().is_some(), "table was not cached");
+        assert!(st.piece_hashes.lock().unwrap().is_some(), "table was not cached");
         assert_eq!(st.piece_hash(4), None, "out-of-range piece returned a hash");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Releasing gives the memory back and is idempotent.
+    #[test]
+    fn release_drops_the_table_and_can_be_repeated() {
+        let (st, hashes, path) = state_for("release", 4);
+        assert_eq!(st.piece_hash(1), Some(hashes[1]));
+        assert!(st.piece_hashes.lock().unwrap().is_some());
+
+        st.release_piece_hashes();
+        assert!(st.piece_hashes.lock().unwrap().is_none(), "release kept the table");
+        st.release_piece_hashes(); // no-op, must not panic
+        assert!(st.piece_hashes.lock().unwrap().is_none());
+
+        // Still correct afterwards: a later recheck reloads from the file.
+        assert_eq!(st.piece_hash(1), Some(hashes[1]), "reload after release failed");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The release really frees the table rather than hiding it: with the file
+    /// gone afterwards there is nothing left to serve, and the engine says so
+    /// instead of quietly answering from a stale copy.
+    #[test]
+    fn release_is_not_a_cache_that_survives_the_file() {
+        let (st, hashes, path) = state_for("released-gone", 3);
+        assert_eq!(st.piece_hash(0), Some(hashes[0]));
+        st.release_piece_hashes();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(st.piece_hash(0), None, "answered from a table it claimed to release");
+    }
+
+    /// A verification already in flight keeps the table it started with, so
+    /// releasing concurrently cannot make it read freed memory or fail.
+    #[test]
+    fn release_during_a_verification_does_not_disturb_it() {
+        let (st, hashes, path) = state_for("concurrent", 6);
+        assert_eq!(st.piece_hash(0), Some(hashes[0]));
+        let in_flight = st.piece_hashes.lock().unwrap().clone().unwrap();
+        st.release_piece_hashes();
+        // The Arc held by the "verifier" is still whole and still correct.
+        assert_eq!(in_flight.len(), 6);
+        assert_eq!(in_flight[5], hashes[5]);
         std::fs::remove_file(&path).ok();
     }
 
