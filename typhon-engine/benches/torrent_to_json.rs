@@ -11,7 +11,7 @@ fn make_torrent(i: u32) -> Arc<TorrentState> {
     let meta = TorrentMeta {
         info_hash: [i as u8; 20],
         name: format!("torrent-{}", i),
-        pieces: vec![[0u8; 20]; 500],         // ~500 pieces
+        num_pieces: 500,                      // hashes live in the .torrent
         piece_length: 1 << 20,                // 1 MB pieces
         total_size: 500 * (1 << 20),
         files: vec![FileEntry {
