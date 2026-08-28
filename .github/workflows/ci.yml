@@ -65,6 +65,36 @@ jobs:
       - name: Shellcheck
         run: shellcheck -s sh entrypoint.sh
 
+  # The one check that needs a real kernel: bringing a WireGuard tunnel up and
+  # proving the host's own routing is untouched by it.
+  #
+  # Everything else about this feature is asserted against the PLAN -- what the
+  # code says it will run. That catches a wrong table number; it cannot catch
+  # the plan being right and the effect being wrong. And the failure it guards
+  # against is not a broken test suite, it is a machine that silently moves its
+  # whole egress into a VPN, which has no undo.
+  #
+  # No container and no capability juggling: the hosted runner is a VM with
+  # passwordless sudo, so the test simply runs as root. No provider is
+  # involved -- the peer endpoint is TEST-NET-1 and never answers. The
+  # handshake is not what is under test; the routing table is.
+  wireguard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Tools
+        run: sudo apt-get install -y --no-install-recommends wireguard-tools iproute2
+      # Built as an unprivileged user and only RUN as root: a `sudo go test`
+      # would hand root a module cache and a compiler, for one syscall's worth
+      # of privilege.
+      - name: Build the test binary
+        run: go test -mod=vendor -c -o wgtun.test ./internal/wgtun/
+      - name: Bring a tunnel up for real
+        run: sudo HYDRA_WG_ROOT_TEST=1 ./wgtun.test -test.v -test.run TestRoot
+
   rust:
     runs-on: ubuntu-latest
     steps:
