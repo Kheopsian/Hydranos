@@ -36,7 +36,10 @@ pub struct FileEntry {
 pub struct TorrentMeta {
     pub info_hash: InfoHash,
     pub name: String,
-    pub pieces: Vec<[u8; 20]>,
+    /// How many pieces this torrent has. The 20-byte SHA-1 of each one is
+    /// NOT kept here -- see `TorrentState::piece_hash`. Every caller but the
+    /// two that actually verify data wants this count and nothing more.
+    pub num_pieces: u32,
     pub piece_length: u32,
     pub total_size: u64,
     pub files: Vec<FileEntry>,
@@ -57,7 +60,7 @@ pub struct TorrentMeta {
 
 impl TorrentMeta {
     pub fn num_pieces(&self) -> u32 {
-        self.pieces.len() as u32
+        self.num_pieces
     }
 
     pub fn piece_size(&self, index: u32) -> u32 {
@@ -275,6 +278,11 @@ pub struct TorrentState {
     /// write_piece (create=true) re-creates the files we just deleted.
     pub is_removed: AtomicBool,
 
+    /// The torrent's 20-byte piece hashes, loaded from `torrent_file_path` the
+    /// first time something needs to verify data, and never at all for a
+    /// torrent that only seeds. See `piece_hash`.
+    piece_hashes: OnceLock<Vec<[u8; 20]>>,
+
     // Download mode
     pub picker: OnceLock<Arc<Mutex<PiecePicker>>>,
     pub have_tx: Option<broadcast::Sender<u32>>,
@@ -316,6 +324,39 @@ pub struct TorrentState {
 }
 
 impl TorrentState {
+    /// The expected SHA-1 of one piece, loading the hash table on first use.
+    ///
+    /// Returns `None` when the table cannot be read -- a missing or truncated
+    /// `.torrent`. Callers MUST treat that as "cannot verify", never as
+    /// "verified": the two call sites compare against the returned hash, so a
+    /// `None` has to fail the piece rather than pass it.
+    pub fn piece_hash(&self, piece: u32) -> Option<[u8; 20]> {
+        let table = match self.piece_hashes.get() {
+            Some(t) => t,
+            None => {
+                match crate::torrent::metainfo::piece_hashes_from_file(&self.torrent_file_path) {
+                    Ok(h) => {
+                        if h.len() as u32 != self.meta.num_pieces {
+                            tracing::error!(
+                                "piece hashes for {} disagree with metadata: {} on disk, {} expected; refusing to verify",
+                                self.torrent_file_path, h.len(), self.meta.num_pieces
+                            );
+                            return None;
+                        }
+                        let _ = self.piece_hashes.set(h);
+                    }
+                    Err(e) => {
+                        tracing::error!("cannot load piece hashes: {}", e);
+                        return None;
+                    }
+                }
+                self.piece_hashes.get()?
+            }
+        };
+        table.get(piece as usize).copied()
+    }
+
+
     pub fn new(meta: TorrentMeta, save_path: PathBuf, torrent_file_path: String, seed_mode: bool) -> Self {
         Self::new_with_times(meta, save_path, torrent_file_path, seed_mode, None, None)
     }
@@ -368,6 +409,7 @@ impl TorrentState {
             is_paused: AtomicBool::new(false),
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
+            piece_hashes: OnceLock::new(),
             picker,
             have_tx,
             upload_rate: RateTracker::new(),
@@ -457,6 +499,71 @@ mod tests {
             default_shards > PER_TORRENT_SHARDS,
             "dashmap no longer shards by core count; PER_TORRENT_SHARDS is moot"
         );
+    }
+
+    fn torrent_bytes(n: usize) -> (Vec<u8>, Vec<[u8; 20]>) {
+        let mut hashes = Vec::new();
+        let mut pieces = Vec::new();
+        for i in 0..n {
+            let h = [(i + 1) as u8; 20];
+            hashes.push(h);
+            pieces.extend_from_slice(&h);
+        }
+        let mut b = Vec::new();
+        b.extend_from_slice(b"d8:announce19:http://tracker/annc");
+        b.extend_from_slice(b"4:infod");
+        b.extend_from_slice(format!("6:lengthi{}e", n * 16384).as_bytes());
+        b.extend_from_slice(b"4:name8:some.bin");
+        b.extend_from_slice(b"12:piece lengthi16384e");
+        b.extend_from_slice(format!("6:pieces{}:", pieces.len()).as_bytes());
+        b.extend_from_slice(&pieces);
+        b.extend_from_slice(b"ee");
+        (b, hashes)
+    }
+
+    fn state_for(tag: &str, n: usize) -> (TorrentState, Vec<[u8; 20]>, String) {
+        let (bytes, hashes) = torrent_bytes(n);
+        let mut p = std::env::temp_dir();
+        p.push(format!("typhon-state-{}-{}.torrent", std::process::id(), tag));
+        std::fs::write(&p, &bytes).unwrap();
+        let path = p.to_string_lossy().into_owned();
+        let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+        let st = TorrentState::new(meta, std::path::PathBuf::from("/tmp"), path.clone(), true);
+        (st, hashes, path)
+    }
+
+    /// A seeder holds no hashes until something asks to verify, and then it
+    /// gets the right ones.
+    #[test]
+    fn piece_hash_loads_on_demand_and_matches() {
+        let (st, hashes, path) = state_for("ondemand", 4);
+        assert!(st.piece_hashes.get().is_none(), "hashes were loaded eagerly");
+        assert_eq!(st.piece_hash(0), Some(hashes[0]));
+        assert_eq!(st.piece_hash(3), Some(hashes[3]));
+        assert!(st.piece_hashes.get().is_some(), "table was not cached");
+        assert_eq!(st.piece_hash(4), None, "out-of-range piece returned a hash");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// ⚠️ The one that matters: a torrent whose file is gone must report "I
+    /// cannot verify", never a hash. Both call sites turn None into a refusal,
+    /// so returning Some(anything) here would silently bless unchecked data.
+    #[test]
+    fn piece_hash_is_none_when_the_torrent_file_is_gone() {
+        let (st, _, path) = state_for("gone", 3);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(st.piece_hash(0), None, "verification passed without a hash table");
+    }
+
+    /// A `.torrent` that no longer agrees with the metadata is refused whole,
+    /// rather than verifying some pieces against the wrong offsets.
+    #[test]
+    fn piece_hash_refuses_a_table_of_the_wrong_length() {
+        let (st, _, path) = state_for("mismatch", 5);
+        let (other, _) = torrent_bytes(2);
+        std::fs::write(&path, &other).unwrap();
+        assert_eq!(st.piece_hash(0), None, "accepted a table of the wrong length");
+        std::fs::remove_file(&path).ok();
     }
 
     /// One shard still has to behave like the set it replaced.

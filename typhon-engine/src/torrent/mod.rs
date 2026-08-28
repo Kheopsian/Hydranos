@@ -854,7 +854,13 @@ impl TorrentManager {
                 return; // torrent removed mid-check -> drop out
             }
             if let Some(data) = crate::disk::read_piece_for_check(&t, piece).await {
-                let expected = t.meta.pieces[piece as usize];
+                // No hash table -> we cannot say this piece is good. Leave the
+                // have bit clear; the recheck reports the torrent incomplete
+                // rather than blessing unverified data.
+                let expected = match t.piece_hash(piece) {
+                    Some(h) => h,
+                    None => continue,
+                };
                 let mut hasher = Sha1::new();
                 hasher.update(&data);
                 let mut computed = [0u8; 20];

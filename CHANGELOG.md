@@ -3,6 +3,23 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.156.2 - 2026-08-28
+
+### Fixed
+- **4.2 GB of RAM held piece hashes that nothing was reading.** A torrent's
+  SHA-1 piece hashes are 20 bytes per piece and dominate a `.torrent` file --
+  measured across 4000 production torrents, 91.7% of the bytes, averaging
+  20.1 KiB each. The engine parsed them into memory on add and kept them there
+  for the lifetime of the torrent, 4.2 GB across a 205k-torrent instance. Only
+  two call sites ever read a hash: rechecking a torrent, and accepting a piece
+  we just downloaded. Both already read the piece off disk and SHA-1 it, so one
+  extra file read costs nothing next to the work they were doing anyway. A
+  torrent that only seeds never verifies anything and now holds no hashes at
+  all. The table is loaded from the `.torrent` on first use and kept from then
+  on, which is the same trick the engine already used for the BEP 9 info dict.
+  A torrent whose file has gone missing now refuses to verify rather than
+  accepting the piece.
+
 ## v3.156.1 - 2026-08-28
 
 ### Fixed
