@@ -90,7 +90,7 @@ pub fn track_torrent(torrent: Arc<TorrentState>) {
                 break;
             }
             DHT_PEERS_DISCOVERED.fetch_add(1, Ordering::Relaxed);
-            if torrent.connected_addrs.contains(&peer_addr) {
+            if torrent.connected_addrs.contains_key(&peer_addr) {
                 continue;
             }
             DHT_PEERS_DIALED.fetch_add(1, Ordering::Relaxed);

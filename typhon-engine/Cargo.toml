@@ -23,7 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 console-subscriber = { version = "0.5", optional = true }
 lru = "0.12"
-dashmap = "6"
+dashmap = { version = "6", features = ["raw-api"] }
 futures = "0.3"
 tokio-socks = "0.5"
 libc = "0.2"

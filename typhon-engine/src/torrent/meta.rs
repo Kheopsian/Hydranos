@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use parking_lot::RwLock;
 use bytes::Bytes;
 use tokio::sync::broadcast;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 
 use super::piece_picker::PiecePicker;
 use super::rate::RateTracker;
@@ -189,7 +189,7 @@ impl PeerGuard {
         // the contains() check in tracker/mod.rs and dht.rs is always
         // false and every announce cycle re-dials known peers, fragmenting
         // throughput across redundant connections.
-        torrent.connected_addrs.insert(addr);
+        torrent.connected_addrs.insert(addr, ());
         Self {
             torrent,
             addr,
@@ -220,6 +220,27 @@ impl Drop for PeerGuard {
 }
 
 /// Runtime state for an active torrent.
+/// Shard count for the two per-torrent concurrent maps below.
+///
+/// `DashMap::new()` sizes its shard array from the machine: `(nproc * 4)`
+/// rounded up to a power of two. On a 12-core box that is 64 shards, and
+/// dashmap allocates the whole array up front, at construction, before a
+/// single entry exists. Each shard is a `CachePadded<RwLock<HashMap>>` = 128
+/// bytes, so one empty `DashMap` costs 8 KiB and a `TorrentState` carrying two
+/// of them costs ~16.7 KiB of untouched shards.
+///
+/// Measured on prod 2026-08-28: 204,893 torrents, 167k of them with zero
+/// peers, 3.43 GB of RAM in shard arrays that never held anything.
+///
+/// Sharding buys nothing here. These maps are per torrent, not global: they
+/// are written on peer connect/disconnect and read by the PEX tick, the dial
+/// dedup and `get_peers`. Contention is bounded by one torrent's peer count,
+/// and every critical section is a single insert/remove on a small map. The
+/// global maps in `TorrentManager` (`torrents`, `skey_index`) keep the default
+/// sharding -- those are genuinely hot across 200k entries.
+/// 2, not 1: dashmap asserts `shard_amount > 1` at construction.
+const PER_TORRENT_SHARDS: usize = 2;
+
 pub struct TorrentState {
     /// Parsed straight from the .torrent. `meta.trackers` is the SEED for
     /// `live_trackers` and nothing else reads it: the operator can edit the
@@ -291,7 +312,7 @@ pub struct TorrentState {
     /// peer tasks (insert at handshake success, remove on disconnect). Used by
     /// PEX (BEP 11) to compute added/dropped between ticks and by the dial
     /// dedup path ("don't redial a peer we already serve").
-    pub connected_addrs: DashSet<std::net::SocketAddr>,
+    pub connected_addrs: DashMap<std::net::SocketAddr, ()>,
 }
 
 impl TorrentState {
@@ -359,8 +380,8 @@ impl TorrentState {
             last_announce_at: AtomicI64::new(0),
             next_announce_at: AtomicI64::new(0),
             error_msg: Mutex::new(String::new()),
-            peer_stats: DashMap::new(),
-            connected_addrs: DashSet::new(),
+            peer_stats: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
+            connected_addrs: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
         }
     }
 
@@ -397,5 +418,61 @@ impl TorrentState {
         } else {
             Bytes::from(vec![0u8; byte_len])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two per-torrent maps must NOT be sharded by core count.
+    ///
+    /// `DashMap::new()` allocates `(nproc * 4).next_power_of_two()` shards up
+    /// front -- 64 on a 12-core box, 128 bytes each, per map, per torrent,
+    /// before a single peer exists. At 200k torrents that was 3.43 GB of empty
+    /// shard arrays. Revert either constructor to `::new()` and this test goes
+    /// from 2 to nproc*4 on the CI runner.
+    #[test]
+    fn per_torrent_maps_are_not_sharded_by_core_count() {
+        let stats: DashMap<std::net::SocketAddr, Arc<PeerStats>> =
+            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
+        let addrs: DashMap<std::net::SocketAddr, ()> =
+            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
+        assert_eq!(
+            stats.shards().len(),
+            PER_TORRENT_SHARDS,
+            "peer_stats regained shards"
+        );
+        assert_eq!(
+            addrs.shards().len(),
+            PER_TORRENT_SHARDS,
+            "connected_addrs regained shards"
+        );
+
+        // Proof the default is what we are avoiding: if dashmap ever stops
+        // sizing from the core count, this assert fires and the constant can
+        // go away.
+        let default_shards = DashMap::<u8, u8>::new().shards().len();
+        assert!(
+            default_shards > PER_TORRENT_SHARDS,
+            "dashmap no longer shards by core count; PER_TORRENT_SHARDS is moot"
+        );
+    }
+
+    /// One shard still has to behave like the set it replaced.
+    #[test]
+    fn single_shard_map_still_stores_and_removes() {
+        let addrs: DashMap<std::net::SocketAddr, ()> =
+            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
+        let a: std::net::SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        let b: std::net::SocketAddr = "10.0.0.2:6881".parse().unwrap();
+        assert!(addrs.insert(a, ()).is_none(), "first insert was not new");
+        assert!(addrs.insert(b, ()).is_none());
+        assert!(addrs.insert(a, ()).is_some(), "duplicate insert must report the old entry");
+        assert_eq!(addrs.len(), 2, "duplicate must not grow the map");
+        assert!(addrs.contains_key(&a));
+        assert!(addrs.remove(&a).is_some());
+        assert!(!addrs.contains_key(&a));
+        assert_eq!(addrs.len(), 1);
     }
 }
