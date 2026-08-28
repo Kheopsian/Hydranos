@@ -3,6 +3,21 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.156.1 - 2026-08-28
+
+### Fixed
+- **3.3 GB of RAM went to per-torrent maps that never held anything.** Every
+  torrent carries two concurrent maps for its peers. `DashMap::new()` sizes its
+  shard array from the machine -- `(cores * 4)` rounded up to a power of two --
+  and allocates the whole array at construction, before a single peer connects.
+  On a 12-core box that was 64 shards of 128 bytes per map, so 16.7 KiB per
+  torrent whether or not anything was ever inserted. Measured on a 204,893
+  torrent instance, 167k of them with no peers at all: 3.43 GB of empty shards.
+  These maps are per torrent, not global -- they are touched on peer connect and
+  disconnect -- so the sharding bought nothing. They now use the minimum,
+  dropping the cost to 512 bytes per torrent. The global maps that really are
+  contended keep the default sharding.
+
 ## v3.156.0 - 2026-08-27
 
 ### Added
