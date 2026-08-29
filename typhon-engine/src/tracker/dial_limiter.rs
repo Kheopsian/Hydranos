@@ -34,6 +34,14 @@ pub static LIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
 /// Ceiling on `LIVE_CONNS`. 0 = unlimited.
 static MAX_CONNS: AtomicUsize = AtomicUsize::new(0);
 
+/// Live cap on outbound dials per second, held as `f64` bits. 0 = unlimited.
+///
+/// This lives here rather than in `DialPacer` so the rate can be changed while
+/// the engine runs: the pacer re-reads it on every `acquire`, so a new value
+/// takes effect on the next dial instead of at the next restart. Restarting a
+/// 200k-torrent hoard to try a rate is not a knob anyone would turn twice.
+static MAX_DIALS_PER_SEC: AtomicU64 = AtomicU64::new(0);
+
 /// Startup pause. While set, no outbound dial leaves the process. This is a
 /// process-level gate on purpose: it must never be written into per-torrent
 /// paused state, or lifting it would resume the torrents the user had
@@ -62,6 +70,19 @@ pub fn conn_cap_reached() -> bool {
     cap != 0 && LIVE_CONNS.load(Ordering::Relaxed) >= cap
 }
 
+/// Sets the outbound dial ceiling in dials per second. Anything that is not a
+/// finite positive number means "no limit", so a caller cannot wedge the pacer
+/// with a NaN and stop every dial in the process.
+pub fn set_max_dials_per_sec(per_sec: f64) {
+    let v = if per_sec.is_finite() && per_sec > 0.0 { per_sec } else { 0.0 };
+    MAX_DIALS_PER_SEC.store(v.to_bits(), Ordering::Relaxed);
+}
+
+/// The live dial rate. 0 = unlimited.
+pub fn max_dials_per_sec() -> f64 {
+    f64::from_bits(MAX_DIALS_PER_SEC.load(Ordering::Relaxed))
+}
+
 pub fn set_dials_paused(paused: bool) {
     DIALS_PAUSED.store(paused, Ordering::Relaxed);
 }
@@ -74,28 +95,22 @@ pub fn dials_paused() -> bool {
 /// side so the two read the same way. Owned by the single dial-queue consumer
 /// task, hence no interior locking: the consumer is the only caller.
 pub struct DialPacer {
-    rate: f64,
     burst: f64,
     tokens: f64,
     last: Instant,
 }
 
 impl DialPacer {
-    /// `per_sec <= 0` means "no limit" and yields None, which the consumer
-    /// treats as a no-op.
-    pub fn new(per_sec: f64) -> Option<Self> {
-        if per_sec <= 0.0 {
-            return None;
-        }
-        // One second of credit, never below a single token: a rate under 1/s
-        // must still let one dial through.
-        let burst = if per_sec < 1.0 { 1.0 } else { per_sec };
-        Some(Self {
-            rate: per_sec,
-            burst,
-            tokens: burst,
+    /// The pacer is always constructed; whether it actually paces is decided
+    /// per call by `max_dials_per_sec`. There is no "unlimited" variant to
+    /// build, because unlimited is a value the rate can hold and then stop
+    /// holding while the process runs.
+    pub fn new() -> Self {
+        Self {
+            burst: 0.0,
+            tokens: 0.0,
             last: Instant::now(),
-        })
+        }
     }
 
     /// Block until this dial may go out. Unlike the announce limiter there is
@@ -108,12 +123,23 @@ impl DialPacer {
         // would report a backlog far worse than the real one.
         let mut counted = false;
         loop {
+            // Re-read every pass: the rate can change mid-wait, and a dial
+            // already sleeping on the old rate must be released by the new one.
+            let rate = max_dials_per_sec();
             let now = Instant::now();
-            self.tokens += now.duration_since(self.last).as_secs_f64() * self.rate;
+            let elapsed = now.duration_since(self.last).as_secs_f64();
             self.last = now;
-            if self.tokens > self.burst {
-                self.tokens = self.burst;
+            if rate <= 0.0 {
+                // Unlimited. Drop the bucket rather than keep filling it, so
+                // turning a limit back on paces from empty instead of handing
+                // out a burst minted while nothing was being enforced.
+                self.burst = 0.0;
+                self.tokens = 0.0;
+                return;
             }
+            // A rate under 1/s must still let one dial through eventually.
+            self.burst = if rate < 1.0 { 1.0 } else { rate };
+            self.tokens = (self.tokens + elapsed * rate).min(self.burst);
             if self.tokens >= 1.0 {
                 self.tokens -= 1.0;
                 return;
@@ -122,7 +148,7 @@ impl DialPacer {
                 DIAL_DELAYED.fetch_add(1, Ordering::Relaxed);
                 counted = true;
             }
-            let need = (1.0 - self.tokens) / self.rate;
+            let need = (1.0 - self.tokens) / rate;
             tokio::time::sleep(Duration::from_secs_f64(need.max(0.001))).await;
         }
     }
@@ -132,34 +158,95 @@ impl DialPacer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn zero_rate_means_no_pacer() {
-        assert!(DialPacer::new(0.0).is_none());
-        assert!(DialPacer::new(-1.0).is_none());
-    }
+    /// The rate is a process global, so these tests cannot run concurrently
+    /// with each other and stay meaningful.
+    static RATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn sub_unit_rate_still_gets_one_token() {
+    fn non_positive_and_nan_rates_mean_unlimited() {
+        let _g = RATE_LOCK.lock().unwrap();
+        for bad in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
+            set_max_dials_per_sec(bad);
+            assert_eq!(max_dials_per_sec(), 0.0, "{bad} should read back as unlimited");
+        }
+        set_max_dials_per_sec(0.0);
+    }
+
+    #[tokio::test]
+    async fn unlimited_rate_does_not_pace() {
+        let _g = RATE_LOCK.lock().unwrap();
+        set_max_dials_per_sec(0.0);
+        let mut p = DialPacer::new();
+        let start = Instant::now();
+        for _ in 0..1000 {
+            p.acquire().await;
+        }
+        assert!(start.elapsed() < Duration::from_millis(50), "no ceiling must not pace");
+    }
+
+    #[tokio::test]
+    async fn sub_unit_rate_still_gets_one_token() {
         // A rate of 0.5/s must not produce a bucket that can never fill.
-        let p = DialPacer::new(0.5).expect("pacer");
+        let _g = RATE_LOCK.lock().unwrap();
+        set_max_dials_per_sec(0.5);
+        let mut p = DialPacer::new();
+        p.acquire().await;
         assert_eq!(p.burst, 1.0);
-        assert_eq!(p.tokens, 1.0);
+        set_max_dials_per_sec(0.0);
     }
 
     #[tokio::test]
     async fn burst_drains_then_paces() {
-        // 10/s: the first 10 dials are free (one second of credit), the 11th
-        // has to wait for the bucket to refill.
-        let mut p = DialPacer::new(10.0).expect("pacer");
+        let _g = RATE_LOCK.lock().unwrap();
+        set_max_dials_per_sec(10.0);
+        let mut p = DialPacer::new();
+        // The bucket starts empty, so credit has to be earned: ten dials at
+        // 10/s cannot all clear inside a tenth of a second.
         let start = Instant::now();
-        for _ in 0..10 {
+        for _ in 0..3 {
             p.acquire().await;
         }
-        assert!(start.elapsed() < Duration::from_millis(50), "burst should not pace");
-        p.acquire().await;
         assert!(
-            start.elapsed() >= Duration::from_millis(50),
-            "11th dial should have waited for a token"
+            start.elapsed() >= Duration::from_millis(200),
+            "3 dials at 10/s should have taken ~300ms, took {:?}",
+            start.elapsed()
+        );
+        set_max_dials_per_sec(0.0);
+    }
+
+    /// ⭐ The point of the whole change: a pacer built while the engine was
+    /// unlimited must start pacing when the rate is set under it, with no
+    /// restart and no reconstruction. Pinning the rate in `DialPacer::new`
+    /// (what the code used to do) fails this.
+    #[tokio::test]
+    async fn rate_change_applies_to_a_live_pacer() {
+        let _g = RATE_LOCK.lock().unwrap();
+        set_max_dials_per_sec(0.0);
+        let mut p = DialPacer::new();
+        for _ in 0..50 {
+            p.acquire().await;
+        }
+
+        set_max_dials_per_sec(4.0);
+        let start = Instant::now();
+        for _ in 0..3 {
+            p.acquire().await;
+        }
+        let tightened = start.elapsed();
+        assert!(
+            tightened >= Duration::from_millis(500),
+            "a rate set under a live pacer must bite: 3 dials at 4/s took {tightened:?}"
+        );
+
+        // ...and lifting it must release just as promptly.
+        set_max_dials_per_sec(0.0);
+        let start = Instant::now();
+        for _ in 0..100 {
+            p.acquire().await;
+        }
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "lifting the ceiling must stop pacing at once"
         );
     }
 

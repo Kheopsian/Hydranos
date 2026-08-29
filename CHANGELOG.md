@@ -3,6 +3,30 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.158.0 - 2026-08-29
+
+### Added
+- **The outbound dial governor can be moved while the engine runs.**
+  `max_dials_per_sec` and `max_connections` both existed, but neither could be
+  changed without a restart: the rate was captured once when `DialPacer` was
+  built, and the connection ceiling was seeded from the config at boot and
+  never written again. Restarting a 200k-torrent hoard to try a value is not a
+  knob anyone turns twice, so in practice both stayed at their default of
+  unlimited. `POST /api/hoard/dial-limits` and `POST /api/race/dial-limits`
+  now apply either ceiling on the next dial and persist it to the TOML, on the
+  same pattern (and the same write lock) as the listen-port hot-rebind.
+
+  Both fields are optional, and nil means "leave this one alone" rather than
+  zero, because zero is itself a meaningful value: unlimited. A plain int could
+  not tell the two apart and would silently un-cap the other ceiling.
+
+  This exists because a hoard seeding 207k torrents was measured burning 4.7
+  cores with 37% of its profile inside `connect()`: at 1600 outbound dials per
+  second against a 28k-port ephemeral range that was 92% occupied, the kernel
+  spends its time in `__inet6_check_established` walking hash chains under a
+  spinlock. The dial rate is the multiplier on that cost, and it was the one
+  input nothing could reach.
+
 ## v3.157.0 - 2026-08-29
 
 ### Added

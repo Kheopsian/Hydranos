@@ -317,6 +317,7 @@ async fn main() {
     // so an existing install may already carry a value that has never taken
     // effect -- it starts biting at this upgrade.
     tracker::dial_limiter::set_max_connections(config.max_connections);
+    tracker::dial_limiter::set_max_dials_per_sec(config.max_dials_per_sec);
     tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp_socket.clone(), config.max_dials_per_sec);
 
     // Choking engine DISABLED (2.4.13-typhon).

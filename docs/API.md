@@ -107,8 +107,8 @@ La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DIS
 | stats | `GET/POST /stats/baseline` |
 | config | `GET/POST /config/create-folder` |
 | port-forward | `GET /port-forward` · `GET /port-forward/assignment` · `POST /port-forward/assignment` |
-| **`/api/race`** | `GET /torrents` · `GET /torrents/:ih` · `GET /choking` · `GET/POST /settings` · `POST /uploader` · `GET /uploaders` · `GET /uploaders/:username` · `GET /timeline/:ih` · `POST /torrents/:ih/purge` · `POST /listen-port` |
-| **`/api/hoard`** | `GET /stats` · `GET /torrents` · `GET /torrents/:ih` · `POST /pause-all` · `POST /resume-all` · `POST /restart-stuck` · `POST /verify-downloading` · `POST /torrents/:ih/verify` · `POST /torrents/:ih/category` · `GET/POST/DELETE /download-slots` · `POST /listen-port` |
+| **`/api/race`** | `GET /torrents` · `GET /torrents/:ih` · `GET /choking` · `GET/POST /settings` · `POST /uploader` · `GET /uploaders` · `GET /uploaders/:username` · `GET /timeline/:ih` · `POST /torrents/:ih/purge` · `POST /listen-port` · `POST /dial-limits` |
+| **`/api/hoard`** | `GET /stats` · `GET /torrents` · `GET /torrents/:ih` · `POST /pause-all` · `POST /resume-all` · `POST /restart-stuck` · `POST /verify-downloading` · `POST /torrents/:ih/verify` · `POST /torrents/:ih/category` · `GET/POST/DELETE /download-slots` · `POST /listen-port` · `POST /dial-limits` |
 | **`/api/hardlinks`** | `GET /summary` · `POST /scan` · `GET /orphans` · `GET /orphans/:ih/files` · `GET/POST /config` · `GET /orphan-media` · `GET /ghosts` · `POST /cleanup` · `POST /relink` · `GET /superseded` |
 | **`/api/drain`** | `GET /status` · `GET /history` · `POST /now` |
 | **`/api/huntarr`** | `GET /status` · `GET /history` · `GET/POST /config` · `GET /library` · `GET /grabs` · `GET /found` · `POST /scan` |

@@ -26,6 +26,34 @@ func (s *Server) persistListenPort(role string, port int) error {
 		return fmt.Errorf("listen port %d out of range (1-65535)", port)
 	}
 
+	return s.persistEngineKeys(role, [][2]string{{"listen_port", strconv.Itoa(port)}})
+}
+
+// persistDialLimits writes a hot-applied dial governor back into the TOML.
+// Nil fields are left untouched in the file, matching what was applied to the
+// engine: a request that moved one ceiling must not quietly rewrite the other.
+func (s *Server) persistDialLimits(role string, maxDialsPerSec *float64, maxConnections *int) error {
+	if role != "race" && role != "hoard" {
+		return fmt.Errorf("unknown agent role %q", role)
+	}
+	var kv [][2]string
+	if maxDialsPerSec != nil {
+		kv = append(kv, [2]string{"max_dials_per_sec", strconv.FormatFloat(*maxDialsPerSec, 'f', -1, 64)})
+	}
+	if maxConnections != nil {
+		kv = append(kv, [2]string{"max_connections", strconv.Itoa(*maxConnections)})
+	}
+	if len(kv) == 0 {
+		return nil
+	}
+	return s.persistEngineKeys(role, kv)
+}
+
+// persistEngineKeys applies a set of key/value edits to one engine's TOML
+// table, under the same lock and the same parse/schema guards as a settings
+// save. Ordered pairs rather than a map so the edits are applied
+// deterministically and a failure always names the same key first.
+func (s *Server) persistEngineKeys(role string, kv [][2]string) error {
 	configWriteMu.Lock()
 	defer configWriteMu.Unlock()
 
@@ -34,9 +62,12 @@ func (s *Server) persistListenPort(role string, port int) error {
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
 	}
-	doc, err := config.SetTOMLValue(string(data), role, "listen_port", strconv.Itoa(port))
-	if err != nil {
-		return fmt.Errorf("set [%s] listen_port: %w", role, err)
+	doc := string(data)
+	for _, pair := range kv {
+		doc, err = config.SetTOMLValue(doc, role, pair[0], pair[1])
+		if err != nil {
+			return fmt.Errorf("set [%s] %s: %w", role, pair[0], err)
+		}
 	}
 	// Same guards as a settings save: never leave a config on disk that the
 	// daemon cannot boot from.

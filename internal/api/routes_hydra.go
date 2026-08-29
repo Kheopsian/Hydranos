@@ -619,6 +619,7 @@ func (s *Server) registerHydraRoutes() {
 			race.POST("/pause", s.handleRacePauseBulk)
 			race.POST("/torrents/bulk", s.handleRaceBulk)
 			race.POST("/listen-port", s.handleRaceSetListenPort)
+			race.POST("/dial-limits", s.handleRaceSetDialLimits)
 		}
 
 		// Hoard engine
@@ -644,6 +645,7 @@ func (s *Server) registerHydraRoutes() {
 			hoard.POST("/pause-all", s.handleHoardPauseAll)
 			hoard.POST("/resume-all", s.handleHoardResumeAll)
 			hoard.POST("/listen-port", s.handleHoardSetListenPort)
+			hoard.POST("/dial-limits", s.handleHoardSetDialLimits)
 			hoard.POST("/restart-stuck", s.handleHoardRestartStuck)
 			hoard.POST("/verify-downloading", s.handleHoardVerifyDownloading)
 			hoard.POST("/torrents/:info_hash/verify", s.handleHoardVerifyTorrent)
@@ -3031,6 +3033,69 @@ func (s *Server) handleHoardSetListenPort(c *gin.Context) {
 
 func (s *Server) handleRaceSetListenPort(c *gin.Context) {
 	s.setListenPort(c, "race", s.raceEngine)
+}
+
+// setDialLimits hot-applies the outbound dial governor (rate ceiling and live
+// connection ceiling) with no restart.
+//
+// Both fields are pointers because 0 already means "unlimited": a plain int
+// could not tell "set this to unlimited" apart from "leave it as it is", and
+// guessing wrong silently un-caps a hoard.
+func (s *Server) setDialLimits(c *gin.Context, role string, setter interface {
+	SetDialLimits(*float64, *int) error
+}) {
+	var req struct {
+		MaxDialsPerSec *float64 `json:"max_dials_per_sec"`
+		MaxConnections *int     `json:"max_connections"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.MaxDialsPerSec == nil && req.MaxConnections == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "need at least one of max_dials_per_sec or max_connections"})
+		return
+	}
+	if req.MaxDialsPerSec != nil && *req.MaxDialsPerSec < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_dials_per_sec cannot be negative (0 = unlimited)"})
+		return
+	}
+	if req.MaxConnections != nil && *req.MaxConnections < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_connections cannot be negative (0 = unlimited)"})
+		return
+	}
+	if setter == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "agent unavailable"})
+		return
+	}
+	if err := setter.SetDialLimits(req.MaxDialsPerSec, req.MaxConnections); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Same rule as the listen port: persist only what actually took effect,
+	// and report a write failure instead of swallowing it -- a limit that is
+	// live but unwritten silently reverts at the next restart.
+	persisted := true
+	if err := s.persistDialLimits(role, req.MaxDialsPerSec, req.MaxConnections); err != nil {
+		slog.Warn("dial limits: applied but not persisted", "role", role, "err", err)
+		persisted = false
+	}
+	resp := gin.H{"status": "ok", "persisted": persisted}
+	if req.MaxDialsPerSec != nil {
+		resp["max_dials_per_sec"] = *req.MaxDialsPerSec
+	}
+	if req.MaxConnections != nil {
+		resp["max_connections"] = *req.MaxConnections
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) handleHoardSetDialLimits(c *gin.Context) {
+	s.setDialLimits(c, "hoard", s.hoardEngine)
+}
+
+func (s *Server) handleRaceSetDialLimits(c *gin.Context) {
+	s.setDialLimits(c, "race", s.raceEngine)
 }
 
 func (s *Server) handleSetPasskey(c *gin.Context) {

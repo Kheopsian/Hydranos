@@ -740,6 +740,25 @@ func (c *Client) SetDialsPaused(paused bool) error {
 	return err
 }
 
+// SetDialLimits hot-sets the dial governor: the outbound dial rate ceiling and
+// the live-connection ceiling. Both are pointers so a caller can move one and
+// leave the other alone -- passing a zero for "don't touch" is impossible here,
+// because zero is itself a meaningful value (unlimited).
+func (c *Client) SetDialLimits(maxDialsPerSec *float64, maxConnections *int) error {
+	params := map[string]interface{}{}
+	if maxDialsPerSec != nil {
+		params["max_dials_per_sec"] = *maxDialsPerSec
+	}
+	if maxConnections != nil {
+		params["max_connections"] = *maxConnections
+	}
+	if len(params) == 0 {
+		return fmt.Errorf("set_dial_limits: nothing to set")
+	}
+	_, err := c.call("set_dial_limits", params)
+	return err
+}
+
 // SetUploadLimit sets the session upload rate limit in bytes/s (0 = unlimited).
 func (c *Client) SetUploadLimit(limitBytes int) error {
 	_, err := c.call("set_upload_limit", map[string]interface{}{

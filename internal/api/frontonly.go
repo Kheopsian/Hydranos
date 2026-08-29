@@ -64,6 +64,7 @@ func (emptyRaceEngine) ApplySettings(map[string]interface{}) map[string]interfac
 	return map[string]interface{}{}
 }
 func (emptyRaceEngine) SetListenPort(int) error                { return errNoLocalEngine }
+func (emptyRaceEngine) SetDialLimits(*float64, *int) error     { return errNoLocalEngine }
 func (emptyRaceEngine) ListenPort() int                        { return 0 }
 func (emptyRaceEngine) HasTorrent(string) bool                 { return false }
 func (emptyRaceEngine) SessionGrabbed() int64                  { return 0 }
@@ -112,6 +113,7 @@ func (emptyHoardEngine) SetTrackerTiers(string, [][]string) ([][]string, error) 
 }
 func (emptyHoardEngine) TorrentFilePath(string) (string, bool)                      { return "", false }
 func (emptyHoardEngine) SetListenPort(int) error                                    { return errNoLocalEngine }
+func (emptyHoardEngine) SetDialLimits(*float64, *int) error                         { return errNoLocalEngine }
 func (emptyHoardEngine) ListenPort() int                                            { return 0 }
 func (emptyHoardEngine) HasTorrent(string) bool                                     { return false }
 func (emptyHoardEngine) PauseAll() int                                              { return 0 }

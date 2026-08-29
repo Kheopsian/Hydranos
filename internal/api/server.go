@@ -96,6 +96,9 @@ type RaceEngine interface {
 	GetSessionSettings() map[string]interface{}
 	ApplySettings(settings map[string]interface{}) map[string]interface{}
 	SetListenPort(port int) error
+	// SetDialLimits hot-applies the outbound dial governor. Nil means
+	// "leave this one alone"; 0 is a value, not an absence.
+	SetDialLimits(maxDialsPerSec *float64, maxConnections *int) error
 	ListenPort() int
 	HasTorrent(infoHash string) bool
 	SessionGrabbed() int64
@@ -139,6 +142,7 @@ type HoardEngine interface {
 	SetTrackerTiers(infoHash string, tiers [][]string) ([][]string, error)
 	TorrentFilePath(infoHash string) (string, bool)
 	SetListenPort(port int) error
+	SetDialLimits(maxDialsPerSec *float64, maxConnections *int) error
 	ListenPort() int
 	HasTorrent(infoHash string) bool
 	PauseAll() int
