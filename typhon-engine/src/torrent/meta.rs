@@ -289,7 +289,17 @@ pub struct TorrentState {
 
     // Download mode
     pub picker: OnceLock<Arc<Mutex<PiecePicker>>>,
-    pub have_tx: Option<broadcast::Sender<u32>>,
+    /// Broadcast of freshly completed pieces, so connected peers can be sent
+    /// a Have. Created on first use and dropped again the moment the torrent
+    /// starts seeding: a complete torrent never announces a new piece, and
+    /// nothing subscribes to a channel that will never fire.
+    ///
+    /// It used to be built eagerly for every torrent not added in seed_mode
+    /// and kept for life. A 256-slot ring costs ~8.4 KiB, and production had
+    /// 81,005 such torrents holding one long after they had finished
+    /// downloading: 682 MB of rings nothing would ever send to. See
+    /// `have_sender`, `subscribe_have` and `release_have_tx`.
+    have_tx: RwLock<Option<broadcast::Sender<u32>>>,
 
     // Per-torrent rate tracking
     pub upload_rate: RateTracker,
@@ -328,6 +338,43 @@ pub struct TorrentState {
 }
 
 impl TorrentState {
+    /// The have-broadcast sender, creating the channel on first use.
+    ///
+    /// Only the download path calls this, and only when a piece completes, so
+    /// a torrent that merely seeds never allocates the ring at all.
+    pub fn have_sender(&self) -> broadcast::Sender<u32> {
+        if let Some(tx) = self.have_tx.read().as_ref() {
+            return tx.clone();
+        }
+        let mut slot = self.have_tx.write();
+        // Another thread may have created it while we waited for the write lock.
+        if let Some(tx) = slot.as_ref() {
+            return tx.clone();
+        }
+        let tx = broadcast::channel(256).0;
+        *slot = Some(tx.clone());
+        tx
+    }
+
+    /// Subscribe to the have-broadcast, if there is one.
+    ///
+    /// Deliberately does NOT create the channel: a peer session attaching to a
+    /// seeding torrent would otherwise allocate the very ring this scheme
+    /// exists to avoid, once per torrent, the first time anyone connected.
+    pub fn subscribe_have(&self) -> Option<broadcast::Receiver<u32>> {
+        self.have_tx.read().as_ref().map(|tx| tx.subscribe())
+    }
+
+    /// Drop the have-broadcast. Called when the torrent reaches Seeding.
+    ///
+    /// Existing subscribers keep their `Receiver` and simply see the channel
+    /// close, which is exactly right: there will be no further pieces to
+    /// announce. If a recheck later finds the torrent incomplete, the download
+    /// path calls `have_sender` and a fresh channel is built.
+    pub fn release_have_tx(&self) {
+        *self.have_tx.write() = None;
+    }
+
     /// The expected SHA-1 of one piece, loading the hash table on first use.
     ///
     /// Returns `None` when the table cannot be read -- a missing or truncated
@@ -419,7 +466,7 @@ impl TorrentState {
         }
         // Only downloaders use the have-broadcast; seeders never send/subscribe,
         // so skip the 256-slot ring allocation for every seeder.
-        let have_tx = if seed_mode { None } else { Some(broadcast::channel(256).0) };
+        // Built lazily by `have_sender`; a seeder never asks for one.
         Self {
             live_trackers: RwLock::new(meta.trackers.clone()),
             meta,
@@ -439,7 +486,7 @@ impl TorrentState {
             is_removed: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
             picker,
-            have_tx,
+            have_tx: RwLock::new(None),
             upload_rate: RateTracker::new(),
             download_rate: RateTracker::new(),
             scrape_seeders: AtomicU32::new(0),
@@ -570,6 +617,51 @@ mod tests {
         assert_eq!(st.piece_hash(3), Some(hashes[3]));
         assert!(st.piece_hashes.lock().unwrap().is_some(), "table was not cached");
         assert_eq!(st.piece_hash(4), None, "out-of-range piece returned a hash");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A seeder must never allocate the have-broadcast ring.
+    ///
+    /// This is the whole point: 81,005 production torrents were holding an
+    /// 8.4 KiB channel nothing would ever send to. `subscribe_have` in
+    /// particular must not create one, or the first peer to attach would
+    /// resurrect it for every torrent.
+    #[test]
+    fn seeding_torrent_never_allocates_the_have_ring() {
+        let (st, _, path) = state_for("havetx-seed", 3);
+        assert!(st.have_tx.read().is_none(), "ring allocated at construction");
+        assert!(st.subscribe_have().is_none(), "subscribe created a ring");
+        assert!(st.have_tx.read().is_none(), "subscribe left a ring behind");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A downloader gets one on demand, and subscribers then see it.
+    #[test]
+    fn downloader_gets_a_ring_on_demand_and_peers_can_subscribe() {
+        let (st, _, path) = state_for("havetx-dl", 3);
+        let tx = st.have_sender();
+        assert!(st.have_tx.read().is_some(), "sender did not cache the ring");
+        let mut rx = st.subscribe_have().expect("subscribe found no ring");
+        tx.send(7).expect("send failed with a live subscriber");
+        assert_eq!(rx.try_recv().ok(), Some(7), "subscriber missed the piece");
+
+        // Asking twice hands back the same channel, not a second one.
+        let tx2 = st.have_sender();
+        assert!(tx.same_channel(&tx2), "have_sender built a second ring");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Releasing frees it, and a later download rebuilds one.
+    #[test]
+    fn release_have_tx_frees_and_a_later_download_rebuilds() {
+        let (st, _, path) = state_for("havetx-rel", 3);
+        let _ = st.have_sender();
+        st.release_have_tx();
+        assert!(st.have_tx.read().is_none(), "release kept the ring");
+        assert!(st.subscribe_have().is_none(), "release left a subscribable ring");
+        st.release_have_tx(); // idempotent
+        let _ = st.have_sender();
+        assert!(st.have_tx.read().is_some(), "could not rebuild after release");
         std::fs::remove_file(&path).ok();
     }
 

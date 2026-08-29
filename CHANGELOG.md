@@ -3,6 +3,33 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.157.0 - 2026-08-29
+
+### Added
+- **The engine reports what the allocator is actually holding, every five
+  minutes.** A sampled heap profile could not settle where the memory was
+  going: even sampling every 4 KiB it accounted for under a quarter of the
+  resident set, which left "live objects the sampler misses" and "pages
+  jemalloc kept rather than returning" impossible to tell apart. The engine now
+  logs jemalloc's own unsampled counters -- allocated, active, resident,
+  mapped, retained -- plus the two differences worth naming: allocator slop
+  inside live pages, and dirty pages not returned to the OS.
+- **`typhon-engine/tools/heap_report.py`** turns a heap dump into a table of
+  allocation sites. `jeprof` cannot: the engine is a PIE and jemalloc's dump
+  lists no file-backed mapping, so every frame symbolises as `?`. The tool
+  reads the load base from `/proc/<pid>/maps`, subtracts it, and batches the
+  addresses through `addr2line`.
+
+### Fixed
+- **683 MB of broadcast channels for pieces that will never complete.** Every
+  torrent not added in seed mode built a 256-slot have-broadcast ring, ~8.4 KiB,
+  and held it for life. Production had 81,131 of them, nearly all on torrents
+  that had long since finished downloading and would never announce another
+  piece. The ring is now created on demand by the download path and dropped as
+  soon as the torrent starts seeding, whether it got there by finishing a
+  download, by a recheck, or by being restored complete at startup. Peers
+  attaching to a seeding torrent no longer create one just by subscribing.
+
 ## v3.156.3 - 2026-08-28
 
 ### Fixed

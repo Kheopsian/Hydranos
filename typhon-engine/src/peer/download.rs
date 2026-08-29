@@ -204,7 +204,7 @@ impl DownloadState {
                             p.set_have(index);
                         }
                         // Broadcast Have to all peers
-                        if let Some(tx) = &self.torrent.have_tx { tx.send(index).ok(); }
+                        self.torrent.have_sender().send(index).ok();
 
                         // Check if download is complete
                         let is_complete = {
@@ -217,6 +217,8 @@ impl DownloadState {
                             // Nothing will verify this torrent again unless the
                             // user asks for a recheck, so give the hash table back.
                             self.torrent.release_piece_hashes();
+                            // No further piece will complete: nothing left to announce.
+                            self.torrent.release_have_tx();
                             self.torrent.completed_time.store(
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
