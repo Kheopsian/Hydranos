@@ -2748,14 +2748,19 @@ func PublicIPs(includeV6 bool) []string {
 		if v6 := getPublicIPv6(); v6 != "" {
 			out = append(out, v6)
 		}
-		// And every v6 address this host holds, not just the public one. In
-		// IPv4 that would be pointless: local addresses are RFC1918, never
-		// routable and never handed out as peers. In IPv6 they are all globally
-		// routable, so a peer list can return one of ours and we dial ourselves.
-		// Measured in production before this guard: 8348 self-connections, all
-		// to a Docker bridge address the filter had never heard of.
-		out = append(out, localIPv6s()...)
 	}
+	// Every v6 address this host holds, unconditionally. In IPv4 this would be
+	// pointless: local addresses are RFC1918, never routable and never handed
+	// out as peers. In IPv6 they are all globally routable, so a peer list can
+	// return one of ours and we dial ourselves.
+	//
+	// This used to sit behind includeV6, i.e. behind the engines' enable_ipv6.
+	// That gate is what failed in production on 2026-08-29: the flag did not
+	// reach this decision, so the whole local set was skipped and the hoard
+	// dialled its own listener 7342 times. Enumerating local interfaces is a
+	// syscall with no network round trip, so there is nothing to gate -- only
+	// getPublicIPv6 above, which does hit the network, still is.
+	out = append(out, localIPv6s()...)
 	return dedupeStrings(out)
 }
 
