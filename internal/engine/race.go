@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -728,6 +729,34 @@ func (e *RaceEngine) SetSelfIPs(ips []string) {
 	if err := lt.SetSelfIPs(ips); err != nil {
 		slog.Warn("race: set_self_ips failed", "err", err)
 	}
+}
+
+// SetDialLimits hot-applies the dial governor with no restart. The config
+// struct is updated too, so a later reader sees what is actually in force
+// rather than what the file said at boot.
+func (e *RaceEngine) SetDialLimits(maxDialsPerSec *float64, maxConnections *int) error {
+	if maxDialsPerSec != nil && (*maxDialsPerSec < 0 || math.IsNaN(*maxDialsPerSec)) {
+		return fmt.Errorf("race: max_dials_per_sec %v is not a rate", *maxDialsPerSec)
+	}
+	if maxConnections != nil && *maxConnections < 0 {
+		return fmt.Errorf("race: max_connections %d cannot be negative", *maxConnections)
+	}
+	lt, ok := e.client.(*ltclient.Client)
+	if !ok {
+		return fmt.Errorf("race: dial limits unsupported on this engine client")
+	}
+	if err := lt.SetDialLimits(maxDialsPerSec, maxConnections); err != nil {
+		return fmt.Errorf("race: engine dial-limit change failed: %w", err)
+	}
+	if maxDialsPerSec != nil {
+		e.config.MaxDialsPerSec = *maxDialsPerSec
+	}
+	if maxConnections != nil {
+		e.config.MaxConnections = *maxConnections
+	}
+	slog.Info("race: dial limits hot-applied",
+		"max_dials_per_sec", e.config.MaxDialsPerSec, "max_connections", e.config.MaxConnections)
+	return nil
 }
 
 func (e *RaceEngine) SetListenPort(port int) error {

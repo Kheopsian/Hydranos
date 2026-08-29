@@ -25,6 +25,8 @@ type fakeRaceEngine struct {
 	err     error
 }
 
+func (f *fakeRaceEngine) SetDialLimits(*float64, *int) error { return nil }
+
 func (f *fakeRaceEngine) SetListenPort(port int) error {
 	if f.err != nil {
 		return f.err

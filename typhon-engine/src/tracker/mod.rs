@@ -303,8 +303,11 @@ pub fn start_announce_loop(
         // the startup pause all live at this one spot rather than at each
         // discovery source. The pacer is owned by the task: no other caller,
         // so no locking.
-        let mut pacer = dial_limiter::DialPacer::new(max_dials_per_sec);
-        if pacer.is_some() {
+        // Always built: the rate is read live from the limiter on each dial,
+        // so an engine that starts unlimited can be capped later without a
+        // restart.
+        let mut pacer = dial_limiter::DialPacer::new();
+        if max_dials_per_sec > 0.0 {
             info!("[peer] outbound dial rate limit active: {}/s", max_dials_per_sec);
         }
         tokio::spawn(async move {
@@ -323,9 +326,7 @@ pub fn start_announce_loop(
                     dial_limiter::DIAL_SKIPPED_CONN_CAP.fetch_add(1, AtomicOrdering::Relaxed);
                     continue;
                 }
-                if let Some(p) = pacer.as_mut() {
-                    p.acquire().await;
-                }
+                pacer.acquire().await;
                 let d = disk_c.clone();
                 let u = utp_c.clone();
                 let b = pick_binding_for_dial(&bindings_c, addr);

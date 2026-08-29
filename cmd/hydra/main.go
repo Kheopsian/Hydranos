@@ -2373,6 +2373,10 @@ func (a *raceAPIAdapter) ApplySettings(settings map[string]interface{}) map[stri
 }
 func (a *raceAPIAdapter) ListenPort() int { return a.engine.ListenPort() }
 
+func (a *raceAPIAdapter) SetDialLimits(r *float64, c *int) error {
+	return a.engine.SetDialLimits(r, c)
+}
+
 func (a *raceAPIAdapter) SetListenPort(port int) error {
 	return a.engine.SetListenPort(port)
 }
@@ -2474,6 +2478,9 @@ func (a *hoardAPIAdapter) TorrentFilePath(infoHash string) (string, bool) {
 func (a *hoardAPIAdapter) ListenPort() int { return a.engine.ListenPort() }
 
 func (a *hoardAPIAdapter) SetListenPort(port int) error { return a.engine.SetListenPort(port) }
+func (a *hoardAPIAdapter) SetDialLimits(r *float64, c *int) error {
+	return a.engine.SetDialLimits(r, c)
+}
 func (a *hoardAPIAdapter) SetAddedTime(infoHash string, t time.Time) {
 	a.engine.SetAddedTime(infoHash, t)
 }
