@@ -33,6 +33,49 @@ async fn main() {
             Err(e) => tracing::error!("SIGUSR1 handler setup failed: {}", e),
         }
     });
+    // Exact allocator accounting, every five minutes.
+    //
+    // The sampled heap profile is not enough to say where the memory is: at
+    // lg_prof_sample:12 it accounted for well under half of RSS on the 200k
+    // torrent instance, which left "live objects the sampler misses" and
+    // "pages jemalloc is holding" indistinguishable. These five numbers are
+    // not sampled, so they separate the two for good:
+    //
+    //   allocated          bytes the application actually holds
+    //   active - allocated allocator slop inside live pages
+    //   resident - active  dirty pages jemalloc kept instead of returning
+    //   retained           address space unmapped, costs no RSS
+    //
+    // If resident tracks allocated, the memory is real and the fix is in the
+    // code. If resident dwarfs it, the fix is in the decay settings.
+    #[cfg(unix)]
+    tokio::spawn(async {
+        use tikv_jemalloc_ctl::{epoch, stats};
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            // Stats are cached; advancing the epoch is what refreshes them.
+            if epoch::advance().is_err() {
+                continue;
+            }
+            let mb = |v: usize| v as f64 / (1024.0 * 1024.0);
+            match (
+                stats::allocated::read(),
+                stats::active::read(),
+                stats::resident::read(),
+                stats::mapped::read(),
+                stats::retained::read(),
+            ) {
+                (Ok(al), Ok(ac), Ok(re), Ok(ma), Ok(rt)) => tracing::info!(
+                    "jemalloc allocated={:.0}MiB active={:.0}MiB resident={:.0}MiB mapped={:.0}MiB retained={:.0}MiB slop={:.0}MiB dirty={:.0}MiB",
+                    mb(al), mb(ac), mb(re), mb(ma), mb(rt),
+                    mb(ac.saturating_sub(al)), mb(re.saturating_sub(ac))
+                ),
+                _ => tracing::warn!("jemalloc stats unavailable"),
+            }
+        }
+    });
+
     // Parse CLI args: --config <path> --socket <path>
     // Compatible with hydra-engine C++ interface
     let args: Vec<String> = std::env::args().collect();

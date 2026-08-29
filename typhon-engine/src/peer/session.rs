@@ -119,7 +119,7 @@ pub async fn run(
     // seeding torrents pointlessly wakes every task on every piece we
     // complete (we don't complete any) — see feedback_tokio_broadcast_cap.
     let mut have_rx = if torrent.picker.get().is_some() && !is_seeding {
-        torrent.have_tx.as_ref().map(|tx| tx.subscribe())
+        torrent.subscribe_have()
     } else {
         None
     };

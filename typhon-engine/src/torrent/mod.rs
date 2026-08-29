@@ -417,8 +417,10 @@ impl TorrentManager {
                 state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
             } else if rd.seed_mode || state.picker.get().is_none() {
                 state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                state.release_have_tx();
             } else if state.picker.get().unwrap().lock().unwrap().is_complete() {
                 state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                state.release_have_tx();
             } else {
                 state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
             }
@@ -888,6 +890,7 @@ impl TorrentManager {
                 .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
             // The recheck was the only reader; a seeder needs no hashes.
             t.release_piece_hashes();
+            t.release_have_tx();
         } else {
             // Still incomplete: the download path is about to verify every
             // piece it pulls, so the table stays loaded.
