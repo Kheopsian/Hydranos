@@ -61,6 +61,68 @@ pub fn set_self_ips(ips: Vec<std::net::IpAddr>) {
     *SELF_IPS.write().unwrap() = ips;
 }
 
+/// Addresses this host holds, discovered by the engine itself rather than
+/// pushed in. An agent that knows its own exit addresses can never dial
+/// itself, whatever the control plane does or fails to do.
+///
+/// This exists because the pushed set alone was not enough: production ran
+/// with only the public IPv4 in `SELF_IPS`, so every v6 address we hold was
+/// invisible to the filter, and the hoard dialled its own listener 7342 times.
+/// The push is now a supplement (it carries the public address seen from
+/// outside, which we cannot observe locally), no longer the only source.
+static OWN_IPS: std::sync::RwLock<Vec<std::net::IpAddr>> = std::sync::RwLock::new(Vec::new());
+
+/// Re-reads this host's own IPv6 addresses.
+///
+/// v6 only, on purpose: local v4 addresses are RFC1918, never routable and
+/// never handed back by a tracker as a peer, so enumerating them would add
+/// entries that can never match. Every global v6 address, by contrast, is
+/// routable and can come back to us in a peer list.
+///
+/// Link-local and loopback are skipped -- a swarm cannot reach us on either,
+/// so they cannot appear as a peer address.
+#[cfg(target_os = "linux")]
+pub fn refresh_own_ips() {
+    let Ok(raw) = std::fs::read_to_string("/proc/net/if_inet6") else { return };
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let mut f = line.split_whitespace();
+        let (Some(hex), Some(_idx), Some(_plen), Some(scope)) = (f.next(), f.next(), f.next(), f.next())
+        else { continue };
+        // scope 0x00 = global. 0x20 link-local, 0x10 host: both unreachable
+        // from a swarm, so they can never show up as a peer.
+        if scope != "00" { continue; }
+        if hex.len() != 32 { continue; }
+        let mut octets = [0u8; 16];
+        let mut ok = true;
+        for i in 0..16 {
+            match u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
+                Ok(b) => octets[i] = b,
+                Err(_) => { ok = false; break; }
+            }
+        }
+        if ok { out.push(std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets))); }
+    }
+    out.sort(); out.dedup();
+    let changed = *OWN_IPS.read().unwrap() != out;
+    if changed {
+        eprintln!("[tracker] own addresses: {} discovered", out.len());
+        *OWN_IPS.write().unwrap() = out;
+    }
+}
+
+/// No `/proc` outside Linux; the Windows agent keeps relying on the pushed set.
+#[cfg(not(target_os = "linux"))]
+pub fn refresh_own_ips() {}
+
+/// The pushed set and the discovered set, for diagnostics.
+pub fn self_ip_sets() -> (Vec<String>, Vec<String>) {
+    (
+        SELF_IPS.read().unwrap().iter().map(|i| i.to_string()).collect(),
+        OWN_IPS.read().unwrap().iter().map(|i| i.to_string()).collect(),
+    )
+}
+
 /// Seed the self-IP set from the TYPHON_SELF_IPS env (comma-separated).
 pub fn seed_self_ips_from_env() {
     let raw = std::env::var("TYPHON_SELF_IPS").unwrap_or_default();
@@ -86,7 +148,10 @@ pub fn is_self_ip(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(std::net::IpAddr::V6(v6)),
         v4 => v4,
     };
-    SELF_IPS.read().unwrap().iter().any(|ip| *ip == target)
+    if SELF_IPS.read().unwrap().iter().any(|ip| *ip == target) {
+        return true;
+    }
+    OWN_IPS.read().unwrap().iter().any(|ip| *ip == target)
 }
 static DIAL_INFLIGHT: std::sync::OnceLock<dashmap::DashSet<([u8; 20], std::net::SocketAddr)>> = std::sync::OnceLock::new();
 fn dial_inflight() -> &'static dashmap::DashSet<([u8; 20], std::net::SocketAddr)> {
@@ -651,4 +716,65 @@ pub async fn dial_peer(
         listen_port,
     )
     .await;
+}
+
+#[cfg(test)]
+mod self_ip_tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// ⭐ The regression of 2026-08-29: production held only the public IPv4 in
+    /// the pushed set, so every address we held in v6 was invisible to the
+    /// filter and the hoard dialled its own listener. The discovered set must
+    /// cover us on its own, with nothing pushed at all.
+    #[test]
+    fn discovered_addresses_stand_alone_without_a_push() {
+        let _g = LOCK.lock().unwrap();
+        set_self_ips(vec![]);
+        let mine: IpAddr = "2a01:db8::200".parse().unwrap();
+        *OWN_IPS.write().unwrap() = vec![mine];
+        assert!(is_self_ip(mine), "a discovered address must be recognised as ours");
+        *OWN_IPS.write().unwrap() = vec![];
+    }
+
+    /// An agent must still be able to reach ANOTHER agent on the same host:
+    /// the same address on a different port is not us. Two copies of one
+    /// torrent across two engines share bandwidth that way.
+    #[test]
+    fn same_address_other_port_is_another_agent() {
+        let _g = LOCK.lock().unwrap();
+        let mine: IpAddr = "2a01:db8::200".parse().unwrap();
+        *OWN_IPS.write().unwrap() = vec![mine];
+        let ours = std::net::SocketAddr::new(mine, 16172);
+        let neighbour = std::net::SocketAddr::new(mine, 16171);
+        assert!(is_self_dial(ours, 16172), "our own address on our own port is us");
+        assert!(!is_self_dial(neighbour, 16172), "another engine's port must stay dialable");
+        *OWN_IPS.write().unwrap() = vec![];
+    }
+
+    #[test]
+    fn a_pushed_address_still_counts() {
+        let _g = LOCK.lock().unwrap();
+        let pushed: IpAddr = "203.0.113.7".parse().unwrap();
+        set_self_ips(vec![pushed]);
+        assert!(is_self_ip(pushed));
+        set_self_ips(vec![]);
+    }
+
+    /// Link-local and loopback are never reachable from a swarm, so they can
+    /// never arrive as a peer; keeping them would only pad the list.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discovery_keeps_only_global_scope() {
+        let _g = LOCK.lock().unwrap();
+        refresh_own_ips();
+        for ip in OWN_IPS.read().unwrap().iter() {
+            if let IpAddr::V6(v6) = ip {
+                assert!(!v6.is_loopback(), "{v6} is loopback");
+                assert!(!(v6.segments()[0] & 0xffc0 == 0xfe80), "{v6} is link-local");
+            }
+        }
+    }
 }

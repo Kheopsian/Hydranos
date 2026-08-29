@@ -3,6 +3,45 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.160.0 - 2026-08-29
+
+### Fixed
+- **An engine no longer dials itself over IPv6.** The self-dial filter only
+  knew the addresses the Go side pushed to it, and in production that set held
+  the public IPv4 alone. Every IPv6 address the host owns was therefore
+  invisible to it, so the hoard kept connecting to its own listener: 7342 live
+  self-connections were measured, about a quarter of everything the engine
+  counted as a peer, each one a TCP connect plus a handshake thrown away and
+  retried.
+
+  Each engine now discovers its own addresses instead of waiting to be told,
+  reading them from the interfaces at startup and every two minutes after (a
+  tunnel raised later brings an address that must not be dialled either). The
+  push from Go stays, but as a supplement carrying the address seen from
+  outside, which cannot be observed locally -- it is no longer the only source.
+
+  IPv6 only, deliberately: local IPv4 addresses are RFC1918, never routable and
+  never handed back by a tracker as a peer, whereas every global IPv6 address
+  is routable and can come back to us in a peer list. Link-local and loopback
+  are skipped for the same reason.
+
+- **An agent can still reach another agent.** The filter stays port-aware: our
+  own address on our own listen port is us, the same address on a different
+  port is the engine next door. Two copies of one torrent on two engines share
+  bandwidth exactly as before -- only the loop back onto ourselves is cut.
+
+- **The local IPv6 enumeration no longer sits behind `enable_ipv6`.** That gate
+  is what failed: the flag did not reach the decision, so the whole local set
+  was skipped. Listing local interfaces is a syscall with no network round
+  trip, so there was nothing to gate. Only the public-IPv6 lookup, which does
+  hit the network, still is.
+
+### Added
+- `self_dial_filter` in the engine diagnostics: the pushed set, the discovered
+  set, and `dials_skipped_self`. That counter already existed and was published
+  nowhere, which is why 7342 self-dials could accumulate without a single
+  signal anywhere.
+
 ## v3.159.0 - 2026-08-29
 
 ### Changed

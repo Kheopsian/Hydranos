@@ -688,6 +688,14 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
         // Live view of the dial governor: what the ceiling is, how close we
         // are to it, and how much work each control is shedding. `skipped_*`
         // climbing is the signal that a limit is set too tight.
+        // The self-dial filter, which ran blind until 2026-08-29: the counter
+        // below already existed and was exposed nowhere, so 7342 self-dials
+        // could accumulate without a single signal.
+        "self_dial_filter": {
+            "pushed_ips": crate::tracker::self_ip_sets().0,
+            "own_ips": crate::tracker::self_ip_sets().1,
+            "dials_skipped_self": crate::tracker::DIAL_SKIPPED_SELF.load(std::sync::atomic::Ordering::Relaxed),
+        },
         "dial_governor": {
             "live_connections": crate::tracker::dial_limiter::LIVE_CONNS.load(std::sync::atomic::Ordering::Relaxed),
             "max_connections": crate::tracker::dial_limiter::max_connections(),

@@ -137,6 +137,16 @@ async fn main() {
     // Seed the self-dial IP filter from env; Go refreshes it at runtime with the
     // observed public IP via the set_self_ips RPC (no more hard-coded staleness).
     tracker::seed_self_ips_from_env();
+    // Discovered before the first dial, then kept fresh: interfaces come and go
+    // (a tunnel raised after boot brings a new address that must not be dialled).
+    tracker::refresh_own_ips();
+    tokio::spawn(async {
+        let mut tk = tokio::time::interval(std::time::Duration::from_secs(120));
+        loop {
+            tk.tick().await;
+            tracker::refresh_own_ips();
+        }
+    });
 
     // Configure outbound SOCKS5 proxy (used for v6 peer dials to avoid Free leak).
     if !config.socks5_outbound_host.is_empty() {
