@@ -11,6 +11,17 @@
 //!     may re-choke later via `choking_gen`)
 //!   * runs the bidirectional message loop until the peer disconnects
 
+/// A peer that sends us nothing for this long is dropped.
+///
+/// Note this now actually fires on downloading sessions. It could not before:
+/// the deadline was rebuilt on every turn of the loop, and the 10s choke tick
+/// turned the loop, so a non-seeding session reset its own 300s timeout every
+/// 10 seconds and never hit it. Seeding sessions are unaffected -- their choke
+/// arm is disabled, so only peer traffic ever turned their loop.
+const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Cadence at which a downloading session wakes to flush choking decisions.
+const CHOKE_TICK: Duration = Duration::from_secs(10);
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -115,6 +126,7 @@ pub async fn run(
     };
 
     let mut dl = DownloadState::new(torrent.clone(), disk.clone());
+
     // Have broadcasts only matter while we're downloading. Subscribing on
     // seeding torrents pointlessly wakes every task on every piece we
     // complete (we don't complete any) — see feedback_tokio_broadcast_cap.
@@ -130,6 +142,21 @@ pub async fn run(
     // keeps blocks in the ARC (compressed, scan-resistant, prefetch).
     let serve_zerocopy = !is_encrypted && !crate::disk::path_is_zfs(torrent.save_path.read().as_path());
     let mut local_choking_gen: u32 = stats.choking_gen.load(Ordering::Relaxed);
+
+    // Both timers are built once and reset in place. Building them inside the
+    // loop meant every turn allocated a `Sleep`, took tokio's timer-wheel lock
+    // to register an entry, and took it again on drop to cancel it. That lock
+    // (`tokio::runtime::time::Inner`) is one mutex for the whole process, and
+    // with 67k sessions on 12 worker threads the contention measured ~30% of
+    // the engine's CPU -- more than any BitTorrent work it was doing.
+    let deadline = tokio::time::sleep(PEER_IDLE_TIMEOUT);
+    tokio::pin!(deadline);
+    // Wake once per choking tick so the engine's decisions land on the wire
+    // within the next tick cycle even when the peer is otherwise idle. A
+    // seeding session has no choking decisions to flush, so its arm stays
+    // disabled and never registers a timer at all.
+    let choke_poll = tokio::time::sleep(CHOKE_TICK);
+    tokio::pin!(choke_poll);
 
     loop {
         // A flag that gated only NEW handshakes would leave the long-lived
@@ -169,15 +196,11 @@ pub async fn run(
             }
         }
 
-        let deadline = tokio::time::sleep(Duration::from_secs(300));
-        tokio::pin!(deadline);
-        // Wake once per choking tick so the engine's decisions land on the wire
-        // within the next tick cycle even when the peer is otherwise idle.
-        let choke_poll = async move { if is_seeding { std::future::pending::<()>().await } else { tokio::time::sleep(Duration::from_secs(10)).await } };
-        tokio::pin!(choke_poll);
-
         tokio::select! {
             msg = framed.next() => {
+                // Traffic from the peer is what "not idle" means, so this is
+                // the only arm that pushes the deadline out.
+                deadline.as_mut().reset(tokio::time::Instant::now() + PEER_IDLE_TIMEOUT);
                 match msg {
                     Some(Ok(message)) => {
                         match message {
@@ -366,7 +389,8 @@ pub async fn run(
                     framed.send(Message::Have { piece }).await.ok();
                 }
             }
-            _ = &mut choke_poll => {
+            _ = &mut choke_poll, if !is_seeding => {
+                choke_poll.as_mut().reset(tokio::time::Instant::now() + CHOKE_TICK);
                 // fall through — top of loop flushes pending Choke/Unchoke
                 continue;
             }

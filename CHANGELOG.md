@@ -3,6 +3,37 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.159.0 - 2026-08-29
+
+### Changed
+- **The peer session loop stopped rebuilding its timers on every message.**
+  Both the 300s idle deadline and the 10s choke tick were constructed inside
+  the loop body, so each turn allocated a `Sleep`, took tokio's timer-wheel
+  lock to register an entry, and took it again on drop to cancel it. That lock
+  (`tokio::runtime::time::Inner`) is a single mutex for the whole process; with
+  67k live sessions spread over 12 worker threads, a DWARF profile put
+  `parking_lot::RawMutex::lock_slow` under it at 17-19% of the engine, plus
+  ~11% more in `Wheel::insert`/`remove`/`reregister`/`clear_entry`. Close to a
+  third of the engine's CPU was timer bookkeeping rather than BitTorrent.
+
+  Both timers are now created once per session and reset in place.
+
+- **The 300s idle deadline now actually fires on downloading sessions.** It
+  could not before: the deadline was rebuilt every turn of the loop, and the
+  10s choke tick turned the loop, so a non-seeding session reset its own
+  timeout every 10 seconds and never reached it. Seeding sessions are
+  unaffected -- their choke arm is disabled, so only peer traffic ever turned
+  their loop, which is exactly what the new reset condition is.
+
+### Fixed
+- Ephemeral-port exhaustion on the host was starving `connect()`: at 207k
+  torrents the hoard held ~28k distinct source ports against a 28,232-port
+  range (99% occupied), and `__inet6_check_established` plus the spinlock in
+  `__inet_hash_connect` accounted for 20% of the engine's profile. This is a
+  host sysctl rather than a code change (`net.ipv4.ip_local_port_range`), and
+  it is recorded here because the dial-governor work above only makes sense
+  read together with it.
+
 ## v3.158.0 - 2026-08-29
 
 ### Added
