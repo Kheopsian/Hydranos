@@ -633,6 +633,20 @@ func (e *RaceEngine) RemoveTorrent(infoHash string, deleteFiles bool) error {
 		e.cacheManager.OnTorrentRemoved(infoHash)
 	}
 
+	// Read the file list BEFORE the engine drops the torrent: once
+	// client.RemoveTorrent has run, get_files answers "torrent not found" and
+	// all that is left is savePath and name -- which is exactly what used to
+	// push this path into an os.RemoveAll on savePath/name.
+	var ownedFiles []ltclient.FileInfo
+	if deleteFiles {
+		f, err := e.client.GetFiles(infoHash)
+		if err != nil || len(f) == 0 {
+			slog.Warn("race: no file list before remove, data will be left on disk",
+				"info_hash", infoHash, "save_path", savePath, "name", name, "err", err)
+		}
+		ownedFiles = f
+	}
+
 	keepData := !deleteFiles
 	var aggErr error
 	if err := e.client.RemoveTorrent(infoHash, keepData); err != nil {
@@ -640,23 +654,13 @@ func (e *RaceEngine) RemoveTorrent(infoHash string, deleteFiles bool) error {
 		aggErr = err
 	}
 
-	// Delete real data if requested. Verbose logging — c'est le path qui laisse
-	// des orphelins quand Typhon delete partiel + Lstat skip silencieux.
+	// Delete real data if requested, file by file -- never a recursive blast on
+	// savePath/name. Verbose logging: this is the path that leaves orphans when
+	// Typhon deleted only part of the payload.
 	if deleteFiles {
-		realPath := filepath.Join(savePath, name)
-		var lstatErr error
-		var lstatIsDir bool
-		if fi, err := os.Lstat(realPath); err == nil {
-			lstatIsDir = fi.IsDir()
-		} else {
-			lstatErr = err
-		}
-		var removeErr error
-		if lstatErr == nil {
-			if err := os.RemoveAll(realPath); err != nil {
-				removeErr = err
-				aggErr = err
-			}
+		removed, removeErr := removeTorrentFiles(savePath, name, ownedFiles)
+		if removeErr != nil {
+			aggErr = removeErr
 		}
 		residualCount := -1
 		if entries, err := os.ReadDir(savePath); err == nil {
@@ -666,16 +670,11 @@ func (e *RaceEngine) RemoveTorrent(infoHash string, deleteFiles bool) error {
 			"info_hash", infoHash,
 			"save_path", savePath,
 			"name", name,
-			"real_path", realPath,
-			"lstat_err", lstatErr,
-			"lstat_is_dir", lstatIsDir,
+			"owned_files", len(ownedFiles),
+			"removed", removed,
 			"remove_err", removeErr,
 			"residual_entries_in_save_path", residualCount,
 		)
-		if lstatErr != nil {
-			slog.Warn("race: delete skipped, path absent côté Go (Typhon a peut-être tout fait, ou path mismatch save_path/name)",
-				"info_hash", infoHash, "real_path", realPath, "lstat_err", lstatErr)
-		}
 	}
 
 	e.cachedStatsMu.Lock()

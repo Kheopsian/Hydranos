@@ -10,7 +10,7 @@ Deux interfaces sur le même daemon. **Lis ça avant de deviner un endpoint.**
 
 ## Auth
 - **Natif `/api/*`** : header `X-API-Key: change-me-in-production`
-- **Shim qBit `/api/v2/*`** : stateless. `POST /api/v2/auth/login` (n'importe quels creds → cookie `SID`). La plupart des calls passent même sans.
+- **Shim qBit `/api/v2/*`** : `POST /api/v2/auth/login` (form `username`/`password`, vérifiés contre `[auth]`) → cookie `SID` aléatoire, valable 24 h. Le header `X-API-Key` est accepté aussi, ce qui évite le login aux scripts. Tout le reste du shim répond **403** sans l'un des deux. ⚠️ Avant la v3.161.0 le login acceptait n'importe quels creds et le cookie n'était jamais relu : le shim entier était ouvert.
 
 ---
 
