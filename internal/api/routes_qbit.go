@@ -26,11 +26,12 @@ import (
 // ---------------------------------------------------------------------------
 
 func (s *Server) registerQbitRoutes() {
-	v2 := s.router.Group("/api/v2")
+	// Auth is registered outside the guarded group: a caller must be able to
+	// reach login without already holding a session.
+	s.router.POST("/api/v2/auth/login", s.qbitAuthLogin)
+	s.router.POST("/api/v2/auth/logout", s.qbitAuthLogout)
 
-	// Auth — always succeed (stateless, autobrr just needs the SID cookie)
-	v2.POST("/auth/login", s.qbitAuthLogin)
-	v2.POST("/auth/logout", s.qbitAuthLogout)
+	v2 := s.router.Group("/api/v2", s.qbitAuth())
 
 	// App info (Any = GET+POST, cross-seed uses POST for everything)
 	v2.Any("/app/version", s.qbitAppVersion)
@@ -73,20 +74,7 @@ func (s *Server) registerQbitRoutes() {
 	v2.POST("/torrents/removeTags", s.qbitRemoveTags)
 }
 
-// ===========================================================================
-// Auth
-// ===========================================================================
-
-func (s *Server) qbitAuthLogin(c *gin.Context) {
-	// Always succeed — set SID cookie so autobrr is happy
-	c.SetCookie("SID", "hydra-session-token", 3600*24, "/", "", false, true)
-	c.String(http.StatusOK, "Ok.")
-}
-
-func (s *Server) qbitAuthLogout(c *gin.Context) {
-	c.SetCookie("SID", "", -1, "/", "", false, true)
-	c.String(http.StatusOK, "")
-}
+// Auth lives in qbitauth.go.
 
 // ===========================================================================
 // App Info

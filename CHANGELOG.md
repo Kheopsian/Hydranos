@@ -3,6 +3,51 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.161.0 - 2026-08-30
+
+### Security
+- **The qBittorrent shim now authenticates.** `/api/v2/*` carried no middleware
+  at all, so anything that could reach the port could reach it -- including
+  `torrents/delete?deleteFiles=true` and `torrents/add` with an arbitrary
+  `savepath`. `auth/login` answered every request with the same constant `SID`
+  cookie and nothing ever read it back, which made the surface look guarded
+  when it was not.
+
+  Login now checks the `[auth]` username and password and issues a random
+  session token; every other shim route requires that cookie or the daemon API
+  key, and answers `403` without one. The escape hatch is the same condition
+  the native API already used, so the two surfaces cannot disagree about
+  whether an instance is open.
+
+  **Action required** if you drive Hydra from autobrr, cross-seed or a script:
+  give it the credentials, or the daemon API key in `X-Api-Key`. A client
+  configured against the old always-succeeds login will start getting 403.
+
+### Fixed
+- **Deleting a race torrent no longer takes its neighbours with it.** The Rust
+  engine deletes a torrent file by file, precisely so a torrent that shares a
+  parent directory with unrelated data cannot damage it. The Go side then ran
+  `os.RemoveAll` on `save_path/info.name`, which undid that: a multi-file
+  torrent whose name matched a directory holding another torrent's data took
+  both down. Nothing human had to be involved -- the race drain deletes with
+  `deleteFiles=true` in a loop to reclaim space.
+
+  The file list is now read from the engine *before* the torrent is dropped
+  (afterwards there is nothing left to ask), and only those files are removed,
+  followed by the directories their removal emptied. With no list, nothing is
+  deleted: leaving an orphan is recoverable, deleting a stranger's data is not.
+  Paths that escape `save_path` are refused rather than followed.
+
+- **`file_pool_size` does something.** The setting travelled from the TOML
+  through the engine handshake into a `DiskManager` field that nothing ever
+  read, so the real ceiling was the hard-coded 10 000 per process -- 20 000
+  across the two engines, where the config asked for 8 000. It now sizes the
+  global fd cache it was always meant to size, which also makes the LRU evict
+  when it should: the cached handle of an unlinked file pins its blocks until
+  eviction, and a ceiling higher than the configured one made that leak worse.
+
+Reported by Lion, from a storage-handling audit across several clients.
+
 ## v3.160.0 - 2026-08-29
 
 ### Fixed

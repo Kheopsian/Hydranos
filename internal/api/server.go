@@ -284,6 +284,10 @@ type Server struct {
 	// agentRows caches the remote agents' hoard torrents (see agentrows.go).
 	agentRows agentRowCache
 
+	// qbitSessions holds the SID tokens the qBittorrent shim issues, so
+	// /api/v2 can tell a logged-in client from anyone who reached the port.
+	qbitSessions *qbitSessions
+
 	// sseClients counts the browsers on /api/events. The hub's own NumSubs
 	// cannot answer that: the reconnect watcher holds a subscription for the
 	// life of the process, so it never reads zero.
@@ -305,8 +309,9 @@ func NewServer(cfg *config.HydraConfig) *Server {
 	}))
 
 	s := &Server{
-		router: router,
-		config: cfg,
+		router:       router,
+		config:       cfg,
+		qbitSessions: newQbitSessions(),
 	}
 
 	// Load HTML templates from the embedded FS (self-contained binary).

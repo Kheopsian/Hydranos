@@ -3,17 +3,49 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 pub static FD_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
 pub static FD_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
 
+/// Capacity the global fd cache is built with, and resized to when
+/// `set_fd_cache_capacity` runs after the cache already exists.
+///
+/// The default is only what applies until the config is read: every process
+/// calls `DiskManager::new` at startup, which forwards `file_pool_size`.
+static FD_CACHE_CAP: AtomicUsize = AtomicUsize::new(10_000);
+
+/// Minimum capacity. A pool below this thrashes open()/close() on any torrent
+/// with a normal file count, which is the syscall storm the cache exists for.
+const FD_CACHE_MIN: usize = 100;
+
 /// Global cached File handles, keyed by absolute path.
 /// Avoids open()/close() syscall storm under high concurrent peer load.
 fn fd_cache() -> &'static Mutex<LruCache<PathBuf, Arc<File>>> {
     static CACHE: OnceLock<Mutex<LruCache<PathBuf, Arc<File>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(LruCache::new(NonZeroUsize::new(10_000).unwrap())))
+    CACHE.get_or_init(|| {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(FD_CACHE_CAP.load(Ordering::Relaxed)).unwrap(),
+        ))
+    })
+}
+
+/// Point the global fd cache at the configured `file_pool_size`.
+///
+/// The cache used to be a hard-coded 10_000 and `file_pool_size` travelled all
+/// the way from the TOML into a `DiskManager` field that nothing ever read, so
+/// the setting had no effect at all: the real ceiling was 10_000 per process
+/// whatever the config said. That also made `evict_fds`'s space leak worse than
+/// it looked, because the LRU evicted even more rarely than the configured
+/// number suggested.
+///
+/// Resizes an already-built cache rather than only seeding the lazy init, so
+/// this is correct whoever opened a file first.
+pub fn set_fd_cache_capacity(max_open_files: usize) {
+    let cap = max_open_files.max(FD_CACHE_MIN);
+    FD_CACHE_CAP.store(cap, Ordering::Relaxed);
+    fd_cache().lock().resize(NonZeroUsize::new(cap).unwrap());
 }
 
 /// Get or open a File for this path, cached as Arc<File>.
@@ -108,16 +140,17 @@ pub fn evict_fds(paths: &[PathBuf]) {
 }
 
 pub struct DiskManager {
-    fd_cache: Mutex<LruCache<PathBuf, Arc<File>>>,
     read_cache: Mutex<LruCache<CacheKey, CacheEntry>>,
 }
 
 impl DiskManager {
+    /// `max_open_files` sizes the GLOBAL fd cache, not a per-manager one: every
+    /// open goes through the free `fd_cache()` because a path must resolve to a
+    /// single handle process-wide (see `get_or_open`). The manager used to hold
+    /// its own `LruCache` here, which nothing ever read.
     pub fn new(max_open_files: usize) -> Self {
+        set_fd_cache_capacity(max_open_files);
         Self {
-            fd_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(max_open_files.max(100)).unwrap()
-            )),
             read_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(CACHE_MAX_ENTRIES).unwrap()
             )),
@@ -547,4 +580,30 @@ pub async fn read_piece_for_check(torrent: &TorrentState, piece: u32) -> Option<
     .await
     .ok()
     .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Guards the bug where file_pool_size travelled from the TOML into a
+    // DiskManager field nothing read, leaving the real ceiling at the
+    // hard-coded 10_000 whatever the config asked for.
+    #[test]
+    fn disk_manager_sizes_the_global_fd_cache() {
+        let _mgr = DiskManager::new(4242);
+        let got = fd_cache().lock().cap().get();
+        assert_eq!(
+            got, 4242,
+            "file_pool_size must size the global fd cache, got {got}"
+        );
+
+        // Below the floor the pool would thrash, so it clamps.
+        let _small = DiskManager::new(1);
+        let got = fd_cache().lock().cap().get();
+        assert_eq!(got, FD_CACHE_MIN, "capacity must clamp up to the floor");
+
+        // Leave the global as we found it for any other test in this process.
+        set_fd_cache_capacity(10_000);
+    }
 }

@@ -62,6 +62,26 @@ box sustains.
 
 ---
 
+## Who can reach the API
+
+Both API surfaces are authenticated, and both give full control of the daemon
+-- including deleting torrents together with their files:
+
+- **Native `/api/*`** takes the daemon API key in `X-Api-Key` (or `?apikey=`).
+  The key is generated on first boot and lives in `[daemon] api_key`. The web
+  UI gets it from `/api/login` after a username/password check against
+  `[auth]`.
+- **qBittorrent shim `/api/v2/*`** takes either the same API key or a `SID`
+  cookie from `POST /api/v2/auth/login`, which checks the same `[auth]`
+  credentials. Point autobrr, cross-seed and friends at those.
+
+Set an admin account (`hydra hash-password`, or the settings UI) before Hydra
+is reachable by anything you do not control. Hydra has no rate limiting, no
+account lockout and no TLS of its own: if you expose it beyond a trusted LAN,
+put it behind a reverse proxy that terminates TLS.
+
+---
+
 ## Give Hydra time to stop
 
 On SIGTERM Hydra saves its store and then asks each engine to flush its resume
