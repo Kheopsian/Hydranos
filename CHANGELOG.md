@@ -3,6 +3,101 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.169.0
+
+### Fixed
+- **A peer connection kept a 128 KiB read buffer for life.** `BtCodec` accepts
+  frames up to 256 KiB, and `BytesMut::reserve` grows by doubling, so any
+  connection that once had to buffer a 16 KiB `Piece` message ratcheted its
+  read buffer up and never gave the memory back: `split_to` hands the payload
+  out on the same allocation, so `bytes` cannot reclaim the space in place
+  while that payload is alive. A 192k-torrent instance held **2042 live
+  read/write buffers averaging ~131 KB** -- on connections whose steady state,
+  once a torrent is seeding, is 17-byte `Request` messages.
+  Both `decode` and `encode` now swap in a right-sized buffer when the existing
+  one is **empty** and has grown past 64 KiB. Empty means there is nothing to
+  copy, and the test is one comparison on a path that already returns early, so
+  the hot path is untouched: a connection actively moving blocks never empties
+  its buffer between frames and is left alone. The write half is the one that
+  matters on a seeding instance -- it is the buffer carrying the 16 KiB Piece
+  payloads -- so fixing only the read side would have left half the memory in
+  place.
+
+  Measured: the guard tests fail with `kept 131072 bytes` on both halves when
+  the swap is removed, which is the ratchet reproduced in isolation.
+
+## v3.164.0
+
+### Fixed
+- **A seeding torrent no longer asks the tracker for peers, and two seeders no
+  longer stay connected.** Both announce paths sent `numwant=200`
+  unconditionally, so every one of ~192k seeding torrents asked for 200 peers
+  and dialed everything that came back. Because a BitTorrent connection belongs
+  to one torrent, a large seedbox sharing thousands of swarms with us was dialed
+  once per swarm: prod held **21372 established sockets across only 4163 distinct
+  destinations** (5.13 each), with three addresses alone accounting for 76% --
+  8392 simultaneous connections to a single peer. 20986 of those sockets had no
+  data queued in either direction: seeder-to-seeder links with nothing to
+  exchange. Descriptors grew ~9500/h against a 1M limit, scaling with the
+  catalogue rather than settling.
+  - `numwant` is now 0 when `left == 0`. We are directly reachable, so leechers
+    open the connection to us; a complete torrent has nothing to dial.
+  - A session that learns (via `Bitfield` or `HaveAll`) that the remote holds
+    every piece closes when we are complete too. Completeness is re-read live,
+    not taken from the snapshot made when the session opened.
+  - New `seed_seed_dropped` counter in `/api/status`, next to `inbound_accepted`.
+
+### Note
+  This makes a complete torrent **passive**: it depends on the listen port
+  staying reachable. If the port forward breaks, upload stops dead rather than
+  degrading, and there are no outbound dials to compensate.
+
+## v3.163.0
+
+### Fixed
+- **An inbound peer that connected and then said nothing leaked its socket
+  forever.** `handle_incoming` read the handshake with `read_exact` and no
+  deadline, so the task parked on the read, the socket stayed ESTABLISHED, and
+  because no `PeerGuard` had been built yet nothing counted it and nothing
+  reaped it. Prod showed **20758 established sockets for 10874 peers**, growing
+  ~9500 fd/h against a 1M limit. Every read and write of the inbound handshake
+  -- first byte, plaintext remainder, our reply, MSE Ya, and the whole MSE
+  exchange -- is now bounded by a 30s timeout, and a `HS_TIMED_OUT` counter
+  names the cause instead of leaving the fd curve unexplained.
+  This also closed a trivial resource exhaustion: opening connections and
+  never sending was enough to consume the engine's descriptors.
+
+## v3.162.0
+
+### Changed
+- **A complete torrent no longer allocates a piece picker.** The resume loader
+  built a `PiecePicker` for every torrent whose stored `seed_mode` was 0,
+  imported the bitfield into it, concluded the torrent was complete, promoted it
+  to Seeding -- and then kept the picker for the life of the process. On a
+  192k-torrent instance, 82954 torrents were in exactly that state and
+  `PiecePicker::new` was 21% of the engine's live heap. Completeness is now
+  decided from the resume bitfield *before* the state is built
+  (`bitfield_is_complete`), so those torrents get no picker at all.
+  A partially-downloaded torrent is unaffected and still gets one.
+
+## v3.161.0
+
+### Fixed
+- **DHT: a `get_peers` span was held open for every public torrent, forever.**
+  `request_peers_forever` wrapped its task in `error_span!(parent: None, "get_peers", ...)`.
+  At ERROR level the default `info` filter never discarded it, so the subscriber
+  registry accumulated one root span -- plus a formatted `info_hash` String -- per
+  public torrent, for the life of the process. The per-request `error_span!("addr", ...)`
+  had the same problem, once per in-flight DHT request. Both are now `debug_span!`,
+  which the `info` filter drops before any allocation happens. Measured on a
+  192k-torrent instance: the engine grew 7.51 -> 10.18 GiB in 38 minutes
+  (~4.2 GiB/h) before this change.
+
+### Changed
+- `PiecePicker::availability` is `Vec<u16>` instead of `Vec<u32>`: 2 bytes per piece
+  instead of 4. A swarm never holds 65535 copies of a piece, and the increments
+  now saturate instead of wrapping.
+
 ## v3.160.0 - 2026-08-29
 
 ### Fixed
