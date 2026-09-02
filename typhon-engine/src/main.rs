@@ -33,6 +33,86 @@ async fn main() {
             Err(e) => tracing::error!("SIGUSR1 handler setup failed: {}", e),
         }
     });
+    // SIGUSR2 => hand the allocator's dirty pages back to the kernel, now.
+    //
+    // `dirty_decay_ms`/`muzzy_decay_ms` are the RAM/CPU dial, and they are set
+    // through MALLOC_CONF -- an environment variable, so moving them normally
+    // means recreating the container. That is the one operation on this engine
+    // with a real blast radius, which is why the dial never got retuned after
+    // the 2026-09-01 measurement showed `decay_ms:0` taking RSS from 6.81 GiB
+    // to 2.86 GiB at equal age, for 0.03% of CPU in jemalloc and 0.00% in
+    // madvise. Both arena settings are writable at runtime, so expose them on
+    // a signal instead: setting the decay to 0 purges what is already dirty
+    // and keeps it that way, and it is reversible by restoring the old value.
+    //
+    // Logs allocated/resident either side so the effect is measured, not
+    // assumed -- `resident` is the number that moves, `allocated` should not.
+    #[cfg(unix)]
+    tokio::spawn(async {
+        use tokio::signal::unix::{signal, SignalKind};
+        use tikv_jemalloc_ctl::{epoch, stats};
+        let mb = |v: usize| v as f64 / (1024.0 * 1024.0);
+        let snapshot = || {
+            let _ = epoch::advance();
+            (stats::allocated::read().unwrap_or(0), stats::resident::read().unwrap_or(0))
+        };
+        match signal(SignalKind::user_defined2()) {
+            Ok(mut sig) => loop {
+                sig.recv().await;
+                let (al0, re0) = snapshot();
+                // NOT MALLCTL_ARENAS_ALL (4096). That sentinel is only accepted by
+                // arena.<i>.{purge,decay,reset,destroy}; arena.<i>.dirty_decay_ms
+                // resolves the index through arena_get(), which indexes the arena
+                // array unchecked in a release build. Passing 4096 against
+                // narenas:8 reads out of bounds -- verified on an isolated engine,
+                // where it segfaulted the process and the Go watchdog then
+                // restarted the whole stack. Walk the real indices instead.
+                let narenas: u32 = unsafe {
+                    tikv_jemalloc_ctl::raw::read(b"arenas.narenas\0").unwrap_or(0)
+                };
+                // Arenas are created lazily, so most of 0..narenas do not exist yet
+                // and answer EFAULT. That is not a failure: an arena that was never
+                // initialised holds no dirty pages. Skip it and keep going -- only
+                // a run where *nothing* took is worth reporting as an error.
+                // Also move the template every future arena is created from.
+                let mut moved = 0u32;
+                let mut err = None;
+                for i in 0..narenas {
+                    let d = format!("arena.{}.dirty_decay_ms\0", i);
+                    let m = format!("arena.{}.muzzy_decay_ms\0", i);
+                    let r = unsafe {
+                        tikv_jemalloc_ctl::raw::write(d.as_bytes(), 0isize)
+                            .and_then(|_| tikv_jemalloc_ctl::raw::write(m.as_bytes(), 0isize))
+                    };
+                    match r {
+                        Ok(_) => moved += 1,
+                        Err(e) => err = Some(e),
+                    }
+                }
+                unsafe {
+                    let _ = tikv_jemalloc_ctl::raw::write(b"arenas.dirty_decay_ms\0", 0isize);
+                    let _ = tikv_jemalloc_ctl::raw::write(b"arenas.muzzy_decay_ms\0", 0isize);
+                }
+                if narenas == 0 {
+                    tracing::error!("jemalloc: arenas.narenas unreadable, decay left alone");
+                } else if moved == 0 {
+                    tracing::error!(
+                        "jemalloc decay moved on no arena out of {}: {}",
+                        narenas,
+                        err.map(|e| e.to_string()).unwrap_or_default()
+                    );
+                } else {
+                    let (al1, re1) = snapshot();
+                    tracing::warn!(
+                        "jemalloc decay forced to 0 on {}/{} arenas (SIGUSR2): resident {:.0}MiB -> {:.0}MiB (freed {:.0}MiB), allocated {:.0}MiB -> {:.0}MiB",
+                        moved, narenas, mb(re0), mb(re1), mb(re0.saturating_sub(re1)), mb(al0), mb(al1)
+                    );
+                }
+            },
+            Err(e) => tracing::error!("SIGUSR2 handler setup failed: {}", e),
+        }
+    });
+
     // Exact allocator accounting, every five minutes.
     //
     // The sampled heap profile is not enough to say where the memory is: at
@@ -67,8 +147,9 @@ async fn main() {
                 stats::retained::read(),
             ) {
                 (Ok(al), Ok(ac), Ok(re), Ok(ma), Ok(rt)) => tracing::info!(
-                    "jemalloc allocated={:.0}MiB active={:.0}MiB resident={:.0}MiB mapped={:.0}MiB retained={:.0}MiB slop={:.0}MiB dirty={:.0}MiB",
+                    "jemalloc allocated={:.0}MiB active={:.0}MiB resident={:.0}MiB mapped={:.0}MiB retained={:.0}MiB metadata={:.0}MiB slop={:.0}MiB dirty={:.0}MiB",
                     mb(al), mb(ac), mb(re), mb(ma), mb(rt),
+                    mb(stats::metadata::read().unwrap_or(0)),
                     mb(ac.saturating_sub(al)), mb(re.saturating_sub(ac))
                 ),
                 _ => tracing::warn!("jemalloc stats unavailable"),
@@ -420,6 +501,16 @@ async fn main() {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             tm_unseeded.update_unseeded_count();
+        }
+    });
+
+    // Persist completions as they happen, not on the next sweep.
+    let tm_done = torrent_mgr.clone();
+    tokio::spawn(async move {
+        if let Some(mut rx) = torrent::take_completion_receiver() {
+            while let Some(ih) = rx.recv().await {
+                tm_done.persist_completed(&ih);
+            }
         }
     });
 

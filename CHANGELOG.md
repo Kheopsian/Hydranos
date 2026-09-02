@@ -3,6 +3,25 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.170.0
+
+### Added
+- **The allocator's decay dial can be moved without recreating the container,
+  and the stats line now reports `metadata`.** `dirty_decay_ms`/`muzzy_decay_ms`
+  decide how long jemalloc holds freed pages before handing them back, and they
+  are the RAM/CPU trade-off on this engine: on 2026-09-01, forcing them to 0
+  took RSS from 6.81 GiB to 2.86 GiB at equal age, while `perf` put jemalloc at
+  0.03% of CPU and `madvise` at 0.00%. They are set through `MALLOC_CONF`, an
+  environment variable, so moving them meant recreating `hydra-go` -- the one
+  operation here with a real blast radius -- and so they were never retuned.
+  Both are writable at runtime, so `SIGUSR2` now sets them to 0 across every
+  arena and logs `resident` either side. `allocated` should not move; if it
+  does, the reading was not what we thought it was.
+- `metadata` in the five-minute jemalloc line. Without it, allocator bookkeeping
+  was indistinguishable from application memory when `allocated`, RSS and the
+  sampled profile disagreed -- which is exactly what happened on 2026-09-02,
+  where 85 GiB of address space was mapped for 5.35 GiB resident.
+
 ## v3.169.0
 
 ### Fixed
