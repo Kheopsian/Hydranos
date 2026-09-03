@@ -66,7 +66,31 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
-## v3.175.0
+## v3.176.0
+
+### Changed
+- **A webseed span's per-file requests now go out together instead of one after
+  another.** v3.174.0 grouped contiguous pieces into one 8 MB span and lifted
+  production from 0.80 to 2.07 MB/s — real, but far short of the 51 MB/s the
+  bench had shown at the same concurrency. The remaining cost was not the piece
+  grouping at all: BEP 19 gives **one URL per file** and a byte range cannot
+  straddle two of them, so a 2.2 MB Internet Archive item spread over its
+  median **10 files** costs ten requests however the pieces are batched.
+  Measured on the running catalogue: 1981 torrents in flight held 19 953 files,
+  **10.1 files per torrent at 179 KB each**. Ten sequential round trips of
+  ~2.5 s each gives 0.089 MB/s per worker, and 1.4 MB/s across the 16 of them —
+  which is the 2.07 MB/s that was actually observed. The model and the
+  measurement agree, so the fix is to overlap the requests, not to add workers.
+  A span's file requests are now issued with `buffered(SPAN_FILE_PARALLEL)`,
+  which preserves stream order so the pieces can still be cut back out of the
+  assembled buffer. The parallelism is 6, keeping the engine-wide ceiling near
+  96 in-flight requests at the default 16 workers — the neighbourhood of the
+  32-stream bench that reached 51 MB/s without finding a limit, rather than a
+  leap past anything measured.
+  The per-file range arithmetic moved into `span_file_ranges`, a pure function,
+  because that is where an off-by-one silently assembles corrupt bytes that
+  only surface later as a SHA1 failure.
+
 
 ### Fixed
 - **A torrent whose data has no folder of its own can change category again.**

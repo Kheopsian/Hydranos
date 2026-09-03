@@ -21,6 +21,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::{DashMap, DashSet};
+use futures::stream::StreamExt;
 use tracing::{info, warn};
 
 use crate::config::EngineConfig;
@@ -50,6 +51,21 @@ const SPAN_TARGET_BYTES: u64 = 8 * 1024 * 1024;
 /// Hard ceiling on pieces per span, for torrents whose piece_length is tiny
 /// enough that 8 MB would mean thousands of them.
 const SPAN_MAX_PIECES: usize = 64;
+
+/// How many of a span's per-file requests may be in flight together.
+///
+/// BEP 19 gives one URL per file and a byte range cannot straddle two of
+/// them, so a 2.2 MB Internet Archive item spread over its median 10 files
+/// costs ten requests however the pieces are grouped. Measured in production:
+/// issuing them in sequence gave 2.07 MB/s, matching ten round trips of
+/// ~2.5 s per torrent almost exactly. Overlapping them turns those ten
+/// latencies back into roughly one.
+///
+/// 6 keeps the engine-wide ceiling near 96 in-flight requests at the default
+/// 16 workers — the neighbourhood of the 32-stream bench that reached
+/// 51 MB/s without finding a limit, rather than a leap past anything
+/// measured.
+const SPAN_FILE_PARALLEL: usize = 6;
 
 /// How many pieces one worker pulls before releasing a torrent back to the
 /// pool. Most webseed torrents are small (Internet Archive median: 2.2 MB,
@@ -170,24 +186,18 @@ fn span_byte_range(meta: &TorrentMeta, first: u32, last: u32) -> (u64, u64) {
     (start, end)
 }
 
-/// Assemble a run of contiguous pieces from the HTTP mirror in as few requests
-/// as the file layout allows.
+/// The per-file ranged requests a span resolves to, in stream order.
 ///
-/// The span is a window over the concatenated file stream, so it can straddle
-/// several files; each overlapping file contributes exactly one ranged GET
-/// whatever the number of pieces involved. That is the whole point: one round
-/// trip for 8 MB instead of sixteen for 512 KB each.
-async fn fetch_span(
-    client: &reqwest::Client,
+/// Split out as a pure function: this is where an off-by-one silently corrupts
+/// a piece, and it can be checked without a network.
+fn span_file_ranges(
     meta: &TorrentMeta,
     base: &str,
     first: u32,
     last: u32,
-) -> Result<Vec<u8>, String> {
+) -> Vec<(String, u64, u64, u64)> {
     let (span_start, span_end) = span_byte_range(meta, first, last);
-    let want = span_end - span_start;
-
-    let mut out: Vec<u8> = Vec::with_capacity(want as usize);
+    let mut reqs = Vec::new();
     for f in &meta.files {
         if f.length == 0 {
             continue; // a zero-length file occupies no range: skip, never GET
@@ -198,9 +208,42 @@ async fn fetch_span(
         }
         let from = span_start.max(f.offset) - f.offset;
         let to = span_end.min(f_end) - f.offset - 1; // inclusive
-        let url = file_url(base, meta, f);
-        let chunk = fetch_range(client, &url, from, to, f.length).await?;
-        out.extend_from_slice(&chunk);
+        reqs.push((file_url(base, meta, f), from, to, f.length));
+    }
+    reqs
+}
+
+/// Assemble a run of contiguous pieces from the HTTP mirror.
+///
+/// The span is a window over the concatenated file stream, so it can straddle
+/// several files, and BEP 19 forces one request per file it touches. Those
+/// requests go out together rather than one after another: `buffered` keeps
+/// the responses in stream order, which is what lets the pieces be cut back
+/// out of the assembled buffer afterwards.
+async fn fetch_span(
+    client: &reqwest::Client,
+    meta: &TorrentMeta,
+    base: &str,
+    first: u32,
+    last: u32,
+) -> Result<Vec<u8>, String> {
+    let (span_start, span_end) = span_byte_range(meta, first, last);
+    let want = span_end - span_start;
+    let reqs = span_file_ranges(meta, base, first, last);
+
+    let chunks: Vec<Result<Vec<u8>, String>> = futures::stream::iter(reqs.into_iter().map(
+        |(url, from, to, len)| {
+            let client = client.clone();
+            async move { fetch_range(&client, &url, from, to, len).await }
+        },
+    ))
+    .buffered(SPAN_FILE_PARALLEL)
+    .collect()
+    .await;
+
+    let mut out: Vec<u8> = Vec::with_capacity(want as usize);
+    for c in chunks {
+        out.extend_from_slice(&c?);
     }
 
     if out.len() as u64 != want {
@@ -606,6 +649,51 @@ mod tests {
         let (_, end) = span_byte_range(&m, 2, 2);
         assert_eq!(end, 40000);
         assert!(end < 3 * 16384);
+    }
+
+    /// A span that straddles three files resolves to three requests, each
+    /// clipped to its own file's coordinates. Getting these offsets wrong is
+    /// how a span silently assembles corrupt bytes that then fail SHA1.
+    #[test]
+    fn span_splits_into_one_request_per_file_touched() {
+        let mut m = meta(true, "it", vec![("a", 100), ("b", 100), ("c", 100)]);
+        m.piece_length = 150;
+        m.num_pieces = 2;
+        m.total_size = 300;
+        // pieces 0..=1 cover bytes 0..300 = all three files
+        let r = span_file_ranges(&m, "http://h/", 0, 1);
+        assert_eq!(r.len(), 3);
+        assert_eq!((r[0].1, r[0].2), (0, 99));
+        assert_eq!((r[1].1, r[1].2), (0, 99));
+        assert_eq!((r[2].1, r[2].2), (0, 99));
+    }
+
+    /// A span covering only the middle of the stream must not request the
+    /// files it does not touch, and must clip the ones it partially covers.
+    #[test]
+    fn span_clips_partial_files_and_skips_untouched_ones() {
+        let mut m = meta(true, "it", vec![("a", 100), ("b", 100), ("c", 100)]);
+        m.piece_length = 50;
+        m.num_pieces = 6;
+        m.total_size = 300;
+        // piece 2 = bytes 100..150 -> file b only, its first 50 bytes
+        let r = span_file_ranges(&m, "http://h/", 2, 2);
+        assert_eq!(r.len(), 1);
+        assert!(r[0].0.ends_with("/b"));
+        assert_eq!((r[0].1, r[0].2), (0, 49));
+    }
+
+    /// A zero-length file sits at an offset but owns no bytes; requesting a
+    /// range on it would be a guaranteed 416.
+    #[test]
+    fn zero_length_files_are_never_requested() {
+        let mut m = meta(true, "it", vec![("a", 100), ("empty", 0), ("b", 100)]);
+        m.piece_length = 200;
+        m.num_pieces = 1;
+        m.total_size = 200;
+        let r = span_file_ranges(&m, "http://h/", 0, 0);
+        assert_eq!(r.len(), 2);
+        assert!(r.iter().all(|x| !x.0.ends_with("/empty")));
     }
 
     /// Names routinely carry spaces and accents; each segment is encoded on its
