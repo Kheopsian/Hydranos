@@ -265,6 +265,17 @@ impl PiecePicker {
         self.have.iter().all(|&h| h)
     }
 
+    /// Is this piece already reserved by someone?
+    ///
+    /// The webseed pool walks forward from a picked piece to batch a run of
+    /// contiguous ones into a single HTTP request, and must stop at anything
+    /// another source already holds: calling `start_piece` on a pending piece
+    /// resets its `blocks_received`, throwing away whatever a peer had already
+    /// delivered for it.
+    pub fn is_pending(&self, index: u32) -> bool {
+        self.pending.contains_key(&index)
+    }
+
     /// Do we have this specific piece?
     pub fn has_piece(&self, index: u32) -> bool {
         self.have.get(index as usize).copied().unwrap_or(false)
@@ -300,6 +311,19 @@ mod receive_block_tests {
         assert!(!p.receive_block(0, 5, &[1u8; 16]));
         assert!(!p.receive_block(0, 0, &[1u8; 16]));
         assert!(p.receive_block(0, 16, &[2u8; 16]));
+    }
+
+    /// A reserved piece must report as pending, so the webseed batcher stops
+    /// its run there instead of resetting a piece a peer is mid-way through.
+    #[test]
+    fn reserved_piece_reports_pending() {
+        let mut p = PiecePicker::new(4);
+        assert!(!p.is_pending(2));
+        p.begin_piece_for_test(2, 32, 16);
+        assert!(p.is_pending(2));
+        assert!(!p.is_pending(3));
+        p.set_have(2);
+        assert!(!p.is_pending(2), "set_have clears the reservation");
     }
 
     /// The tail block is shorter than block_size and must still be accepted.
