@@ -85,6 +85,23 @@ const QUEUE_TARGET: usize = 2048;
 const MAX_FAILS: u32 = 5;
 const PARK_SECS: u64 = 3600;
 
+/// Wall-clock nanoseconds spent in each phase of the worker loop, summed
+/// across every worker. Ratios between them are what matter: they say which
+/// phase actually owns the throughput, which six rounds of reasoning about the
+/// design did not manage to establish.
+static T_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static T_PICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static T_FETCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static T_FEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static T_COMMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static N_SPANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static N_REQS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static N_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn add_ns(c: &std::sync::atomic::AtomicU64, t: std::time::Instant) {
+    c.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
 static CLAIMED: std::sync::OnceLock<DashSet<InfoHash>> = std::sync::OnceLock::new();
 /// info_hash -> (consecutive failures, unix time before which not to retry)
 static BACKOFF: std::sync::OnceLock<DashMap<InfoHash, (u32, u64)>> = std::sync::OnceLock::new();
@@ -348,6 +365,12 @@ async fn drive_torrent(
         // fall through to the next one when a host is down.
         let mut data = None;
         let mut last_err = String::new();
+        let t_fetch = std::time::Instant::now();
+        N_SPANS.fetch_add(1, Ordering::Relaxed);
+        N_REQS.fetch_add(
+            span_file_ranges(&t.meta, "x", first, last).len() as u64,
+            Ordering::Relaxed,
+        );
         for k in 0..t.meta.url_list.len() {
             let base = &t.meta.url_list[(first as usize + k) % t.meta.url_list.len()];
             match fetch_span(client, &t.meta, base, first, last).await {
@@ -358,6 +381,7 @@ async fn drive_torrent(
                 Err(e) => last_err = e,
             }
         }
+        add_ns(&T_FETCH, t_fetch);
         let data = match data {
             Some(d) => d,
             None => {
@@ -368,6 +392,7 @@ async fn drive_torrent(
                 return Err(last_err);
             }
         };
+        N_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
 
         // Cut the span back into pieces and commit them one by one, each
         // through the same block-level checks and completion sequence a peer
@@ -378,6 +403,7 @@ async fn drive_torrent(
             let piece_bytes = &data[off..off + psz];
             off += psz;
 
+            let t_feed = std::time::Instant::now();
             let complete = {
                 let mut p = picker.lock().unwrap();
                 let mut c = false;
@@ -389,6 +415,7 @@ async fn drive_torrent(
                 }
                 c
             };
+            add_ns(&T_FEED, t_feed);
             if !complete {
                 let mut p = picker.lock().unwrap();
                 for &i in &run[n..] {
@@ -402,7 +429,10 @@ async fn drive_torrent(
                 Some(d) => d,
                 None => continue,
             };
-            if crate::peer::download::commit_piece(t, disk, index, piece_data).await {
+            let t_commit = std::time::Instant::now();
+            let ok = crate::peer::download::commit_piece(t, disk, index, piece_data).await;
+            add_ns(&T_COMMIT, t_commit);
+            if ok {
                 done += 1;
                 budget = budget.saturating_sub(1);
             } else {
@@ -424,13 +454,17 @@ async fn drive_torrent(
 /// release it.
 async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwest::Client) {
     loop {
+        let t_pick = std::time::Instant::now();
         let candidate = next_candidate(&mgr);
+        add_ns(&T_PICK, t_pick);
         let t = match candidate {
             Some(t) => t,
             None => {
                 // The scanner refills every 500 ms; waiting longer than
                 // that just idles a worker.
+                let t_wait = std::time::Instant::now();
                 tokio::time::sleep(Duration::from_millis(500)).await;
+                add_ns(&T_WAIT, t_wait);
                 continue;
             }
         };
@@ -538,6 +572,37 @@ fn next_candidate(mgr: &TorrentManager) -> Option<Arc<TorrentState>> {
     }
 }
 
+/// Log the phase breakdown once a minute, then reset it. Deltas rather than
+/// totals: a running average hides a regime change.
+async fn reporter() {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let w = T_WAIT.swap(0, Ordering::Relaxed) / 1_000_000;
+        let p = T_PICK.swap(0, Ordering::Relaxed) / 1_000_000;
+        let f = T_FETCH.swap(0, Ordering::Relaxed) / 1_000_000;
+        let d = T_FEED.swap(0, Ordering::Relaxed) / 1_000_000;
+        let c = T_COMMIT.swap(0, Ordering::Relaxed) / 1_000_000;
+        let spans = N_SPANS.swap(0, Ordering::Relaxed);
+        let reqs = N_REQS.swap(0, Ordering::Relaxed);
+        let bytes = N_BYTES.swap(0, Ordering::Relaxed);
+        info!(
+            "[webseed] 60s: wait={}ms pick={}ms fetch={}ms feed={}ms commit={}ms | \
+             spans={} reqs={} ({:.1}/s) MB={:.1} ({:.2} MB/s) | ms_per_req={:.0}",
+            w,
+            p,
+            f,
+            d,
+            c,
+            spans,
+            reqs,
+            reqs as f64 / 60.0,
+            bytes as f64 / 1e6,
+            bytes as f64 / 60.0 / 1e6,
+            if reqs > 0 { f as f64 / reqs as f64 } else { 0.0 }
+        );
+    }
+}
+
 /// Build the HTTP client used for every webseed fetch.
 ///
 /// It deliberately reuses `TYPHON_ANNOUNCE_PROXY`: a webseed GET is an outbound
@@ -595,6 +660,7 @@ pub fn start(mgr: Arc<TorrentManager>, cfg: &EngineConfig) {
         let mgr = mgr.clone();
         tokio::spawn(async move { scanner(mgr).await });
     }
+    tokio::spawn(async move { reporter().await });
     info!("[webseed] BEP 19 enabled, {} concurrent fetches", workers);
     for _ in 0..workers {
         let mgr = mgr.clone();

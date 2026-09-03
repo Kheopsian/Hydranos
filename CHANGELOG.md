@@ -66,6 +66,21 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
+## v3.179.0
+
+### Added
+- **The webseed loop now reports where its wall clock goes.** Six hypotheses
+  had been tested and refuted by measurement — origin throttling (a 32-stream
+  benchmark pulled 20.78 MB/s from archive.org *while* the engine crawled),
+  worker count (16 -> 48 changed nothing), span truncation, per-file
+  serialisation, catalogue scanning, and the download-slot budget (300, 2000,
+  8000 and 25000 slots all landed between 2.0 and 2.8 MB/s) — and the rate
+  stayed flat throughout. Rather than a seventh guess, each worker now
+  accumulates the nanoseconds it spends waiting for work, picking a run,
+  fetching, feeding the picker and committing, and one line a minute prints the
+  breakdown with requests/s, MB/s and ms per request. Counters are swapped to
+  zero on every report, because a running average hides a regime change.
+
 ## v3.178.0
 
 ### Fixed
