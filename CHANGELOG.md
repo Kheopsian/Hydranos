@@ -3,6 +3,69 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## Release overview: v3.160.0 to v3.172.0
+
+`main` last carried v3.160.0. This release lands twelve versions at once. The
+per-version entries below are the record; this section is the map through them.
+
+Almost all of it comes from running one instance at **192k torrents**, which is
+where costs that look like constants stop being constants. Several of these
+were not slow paths but *unbounded* ones: a buffer that only ever grew, a span
+that was never dropped, a socket nothing reaped.
+
+### Memory, on a large catalogue
+- **A `get_peers` tracing span was held open for every public torrent, forever**
+  (v3.161.0). At ERROR level the `info` filter never discarded it, so the
+  subscriber registry accumulated one root span per public torrent for the life
+  of the process: 7.51 -> 10.18 GiB in 38 minutes.
+- **A complete torrent no longer allocates a piece picker** (v3.162.0). 82954
+  torrents held one for nothing; `PiecePicker::new` was 21% of the engine's live
+  heap. `PiecePicker::availability` also went from `Vec<u32>` to `Vec<u16>`.
+- **A peer connection kept a 128 KiB read and write buffer for life**
+  (v3.169.0). `BytesMut` grows by doubling and could not reclaim in place, so a
+  connection that once buffered a 16 KiB `Piece` ratcheted up and stayed there.
+  2042 live buffers averaged ~131 KB on connections whose steady state is
+  17-byte `Request` messages.
+- **The allocator's decay dial is movable at runtime** (v3.170.0).
+  `dirty_decay_ms`/`muzzy_decay_ms` are the RAM/CPU trade-off here -- forcing
+  them to 0 took RSS from 6.81 to 2.86 GiB at equal age -- but they were set
+  through `MALLOC_CONF`, so retuning them meant recreating the container. They
+  now move on `SIGUSR2`, and the jemalloc line reports `metadata` so allocator
+  bookkeeping stops being mistaken for application memory.
+
+### Descriptors and connections
+- **An inbound peer that connected and then said nothing leaked its socket
+  forever** (v3.163.0). No deadline on the handshake read, and no `PeerGuard`
+  built yet, so nothing counted it and nothing reaped it: 20758 established
+  sockets for 10874 peers, growing ~9500 fd/h. Every step of the inbound
+  handshake is now bounded, and `HS_TIMED_OUT` names the cause. This also closed
+  a trivial resource exhaustion.
+- **A seeding torrent no longer asks the tracker for peers, and two seeders no
+  longer stay connected** (v3.164.0). `numwant=200` on every one of ~192k
+  seeding torrents meant one dial per shared swarm: 21372 sockets across 4163
+  destinations, 8392 of them to a single peer, 20986 with nothing queued either
+  way. `numwant` is 0 when `left == 0`, and a session where both sides are
+  complete closes. Note that this makes a complete torrent **passive**: it now
+  depends on the listen port staying reachable.
+
+### Interface
+- **The whole UI answered about a second late** (v3.171.0) -- hover, cursor
+  shape, clicks. Each `stats_snapshot` frame sorted all 196k torrents to paint
+  500 rows, and the comparator's tie-break ran an Intl `localeCompare` on
+  40-character info hashes for nearly every comparison. Top-K through a bounded
+  heap, same rows in the same order: 130ms -> 13ms by date added, 360ms -> 18ms
+  by upload rate, 340ms -> 41ms by name.
+
+### Configuration
+- **DHT and PEX can be turned off, per engine** (v3.172.0). `enable_dht` and
+  `enable_pex` in `[race]` and `[hoard]`, both defaulting to true, both reaching
+  a remote node's engines through the pushed agent config. For the operator who
+  wants a seedbox that talks to nothing but its trackers.
+
+### Versions 3.165 to 3.168
+Never released. Those numbers were spent on a line of work that did not reach
+this branch, so the history goes from 3.164.0 straight to 3.169.0.
+
 ## v3.172.0
 
 ### Added
