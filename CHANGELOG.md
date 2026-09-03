@@ -66,6 +66,25 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
+## v3.172.2
+
+### Fixed
+- **A torrent was stopped to free a download slot nobody was waiting for.**
+  Activity demotion exists to hand a *scarce* slot to a torrent that can use it,
+  but `enforceDownloadSlots` ran it whatever the pressure. With
+  `max_downloads=2000` and 114 incomplete torrents, one tick logged
+  `demoted=89` and the next `started=104` while **1886 slots sat idle**: a full
+  stop -> cooldown -> re-announce -> reconnect cycle that freed nothing.
+  Progress is now only judged when slots are actually contended
+  (`incomplete > maxSlots`). A torrent idling while slots are free keeps its
+  slot *and* restarts its evaluation window, so if contention does appear it is
+  judged on fresh evidence instead of being demoted the instant it appears, on
+  evidence gathered while stalling cost nothing.
+- **The Go announcer still asked for 200 peers on a completed torrent.**
+  v3.164.0 set `numwant=0` when `left == 0` in the Rust announcer but left the
+  Go path unconditional, so half that fix was missing and the hoard kept asking
+  trackers for peers it had no reason to dial. Both paths agree now.
+
 ## v3.172.1
 
 ### Fixed
