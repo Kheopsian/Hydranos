@@ -66,6 +66,26 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
+## v3.180.0
+
+### Fixed
+- **Webseed fetches now use HTTP/1.1, and that is the whole performance story.**
+  archive.org negotiates h2 (ALPN verified), so reqwest was multiplexing every
+  concurrent request to a host onto a single TCP connection whose bandwidth the
+  streams then shared. The phase instrumentation added in v3.179.0 made it
+  unambiguous: 9.25 requests per span taking 11.2 s at 1.21 s each -- exactly
+  their sum, so no overlap whatsoever -- with 761 s of a 60 s window spent in
+  fetch and essentially nothing anywhere else. That is why raising the worker
+  count from 16 to 48, batching pieces into spans, issuing a span's file
+  requests together and moving the slot budget between 300 and 25000 had all
+  left the rate pinned around 2.7 MB/s: they were adding parallelism upstream
+  of a transport that refused to carry it.
+  A plain HTTP/1.1 benchmark run from the same host, on the same IP, at the same
+  moment, pulled 20.78 MB/s -- it opens one socket per thread. Forcing h1 gives
+  each in-flight request its own connection, and `pool_max_idle_per_host` is
+  raised to 256 so those connections are reused instead of re-handshaking TLS
+  at every request.
+
 ## v3.179.0
 
 ### Added
