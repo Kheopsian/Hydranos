@@ -614,7 +614,25 @@ fn build_client(cfg: &EngineConfig) -> Result<reqwest::Client, String> {
         .user_agent(cfg.user_agent.clone())
         .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(20))
-        .pool_idle_timeout(Duration::from_secs(90));
+        .pool_idle_timeout(Duration::from_secs(90))
+        // HTTP/1.1 ONLY, and this is the whole performance story.
+        //
+        // archive.org negotiates h2 (verified: ALPN returns `h2`), and reqwest
+        // then multiplexes every concurrent request to a host onto ONE TCP
+        // connection. Streams on that single connection share its bandwidth, so
+        // a span's file requests serialised no matter what: instrumentation
+        // measured 9.25 requests per span taking 11.2 s at 1.21 s each -- the
+        // exact sum, i.e. no overlap at all -- while worker count, span length
+        // and slot budget all moved without shifting the 2.7 MB/s ceiling.
+        // A plain HTTP/1.1 benchmark from the same host at the same moment
+        // pulled 20.78 MB/s, because urllib opens one socket per thread.
+        // Forcing h1 gives each in-flight request its own connection, which is
+        // what the parallelism was written to exploit.
+        .http1_only()
+        // With one connection per in-flight request, the pool has to be allowed
+        // to keep them: the default would re-handshake TLS constantly at this
+        // request rate.
+        .pool_max_idle_per_host(256);
     if let Ok(url) = std::env::var("TYPHON_ANNOUNCE_PROXY") {
         if !url.is_empty() {
             let p = reqwest::Proxy::all(&url).map_err(|e| format!("proxy {}: {}", url, e))?;
