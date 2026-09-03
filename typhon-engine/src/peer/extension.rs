@@ -72,7 +72,10 @@ impl PeerExt {
 /// use to send data *back* to us.
 pub fn build_extension_handshake(listen_port: u16, metadata_size: Option<usize>) -> Vec<u8> {
     let mut m = BTreeMap::new();
-    m.insert(b"ut_pex".to_vec(), Bencode::Int(OUR_UT_PEX_ID as i64));
+    // Left out entirely when PEX is off, rather than advertised and ignored.
+    if pex_enabled() {
+        m.insert(b"ut_pex".to_vec(), Bencode::Int(OUR_UT_PEX_ID as i64));
+    }
     m.insert(b"ut_metadata".to_vec(), Bencode::Int(OUR_UT_METADATA_ID as i64));
 
     let mut root = BTreeMap::new();
@@ -115,7 +118,9 @@ pub fn parse_extension_handshake_full(payload: &[u8]) -> Option<ExtHandshake> {
         .filter(|n| *n > 0)
         .map(|n| n as usize);
     Some(ExtHandshake {
-        ut_pex_id: id_of(b"ut_pex"),
+        // With PEX off the peer's id is dropped here, so no caller can reach
+        // for it later and start a conversation the config forbade.
+        ut_pex_id: if pex_enabled() { id_of(b"ut_pex") } else { None },
         ut_metadata_id: id_of(b"ut_metadata"),
         metadata_size,
     })
@@ -181,6 +186,21 @@ static ENABLE_IPV6: AtomicBool = AtomicBool::new(false);
 
 pub fn set_enable_ipv6(on: bool) {
     ENABLE_IPV6.store(on, Ordering::Relaxed);
+}
+
+/// Whether this engine takes part in BEP 11 peer exchange at all. On unless
+/// the config says otherwise, which is the behaviour every install has had.
+/// Off is enforced on both sides at once: we stop advertising `ut_pex`, and we
+/// forget a peer's ut_pex id. Advertising the extension and then dropping what
+/// arrives would still tell the swarm we trade peer lists.
+static ENABLE_PEX: AtomicBool = AtomicBool::new(true);
+
+pub fn set_enable_pex(on: bool) {
+    ENABLE_PEX.store(on, Ordering::Relaxed);
+}
+
+pub fn pex_enabled() -> bool {
+    ENABLE_PEX.load(Ordering::Relaxed)
 }
 
 /// Parse a BEP 11 PEX message payload. Returns the peers in `added`, plus
@@ -249,4 +269,48 @@ fn encode_compact_v4(addrs: &[SocketAddr]) -> Vec<u8> {
         }
     }
     out
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both directions of the PEX switch, in one test on purpose: ENABLE_PEX is
+    /// a process-wide static, so two tests toggling it would race each other.
+    #[test]
+    fn pex_off_is_silent_on_the_wire_and_deaf_to_what_arrives() {
+        // A handshake as a peer that does advertise ut_pex would send it.
+        let peer_hs = build_extension_handshake(6881, None);
+
+        set_enable_pex(true);
+        let on = build_extension_handshake(6881, None);
+        assert!(
+            on.windows(6).any(|w| w == b"ut_pex"),
+            "PEX on but ut_pex is missing from our handshake"
+        );
+        assert_eq!(
+            parse_extension_handshake_full(&peer_hs).unwrap().ut_pex_id,
+            Some(OUR_UT_PEX_ID),
+            "PEX on but we dropped the peer's ut_pex id"
+        );
+
+        set_enable_pex(false);
+        let off = build_extension_handshake(6881, None);
+        assert!(
+            !off.windows(6).any(|w| w == b"ut_pex"),
+            "PEX off but we still advertise ut_pex, which tells the swarm we trade peers"
+        );
+        assert!(
+            off.windows(11).any(|w| w == b"ut_metadata"),
+            "PEX off must not take ut_metadata down with it"
+        );
+        assert_eq!(
+            parse_extension_handshake_full(&peer_hs).unwrap().ut_pex_id,
+            None,
+            "PEX off but we kept the peer's ut_pex id"
+        );
+
+        set_enable_pex(true);
+    }
 }

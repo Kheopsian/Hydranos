@@ -119,6 +119,22 @@ pub struct EngineConfig {
     /// reads the tracker `peers6` field).
     #[serde(default)]
     pub enable_ipv6: bool,
+    /// Take part in the BEP 5 DHT: bootstrap a node, run a `get_peers` stream
+    /// per torrent, and feed what it finds to the dial queue. On by default,
+    /// which is how every install has run so far. Off, `dht::start` is never
+    /// called, so `dht::handle()` stays None and every `track_torrent` call
+    /// site (add, start, boot, magnet) turns into a no-op on its own -- there
+    /// is no second place that has to remember this switch exists.
+    ///
+    /// `private` torrents (BEP 27) are skipped either way.
+    #[serde(default = "default_true")]
+    pub dht_enabled: bool,
+    /// Take part in BEP 11 peer exchange. On by default. Off, we do not
+    /// advertise `ut_pex` in our extended handshake and we ignore any PEX
+    /// message that still arrives, so no peer address is learned from, or
+    /// disclosed to, the swarm outside the tracker.
+    #[serde(default = "default_true")]
+    pub pex_enabled: bool,
     /// Per-tunnel network bindings. Empty = legacy single-binding derived
     /// from `listen_port`/`listen_interfaces`/`peer_fingerprint`. Non-empty
     /// = each binding owns one TCP listener and one source-bound dial path
@@ -127,6 +143,7 @@ pub struct EngineConfig {
     pub bindings: Vec<Binding>,
 }
 
+fn default_true() -> bool { true }
 fn default_data_dir() -> String { "/configs".into() }
 fn default_listen_port() -> u16 { 16172 }
 fn default_max_connections() -> usize { 12000 }

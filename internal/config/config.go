@@ -36,6 +36,13 @@ type SessionConfig struct {
 	// far. Enabling it adds a v6-only listener beside the v4 one rather than
 	// replacing it, so v4 peers keep their v4 addresses everywhere.
 	EnableIPv6 bool `toml:"enable_ipv6" json:"enable_ipv6"`
+	// Peer discovery that does not go through a tracker. Both default to true
+	// (DefaultConfig), and Reload decodes the file over those defaults, so a
+	// config written before these keys existed keeps the behaviour it had.
+	// Both already skip `private` torrents; turning them off is for the
+	// operator who wants this engine to reach nothing but its trackers.
+	EnableDHT bool `toml:"enable_dht" json:"enable_dht"`
+	EnablePEX bool `toml:"enable_pex" json:"enable_pex"`
 	// Optional second TCP listener expecting HAProxy PROXY protocol v2 (real
 	// peer IP in header). Used by the v6 bypass path: peer → VPS haproxy →
 	// the router rdr → the seedbox host [::]:listen_port_proxy_v2. 0 = disabled.
@@ -395,6 +402,8 @@ func DefaultConfig() *HydraConfig {
 			CreateTorrentFolder: false,
 		},
 		Race: SessionConfig{
+			EnableDHT:            true,
+			EnablePEX:            true,
 			ListenPort:           16171,
 			MaxConnections:       4000,
 			MaxUploadsPerTorrent: 100,
@@ -414,6 +423,8 @@ func DefaultConfig() *HydraConfig {
 			},
 		},
 		Hoard: SessionConfig{
+			EnableDHT:            true,
+			EnablePEX:            true,
 			ListenPort:           16172,
 			MaxConnections:       8000,
 			MaxUploadsPerTorrent: 20,
@@ -460,12 +471,16 @@ var migrationKeys = []struct{ section, key, value string }{
 	{"daemon", "agent_token", `""`},
 	{"race", "bind_interface", `""`},
 	{"race", "enable_ipv6", `false`},
+	{"race", "enable_dht", `true`},
+	{"race", "enable_pex", `true`},
 	{"race", "listen_interfaces", `""`},
 	{"race", "announce_rate_limit", `0.0`},
 	{"race", "max_dials_per_sec", `0.0`},
 	{"race", "start_paused", `false`},
 	{"hoard", "bind_interface", `""`},
 	{"hoard", "enable_ipv6", `false`},
+	{"hoard", "enable_dht", `true`},
+	{"hoard", "enable_pex", `true`},
 	{"hoard", "listen_interfaces", `""`},
 	{"hoard", "announce_rate_limit", `0.0`},
 	{"hoard", "max_dials_per_sec", `0.0`},

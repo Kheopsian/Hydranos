@@ -5385,6 +5385,8 @@ const _SETTINGS_DESC = {
     listen_port: "TCP/UDP port this session listens on for incoming peers.",
     listen_interfaces: "Comma-separated ip:port bind list (multi-homing).",
     enable_ipv6: "Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX offer. Off = IPv4 only. Only enable it if this host has working IPv6, otherwise you announce an address nobody can reach.",
+    enable_dht: "Find peers through the global DHT (BEP 5) on top of the trackers. Private torrents are never announced to it either way. Off, this engine bootstraps no DHT node at all and reaches nothing but its trackers.",
+    enable_pex: "Trade peer lists with the peers already connected (BEP 11). Off, the engine stops advertising ut_pex and ignores any PEX message it still receives, so no address is learned from or given to the swarm.",
     listen_port_proxy_v2: "Extra listener expecting HAProxy PROXY-protocol v2 (real peer IP). 0 = off.",
     listen_addr_proxy_v2: "Explicit bind address for the PROXY-v2 listener. Empty = [::] wildcard.",
     proxy_v2_trusted_sources: "Source IPs allowed to send PROXY-v2 headers.",
@@ -5446,6 +5448,9 @@ const _SETTINGS_COMMON = new Set([
     "race::upload_rate_limit", "race::active_downloads", "race::active_seeds", "race::active_limit",
     "hoard::listen_port", "hoard::bind_interface", "hoard::enable_ipv6", "hoard::max_connections", "hoard::max_uploads_per_torrent",
     "hoard::upload_rate_limit", "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit",
+    // Peer sources: not advanced tuning. Someone on a private tracker has to
+    // be able to find these without hunting through the advanced list.
+    "race::enable_dht", "race::enable_pex", "hoard::enable_dht", "hoard::enable_pex",
     // Common toggles
     "vpn_speedtest::enabled", "race_drain::enabled",
 ]);
@@ -5470,6 +5475,8 @@ const _SETTINGS_DEFAULT = {
     "daemon::api_host": "0.0.0.0", "daemon::api_port": 8199,
     "daemon::data_dir": "/config",
     "daemon::create_torrent_folder": true,
+    "race::enable_dht": true, "race::enable_pex": true,
+    "hoard::enable_dht": true, "hoard::enable_pex": true,
     "race::listen_port": 16171, "race::max_connections": 4000,
     "race::max_uploads_per_torrent": 100,
     "race::peer_timeout": 30,
