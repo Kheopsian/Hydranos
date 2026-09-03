@@ -3,6 +3,21 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.171.0
+
+### Fixed
+- The whole UI answered about a second late: hovering a menu, the cursor shape
+  and clicking a torrent all lagged behind the mouse. Every `stats_snapshot`
+  frame (about one per second) made the hoard table sort all 196k torrents to
+  paint 500 rows, and the comparator's tie-break ran an Intl `localeCompare` on
+  40-character info hashes for nearly every comparison whenever the sorted
+  column held mostly equal values. The table now takes the top 500 through a
+  bounded heap and orders only those, for the same rows in the same order:
+  130ms -> 13ms sorted by date added, 360ms -> 18ms by upload rate, 340ms ->
+  41ms by name.
+- The hoard table also rebuilt itself once a second while another tab was on
+  screen. It now defers the repaint until the Hoard tab comes back.
+
 ## v3.170.0
 
 ### Added
