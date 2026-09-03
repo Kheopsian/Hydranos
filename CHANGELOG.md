@@ -3,6 +3,32 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v3.172.0
+
+### Added
+- `enable_dht` and `enable_pex`, per engine, in `[race]` and `[hoard]`. Both
+  default to true, which is what every install has run so far, and both appear
+  in the Configuration tab beside `enable_ipv6` rather than behind the advanced
+  toggle: someone seeding on a private tracker should not have to hunt for
+  them. Existing configs gain the keys on the next start through the additive
+  migration, so the editor shows them without hand-editing the file.
+- `enable_dht = false` stops the engine bootstrapping a DHT node at all. No
+  `get_peers` stream is opened, and every later `track_torrent` (add, start,
+  resume, magnet resolution) turns into a no-op on its own.
+- `enable_pex = false` stops advertising `ut_pex` in the BEP 10 handshake and
+  drops the peer's ut_pex id, so an incoming PEX message is ignored rather than
+  parsed. Advertising the extension and silently discarding what arrives would
+  still have told the swarm we trade peer lists.
+- Both settings reach a remote node's engines through the pushed agent config,
+  so turning a peer source off is fleet-wide and not just local.
+
+### Notes
+- `private` torrents (BEP 27) were, and remain, excluded from both regardless
+  of these keys.
+- The `dht_enabled` / `pex_enabled` fields already existed in the engine config
+  JSON, hardcoded to true and ignored by Typhon since the libtorrent era. They
+  are now read, and carry the operator's choice.
+
 ## v3.171.0
 
 ### Fixed

@@ -301,16 +301,33 @@ async fn main() {
     let loaded = torrent_mgr.load_resume_data();
     info!("[engine] loaded {} torrents from resume data", loaded);
 
+    // DHT (BEP 5) and PEX (BEP 11) are the two ways this engine finds peers
+    // without a tracker. Both default to on and both already skip `private`
+    // torrents, but an operator who wants to talk to nothing but their
+    // trackers can switch either off per engine.
+    peer::extension::set_enable_pex(config.pex_enabled);
+    if !config.pex_enabled {
+        info!("[engine] PEX disabled by config: ut_pex is not advertised, and an incoming PEX message is ignored");
+    }
+
     // Bootstrap DHT (BEP 5). Non-private torrents will get a get_peers stream
     // that funnels discovered peers into the dial queue.
-    dht::start().await;
-    for t in torrent_mgr.all().iter() {
-        // Stopped torrents stay off the DHT until they are started again;
-        // tracking them here would resurrect the very tasks stop_torrent kills.
-        if t.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
-            continue;
+    //
+    // Skipping start() is the whole switch: DHT.get() then stays None, so the
+    // track_torrent calls that fire later on add/start/magnet return early by
+    // themselves. Nothing else in the engine has to test this flag.
+    if config.dht_enabled {
+        dht::start().await;
+        for t in torrent_mgr.all().iter() {
+            // Stopped torrents stay off the DHT until they are started again;
+            // tracking them here would resurrect the very tasks stop_torrent kills.
+            if t.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            dht::track_torrent(t.clone());
         }
-        dht::track_torrent(t.clone());
+    } else {
+        info!("[engine] DHT disabled by config: no bootstrap, no get_peers, no peer discovery outside the trackers");
     }
 
     // Bind shared uTP socket on the same UDP port as TCP listen_port (qBittorrent default).

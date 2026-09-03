@@ -105,7 +105,9 @@ type EngineConfig struct {
 	PeerTurnoverCutoff   int `json:"peer_turnover_cutoff"`
 	AllowedFastSetSize   int `json:"allowed_fast_set_size"`
 
-	// Features
+	// Features. Mirrors SessionConfig.EnableDHT / EnablePEX. Typhon defaults
+	// both to true when the key is absent, so an older front that omits them
+	// still gets the historical behaviour.
 	DHTEnabled    bool   `json:"dht_enabled"`
 	PEXEnabled    bool   `json:"pex_enabled"`
 	SuggestMode   int    `json:"suggest_mode"`
@@ -250,9 +252,10 @@ func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		PeerTurnoverCutoff:   90,
 		AllowedFastSetSize:   0, // 0 = disabled
 
-		// Features
-		DHTEnabled:    true,
-		PEXEnabled:    true,
+		// Features. Typhon reads both; they were hardcoded here while it
+		// ignored them, and are now the operator's switch.
+		DHTEnabled:    cfg.EnableDHT,
+		PEXEnabled:    cfg.EnablePEX,
 		SuggestMode:   1, // suggest_read_cache
 		MixedModeAlgo: "prefer_tcp",
 
@@ -342,9 +345,10 @@ func BuildRaceConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		PeerTurnoverCutoff:   90,
 		AllowedFastSetSize:   10,
 
-		// Features
-		DHTEnabled:  true,
-		PEXEnabled:  true,
+		// Features. Typhon reads both; they were hardcoded here while it
+		// ignored them, and are now the operator's switch.
+		DHTEnabled:  cfg.EnableDHT,
+		PEXEnabled:  cfg.EnablePEX,
 		SuggestMode: 1,
 
 		// Race-specific tuning

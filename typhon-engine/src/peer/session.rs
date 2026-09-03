@@ -354,7 +354,7 @@ pub async fn run(
                                                 .ok();
                                         }
                                     }
-                                } else if ext_id == OUR_UT_PEX_ID {
+                                } else if ext_id == OUR_UT_PEX_ID && extension::pex_enabled() {
                                     let new_peers = extension::parse_pex(&payload);
                                     if !new_peers.is_empty() {
                                         crate::tracker::PEX_PEERS_DISCOVERED.fetch_add(
