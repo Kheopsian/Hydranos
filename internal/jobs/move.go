@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/Kheopsian/hydra/internal/move"
 	"github.com/Kheopsian/hydra/internal/store"
@@ -47,6 +48,14 @@ type MoveParams struct {
 	AllowBreakingHardlinks bool `json:"allow_breaking_hardlinks"`
 	// BytesPerSecond caps the copy. Zero is uncapped.
 	BytesPerSecond int64 `json:"bytes_per_second,omitempty"`
+	// Loose marks a payload with no folder of its own, whose Source is a
+	// category directory shared with other torrents. Files then lists what
+	// belongs to this torrent; nothing else in Source may be touched.
+	Loose bool `json:"loose,omitempty"`
+	// Files are the payload's paths relative to Source. Stored rather than
+	// re-derived so a resumed job moves what it was asked to move, even if
+	// the engine has since forgotten the torrent.
+	Files []string `json:"files,omitempty"`
 }
 
 // MoveRunner relocates torrent payloads.
@@ -69,6 +78,27 @@ func (r *MoveRunner) Resume(j *store.Job) (bool, string) {
 	var p MoveParams
 	if err := json.Unmarshal([]byte(j.Params), &p); err != nil {
 		return false, "job params unreadable: " + err.Error()
+	}
+	if p.Loose {
+		// The source is a shared directory: it exists whether or not this
+		// move ran, so its presence says nothing. Where the payload's own
+		// files are is what tells the two apart.
+		atSource, atTarget := 0, 0
+		for _, rel := range p.Files {
+			if _, err := os.Stat(filepath.Join(p.Source, rel)); err == nil {
+				atSource++
+			}
+			if _, err := os.Stat(filepath.Join(p.Target, rel)); err == nil {
+				atTarget++
+			}
+		}
+		if atSource == 0 && len(p.Files) > 0 && atTarget == len(p.Files) {
+			return false, "already completed before the restart: payload is at " + p.Target
+		}
+		if atSource == 0 {
+			return false, "payload is no longer at " + p.Source
+		}
+		return true, ""
 	}
 	if _, err := os.Stat(p.Source); err != nil {
 		// The source is gone. Either the move finished and the process died
@@ -94,7 +124,13 @@ func (r *MoveRunner) Run(ctx context.Context, j *store.Job, report func(done, to
 		return fmt.Errorf("move job: no engine holds %s", j.InfoHash)
 	}
 
-	plan, err := move.Inspect(p.Source, p.Target)
+	var plan *move.Plan
+	var err error
+	if p.Loose {
+		plan, err = move.InspectLoose(p.Source, p.Target, j.InfoHash, p.Files)
+	} else {
+		plan, err = move.Inspect(p.Source, p.Target)
+	}
 	if err != nil {
 		return err
 	}
@@ -134,6 +170,16 @@ func (r *MoveRunner) Run(ctx context.Context, j *store.Job, report func(done, to
 			stopped = false
 			return nil
 		},
+		// Called instead of AfterSwap when the swap is called off: the
+		// payload never left the source and the engine still points at it,
+		// so the torrent only has to go back to work.
+		AbortSwap: func() error {
+			if err := host.StartTorrent(j.InfoHash); err != nil {
+				return fmt.Errorf("restarting the torrent: %w", err)
+			}
+			stopped = false
+			return nil
+		},
 	})
 
 	if err != nil {
@@ -149,7 +195,7 @@ func (r *MoveRunner) Run(ctx context.Context, j *store.Job, report func(done, to
 		if ctx.Err() != nil {
 			// Cancelled: drop the half-built copy so the next attempt is not
 			// misled by it and the space is returned.
-			if cerr := move.CleanupStaging(p.Target); cerr != nil {
+			if cerr := move.CleanupStagingAt(plan.Staging); cerr != nil {
 				slog.Warn("move job: could not clean up staging", "target", p.Target, "error", cerr)
 			}
 		}

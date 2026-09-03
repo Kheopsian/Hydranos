@@ -127,16 +127,16 @@ func (s *Server) handleMovePreview(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "category required"})
 		return
 	}
-	src, dst, _, _, _, err := s.resolveMovePaths(hash, target)
+	mp, err := s.resolveMovePaths(hash, target)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
-	if src == dst {
+	if mp.Source == mp.Target {
 		c.JSON(http.StatusOK, gin.H{"move_needed": false})
 		return
 	}
-	plan, err := move.Inspect(src, dst)
+	plan, err := inspectFor(mp, hash)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -153,6 +153,9 @@ func (s *Server) handleMovePreview(c *gin.Context) {
 		"hardlinked_bytes":       plan.HardlinkedBytes,
 		"hardlink_examples":      plan.HardlinkExamples,
 		"needs_hardlink_consent": !plan.SameFS && plan.HardlinkedFiles > 0,
+		// Loose says the payload has no folder of its own and will land
+		// directly in the category directory, keeping the layout it has.
+		"loose": plan.Loose,
 	}
 	// Report the blocking problems the same way the submit path will, so the
 	// UI never shows a green preview for something that will be refused.
@@ -167,15 +170,15 @@ func (s *Server) handleMovePreview(c *gin.Context) {
 // Returns 409 with a machine-readable reason when the operator has to decide
 // something -- hardlinks above all -- rather than guessing on their behalf.
 func (s *Server) submitMoveJob(c *gin.Context, hash, category string, allowBreakingHardlinks bool) bool {
-	src, dst, engineSavePath, name, _, err := s.resolveMovePaths(hash, category)
+	mp, err := s.resolveMovePaths(hash, category)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return false
 	}
-	if src == dst {
+	if mp.Source == mp.Target {
 		return true // nothing to move; caller carries on with the label change
 	}
-	plan, err := move.Inspect(src, dst)
+	plan, err := inspectFor(mp, hash)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return false
@@ -190,6 +193,12 @@ func (s *Server) submitMoveJob(c *gin.Context, hash, category string, allowBreak
 			body["hardlinked_bytes"] = plan.HardlinkedBytes
 			body["hardlink_examples"] = plan.HardlinkExamples
 			body["retry_with"] = "allow_breaking_hardlinks"
+		case errors.Is(err, move.ErrTargetFileExists):
+			// A loose move refused per file: the names it needs are
+			// taken by torrents already in the target category.
+			body["reason"] = "target_file_exists"
+			body["target"] = plan.Target
+			body["collisions"] = plan.Collisions
 		case errors.Is(err, move.ErrTargetExists):
 			body["reason"] = "target_exists"
 			body["target"] = plan.Target
@@ -206,11 +215,13 @@ func (s *Server) submitMoveJob(c *gin.Context, hash, category string, allowBreak
 	j, err := s.jobs.Submit(store.JobTypeMoveData, hash, jobs.MoveParams{
 		Source:                 plan.Source,
 		Target:                 plan.Target,
-		EngineSavePath:         engineSavePath,
+		EngineSavePath:         mp.EngineSavePath,
 		Category:               category,
-		Name:                   name,
+		Name:                   mp.Name,
 		AllowBreakingHardlinks: allowBreakingHardlinks,
 		BytesPerSecond:         s.config.Daemon.MoveBytesPerSecond(),
+		Loose:                  plan.Loose,
+		Files:                  plan.Files,
 	})
 	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
