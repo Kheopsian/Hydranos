@@ -66,7 +66,26 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
-## v3.177.0
+## v3.178.0
+
+### Fixed
+- **Webseed workers spent their time walking the catalogue instead of
+  downloading.** Each worker called `find_torrent` — a walk of all 243k
+  torrents — **once per torrent it claimed**, and for each of the ~2000 in
+  download state it took that torrent's picker mutex for an `is_complete()` in
+  O(pieces). With the worker count raised to 48 the walk became the engine's
+  main occupation: CPU went from 87% to 223% while throughput stayed exactly
+  where it was, at ~2.7 MB/s.
+  Proof that the origin was not the limit: a plain 32-stream python benchmark
+  run **at the same time, from the same host and IP**, pulled **20.78 MB/s**
+  from archive.org while Typhon crawled at 2.7. Three successive increases in
+  concurrency had produced no gain at all, which is the signature of spinning,
+  not of an external cap.
+  A single scanner task now refills a shared queue in one walk per batch, on a
+  blocking thread rather than on a runtime worker, and the workers just pop
+  from it. `TorrentManager::collect_torrents` gathers a batch in one pass and
+  returns info hashes only, so the result keeps nothing alive.
+
 
 ### Fixed
 - **Webseed spans were being truncated by a random starting piece.** The pool

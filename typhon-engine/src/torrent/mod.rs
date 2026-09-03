@@ -149,6 +149,27 @@ impl TorrentManager {
             .map(|r| r.value().clone())
     }
 
+    /// Up to `max` torrents matching `pred`, gathered in ONE walk.
+    ///
+    /// The point is the amortisation: a caller that needs a stream of work
+    /// items must not re-walk the whole catalogue per item. Only the info
+    /// hashes come back, so nothing is kept alive by the result.
+    pub fn collect_torrents<F>(&self, max: usize, pred: F) -> Vec<InfoHash>
+    where
+        F: Fn(&Arc<TorrentState>) -> bool,
+    {
+        let mut out = Vec::with_capacity(max.min(1024));
+        for r in self.torrents.iter() {
+            if out.len() >= max {
+                break;
+            }
+            if pred(r.value()) {
+                out.push(*r.key());
+            }
+        }
+        out
+    }
+
     pub fn all(&self) -> Vec<Arc<TorrentState>> {
         self.torrents.iter().map(|r| r.value().clone()).collect()
     }
