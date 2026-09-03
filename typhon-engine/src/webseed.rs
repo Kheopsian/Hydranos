@@ -16,6 +16,7 @@
 //! Each worker claims a torrent, drives it as far as it can, and releases it.
 //! Claims live in `CLAIMED` so two workers never fight over the same picker.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -76,6 +77,11 @@ const MAX_PIECES_PER_CLAIM: u32 = 64;
 /// Consecutive failures before a torrent is parked. A deleted or renamed item
 /// answers 404 for ever; at catalogue scale that must not become a permanent
 /// retry storm against the origin.
+/// Refill the work queue once it drops below this.
+const QUEUE_LOW: usize = 64;
+/// How many candidates one walk of the catalogue gathers.
+const QUEUE_TARGET: usize = 2048;
+
 const MAX_FAILS: u32 = 5;
 const PARK_SECS: u64 = 3600;
 
@@ -422,9 +428,9 @@ async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwes
         let t = match candidate {
             Some(t) => t,
             None => {
-                // Ten seconds here was pure lost throughput whenever the
-                // candidate set thinned out for a moment.
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                // The scanner refills every 500 ms; waiting longer than
+                // that just idles a worker.
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             }
         };
@@ -461,25 +467,75 @@ async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwes
     }
 }
 
-/// Scan for the next torrent to work on. Skips anything already claimed by
-/// another worker or parked by the failure backoff.
-fn next_candidate(mgr: &TorrentManager) -> Option<Arc<TorrentState>> {
-    let now = now_secs();
-    // find_torrent walks the shard map in place: at a million torrents this
-    // must not allocate a vector of every Arc just to pick one.
-    mgr.find_torrent(|t| {
-        let ih = t.info_hash;
-        if let Some(b) = backoff().get(&ih) {
-            if b.1 > now {
-                return false;
+/// Work waiting to be claimed, filled by the scanner, drained by the workers.
+static QUEUE: std::sync::OnceLock<std::sync::Mutex<VecDeque<InfoHash>>> =
+    std::sync::OnceLock::new();
+
+fn queue() -> &'static std::sync::Mutex<VecDeque<InfoHash>> {
+    QUEUE.get_or_init(|| std::sync::Mutex::new(VecDeque::new()))
+}
+
+/// Refill the queue when it runs low, in ONE walk of the catalogue.
+///
+/// Every worker used to walk all 243k torrents itself, once per torrent it
+/// claimed, taking the picker mutex on each of the ~2000 downloading ones for
+/// an `is_complete()` in O(pieces). At 48 workers that walk became the engine's
+/// main occupation: tripling the workers tripled the CPU (87% -> 223%) and left
+/// throughput exactly where it was. One scanner amortises the walk over a whole
+/// batch, and it runs on a blocking thread because it is a long synchronous
+/// scan that has no business sitting on a runtime worker.
+async fn scanner(mgr: Arc<TorrentManager>) {
+    loop {
+        let queued = queue().lock().map(|q| q.len()).unwrap_or(0);
+        if queued < QUEUE_LOW {
+            let mgr2 = mgr.clone();
+            let found = tokio::task::spawn_blocking(move || {
+                let now = now_secs();
+                mgr2.collect_torrents(QUEUE_TARGET, |t| {
+                    let ih = t.info_hash;
+                    if let Some(b) = backoff().get(&ih) {
+                        if b.1 > now {
+                            return false;
+                        }
+                    }
+                    if claimed().contains(&ih) {
+                        return false;
+                    }
+                    wants_webseed(t)
+                })
+            })
+            .await
+            .unwrap_or_default();
+
+            if let Ok(mut q) = queue().lock() {
+                for ih in found {
+                    q.push_back(ih);
+                }
             }
         }
-        if !wants_webseed(t) {
-            return false;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Take the next piece of work off the queue, claiming it on the way out.
+fn next_candidate(mgr: &TorrentManager) -> Option<Arc<TorrentState>> {
+    loop {
+        let ih = {
+            let mut q = queue().lock().ok()?;
+            q.pop_front()?
+        };
+        if !claimed().insert(ih) {
+            continue; // another worker got there first
         }
-        // insert() returns false when another worker already holds the claim.
-        claimed().insert(ih)
-    })
+        match mgr.get(&ih) {
+            Some(t) if wants_webseed(&t) => return Some(t),
+            _ => {
+                // Gone or finished between the scan and now.
+                claimed().remove(&ih);
+                continue;
+            }
+        }
+    }
 }
 
 /// Build the HTTP client used for every webseed fetch.
@@ -535,6 +591,10 @@ pub fn start(mgr: Arc<TorrentManager>, cfg: &EngineConfig) {
     };
     let workers = cfg.webseed_max_concurrent.max(1);
     let disk = mgr.disk().clone();
+    {
+        let mgr = mgr.clone();
+        tokio::spawn(async move { scanner(mgr).await });
+    }
     info!("[webseed] BEP 19 enabled, {} concurrent fetches", workers);
     for _ in 0..workers {
         let mgr = mgr.clone();
