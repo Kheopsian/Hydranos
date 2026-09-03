@@ -130,6 +130,25 @@ impl TorrentManager {
         self.torrents.len()
     }
 
+    /// The disk manager every torrent here writes through. Needed by the
+    /// subsystems that complete a piece without owning a peer connection.
+    pub fn disk(&self) -> &Arc<DiskManager> {
+        &self.disk
+    }
+
+    /// First torrent matching `pred`, walked in place. Deliberately not
+    /// `all().into_iter().find()`: that clones an Arc for every torrent in
+    /// the catalogue before looking at the first one.
+    pub fn find_torrent<F>(&self, pred: F) -> Option<Arc<TorrentState>>
+    where
+        F: Fn(&Arc<TorrentState>) -> bool,
+    {
+        self.torrents
+            .iter()
+            .find(|r| pred(r.value()))
+            .map(|r| r.value().clone())
+    }
+
     pub fn all(&self) -> Vec<Arc<TorrentState>> {
         self.torrents.iter().map(|r| r.value().clone()).collect()
     }

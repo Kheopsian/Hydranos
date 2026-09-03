@@ -112,6 +112,26 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         }
     }
 
+    // BEP 19 webseeds. The key is either a single string or a list of
+    // them; Internet Archive ships two (the collection URL and the
+    // storage node that currently holds the item).
+    let mut url_list = Vec::new();
+    if let Some(ul) = dict.get("url-list") {
+        if let Some(s) = ul.as_string() {
+            if !s.is_empty() {
+                url_list.push(s.to_string());
+            }
+        } else if let Some(items) = ul.as_list() {
+            for u in items {
+                if let Some(s) = u.as_string() {
+                    if !s.is_empty() {
+                        url_list.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     Ok(TorrentMeta {
         info_hash,
         name,
@@ -120,6 +140,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         total_size,
         files,
         trackers,
+        url_list,
         private,
         multi_file,
         info_dict_len: info_raw.len() as u32,

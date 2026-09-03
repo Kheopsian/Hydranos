@@ -110,6 +110,8 @@ type EngineConfig struct {
 	// still gets the historical behaviour.
 	DHTEnabled    bool   `json:"dht_enabled"`
 	PEXEnabled    bool   `json:"pex_enabled"`
+	Webseed       bool   `json:"enable_webseed"`
+	WebseedConc   int    `json:"webseed_max_concurrent"`
 	SuggestMode   int    `json:"suggest_mode"`
 	MixedModeAlgo string `json:"mixed_mode_algorithm"`
 
@@ -256,6 +258,8 @@ func BuildHoardConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		// ignored them, and are now the operator's switch.
 		DHTEnabled:    cfg.EnableDHT,
 		PEXEnabled:    cfg.EnablePEX,
+		Webseed:       cfg.EnableWebseed,
+		WebseedConc:   cfg.WebseedMaxConcurrent,
 		SuggestMode:   1, // suggest_read_cache
 		MixedModeAlgo: "prefer_tcp",
 
@@ -349,6 +353,8 @@ func BuildRaceConfig(cfg *config.SessionConfig, dataDir string) EngineConfig {
 		// ignored them, and are now the operator's switch.
 		DHTEnabled:  cfg.EnableDHT,
 		PEXEnabled:  cfg.EnablePEX,
+		Webseed:     cfg.EnableWebseed,
+		WebseedConc: cfg.WebseedMaxConcurrent,
 		SuggestMode: 1,
 
 		// Race-specific tuning

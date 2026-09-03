@@ -135,6 +135,17 @@ pub struct EngineConfig {
     /// disclosed to, the swarm outside the tracker.
     #[serde(default = "default_true")]
     pub pex_enabled: bool,
+    /// Fetch from the BEP 19 `url-list` HTTP mirrors a torrent names.
+    /// On by default: a torrent that ships webseeds and has no seeder --
+    /// every Internet Archive item is one -- cannot complete any other
+    /// way, and sits at 0% with no error to explain it.
+    #[serde(default = "default_true")]
+    pub enable_webseed: bool,
+    /// How many webseed fetches may be in flight for the whole engine.
+    /// A fixed pool, not a task per torrent: the HTTP origin bounds
+    /// throughput long before the size of the catalogue does.
+    #[serde(default = "default_webseed_concurrency")]
+    pub webseed_max_concurrent: usize,
     /// Per-tunnel network bindings. Empty = legacy single-binding derived
     /// from `listen_port`/`listen_interfaces`/`peer_fingerprint`. Non-empty
     /// = each binding owns one TCP listener and one source-bound dial path
@@ -144,6 +155,7 @@ pub struct EngineConfig {
 }
 
 fn default_true() -> bool { true }
+fn default_webseed_concurrency() -> usize { 16 }
 fn default_data_dir() -> String { "/configs".into() }
 fn default_listen_port() -> u16 { 16172 }
 fn default_max_connections() -> usize { 12000 }

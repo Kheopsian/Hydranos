@@ -330,6 +330,10 @@ async fn main() {
         info!("[engine] DHT disabled by config: no bootstrap, no get_peers, no peer discovery outside the trackers");
     }
 
+    // BEP 19 webseed. Started after the resume load so the very first scan
+    // already sees the whole catalogue.
+    typhon_engine::webseed::start(torrent_mgr.clone(), &config);
+
     // Bind shared uTP socket on the same UDP port as TCP listen_port (qBittorrent default).
     // Used both for outgoing (dial fallback) and incoming (separate accept loop).
     // max_live_vsocks default is 128 which saturates immediately on a seedbox with

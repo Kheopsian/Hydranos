@@ -192,59 +192,11 @@ impl DownloadState {
             };
 
             if let Some(piece_data) = piece_data {
-                let len = piece_data.len() as u64;
-                // Write to disk with SHA1 verification
-                match self.disk.write_piece(&self.torrent, index, piece_data).await {
-                    Ok(true) => {
-                        // SHA1 verified, piece complete
-                        self.torrent.total_downloaded.fetch_add(len, Ordering::Relaxed);
-                        self.started_pieces.remove(&index);
-                        {
-                            let mut p = picker.lock().unwrap();
-                            p.set_have(index);
-                        }
-                        // Broadcast Have to all peers
-                        self.torrent.have_sender().send(index).ok();
-
-                        // Check if download is complete
-                        let is_complete = {
-                            let p = picker.lock().unwrap();
-                            p.is_complete()
-                        };
-                        if is_complete {
-                            info!("[download] {} complete!", crate::torrent::hex_encode(&self.torrent.info_hash)[..8].to_string());
-                            self.torrent.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-                            // Nothing will verify this torrent again unless the
-                            // user asks for a recheck, so give the hash table back.
-                            self.torrent.release_piece_hashes();
-                            // No further piece will complete: nothing left to announce.
-                            self.torrent.release_have_tx();
-                            self.torrent.completed_time.store(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64,
-                                Ordering::Relaxed,
-                            );
-                            // Write it down now. Waiting for the five-minute
-                            // sweep meant a restart inside that window lost the
-                            // completion and re-downloaded the whole torrent.
-                            crate::torrent::notify_completed(self.torrent.info_hash);
-                        }
-
-                        return Some(index);
-                    }
-                    Ok(false) => {
-                        // SHA1 mismatch — release so another peer can retry.
-                        tracing::warn!("[download] piece {} SHA1 mismatch, re-requesting", index);
-                        self.started_pieces.remove(&index);
-                        picker.lock().unwrap().cancel_piece(index);
-                    }
-                    Err(e) => {
-                        tracing::warn!("[download] piece {} write failed: {}", index, e);
-                        self.started_pieces.remove(&index);
-                        picker.lock().unwrap().cancel_piece(index);
-                    }
+                // Off this peer's books either way: commit_piece hands the
+                // piece back to the picker itself when it fails to verify.
+                self.started_pieces.remove(&index);
+                if commit_piece(&self.torrent, &self.disk, index, piece_data).await {
+                    return Some(index);
                 }
             }
         }
@@ -264,6 +216,82 @@ impl DownloadState {
             for piece in self.started_pieces.drain() {
                 p.cancel_piece(piece);
             }
+        }
+    }
+}
+
+/// Verify, store and account one assembled piece.
+///
+/// Shared by the peer path and the BEP 19 webseed pool: both assemble a piece
+/// from somewhere and then need the identical completion sequence — SHA1 through
+/// the disk layer, `set_have`, the Have broadcast, the hash-table release and
+/// the durable completion notice. There is deliberately ONE copy: the last time
+/// a completion path diverged from what the resume writer expected, every
+/// complete torrent had its bitfield erased on the following sweep.
+///
+/// Returns true when the piece verified and is now owned. On failure the piece
+/// is released back to the picker so another source can retry it.
+pub async fn commit_piece(
+    torrent: &Arc<TorrentState>,
+    disk: &Arc<DiskManager>,
+    index: u32,
+    piece_data: Vec<u8>,
+) -> bool {
+    let picker = match torrent.picker.get() {
+        Some(p) => p,
+        None => return false,
+    };
+    let len = piece_data.len() as u64;
+    match disk.write_piece(torrent, index, piece_data).await {
+        Ok(true) => {
+            torrent.total_downloaded.fetch_add(len, Ordering::Relaxed);
+            {
+                let mut p = picker.lock().unwrap();
+                p.set_have(index);
+            }
+            // Broadcast Have to all peers
+            torrent.have_sender().send(index).ok();
+
+            let is_complete = {
+                let p = picker.lock().unwrap();
+                p.is_complete()
+            };
+            if is_complete {
+                info!(
+                    "[download] {} complete!",
+                    crate::torrent::hex_encode(&torrent.info_hash)[..8].to_string()
+                );
+                torrent
+                    .status
+                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                // Nothing will verify this torrent again unless the user asks
+                // for a recheck, so give the hash table back.
+                torrent.release_piece_hashes();
+                // No further piece will complete: nothing left to announce.
+                torrent.release_have_tx();
+                torrent.completed_time.store(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                    Ordering::Relaxed,
+                );
+                // Write it down now. Waiting for the five-minute sweep meant a
+                // restart inside that window lost the completion and
+                // re-downloaded the whole torrent.
+                crate::torrent::notify_completed(torrent.info_hash);
+            }
+            true
+        }
+        Ok(false) => {
+            tracing::warn!("[download] piece {} SHA1 mismatch, re-requesting", index);
+            picker.lock().unwrap().cancel_piece(index);
+            false
+        }
+        Err(e) => {
+            tracing::warn!("[download] piece {} write failed: {}", index, e);
+            picker.lock().unwrap().cancel_piece(index);
+            false
         }
     }
 }

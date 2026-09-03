@@ -12,3 +12,4 @@ pub mod crypto;
 pub mod dht;
 pub mod magnet;
 pub mod netpin;
+pub mod webseed;
