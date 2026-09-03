@@ -819,6 +819,9 @@ function _activateTabNow(name) {
     content.classList.add("active");
     window.location.hash = name;
     if (name !== "logs") stopLogsTail();
+    // The hoard table skips its render while off screen, so pay the deferred
+    // one now rather than leaving a stale table until the next snapshot.
+    if (name === "hoard" && _hoardRenderDirty) _scheduleHoardRender();
     if (name === "config") updateSettings();
     else if (name === "add") refreshCategoryOptions();
     else if (name === "changelog") loadChangelog();
@@ -2126,32 +2129,70 @@ function sortHoard(th) {
     renderHoardTable();
 }
 
-function renderHoardTable() {
-    const search = (document.getElementById("hoard-search")?.value || "").toLowerCase();
-    const catFilter = _hoardCatFilter;
-    const stateFilter = _hoardStateFilter;
-
-    let filtered = _hoardAllTorrents.filter(t => _hoardMatches(t, search, null));
-
-    // Tri
-    const col = _hoardSortCol;
-    const asc = _hoardSortAsc;
-    filtered = [...filtered].sort((a, b) => {
-        let va = a[col] ?? 0, vb = b[col] ?? 0;
+// Comparator for the hoard table. The tie-break used to be a localeCompare on
+// the info_hash, which is the expensive path taken by nearly EVERY comparison
+// as soon as the sorted column holds mostly equal values (upload_rate and
+// peers are 0 on most rows): hashes are lowercase hex, so plain string order
+// is the same order for free.
+const _hoardCollator = new Intl.Collator();
+function _hoardCmp(col, asc) {
+    return (a, b) => {
+        const va = a[col] ?? 0, vb = b[col] ?? 0;
         if (typeof va === "string") {
-            const cmp = va.localeCompare(vb);
+            const cmp = _hoardCollator.compare(va, vb);
             if (cmp !== 0) return asc ? cmp : -cmp;
         } else {
             const diff = asc ? va - vb : vb - va;
             if (diff !== 0) return diff;
         }
-        return (a.info_hash || "").localeCompare(b.info_hash || "");
-    });
+        const ha = a.info_hash || "", hb = b.info_hash || "";
+        return ha < hb ? -1 : ha > hb ? 1 : 0;
+    };
+}
+
+// The k best rows, in order, without ordering the other N-k. Bounded max-heap:
+// heap[0] is the worst row kept so far, so a losing row is rejected in one
+// comparison and the pass is O(N log k) instead of O(N log N).
+//
+// Why it matters: stats_snapshot re-renders the table about once a second, and
+// fully sorting the hoard to paint 500 rows cost 130ms (added_time) to 360ms
+// (upload_rate) at 196k torrents. That stall lands on the frame boundary,
+// which is what made hover, the cursor shape and clicks lag about a second
+// behind the mouse. Output is identical to the sort it replaces.
+function _topKSorted(rows, k, cmp) {
+    const n = rows.length;
+    if (n <= k) return rows.slice().sort(cmp);
+    const heap = rows.slice(0, k);
+    for (let i = (k >> 1) - 1; i >= 0; i--) _heapSiftDown(heap, i, k, cmp);
+    for (let i = k; i < n; i++) {
+        if (cmp(rows[i], heap[0]) < 0) { heap[0] = rows[i]; _heapSiftDown(heap, 0, k, cmp); }
+    }
+    return heap.sort(cmp);
+}
+
+function _heapSiftDown(h, i, n, cmp) {
+    for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let worst = i;
+        if (l < n && cmp(h[l], h[worst]) > 0) worst = l;
+        if (r < n && cmp(h[r], h[worst]) > 0) worst = r;
+        if (worst === i) return;
+        const tmp = h[i]; h[i] = h[worst]; h[worst] = tmp;
+        i = worst;
+    }
+}
+
+function renderHoardTable() {
+    const search = (document.getElementById("hoard-search")?.value || "").toLowerCase();
+
+    const filtered = _hoardAllTorrents.filter(t => _hoardMatches(t, search, null));
 
     // Keep the filtered set around: only HOARD_RENDER_LIMIT rows are rendered,
-    // so Ctrl+A cannot read the selection universe off the DOM.
+    // so Ctrl+A cannot read the selection universe off the DOM. Its consumers
+    // (_selectAllFiltered, the bulk-filter path) read it as a set and never as
+    // an order, which is what lets the sort below be a top-K.
     _hoardFiltered = filtered;
-    const visible = filtered.slice(0, HOARD_RENDER_LIMIT);
+    const visible = _topKSorted(filtered, HOARD_RENDER_LIMIT, _hoardCmp(_hoardSortCol, _hoardSortAsc));
     const countEl = document.getElementById("hoard-filter-count");
     if (countEl) {
         if (filtered.length > HOARD_RENDER_LIMIT)
@@ -5203,13 +5244,24 @@ function setupHoardSSE() {
 }
 
 let _hoardRenderScheduled = false;
+let _hoardRenderDirty = false;
+
+function _hoardTabVisible() {
+    const el = document.getElementById("tab-hoard");
+    return !!el && el.classList.contains("active");
+}
+
 function _scheduleHoardRender() {
+    // On another tab the table is off screen, yet the filter pass, the sort and
+    // 500 rows of innerHTML still ran once a second on every stats_snapshot.
+    // Remember that a repaint is owed and do it when the tab comes back.
+    if (!_hoardTabVisible()) { _hoardRenderDirty = true; return; }
     if (_hoardRenderScheduled) return;
     _hoardRenderScheduled = true;
     requestAnimationFrame(() => {
         _hoardRenderScheduled = false;
         if (document.hidden) return;
-        try { renderHoardTable(); } catch (_) {}
+        try { renderHoardTable(); _hoardRenderDirty = false; } catch (_) {}
     });
 }
 
