@@ -66,6 +66,39 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
+## v3.175.0
+
+### Fixed
+- **A torrent whose data has no folder of its own can change category again.**
+  When a payload sits directly in a category directory -- the shape an
+  rtorrent or Transmission import leaves behind -- its content root *is* that
+  directory. The mover is expressed as directory-to-directory, so moving the
+  torrent would have moved every other torrent in the category with it, and
+  the only safe answer available was to refuse: `0 OK, 1 failure` with no way
+  forward.
+  Such a payload now moves file by file. The file list comes from the torrent
+  rather than from walking the directory -- that directory belongs to the
+  category, and walking it would sweep up everything in it -- and the source
+  directory is never renamed and never removed. The layout is preserved on the
+  other side: the files land loose in the target category directory, because
+  changing a category should not silently restructure somebody's library.
+  Four things this path has to do that the ordinary one does not:
+  collisions are checked **per file**, since the target category is
+  legitimately non-empty and a name already taken belongs to another torrent
+  (a refusal, never an overwrite, re-checked at swap time because a plan is a
+  snapshot); a rename that fails part way **puts back what it already moved**,
+  half a payload in each directory being the one outcome with no good
+  recovery; `stat` reporting one filesystem while `rename` returns `EXDEV` is
+  the ordinary shape of two bind mounts of one pool, so the move falls back to
+  a copy, restarting the torrent first through a new `AbortSwap` hook that
+  undoes the stop without repointing the engine at data that has not moved
+  yet; and paths coming from the torrent are rejected if they are absolute or
+  climb out of the directory, a torrent being remote input.
+  A mount point is accepted as a loose source, unlike elsewhere in the mover,
+  precisely because the directory itself never moves.
+  Remote agents still refuse this layout -- that mover is a separate
+  implementation.
+
 ## v3.174.0
 
 ### Changed
