@@ -34,6 +34,23 @@ use crate::torrent::TorrentManager;
 /// to complete a piece with a hole in it.
 const BLOCK_SIZE: u32 = 16384;
 
+/// Bytes one HTTP round trip should aim to carry.
+///
+/// Latency against archive.org is ~2.5 s per request whatever its size, while a
+/// single stream then carries 2.4-4 MB/s. A lone 512 KB piece therefore spends
+/// roughly 80% of its life waiting for headers. 8 MB is the knee: transfer time
+/// comes back to the same order as the latency, and 16 workers hold at most
+/// 128 MB of piece buffers between them. Beyond it the curve flattens while the
+/// memory keeps growing.
+///
+/// Most Internet Archive items are smaller than this (median 2.2 MB), so the
+/// common case collapses to ONE request for the entire torrent.
+const SPAN_TARGET_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Hard ceiling on pieces per span, for torrents whose piece_length is tiny
+/// enough that 8 MB would mean thousands of them.
+const SPAN_MAX_PIECES: usize = 64;
+
 /// How many pieces one worker pulls before releasing a torrent back to the
 /// pool. Most webseed torrents are small (Internet Archive median: 2.2 MB,
 /// about 5 pieces), so this finishes the typical torrent in a single claim
@@ -143,42 +160,56 @@ async fn fetch_range(
     Ok(body.to_vec())
 }
 
-/// Assemble one whole piece from the HTTP mirror.
+/// Byte window covered by pieces `first..=last`, as a half-open range.
 ///
-/// A piece is a window over the concatenated file stream, so it can straddle
-/// several files; each overlapping file contributes one ranged GET.
-async fn fetch_piece(
+/// Pulled out as a plain function so the span arithmetic is testable without a
+/// torrent, an engine or a network.
+fn span_byte_range(meta: &TorrentMeta, first: u32, last: u32) -> (u64, u64) {
+    let start = first as u64 * meta.piece_length as u64;
+    let end = last as u64 * meta.piece_length as u64 + meta.piece_size(last) as u64;
+    (start, end)
+}
+
+/// Assemble a run of contiguous pieces from the HTTP mirror in as few requests
+/// as the file layout allows.
+///
+/// The span is a window over the concatenated file stream, so it can straddle
+/// several files; each overlapping file contributes exactly one ranged GET
+/// whatever the number of pieces involved. That is the whole point: one round
+/// trip for 8 MB instead of sixteen for 512 KB each.
+async fn fetch_span(
     client: &reqwest::Client,
     meta: &TorrentMeta,
     base: &str,
-    index: u32,
+    first: u32,
+    last: u32,
 ) -> Result<Vec<u8>, String> {
-    let piece_size = meta.piece_size(index) as u64;
-    let piece_start = index as u64 * meta.piece_length as u64;
-    let piece_end = piece_start + piece_size; // exclusive
+    let (span_start, span_end) = span_byte_range(meta, first, last);
+    let want = span_end - span_start;
 
-    let mut out: Vec<u8> = Vec::with_capacity(piece_size as usize);
+    let mut out: Vec<u8> = Vec::with_capacity(want as usize);
     for f in &meta.files {
         if f.length == 0 {
             continue; // a zero-length file occupies no range: skip, never GET
         }
         let f_end = f.offset + f.length;
-        if f.offset >= piece_end || f_end <= piece_start {
+        if f.offset >= span_end || f_end <= span_start {
             continue;
         }
-        let from = piece_start.max(f.offset) - f.offset;
-        let to = piece_end.min(f_end) - f.offset - 1; // inclusive
+        let from = span_start.max(f.offset) - f.offset;
+        let to = span_end.min(f_end) - f.offset - 1; // inclusive
         let url = file_url(base, meta, f);
         let chunk = fetch_range(client, &url, from, to, f.length).await?;
         out.extend_from_slice(&chunk);
     }
 
-    if out.len() as u64 != piece_size {
+    if out.len() as u64 != want {
         return Err(format!(
-            "piece {} assembled to {} bytes, expected {}",
-            index,
+            "pieces {}..={} assembled to {} bytes, expected {}",
+            first,
+            last,
             out.len(),
-            piece_size
+            want
         ));
     }
     Ok(out)
@@ -211,11 +242,12 @@ async fn drive_torrent(
     // A webseed has everything, so the picker is asked with an all-ones
     // bitfield. Availability is deliberately NOT incremented: the swarm
     // availability figure describes peers, and an HTTP mirror is not one.
-    let num_pieces = t.meta.num_pieces() as usize;
-    let have_all = vec![0xFFu8; num_pieces.div_ceil(8)];
+    let num_pieces = t.meta.num_pieces();
+    let have_all = vec![0xFFu8; (num_pieces as usize).div_ceil(8)];
     let mut done = 0u32;
+    let mut budget = MAX_PIECES_PER_CLAIM;
 
-    for _ in 0..MAX_PIECES_PER_CLAIM {
+    while budget > 0 {
         if !wants_webseed(t) {
             break;
         }
@@ -224,27 +256,50 @@ async fn drive_torrent(
             None => break,
         };
 
-        // Reserve a piece. The lock is released before any await: holding a
-        // std Mutex across .await would poison the whole download path.
-        let index = {
+        // Reserve a contiguous run of pieces. The picker chooses the head; the
+        // run then walks forward over pieces we neither hold nor have already
+        // reserved, until the byte target is met. The lock is released before
+        // any await: holding a std Mutex across .await would poison the whole
+        // download path.
+        let run: Vec<u32> = {
             let mut p = picker.lock().unwrap();
-            match p.pick_piece(&have_all) {
-                Some(i) => {
-                    let size = t.meta.piece_size(i);
-                    p.start_piece(i, size, BLOCK_SIZE);
-                    i
-                }
+            let first = match p.pick_piece(&have_all) {
+                Some(i) => i,
                 None => break,
+            };
+            let mut run = Vec::new();
+            let mut bytes = t.meta.piece_size(first) as u64;
+            p.start_piece(first, t.meta.piece_size(first), BLOCK_SIZE);
+            run.push(first);
+
+            let mut next = first + 1;
+            while bytes < SPAN_TARGET_BYTES
+                && run.len() < SPAN_MAX_PIECES
+                && (run.len() as u32) < budget
+                && next < num_pieces
+            {
+                if p.has_piece(next) || p.is_pending(next) {
+                    break;
+                }
+                let sz = t.meta.piece_size(next);
+                p.start_piece(next, sz, BLOCK_SIZE);
+                run.push(next);
+                bytes += sz as u64;
+                next += 1;
             }
+            run
         };
+
+        let first = run[0];
+        let last = *run.last().unwrap();
 
         // Rotate over the mirrors so a multi-host url-list spreads load, and
         // fall through to the next one when a host is down.
         let mut data = None;
         let mut last_err = String::new();
         for k in 0..t.meta.url_list.len() {
-            let base = &t.meta.url_list[(index as usize + k) % t.meta.url_list.len()];
-            match fetch_piece(client, &t.meta, base, index).await {
+            let base = &t.meta.url_list[(first as usize + k) % t.meta.url_list.len()];
+            match fetch_span(client, &t.meta, base, first, last).await {
                 Ok(d) => {
                     data = Some(d);
                     break;
@@ -255,41 +310,60 @@ async fn drive_torrent(
         let data = match data {
             Some(d) => d,
             None => {
-                picker.lock().unwrap().cancel_piece(index);
+                let mut p = picker.lock().unwrap();
+                for &i in &run {
+                    p.cancel_piece(i);
+                }
                 return Err(last_err);
             }
         };
 
-        // Hand the bytes over block by block so they pass the same alignment
-        // and length checks as anything arriving from a peer.
-        let complete = {
-            let mut p = picker.lock().unwrap();
-            let mut c = false;
-            let mut off = 0u32;
-            while (off as usize) < data.len() {
-                let end = (off as usize + BLOCK_SIZE as usize).min(data.len());
-                c = p.receive_block(index, off, &data[off as usize..end]);
-                off = end as u32;
-            }
-            c
-        };
-        if !complete {
-            picker.lock().unwrap().cancel_piece(index);
-            return Err(format!("piece {} refused by the picker", index));
-        }
+        // Cut the span back into pieces and commit them one by one, each
+        // through the same block-level checks and completion sequence a peer
+        // download uses.
+        let mut off = 0usize;
+        for (n, &index) in run.iter().enumerate() {
+            let psz = t.meta.piece_size(index) as usize;
+            let piece_bytes = &data[off..off + psz];
+            off += psz;
 
-        let piece_data = { picker.lock().unwrap().take_piece_data(index) };
-        let piece_data = match piece_data {
-            Some(d) => d,
-            None => continue,
-        };
-        if crate::peer::download::commit_piece(t, disk, index, piece_data).await {
-            done += 1;
-        } else {
-            // SHA1 mismatch or write error: commit_piece already released the
-            // piece. A mirror serving wrong bytes is a real failure, not a
-            // retry-for-ever situation.
-            return Err(format!("piece {} failed verification", index));
+            let complete = {
+                let mut p = picker.lock().unwrap();
+                let mut c = false;
+                let mut b = 0u32;
+                while (b as usize) < piece_bytes.len() {
+                    let end = (b as usize + BLOCK_SIZE as usize).min(piece_bytes.len());
+                    c = p.receive_block(index, b, &piece_bytes[b as usize..end]);
+                    b = end as u32;
+                }
+                c
+            };
+            if !complete {
+                let mut p = picker.lock().unwrap();
+                for &i in &run[n..] {
+                    p.cancel_piece(i);
+                }
+                return Err(format!("piece {} refused by the picker", index));
+            }
+
+            let piece_data = { picker.lock().unwrap().take_piece_data(index) };
+            let piece_data = match piece_data {
+                Some(d) => d,
+                None => continue,
+            };
+            if crate::peer::download::commit_piece(t, disk, index, piece_data).await {
+                done += 1;
+                budget = budget.saturating_sub(1);
+            } else {
+                // SHA1 mismatch or write error: commit_piece already released
+                // this piece. Release the rest of the run too — a mirror
+                // serving wrong bytes is a real failure, not a retry loop.
+                let mut p = picker.lock().unwrap();
+                for &i in &run[n + 1..] {
+                    p.cancel_piece(i);
+                }
+                return Err(format!("piece {} failed verification", index));
+            }
         }
     }
     Ok(done)
@@ -497,6 +571,41 @@ mod tests {
             file_url("http://h/d/movie.mkv", &m, &m.files[0]),
             "http://h/d/movie.mkv"
         );
+    }
+
+    /// A single-piece span covers exactly that piece.
+    #[test]
+    fn span_of_one_piece_is_that_piece() {
+        let mut m = meta(true, "i", vec![("f", 40000)]);
+        m.piece_length = 16384;
+        m.num_pieces = 3;
+        m.total_size = 40000;
+        assert_eq!(span_byte_range(&m, 1, 1), (16384, 32768));
+    }
+
+    /// A multi-piece span runs from the first piece's start to the last one's
+    /// end — the whole point of the batch.
+    #[test]
+    fn span_covers_first_start_to_last_end() {
+        let mut m = meta(true, "i", vec![("f", 40000)]);
+        m.piece_length = 16384;
+        m.num_pieces = 3;
+        m.total_size = 40000;
+        assert_eq!(span_byte_range(&m, 0, 2), (0, 40000));
+    }
+
+    /// The last piece is short, and the span must stop at the real end of the
+    /// torrent rather than at a rounded piece boundary — asking archive.org for
+    /// bytes past EOF is how you earn a 416 on every final span.
+    #[test]
+    fn span_stops_at_the_short_tail_piece() {
+        let mut m = meta(true, "i", vec![("f", 40000)]);
+        m.piece_length = 16384;
+        m.num_pieces = 3;
+        m.total_size = 40000;
+        let (_, end) = span_byte_range(&m, 2, 2);
+        assert_eq!(end, 40000);
+        assert!(end < 3 * 16384);
     }
 
     /// Names routinely carry spaces and accents; each segment is encoded on its

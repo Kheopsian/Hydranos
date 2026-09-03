@@ -66,6 +66,31 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
+## v3.174.0
+
+### Changed
+- **Webseed fetches a run of contiguous pieces per request instead of one
+  piece.** v3.173.0 worked but ran at **1.12 MB/s in production** against a
+  benchmark that had shown 51 MB/s, and the gap was entirely round trips:
+  archive.org costs ~2.5 s of latency per request whatever its size, so a
+  512 KB Internet Archive piece spent about 80% of its life waiting for
+  headers.
+  A worker now reserves pieces forward from the one the picker chose until it
+  has about **8 MB** in hand, and pulls the lot with a single ranged GET per
+  file the span touches. The target is a byte budget rather than a piece count
+  on purpose: `piece_length` ranges from 16 KB to 16 MB across torrents, so
+  counting pieces would produce absurd request sizes at both ends. 8 MB is
+  where transfer time comes back to the same order as the latency (~50%
+  efficiency against ~17%) while 16 workers still hold at most 128 MB of
+  buffers between them; past that the curve flattens and only the memory grows.
+  Since the median Internet Archive item is 2.2 MB, the common case collapses
+  to **one request for the whole torrent**.
+  The run stops at any piece already held or already reserved, so batching
+  never resets a piece another source is part-way through delivering — that is
+  what the new `PiecePicker::is_pending` is for. Each piece is still cut back
+  out of the span and committed individually, through the same block-level
+  alignment checks and the same completion sequence as before.
+
 ## v3.173.0
 
 ### Added
