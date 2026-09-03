@@ -118,7 +118,7 @@ pub async fn announce(
         downloaded={}&\
         left={}&\
         compact=1&\
-        numwant=200\
+        numwant={}\
         {}",
         tracker_url,
         sep,
@@ -128,6 +128,15 @@ pub async fn announce(
         uploaded,
         downloaded,
         left,
+        // A complete torrent asks for NO peers. We are directly reachable, so a
+        // leecher -- NAT or not -- opens the connection to us; there is nothing
+        // for us to dial. Asking for 200 peers per announce across a catalogue
+        // of seeding torrents is what produced thousands of idle sockets to the
+        // same handful of large seedboxes, one per shared swarm.
+        // NOTE: this makes a complete torrent PASSIVE. It relies on our listen
+        // port staying reachable; if the port forward breaks, upload stops dead
+        // rather than degrading.
+        if left == 0 { 0 } else { 200 },
         if event.is_empty() { String::new() } else { format!("&event={}", event) },
     );
 

@@ -226,6 +226,10 @@ impl DownloadState {
                                     .as_secs() as i64,
                                 Ordering::Relaxed,
                             );
+                            // Write it down now. Waiting for the five-minute
+                            // sweep meant a restart inside that window lost the
+                            // completion and re-downloaded the whole torrent.
+                            crate::torrent::notify_completed(self.torrent.info_hash);
                         }
 
                         return Some(index);

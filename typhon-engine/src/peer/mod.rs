@@ -536,6 +536,15 @@ async fn utp_accept_loop(
 /// provider and proves nothing either way, while a stranger arriving here has,
 /// by definition, got through. Self-addresses are excluded so our own
 /// reachability probe cannot validate itself.
+/// Inbound connections dropped because their handshake never finished.
+/// Exposed so the fd curve has a named cause instead of a mystery.
+pub static HS_TIMED_OUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Connections closed because both ends already hold every piece.
+/// Two seeders have nothing to exchange; keeping the socket open costs a file
+/// descriptor per shared swarm, and a big seedbox shares thousands with us.
+pub static SEED_SEED_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub static INBOUND_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 async fn handle_incoming(
@@ -557,14 +566,33 @@ async fn handle_incoming(
         INBOUND_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    // A peer that connects and then says nothing used to park a task in
+    // read_exact forever: the socket stayed ESTABLISHED, no PeerGuard was ever
+    // built, so `active_peers` never counted it and nothing ever reaped it.
+    // Measured on prod: 20758 established sockets for 10874 peers.
+    // Every read and write of the handshake is bounded from here on.
+    const HS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     // Read first byte to detect MSE vs plaintext
     let mut first = [0u8; 1];
-    if stream.read_exact(&mut first).await.is_err() { return; }
+    match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut first)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => return,
+        Err(_) => {
+            HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!("[peer] {} sent nothing within {:?}, dropping", addr, HS_TIMEOUT);
+            return;
+        }
+    }
 
     let (crypto_stream, torrent, fast_ext, lt_ext, remote_peer_id, is_encrypted) = if first[0] == 19 {
         // Plaintext BT handshake — read remaining 67 bytes
         let mut rest = [0u8; 67];
-        if stream.read_exact(&mut rest).await.is_err() { return; }
+        match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut rest)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return,
+            Err(_) => { HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); return; }
+        }
         if &rest[0..19] != b"BitTorrent protocol" { return; }
 
         let mut info_hash = [0u8; 20];
@@ -589,7 +617,11 @@ async fn handle_incoming(
         reply.extend_from_slice(&res);
         reply.extend_from_slice(&info_hash);
         reply.extend_from_slice(&peer_id);
-        if stream.write_all(&reply).await.is_err() { return; }
+        match tokio::time::timeout(HS_TIMEOUT, stream.write_all(&reply)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return,
+            Err(_) => { HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); return; }
+        }
 
         (CryptoStream::plain(stream), torrent, fast_ext, ext_proto, remote_pid, false)
     } else {
@@ -599,19 +631,34 @@ async fn handle_incoming(
             return;
         }
         let mut ya_rest = [0u8; 95];
-        if stream.read_exact(&mut ya_rest).await.is_err() {
-            warn!("[peer] {} MSE: failed to read Ya", addr);
-            return;
+        match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut ya_rest)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {
+                warn!("[peer] {} MSE: failed to read Ya", addr);
+                return;
+            }
+            Err(_) => { HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); return; }
         }
 
         let tm_clone = torrent_mgr.clone();
-        match crate::crypto::mse::handshake_incoming(
-            &mut stream,
-            first[0],
-            &ya_rest,
-            &peer_id,
-            |req2_hash| tm_clone.lookup_skey(req2_hash),
-        ).await {
+        let mse_res = tokio::time::timeout(
+            HS_TIMEOUT,
+            crate::crypto::mse::handshake_incoming(
+                &mut stream,
+                first[0],
+                &ya_rest,
+                &peer_id,
+                |req2_hash| tm_clone.lookup_skey(req2_hash),
+            ),
+        ).await;
+        let mse_res = match mse_res {
+            Ok(r) => r,
+            Err(_) => {
+                HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        };
+        match mse_res {
             Ok((enc, dec, hs)) => {
                 let torrent = match torrent_mgr.get(&hs.info_hash) {
                     Some(t) => t,

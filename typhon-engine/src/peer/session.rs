@@ -15,10 +15,29 @@
 ///
 /// Note this now actually fires on downloading sessions. It could not before:
 /// the deadline was rebuilt on every turn of the loop, and the 10s choke tick
+/// Do we hold every piece of this torrent right now?
+///
+/// Read live rather than reusing the `is_seeding` snapshot taken when the
+/// session opened: a torrent that completed since then is a seeder too, and
+/// keeping its useless connections is exactly what we are trying to stop.
+fn we_are_complete(t: &std::sync::Arc<crate::torrent::meta::TorrentState>) -> bool {
+    t.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8
+}
+
 /// turned the loop, so a non-seeding session reset its own 300s timeout every
 /// 10 seconds and never hit it. Seeding sessions are unaffected -- their choke
 /// arm is disabled, so only peer traffic ever turned their loop.
 const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Granularity for pushing out the idle deadline.
+///
+/// Resetting a `tokio::time::Sleep` removes and re-inserts an entry in the
+/// timer wheel behind a sharded mutex. Doing it per inbound message meant
+/// ~39k wheel operations per second at 640 MB/s of download -- visible as
+/// `Sleep::poll` plus `parking_lot::lock_slow` in a profile. The deadline
+/// guards a 300 s idle timeout, so moving it at most once per second is
+/// indistinguishable in behaviour and drops the wheel traffic by ~4 orders
+/// of magnitude on a busy peer.
+const DEADLINE_GRANULARITY: Duration = Duration::from_secs(1);
 /// Cadence at which a downloading session wakes to flush choking decisions.
 const CHOKE_TICK: Duration = Duration::from_secs(10);
 
@@ -151,6 +170,8 @@ pub async fn run(
     // the engine's CPU -- more than any BitTorrent work it was doing.
     let deadline = tokio::time::sleep(PEER_IDLE_TIMEOUT);
     tokio::pin!(deadline);
+    // Last time the idle deadline was actually pushed out; see DEADLINE_GRANULARITY.
+    let mut deadline_set_at = tokio::time::Instant::now();
     // Wake once per choking tick so the engine's decisions land on the wire
     // within the next tick cycle even when the peer is otherwise idle. A
     // seeding session has no choking decisions to flush, so its arm stays
@@ -184,15 +205,23 @@ pub async fn run(
             framed.send(Message::Interested).await.ok();
         }
         if dl.is_downloading() && !dl.peer_choking {
+            // SinkExt::send flushes after every message, so a pipelined peer
+            // cost one write() syscall and a full task wake-up per 17-byte
+            // Request. Feed the whole batch, then flush once.
+            let mut queued = false;
             for (idx, off, len) in dl.get_requests() {
                 if framed
-                    .send(Message::Request { index: idx, begin: off, length: len })
+                    .feed(Message::Request { index: idx, begin: off, length: len })
                     .await
                     .is_err()
                 {
                     tracing::debug!("[peer-debug] {} BREAK send-request failed", addr);
                     break;
                 }
+                queued = true;
+            }
+            if queued && framed.flush().await.is_err() {
+                tracing::debug!("[peer-debug] {} BREAK flush-requests failed", addr);
             }
         }
 
@@ -200,7 +229,11 @@ pub async fn run(
             msg = framed.next() => {
                 // Traffic from the peer is what "not idle" means, so this is
                 // the only arm that pushes the deadline out.
-                deadline.as_mut().reset(tokio::time::Instant::now() + PEER_IDLE_TIMEOUT);
+                let now = tokio::time::Instant::now();
+                if now.duration_since(deadline_set_at) >= DEADLINE_GRANULARITY {
+                    deadline_set_at = now;
+                    deadline.as_mut().reset(now + PEER_IDLE_TIMEOUT);
+                }
                 match msg {
                     Some(Ok(message)) => {
                         match message {
@@ -220,11 +253,21 @@ pub async fn run(
                                 let is_seed = num_pieces > 0 && count >= num_pieces;
                                 stats.is_seed.store(is_seed, Ordering::Relaxed);
                                 dl.on_bitfield(&data);
+                                if is_seed && we_are_complete(&torrent) {
+                                    crate::peer::SEED_SEED_DROPPED
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    break;
+                                }
                             }
                             Message::HaveAll => {
                                 stats.num_pieces_have.store(num_pieces, Ordering::Relaxed);
                                 stats.is_seed.store(true, Ordering::Relaxed);
                                 dl.on_have_all();
+                                if we_are_complete(&torrent) {
+                                    crate::peer::SEED_SEED_DROPPED
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    break;
+                                }
                             }
                             Message::Have { piece } => {
                                 // Only count pieces we did not already know from

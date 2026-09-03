@@ -433,7 +433,7 @@ impl TorrentState {
 
 
     pub fn new(meta: TorrentMeta, save_path: PathBuf, torrent_file_path: String, seed_mode: bool) -> Self {
-        Self::new_with_times(meta, save_path, torrent_file_path, seed_mode, None, None)
+        Self::new_with_times(meta, save_path, torrent_file_path, seed_mode, None, None, !seed_mode)
     }
 
     /// Create a TorrentState, optionally restoring added_time / completed_time
@@ -445,6 +445,11 @@ impl TorrentState {
         seed_mode: bool,
         added_time_override: Option<i64>,
         completed_time_override: Option<i64>,
+        // A picker is ~5 bytes per piece and is useless to a torrent that has
+        // nothing left to pick. The caller knows whether this one still needs
+        // one; it is NOT the same question as `seed_mode`, because a torrent
+        // added as a download and since completed is no longer picking either.
+        needs_picker: bool,
     ) -> Self {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -461,7 +466,7 @@ impl TorrentState {
             TorrentStatus::Stopped as u8
         };
         let picker: OnceLock<Arc<Mutex<PiecePicker>>> = OnceLock::new();
-        if !seed_mode {
+        if needs_picker {
             let _ = picker.set(Arc::new(Mutex::new(PiecePicker::new(meta.num_pieces()))));
         }
         // Only downloaders use the have-broadcast; seeders never send/subscribe,

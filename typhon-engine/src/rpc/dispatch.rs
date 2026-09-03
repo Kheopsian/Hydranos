@@ -607,6 +607,7 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     put_u!("dial_mse_ok", crate::tracker::DIAL_MSE_OK.load(Ordering::Relaxed));
     put_u!("dial_mse_fail", crate::tracker::DIAL_MSE_FAIL.load(Ordering::Relaxed));
     put_u!("inbound_accepted", crate::peer::INBOUND_ACCEPTED.load(Ordering::Relaxed));
+    put_u!("seed_seed_dropped", crate::peer::SEED_SEED_DROPPED.load(Ordering::Relaxed));
     put_u!("mse_inbound_refused", crate::tracker::MSE_INBOUND_REFUSED.load(Ordering::Relaxed));
     put_u!("mse_outbound_skipped", crate::tracker::MSE_OUTBOUND_SKIPPED.load(Ordering::Relaxed));
     put_u!("mse_sessions_dropped", crate::tracker::MSE_SESSIONS_DROPPED.load(Ordering::Relaxed));

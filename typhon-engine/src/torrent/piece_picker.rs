@@ -4,7 +4,7 @@ use std::collections::HashMap;
 pub struct PiecePicker {
     num_pieces: u32,
     have: Vec<bool>,           // pieces we have
-    availability: Vec<u32>,    // how many peers have each piece
+    availability: Vec<u16>,    // how many peers have each piece (u16: le swarm ne depasse jamais 65535 copies)
     pending: HashMap<u32, PendingPiece>,  // piece index -> in-flight requests
 }
 
@@ -49,7 +49,7 @@ impl PiecePicker {
             let byte_idx = piece as usize / 8;
             let bit_idx = 7 - (piece % 8);
             if byte_idx < bitfield.len() && (bitfield[byte_idx] >> bit_idx) & 1 == 1 {
-                self.availability[piece as usize] += 1;
+                self.availability[piece as usize] = self.availability[piece as usize].saturating_add(1);
             }
         }
     }
@@ -57,7 +57,7 @@ impl PiecePicker {
     /// Update availability for a single HAVE message.
     pub fn add_have(&mut self, piece: u32) {
         if (piece as usize) < self.availability.len() {
-            self.availability[piece as usize] += 1;
+            self.availability[piece as usize] = self.availability[piece as usize].saturating_add(1);
         }
     }
 
@@ -105,7 +105,7 @@ impl PiecePicker {
             if byte_idx >= peer_has.len() || (peer_has[byte_idx] >> bit_idx) & 1 == 0 {
                 continue;
             }
-            let avail = self.availability[piece as usize];
+            let avail = self.availability[piece as usize] as u32;
             if avail < best_avail {
                 best_avail = avail;
                 best_count = 1;
@@ -181,15 +181,34 @@ impl PiecePicker {
     /// Record a received block. Returns true if the piece is now complete.
     pub fn receive_block(&mut self, piece: u32, offset: u32, data: &[u8]) -> bool {
         if let Some(pending) = self.pending.get_mut(&piece) {
-            let block_idx = (offset / pending.block_size) as usize;
-            if block_idx < pending.blocks_received.len() {
-                pending.blocks_received[block_idx] = true;
-                let start = offset as usize;
-                let end = start + data.len();
-                if end <= pending.data.len() {
-                    pending.data[start..end].copy_from_slice(data);
-                }
+            // A block counts as received only once its bytes are actually in
+            // the buffer, and only if it is the block it claims to be.
+            //
+            // Marking the slot before the bounds check let a short, overlong or
+            // unaligned block complete a piece with a hole of zeros in it. The
+            // assembled buffer then failed SHA1 in write_piece, the piece was
+            // re-requested, and with a large peer set that became a permanent
+            // re-download loop: ~24% of completed pieces were being discarded.
+            if pending.block_size == 0 || offset % pending.block_size != 0 {
+                return false;
             }
+            let block_idx = (offset / pending.block_size) as usize;
+            if block_idx >= pending.blocks_received.len() {
+                return false;
+            }
+            let expected_len =
+                std::cmp::min(pending.block_size, pending.piece_size.saturating_sub(offset))
+                    as usize;
+            if data.len() != expected_len {
+                return false;
+            }
+            let start = offset as usize;
+            let end = start + data.len();
+            if end > pending.data.len() {
+                return false;
+            }
+            pending.data[start..end].copy_from_slice(data);
+            pending.blocks_received[block_idx] = true;
             // Check if all blocks received
             pending.blocks_received.iter().all(|&b| b)
         } else {
@@ -200,6 +219,18 @@ impl PiecePicker {
     /// Get the assembled piece data (after receive_block returned true).
     pub fn take_piece_data(&mut self, piece: u32) -> Option<Vec<u8>> {
         self.pending.remove(&piece).map(|p| p.data)
+    }
+
+    #[cfg(test)]
+    pub fn begin_piece_for_test(&mut self, piece: u32, piece_size: u32, block_size: u32) {
+        let num_blocks = piece_size.div_ceil(block_size);
+        self.pending.insert(piece, PendingPiece {
+            blocks_requested: vec![true; num_blocks as usize],
+            blocks_received: vec![false; num_blocks as usize],
+            data: vec![0u8; piece_size as usize],
+            block_size,
+            piece_size,
+        });
     }
 
     /// How many pieces do we have?
@@ -215,7 +246,8 @@ impl PiecePicker {
         let mut min = u32::MAX;
         let mut max = 0u32;
         let mut sum = 0u64;
-        for (i, peers) in self.availability.iter().enumerate() {
+        for (i, &peers) in self.availability.iter().enumerate() {
+            let peers = peers as u32;
             let a = peers + if self.have[i] { 1 } else { 0 };
             min = min.min(a);
             max = max.max(a);
@@ -236,5 +268,45 @@ impl PiecePicker {
     /// Do we have this specific piece?
     pub fn has_piece(&self, index: u32) -> bool {
         self.have.get(index as usize).copied().unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod receive_block_tests {
+    use super::PiecePicker;
+
+    fn picker_with_one_pending(piece_size: u32, block_size: u32) -> PiecePicker {
+        let mut p = PiecePicker::new(1);
+        p.begin_piece_for_test(0, piece_size, block_size);
+        p
+    }
+
+    /// A block whose bytes do not fit must not be counted: counting it used to
+    /// complete the piece with a hole and burn the whole piece on a SHA1 fail.
+    #[test]
+    fn short_block_does_not_complete_piece() {
+        let mut p = picker_with_one_pending(32, 16);
+        assert!(!p.receive_block(0, 0, &[1u8; 16]));
+        // second block arrives truncated -> refused, piece stays incomplete
+        assert!(!p.receive_block(0, 16, &[2u8; 4]));
+        // the same block at its real length completes the piece
+        assert!(p.receive_block(0, 16, &[2u8; 16]));
+    }
+
+    /// An unaligned offset addresses no block slot and must be refused.
+    #[test]
+    fn unaligned_offset_is_refused() {
+        let mut p = picker_with_one_pending(32, 16);
+        assert!(!p.receive_block(0, 5, &[1u8; 16]));
+        assert!(!p.receive_block(0, 0, &[1u8; 16]));
+        assert!(p.receive_block(0, 16, &[2u8; 16]));
+    }
+
+    /// The tail block is shorter than block_size and must still be accepted.
+    #[test]
+    fn short_tail_block_is_accepted() {
+        let mut p = picker_with_one_pending(20, 16);
+        assert!(!p.receive_block(0, 0, &[1u8; 16]));
+        assert!(p.receive_block(0, 16, &[2u8; 4]));
     }
 }
