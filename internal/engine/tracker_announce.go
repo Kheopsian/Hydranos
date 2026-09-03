@@ -1178,7 +1178,13 @@ func (ta *trackerAnnouncer) announceOnce(trackerURL, infoHash string, uploaded, 
 	announceURL += "&uploaded=" + strconv.FormatInt(uploaded, 10)
 	announceURL += "&downloaded=" + strconv.FormatInt(downloaded, 10)
 	announceURL += "&left=" + strconv.FormatInt(left, 10)
-	announceURL += "&compact=1&numwant=200"
+	// A complete torrent asks for no peers: we are reachable, leechers dial us.
+	// See the same reasoning in typhon-engine/src/tracker/http.rs.
+	numwant := 200
+	if left == 0 {
+		numwant = 0
+	}
+	announceURL += "&compact=1&numwant=" + strconv.Itoa(numwant)
 	if event != "" {
 		announceURL += "&event=" + event
 	}
