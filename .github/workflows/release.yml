@@ -102,10 +102,25 @@ jobs:
       # so the C dependencies -- jemalloc, ring, aws-lc -- build as they would
       # natively, and the image is multi-arch so each runner uses its own
       # architecture with no emulation.
+      # The cargo registry lives INSIDE the alpine container, so it started
+      # from nothing on every tag and rebuilt ring, aws-lc and jemalloc for
+      # nothing. CARGO_HOME is hoisted onto the runner so actions/cache can keep
+      # it, the same way it keeps target/.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .cargo-home
+            typhon-engine/target
+          key: cargo-musl-${{ matrix.target }}-${{ hashFiles('typhon-engine/Cargo.lock') }}
+          restore-keys: cargo-musl-${{ matrix.target }}-
+
       - name: Build Typhon engine
         run: |
+          mkdir -p "$PWD/.cargo-home"
           docker run --rm \
             -v "$PWD":/src -w /src/typhon-engine \
+            -v "$PWD/.cargo-home":/cargo-home \
+            -e CARGO_HOME=/cargo-home \
             -e RUSTFLAGS="--cfg tokio_unstable" \
             rust:alpine sh -c '
               set -e
@@ -113,7 +128,7 @@ jobs:
               cargo build --release --target ${{ matrix.target }} --bin typhon-engine
             '
           # The container writes as root; later steps read as the runner user.
-          sudo chown -R "$(id -u):$(id -g)" typhon-engine/target
+          sudo chown -R "$(id -u):$(id -g)" typhon-engine/target .cargo-home
 
       - name: Check the engine really is static
         working-directory: typhon-engine
@@ -164,6 +179,13 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      # Same reason as on linux: with no cache, every release rebuilt the
+      # engine's entire dependency tree on the Windows runner, the slowest of
+      # the lot.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: typhon-engine
 
       - name: Set up Go
         uses: actions/setup-go@v5

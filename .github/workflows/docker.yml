@@ -64,7 +64,9 @@ jobs:
           # Scoped per architecture: a shared cache key would have each job
           # restoring the other's layers and rebuilding them anyway.
           cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=min,scope=${{ matrix.arch }}
+          # mode=min exported only the final layers, so the typhon-builder
+          # stage -- by far the most expensive one -- was never reused.
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
       - name: Export digest
         run: |
