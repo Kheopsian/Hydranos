@@ -66,6 +66,33 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
+## v3.172.1
+
+### Fixed
+- **v3.170.0 published a tree that does not compile.** Its `main.rs` called
+  `torrent::take_completion_receiver` and `TorrentManager::persist_completed`,
+  neither of which had been committed: every Rust job of v3.172.0 -- the release
+  binaries, the container image and the CI check -- failed on those two errors,
+  while the Go side passed. The sources are in the tree now. They are the engine
+  that has been running in production since 2026-09-03; only the commit was
+  missing. What they contain:
+  - **A complete torrent was written back to the store with an empty bitfield,
+    and came back at 0% on the next boot.** Since v3.162.0 a torrent loaded
+    already-complete gets no piece picker, but `build_resume_data` still read
+    the bitfield off that picker, and with no picker it wrote `""`.
+    `bitfield_is_complete("")` is false, so the next start rebuilt the torrent
+    at zero, allocated an all-missing picker and re-downloaded data already
+    sitting on disk. `last_saved` is empty at boot, so the first sweep marked
+    the whole catalogue dirty and did this to all of it.
+    `build_resume_data` now tells apart the two ways a torrent can lack a
+    picker: `seed_mode`, where an empty bitfield is the intended encoding and
+    the torrent is trusted complete on load, and loaded-complete, where it
+    writes the full bitfield the picker would have produced.
+  - A completion channel (`notify_completed` / `take_completion_receiver`), so a
+    torrent finishing mid-session persists its record immediately instead of
+    waiting for the periodic sweep.
+  - The `seed_seed_dropped` counter that the v3.164.0 entry already described.
+
 ## v3.172.0
 
 ### Added
