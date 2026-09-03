@@ -43,6 +43,12 @@ type SessionConfig struct {
 	// operator who wants this engine to reach nothing but its trackers.
 	EnableDHT bool `toml:"enable_dht" json:"enable_dht"`
 	EnablePEX bool `toml:"enable_pex" json:"enable_pex"`
+	// EnableWebseed turns on BEP 19: when a torrent names HTTP mirrors in
+	// its url-list, fetch from them. Torrents published without a seeder
+	// (every Internet Archive item) need this to move at all.
+	EnableWebseed bool `toml:"enable_webseed" json:"enable_webseed"`
+	// WebseedMaxConcurrent caps webseed fetches in flight per engine.
+	WebseedMaxConcurrent int `toml:"webseed_max_concurrent" json:"webseed_max_concurrent"`
 	// Optional second TCP listener expecting HAProxy PROXY protocol v2 (real
 	// peer IP in header). Used by the v6 bypass path: peer → VPS haproxy →
 	// the router rdr → the seedbox host [::]:listen_port_proxy_v2. 0 = disabled.
@@ -473,6 +479,8 @@ var migrationKeys = []struct{ section, key, value string }{
 	{"race", "enable_ipv6", `false`},
 	{"race", "enable_dht", `true`},
 	{"race", "enable_pex", `true`},
+	{"race", "enable_webseed", `true`},
+	{"race", "webseed_max_concurrent", `16`},
 	{"race", "listen_interfaces", `""`},
 	{"race", "announce_rate_limit", `0.0`},
 	{"race", "max_dials_per_sec", `0.0`},
@@ -481,6 +489,8 @@ var migrationKeys = []struct{ section, key, value string }{
 	{"hoard", "enable_ipv6", `false`},
 	{"hoard", "enable_dht", `true`},
 	{"hoard", "enable_pex", `true`},
+	{"hoard", "enable_webseed", `true`},
+	{"hoard", "webseed_max_concurrent", `16`},
 	{"hoard", "listen_interfaces", `""`},
 	{"hoard", "announce_rate_limit", `0.0`},
 	{"hoard", "max_dials_per_sec", `0.0`},

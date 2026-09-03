@@ -66,6 +66,47 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
+## v3.173.0
+
+### Added
+- **BEP 19 webseeds (`url-list`): a torrent published without a seeder can now
+  complete.** Some publishers ship torrents that were never meant to have a
+  swarm. The tracker only helps downloaders find each other; the bytes live on
+  an HTTP mirror named in the `url-list` key. Every one of Internet Archive's
+  ~88M items is built that way. Typhon parsed `announce-list` and ignored
+  `url-list` entirely, so such a torrent sat at 0% for ever with nothing to
+  explain it: across a 51,158-torrent sample, 100% had zero seeds and **zero
+  bytes received**, and not one error was logged.
+  A fixed pool of workers (`webseed_max_concurrent`, default 16) claims a
+  torrent, pulls its pieces with ranged HTTP GETs and releases it. A pool
+  rather than a task per torrent, because a million-torrent catalogue cannot
+  afford a task each, and the origin bounds throughput long before the
+  catalogue does (measured against archive.org: 2.4 MB/s at one stream,
+  51 MB/s at 32, still climbing).
+  A fetched piece is handed to the picker in 16 KiB blocks, so it passes the
+  same alignment and length checks as anything arriving from a peer, and is
+  stored through the same completion sequence the peer path uses.
+  Per engine, `enable_webseed`, on by default.
+  A torrent that fails five times running is parked for an hour: a deleted or
+  renamed item answers 404 for ever, and at catalogue scale that must not turn
+  into a permanent retry storm against the mirror.
+  A `Range` request answered with 200 instead of 206 is refused unless the
+  range happened to cover the whole file, so a server that ignores `Range`
+  cannot make a 512 KB piece pull a multi-gigabyte body.
+- ⚠️ An engine pinned to a device (`bind_interface`) with no
+  `TYPHON_ANNOUNCE_PROXY` set does **not** start the pool. reqwest opens its
+  own sockets, so the `SO_BINDTODEVICE` pin the engine applies to its peer
+  sockets does not reach them, and the GET would leave by the default route
+  carrying the host address. Refusing to fetch is the only safe answer.
+
+### Changed
+- **Piece completion now exists in exactly one place.** The peer path and the
+  webseed pool share `commit_piece`: SHA1 through the disk layer, `set_have`,
+  the Have broadcast, the hash-table release and the durable completion
+  notice. This is deliberate — the last time a completion path diverged from
+  what the resume writer expected, every complete torrent had its bitfield
+  erased on the following sweep.
+
 ## v3.172.2
 
 ### Fixed

@@ -44,6 +44,10 @@ pub struct TorrentMeta {
     pub total_size: u64,
     pub files: Vec<FileEntry>,
     pub trackers: Vec<Vec<String>>,
+    /// BEP 19 `url-list`: HTTP mirrors that serve this torrent's payload.
+    /// Empty for almost every torrent (an empty Vec is 24 bytes), which is
+    /// what makes carrying it on a million-torrent catalogue affordable.
+    pub url_list: Vec<String>,
     pub private: bool,
     /// True when the torrent's info dict has a `files` key (even with a
     /// single entry). In that case, the on-disk path is `name/<file path>`.
