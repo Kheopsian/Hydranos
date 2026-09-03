@@ -265,6 +265,20 @@ impl PiecePicker {
         self.have.iter().all(|&h| h)
     }
 
+    /// Lowest-indexed piece we neither hold nor have reserved.
+    ///
+    /// For a source that has everything, rarest-first is meaningless: every
+    /// piece has availability 0, so `pick_piece` picks at random among all of
+    /// them. That is right for a swarm and wrong for an HTTP mirror, where a
+    /// batch of pieces is only worth batching if it is CONTIGUOUS -- a run can
+    /// only be extended forwards, so starting in the middle truncates it.
+    /// Walking from the front keeps every run as long as the torrent allows.
+    pub fn first_missing(&self) -> Option<u32> {
+        (0..self.num_pieces).find(|&i| {
+            !self.have[i as usize] && !self.pending.contains_key(&i)
+        })
+    }
+
     /// Is this piece already reserved by someone?
     ///
     /// The webseed pool walks forward from a picked piece to batch a run of
@@ -311,6 +325,21 @@ mod receive_block_tests {
         assert!(!p.receive_block(0, 5, &[1u8; 16]));
         assert!(!p.receive_block(0, 0, &[1u8; 16]));
         assert!(p.receive_block(0, 16, &[2u8; 16]));
+    }
+
+    /// The front-walking pick skips what we hold and what is reserved, and
+    /// returns None only when there is nothing left to ask for.
+    #[test]
+    fn first_missing_walks_from_the_front() {
+        let mut p = PiecePicker::new(4);
+        assert_eq!(p.first_missing(), Some(0));
+        p.set_have(0);
+        assert_eq!(p.first_missing(), Some(1));
+        p.begin_piece_for_test(1, 32, 16);
+        assert_eq!(p.first_missing(), Some(2), "a reserved piece is skipped");
+        p.set_have(2);
+        p.set_have(3);
+        assert_eq!(p.first_missing(), None, "1 is reserved, nothing else left");
     }
 
     /// A reserved piece must report as pending, so the webseed batcher stops
