@@ -14,6 +14,7 @@ use tracing::{info, warn};
 use meta::{InfoHash, TorrentState, TorrentStatus};
 use crate::disk::DiskManager;
 use std::sync::OnceLock;
+use futures::StreamExt;
 use tokio::sync::Semaphore;
 use sha1::{Sha1, Digest};
 
@@ -378,6 +379,12 @@ impl TorrentManager {
             // reboots. Plain new() falls back to SystemTime::now(), which wipes
             // the fastresume history on every restart.
             let saved_trackers = rd.trackers.clone();
+            // Decode the bitfield here, before the meta is moved: a torrent that
+            // is already complete gets no picker at all, instead of allocating
+            // one, importing into it, being promoted to Seeding, and carrying it
+            // for the life of the process.
+            let resume_bits = hex_decode_bytes(&rd.bitfield);
+            let already_complete = bitfield_is_complete(&resume_bits, meta.num_pieces());
             let state = TorrentState::new_with_times(
                 meta,
                 rd.save_path.into(),
@@ -385,6 +392,7 @@ impl TorrentManager {
                 rd.seed_mode,
                 Some(rd.added_time),
                 Some(rd.completed_time),
+                !rd.seed_mode && !already_complete,
             );
             // The resume record wins over the .torrent: an edited list lives
             // here, and the file on disk may be the original one. Empty means
@@ -398,12 +406,9 @@ impl TorrentManager {
             // on every restart AND so an already-complete torrent is
             // recognised as a seed below. Pre-bitfield resume files have an
             // empty string here (serde default) — old behaviour preserved.
-            if !rd.bitfield.is_empty() {
+            if !resume_bits.is_empty() {
                 if let Some(picker) = state.picker.get() {
-                    let bytes = hex_decode_bytes(&rd.bitfield);
-                    if !bytes.is_empty() {
-                        picker.lock().unwrap().import_bitfield(&bytes);
-                    }
+                    picker.lock().unwrap().import_bitfield(&resume_bits);
                 }
             }
             // Derive initial status from completion (same rule as
@@ -559,10 +564,31 @@ impl TorrentManager {
     /// Build a fastresume snapshot from the live TorrentState. Shared
     /// between save_all_resume (periodic) and set_save_path (immediate
     /// flush after a category move).
+    /// Write one torrent's record to the store right now.
+    pub fn persist_completed(&self, ih: &InfoHash) {
+        if let Some(t) = self.get(ih) {
+            let rd = Self::build_resume_data(&t);
+            self.persist(ih, &rd);
+        }
+    }
+
     fn build_resume_data(t: &TorrentState) -> fastresume::ResumeData {
         let bitfield = match t.picker.get() {
             Some(p) => hex_encode_bytes(&p.lock().unwrap().export_bitfield()),
-            None => String::new(),
+            // A seed_mode torrent is trusted complete on load without reading
+            // any bitfield, so an empty one is the intended encoding.
+            None if t.seed_mode => String::new(),
+            // No picker and not seed_mode means the torrent was loaded complete
+            // -- that is the invariant behind skipping the allocation
+            // (alloc_picker = !seed_mode && !already_complete).
+            //
+            // Writing an empty bitfield here ERASED that fact:
+            // bitfield_is_complete("") is false, so the next boot rebuilt the
+            // torrent at 0%, allocated an all-missing picker and re-downloaded
+            // data already sitting on disk. Since last_saved is empty at boot,
+            // the first sweep marked every torrent dirty and did this to the
+            // whole catalogue. Emit the full bitfield the picker would have.
+            None => hex_encode_bytes(&full_bitfield(t.meta.num_pieces())),
         };
         fastresume::ResumeData {
             info_hash: hex_encode(&t.info_hash),
@@ -646,6 +672,8 @@ impl TorrentManager {
             return Err("torrent already present in this engine".into());
         }
 
+        let resume_bits = hex_decode_bytes(&rd.bitfield);
+        let already_complete = bitfield_is_complete(&resume_bits, meta.num_pieces());
         let state = TorrentState::new_with_times(
             meta,
             rd.save_path.clone().into(),
@@ -653,6 +681,7 @@ impl TorrentManager {
             rd.seed_mode,
             Some(rd.added_time),
             Some(rd.completed_time),
+            !rd.seed_mode && !already_complete,
         );
         // An edited tracker list lives in the record, not in the .torrent on
         // disk. Dropping it here would silently undo the edit on every move.
@@ -663,12 +692,9 @@ impl TorrentManager {
         state.total_downloaded.store(rd.total_downloaded, Ordering::Relaxed);
         // Bitfield before status, for the same reason the startup path does it
         // in that order: the status is derived from completeness.
-        if !rd.bitfield.is_empty() {
+        if !resume_bits.is_empty() {
             if let Some(picker) = state.picker.get() {
-                let bytes = hex_decode_bytes(&rd.bitfield);
-                if !bytes.is_empty() {
-                    picker.lock().unwrap().import_bitfield(&bytes);
-                }
+                picker.lock().unwrap().import_bitfield(&resume_bits);
             }
         }
         if rd.paused {
@@ -744,6 +770,72 @@ fn hex_encode_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Is every piece already present in this resume bitfield?
+///
+/// Answered without building a `PiecePicker`, which is the whole point: the
+/// picker is what we are trying not to allocate. A short or empty bitfield is
+/// "not complete" -- the same conservative reading `import_bitfield` gives it.
+/// Torrents that just finished downloading, waiting to be written to the store.
+///
+/// A completion used to update memory only and rely on the five-minute sweep.
+/// Anything that stopped the engine inside that window -- a deploy, a crash,
+/// an OOM -- lost the fact that the torrent was complete, and the next boot
+/// re-downloaded every byte of it. The manager drains this and persists at
+/// once.
+static COMPLETED: OnceLock<tokio::sync::mpsc::UnboundedSender<InfoHash>> = OnceLock::new();
+static COMPLETED_RX: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<InfoHash>>> =
+    std::sync::Mutex::new(None);
+
+fn completed_channel() -> &'static tokio::sync::mpsc::UnboundedSender<InfoHash> {
+    COMPLETED.get_or_init(|| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        *COMPLETED_RX.lock().unwrap() = Some(rx);
+        tx
+    })
+}
+
+/// Signal that a torrent finished downloading. Cheap and non-blocking.
+pub fn notify_completed(ih: InfoHash) {
+    let _ = completed_channel().send(ih);
+}
+
+/// Taken once, by the task that persists completions.
+pub fn take_completion_receiver() -> Option<tokio::sync::mpsc::UnboundedReceiver<InfoHash>> {
+    completed_channel();
+    COMPLETED_RX.lock().unwrap().take()
+}
+
+/// Every piece present, in the bit order `bitfield_is_complete` reads.
+fn full_bitfield(num_pieces: u32) -> Vec<u8> {
+    let n = num_pieces as usize;
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut bytes = vec![0xFFu8; n.div_ceil(8)];
+    let rem = n % 8;
+    if rem != 0 {
+        if let Some(last) = bytes.last_mut() {
+            *last = !((1u8 << (8 - rem)) - 1);
+        }
+    }
+    bytes
+}
+
+fn bitfield_is_complete(bytes: &[u8], num_pieces: u32) -> bool {
+    let n = num_pieces as usize;
+    if n == 0 || bytes.is_empty() {
+        return false;
+    }
+    for i in 0..n {
+        let byte_idx = i / 8;
+        let bit_idx = 7 - (i % 8);
+        if byte_idx >= bytes.len() || (bytes[byte_idx] >> bit_idx) & 1 == 0 {
+            return false;
+        }
+    }
+    true
+}
+
 fn hex_decode_bytes(hex: &str) -> Vec<u8> {
     if hex.len() % 2 != 0 { return Vec::new(); }
     let mut out = Vec::with_capacity(hex.len() / 2);
@@ -775,7 +867,17 @@ fn remove_empty_dirs_recursive(dir: &std::path::Path) {
 /// re-adds could otherwise thrash the disk -- cap concurrent checks.
 fn recheck_sem() -> &'static Semaphore {
     static S: OnceLock<Semaphore> = OnceLock::new();
-    S.get_or_init(|| Semaphore::new(2))
+    // Deux rechecks simultanes lisant leurs pieces une par une plafonnaient a
+    // ~2 Mo/s sur un pool qui en sert 500. Reparer 573 torrents aurait pris des
+    // milliers d heures. Reglable sans rebuild pour une campagne de reparation.
+    S.get_or_init(|| {
+        let n = std::env::var("TYPHON_RECHECK_TORRENTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(4);
+        Semaphore::new(n)
+    })
 }
 
 impl TorrentManager {
@@ -847,30 +949,56 @@ impl TorrentManager {
             Some(p) => p.clone(),
             None => return,
         };
-        // Recheck is authoritative: clear prior have bits, then re-derive from
-        // disk. Otherwise a now-corrupt piece keeps its stale have bit.
-        picker.lock().unwrap().reset_have();
-        let mut have = 0u32;
-        for piece in 0..num_pieces {
-            if t.is_removed.load(Ordering::Relaxed) {
-                return; // torrent removed mid-check -> drop out
-            }
-            if let Some(data) = crate::disk::read_piece_for_check(&t, piece).await {
-                // No hash table -> we cannot say this piece is good. Leave the
-                // have bit clear; the recheck reports the torrent incomplete
-                // rather than blessing unverified data.
-                let expected = match t.piece_hash(piece) {
-                    Some(h) => h,
-                    None => continue,
-                };
-                let mut hasher = Sha1::new();
-                hasher.update(&data);
-                let mut computed = [0u8; 20];
-                computed.copy_from_slice(&hasher.finalize());
-                if computed == expected {
-                    picker.lock().unwrap().set_have(piece);
-                    have += 1;
+        // Recheck is authoritative, but it must not publish a verdict it does
+        // not have yet. Clearing the live picker up front left the torrent at
+        // 0% for the entire scan, and the five-minute state sweep -- whose
+        // dirty check is num_have -- persisted that empty bitfield within
+        // minutes. A 160 GiB torrent takes hours to verify, so any restart in
+        // that window resurrected a complete torrent as 0% and re-downloaded
+        // data already sitting on disk. Verify into a local set and install it
+        // in one critical section once the verdict is final.
+        // Une piece a la fois laissait le disque a l arret entre deux lectures :
+        // mesure a 0,5 piece/s (~2 Mo/s) la ou le pool en sert plusieurs
+        // centaines. Les lectures partent en parallele, le hachage suit, et
+        // c est le disque qui redevient le facteur limitant.
+        let width = std::env::var("TYPHON_RECHECK_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(16);
+        let mut verified: Vec<u32> = futures::stream::iter(0..num_pieces)
+            .map(|piece| {
+                let t = t.clone();
+                async move {
+                    if t.is_removed.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                    let data = crate::disk::read_piece_for_check(&t, piece).await?;
+                    // No hash table -> we cannot say this piece is good. Leave
+                    // the have bit clear; the recheck reports the torrent
+                    // incomplete rather than blessing unverified data.
+                    let expected = t.piece_hash(piece)?;
+                    let mut hasher = Sha1::new();
+                    hasher.update(&data);
+                    let mut computed = [0u8; 20];
+                    computed.copy_from_slice(&hasher.finalize());
+                    if computed == expected { Some(piece) } else { None }
                 }
+            })
+            .buffer_unordered(width)
+            .filter_map(|r| async move { r })
+            .collect()
+            .await;
+        if t.is_removed.load(Ordering::Relaxed) {
+            return; // torrent removed mid-check -> do not publish a verdict
+        }
+        verified.sort_unstable();
+        let have = verified.len() as u32;
+        {
+            let mut p = picker.lock().unwrap();
+            p.reset_have();
+            for piece in &verified {
+                p.set_have(*piece);
             }
         }
 
@@ -922,5 +1050,62 @@ impl TorrentManager {
             num_pieces,
             if complete { "seeding" } else { "downloading" }
         );
+    }
+}
+
+#[cfg(test)]
+mod picker_alloc_tests {
+    use super::bitfield_is_complete;
+
+    /// A full bitfield must be recognised without a picker: that recognition is
+    /// exactly what lets the loader skip the allocation.
+    #[test]
+    fn full_bitfield_is_complete() {
+        assert!(bitfield_is_complete(&[0b1111_1111], 8));
+        assert!(bitfield_is_complete(&[0xFF, 0b1100_0000], 10));
+    }
+
+    /// One missing piece anywhere must keep the picker alive, otherwise a
+    /// partial download would be silently promoted to "seeding" and never
+    /// finish.
+    #[test]
+    fn one_hole_is_not_complete() {
+        assert!(!bitfield_is_complete(&[0b1111_1110], 8));
+        assert!(!bitfield_is_complete(&[0b0111_1111], 8));
+        assert!(!bitfield_is_complete(&[0xFF, 0b1000_0000], 10));
+    }
+
+    /// Short, empty or zero-piece bitfields are "not complete" -- the same
+    /// conservative reading import_bitfield gives them.
+    #[test]
+    fn short_or_empty_is_not_complete() {
+        assert!(!bitfield_is_complete(&[], 8));
+        assert!(!bitfield_is_complete(&[0xFF], 16));
+        assert!(!bitfield_is_complete(&[0xFF], 0));
+    }
+}
+
+#[cfg(test)]
+mod full_bitfield_tests {
+    use super::{bitfield_is_complete, full_bitfield};
+
+    /// The bitfield persisted for a complete, picker-less torrent must read
+    /// back as complete. When it did not, every boot re-downloaded the whole
+    /// catalogue.
+    #[test]
+    fn full_bitfield_reads_back_complete() {
+        for n in [1u32, 7, 8, 9, 10, 63, 64, 65, 38067] {
+            let bf = full_bitfield(n);
+            assert!(bitfield_is_complete(&bf, n), "n={}", n);
+        }
+    }
+
+    /// Guard the tail mask: bits past num_pieces must stay clear, otherwise a
+    /// short torrent would claim pieces it does not have.
+    #[test]
+    fn tail_bits_beyond_num_pieces_are_clear() {
+        assert_eq!(full_bitfield(10), vec![0xFF, 0b1100_0000]);
+        assert_eq!(full_bitfield(8), vec![0xFF]);
+        assert!(full_bitfield(0).is_empty());
     }
 }

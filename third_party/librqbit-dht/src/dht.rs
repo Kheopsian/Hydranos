@@ -340,7 +340,7 @@ impl RecursiveRequest<RecursiveRequestCallbacksGetPeers> {
     ) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
         spawn(
-            error_span!(parent: None, "get_peers", info_hash = format!("{:?}", self.info_hash)),
+            debug_span!(parent: None, "get_peers", info_hash = format!("{:?}", self.info_hash)),
             async move {
                 let this = &this;
                 // Looper adds root nodes to the queue every 60 seconds.
@@ -373,7 +373,7 @@ impl RecursiveRequest<RecursiveRequestCallbacksGetPeers> {
                             futs.push(
                                 this.request_one(id, addr, depth)
                                     .map_err(|e| debug!("error: {e:#}"))
-                                    .instrument(error_span!("addr", addr=addr.to_string()))
+                                    .instrument(debug_span!("addr", addr=addr.to_string()))
                             );
                         }
                         Some(_) = futs.next(), if !futs.is_empty() => {}
