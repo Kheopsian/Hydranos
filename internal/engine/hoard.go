@@ -1954,6 +1954,15 @@ func (e *HoardEngine) enforceDownloadSlots() {
 	// downloading. Without the sticky pass, a torrent pulling 8 MB/s competed
 	// on equal footing with 18k parked ones, and lost whenever the (heavily
 	// tied) seed sort reshuffled.
+	// Activity demotion exists to hand a SCARCE slot to a torrent that can use
+	// it. When every incomplete torrent already fits, stopping one frees
+	// nothing and costs a full stop -> cooldown -> re-announce -> reconnect
+	// cycle. Observed in prod with max_downloads=2000 and 114 incomplete
+	// torrents: "demoted=89" in one tick, then "started=104" the next, while
+	// 1886 slots sat idle. Only judge progress when slots are actually
+	// contended.
+	slotsContended := maxSlots > 0 && len(incomplete) > maxSlots
+
 	sticky := make(map[string]bool, len(actives))
 	demoted := make(map[string]bool)
 	e.slotProgressMu.Lock()
@@ -1985,6 +1994,16 @@ func (e *HoardEngine) enforceDownloadSlots() {
 			continue
 		}
 		delta := t.Bytes - pi.bytesAtUnpark
+		if delta < progressMinBytes && t.Rate < progressMinRate && !slotsContended {
+			// Idle, but nobody is waiting for the slot. Keep it and restart the
+			// evaluation window so the torrent is judged on fresh evidence if
+			// contention ever appears, instead of being demoted the instant it
+			// does on evidence gathered while it was free to stall.
+			pi.unparkAt = now
+			pi.bytesAtUnpark = t.Bytes
+			sticky[ih] = true
+			continue
+		}
 		if delta < progressMinBytes && t.Rate < progressMinRate {
 			// No progress — demote with cooldown
 			level := pi.backoffLevel
