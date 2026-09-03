@@ -75,6 +75,21 @@ type Plan struct {
 	// removes on its way past.
 	TargetExists bool
 	TargetEmpty  bool
+
+	// Loose marks a payload with no folder of its own: its files sit
+	// directly in a directory shared with other torrents. Source is then
+	// that shared directory, and only Files may leave it -- Source itself
+	// is never renamed and never removed.
+	Loose bool
+
+	// Collisions are the relative paths already occupied under Target. Only
+	// a loose move can have them: a normal move lands in a directory of its
+	// own, so the whole-directory check covers it.
+	Collisions []string
+
+	// Staging is where a cross-filesystem copy is assembled before being
+	// swapped into place. It is always on the target's filesystem.
+	Staging string
 }
 
 // Inspect walks the payload and reports what moving it would involve. It reads
@@ -110,7 +125,7 @@ func Inspect(source, target string) (*Plan, error) {
 			"moving it would move the whole volume", src)
 	}
 
-	p := &Plan{Source: src, Target: dst}
+	p := &Plan{Source: src, Target: dst, Staging: dst + stagingSuffix}
 	if st, err := os.Stat(dst); err == nil {
 		p.TargetExists = true
 		p.TargetEmpty = st.IsDir() && dirIsEmpty(dst)
@@ -163,7 +178,16 @@ func Inspect(source, target string) (*Plan, error) {
 func (p *Plan) Check(allowBreakingHardlinks bool) error {
 	// Before anything else, and on both paths: a rename onto an occupied
 	// path fails, and a copy onto one wastes hours to fail the same way.
-	if p.TargetExists && !p.TargetEmpty {
+	//
+	// A loose payload is the exception: it moves into a directory it shares
+	// with other torrents, so that directory being occupied is the normal
+	// case and the only meaningful question is per file.
+	if p.Loose {
+		if len(p.Collisions) > 0 {
+			return fmt.Errorf("%w: %s already holds %s",
+				ErrTargetFileExists, p.Target, strings.Join(p.Collisions, ", "))
+		}
+	} else if p.TargetExists && !p.TargetEmpty {
 		return fmt.Errorf("%w: %s", ErrTargetExists, p.Target)
 	}
 	if p.SameFS {

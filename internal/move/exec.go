@@ -47,6 +47,12 @@ type Options struct {
 	// path and restarts the torrent. If it returns an error the source is
 	// left alone, so the torrent can be pointed back at it.
 	AfterSwap func() error
+
+	// AbortSwap undoes BeforeSwap when a swap that was about to happen is
+	// called off. Distinct from AfterSwap because nothing has moved: the
+	// payload is where it started and the engine was never repointed, so
+	// all that is owed is putting the torrent back to work.
+	AbortSwap func() error
 }
 
 // Execute performs the move described by the plan.
@@ -63,6 +69,12 @@ type Options struct {
 func Execute(ctx context.Context, p *Plan, opts Options) error {
 	if err := p.Check(opts.AllowBreakingHardlinks); err != nil {
 		return err
+	}
+
+	// A payload with no folder of its own cannot be moved by moving its
+	// directory: the directory is the category, and other torrents live in it.
+	if p.Loose {
+		return executeLoose(ctx, p, opts)
 	}
 
 	if p.SameFS {
@@ -126,7 +138,10 @@ func Execute(ctx context.Context, p *Plan, opts Options) error {
 		}
 	}
 
-	staging := p.Target + stagingSuffix
+	staging := p.Staging
+	if staging == "" {
+		staging = p.Target + stagingSuffix
+	}
 	if err := os.MkdirAll(staging, 0o755); err != nil {
 		return fmt.Errorf("move: mkdir staging %s: %w", staging, err)
 	}
@@ -266,7 +281,17 @@ func ensureSpace(p *Plan) error {
 // CleanupStaging removes a half-finished copy. Used when a move is cancelled
 // or abandoned; safe to call when there is nothing there.
 func CleanupStaging(target string) error {
-	err := os.RemoveAll(target + stagingSuffix)
+	return CleanupStagingAt(target + stagingSuffix)
+}
+
+// CleanupStagingAt removes a half-finished copy at an explicit path. A loose
+// move stages inside the target directory under a per-torrent name, so its
+// path cannot be derived from the target alone.
+func CleanupStagingAt(staging string) error {
+	if staging == "" {
+		return nil
+	}
+	err := os.RemoveAll(staging)
 	if os.IsNotExist(err) {
 		return nil
 	}
