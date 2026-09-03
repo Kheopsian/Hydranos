@@ -155,7 +155,7 @@ pub struct EngineConfig {
 }
 
 fn default_true() -> bool { true }
-fn default_webseed_concurrency() -> usize { 16 }
+fn default_webseed_concurrency() -> usize { 48 }
 fn default_data_dir() -> String { "/configs".into() }
 fn default_listen_port() -> u16 { 16172 }
 fn default_max_connections() -> usize { 12000 }

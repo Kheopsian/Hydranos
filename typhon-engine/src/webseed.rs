@@ -282,11 +282,10 @@ async fn drive_torrent(
     t: &Arc<TorrentState>,
     disk: &Arc<DiskManager>,
 ) -> Result<u32, String> {
-    // A webseed has everything, so the picker is asked with an all-ones
-    // bitfield. Availability is deliberately NOT incremented: the swarm
-    // availability figure describes peers, and an HTTP mirror is not one.
+    // Availability is deliberately NOT incremented anywhere for a webseed:
+    // the swarm availability figure describes peers, and an HTTP mirror is
+    // not one.
     let num_pieces = t.meta.num_pieces();
-    let have_all = vec![0xFFu8; (num_pieces as usize).div_ceil(8)];
     let mut done = 0u32;
     let mut budget = MAX_PIECES_PER_CLAIM;
 
@@ -306,7 +305,10 @@ async fn drive_torrent(
         // download path.
         let run: Vec<u32> = {
             let mut p = picker.lock().unwrap();
-            let first = match p.pick_piece(&have_all) {
+            // NOT pick_piece: rarest-first tie-breaks at random, and every
+            // piece is equally rare on a torrent with no peers. A random start
+            // truncates the run, because a run only grows forwards.
+            let first = match p.first_missing() {
                 Some(i) => i,
                 None => break,
             };
@@ -420,7 +422,9 @@ async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwes
         let t = match candidate {
             Some(t) => t,
             None => {
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                // Ten seconds here was pure lost throughput whenever the
+                // candidate set thinned out for a moment.
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
         };

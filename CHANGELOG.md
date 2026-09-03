@@ -66,7 +66,31 @@ that was never dropped, a socket nothing reaped.
 Never released. Those numbers were spent on a line of work that did not reach
 this branch, so the history goes from 3.164.0 straight to 3.169.0.
 
-## v3.176.0
+## v3.177.0
+
+### Fixed
+- **Webseed spans were being truncated by a random starting piece.** The pool
+  asked the picker for work through `pick_piece`, which is rarest-first with a
+  random tie-break — correct for a swarm, wrong for an HTTP mirror, where every
+  piece has availability 0 and the tie-break therefore picks uniformly at
+  random. Since a run can only be extended *forwards*, starting in the middle
+  of a five-piece torrent produced a two-piece span touching two or three
+  files, so `buffered(6)` had almost nothing to overlap. Measured in
+  production: **~14 requests actually in flight where the design allows 96**,
+  while archive.org answered in 1.68 s median under that same load and the
+  engine sat at 0.88 core with a flat profile — neither the origin nor the CPU
+  was the limit. The pool now takes `PiecePicker::first_missing`, the
+  lowest-indexed piece that is neither held nor reserved, so runs are as long
+  as the torrent allows and the common case is one maximal span per torrent.
+
+### Changed
+- `webseed_max_concurrent` default 16 -> 48. The download-slot manager opens
+  2000 slots; with 16 workers the other ~1984 torrents made no progress between
+  its 30 s ticks, so it demoted them into cooldown exactly as designed, which
+  then starved the pool of candidates.
+- The pool's idle wait when no candidate is available drops from 10 s to 2 s.
+  Ten seconds was pure lost throughput whenever the candidate set thinned.
+
 
 ### Changed
 - **A webseed span's per-file requests now go out together instead of one after
