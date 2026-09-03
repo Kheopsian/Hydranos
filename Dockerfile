@@ -9,7 +9,15 @@ COPY typhon-engine/benches ./benches
 # Vendored crate referenced by [patch.crates-io] path = "../third_party/...".
 COPY third_party /build/third_party
 ENV RUSTFLAGS="--cfg tokio_unstable"
-RUN cargo build --release --bin typhon-engine
+# Without these caches, changing one line of src/ recompiled all 205 crates --
+# some 200 of them third-party dependencies that never move -- for about 30
+# minutes per build.
+# The binary has to be copied OUT of the cache in the same RUN: a cache mount
+# does not exist in the final layer, so the runtime stage cannot read from it.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/build/typhon-engine/target,sharing=locked \
+    cargo build --release --bin typhon-engine \
+    && cp target/release/typhon-engine /usr/local/bin/typhon-engine
 
 # Stage 2: Go builder.
 FROM golang:1.25-bookworm AS go-builder
@@ -30,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # jemalloc heap profiling on the Rust engine (low-overhead sampling every
 # 512KB). Dumps triggered on SIGUSR1 by the watchdog. Go (hydra) ignores it.
 ENV MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/config/jeprof
-COPY --from=typhon-builder /build/typhon-engine/target/release/typhon-engine /usr/local/bin/hydra-engine
+COPY --from=typhon-builder /usr/local/bin/typhon-engine /usr/local/bin/hydra-engine
 
 COPY --from=go-builder /hydra /usr/local/bin/hydra
 COPY configs/ /app/configs/

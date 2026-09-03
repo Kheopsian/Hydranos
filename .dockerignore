@@ -1,7 +1,5 @@
-.git
-.gitignore
-typhon-engine/target
-hydra-engine/build
-**/*.md
-**/.DS_Store
-!CHANGELOG.md
+target/
+.git/
+*.bak*
+*.log
+node_modules/
