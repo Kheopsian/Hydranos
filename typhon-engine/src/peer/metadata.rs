@@ -42,10 +42,10 @@ pub async fn fetch_from_peer(
     peer_id: [u8; 20],
     utp_socket: Option<Arc<UtpSocketUdp>>,
     listen_port: u16,
-    source_fwmark: u32,
+    egress: crate::netpin::Egress,
 ) -> Result<Vec<u8>, String> {
     let (cs, _fast_ext, lt_ext, _remote_peer_id, _encrypted) =
-        crate::tracker::open_peer(addr, &utp_socket, &info_hash, &peer_id, source_fwmark, false)
+        crate::tracker::open_peer(addr, &utp_socket, &info_hash, &peer_id, &egress, false)
             .await
             .ok_or_else(|| "no connection".to_string())?;
     if !lt_ext {
@@ -171,7 +171,7 @@ pub async fn fetch(
     peer_id: [u8; 20],
     utp_socket: Option<Arc<UtpSocketUdp>>,
     listen_port: u16,
-    source_fwmark: u32,
+    egress: crate::netpin::Egress,
     concurrency: usize,
 ) -> Result<Vec<u8>, String> {
     if peers.is_empty() {
@@ -183,9 +183,10 @@ pub async fn fetch(
         for addr in wave {
             let addr = *addr;
             let utp = utp_socket.clone();
+            let eg = egress.clone();
             inflight.push(async move {
                 let attempt =
-                    fetch_from_peer(addr, info_hash, peer_id, utp, listen_port, source_fwmark);
+                    fetch_from_peer(addr, info_hash, peer_id, utp, listen_port, eg);
                 match tokio::time::timeout(PEER_TIMEOUT, attempt).await {
                     Ok(r) => (addr, r),
                     Err(_) => (addr, Err("timed out".to_string())),

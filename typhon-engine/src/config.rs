@@ -219,7 +219,7 @@ impl EngineConfig {
             // Same peer_id as the v4 listener: one engine, one identity. The
             // CSV multi-interface path already shares it the same way.
             peer_id: out.first().map(|b| b.peer_id).unwrap_or_else(|| self.peer_id()),
-            fwmark: out.first().map(|b| b.fwmark).unwrap_or(0),
+            egress: out.first().map(|b| b.egress.clone()).unwrap_or_default(),
             advertised_port: advertised,
             only_v6: true,
         });
@@ -257,7 +257,10 @@ impl EngineConfig {
                     id: b.id,
                     addr,
                     peer_id: pid,
-                    fwmark: b.fwmark,
+                    egress: crate::netpin::Egress {
+                        fwmark: b.fwmark,
+                        device: self.bind_device.clone(),
+                    },
                     advertised_port: advertised,
                     only_v6: false,
                 });
@@ -270,7 +273,7 @@ impl EngineConfig {
         if self.listen_interfaces.is_empty() {
             if let Ok(addr) = format!("0.0.0.0:{}", self.listen_port).parse::<std::net::SocketAddr>() {
                 let port = addr.port();
-                out.push(ResolvedBinding { id: 0, addr, peer_id: global_pid, fwmark: 0, advertised_port: port, only_v6: false });
+                out.push(ResolvedBinding { id: 0, addr, peer_id: global_pid, egress: crate::netpin::Egress { fwmark: 0, device: self.bind_device.clone() }, advertised_port: port, only_v6: false });
             }
         } else {
             for (i, part) in self.listen_interfaces.split(',').enumerate() {
@@ -278,7 +281,7 @@ impl EngineConfig {
                 if s.is_empty() { continue; }
                 if let Ok(addr) = s.parse::<std::net::SocketAddr>() {
                     let port = addr.port();
-                    out.push(ResolvedBinding { id: i as u32, addr, peer_id: global_pid, fwmark: 0, advertised_port: port, only_v6: false });
+                    out.push(ResolvedBinding { id: i as u32, addr, peer_id: global_pid, egress: crate::netpin::Egress { fwmark: 0, device: self.bind_device.clone() }, advertised_port: port, only_v6: false });
                 }
             }
         }
@@ -297,7 +300,10 @@ pub struct ResolvedBinding {
     pub id: u32,
     pub addr: std::net::SocketAddr,
     pub peer_id: [u8; 20],
-    pub fwmark: u32,
+    /// Where sockets for this binding must leave by: routing mark and
+    /// interface, chosen together. Was a bare fwmark plus a process-wide
+    /// device, which stopped working the day one process carried two engines.
+    pub egress: crate::netpin::Egress,
     pub advertised_port: u16,
     /// Set IPV6_V6ONLY on the listener. True only for the `[::]` listener we
     /// add for `enable_ipv6`, which sits *beside* the v4 one. Without it the
