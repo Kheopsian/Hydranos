@@ -270,6 +270,10 @@ pub struct TorrentState {
     pub total_downloaded: AtomicU64,
     pub peers_connected: AtomicUsize,
     pub peers_interested: AtomicUsize,
+    /// Peers this torrent learned about through PEX. Counted per torrent, not
+    /// per process: the diagnostics of one engine must not include the PEX
+    /// traffic of the engine sharing its process.
+    pub pex_peers_discovered: AtomicU64,
     pub is_paused: AtomicBool,
     /// Anti-thrash: when true, this torrent serves no piece Requests
     /// (disk reads gated in peer::session), but stays connected and
@@ -490,6 +494,7 @@ impl TorrentState {
             total_downloaded: AtomicU64::new(0),
             peers_connected: AtomicUsize::new(0),
             peers_interested: AtomicUsize::new(0),
+            pex_peers_discovered: AtomicU64::new(0),
             is_paused: AtomicBool::new(false),
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),

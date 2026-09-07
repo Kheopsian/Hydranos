@@ -400,7 +400,7 @@ pub async fn run(
                                 } else if ext_id == OUR_UT_PEX_ID && extension::pex_enabled() {
                                     let new_peers = extension::parse_pex(&payload);
                                     if !new_peers.is_empty() {
-                                        crate::tracker::PEX_PEERS_DISCOVERED.fetch_add(
+                                        torrent.pex_peers_discovered.fetch_add(
                                             new_peers.len() as u64,
                                             Ordering::Relaxed,
                                         );

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -44,23 +44,29 @@ struct Job {
     started: Instant,
 }
 
-static JOBS: OnceLock<Mutex<HashMap<[u8; 20], Job>>> = OnceLock::new();
-
-fn jobs() -> &'static Mutex<HashMap<[u8; 20], Job>> {
-    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+/// The magnet resolutions in flight for ONE engine.
+///
+/// Keyed by info hash, which was unambiguous while one engine meant one
+/// process. With two engines sharing a process, the same magnet added to both
+/// collided: the second `start` saw a live job and returned false, so that
+/// engine never resolved the magnet and never reported a failure either.
+#[derive(Default)]
+pub struct MagnetJobs {
+    map: Mutex<HashMap<[u8; 20], Job>>,
 }
 
-fn set_state(info_hash: [u8; 20], state: JobState) {
-    if let Ok(mut map) = jobs().lock() {
-        if let Some(job) = map.get_mut(&info_hash) {
-            job.state = state;
+impl MagnetJobs {
+    fn set_state(&self, info_hash: [u8; 20], state: JobState) {
+        if let Ok(mut map) = self.map.lock() {
+            if let Some(job) = map.get_mut(&info_hash) {
+                job.state = state;
+            }
         }
     }
-}
 
 /// Current state of a resolution, if we know about one.
-pub fn state_of(info_hash: &[u8; 20]) -> Option<JobState> {
-    let map = jobs().lock().ok()?;
+pub fn state_of(&self, info_hash: &[u8; 20]) -> Option<JobState> {
+    let map = self.map.lock().ok()?;
     let job = map.get(info_hash)?;
     // A job that blew its ceiling reports as failed rather than resolving
     // forever; the caller can start a fresh one.
@@ -71,8 +77,8 @@ pub fn state_of(info_hash: &[u8; 20]) -> Option<JobState> {
 }
 
 /// Forget a job, so its dict stops occupying memory once collected.
-pub fn forget(info_hash: &[u8; 20]) {
-    if let Ok(mut map) = jobs().lock() {
+pub fn forget(&self, info_hash: &[u8; 20]) {
+    if let Ok(mut map) = self.map.lock() {
         map.remove(info_hash);
     }
 }
@@ -80,6 +86,7 @@ pub fn forget(info_hash: &[u8; 20]) {
 /// Start resolving, unless a job for this info hash is already alive.
 /// Returns false when one was already running (or finished and uncollected).
 pub fn start(
+    self: &Arc<Self>,
     info_hash: [u8; 20],
     trackers: Vec<String>,
     seed_peers: Vec<SocketAddr>,
@@ -91,7 +98,7 @@ pub fn start(
     dht: Option<librqbit_dht::Dht>,
 ) -> bool {
     {
-        let mut map = match jobs().lock() {
+        let mut map = match self.map.lock() {
             Ok(m) => m,
             Err(_) => return false,
         };
@@ -117,16 +124,17 @@ pub fn start(
     let (peer_id, egress, port) = match binding {
         Some(b) => (b.peer_id, b.egress.clone(), b.advertised_port),
         None => {
-            set_state(info_hash, JobState::Failed("no usable network binding".into()));
+            self.set_state(info_hash, JobState::Failed("no usable network binding".into()));
             return true;
         }
     };
 
+    let jobs = self.clone();
     tokio::spawn(async move {
         let peers = discover(info_hash, &trackers, seed_peers, &peer_id, port, dht).await;
         if peers.is_empty() {
             warn!("[magnet] no peers found for {}", hex(&info_hash));
-            set_state(info_hash, JobState::Failed("no peers found".into()));
+            jobs.set_state(info_hash, JobState::Failed("no peers found".into()));
             return;
         }
         debug!("[magnet] {} candidate peers for {}", peers.len(), hex(&info_hash));
@@ -146,15 +154,16 @@ pub fn start(
         match result {
             Ok(dict) => {
                 info!("[magnet] resolved {} ({} bytes)", hex(&info_hash), dict.len());
-                set_state(info_hash, JobState::Done(dict));
+                jobs.set_state(info_hash, JobState::Done(dict));
             }
             Err(e) => {
                 warn!("[magnet] {} failed: {}", hex(&info_hash), e);
-                set_state(info_hash, JobState::Failed(e));
+                jobs.set_state(info_hash, JobState::Failed(e));
             }
         }
     });
     true
+}
 }
 
 /// Collect peer candidates from the magnet's trackers and the DHT.

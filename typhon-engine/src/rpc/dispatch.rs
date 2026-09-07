@@ -19,7 +19,7 @@ pub fn dispatch(
         "ping" => json!({"pong": true}),
         "add_torrent" => add_torrent(params, torrent_mgr),
         "fetch_metadata" => fetch_metadata(params, config, torrent_mgr),
-        "get_metadata" => get_metadata(params),
+        "get_metadata" => get_metadata(params, torrent_mgr),
         "remove_torrent" => remove_torrent(params, torrent_mgr),
         "start_torrent" => start_torrent(params, torrent_mgr),
         "stop_torrent" => stop_torrent(params, torrent_mgr),
@@ -96,18 +96,18 @@ fn fetch_metadata(params: &Value, config: &EngineConfig, mgr: &Arc<TorrentManage
         .unwrap_or_default();
     let binding_id = params.get("binding_id").and_then(|v| v.as_u64()).map(|n| n as u32);
 
-    let started = crate::magnet::start(ih, trackers, peers, config, binding_id, mgr.dht().map(|d| d.handle()));
+    let started = mgr.magnet().start(ih, trackers, peers, config, binding_id, mgr.dht().map(|d| d.handle()));
     json!({"info_hash": hex_encode(&ih), "started": started})
 }
 
 /// Poll a resolution. `state` is one of resolving / done / failed; on done the
 /// raw info dict comes back hex-encoded (there is no base64 in the tree).
-fn get_metadata(params: &Value) -> Value {
+fn get_metadata(params: &Value, torrent_mgr: &Arc<TorrentManager>) -> Value {
     let ih = match get_info_hash(params) {
         Ok(ih) => ih,
         Err(e) => return e,
     };
-    match crate::magnet::state_of(&ih) {
+    match torrent_mgr.magnet().state_of(&ih) {
         None => json!({"state": "unknown"}),
         Some(crate::magnet::JobState::Resolving) => json!({"state": "resolving"}),
         Some(crate::magnet::JobState::Failed(e)) => json!({"state": "failed", "error": e}),
@@ -115,7 +115,7 @@ fn get_metadata(params: &Value) -> Value {
             let encoded = crate::magnet::hex(&dict);
             // The caller has it now; holding megabytes per resolved magnet
             // would be a slow leak at our torrent counts.
-            crate::magnet::forget(&ih);
+            torrent_mgr.magnet().forget(&ih);
             json!({"state": "done", "info": encoded})
         }
     }
@@ -581,6 +581,7 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     let mut total_peers = 0usize;
     let mut total_interested = 0usize;
     let mut total_uploading = 0usize;
+    let mut pex_discovered = 0u64;
 
     for t in &all {
         let peers = t.peers_connected.load(Ordering::Relaxed);
@@ -590,6 +591,7 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
         if t.total_uploaded.load(Ordering::Relaxed) > 0 {
             total_uploading += 1;
         }
+        pex_discovered += t.pex_peers_discovered.load(Ordering::Relaxed);
     }
 
     // NOTE: counters must be built via an explicit map rather than `json!{}` — the
@@ -661,10 +663,12 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     put_u!("leechers_out_total", crate::tracker::LEECHERS_OUT_TOTAL.load(Ordering::Relaxed));
     put_u!("pex_ext_handshakes_sent", crate::tracker::PEX_EXT_HANDSHAKES_SENT.load(Ordering::Relaxed));
     put_u!("pex_ext_handshakes_recv", crate::tracker::PEX_EXT_HANDSHAKES_RECV.load(Ordering::Relaxed));
-    put_u!("pex_msgs_sent", crate::tracker::PEX_MSGS_SENT.load(Ordering::Relaxed));
-    put_u!("pex_msgs_recv", crate::tracker::PEX_MSGS_RECV.load(Ordering::Relaxed));
-    put_u!("pex_peers_discovered", crate::tracker::PEX_PEERS_DISCOVERED.load(Ordering::Relaxed));
-    put_u!("pex_peers_dialed", crate::tracker::PEX_PEERS_DIALED.load(Ordering::Relaxed));
+    // Never incremented anywhere, and published as zero since they were added.
+    // Kept so the shape of the answer does not change.
+    put_u!("pex_msgs_sent", 0u64);
+    put_u!("pex_msgs_recv", 0u64);
+    put_u!("pex_peers_dialed", 0u64);
+    put_u!("pex_peers_discovered", pex_discovered);
     // This engine's node, not the process's: an engine without a DHT reports
     // zeroes rather than its neighbour's traffic.
     let (dht_tracked, dht_found, dht_dialed) = match mgr.dht() {

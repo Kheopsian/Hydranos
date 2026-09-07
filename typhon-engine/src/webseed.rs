@@ -89,30 +89,40 @@ const PARK_SECS: u64 = 3600;
 /// across every worker. Ratios between them are what matter: they say which
 /// phase actually owns the throughput, which six rounds of reasoning about the
 /// design did not manage to establish.
-static T_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static T_PICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static T_FETCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static T_FEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static T_COMMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static N_SPANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static N_REQS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static N_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Everything the webseed workers of ONE engine share.
+///
+/// These were statics, which described reality while one engine meant one
+/// process. In Hydra 4 race and hoard share a process: a shared claim set and
+/// a shared queue would have let a hoard worker claim a race torrent, and the
+/// timing counters would have reported the two engines added together under
+/// whichever one was asked.
+#[derive(Default)]
+pub struct WebseedState {
+    /// Claims, so two workers never fight over the same picker.
+    claimed: DashSet<InfoHash>,
+    /// Per-torrent failure count and the time to retry after.
+    backoff: DashMap<InfoHash, (u32, u64)>,
+    /// Candidates the scanner found, waiting for a worker.
+    queue: std::sync::Mutex<VecDeque<InfoHash>>,
+    t_wait: std::sync::atomic::AtomicU64,
+    t_pick: std::sync::atomic::AtomicU64,
+    t_fetch: std::sync::atomic::AtomicU64,
+    t_feed: std::sync::atomic::AtomicU64,
+    t_commit: std::sync::atomic::AtomicU64,
+    n_spans: std::sync::atomic::AtomicU64,
+    n_reqs: std::sync::atomic::AtomicU64,
+    n_bytes: std::sync::atomic::AtomicU64,
+}
 
 fn add_ns(c: &std::sync::atomic::AtomicU64, t: std::time::Instant) {
     c.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
-static CLAIMED: std::sync::OnceLock<DashSet<InfoHash>> = std::sync::OnceLock::new();
+
 /// info_hash -> (consecutive failures, unix time before which not to retry)
-static BACKOFF: std::sync::OnceLock<DashMap<InfoHash, (u32, u64)>> = std::sync::OnceLock::new();
 
-fn claimed() -> &'static DashSet<InfoHash> {
-    CLAIMED.get_or_init(DashSet::new)
-}
 
-fn backoff() -> &'static DashMap<InfoHash, (u32, u64)> {
-    BACKOFF.get_or_init(DashMap::new)
-}
+
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -304,6 +314,7 @@ async fn drive_torrent(
     client: &reqwest::Client,
     t: &Arc<TorrentState>,
     disk: &Arc<DiskManager>,
+    ws: &WebseedState,
 ) -> Result<u32, String> {
     // Availability is deliberately NOT incremented anywhere for a webseed:
     // the swarm availability figure describes peers, and an HTTP mirror is
@@ -366,8 +377,8 @@ async fn drive_torrent(
         let mut data = None;
         let mut last_err = String::new();
         let t_fetch = std::time::Instant::now();
-        N_SPANS.fetch_add(1, Ordering::Relaxed);
-        N_REQS.fetch_add(
+        ws.n_spans.fetch_add(1, Ordering::Relaxed);
+        ws.n_reqs.fetch_add(
             span_file_ranges(&t.meta, "x", first, last).len() as u64,
             Ordering::Relaxed,
         );
@@ -381,7 +392,7 @@ async fn drive_torrent(
                 Err(e) => last_err = e,
             }
         }
-        add_ns(&T_FETCH, t_fetch);
+        add_ns(&ws.t_fetch, t_fetch);
         let data = match data {
             Some(d) => d,
             None => {
@@ -392,7 +403,7 @@ async fn drive_torrent(
                 return Err(last_err);
             }
         };
-        N_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
+        ws.n_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
 
         // Cut the span back into pieces and commit them one by one, each
         // through the same block-level checks and completion sequence a peer
@@ -415,7 +426,7 @@ async fn drive_torrent(
                 }
                 c
             };
-            add_ns(&T_FEED, t_feed);
+            add_ns(&ws.t_feed, t_feed);
             if !complete {
                 let mut p = picker.lock().unwrap();
                 for &i in &run[n..] {
@@ -431,7 +442,7 @@ async fn drive_torrent(
             };
             let t_commit = std::time::Instant::now();
             let ok = crate::peer::download::commit_piece(t, disk, index, piece_data).await;
-            add_ns(&T_COMMIT, t_commit);
+            add_ns(&ws.t_commit, t_commit);
             if ok {
                 done += 1;
                 budget = budget.saturating_sub(1);
@@ -453,10 +464,11 @@ async fn drive_torrent(
 /// One worker: find an unclaimed torrent that wants webseed help, drive it,
 /// release it.
 async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwest::Client) {
+    let ws = mgr.webseed();
     loop {
         let t_pick = std::time::Instant::now();
         let candidate = next_candidate(&mgr);
-        add_ns(&T_PICK, t_pick);
+        add_ns(&ws.t_pick, t_pick);
         let t = match candidate {
             Some(t) => t,
             None => {
@@ -464,20 +476,20 @@ async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwes
                 // that just idles a worker.
                 let t_wait = std::time::Instant::now();
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                add_ns(&T_WAIT, t_wait);
+                add_ns(&ws.t_wait, t_wait);
                 continue;
             }
         };
         let ih = t.info_hash;
-        let res = drive_torrent(&client, &t, &disk).await;
-        claimed().remove(&ih);
+        let res = drive_torrent(&client, &t, &disk, ws).await;
+        ws.claimed.remove(&ih);
 
         match res {
             Ok(_) => {
-                backoff().remove(&ih);
+                ws.backoff.remove(&ih);
             }
             Err(e) => {
-                let mut entry = backoff().entry(ih).or_insert((0, 0));
+                let mut entry = ws.backoff.entry(ih).or_insert((0, 0));
                 entry.0 += 1;
                 if entry.0 >= MAX_FAILS {
                     entry.1 = now_secs() + PARK_SECS;
@@ -502,12 +514,7 @@ async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwes
 }
 
 /// Work waiting to be claimed, filled by the scanner, drained by the workers.
-static QUEUE: std::sync::OnceLock<std::sync::Mutex<VecDeque<InfoHash>>> =
-    std::sync::OnceLock::new();
 
-fn queue() -> &'static std::sync::Mutex<VecDeque<InfoHash>> {
-    QUEUE.get_or_init(|| std::sync::Mutex::new(VecDeque::new()))
-}
 
 /// Refill the queue when it runs low, in ONE walk of the catalogue.
 ///
@@ -519,20 +526,24 @@ fn queue() -> &'static std::sync::Mutex<VecDeque<InfoHash>> {
 /// batch, and it runs on a blocking thread because it is a long synchronous
 /// scan that has no business sitting on a runtime worker.
 async fn scanner(mgr: Arc<TorrentManager>) {
+    let ws = mgr.webseed();
     loop {
-        let queued = queue().lock().map(|q| q.len()).unwrap_or(0);
+        let queued = ws.queue.lock().map(|q| q.len()).unwrap_or(0);
         if queued < QUEUE_LOW {
             let mgr2 = mgr.clone();
             let found = tokio::task::spawn_blocking(move || {
                 let now = now_secs();
+                // Borrowed inside the closure, not captured from the loop: the
+                // blocking task must own everything it touches.
+                let ws = mgr2.webseed();
                 mgr2.collect_torrents(QUEUE_TARGET, |t| {
                     let ih = t.info_hash;
-                    if let Some(b) = backoff().get(&ih) {
+                    if let Some(b) = ws.backoff.get(&ih) {
                         if b.1 > now {
                             return false;
                         }
                     }
-                    if claimed().contains(&ih) {
+                    if ws.claimed.contains(&ih) {
                         return false;
                     }
                     wants_webseed(t)
@@ -541,7 +552,7 @@ async fn scanner(mgr: Arc<TorrentManager>) {
             .await
             .unwrap_or_default();
 
-            if let Ok(mut q) = queue().lock() {
+            if let Ok(mut q) = ws.queue.lock() {
                 for ih in found {
                     q.push_back(ih);
                 }
@@ -553,19 +564,20 @@ async fn scanner(mgr: Arc<TorrentManager>) {
 
 /// Take the next piece of work off the queue, claiming it on the way out.
 fn next_candidate(mgr: &TorrentManager) -> Option<Arc<TorrentState>> {
+    let ws = mgr.webseed();
     loop {
         let ih = {
-            let mut q = queue().lock().ok()?;
+            let mut q = ws.queue.lock().ok()?;
             q.pop_front()?
         };
-        if !claimed().insert(ih) {
+        if !ws.claimed.insert(ih) {
             continue; // another worker got there first
         }
         match mgr.get(&ih) {
             Some(t) if wants_webseed(&t) => return Some(t),
             _ => {
                 // Gone or finished between the scan and now.
-                claimed().remove(&ih);
+                ws.claimed.remove(&ih);
                 continue;
             }
         }
@@ -574,17 +586,18 @@ fn next_candidate(mgr: &TorrentManager) -> Option<Arc<TorrentState>> {
 
 /// Log the phase breakdown once a minute, then reset it. Deltas rather than
 /// totals: a running average hides a regime change.
-async fn reporter() {
+async fn reporter(mgr: Arc<TorrentManager>) {
+    let ws = mgr.webseed();
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
-        let w = T_WAIT.swap(0, Ordering::Relaxed) / 1_000_000;
-        let p = T_PICK.swap(0, Ordering::Relaxed) / 1_000_000;
-        let f = T_FETCH.swap(0, Ordering::Relaxed) / 1_000_000;
-        let d = T_FEED.swap(0, Ordering::Relaxed) / 1_000_000;
-        let c = T_COMMIT.swap(0, Ordering::Relaxed) / 1_000_000;
-        let spans = N_SPANS.swap(0, Ordering::Relaxed);
-        let reqs = N_REQS.swap(0, Ordering::Relaxed);
-        let bytes = N_BYTES.swap(0, Ordering::Relaxed);
+        let w = ws.t_wait.swap(0, Ordering::Relaxed) / 1_000_000;
+        let p = ws.t_pick.swap(0, Ordering::Relaxed) / 1_000_000;
+        let f = ws.t_fetch.swap(0, Ordering::Relaxed) / 1_000_000;
+        let d = ws.t_feed.swap(0, Ordering::Relaxed) / 1_000_000;
+        let c = ws.t_commit.swap(0, Ordering::Relaxed) / 1_000_000;
+        let spans = ws.n_spans.swap(0, Ordering::Relaxed);
+        let reqs = ws.n_reqs.swap(0, Ordering::Relaxed);
+        let bytes = ws.n_bytes.swap(0, Ordering::Relaxed);
         info!(
             "[webseed] 60s: wait={}ms pick={}ms fetch={}ms feed={}ms commit={}ms | \
              spans={} reqs={} ({:.1}/s) MB={:.1} ({:.2} MB/s) | ms_per_req={:.0}",
@@ -678,7 +691,10 @@ pub fn start(mgr: Arc<TorrentManager>, cfg: &EngineConfig) {
         let mgr = mgr.clone();
         tokio::spawn(async move { scanner(mgr).await });
     }
-    tokio::spawn(async move { reporter().await });
+    {
+        let mgr = mgr.clone();
+        tokio::spawn(async move { reporter(mgr).await });
+    }
     info!("[webseed] BEP 19 enabled, {} concurrent fetches", workers);
     for _ in 0..workers {
         let mgr = mgr.clone();

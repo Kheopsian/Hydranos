@@ -33,6 +33,12 @@ pub struct TorrentManager {
     /// than per process: two engines in one process each get their own node,
     /// and an engine with `enable_dht = false` simply never sets it.
     dht: std::sync::OnceLock<Arc<crate::dht::DhtSession>>,
+    /// Claims, backoff and queue for this engine's webseed workers. Per
+    /// manager for the same reason as the DHT: a hoard worker must not be able
+    /// to claim a race torrent.
+    webseed: crate::webseed::WebseedState,
+    /// Magnet resolutions in flight for this engine.
+    magnet: Arc<crate::magnet::MagnetJobs>,
     /// Durable per-torrent state. `None` only if SQLite could not be opened at
     /// all, in which case everything falls back to the legacy JSON directory
     /// so a broken database degrades into the old behaviour instead of losing
@@ -54,6 +60,16 @@ impl TorrentManager {
     /// Attach this engine's DHT node. Called once, after bootstrap.
     pub fn set_dht(&self, session: Arc<crate::dht::DhtSession>) {
         let _ = self.dht.set(session);
+    }
+
+    /// This engine's magnet resolutions.
+    pub fn magnet(&self) -> &Arc<crate::magnet::MagnetJobs> {
+        &self.magnet
+    }
+
+    /// This engine's webseed working set.
+    pub fn webseed(&self) -> &crate::webseed::WebseedState {
+        &self.webseed
     }
 
     /// This engine's DHT node, if it has one.
@@ -110,6 +126,8 @@ impl TorrentManager {
             cached_unseeded_peers: std::sync::atomic::AtomicUsize::new(0),
             skey_index: DashMap::new(),
             dht: std::sync::OnceLock::new(),
+            webseed: Default::default(),
+            magnet: Default::default(),
             state_db,
             last_saved: DashMap::new(),
             mirror_json,
