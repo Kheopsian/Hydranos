@@ -270,6 +270,68 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
     })
 }
 
+/// One announce over HTTP, with the transport this module already knows about:
+/// the primary proxy, the timeout, and the bencode response.
+///
+/// The URL is built by the caller. Policy -- passkeys, client spoofing, the
+/// `ip=` parameter, rate limiting -- belongs to the announcer, not here; this
+/// only has to put a request on the wire and read the answer.
+pub async fn send_announce(url: &str, user_agent: &str) -> Result<AnnounceResponse, String> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(user_agent.to_string());
+    if let Some(px) = primary_proxy() {
+        builder = builder.proxy(px.clone());
+    }
+    let client = builder
+        .build()
+        .map_err(|e| format!("http client: {}", fmt_err_chain(&e)))?;
+
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("http request: {}", fmt_err_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let st = resp.status();
+        // Up to 200 characters of body: a tracker's own reason for a 403 or a
+        // 502 is the only thing that tells an operator whether they are banned
+        // or merely behind a broken CDN.
+        let body = resp.text().await.unwrap_or_default();
+        let snip: String = body.chars().take(200).collect();
+        return Err(format!("http {}: {}", st, snip.trim()));
+    }
+
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("http body: {}", fmt_err_chain(&e)))?;
+    parse_announce_response(&body)
+}
+
+/// The secondary announce, sent through the v6 SOCKS5 proxy when one is set.
+///
+/// Fire and forget: it exists to add a second egress path, and a failure on it
+/// must not fail the announce that already succeeded. The caller has already
+/// swapped the peer id, because some trackers dedup by it and would overwrite
+/// the primary entry instead of storing both.
+pub fn spawn_secondary_announce(url: String) {
+    let Some(pxc) = v6_proxy_client() else {
+        return;
+    };
+    let pxc = pxc.clone();
+    tokio::spawn(async move {
+        match pxc.get(&url).send().await {
+            Ok(r) if !r.status().is_success() => {
+                tracing::warn!(status = %r.status(), "secondary announce refused");
+            }
+            Err(e) => tracing::warn!(error = %e, "secondary announce failed"),
+            _ => {}
+        }
+    });
+}
+
 fn url_encode_binary(data: &[u8]) -> String {
     let mut result = String::with_capacity(data.len() * 3);
     for &b in data {
