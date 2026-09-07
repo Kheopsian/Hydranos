@@ -131,3 +131,136 @@ mod tests {
         }
     }
 }
+
+/// Re-run the health invariants on a timer and keep the last report.
+///
+/// The scan walks both catalogues and stats the ghosts, so it is not free: it
+/// runs every five minutes, as 3.x did, and the route serves whatever the last
+/// pass found rather than scanning on request. A panel refresh must not be
+/// able to walk 244k torrents.
+pub fn spawn_health_scan(
+    engines: Arc<crate::engines::EngineHost>,
+    last: Arc<std::sync::RwLock<Option<crate::health::Report>>>,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
+        loop {
+            tick.tick().await;
+            let mut report = crate::health::Report::default();
+            let mut per_engine = Vec::new();
+            for engine in engines.engines() {
+                let torrents = engine.manager.all();
+                let cache = engine.announce_cache.clone();
+                crate::health::scan_engine(
+                    &engine.id,
+                    &torrents,
+                    |hash| cache.swarm_seeds(hash),
+                    // Outage is a host-level fact and the breaker owns it; the
+                    // scan does not second-guess it from here.
+                    |_host| false,
+                    &mut report,
+                );
+                per_engine.push((engine.id.clone(), torrents));
+            }
+            crate::health::scan_dual_seed(&per_engine, &mut report);
+            let found = report.anomalies.len();
+            *last.write().unwrap() = Some(report);
+            if found > 0 {
+                tracing::info!(anomalies = found, "health scan found something");
+            }
+        }
+    });
+}
+
+/// Free space on the race disk by removing what has earned its keep.
+///
+/// Destructive by design and gated twice: it does nothing unless the operator
+/// enabled it, and nothing until usage is over the high watermark. It then
+/// removes only down to the low watermark -- the gap between the two is what
+/// stops it running again on the next tick.
+pub fn spawn_race_drain(
+    manager: Arc<TorrentManager>,
+    config: crate::config::RaceDrain,
+    race_path: std::path::PathBuf,
+) {
+    if !config.enabled {
+        tracing::info!("race drain: disabled");
+        return;
+    }
+    let interval = if config.check_interval_seconds > 0 {
+        Duration::from_secs(config.check_interval_seconds as u64)
+    } else {
+        Duration::from_secs(300)
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        tracing::info!(
+            check_interval_s = interval.as_secs(),
+            high = config.high_watermark_pct,
+            low = config.low_watermark_pct,
+            "race drain started"
+        );
+        loop {
+            tokio::time::sleep(interval).await;
+            drain_once(&manager, &config, &race_path);
+        }
+    });
+}
+
+fn drain_once(
+    manager: &Arc<TorrentManager>,
+    config: &crate::config::RaceDrain,
+    race_path: &std::path::Path,
+) {
+    let Some((used, total)) = disk_usage(race_path) else {
+        return;
+    };
+    if total == 0 {
+        return;
+    }
+    let pct = used as f64 * 100.0 / total as f64;
+    if pct < config.high_watermark_pct as f64 {
+        return;
+    }
+    let target = total as f64 * config.low_watermark_pct as f64 / 100.0;
+    let mut to_free = used as f64 - target;
+    tracing::warn!(pct = pct.round(), high = config.high_watermark_pct, "race disk over the high watermark, draining");
+
+    // Oldest first: a race that has been sitting the longest has had the most
+    // time to earn its ratio, so it is the cheapest to let go.
+    let mut torrents = manager.all();
+    torrents.sort_by_key(|t| t.added_time);
+
+    for torrent in torrents {
+        if to_free <= 0.0 {
+            break;
+        }
+        let size = torrent.meta.total_size as f64;
+        // ⚠ keep_data, NOT delete_files. The Go signature at this position is
+        // `deleteFiles` and passes true; this one is its opposite. Passing true
+        // here would drop the torrent from the engine and leave every byte on
+        // disk -- freeing nothing, so the next tick drains again, and the race
+        // catalogue disappears without the disk ever emptying.
+        if manager.remove_torrent(&torrent.info_hash, false).is_ok() {
+            to_free -= size;
+            tracing::info!(name = %torrent.meta.name, "drained");
+        }
+    }
+}
+
+/// Bytes used and total on the filesystem holding `path`.
+fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    let block = stat.f_frsize as u64;
+    let total = stat.f_blocks as u64 * block;
+    // Used is what the filesystem counts as taken, not total minus free: the
+    // reserved blocks are neither available nor used by us, and counting them
+    // as used would trigger a drain on a disk that is not full.
+    let used = (stat.f_blocks as u64 - stat.f_bfree as u64) * block;
+    Some((used, total))
+}
