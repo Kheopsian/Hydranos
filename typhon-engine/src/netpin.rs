@@ -31,6 +31,11 @@
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Egress {
     pub fwmark: u32,
+    /// Outbound SOCKS5 for v6 dials, when the engine has one. It belongs here
+    /// rather than in a global for the same reason as the device: it decides
+    /// which address a peer sees, and two engines can be sent out different
+    /// ways.
+    pub socks5: Option<std::sync::Arc<crate::peer::Socks5Config>>,
     /// Interface name. Empty means "let the kernel decide", which is the
     /// correct behaviour for an engine with no `bind_interface`.
     pub device: String,
@@ -101,7 +106,7 @@ mod tests {
         assert_eq!(e.device(), None);
         // Whitespace is not a device name; treating " " as one would hand
         // SO_BINDTODEVICE a name no interface has and fail every socket.
-        let blank = Egress { fwmark: 0, device: "  ".into() };
+        let blank = Egress { fwmark: 0, device: "  ".into(), ..Default::default() };
         assert_eq!(blank.device(), None);
         assert!(!blank.is_steered());
     }
@@ -110,7 +115,7 @@ mod tests {
     fn a_fwmark_alone_still_counts_as_steered() {
         // The single-tunnel-with-mark setup has no device: skipping the
         // pre-connect socket setup for it would drop the mark.
-        let e = Egress { fwmark: 42, device: String::new() };
+        let e = Egress { fwmark: 42, device: String::new(), ..Default::default() };
         assert!(e.is_steered());
         assert_eq!(e.device(), None);
     }
@@ -123,8 +128,8 @@ mod tests {
     // express, so this test fails against the design it replaced.
     #[test]
     fn two_engines_in_one_process_keep_their_own_device() {
-        let race = Egress { fwmark: 0, device: "wg-race".into() };
-        let hoard = Egress { fwmark: 0, device: "wg-hoard".into() };
+        let race = Egress { fwmark: 0, device: "wg-race".into(), ..Default::default() };
+        let hoard = Egress { fwmark: 0, device: "wg-hoard".into(), ..Default::default() };
         assert_eq!(race.device(), Some("wg-race"));
         assert_eq!(hoard.device(), Some("wg-hoard"));
         assert_ne!(race, hoard);

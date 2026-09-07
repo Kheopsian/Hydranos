@@ -204,6 +204,23 @@ impl EngineConfig {
     /// every v4 peer, so no address changes shape (see `only_v6`). If a v6
     /// binding was configured by hand we add nothing, the operator already
     /// said what they wanted.
+    /// The outbound SOCKS5 this engine dials v6 peers through, if configured.
+    fn socks5_outbound(&self) -> Option<std::sync::Arc<crate::peer::Socks5Config>> {
+        if self.socks5_outbound_host.is_empty() {
+            return None;
+        }
+        let auth = if self.socks5_outbound_user.is_empty() {
+            None
+        } else {
+            Some((self.socks5_outbound_user.clone(), self.socks5_outbound_pass.clone()))
+        };
+        Some(std::sync::Arc::new((
+            self.socks5_outbound_host.clone(),
+            self.socks5_outbound_port,
+            auth,
+        )))
+    }
+
     pub fn resolved_bindings(&self) -> Vec<ResolvedBinding> {
         let mut out = self.configured_bindings();
         if !self.enable_ipv6 || out.iter().any(|b| b.addr.is_ipv6()) {
@@ -260,6 +277,7 @@ impl EngineConfig {
                     egress: crate::netpin::Egress {
                         fwmark: b.fwmark,
                         device: self.bind_device.clone(),
+                        socks5: self.socks5_outbound(),
                     },
                     advertised_port: advertised,
                     only_v6: false,
@@ -273,7 +291,7 @@ impl EngineConfig {
         if self.listen_interfaces.is_empty() {
             if let Ok(addr) = format!("0.0.0.0:{}", self.listen_port).parse::<std::net::SocketAddr>() {
                 let port = addr.port();
-                out.push(ResolvedBinding { id: 0, addr, peer_id: global_pid, egress: crate::netpin::Egress { fwmark: 0, device: self.bind_device.clone() }, advertised_port: port, only_v6: false });
+                out.push(ResolvedBinding { id: 0, addr, peer_id: global_pid, egress: crate::netpin::Egress { fwmark: 0, device: self.bind_device.clone(), socks5: self.socks5_outbound() }, advertised_port: port, only_v6: false });
             }
         } else {
             for (i, part) in self.listen_interfaces.split(',').enumerate() {
@@ -281,7 +299,7 @@ impl EngineConfig {
                 if s.is_empty() { continue; }
                 if let Ok(addr) = s.parse::<std::net::SocketAddr>() {
                     let port = addr.port();
-                    out.push(ResolvedBinding { id: i as u32, addr, peer_id: global_pid, egress: crate::netpin::Egress { fwmark: 0, device: self.bind_device.clone() }, advertised_port: port, only_v6: false });
+                    out.push(ResolvedBinding { id: i as u32, addr, peer_id: global_pid, egress: crate::netpin::Egress { fwmark: 0, device: self.bind_device.clone(), socks5: self.socks5_outbound() }, advertised_port: port, only_v6: false });
                 }
             }
         }

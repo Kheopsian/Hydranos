@@ -180,7 +180,7 @@ async fn handle_conn<Rd, Wr>(
                 // via the ev_recv branch.
                 let result = if request.method == "subscribe_events" {
                     if event_rx.is_none() {
-                        event_rx = Some(events::subscribe());
+                        event_rx = Some(tm.bus().subscribe());
                     }
                     serde_json::json!({"result": {"subscribed": true}})
                 } else {

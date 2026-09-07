@@ -41,6 +41,22 @@ pub struct TorrentManager {
     magnet: Arc<crate::magnet::MagnetJobs>,
     /// PEX and IPv6 for this engine. Handed to every torrent it owns.
     policy: Arc<crate::peer::extension::PeerPolicy>,
+    /// IPs whose PROXY v2 headers this engine trusts. The firewall must
+    /// guarantee only these can reach the PROXY v2 port; the header carries an
+    /// attacker-chosen peer IP otherwise.
+    trusted_proxy_sources: std::sync::OnceLock<Vec<std::net::IpAddr>>,
+    /// Runtime listen-port rebind signal for this engine's TCP listener. The
+    /// RPC `set_listen_port` sends the new port here and the supervisor in
+    /// `peer::listen` rebinds without restarting: torrents and live peer
+    /// connections are untouched.
+    rebind_tx: std::sync::OnceLock<tokio::sync::watch::Sender<u16>>,
+    /// This engine's event stream.
+    bus: crate::rpc::events::EventBus,
+    /// Completions waiting to be persisted. A torrent that finishes is only
+    /// durable once the store says so; anything that stopped the engine inside
+    /// that window re-downloaded every byte on the next boot.
+    completed_tx: tokio::sync::mpsc::UnboundedSender<InfoHash>,
+    completed_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<InfoHash>>>,
     /// Dial ceilings and gauges for this engine.
     limiter: Arc<crate::tracker::dial_limiter::DialLimiter>,
     /// Durable per-torrent state. `None` only if SQLite could not be opened at
@@ -64,6 +80,42 @@ impl TorrentManager {
     /// Attach this engine's DHT node. Called once, after bootstrap.
     pub fn set_dht(&self, session: Arc<crate::dht::DhtSession>) {
         let _ = self.dht.set(session);
+    }
+
+    /// This engine's event stream.
+    pub fn bus(&self) -> &crate::rpc::events::EventBus {
+        &self.bus
+    }
+
+    /// Taken once, by the task that persists this engine's completions.
+    pub fn take_completion_receiver(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<InfoHash>> {
+        self.completed_rx.lock().unwrap().take()
+    }
+
+    /// IPs whose PROXY v2 headers this engine trusts.
+    pub fn trusted_proxy_sources(&self) -> &[std::net::IpAddr] {
+        self.trusted_proxy_sources.get().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn set_trusted_proxy_sources(&self, ips: Vec<std::net::IpAddr>) {
+        let _ = self.trusted_proxy_sources.set(ips);
+    }
+
+    /// Register this engine's listener rebind channel. Called once, by
+    /// `peer::listen` when the supervisor comes up.
+    pub fn set_rebind_tx(&self, tx: tokio::sync::watch::Sender<u16>) {
+        let _ = self.rebind_tx.set(tx);
+    }
+
+    /// Ask this engine's TCP listener to rebind to `port`. False when the
+    /// supervisor is not up yet.
+    pub fn request_listen_rebind(&self, port: u16) -> bool {
+        match self.rebind_tx.get() {
+            Some(tx) => tx.send(port).is_ok(),
+            None => false,
+        }
     }
 
     /// This engine's dial ceilings.
@@ -107,6 +159,7 @@ impl TorrentManager {
 
     pub fn new(data_dir: String, resume_dir: String, disk: Arc<DiskManager>) -> Self {
         std::fs::create_dir_all(&resume_dir).ok();
+        let (completed_tx, completed_rx) = tokio::sync::mpsc::unbounded_channel();
         let mirror_json = std::env::var("TYPHON_RESUME_JSON").map(|v| v == "1").unwrap_or(false);
         let state_db = if std::env::var("TYPHON_STATE_DB").map(|v| v == "0").unwrap_or(false) {
             info!("[statedb] disabled by TYPHON_STATE_DB=0, using legacy resume JSON only");
@@ -143,6 +196,11 @@ impl TorrentManager {
             webseed: Default::default(),
             magnet: Default::default(),
             policy: Default::default(),
+            trusted_proxy_sources: std::sync::OnceLock::new(),
+            rebind_tx: std::sync::OnceLock::new(),
+            bus: Default::default(),
+            completed_tx,
+            completed_rx: std::sync::Mutex::new(Some(completed_rx)),
             limiter: Default::default(),
             state_db,
             last_saved: DashMap::new(),
@@ -265,6 +323,7 @@ impl TorrentManager {
         );
         let _ = state.policy.set(self.policy.clone());
         let _ = state.limiter.set(self.limiter.clone());
+        let _ = state.completed_tx.set(self.completed_tx.clone());
 
         if stopped {
             state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
@@ -301,7 +360,7 @@ impl TorrentManager {
         // Track in DHT (no-op for private torrents, see dht::track_torrent).
         self.track_in_dht(state_arc);
         // Push event to subscribers (Go hydra cache). Silent if no subscribers.
-        crate::rpc::events::publish(crate::rpc::events::Event::TorrentAdded {
+        self.bus.publish(crate::rpc::events::Event::TorrentAdded {
             info_hash: hex_encode(&ih),
             name: name.clone(),
             save_path: save_path.to_string(),
@@ -352,7 +411,7 @@ impl TorrentManager {
             .map(|_| ())
             .ok_or_else(|| "torrent not found".into());
         if result.is_ok() {
-            crate::rpc::events::publish(crate::rpc::events::Event::TorrentRemoved {
+            self.bus.publish(crate::rpc::events::Event::TorrentRemoved {
                 info_hash: hex_encode(info_hash),
             });
             if let Some((files, folder)) = to_delete {
@@ -501,6 +560,7 @@ impl TorrentManager {
             );
             let _ = state.policy.set(self.policy.clone());
         let _ = state.limiter.set(self.limiter.clone());
+        let _ = state.completed_tx.set(self.completed_tx.clone());
             // The resume record wins over the .torrent: an edited list lives
             // here, and the file on disk may be the original one. Empty means
             // the torrent predates tracker editing, so the parsed list stands.
@@ -792,6 +852,7 @@ impl TorrentManager {
         );
         let _ = state.policy.set(self.policy.clone());
         let _ = state.limiter.set(self.limiter.clone());
+        let _ = state.completed_tx.set(self.completed_tx.clone());
         // An edited tracker list lives in the record, not in the .torrent on
         // disk. Dropping it here would silently undo the edit on every move.
         if !rd.trackers.is_empty() {
@@ -827,7 +888,7 @@ impl TorrentManager {
         // Durable here before the source is told to let go, so a crash in the
         // middle leaves the torrent in both engines rather than in neither.
         self.persist(&ih, rd);
-        crate::rpc::events::publish(crate::rpc::events::Event::TorrentAdded {
+        self.bus.publish(crate::rpc::events::Event::TorrentAdded {
             info_hash: hex_encode(&ih),
             name: name.clone(),
             save_path: rd.save_path.clone(),
@@ -891,29 +952,6 @@ fn hex_encode_bytes(bytes: &[u8]) -> String {
 /// an OOM -- lost the fact that the torrent was complete, and the next boot
 /// re-downloaded every byte of it. The manager drains this and persists at
 /// once.
-static COMPLETED: OnceLock<tokio::sync::mpsc::UnboundedSender<InfoHash>> = OnceLock::new();
-static COMPLETED_RX: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<InfoHash>>> =
-    std::sync::Mutex::new(None);
-
-fn completed_channel() -> &'static tokio::sync::mpsc::UnboundedSender<InfoHash> {
-    COMPLETED.get_or_init(|| {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        *COMPLETED_RX.lock().unwrap() = Some(rx);
-        tx
-    })
-}
-
-/// Signal that a torrent finished downloading. Cheap and non-blocking.
-pub fn notify_completed(ih: InfoHash) {
-    let _ = completed_channel().send(ih);
-}
-
-/// Taken once, by the task that persists completions.
-pub fn take_completion_receiver() -> Option<tokio::sync::mpsc::UnboundedReceiver<InfoHash>> {
-    completed_channel();
-    COMPLETED_RX.lock().unwrap().take()
-}
-
 /// Every piece present, in the bit order `bitfield_is_complete` reads.
 fn full_bitfield(num_pieces: u32) -> Vec<u8> {
     let n = num_pieces as usize;

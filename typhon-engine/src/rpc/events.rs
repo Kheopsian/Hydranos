@@ -7,35 +7,48 @@
 //!   * `stats_snapshot` — batched every ~1 s, includes only torrents whose
 //!     counters moved since last tick (delta-filtered).
 //!
-//! Uses a global `tokio::sync::broadcast::Sender` so hot-path sites
+//! A `tokio::sync::broadcast::Sender` per engine, so hot-path sites
 //! (add_torrent, peer uploads) can publish without holding a shared
 //! async context.
-use std::sync::OnceLock;
+//!
+//! It used to be one global bus, which was right while one engine meant one
+//! process. Events carry an info hash and no engine tag: merged, a subscriber
+//! watching the race would receive the hoard's 240k torrents too, with no way
+//! to tell them apart.
 use tokio::sync::broadcast;
 use serde::Serialize;
 
-static BUS: OnceLock<broadcast::Sender<Event>> = OnceLock::new();
-
-/// Capacity = 4096. Enough buffer for a slow Go consumer without OOM.
+/// Capacity = 4096. Enough buffer for a slow consumer without OOM.
 /// If a consumer lags > 4096 events, it gets `RecvError::Lagged(n)` and should
 /// drop its cache + resubscribe (after requesting a full `list_torrents`
 /// snapshot via the classic RPC).
 const BUS_CAP: usize = 4096;
 
-pub fn bus() -> &'static broadcast::Sender<Event> {
-    BUS.get_or_init(|| {
+/// One engine's event stream.
+pub struct EventBus {
+    tx: broadcast::Sender<Event>,
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
         let (tx, _) = broadcast::channel(BUS_CAP);
-        tx
-    })
+        Self { tx }
+    }
 }
 
-/// Publish an event. Best-effort: silently dropped if no subscribers or buffer full.
-pub fn publish(ev: Event) {
-    let _ = bus().send(ev);
-}
+impl EventBus {
+    /// Publish. Best-effort: dropped if nobody listens or the buffer is full.
+    pub fn publish(&self, ev: Event) {
+        let _ = self.tx.send(ev);
+    }
 
-pub fn subscribe() -> broadcast::Receiver<Event> {
-    bus().subscribe()
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.tx.subscribe()
+    }
+
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
 }
 
 /// Wire format matches Hydra-Go's existing `ltclient.Event` struct:

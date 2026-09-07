@@ -281,6 +281,9 @@ pub struct TorrentState {
     /// The dial ceilings of the engine that owns this torrent. Unset for a
     /// torrent built outside a manager, which falls back to unlimited.
     pub limiter: std::sync::OnceLock<Arc<crate::tracker::dial_limiter::DialLimiter>>,
+    /// Where this torrent reports that it finished downloading, so its engine
+    /// can persist the fact at once.
+    pub completed_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<InfoHash>>,
     pub is_paused: AtomicBool,
     /// Anti-thrash: when true, this torrent serves no piece Requests
     /// (disk reads gated in peer::session), but stays connected and
@@ -354,6 +357,14 @@ pub struct TorrentState {
 
 impl TorrentState {
     /// The PEX / IPv6 policy this torrent runs under.
+    /// Signal that this torrent finished downloading. Cheap and non-blocking,
+    /// and a no-op for a torrent with no engine behind it.
+    pub fn notify_completed(&self) {
+        if let Some(tx) = self.completed_tx.get() {
+            let _ = tx.send(self.info_hash);
+        }
+    }
+
     /// The dial ceilings this torrent runs under.
     pub fn limiter(&self) -> &crate::tracker::dial_limiter::DialLimiter {
         self.limiter
@@ -520,6 +531,7 @@ impl TorrentState {
             pex_peers_discovered: AtomicU64::new(0),
             policy: std::sync::OnceLock::new(),
             limiter: std::sync::OnceLock::new(),
+            completed_tx: std::sync::OnceLock::new(),
             is_paused: AtomicBool::new(false),
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),

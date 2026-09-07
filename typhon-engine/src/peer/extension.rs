@@ -194,12 +194,17 @@ pub fn build_metadata_data(piece: u32, total_size: usize, block: &[u8]) -> Vec<u
 pub struct PeerPolicy {
     pex: AtomicBool,
     ipv6: AtomicBool,
+    block_mse: AtomicBool,
 }
 
 impl Default for PeerPolicy {
     /// PEX on, IPv6 off: what every install has run with.
     fn default() -> Self {
-        Self { pex: AtomicBool::new(true), ipv6: AtomicBool::new(false) }
+        Self {
+            pex: AtomicBool::new(true),
+            ipv6: AtomicBool::new(false),
+            block_mse: AtomicBool::new(false),
+        }
     }
 }
 
@@ -222,6 +227,22 @@ impl PeerPolicy {
 
     pub fn ipv6(&self) -> bool {
         self.ipv6.load(Ordering::Relaxed)
+    }
+
+    /// Refuse MSE, to measure what encryption costs against the upload lost
+    /// from peers that require it. Off by default: turning away real peers is
+    /// a trade to measure, not a default to assume.
+    ///
+    /// Unlike most switches this reaches live sessions too -- the encrypted
+    /// peers are precisely the long-lived ones, so gating only new handshakes
+    /// would leave them running for hours and a measurement would never reach
+    /// a clean state.
+    pub fn block_mse(&self) -> bool {
+        self.block_mse.load(Ordering::Relaxed)
+    }
+
+    pub fn set_block_mse(&self, on: bool) {
+        self.block_mse.store(on, Ordering::Relaxed);
     }
 }
 

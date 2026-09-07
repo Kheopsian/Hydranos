@@ -184,7 +184,7 @@ pub async fn run(
         // encrypted sessions in place for hours — they are exactly the
         // persistent peers — so a measurement block would never reach a clean
         // state. Drop them here instead, on the next turn of their own loop.
-        if is_encrypted && crate::peer::block_mse() {
+        if is_encrypted && torrent.policy().block_mse() {
             crate::tracker::MSE_SESSIONS_DROPPED.fetch_add(1, Ordering::Relaxed);
             break;
         }

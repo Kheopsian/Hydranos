@@ -26,6 +26,12 @@ pub static DIAL_UTP_ERR_OTHER: AtomicU64 = AtomicU64::new(0);
 // and silently drops the requester tx when exceeded → DispatcherDead on receiver.
 // With 13k torrents, popular peers get 10+ concurrent dials across torrents → pileup.
 pub static DIAL_UTP_SKIPPED_INFLIGHT: AtomicU64 = AtomicU64::new(0);
+/// uTP dials in flight, so the same peer is not dialled twice at once.
+///
+/// Process-wide on purpose, and the one global here that stays: it is keyed by
+/// peer ADDRESS, and the uTP socket is bound once per process on a single UDP
+/// port. Two engines dialling one address really would share that socket, so
+/// the dedup has to span them.
 static UTP_INFLIGHT: std::sync::OnceLock<dashmap::DashSet<std::net::SocketAddr>> = std::sync::OnceLock::new();
 fn utp_inflight() -> &'static dashmap::DashSet<std::net::SocketAddr> {
     UTP_INFLIGHT.get_or_init(dashmap::DashSet::new)
@@ -52,6 +58,12 @@ pub static DIAL_SKIPPED_SELF: AtomicU64 = AtomicU64::new(0);
 // hard-coded TYPHON_SELF_IPS that goes stale when the ISP lease changes. This is
 // only an optimisation to skip the wasted connect; correctness is guaranteed by
 // the peer_id self-check in handshake::outgoing regardless of this list.
+/// Our own addresses, never to be dialled.
+///
+/// Process-wide, and correct that way even with two engines: an address that
+/// belongs to either engine belongs to this host, and skipping it is the safe
+/// direction. A per-engine split would let race dial an address that is hoard's
+/// tunnel -- a self-dial that costs a connection slot and finds nothing.
 static SELF_IPS: std::sync::RwLock<Vec<std::net::IpAddr>> = std::sync::RwLock::new(Vec::new());
 
 /// Replace the self-IP set (called at startup from env seed, then at runtime by
@@ -437,7 +449,6 @@ async fn try_tcp(
     addr: std::net::SocketAddr,
     egress: &crate::netpin::Egress,
 ) -> Option<PeerTransport> {
-    use crate::peer::SOCKS5_OUTBOUND;
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
     // 3s — on a reachable LAN/WAN peer, TCP connect succeeds in ≤300ms.
@@ -446,7 +457,7 @@ async fn try_tcp(
         // SOCKS5 client doesn't expose fwmark here; the multi-binding case
         // (Proton WG) doesn't use SOCKS5 and falls through to direct.
         {
-            if let Some((host, port, auth)) = SOCKS5_OUTBOUND.get() {
+            if let Some((host, port, auth)) = egress.socks5.as_deref() {
                 let target = (addr.ip().to_string(), addr.port());
                 let stream_res = match auth {
                     Some((u, pw)) => tokio_socks::tcp::Socks5Stream::connect_with_password(
@@ -567,6 +578,7 @@ pub(crate) async fn open_peer(
     info_hash: &[u8; 20],
     peer_id: &[u8; 20],
     egress: &crate::netpin::Egress,
+    policy: &crate::peer::extension::PeerPolicy,
     traced: bool,
 ) -> Option<(CryptoStream, bool, bool, [u8; 20], bool)> {
     // 2.7.11: PLAINTEXT-FIRST outbound dial. Most peers only *prefer* MSE
@@ -576,7 +588,7 @@ pub(crate) async fn open_peer(
     // so connectivity is never lost. TYPHON_NO_MSE=1 also skips the MSE
     // fallback (pure-plaintext bench).
     let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false)
-        || crate::peer::block_mse();
+        || policy.block_mse();
     // TCP plaintext (preferred)
     if let Some(mut t) = try_tcp(addr, egress).await {
         match crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
@@ -690,7 +702,7 @@ pub async fn dial_peer(
 
     DIAL_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
 
-    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(addr, &utp_socket, &torrent.info_hash, &peer_id, egress, traced).await {
+    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(addr, &utp_socket, &torrent.info_hash, &peer_id, egress, torrent.policy(), traced).await {
         Some(v) => { DIAL_HANDSHAKE_OK.fetch_add(1, AtomicOrdering::Relaxed); v }
         None => {
             DIAL_HANDSHAKE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
