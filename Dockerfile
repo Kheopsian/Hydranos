@@ -8,6 +8,11 @@ COPY typhon-engine/src ./src
 COPY typhon-engine/benches ./benches
 # Vendored crate referenced by [patch.crates-io] path = "../third_party/...".
 COPY third_party /build/third_party
+# Baked into the binary by include_str!: the changelog the API serves at
+# /changelog.md, and the default config a first run writes. They live at the
+# repository root, so the builder needs them even though it builds one crate.
+COPY CHANGELOG.md /build/CHANGELOG.md
+COPY configs /build/configs
 ENV RUSTFLAGS="--cfg tokio_unstable"
 # Without these caches, changing one line of src/ recompiled all 205 crates --
 # some 200 of them third-party dependencies that never move -- for about 30

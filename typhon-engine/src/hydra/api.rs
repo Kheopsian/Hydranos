@@ -58,6 +58,9 @@ pub struct AppState {
     pub started_at: i64,
     /// Recent log lines, for the Logs tab and its stream.
     pub logs: crate::logbuf::LogBuffer,
+    /// Changes a returning client can be told about without re-streaming the
+    /// whole library. See `reconnect`.
+    pub reconnect: Arc<crate::reconnect::Ring>,
     /// The measurement database, when one could be opened.
     ///
     /// `None` is a normal state and not a failure: the timeline is
@@ -3605,6 +3608,11 @@ fn edit_trackers(state: &AppState, info_hash: &str, req: &TrackerEdit) -> Respon
         return not_found();
     };
 
+    // The row carries its tracker host, so an edit changes what the list
+    // paints. Tell the reconnect ring, or a client returning on its cursor
+    // keeps showing the old tracker until it reloads everything.
+    state.reconnect.record_changed(&[info_hash.to_string()]);
+
     let current = torrent.live_trackers.read().clone();
     let outcome = if req.op == "set" && !req.tiers.is_empty() {
         crate::trackeredit::from_tiers(&req.tiers)
@@ -5871,6 +5879,7 @@ mod tests {
             public_ip: Arc::new(tokio::sync::Mutex::new((String::new(), String::new()))),
             started_at: 0,
             logs: crate::logbuf::LogBuffer::new(),
+            reconnect: Default::default(),
             bench: None,
         }
     }
