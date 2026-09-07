@@ -5806,6 +5806,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/benchmark/race-events", get(get_race_events))
         .route("/api/benchmark/trackers/current", get(get_tracker_stats_current))
         .route("/api/benchmark/trackers/range", get(get_tracker_stats_range))
+        // The interface. Not an API route, which is exactly why a bench that
+        // compares /api/* answers cannot tell whether it is served at all.
+        .route("/", get(crate::web::index))
+        .route("/static/*path", get(crate::web::static_file))
         .route("/api/status", get(get_status))
         .route("/api/network/interfaces", get(get_network_interfaces))
         .route("/api/network/engines", get(get_network_engines))
