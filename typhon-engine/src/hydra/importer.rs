@@ -239,3 +239,100 @@ mod tests {
         assert_eq!(urlencoding("p@ss&word"), "p%40ss%26word");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Transmission
+// ---------------------------------------------------------------------------
+
+/// One torrent found in a Transmission data directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransmissionEntry {
+    /// Path of the .torrent file.
+    pub torrent_path: std::path::PathBuf,
+    /// Where Transmission put the data, read from the matching .resume.
+    pub destination: String,
+}
+
+/// Pair the `.torrent` files with their `.resume` siblings.
+///
+/// Transmission keeps them in two folders, matched by a name that carries a
+/// hash suffix -- `Some.Name.a1b2c3d4.torrent` beside
+/// `Some.Name.a1b2c3d4.resume`. The stem is the key.
+///
+/// A torrent whose resume file is missing is skipped, not guessed at: the
+/// resume file is the only thing that says where the data lives, and adding it
+/// to a default path would make the engine re-download a library that is
+/// already on disk.
+pub fn pair_transmission(
+    torrents: &[(std::path::PathBuf, ())],
+    resumes: &std::collections::BTreeMap<String, String>,
+) -> (Vec<TransmissionEntry>, Vec<String>) {
+    let mut found = Vec::new();
+    let mut skipped = Vec::new();
+    for (path, _) in torrents {
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        match resumes.get(&stem) {
+            Some(dest) if !dest.is_empty() => found.push(TransmissionEntry {
+                torrent_path: path.clone(),
+                destination: dest.clone(),
+            }),
+            _ => skipped.push(format!("{stem}: no destination in the resume file")),
+        }
+    }
+    (found, skipped)
+}
+
+/// Read the destination out of a Transmission `.resume` file.
+///
+/// The file is bencode with a `destination` key. Everything else in it --
+/// progress bitfield, priorities, speed limits -- describes a client we are
+/// not becoming, and is deliberately ignored.
+pub fn destination_from_resume(data: &[u8]) -> Option<String> {
+    let value = typhon_engine::torrent::metainfo::bencode_decode(data).ok()?;
+    let dict = value.as_dict()?;
+    let raw = dict.get("destination")?.as_bytes()?;
+    Some(String::from_utf8_lossy(raw).into_owned())
+}
+
+#[cfg(test)]
+mod transmission_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_torrent_without_its_resume_is_skipped_not_guessed() {
+        let torrents = vec![
+            (PathBuf::from("/t/A.a1b2.torrent"), ()),
+            (PathBuf::from("/t/B.c3d4.torrent"), ()),
+        ];
+        let mut resumes = BTreeMap::new();
+        resumes.insert("A.a1b2".to_string(), "/data/films".to_string());
+        let (found, skipped) = pair_transmission(&torrents, &resumes);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].destination, "/data/films");
+        // Guessing a path would make the engine re-download a library that is
+        // already sitting on disk.
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("B.c3d4"));
+    }
+
+    #[test]
+    fn an_empty_destination_counts_as_missing() {
+        let torrents = vec![(PathBuf::from("/t/A.a1b2.torrent"), ())];
+        let mut resumes = BTreeMap::new();
+        resumes.insert("A.a1b2".to_string(), String::new());
+        let (found, skipped) = pair_transmission(&torrents, &resumes);
+        assert!(found.is_empty());
+        assert_eq!(skipped.len(), 1);
+    }
+
+    #[test]
+    fn the_destination_is_read_out_of_the_bencode() {
+        // d11:destination10:/data/dl1:xi1ee -- destination plus a key we ignore
+        let data = b"d11:destination8:/data/dl1:xi1ee";
+        assert_eq!(destination_from_resume(data).as_deref(), Some("/data/dl"));
+        assert_eq!(destination_from_resume(b"d1:xi1ee"), None);
+        assert_eq!(destination_from_resume(b"not bencode"), None);
+    }
+}
