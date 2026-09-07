@@ -28,3 +28,6 @@ typhon-engine.prev*
 
 # build scratch (sendfile bench copies) — never track
 .sendfile-build/
+
+# Bytecode Python de l outillage de banc : genere, jamais lu par un humain.
+tools/paritydiff/__pycache__/
