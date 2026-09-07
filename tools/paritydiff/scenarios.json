@@ -1,0 +1,872 @@
+[
+  {
+    "name": "qbit: creer une categorie",
+    "method": "POST",
+    "path": "/api/v2/torrents/createCategory",
+    "form": {
+      "category": "BancParite",
+      "savePath": "/race/torrents"
+    }
+  },
+  {
+    "name": "qbit: creer des tags",
+    "method": "POST",
+    "path": "/api/v2/torrents/createTags",
+    "form": {
+      "tags": "banc-a,banc-b"
+    }
+  },
+  {
+    "name": "qbit: poser un tag sur un torrent existant",
+    "method": "POST",
+    "path": "/api/v2/torrents/addTags",
+    "form": {
+      "hashes": "01235279d753",
+      "tags": "banc-a"
+    }
+  },
+  {
+    "name": "qbit: retirer un tag",
+    "method": "POST",
+    "path": "/api/v2/torrents/removeTags",
+    "form": {
+      "hashes": "01235279d753",
+      "tags": "banc-a"
+    }
+  },
+  {
+    "name": "qbit: supprimer les tags du registre",
+    "method": "POST",
+    "path": "/api/v2/torrents/deleteTags",
+    "form": {
+      "tags": "banc-b"
+    }
+  },
+  {
+    "name": "qbit: editer la categorie creee",
+    "method": "POST",
+    "path": "/api/v2/torrents/editCategory",
+    "form": {
+      "category": "BancParite",
+      "savePath": "/race/autre"
+    }
+  },
+  {
+    "name": "qbit: retirer la categorie",
+    "method": "POST",
+    "path": "/api/v2/torrents/removeCategories",
+    "form": {
+      "categories": "BancParite"
+    }
+  },
+  {
+    "name": "qbit: mettre en pause un torrent",
+    "method": "POST",
+    "path": "/api/v2/torrents/pause",
+    "form": {
+      "hashes": "01235279d753"
+    }
+  },
+  {
+    "name": "qbit: relancer le torrent",
+    "method": "POST",
+    "path": "/api/v2/torrents/resume",
+    "form": {
+      "hashes": "01235279d753"
+    }
+  },
+  {
+    "name": "natif: creer une categorie",
+    "method": "POST",
+    "path": "/api/categories",
+    "body": {
+      "name": "BancNatif",
+      "save_path": "/race/natif",
+      "mode": "hoard"
+    }
+  },
+  {
+    "name": "natif: modifier la categorie",
+    "method": "PUT",
+    "path": "/api/categories/BancNatif",
+    "body": {
+      "name": "BancNatif",
+      "save_path": "/race/natif2",
+      "mode": "hoard"
+    }
+  },
+  {
+    "name": "natif: poser une categorie sur un torrent",
+    "method": "POST",
+    "path": "/api/hoard/torrents/01235279d753/category",
+    "body": {
+      "category": "BancNatif"
+    }
+  },
+  {
+    "name": "natif: remplacer les tags d un torrent",
+    "method": "POST",
+    "path": "/api/hoard/torrents/01235279d753/tags",
+    "body": {
+      "tags": [
+        "banc-x",
+        "banc-y"
+      ]
+    }
+  },
+  {
+    "name": "natif: epingler",
+    "method": "POST",
+    "path": "/api/hoard/torrents/01235279d753/pin",
+    "body": {}
+  },
+  {
+    "name": "natif: desepingler",
+    "method": "POST",
+    "path": "/api/hoard/torrents/01235279d753/unpin",
+    "body": {}
+  },
+  {
+    "name": "natif: pause",
+    "method": "POST",
+    "path": "/api/hoard/torrents/01235279d753/pause",
+    "body": {}
+  },
+  {
+    "name": "natif: reprise",
+    "method": "POST",
+    "path": "/api/hoard/torrents/01235279d753/resume",
+    "body": {}
+  },
+  {
+    "name": "natif: supprimer la categorie",
+    "method": "DELETE",
+    "path": "/api/categories/BancNatif"
+  },
+  {
+    "name": "natif: torrent inconnu -> 404",
+    "method": "POST",
+    "path": "/api/hoard/torrents/ffffffffffff/pause",
+    "body": {}
+  },
+  {
+    "name": "config: poser un mode IP",
+    "method": "POST",
+    "path": "/api/announce/ip-modes",
+    "body": {
+      "host": "banc.example.net",
+      "mode": "v6"
+    }
+  },
+  {
+    "name": "config: remettre le mode par defaut",
+    "method": "POST",
+    "path": "/api/announce/ip-modes",
+    "body": {
+      "host": "banc.example.net",
+      "mode": "auto"
+    }
+  },
+  {
+    "name": "config: mode invalide -> 400",
+    "method": "POST",
+    "path": "/api/announce/ip-modes",
+    "body": {
+      "host": "banc.example.net",
+      "mode": "v9"
+    }
+  },
+  {
+    "name": "config: hote vide -> 400",
+    "method": "POST",
+    "path": "/api/announce/ip-modes",
+    "body": {
+      "host": "",
+      "mode": "v4"
+    }
+  },
+  {
+    "name": "config: poser une passkey",
+    "method": "POST",
+    "path": "/api/announce/passkeys",
+    "body": {
+      "host": "banc.example.net",
+      "passkey": "abc123"
+    }
+  },
+  {
+    "name": "config: retirer la passkey",
+    "method": "POST",
+    "path": "/api/announce/passkeys",
+    "body": {
+      "host": "banc.example.net",
+      "passkey": ""
+    }
+  },
+  {
+    "name": "config: declarer un client de tracker",
+    "method": "POST",
+    "path": "/api/announce/clients",
+    "body": {
+      "host": "banc.example.net",
+      "peer_id_prefix": "-qB5000-",
+      "user_agent": "qBittorrent/5.0.0"
+    }
+  },
+  {
+    "name": "config: retirer le client",
+    "method": "POST",
+    "path": "/api/announce/clients",
+    "body": {
+      "host": "banc.example.net",
+      "peer_id_prefix": "",
+      "user_agent": ""
+    }
+  },
+  {
+    "name": "config: stats secondaires",
+    "method": "POST",
+    "path": "/api/announce/secondary-stats",
+    "body": {
+      "host": "banc.example.net",
+      "mode": "zero"
+    }
+  },
+  {
+    "name": "config: retirer les stats secondaires",
+    "method": "POST",
+    "path": "/api/announce/secondary-stats",
+    "body": {
+      "host": "banc.example.net",
+      "mode": ""
+    }
+  },
+  {
+    "name": "groupe: pause de tout hoard",
+    "method": "POST",
+    "path": "/api/hoard/pause-all"
+  },
+  {
+    "name": "groupe: reprise de tout hoard",
+    "method": "POST",
+    "path": "/api/hoard/resume-all"
+  },
+  {
+    "name": "groupe: pause ciblee race",
+    "method": "POST",
+    "path": "/api/race/pause",
+    "body": {
+      "hashes": [
+        "01235279d753",
+        "015a62920dc3"
+      ],
+      "paused": true
+    }
+  },
+  {
+    "name": "groupe: reprise ciblee race",
+    "method": "POST",
+    "path": "/api/race/pause",
+    "body": {
+      "hashes": [
+        "01235279d753",
+        "015a62920dc3"
+      ],
+      "paused": false
+    }
+  },
+  {
+    "name": "groupe: corps invalide -> 400",
+    "method": "POST",
+    "path": "/api/race/pause",
+    "body": {
+      "nope": 1
+    }
+  },
+  {
+    "name": "qbit: version",
+    "method": "GET",
+    "path": "/api/v2/app/version"
+  },
+  {
+    "name": "qbit: version de la WebAPI",
+    "method": "GET",
+    "path": "/api/v2/app/webapiVersion"
+  },
+  {
+    "name": "qbit: buildInfo",
+    "method": "GET",
+    "path": "/api/v2/app/buildInfo"
+  },
+  {
+    "name": "qbit: preferences",
+    "method": "GET",
+    "path": "/api/v2/app/preferences"
+  },
+  {
+    "name": "qbit: transfer/info",
+    "method": "GET",
+    "path": "/api/v2/transfer/info"
+  },
+  {
+    "name": "qbit: login",
+    "method": "POST",
+    "path": "/api/v2/auth/login",
+    "form": {
+      "username": "admin",
+      "password": "x"
+    }
+  },
+  {
+    "name": "qbit: logout",
+    "method": "POST",
+    "path": "/api/v2/auth/logout",
+    "form": {}
+  },
+  {
+    "name": "qbit: poser une categorie",
+    "method": "POST",
+    "path": "/api/v2/torrents/setCategory",
+    "form": {
+      "hashes": "01235279d753",
+      "category": "Race"
+    }
+  },
+  {
+    "name": "qbit: retirer la categorie",
+    "method": "POST",
+    "path": "/api/v2/torrents/setCategory",
+    "form": {
+      "hashes": "01235279d753",
+      "category": ""
+    }
+  },
+  {
+    "name": "qbit: stop",
+    "method": "POST",
+    "path": "/api/v2/torrents/stop",
+    "form": {
+      "hashes": "01235279d753"
+    }
+  },
+  {
+    "name": "qbit: start",
+    "method": "POST",
+    "path": "/api/v2/torrents/start",
+    "form": {
+      "hashes": "01235279d753"
+    }
+  },
+  {
+    "name": "race: pause d un torrent",
+    "method": "POST",
+    "path": "/api/race/torrents/01235279d753/pause"
+  },
+  {
+    "name": "race: reprise d un torrent",
+    "method": "POST",
+    "path": "/api/race/torrents/01235279d753/resume"
+  },
+  {
+    "name": "race: torrent inconnu -> 404",
+    "method": "POST",
+    "path": "/api/race/torrents/ffffffffffff/pause"
+  },
+  {
+    "name": "groupe: action invalide -> 400",
+    "method": "POST",
+    "path": "/api/race/torrents/bulk",
+    "body": {
+      "action": "nope",
+      "hashes": []
+    }
+  },
+  {
+    "name": "groupe: stop sur liste vide",
+    "method": "POST",
+    "path": "/api/race/torrents/bulk",
+    "body": {
+      "action": "stop",
+      "hashes": [],
+      "exclude": []
+    }
+  },
+  {
+    "name": "groupe: start sur liste vide (remise a zero)",
+    "method": "POST",
+    "path": "/api/race/torrents/bulk",
+    "body": {
+      "action": "start",
+      "hashes": [],
+      "exclude": []
+    }
+  },
+  {
+    "name": "trackers: ajouter",
+    "method": "POST",
+    "path": "/api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/add-tracker",
+    "body": {
+      "url": "https://banc.example.net/announce"
+    }
+  },
+  {
+    "name": "trackers: ajouter en double (no-op)",
+    "method": "POST",
+    "path": "/api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/add-tracker",
+    "body": {
+      "url": "https://banc.example.net/announce"
+    }
+  },
+  {
+    "name": "trackers: retirer",
+    "method": "POST",
+    "path": "/api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/trackers",
+    "body": {
+      "op": "remove",
+      "urls": [
+        "https://banc.example.net/announce"
+      ]
+    }
+  },
+  {
+    "name": "trackers: schema invalide -> 400",
+    "method": "POST",
+    "path": "/api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/add-tracker",
+    "body": {
+      "url": "ftp://banc.example.net/announce"
+    }
+  },
+  {
+    "name": "trackers: url absente -> 400",
+    "method": "POST",
+    "path": "/api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/add-tracker",
+    "body": {}
+  },
+  {
+    "name": "trackers: torrent inconnu -> 404",
+    "method": "POST",
+    "path": "/api/torrents/ffffffffffffffffffffffffffffffffffffffff/add-tracker",
+    "body": {
+      "url": "https://banc.example.net/announce"
+    }
+  },
+  {
+    "name": "reglages: modifier une valeur",
+    "method": "POST",
+    "path": "/api/settings",
+    "body": {
+      "changes": [
+        {
+          "section": "race",
+          "key": "max_connections",
+          "value": 123
+        }
+      ]
+    }
+  },
+  {
+    "name": "reglages: remettre la valeur",
+    "method": "POST",
+    "path": "/api/settings",
+    "body": {
+      "changes": [
+        {
+          "section": "race",
+          "key": "max_connections",
+          "value": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "reglages: cle inexistante -> 400",
+    "method": "POST",
+    "path": "/api/settings",
+    "body": {
+      "changes": [
+        {
+          "section": "race",
+          "key": "cle_qui_nexiste_pas",
+          "value": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "reglages: aucune modification -> 400",
+    "method": "POST",
+    "path": "/api/settings",
+    "body": {
+      "changes": []
+    }
+  },
+  {
+    "name": "reglages: table comme valeur -> 400",
+    "method": "POST",
+    "path": "/api/settings",
+    "body": {
+      "changes": [
+        {
+          "section": "race",
+          "key": "max_connections",
+          "value": {
+            "a": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "qbit: ajouter un tracker",
+    "method": "POST",
+    "path": "/api/v2/torrents/addTrackers",
+    "form": {
+      "hash": "6190dbca7240d5e383db34a499fd1c54cea4ba3d",
+      "urls": "https://banc2.example.net/announce"
+    }
+  },
+  {
+    "name": "qbit: retirer le tracker",
+    "method": "POST",
+    "path": "/api/v2/torrents/removeTrackers",
+    "form": {
+      "hash": "6190dbca7240d5e383db34a499fd1c54cea4ba3d",
+      "urls": "https://banc2.example.net/announce"
+    }
+  },
+  {
+    "name": "stats: fixer la reference",
+    "method": "POST",
+    "path": "/api/stats/baseline",
+    "body": {
+      "total_uploaded": 111,
+      "total_downloaded": 222
+    }
+  },
+  {
+    "name": "stats: restaurer la reference",
+    "method": "POST",
+    "path": "/api/stats/baseline",
+    "body": {
+      "total_uploaded": 2734954302806040,
+      "total_downloaded": 666381196545259
+    }
+  },
+  {
+    "name": "qbit: trackers sans hash -> 400",
+    "method": "POST",
+    "path": "/api/v2/torrents/addTrackers",
+    "form": {
+      "urls": "https://banc3.example.net/announce"
+    }
+  },
+  {
+    "name": "qbit: trackers sans url -> 400",
+    "method": "POST",
+    "path": "/api/v2/torrents/addTrackers",
+    "form": {
+      "hash": "6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+    }
+  },
+  {
+    "name": "moteur: port race -> 500 attendu",
+    "method": "POST",
+    "path": "/api/race/listen-port",
+    "body": {
+      "port": 16999
+    }
+  },
+  {
+    "name": "moteur: port hors bornes -> 400",
+    "method": "POST",
+    "path": "/api/race/listen-port",
+    "body": {
+      "port": 0
+    }
+  },
+  {
+    "name": "moteur: limites race -> 500 attendu",
+    "method": "POST",
+    "path": "/api/race/dial-limits",
+    "body": {
+      "max_dials_per_sec": 12.5,
+      "max_connections": 500
+    }
+  },
+  {
+    "name": "moteur: limites sans champ -> 400",
+    "method": "POST",
+    "path": "/api/race/dial-limits",
+    "body": {}
+  },
+  {
+    "name": "moteur: limite negative -> 400",
+    "method": "POST",
+    "path": "/api/race/dial-limits",
+    "body": {
+      "max_dials_per_sec": -1
+    }
+  },
+  {
+    "name": "maint: verifier les telechargements",
+    "method": "POST",
+    "path": "/api/hoard/verify-downloading"
+  },
+  {
+    "name": "maint: relancer les bloques",
+    "method": "POST",
+    "path": "/api/hoard/restart-stuck"
+  },
+  {
+    "name": "maint: verifier un torrent race sur route hoard -> 404",
+    "method": "POST",
+    "path": "/api/hoard/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/verify"
+  },
+  {
+    "name": "maint: reannonce d un torrent inconnu -> 404",
+    "method": "POST",
+    "path": "/api/torrents/ffffffffffffffffffffffffffffffffffffffff/reannounce"
+  },
+  {
+    "name": "maint: drain immediat",
+    "method": "POST",
+    "path": "/api/drain/now"
+  },
+  {
+    "name": "maint: verifier des chemins",
+    "method": "POST",
+    "path": "/api/import/check-paths",
+    "body": {
+      "paths": [
+        "/race",
+        "/nexiste-pas"
+      ]
+    }
+  },
+  {
+    "name": "maint: speedtest non configure -> 400",
+    "method": "POST",
+    "path": "/api/vpn-speedtest/run"
+  },
+  {
+    "name": "config: clients en masse",
+    "method": "POST",
+    "path": "/api/announce/clients/bulk",
+    "body": {
+      "hosts": [
+        "banc4.example.net"
+      ],
+      "peer_id_prefix": "-qB4400-",
+      "user_agent": "qBittorrent/4.4.0"
+    }
+  },
+  {
+    "name": "config: retirer les clients en masse",
+    "method": "POST",
+    "path": "/api/announce/clients/bulk",
+    "body": {
+      "hosts": [
+        "banc4.example.net"
+      ],
+      "peer_id_prefix": "",
+      "user_agent": ""
+    }
+  },
+  {
+    "name": "agents: creation sans champs -> 400",
+    "method": "POST",
+    "path": "/api/agents",
+    "body": {}
+  },
+  {
+    "name": "agents: maj sans addr -> 400",
+    "method": "PUT",
+    "path": "/api/agents/inconnu",
+    "body": {}
+  },
+  {
+    "name": "agents: suppression idempotente",
+    "method": "DELETE",
+    "path": "/api/agents/inconnu"
+  },
+  {
+    "name": "moteurs: creation sans id -> 400",
+    "method": "POST",
+    "path": "/api/engines",
+    "body": {}
+  },
+  {
+    "name": "moteurs: suppression inconnue -> 404",
+    "method": "DELETE",
+    "path": "/api/engines/inconnu"
+  },
+  {
+    "name": "arr: execution du nettoyage",
+    "method": "POST",
+    "path": "/api/arr-cleanup/execute",
+    "body": {}
+  },
+  {
+    "name": "auth: mot de passe trop court -> 400",
+    "method": "POST",
+    "path": "/api/auth/password",
+    "body": {}
+  },
+  {
+    "name": "import: preview qbit vide -> 400",
+    "method": "POST",
+    "path": "/api/import/qbit/preview",
+    "body": {}
+  },
+  {
+    "name": "jobs: move-remote sans hash -> 400",
+    "method": "POST",
+    "path": "/api/jobs/move-remote",
+    "body": {}
+  },
+  {
+    "name": "jobs: annulation inconnue -> 409",
+    "method": "DELETE",
+    "path": "/api/jobs/inconnu"
+  },
+  {
+    "name": "reseau: mode sans port -> 400",
+    "method": "POST",
+    "path": "/api/network/mode",
+    "body": {}
+  },
+  {
+    "name": "reseau: wireguard sans agents -> 400",
+    "method": "POST",
+    "path": "/api/network/wireguard/engines",
+    "body": {}
+  },
+  {
+    "name": "reseau: retirer une conf wireguard",
+    "method": "DELETE",
+    "path": "/api/network/wireguard/configs/inconnu"
+  },
+  {
+    "name": "opt: drapeau inconnu -> 400",
+    "method": "POST",
+    "path": "/api/opt/flags",
+    "body": {}
+  },
+  {
+    "name": "race: reglages en ecriture",
+    "method": "POST",
+    "path": "/api/race/settings",
+    "body": {}
+  },
+  {
+    "name": "qbit: setPreferences",
+    "method": "POST",
+    "path": "/api/v2/app/setPreferences",
+    "form": {}
+  },
+  {
+    "name": "qbit: reannonce",
+    "method": "POST",
+    "path": "/api/v2/torrents/reannounce",
+    "form": {
+      "hashes": "6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+    }
+  },
+  {
+    "name": "qbit: recheck",
+    "method": "POST",
+    "path": "/api/v2/torrents/recheck",
+    "form": {
+      "hashes": "6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+    }
+  },
+  {
+    "name": "agents: test sans addr -> 400",
+    "method": "POST",
+    "path": "/api/agents/test",
+    "body": {}
+  },
+  {
+    "name": "agents: restauration inconnue -> 404",
+    "method": "POST",
+    "path": "/api/agents/restore/inconnu",
+    "body": {}
+  },
+  {
+    "name": "agents: action sans champs -> 400",
+    "method": "POST",
+    "path": "/api/agents/inconnu/action",
+    "body": {}
+  },
+  {
+    "name": "import: upload transmission sans zip -> 400",
+    "method": "POST",
+    "path": "/api/import/transmission/upload",
+    "body": {}
+  },
+  {
+    "name": "reseau: conf wireguard sans nom -> 400",
+    "method": "POST",
+    "path": "/api/network/wireguard/configs",
+    "body": {}
+  },
+  {
+    "name": "slots: ecriture",
+    "method": "POST",
+    "path": "/api/hoard/download-slots",
+    "body": {
+      "max_slots": 42
+    }
+  },
+  {
+    "name": "slots: liberation",
+    "method": "DELETE",
+    "path": "/api/hoard/download-slots"
+  },
+  {
+    "name": "torrents: ajout natif sans source -> 500",
+    "method": "POST",
+    "path": "/api/torrents",
+    "body": {}
+  },
+  {
+    "name": "qbit: ajout sans source -> 400",
+    "method": "POST",
+    "path": "/api/v2/torrents/add",
+    "form": {}
+  },
+  {
+    "name": "suppression: torrent inconnu -> 404",
+    "method": "DELETE",
+    "path": "/api/torrents/ffffffffffffffffffffffffffffffffffffffff"
+  },
+  {
+    "name": "suppression: purge race inconnue -> 404",
+    "method": "POST",
+    "path": "/api/race/torrents/ffffffffffffffffffffffffffffffffffffffff/purge",
+    "body": {}
+  },
+  {
+    "name": "qbit: suppression d un hash inconnu -> 200",
+    "method": "POST",
+    "path": "/api/v2/torrents/delete",
+    "form": {
+      "hashes": "ffffffffffffffffffffffffffffffffffffffff",
+      "deleteFiles": "false"
+    }
+  },
+  {
+    "name": "import: preview transmission chemin absent -> 400",
+    "method": "POST",
+    "path": "/api/import/transmission/preview",
+    "body": {
+      "path": "/nexiste-pas"
+    }
+  },
+  {
+    "name": "torrents: upload sans fichier -> 400",
+    "method": "POST",
+    "path": "/api/torrents/upload",
+    "body": {}
+  }
+]

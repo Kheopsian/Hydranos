@@ -1,0 +1,1251 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/agents",
+    "handler": "s.handleAgentsGet",
+    "source": "routes_hydra.go:670",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/agents",
+    "handler": "s.handleAgentCreate",
+    "source": "routes_hydra.go:671",
+    "params": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/agents/:name",
+    "handler": "s.handleAgentDelete",
+    "source": "routes_hydra.go:678",
+    "params": [
+      "name"
+    ]
+  },
+  {
+    "method": "PUT",
+    "path": "/api/agents/:name",
+    "handler": "s.handleAgentUpdate",
+    "source": "routes_hydra.go:675",
+    "params": [
+      "name"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/agents/:name/action",
+    "handler": "s.handleAgentAction",
+    "source": "routes_hydra.go:673",
+    "params": [
+      "name"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/agents/removed",
+    "handler": "s.handleAgentsRemovedGet",
+    "source": "routes_hydra.go:676",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/agents/restore/:name",
+    "handler": "s.handleAgentRestore",
+    "source": "routes_hydra.go:677",
+    "params": [
+      "name"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/agents/test",
+    "handler": "s.handleAgentTest",
+    "source": "routes_hydra.go:672",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/agents/torrents",
+    "handler": "s.handleAgentTorrents",
+    "source": "routes_hydra.go:674",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/announce/clients",
+    "handler": "s.handleGetClients",
+    "source": "routes_hydra.go:568",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/announce/clients",
+    "handler": "s.handleSetClient",
+    "source": "routes_hydra.go:569",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/announce/clients/bulk",
+    "handler": "s.handleSetClientBulk",
+    "source": "routes_hydra.go:570",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/announce/ip-modes",
+    "handler": "s.handleGetAnnounceIPModes",
+    "source": "routes_hydra.go:578",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/announce/ip-modes",
+    "handler": "s.handleSetAnnounceIPMode",
+    "source": "routes_hydra.go:579",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/announce/passkeys",
+    "handler": "s.handleGetPasskeys",
+    "source": "routes_hydra.go:565",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/announce/passkeys",
+    "handler": "s.handleSetPasskey",
+    "source": "routes_hydra.go:566",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/announce/secondary-stats",
+    "handler": "s.handleGetSecondaryStats",
+    "source": "routes_hydra.go:575",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/announce/secondary-stats",
+    "handler": "s.handleSetSecondaryStats",
+    "source": "routes_hydra.go:576",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/arr-cleanup/execute",
+    "handler": "s.handleArrCleanupExecute",
+    "source": "routes_hydra.go:706",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/arr-cleanup/scan",
+    "handler": "s.handleArrCleanupScan",
+    "source": "routes_hydra.go:705",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/password",
+    "handler": "s.handleSetPassword",
+    "source": "routes_hydra.go:742",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/benchmark/compare",
+    "handler": "s.handleBenchCompare",
+    "source": "routes_hydra.go:715",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/benchmark/current",
+    "handler": "s.handleBenchCurrent",
+    "source": "routes_hydra.go:712",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/benchmark/race-events",
+    "handler": "s.handleRaceEvents",
+    "source": "routes_hydra.go:716",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/benchmark/race-snapshots/:info_hash",
+    "handler": "s.handleRaceSnapshots",
+    "source": "routes_hydra.go:717",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/benchmark/range",
+    "handler": "s.handleBenchRange",
+    "source": "routes_hydra.go:714",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/benchmark/records",
+    "handler": "s.handleBenchRecords",
+    "source": "routes_hydra.go:713",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/benchmark/trackers/current",
+    "handler": "s.handleTrackerStatsCurrent",
+    "source": "routes_hydra.go:718",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/benchmark/trackers/range",
+    "handler": "s.handleTrackerStatsRange",
+    "source": "routes_hydra.go:719",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/categories",
+    "handler": "s.handleCategoriesGet",
+    "source": "routes_hydra.go:668",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/categories",
+    "handler": "s.handleCategoryCreate",
+    "source": "routes_hydra.go:684",
+    "params": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/categories/:name",
+    "handler": "s.handleCategoryDelete",
+    "source": "routes_hydra.go:686",
+    "params": [
+      "name"
+    ]
+  },
+  {
+    "method": "PUT",
+    "path": "/api/categories/:name",
+    "handler": "s.handleCategoryUpdate",
+    "source": "routes_hydra.go:685",
+    "params": [
+      "name"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/categories/orphans",
+    "handler": "s.handleCategoriesOrphans",
+    "source": "routes_hydra.go:683",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/drain/graduations",
+    "handler": "s.handleGraduations",
+    "source": "routes_hydra.go:699",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/drain/history",
+    "handler": "s.handleDrainHistory",
+    "source": "routes_hydra.go:697",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/drain/now",
+    "handler": "s.handleDrainNow",
+    "source": "routes_hydra.go:698",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/drain/status",
+    "handler": "s.handleDrainStatus",
+    "source": "routes_hydra.go:696",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/engines",
+    "handler": "s.handleEnginesGet",
+    "source": "routes_hydra.go:679",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/engines",
+    "handler": "s.handleEnginesPost",
+    "source": "routes_hydra.go:680",
+    "params": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/engines/:id",
+    "handler": "s.handleEnginesDelete",
+    "source": "routes_hydra.go:681",
+    "params": [
+      "id"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/events",
+    "handler": "s.handleSSE",
+    "source": "routes_hydra.go:590",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/fs/browse",
+    "handler": "s.handleFSBrowse",
+    "source": "routes_hydra.go:689",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/health/anomalies",
+    "handler": "s.handleHealthAnomalies",
+    "source": "routes_hydra.go:723",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/dial-limits",
+    "handler": "s.handleHoardSetDialLimits",
+    "source": "routes_hydra.go:648",
+    "params": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/hoard/download-slots",
+    "handler": "s.handleHoardDownloadSlotsClear",
+    "source": "routes_hydra.go:661",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/hoard/download-slots",
+    "handler": "s.handleHoardDownloadSlotsGet",
+    "source": "routes_hydra.go:659",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/download-slots",
+    "handler": "s.handleHoardDownloadSlotsSet",
+    "source": "routes_hydra.go:660",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/listen-port",
+    "handler": "s.handleHoardSetListenPort",
+    "source": "routes_hydra.go:647",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/pause",
+    "handler": "s.handleHoardPauseBulk",
+    "source": "routes_hydra.go:642",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/pause-all",
+    "handler": "s.handleHoardPauseAll",
+    "source": "routes_hydra.go:645",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/hoard/pinned",
+    "handler": "s.handleHoardPinnedList",
+    "source": "routes_hydra.go:664",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/restart-stuck",
+    "handler": "s.handleHoardRestartStuck",
+    "source": "routes_hydra.go:649",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/resume-all",
+    "handler": "s.handleHoardResumeAll",
+    "source": "routes_hydra.go:646",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/hoard/stats",
+    "handler": "s.handleHoardStats",
+    "source": "routes_hydra.go:637",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/hoard/torrents",
+    "handler": "s.handleHoardTorrents",
+    "source": "routes_hydra.go:638",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/hoard/torrents/:info_hash",
+    "handler": "s.handleHoardTorrentDetail",
+    "source": "routes_hydra.go:639",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/torrents/:info_hash/category",
+    "handler": "s.handleHoardSetCategory",
+    "source": "routes_hydra.go:652",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/hoard/torrents/:info_hash/move-preview",
+    "handler": "s.handleMovePreview",
+    "source": "routes_hydra.go:653",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/torrents/:info_hash/pause",
+    "handler": "s.handleHoardPause",
+    "source": "routes_hydra.go:640",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/torrents/:info_hash/pin",
+    "handler": "s.handleHoardPin",
+    "source": "routes_hydra.go:662",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/torrents/:info_hash/resume",
+    "handler": "s.handleHoardResume",
+    "source": "routes_hydra.go:641",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/torrents/:info_hash/tags",
+    "handler": "s.handleHoardSetTags",
+    "source": "routes_hydra.go:658",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/torrents/:info_hash/unpin",
+    "handler": "s.handleHoardUnpin",
+    "source": "routes_hydra.go:663",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/torrents/:info_hash/verify",
+    "handler": "s.handleHoardVerifyTorrent",
+    "source": "routes_hydra.go:651",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/torrents/bulk",
+    "handler": "s.handleHoardBulk",
+    "source": "routes_hydra.go:644",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/hoard/verify-downloading",
+    "handler": "s.handleHoardVerifyDownloading",
+    "source": "routes_hydra.go:650",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/import/check-paths",
+    "handler": "s.handleImportCheckPaths",
+    "source": "routes_hydra.go:598",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/import/qbit/events",
+    "handler": "s.handleQbitEvents",
+    "source": "routes_hydra.go:603",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/import/qbit/preview",
+    "handler": "s.handleQbitPreview",
+    "source": "routes_hydra.go:597",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/import/qbit/start",
+    "handler": "s.handleQbitStart",
+    "source": "routes_hydra.go:602",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/import/qbit/status",
+    "handler": "s.handleQbitStatus",
+    "source": "routes_hydra.go:604",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/import/transmission/preview",
+    "handler": "s.handleTransmissionPreview",
+    "source": "routes_hydra.go:599",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/import/transmission/start",
+    "handler": "s.handleTransmissionStart",
+    "source": "routes_hydra.go:601",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/import/transmission/upload",
+    "handler": "s.handleTransmissionUpload",
+    "source": "routes_hydra.go:600",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/jobs",
+    "handler": "s.handleJobsList",
+    "source": "routes_hydra.go:631",
+    "params": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/jobs/:id",
+    "handler": "s.handleJobCancel",
+    "source": "routes_hydra.go:633",
+    "params": [
+      "id"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/jobs/:id",
+    "handler": "s.handleJobGet",
+    "source": "routes_hydra.go:632",
+    "params": [
+      "id"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/jobs/move-remote",
+    "handler": "s.handleMoveRemote",
+    "source": "routes_hydra.go:634",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/logs",
+    "handler": "s.handleLogs",
+    "source": "routes_hydra.go:593",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/logs/stream",
+    "handler": "s.handleLogsStream",
+    "source": "routes_hydra.go:594",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/network/check",
+    "handler": "s.handleNetworkCheck",
+    "source": "routes_hydra.go:751",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/network/engines",
+    "handler": "s.handleEngineNet",
+    "source": "routes_hydra.go:752",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/network/interfaces",
+    "handler": "s.handleNetworkInterfaces",
+    "source": "routes_hydra.go:746",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/network/mode",
+    "handler": "s.handleNetworkModeGet",
+    "source": "routes_hydra.go:749",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/network/mode",
+    "handler": "s.handleNetworkModePost",
+    "source": "routes_hydra.go:750",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/network/wireguard",
+    "handler": "s.handleWireGuardStatus",
+    "source": "routes_hydra.go:753",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/network/wireguard/configs",
+    "handler": "s.handleWireGuardUpload",
+    "source": "routes_hydra.go:754",
+    "params": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/network/wireguard/configs/:name",
+    "handler": "s.handleWireGuardDelete",
+    "source": "routes_hydra.go:755",
+    "params": [
+      "name"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/network/wireguard/engines",
+    "handler": "s.handleWireGuardEngines",
+    "source": "routes_hydra.go:756",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/opt/flags",
+    "handler": "s.handleGetOptFlags",
+    "source": "routes_hydra.go:572",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/opt/flags",
+    "handler": "s.handleSetOptFlag",
+    "source": "routes_hydra.go:573",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/port-forward",
+    "handler": "s.handlePortForwardStatus",
+    "source": "routes_hydra.go:745",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/provenance",
+    "handler": "s.handleProvenance",
+    "source": "routes_hydra.go:605",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/public-ip",
+    "handler": "s.handlePublicIP",
+    "source": "routes_hydra.go:759",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/race/choking",
+    "handler": "s.handleRaceChoking",
+    "source": "routes_hydra.go:612",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/dial-limits",
+    "handler": "s.handleRaceSetDialLimits",
+    "source": "routes_hydra.go:622",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/listen-port",
+    "handler": "s.handleRaceSetListenPort",
+    "source": "routes_hydra.go:621",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/pause",
+    "handler": "s.handleRacePauseBulk",
+    "source": "routes_hydra.go:619",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/race/settings",
+    "handler": "s.handleRaceSettingsGet",
+    "source": "routes_hydra.go:613",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/settings",
+    "handler": "s.handleRaceSettingsPost",
+    "source": "routes_hydra.go:614",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/race/timeline/:info_hash",
+    "handler": "s.handleRaceTimeline",
+    "source": "routes_hydra.go:615",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/race/torrents",
+    "handler": "s.handleRaceTorrents",
+    "source": "routes_hydra.go:610",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/race/torrents/:info_hash",
+    "handler": "s.handleRaceTorrentDetail",
+    "source": "routes_hydra.go:611",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/torrents/:info_hash/category",
+    "handler": "s.handleHoardSetCategory",
+    "source": "routes_hydra.go:657",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/race/torrents/:info_hash/move-preview",
+    "handler": "s.handleMovePreview",
+    "source": "routes_hydra.go:654",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/torrents/:info_hash/pause",
+    "handler": "s.handleRacePause",
+    "source": "routes_hydra.go:617",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/torrents/:info_hash/purge",
+    "handler": "s.handleRacePurge",
+    "source": "routes_hydra.go:616",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/torrents/:info_hash/resume",
+    "handler": "s.handleRaceResume",
+    "source": "routes_hydra.go:618",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/race/torrents/bulk",
+    "handler": "s.handleRaceBulk",
+    "source": "routes_hydra.go:620",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/restart",
+    "handler": "s.handleRestart",
+    "source": "routes_hydra.go:682",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/settings",
+    "handler": "s.handleSettingsGet",
+    "source": "routes_hydra.go:738",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/settings",
+    "handler": "s.handleSettingsPost",
+    "source": "routes_hydra.go:739",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/settings/reset",
+    "handler": "s.handleSettingsReset",
+    "source": "routes_hydra.go:741",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/settings/restart",
+    "handler": "s.handleSettingsRestart",
+    "source": "routes_hydra.go:740",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/startup-pause",
+    "handler": "s.handleGetStartupPause",
+    "source": "routes_hydra.go:561",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/startup-pause/release",
+    "handler": "s.handleReleaseStartupPause",
+    "source": "routes_hydra.go:562",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/stats/baseline",
+    "handler": "s.handleBaselineGet",
+    "source": "routes_hydra.go:734",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/stats/baseline",
+    "handler": "s.handleBaselinePost",
+    "source": "routes_hydra.go:735",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/status",
+    "handler": "s.handleStatus",
+    "source": "routes_hydra.go:585",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/store/repair",
+    "handler": "s.handleRepairRun",
+    "source": "storerepair.go:111",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/tags",
+    "handler": "s.handleGetTags",
+    "source": "routes_hydra.go:669",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/torrents",
+    "handler": "s.handleAddTorrent",
+    "source": "routes_hydra.go:550",
+    "params": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/torrents/:info_hash",
+    "handler": "s.handleRemoveTorrent",
+    "source": "routes_hydra.go:553",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/torrents/:info_hash/add-tracker",
+    "handler": "s.handleAddTracker",
+    "source": "routes_hydra.go:555",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/torrents/:info_hash/files",
+    "handler": "s.handleTorrentFiles",
+    "source": "routes_hydra.go:558",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/torrents/:info_hash/reannounce",
+    "handler": "s.handleReannounce",
+    "source": "routes_hydra.go:554",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/torrents/:info_hash/trackers",
+    "handler": "s.handleGetTorrentTrackers",
+    "source": "routes_hydra.go:556",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/torrents/:info_hash/trackers",
+    "handler": "s.handleEditTorrentTrackers",
+    "source": "routes_hydra.go:557",
+    "params": [
+      "info_hash"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/torrents/add-defaults",
+    "handler": "s.handleAddDefaults",
+    "source": "routes_hydra.go:551",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/torrents/upload",
+    "handler": "s.handleUploadTorrent",
+    "source": "routes_hydra.go:552",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/trackers",
+    "handler": "s.handleGetTrackers",
+    "source": "routes_hydra.go:582",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/update-check",
+    "handler": "s.handleUpdateCheck",
+    "source": "routes_hydra.go:586",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/app/buildInfo",
+    "handler": "s.qbitBuildInfo",
+    "source": "routes_qbit.go:38",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/app/preferences",
+    "handler": "s.qbitPreferences",
+    "source": "routes_qbit.go:39",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/app/setPreferences",
+    "handler": "s.qbitSetPreferences",
+    "source": "routes_qbit.go:40",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/app/version",
+    "handler": "s.qbitAppVersion",
+    "source": "routes_qbit.go:36",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/app/webapiVersion",
+    "handler": "s.qbitWebapiVersion",
+    "source": "routes_qbit.go:37",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/auth/login",
+    "handler": "s.qbitAuthLogin",
+    "source": "routes_qbit.go:32",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/auth/logout",
+    "handler": "s.qbitAuthLogout",
+    "source": "routes_qbit.go:33",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/add",
+    "handler": "s.qbitTorrentsAdd",
+    "source": "routes_qbit.go:50",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/addTags",
+    "handler": "s.qbitAddTags",
+    "source": "routes_qbit.go:72",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/addTrackers",
+    "handler": "s.qbitTorrentsAddTrackers",
+    "source": "routes_qbit.go:60",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/v2/torrents/categories",
+    "handler": "s.qbitCategoriesGet",
+    "source": "routes_qbit.go:65",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/createCategory",
+    "handler": "s.qbitCategoryCreate",
+    "source": "routes_qbit.go:66",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/createTags",
+    "handler": "s.qbitCreateTags",
+    "source": "routes_qbit.go:70",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/delete",
+    "handler": "s.qbitTorrentsDelete",
+    "source": "routes_qbit.go:51",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/deleteTags",
+    "handler": "s.qbitDeleteTags",
+    "source": "routes_qbit.go:71",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/editCategory",
+    "handler": "s.qbitCategoryEdit",
+    "source": "routes_qbit.go:67",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/torrents/files",
+    "handler": "s.qbitTorrentsFiles",
+    "source": "routes_qbit.go:48",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/torrents/info",
+    "handler": "s.qbitTorrentsInfo",
+    "source": "routes_qbit.go:46",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/pause",
+    "handler": "s.qbitTorrentsPause",
+    "source": "routes_qbit.go:52",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/torrents/properties",
+    "handler": "s.qbitTorrentsProperties",
+    "source": "routes_qbit.go:47",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/reannounce",
+    "handler": "s.qbitTorrentsReannounce",
+    "source": "routes_qbit.go:62",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/recheck",
+    "handler": "s.qbitTorrentsRecheck",
+    "source": "routes_qbit.go:58",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/removeCategories",
+    "handler": "s.qbitCategoriesRemove",
+    "source": "routes_qbit.go:68",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/removeTags",
+    "handler": "s.qbitRemoveTags",
+    "source": "routes_qbit.go:73",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/removeTrackers",
+    "handler": "s.qbitTorrentsRemoveTrackers",
+    "source": "routes_qbit.go:61",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/resume",
+    "handler": "s.qbitTorrentsResume",
+    "source": "routes_qbit.go:53",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/setCategory",
+    "handler": "s.qbitTorrentsSetCategory",
+    "source": "routes_qbit.go:59",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/start",
+    "handler": "s.qbitTorrentsResume",
+    "source": "routes_qbit.go:57",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/torrents/stop",
+    "handler": "s.qbitTorrentsPause",
+    "source": "routes_qbit.go:56",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/v2/torrents/tags",
+    "handler": "s.qbitTorrentsTags",
+    "source": "routes_qbit.go:69",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/torrents/trackers",
+    "handler": "s.qbitTorrentsTrackers",
+    "source": "routes_qbit.go:49",
+    "params": []
+  },
+  {
+    "method": "Any",
+    "path": "/api/v2/transfer/info",
+    "handler": "s.qbitTransferInfo",
+    "source": "routes_qbit.go:43",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/vpn-speedtest/history",
+    "handler": "s.handleVPNSpeedtestHistory",
+    "source": "routes_hydra.go:729",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/vpn-speedtest/latest",
+    "handler": "s.handleVPNSpeedtestLatest",
+    "source": "routes_hydra.go:728",
+    "params": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/vpn-speedtest/run",
+    "handler": "s.handleVPNSpeedtestRun",
+    "source": "routes_hydra.go:730",
+    "params": []
+  },
+  {
+    "method": "GET",
+    "path": "/changelog.md",
+    "handler": "func(c *gin.Context",
+    "source": "server.go:334",
+    "params": []
+  }
+]

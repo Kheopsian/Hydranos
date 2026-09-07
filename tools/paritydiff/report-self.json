@@ -1,0 +1,570 @@
+{
+  "generated": 1788558136.1774282,
+  "a": "http://v4-go-a:8199",
+  "b": "http://v4-go-a:8199",
+  "matched": 56,
+  "differing": 0,
+  "todo": 0,
+  "results": [
+    {
+      "name": "GET /api/agents",
+      "path": "/api/agents",
+      "method": "GET",
+      "ms": 47,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/agents/removed",
+      "path": "/api/agents/removed",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/agents/torrents",
+      "path": "/api/agents/torrents",
+      "method": "GET",
+      "ms": 3,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/announce/clients",
+      "path": "/api/announce/clients",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/announce/ip-modes",
+      "path": "/api/announce/ip-modes",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/announce/passkeys",
+      "path": "/api/announce/passkeys",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/announce/secondary-stats",
+      "path": "/api/announce/secondary-stats",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/arr-cleanup/scan",
+      "path": "/api/arr-cleanup/scan",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/benchmark/compare",
+      "path": "/api/benchmark/compare",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/benchmark/current",
+      "path": "/api/benchmark/current",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/benchmark/race-events",
+      "path": "/api/benchmark/race-events",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/benchmark/range",
+      "path": "/api/benchmark/range",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/benchmark/records",
+      "path": "/api/benchmark/records",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/benchmark/trackers/current",
+      "path": "/api/benchmark/trackers/current",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/benchmark/trackers/range",
+      "path": "/api/benchmark/trackers/range",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/categories",
+      "path": "/api/categories",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/categories/orphans",
+      "path": "/api/categories/orphans",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/drain/graduations",
+      "path": "/api/drain/graduations",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/drain/history",
+      "path": "/api/drain/history",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/drain/status",
+      "path": "/api/drain/status",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/engines",
+      "path": "/api/engines",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/events",
+      "path": "/api/events",
+      "method": "GET",
+      "ms": 11701,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/fs/browse",
+      "path": "/api/fs/browse",
+      "method": "GET",
+      "ms": 4,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/health/anomalies",
+      "path": "/api/health/anomalies",
+      "method": "GET",
+      "ms": 4,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/hoard/download-slots",
+      "path": "/api/hoard/download-slots",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/hoard/pinned",
+      "path": "/api/hoard/pinned",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/hoard/stats",
+      "path": "/api/hoard/stats",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/hoard/torrents",
+      "path": "/api/hoard/torrents",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/import/qbit/events",
+      "path": "/api/import/qbit/events",
+      "method": "GET",
+      "ms": 21,
+      "status_a": 404,
+      "status_b": 404,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/import/qbit/status",
+      "path": "/api/import/qbit/status",
+      "method": "GET",
+      "ms": 3,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/jobs",
+      "path": "/api/jobs",
+      "method": "GET",
+      "ms": 3,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/logs",
+      "path": "/api/logs",
+      "method": "GET",
+      "ms": 3,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/logs/stream",
+      "path": "/api/logs/stream",
+      "method": "GET",
+      "ms": 20661,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/network/engines",
+      "path": "/api/network/engines",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/network/interfaces",
+      "path": "/api/network/interfaces",
+      "method": "GET",
+      "ms": 3,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/network/mode",
+      "path": "/api/network/mode",
+      "method": "GET",
+      "ms": 3,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/network/wireguard",
+      "path": "/api/network/wireguard",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/opt/flags",
+      "path": "/api/opt/flags",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/port-forward",
+      "path": "/api/port-forward",
+      "method": "GET",
+      "ms": 47,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/provenance",
+      "path": "/api/provenance",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/public-ip",
+      "path": "/api/public-ip",
+      "method": "GET",
+      "ms": 6,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/race/choking",
+      "path": "/api/race/choking",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/race/settings",
+      "path": "/api/race/settings",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/race/torrents",
+      "path": "/api/race/torrents",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/settings",
+      "path": "/api/settings",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/startup-pause",
+      "path": "/api/startup-pause",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/stats/baseline",
+      "path": "/api/stats/baseline",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/status",
+      "path": "/api/status",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/tags",
+      "path": "/api/tags",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/torrents/add-defaults",
+      "path": "/api/torrents/add-defaults",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/trackers",
+      "path": "/api/trackers",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/update-check",
+      "path": "/api/update-check",
+      "method": "GET",
+      "ms": 3,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/v2/torrents/categories",
+      "path": "/api/v2/torrents/categories",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/v2/torrents/tags",
+      "path": "/api/v2/torrents/tags",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/vpn-speedtest/history",
+      "path": "/api/vpn-speedtest/history",
+      "method": "GET",
+      "ms": 2,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    },
+    {
+      "name": "GET /api/vpn-speedtest/latest",
+      "path": "/api/vpn-speedtest/latest",
+      "method": "GET",
+      "ms": 1,
+      "status_a": 200,
+      "status_b": 200,
+      "diffs": [],
+      "state": "ok"
+    }
+  ]
+}

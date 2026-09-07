@@ -1,0 +1,402 @@
+[
+  {
+    "name": "GET /api/agents",
+    "method": "GET",
+    "path": "/api/agents",
+    "ignore": [
+      "$[*].interfaces[*].ip",
+      "$[*].interfaces[*].addresses[*]"
+    ],
+    "ignore_reason": "the container's own address, different for every instance"
+  },
+  {
+    "name": "GET /api/agents/removed",
+    "method": "GET",
+    "path": "/api/agents/removed"
+  },
+  {
+    "name": "GET /api/agents/torrents",
+    "method": "GET",
+    "path": "/api/agents/torrents"
+  },
+  {
+    "name": "GET /api/announce/clients",
+    "method": "GET",
+    "path": "/api/announce/clients"
+  },
+  {
+    "name": "GET /api/announce/ip-modes",
+    "method": "GET",
+    "path": "/api/announce/ip-modes"
+  },
+  {
+    "name": "GET /api/announce/passkeys",
+    "method": "GET",
+    "path": "/api/announce/passkeys"
+  },
+  {
+    "name": "GET /api/announce/secondary-stats",
+    "method": "GET",
+    "path": "/api/announce/secondary-stats"
+  },
+  {
+    "name": "GET /api/arr-cleanup/scan",
+    "method": "GET",
+    "path": "/api/arr-cleanup/scan"
+  },
+  {
+    "name": "GET /api/benchmark/compare",
+    "method": "GET",
+    "path": "/api/benchmark/compare"
+  },
+  {
+    "name": "GET /api/benchmark/current",
+    "method": "GET",
+    "path": "/api/benchmark/current",
+    "ignore": [
+      "$.arc_*",
+      "$.*_per_sec",
+      "$.*_pct"
+    ],
+    "ignore_reason": "host ZFS ARC counters, sampled at two different instants"
+  },
+  {
+    "name": "GET /api/benchmark/race-events",
+    "method": "GET",
+    "path": "/api/benchmark/race-events"
+  },
+  {
+    "name": "GET /api/benchmark/range",
+    "method": "GET",
+    "path": "/api/benchmark/range"
+  },
+  {
+    "name": "GET /api/benchmark/records",
+    "method": "GET",
+    "path": "/api/benchmark/records"
+  },
+  {
+    "name": "GET /api/benchmark/trackers/current",
+    "method": "GET",
+    "path": "/api/benchmark/trackers/current"
+  },
+  {
+    "name": "GET /api/benchmark/trackers/range",
+    "method": "GET",
+    "path": "/api/benchmark/trackers/range"
+  },
+  {
+    "name": "GET /api/categories",
+    "method": "GET",
+    "path": "/api/categories"
+  },
+  {
+    "name": "GET /api/categories/orphans",
+    "method": "GET",
+    "path": "/api/categories/orphans"
+  },
+  {
+    "name": "GET /api/drain/graduations",
+    "method": "GET",
+    "path": "/api/drain/graduations"
+  },
+  {
+    "name": "GET /api/drain/history",
+    "method": "GET",
+    "path": "/api/drain/history"
+  },
+  {
+    "name": "GET /api/drain/status",
+    "method": "GET",
+    "path": "/api/drain/status",
+    "ignore": [
+      "$.disk_total",
+      "$.disk_used",
+      "$.disk_used_pct"
+    ],
+    "ignore_reason": "both sides stat the SAME mounted directory, and ZFS reports a total that moves with the pool: observed drifting by exactly one 131072-byte block between two calls seconds apart"
+  },
+  {
+    "name": "GET /api/engines",
+    "method": "GET",
+    "path": "/api/engines"
+  },
+  {
+    "name": "GET /api/events",
+    "method": "GET",
+    "path": "/api/events"
+  },
+  {
+    "name": "GET /api/fs/browse",
+    "method": "GET",
+    "path": "/api/fs/browse",
+    "query": {
+      "path": "/configs"
+    }
+  },
+  {
+    "name": "GET /api/health/anomalies",
+    "method": "GET",
+    "path": "/api/health/anomalies",
+    "ignore": [
+      "$.generated_at",
+      "$.gc_cpu_pct",
+      "$.scan_duration_ms"
+    ],
+    "ignore_reason": "an instant, a Go runtime metric with no equivalent in Rust, and how long the sweep took -- a duration two instances cannot agree on, and which two Go instances would not agree on either"
+  },
+  {
+    "name": "GET /api/hoard/download-slots",
+    "method": "GET",
+    "path": "/api/hoard/download-slots"
+  },
+  {
+    "name": "GET /api/hoard/pinned",
+    "method": "GET",
+    "path": "/api/hoard/pinned"
+  },
+  {
+    "name": "GET /api/hoard/stats",
+    "method": "GET",
+    "path": "/api/hoard/stats"
+  },
+  {
+    "name": "GET /api/hoard/torrents",
+    "method": "GET",
+    "path": "/api/hoard/torrents"
+  },
+  {
+    "name": "GET /api/import/qbit/events",
+    "method": "GET",
+    "path": "/api/import/qbit/events"
+  },
+  {
+    "name": "GET /api/import/qbit/status",
+    "method": "GET",
+    "path": "/api/import/qbit/status"
+  },
+  {
+    "name": "GET /api/jobs",
+    "method": "GET",
+    "path": "/api/jobs"
+  },
+  {
+    "name": "GET /api/logs",
+    "method": "GET",
+    "path": "/api/logs",
+    "ignore": [
+      "$.entries",
+      "$.entries[*]*"
+    ],
+    "ignore_reason": "each process has its own log; only the envelope is comparable"
+  },
+  {
+    "name": "GET /api/logs/stream",
+    "method": "GET",
+    "path": "/api/logs/stream"
+  },
+  {
+    "name": "GET /api/network/engines",
+    "method": "GET",
+    "path": "/api/network/engines",
+    "ignore": [
+      "$.engines",
+      "$.engines[*]*",
+      "$.measured_at"
+    ],
+    "ignore_reason": "a periodic probe; whichever instance has not measured yet answers empty"
+  },
+  {
+    "name": "GET /api/network/interfaces",
+    "method": "GET",
+    "path": "/api/network/interfaces",
+    "ignore": [
+      "$.interfaces[*].ip",
+      "$.interfaces[*].addresses[*]"
+    ],
+    "ignore_reason": "same: the address belongs to the instance, not to the answer"
+  },
+  {
+    "name": "GET /api/network/mode",
+    "method": "GET",
+    "path": "/api/network/mode"
+  },
+  {
+    "name": "GET /api/network/wireguard",
+    "method": "GET",
+    "path": "/api/network/wireguard"
+  },
+  {
+    "name": "GET /api/opt/flags",
+    "method": "GET",
+    "path": "/api/opt/flags"
+  },
+  {
+    "name": "GET /api/port-forward",
+    "method": "GET",
+    "path": "/api/port-forward",
+    "ignore": [
+      "$.*_reach.at"
+    ],
+    "ignore_reason": "the instant of the last reachability probe, per instance"
+  },
+  {
+    "name": "GET /api/provenance",
+    "method": "GET",
+    "path": "/api/provenance"
+  },
+  {
+    "name": "GET /api/public-ip",
+    "method": "GET",
+    "path": "/api/public-ip"
+  },
+  {
+    "name": "GET /api/race/choking",
+    "method": "GET",
+    "path": "/api/race/choking"
+  },
+  {
+    "name": "GET /api/race/settings",
+    "method": "GET",
+    "path": "/api/race/settings"
+  },
+  {
+    "name": "GET /api/race/torrents",
+    "method": "GET",
+    "path": "/api/race/torrents"
+  },
+  {
+    "name": "GET /api/settings",
+    "method": "GET",
+    "path": "/api/settings"
+  },
+  {
+    "name": "GET /api/startup-pause",
+    "method": "GET",
+    "path": "/api/startup-pause"
+  },
+  {
+    "name": "GET /api/stats/baseline",
+    "method": "GET",
+    "path": "/api/stats/baseline"
+  },
+  {
+    "name": "GET /api/status",
+    "method": "GET",
+    "path": "/api/status"
+  },
+  {
+    "name": "GET /api/tags",
+    "method": "GET",
+    "path": "/api/tags"
+  },
+  {
+    "name": "GET /api/torrents/add-defaults",
+    "method": "GET",
+    "path": "/api/torrents/add-defaults"
+  },
+  {
+    "name": "GET /api/trackers",
+    "method": "GET",
+    "path": "/api/trackers"
+  },
+  {
+    "name": "GET /api/update-check",
+    "method": "GET",
+    "path": "/api/update-check"
+  },
+  {
+    "name": "GET /api/v2/torrents/categories",
+    "method": "GET",
+    "path": "/api/v2/torrents/categories"
+  },
+  {
+    "name": "GET /api/v2/torrents/tags",
+    "method": "GET",
+    "path": "/api/v2/torrents/tags"
+  },
+  {
+    "name": "GET /api/vpn-speedtest/history",
+    "method": "GET",
+    "path": "/api/vpn-speedtest/history"
+  },
+  {
+    "name": "GET /api/vpn-speedtest/latest",
+    "method": "GET",
+    "path": "/api/vpn-speedtest/latest"
+  },
+  {
+    "name": "GET /api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/files",
+    "method": "GET",
+    "path": "/api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/files"
+  },
+  {
+    "name": "GET /api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/trackers",
+    "method": "GET",
+    "path": "/api/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/trackers"
+  },
+  {
+    "name": "GET /api/v2/torrents/files",
+    "method": "GET",
+    "path": "/api/v2/torrents/files",
+    "query": {
+      "hash": "6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+    }
+  },
+  {
+    "name": "GET /api/v2/torrents/trackers",
+    "method": "GET",
+    "path": "/api/v2/torrents/trackers",
+    "query": {
+      "hash": "6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+    }
+  },
+  {
+    "name": "GET /api/v2/torrents/properties",
+    "method": "GET",
+    "path": "/api/v2/torrents/properties",
+    "query": {
+      "hash": "6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+    }
+  },
+  {
+    "name": "GET /api/v2/torrents/info",
+    "method": "GET",
+    "path": "/api/v2/torrents/info"
+  },
+  {
+    "name": "GET /api/jobs/inconnu",
+    "method": "GET",
+    "path": "/api/jobs/inconnu"
+  },
+  {
+    "name": "GET /changelog.md",
+    "method": "GET",
+    "path": "/changelog.md"
+  },
+  {
+    "name": "GET /api/hoard/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d",
+    "method": "GET",
+    "path": "/api/hoard/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+  },
+  {
+    "name": "GET /api/race/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d",
+    "method": "GET",
+    "path": "/api/race/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+  },
+  {
+    "name": "GET /api/race/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/move-preview",
+    "method": "GET",
+    "path": "/api/race/torrents/6190dbca7240d5e383db34a499fd1c54cea4ba3d/move-preview"
+  },
+  {
+    "name": "GET /api/benchmark/race-snapshots/6190dbca7240d5e383db34a499fd1c54cea4ba3d",
+    "method": "GET",
+    "path": "/api/benchmark/race-snapshots/6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+  },
+  {
+    "name": "GET /api/race/timeline/6190dbca7240d5e383db34a499fd1c54cea4ba3d",
+    "method": "GET",
+    "path": "/api/race/timeline/6190dbca7240d5e383db34a499fd1c54cea4ba3d"
+  }
+]
