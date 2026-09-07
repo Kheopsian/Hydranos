@@ -29,7 +29,29 @@ engine's own map, so there is nothing to refresh.
 | `race.go statsRefreshLoop` | same |
 | `api/snapshot_pusher.go` | pushed the copy to clients; handlers read the engine |
 
-## Missing, in order of what breaks
+## Ported since this file was written
+
+| Subsystem | Verified by |
+|---|---|
+| The announcer, whole | a staging instance announced to a real tracker and read its answer |
+| verify throttle, download slots | unit tests; the throttle stopped itself in staging |
+| the eight health invariants | unit tests |
+| the race drain | unit tests; two gates, off by default |
+| move jobs | unit tests, including the hardlink refusal |
+| VPN speedtest | unit tests |
+| qBittorrent import | unit tests; wired to its route |
+| NAT-PMP port forwarding | unit tests |
+| WireGuard config parsing and redaction | unit tests |
+
+## Still missing
+
+- Transmission import (the qBittorrent one is done; this is the same shape
+  against a different API).
+- The engine watchdog and `extrasmgr`'s reconcile loop.
+- Production: the release binary exists and runs in staging. It has not
+  replaced the Go in production.
+
+## Was missing, in order of what breaks
 
 ### 1. The announcer -- nothing works without it
 
