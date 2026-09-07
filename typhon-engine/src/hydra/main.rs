@@ -19,6 +19,7 @@ mod engines;
 mod logbuf;
 mod qbitrow;
 mod row;
+mod speedtest;
 mod store;
 mod tomledit;
 mod trackeredit;
@@ -26,8 +27,10 @@ mod walrepair;
 mod benchdb;
 mod announce;
 mod health;
+mod importer;
 mod jobs;
 mod workers;
+mod portfwd;
 mod raceevents;
 mod config;
 
@@ -155,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let state = api::AppState {
+        imports: Default::default(),
         config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
         engines: engine_host,
         store: Arc::new(std::sync::Mutex::new(store)),

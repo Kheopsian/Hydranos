@@ -35,7 +35,9 @@ dashmap = { version = "6", features = ["raw-api"] }
 futures = "0.3"
 tokio-socks = "0.5"
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks"] }
+# cookies: the qBittorrent Web API hands out a session cookie at login and
+# expects it on every later call. json: the same API answers in JSON.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "cookies", "json"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"
