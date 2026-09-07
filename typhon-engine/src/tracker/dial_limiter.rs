@@ -27,69 +27,128 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::time::{Duration, Instant};
 
-/// Live peer connections, inbound and outbound alike. Maintained by
-/// `PeerGuard` (RAII), so it is decremented even when a session panics.
-pub static LIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
-
-/// Ceiling on `LIVE_CONNS`. 0 = unlimited.
-static MAX_CONNS: AtomicUsize = AtomicUsize::new(0);
-
-/// Live cap on outbound dials per second, held as `f64` bits. 0 = unlimited.
+/// The dial ceilings and gauges of ONE engine.
 ///
-/// This lives here rather than in `DialPacer` so the rate can be changed while
-/// the engine runs: the pacer re-reads it on every `acquire`, so a new value
-/// takes effect on the next dial instead of at the next restart. Restarting a
-/// 200k-torrent hoard to try a rate is not a knob anyone would turn twice.
-static MAX_DIALS_PER_SEC: AtomicU64 = AtomicU64::new(0);
-
-/// Startup pause. While set, no outbound dial leaves the process. This is a
-/// process-level gate on purpose: it must never be written into per-torrent
-/// paused state, or lifting it would resume the torrents the user had
-/// deliberately paused and destroy that intent silently.
-static DIALS_PAUSED: AtomicBool = AtomicBool::new(false);
-
-/// Dials refused because the connection ceiling was reached.
-pub static DIAL_SKIPPED_CONN_CAP: AtomicU64 = AtomicU64::new(0);
-/// Dials refused because the startup pause was in force.
-pub static DIAL_SKIPPED_PAUSED: AtomicU64 = AtomicU64::new(0);
-/// Dials that had to wait on the token bucket.
-pub static DIAL_DELAYED: AtomicU64 = AtomicU64::new(0);
-
-pub fn set_max_connections(n: usize) {
-    MAX_CONNS.store(n, Ordering::Relaxed);
+/// Every field here was a static, which described reality while one engine
+/// meant one process. Sharing them between race and hoard would give the two a
+/// single connection ceiling and a single dial rate -- the last engine to
+/// start deciding for both -- and would report one engine's refusals under the
+/// other's diagnostics.
+pub struct DialLimiter {
+    /// Live peer connections, inbound and outbound alike. Maintained by
+    /// `PeerGuard` (RAII), so it is decremented even when a session panics.
+    live: AtomicUsize,
+    /// Ceiling on `live`. 0 = unlimited.
+    max_conns: AtomicUsize,
+    /// Live cap on outbound dials per second, held as `f64` bits. 0 = unlimited.
+    ///
+    /// It is read on every `acquire` rather than captured by the pacer, so a
+    /// new value takes effect on the next dial instead of at the next restart.
+    /// Restarting a 200k-torrent hoard to try a rate is not a knob anyone would
+    /// turn twice.
+    max_dials_per_sec: AtomicU64,
+    /// Startup pause. While set, no outbound dial leaves this engine. It is an
+    /// engine-level gate on purpose: it must never be written into per-torrent
+    /// paused state, or lifting it would resume the torrents the user had
+    /// deliberately paused and destroy that intent silently.
+    dials_paused: AtomicBool,
+    /// Dials refused because the connection ceiling was reached.
+    skipped_conn_cap: AtomicU64,
+    /// Dials refused because the startup pause was in force.
+    skipped_paused: AtomicU64,
+    /// Dials that had to wait on the token bucket.
+    delayed: AtomicU64,
 }
 
-pub fn max_connections() -> usize {
-    MAX_CONNS.load(Ordering::Relaxed)
+impl Default for DialLimiter {
+    fn default() -> Self {
+        Self {
+            live: AtomicUsize::new(0),
+            max_conns: AtomicUsize::new(0),
+            max_dials_per_sec: AtomicU64::new(0),
+            dials_paused: AtomicBool::new(false),
+            skipped_conn_cap: AtomicU64::new(0),
+            skipped_paused: AtomicU64::new(0),
+            delayed: AtomicU64::new(0),
+        }
+    }
 }
 
-/// True when a new connection would exceed the configured ceiling. Always
-/// false when no ceiling is set.
-pub fn conn_cap_reached() -> bool {
-    let cap = MAX_CONNS.load(Ordering::Relaxed);
-    cap != 0 && LIVE_CONNS.load(Ordering::Relaxed) >= cap
+impl DialLimiter {
+    pub fn connection_opened(&self) {
+        self.live.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn connection_closed(&self) {
+        self.live.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn live_connections(&self) -> usize {
+        self.live.load(Ordering::Relaxed)
+    }
+
+    pub fn set_max_connections(&self, n: usize) {
+        self.max_conns.store(n, Ordering::Relaxed);
+    }
+
+    pub fn max_connections(&self) -> usize {
+        self.max_conns.load(Ordering::Relaxed)
+    }
+
+    /// True when a new connection would exceed the configured ceiling. Always
+    /// false when no ceiling is set.
+    pub fn conn_cap_reached(&self) -> bool {
+        let cap = self.max_conns.load(Ordering::Relaxed);
+        cap != 0 && self.live.load(Ordering::Relaxed) >= cap
+    }
+
+    /// Sets the outbound dial ceiling in dials per second. Anything that is not
+    /// a finite positive number means "no limit", so a caller cannot wedge the
+    /// pacer with a NaN and stop every dial in the engine.
+    pub fn set_max_dials_per_sec(&self, per_sec: f64) {
+        let v = if per_sec.is_finite() && per_sec > 0.0 { per_sec } else { 0.0 };
+        self.max_dials_per_sec.store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The live dial rate. 0 = unlimited.
+    pub fn max_dials_per_sec(&self) -> f64 {
+        f64::from_bits(self.max_dials_per_sec.load(Ordering::Relaxed))
+    }
+
+    pub fn set_dials_paused(&self, paused: bool) {
+        self.dials_paused.store(paused, Ordering::Relaxed);
+    }
+
+    pub fn dials_paused(&self) -> bool {
+        self.dials_paused.load(Ordering::Relaxed)
+    }
+
+    pub fn note_skipped_conn_cap(&self) {
+        self.skipped_conn_cap.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_skipped_paused(&self) {
+        self.skipped_paused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn skipped_conn_cap(&self) -> u64 {
+        self.skipped_conn_cap.load(Ordering::Relaxed)
+    }
+
+    pub fn skipped_paused(&self) -> u64 {
+        self.skipped_paused.load(Ordering::Relaxed)
+    }
+
+    pub fn delayed(&self) -> u64 {
+        self.delayed.load(Ordering::Relaxed)
+    }
 }
 
-/// Sets the outbound dial ceiling in dials per second. Anything that is not a
-/// finite positive number means "no limit", so a caller cannot wedge the pacer
-/// with a NaN and stop every dial in the process.
-pub fn set_max_dials_per_sec(per_sec: f64) {
-    let v = if per_sec.is_finite() && per_sec > 0.0 { per_sec } else { 0.0 };
-    MAX_DIALS_PER_SEC.store(v.to_bits(), Ordering::Relaxed);
-}
-
-/// The live dial rate. 0 = unlimited.
-pub fn max_dials_per_sec() -> f64 {
-    f64::from_bits(MAX_DIALS_PER_SEC.load(Ordering::Relaxed))
-}
-
-pub fn set_dials_paused(paused: bool) {
-    DIALS_PAUSED.store(paused, Ordering::Relaxed);
-}
-
-pub fn dials_paused() -> bool {
-    DIALS_PAUSED.load(Ordering::Relaxed)
-}
+/// The limiter a torrent with no engine behind it runs under: unit tests, and
+/// a magnet being resolved before it is added. Unlimited, which is what an
+/// unconfigured engine has always been.
+pub static DEFAULT_LIMITER: std::sync::LazyLock<DialLimiter> =
+    std::sync::LazyLock::new(DialLimiter::default);
 
 /// Token bucket pacing outbound dials, mirroring `announceLimiter` on the Go
 /// side so the two read the same way. Owned by the single dial-queue consumer
@@ -117,7 +176,7 @@ impl DialPacer {
     /// no wait cap: a dial that waits is a peer we connect to later, while a
     /// dial we drop is a peer lost until the next announce. The queue is the
     /// backlog, and dropping is what the ceiling is for.
-    pub async fn acquire(&mut self) {
+    pub async fn acquire(&mut self, limiter: &DialLimiter) {
         // Counted once per dial that had to wait, not once per sleep: a single
         // dial can go round this loop several times, and counting each pass
         // would report a backlog far worse than the real one.
@@ -125,7 +184,7 @@ impl DialPacer {
         loop {
             // Re-read every pass: the rate can change mid-wait, and a dial
             // already sleeping on the old rate must be released by the new one.
-            let rate = max_dials_per_sec();
+            let rate = limiter.max_dials_per_sec();
             let now = Instant::now();
             let elapsed = now.duration_since(self.last).as_secs_f64();
             self.last = now;
@@ -145,7 +204,7 @@ impl DialPacer {
                 return;
             }
             if !counted {
-                DIAL_DELAYED.fetch_add(1, Ordering::Relaxed);
+                limiter.delayed.fetch_add(1, Ordering::Relaxed);
                 counted = true;
             }
             let need = (1.0 - self.tokens) / rate;
@@ -158,79 +217,54 @@ impl DialPacer {
 mod tests {
     use super::*;
 
-    /// The rate is a process global, so these tests cannot run concurrently
-    /// with each other and stay meaningful.
-    static RATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn non_positive_and_nan_rates_mean_unlimited() {
-        let _g = RATE_LOCK.lock().unwrap();
-        for bad in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
-            set_max_dials_per_sec(bad);
-            assert_eq!(max_dials_per_sec(), 0.0, "{bad} should read back as unlimited");
-        }
-        set_max_dials_per_sec(0.0);
-    }
-
-    #[tokio::test]
-    async fn unlimited_rate_does_not_pace() {
-        let _g = RATE_LOCK.lock().unwrap();
-        set_max_dials_per_sec(0.0);
-        let mut p = DialPacer::new();
-        let start = Instant::now();
-        for _ in 0..1000 {
-            p.acquire().await;
-        }
-        assert!(start.elapsed() < Duration::from_millis(50), "no ceiling must not pace");
-    }
+    // No RATE_LOCK any more: the rate used to be a process-wide static, so two
+    // tests touching it raced and had to serialise. A limiter is a value, and
+    // each test builds its own.
 
     #[tokio::test]
     async fn sub_unit_rate_still_gets_one_token() {
         // A rate of 0.5/s must not produce a bucket that can never fill.
-        let _g = RATE_LOCK.lock().unwrap();
-        set_max_dials_per_sec(0.5);
+        let lim = DialLimiter::default();
+        lim.set_max_dials_per_sec(0.5);
         let mut p = DialPacer::new();
-        p.acquire().await;
+        p.acquire(&lim).await;
         assert_eq!(p.burst, 1.0);
-        set_max_dials_per_sec(0.0);
     }
 
     #[tokio::test]
     async fn burst_drains_then_paces() {
-        let _g = RATE_LOCK.lock().unwrap();
-        set_max_dials_per_sec(10.0);
+        let lim = DialLimiter::default();
+        lim.set_max_dials_per_sec(10.0);
         let mut p = DialPacer::new();
         // The bucket starts empty, so credit has to be earned: ten dials at
         // 10/s cannot all clear inside a tenth of a second.
         let start = Instant::now();
         for _ in 0..3 {
-            p.acquire().await;
+            p.acquire(&lim).await;
         }
         assert!(
             start.elapsed() >= Duration::from_millis(200),
             "3 dials at 10/s should have taken ~300ms, took {:?}",
             start.elapsed()
         );
-        set_max_dials_per_sec(0.0);
     }
 
-    /// ⭐ The point of the whole change: a pacer built while the engine was
-    /// unlimited must start pacing when the rate is set under it, with no
-    /// restart and no reconstruction. Pinning the rate in `DialPacer::new`
-    /// (what the code used to do) fails this.
+    /// ⭐ A pacer built while the engine was unlimited must start pacing when
+    /// the rate is set under it, with no restart and no reconstruction.
+    /// Pinning the rate in `DialPacer::new` fails this.
     #[tokio::test]
     async fn rate_change_applies_to_a_live_pacer() {
-        let _g = RATE_LOCK.lock().unwrap();
-        set_max_dials_per_sec(0.0);
+        let lim = DialLimiter::default();
+        lim.set_max_dials_per_sec(0.0);
         let mut p = DialPacer::new();
         for _ in 0..50 {
-            p.acquire().await;
+            p.acquire(&lim).await;
         }
 
-        set_max_dials_per_sec(4.0);
+        lim.set_max_dials_per_sec(4.0);
         let start = Instant::now();
         for _ in 0..3 {
-            p.acquire().await;
+            p.acquire(&lim).await;
         }
         let tightened = start.elapsed();
         assert!(
@@ -239,10 +273,10 @@ mod tests {
         );
 
         // ...and lifting it must release just as promptly.
-        set_max_dials_per_sec(0.0);
+        lim.set_max_dials_per_sec(0.0);
         let start = Instant::now();
         for _ in 0..100 {
-            p.acquire().await;
+            p.acquire(&lim).await;
         }
         assert!(
             start.elapsed() < Duration::from_millis(50),
@@ -252,16 +286,32 @@ mod tests {
 
     #[test]
     fn conn_cap_is_off_by_default() {
-        set_max_connections(0);
-        LIVE_CONNS.store(999_999, Ordering::Relaxed);
-        assert!(!conn_cap_reached(), "no ceiling means never capped");
-        set_max_connections(10);
-        LIVE_CONNS.store(9, Ordering::Relaxed);
-        assert!(!conn_cap_reached());
-        LIVE_CONNS.store(10, Ordering::Relaxed);
-        assert!(conn_cap_reached());
-        // Leave the globals clean for other tests in this binary.
-        set_max_connections(0);
-        LIVE_CONNS.store(0, Ordering::Relaxed);
+        let lim = DialLimiter::default();
+        lim.set_max_connections(0);
+        for _ in 0..20 {
+            lim.connection_opened();
+        }
+        assert!(!lim.conn_cap_reached(), "no ceiling means never capped");
+        lim.set_max_connections(21);
+        assert!(!lim.conn_cap_reached());
+        lim.connection_opened();
+        assert!(lim.conn_cap_reached());
+    }
+
+    /// The reason the ceilings stopped being statics: race throttled while
+    /// hoard runs wide open, in one process. The old design gave both whatever
+    /// the last engine to start had set.
+    #[test]
+    fn two_engines_hold_different_ceilings_at_once() {
+        let race = DialLimiter::default();
+        let hoard = DialLimiter::default();
+        race.set_max_connections(50);
+        hoard.set_max_connections(0);
+        for _ in 0..50 {
+            race.connection_opened();
+            hoard.connection_opened();
+        }
+        assert!(race.conn_cap_reached(), "race must be at its ceiling");
+        assert!(!hoard.conn_cap_reached(), "hoard has no ceiling to reach");
     }
 }

@@ -248,7 +248,7 @@ async fn main() {
     if config.enable_ipv6 {
         info!("[engine] IPv6 enabled: listening on [::]:{} and accepting PEX added6", config.listen_port);
     }
-    peer::extension::set_enable_ipv6(config.enable_ipv6);
+
 
     // Flamegraph 2026-04-19 showed console-subscriber's task/resource stats
     // scanning (HashMap::retain + DroppedAt) dominates CPU (~50%+ of samples).
@@ -305,7 +305,10 @@ async fn main() {
     // without a tracker. Both default to on and both already skip `private`
     // torrents, but an operator who wants to talk to nothing but their
     // trackers can switch either off per engine.
-    peer::extension::set_enable_pex(config.pex_enabled);
+    // Per engine, not per process: the manager hands this to every torrent it
+    // owns, so two engines in one process keep opposite settings.
+    torrent_mgr.policy().set_pex(config.pex_enabled);
+    torrent_mgr.policy().set_ipv6(config.enable_ipv6);
     if !config.pex_enabled {
         info!("[engine] PEX disabled by config: ut_pex is not advertised, and an incoming PEX message is ignored");
     }
@@ -436,9 +439,9 @@ async fn main() {
     // config (and echoed by get_config) since long before anything read it,
     // so an existing install may already carry a value that has never taken
     // effect -- it starts biting at this upgrade.
-    tracker::dial_limiter::set_max_connections(config.max_connections);
-    tracker::dial_limiter::set_max_dials_per_sec(config.max_dials_per_sec);
-    tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp_socket.clone(), config.max_dials_per_sec);
+    torrent_mgr.limiter().set_max_connections(config.max_connections);
+    torrent_mgr.limiter().set_max_dials_per_sec(config.max_dials_per_sec);
+    tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp_socket.clone(), config.max_dials_per_sec, torrent_mgr.limiter().clone());
 
     // Choking engine DISABLED (2.4.13-typhon).
     // Le loop tickait toutes les 10s et chokait tous les peers sauf top-4 par
