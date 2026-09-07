@@ -158,8 +158,8 @@ async fn announce_one(
                     cache.record(
                         &job.info_hash,
                         Entry {
-                            complete: resp.complete,
-                            incomplete: resp.incomplete,
+                            complete: resp.complete as i64,
+                            incomplete: resp.incomplete as i64,
                             tracker: tracker_url.clone(),
                             at: std::time::Instant::now(),
                             interval,
