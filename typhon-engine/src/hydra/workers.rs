@@ -264,3 +264,60 @@ fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
     let used = (stat.f_blocks as u64 - stat.f_bfree as u64) * block;
     Some((used, total))
 }
+
+/// Watch our own memory and say so before the kernel does.
+///
+/// 3.x watched the engine *process* -- was it alive, how much had it taken --
+/// because the engine was a separate process it had spawned. Half of that
+/// disappears here: there is no other process to find dead. What remains is
+/// the ceiling, and it still matters, because the way this ends otherwise is
+/// the OOM killer taking the whole thing with no warning and no dump.
+pub fn spawn_memory_watch(limit_bytes: u64) {
+    if limit_bytes == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut over = false;
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let Some(rss) = resident_bytes() else { continue };
+            if rss > limit_bytes && !over {
+                // Edge-triggered: a process sitting over the line for an hour
+                // is one problem, not one hundred and twenty alerts.
+                over = true;
+                tracing::error!(
+                    rss_mib = rss / (1 << 20),
+                    limit_mib = limit_bytes / (1 << 20),
+                    "resident memory over the configured ceiling"
+                );
+            } else if rss <= limit_bytes && over {
+                over = false;
+                tracing::info!(rss_mib = rss / (1 << 20), "resident memory back under the ceiling");
+            }
+        }
+    });
+}
+
+/// Resident set size of this process, in bytes.
+///
+/// From statm, whose second field is the resident page count. Not from
+/// `VmRSS` in status: same number, more parsing.
+fn resident_bytes() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    Some(pages * page_size)
+}
+
+#[cfg(test)]
+mod memory_tests {
+    #[test]
+    fn our_own_resident_size_is_readable_and_not_absurd() {
+        let rss = super::resident_bytes().expect("/proc/self/statm is readable on Linux");
+        // A running test process holds more than a page and less than a
+        // terabyte. The point is that the page-size multiplication happened:
+        // forgetting it reports pages as bytes and never alerts.
+        assert!(rss > 4096, "{rss} bytes looks like a page count, not bytes");
+        assert!(rss < (1 << 40));
+    }
+}
