@@ -13,3 +13,4 @@ pub mod dht;
 pub mod magnet;
 pub mod netpin;
 pub mod webseed;
+pub mod session;

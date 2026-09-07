@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("/config"))
         .to_path_buf();
-    let engine_host = Arc::new(engines::EngineHost::start(&config, &config_dir));
+    let engine_host = Arc::new(engines::EngineHost::start(&config, &config_dir).await);
 
     // Same file 3.x writes: the store is what makes the switch reversible.
     let cfg_data_dir = config.daemon.data_dir.clone();
