@@ -3,6 +3,56 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v4.0.0 -- one process, one language
+
+Hydra 3.x ran as two processes: a Go front that served the HTTP API, and the
+Rust engine that owned the torrents, talking over a unix socket. The front kept
+its own copy of every torrent's state to answer requests from. At 243k torrents
+that copy was 1.62 GiB of live Go heap, 3.88 GiB of RSS all told, and it grew
+by 6.6 KB with every torrent added -- a slope that does not reach a million.
+
+4.0.0 is one Rust binary. The engines run inside it, and a request handler
+reads the engine's own map. There is no second copy to keep in step, so the
+class of bug where the UI showed a stale figure because a refresh had not run
+yet cannot be written any more.
+
+**This is a breaking change in packaging, not in the API.** Every route answers
+byte-for-byte what 3.180.0 answered, including four bugs reproduced on purpose
+and marked in place. The config file is unchanged. The SQLite schema is
+unchanged, and a 4.0.0 that finds a 3.x database opens it as it is.
+
+- The image ships one binary. `hydra-engine` is gone, and so is the unix socket
+  between the two halves.
+- `net = false` on an engine loads its state and opens no socket. It exists for
+  benches that hold a real catalogue and must not announce it.
+
+### How it was verified
+
+Not by reading the Go. Every route was sent the same request as 3.180.0 and the
+two answers compared down to the raw bytes, and every mutation was replayed
+against both stores. 169 routes, 114 write mutations. Several contracts here
+are not visible in the source and were found this way.
+
+### Under it: state that assumed one engine per process
+
+The engine library was written when one engine meant one process, and Hydra 4
+puts two in one. Roughly thirty pieces of per-engine state lived in globals,
+where the last engine to start decided for both -- silently, since none of it
+is an error. They now belong to the engine that owns them: the DHT node, the
+webseed queues, magnet jobs, the event bus, the completion channel, PEX, IPv6,
+the dial ceilings, and the MSE block.
+
+Two of those were not tidiness. A process-wide bind device meant the second
+engine kept the first one's, or none, and its traffic left by the default route
+-- the home address at the tracker, with no error and no log. A shared DHT
+would have undone `enable_dht = false` on a hoard, which is what keeps 240k
+idle torrents from paying for peer discovery they never use.
+
+Two globals stay global, with the reason written where they live: the set of
+our own addresses (an address belonging to either engine belongs to this host,
+and skipping it is the safe direction) and the in-flight uTP dial set (keyed by
+peer address, over a socket bound once per process).
+
 ## Release overview: v3.160.0 to v3.172.0
 
 `main` last carried v3.160.0. This release lands twelve versions at once. The
