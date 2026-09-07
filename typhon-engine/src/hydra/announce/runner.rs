@@ -182,10 +182,12 @@ async fn announce_one(
                 }
                 Err(e) => {
                     breaker.record(&host, false, std::time::Instant::now());
-                    // The host, never the URL: a tracker URL carries the
-                    // passkey in its path, and that is an account credential.
-                    // Logs get pasted into issues and shipped in bug reports.
-                    tracing::debug!(tracker = %host, error = %e, "announce failed");
+                    // At warn, not debug: a breaker that says a tracker
+                    // "stopped answering" without saying why sends an operator
+                    // to look at their network for a bug that is here. The
+                    // host, never the URL -- a tracker URL carries the passkey
+                    // in its path, and logs get pasted into issues.
+                    tracing::warn!(tracker = %host, error = %e, "announce failed");
                 }
             }
         }

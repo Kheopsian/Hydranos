@@ -1676,6 +1676,47 @@ async fn stream_events(
     let cfg = state.cfg();
 
     let stream = async_stream::stream! {
+        // Hydration first, and in batches. This is the ONLY path that fills
+        // the list: the page stopped reading /api/hoard/torrents when
+        // hydration moved to SSE, and that endpoint answers 249 MB in thirty
+        // seconds at 300k torrents -- a browser gives up long before.
+        const CHUNK: usize = 1000;
+        for engine in state.engines.engines() {
+            let mode = engine.role.clone();
+            // The same builder the list endpoint uses: 33 keys, verified
+            // byte-for-byte against 3.x. Writing a second one here is how the
+            // two drift.
+            let rows: Vec<serde_json::Value> = engine_rows(&state, &engine.id);
+            let total = rows.len();
+            if total == 0 {
+                let payload = serde_json::json!({
+                    "event": "torrent_batch",
+                    "data": {"mode": mode, "torrents": [], "done": true},
+                });
+                yield Ok::<_, std::convert::Infallible>(
+                    axum::response::sse::Event::default()
+                        .data(serde_json::to_string(&payload).unwrap_or_default()),
+                );
+                continue;
+            }
+            for (i, batch) in rows.chunks(CHUNK).enumerate() {
+                // `done` only on the very last batch of a mode: the page keeps
+                // appending until it is told the mode is complete.
+                let done = (i + 1) * CHUNK >= total;
+                let payload = serde_json::json!({
+                    "event": "torrent_batch",
+                    "data": {"mode": mode, "torrents": batch, "done": done},
+                });
+                yield Ok::<_, std::convert::Infallible>(
+                    axum::response::sse::Event::default()
+                        .data(serde_json::to_string(&payload).unwrap_or_default()),
+                );
+                // Let the runtime breathe between batches: 300 frames back to
+                // back starve every other task on this thread.
+                tokio::task::yield_now().await;
+            }
+        }
+
         loop {
             let payload = serde_json::json!({
                 "data": status_payload(&state),
