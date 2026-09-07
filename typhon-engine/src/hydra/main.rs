@@ -29,6 +29,7 @@ mod announce;
 mod health;
 mod importer;
 mod jobs;
+mod wgtun;
 mod workers;
 mod portfwd;
 mod raceevents;
