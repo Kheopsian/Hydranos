@@ -24,6 +24,7 @@ mod tomledit;
 mod trackeredit;
 mod walrepair;
 mod benchdb;
+mod announce;
 mod raceevents;
 mod config;
 

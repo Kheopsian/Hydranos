@@ -41,6 +41,9 @@ pub struct Engine {
     pub manager: Arc<TorrentManager>,
     /// Kept so the engine can be put on the network after it is built.
     pub disk: Arc<DiskManager>,
+    /// What trackers last said about this engine's torrents. Written by the
+    /// announcer, read by the trackers tab and the download slot manager.
+    pub announce_cache: Arc<crate::announce::cache::Cache>,
 }
 
 pub struct EngineHost {
@@ -83,6 +86,7 @@ impl EngineHost {
                 enable_ipv6: session.enable_ipv6,
                 manager,
                 disk,
+                announce_cache: Default::default(),
             });
         }
 
@@ -125,12 +129,32 @@ impl EngineHost {
                         &engine_cfg,
                     )
                     .await;
+                    // Nothing else in this process tells a tracker we exist.
+                    // Without this the engine seeds, listens and connects, and
+                    // every tracker forgets the whole catalogue within one
+                    // announce interval.
+                    let peer_id = engine_cfg.peer_id();
+                    crate::announce::runner::start(
+                        engine.manager.clone(),
+                        crate::announce::policy_from_config(
+                            config,
+                            String::from_utf8_lossy(&peer_id).into_owned(),
+                            String::new(),
+                        ),
+                        session.listen_port,
+                        if engine.id == "race" {
+                            crate::announce::runner::Mode::Race
+                        } else {
+                            crate::announce::runner::Mode::Hoard
+                        },
+                        engine.announce_cache.clone(),
+                    );
                     tracing::info!(
                         engine = %engine.id,
                         listen_port = session.listen_port,
                         dht = session.enable_dht,
                         pex = session.enable_pex,
-                        "engine on the network"
+                        "engine on the network, announcing"
                     );
                 }
                 None => {
