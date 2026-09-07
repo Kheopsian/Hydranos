@@ -150,6 +150,13 @@ impl EngineHost {
                         engine.announce_cache.clone(),
                     );
                     crate::workers::spawn_verify_throttle(engine.manager.clone());
+                    if engine.id == "race" {
+                        crate::workers::spawn_race_drain(
+                            engine.manager.clone(),
+                            config.race_drain.clone(),
+                            config_dir.join("race"),
+                        );
+                    }
                     crate::workers::spawn_download_slots(
                         engine.manager.clone(),
                         engine.announce_cache.clone(),

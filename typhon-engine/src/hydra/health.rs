@@ -125,7 +125,7 @@ pub fn scan_engine(
         // ghost: an active torrent whose directory is gone. A stat, because
         // nothing else can see it.
         if status == TorrentStatus::Downloading as u8 || status == TorrentStatus::Seeding as u8 {
-            let save_path = t.save_path.read().unwrap().clone();
+            let save_path = t.save_path.read().clone();
             if save_path.as_os_str().len() > 0 && !save_path.exists() {
                 report.add(Anomaly {
                     kind: GHOST.into(),
