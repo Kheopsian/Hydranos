@@ -33,6 +33,7 @@ mod wgtun;
 mod workers;
 mod portfwd;
 mod raceevents;
+mod reconnect;
 mod config;
 
 use config::Config;
@@ -174,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0),
         logs,
+        reconnect: Default::default(),
         config_path: config_path.clone(),
         update_check: Arc::new(tokio::sync::Mutex::new(None)),
         bench,
