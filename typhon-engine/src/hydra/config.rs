@@ -94,6 +94,34 @@ impl Session {
 /// The race drain: it deletes payload when the disk fills, so every field here
 /// is read rather than assumed.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Agent {
+    #[serde(default)]
+    pub name: String,
+    /// Empty means "started here". Present means "reached over the network",
+    /// and then everything below is ignored: the engine's settings live on the
+    /// far side.
+    #[serde(default)]
+    pub addr: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub tls_ca: String,
+    /// "race" or "hoard". Required for a local entry, and deliberately so: an
+    /// entry that merely forgot its `addr` would otherwise be started here,
+    /// turning a remote node into a local one without a word.
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub engine_id: String,
+    /// A SPARSE override of the role profile, not a whole configuration. The
+    /// entry holds what is true of this engine -- its port, its interface --
+    /// and nothing else; everything shared comes from [race] or [hoard], where
+    /// a change is made once.
+    #[serde(default)]
+    pub session: toml::value::Table,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RaceDrain {
     #[serde(default)]
     pub enabled: bool,
@@ -157,6 +185,16 @@ pub struct Auth {
 pub struct Config {
     #[serde(default)]
     pub daemon: Daemon,
+
+    /// Every node of the fleet, local and remote alike.
+    ///
+    /// An entry with an `addr` is reached over the network and its engine is
+    /// configured on the far side. An entry without one runs HERE: this
+    /// process starts that engine itself. That is what "one agent, one engine"
+    /// means -- a node hosts an arbitrary set of engines, each able to sit on
+    /// its own tunnel, rather than exactly a race and a hoard.
+    #[serde(default)]
+    pub agent: Vec<Agent>,
 
     #[serde(default)]
     pub auth: Auth,
@@ -252,5 +290,171 @@ user_agent = "qBittorrent/5.2.2"
         );
         assert_eq!(cfg.announce_secondary_stats["seedpool.org"], "zero");
         assert_eq!(cfg.announce_ip_modes["gemini-tracker.org"], "v4");
+    }
+}
+
+/// One engine this node runs.
+#[derive(Debug, Clone)]
+pub struct LocalEngine {
+    pub id: String,
+    pub role: String,
+    pub session: Session,
+}
+
+impl Config {
+    /// The fleet profile for a role.
+    pub fn profile_for_role(&self, role: &str) -> Option<&Session> {
+        match role {
+            "race" => Some(&self.race),
+            "hoard" => Some(&self.hoard),
+            _ => None,
+        }
+    }
+
+    /// Every engine this process starts.
+    ///
+    /// `[race]` and `[hoard]` first, because that is what every install has,
+    /// then the `[[agent]]` entries that run here. Additive on purpose: the
+    /// older `[[engine]]` blocks REPLACED the two sections the moment one
+    /// existed, a rule nothing stated and which silently disabled half a
+    /// config. An entry whose id matches one already resolved replaces that
+    /// one rather than colliding with it, so a node can override its own race
+    /// engine without restating the rest.
+    pub fn local_engines(&self) -> Vec<LocalEngine> {
+        let mut out = vec![
+            LocalEngine { id: "race".into(), role: "race".into(), session: self.race.clone() },
+            LocalEngine { id: "hoard".into(), role: "hoard".into(), session: self.hoard.clone() },
+        ];
+
+        for agent in &self.agent {
+            // An addr means the engine lives elsewhere. A missing role means we
+            // do not know what it is, and guessing would start a remote node's
+            // engine here.
+            if !agent.addr.trim().is_empty() || agent.role.trim().is_empty() {
+                continue;
+            }
+            let Some(profile) = self.profile_for_role(agent.role.trim()) else {
+                tracing::warn!(
+                    agent = %agent.name,
+                    role = %agent.role,
+                    "unknown role: this agent starts no engine"
+                );
+                continue;
+            };
+            let id = if !agent.engine_id.trim().is_empty() {
+                agent.engine_id.trim().to_string()
+            } else {
+                agent.name.trim().to_string()
+            };
+            if id.is_empty() {
+                tracing::warn!("a local agent has neither engine_id nor name: skipped");
+                continue;
+            }
+            let session = merge_session(profile, &agent.session);
+            let engine = LocalEngine { id: id.clone(), role: agent.role.trim().to_string(), session };
+            match out.iter().position(|e| e.id == id) {
+                Some(i) => out[i] = engine,
+                None => out.push(engine),
+            }
+        }
+        out
+    }
+}
+
+/// The role profile with an entry's own keys laid over it.
+///
+/// Through TOML rather than field by field: a sparse override that had to name
+/// every key would stop being sparse, and a new session key would silently not
+/// be overridable until someone remembered to add it here.
+fn merge_session(profile: &Session, over: &toml::value::Table) -> Session {
+    if over.is_empty() {
+        return profile.clone();
+    }
+    let Ok(toml::Value::Table(mut base)) = toml::Value::try_from(profile) else {
+        return profile.clone();
+    };
+    for (k, v) in over {
+        base.insert(k.clone(), v.clone());
+    }
+    match toml::Value::Table(base).try_into() {
+        Ok(s) => s,
+        Err(e) => {
+            // A bad override is refused rather than half-applied: half a
+            // configuration is one nobody wrote.
+            tracing::warn!(error = %e, "agent session override refused, using the role profile");
+            profile.clone()
+        }
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    fn cfg(toml_text: &str) -> Config {
+        toml::from_str(toml_text).expect("config parses")
+    }
+
+    #[test]
+    fn a_node_with_no_agents_still_runs_race_and_hoard() {
+        let c = cfg("[race]\nlisten_port = 1\n\n[hoard]\nlisten_port = 2\n");
+        let ids: Vec<String> = c.local_engines().iter().map(|e| e.id.clone()).collect();
+        assert_eq!(ids, ["race", "hoard"]);
+    }
+
+    /// ⭐ Additive, unlike the [[engine]] blocks it replaces: those took over
+    /// the moment one existed, silently disabling the rest of a config.
+    #[test]
+    fn a_local_agent_adds_an_engine_without_removing_the_others() {
+        let c = cfg(
+            "[race]\nlisten_port = 1\n\n[hoard]\nlisten_port = 2\n\n\
+             [[agent]]\nname = \"vpn7\"\nrole = \"race\"\n[agent.session]\nlisten_port = 26991\n",
+        );
+        let engines = c.local_engines();
+        let ids: Vec<String> = engines.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(ids, ["race", "hoard", "vpn7"]);
+        assert_eq!(engines[2].session.listen_port, 26991);
+    }
+
+    /// The override is sparse: everything it does not say comes from the role
+    /// profile. Taking it verbatim would run an engine with every other field
+    /// at its zero value -- a configuration nobody wrote.
+    #[test]
+    fn an_override_keeps_everything_it_does_not_mention() {
+        let c = cfg(
+            "[race]\nlisten_port = 1\nmax_connections = 500\nenable_dht = true\n\n\
+             [hoard]\nlisten_port = 2\n\n\
+             [[agent]]\nname = \"vpn7\"\nrole = \"race\"\n[agent.session]\nlisten_port = 26991\n",
+        );
+        let vpn7 = c.local_engines().into_iter().find(|e| e.id == "vpn7").unwrap();
+        assert_eq!(vpn7.session.listen_port, 26991, "what the entry says");
+        assert_eq!(vpn7.session.max_connections, 500, "what it does not, from the profile");
+        assert!(vpn7.session.enable_dht);
+    }
+
+    /// An entry that merely forgot its addr must not be started here: that
+    /// turns a remote node into a local one, silently.
+    #[test]
+    fn a_remote_agent_and_a_roleless_one_start_nothing_here() {
+        let c = cfg(
+            "[race]\nlisten_port = 1\n\n[hoard]\nlisten_port = 2\n\n\
+             [[agent]]\nname = \"far\"\naddr = \"10.0.0.9:7000\"\nrole = \"race\"\n\n\
+             [[agent]]\nname = \"nameless\"\n",
+        );
+        let ids: Vec<String> = c.local_engines().iter().map(|e| e.id.clone()).collect();
+        assert_eq!(ids, ["race", "hoard"]);
+    }
+
+    /// A node overriding its own race engine replaces it rather than ending up
+    /// with two engines called race.
+    #[test]
+    fn an_id_that_already_exists_replaces_it() {
+        let c = cfg(
+            "[race]\nlisten_port = 1\n\n[hoard]\nlisten_port = 2\n\n\
+             [[agent]]\nengine_id = \"race\"\nrole = \"race\"\n[agent.session]\nlisten_port = 9999\n",
+        );
+        let engines = c.local_engines();
+        assert_eq!(engines.len(), 2, "replaced, not added");
+        assert_eq!(engines[0].session.listen_port, 9999);
     }
 }
