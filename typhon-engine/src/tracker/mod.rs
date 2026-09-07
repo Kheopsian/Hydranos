@@ -257,10 +257,11 @@ pub static LEECHERS_OUT_TOTAL: AtomicU64 = AtomicU64::new(0);
 // BEP 10 / BEP 11 PEX counters.
 pub static PEX_EXT_HANDSHAKES_SENT: AtomicU64 = AtomicU64::new(0);
 pub static PEX_EXT_HANDSHAKES_RECV: AtomicU64 = AtomicU64::new(0);
-pub static PEX_MSGS_SENT: AtomicU64 = AtomicU64::new(0);
-pub static PEX_MSGS_RECV: AtomicU64 = AtomicU64::new(0);
-pub static PEX_PEERS_DISCOVERED: AtomicU64 = AtomicU64::new(0);
-pub static PEX_PEERS_DIALED: AtomicU64 = AtomicU64::new(0);
+// PEX_MSGS_SENT / PEX_MSGS_RECV / PEX_PEERS_DIALED were declared and reported
+// but never incremented anywhere, so they always published zero. They are gone
+// rather than made per-engine: the API keeps publishing the same zero, from a
+// literal that says so, instead of from a counter that looks alive.
+// PEX_PEERS_DISCOVERED moved onto TorrentState, which is owned by one engine.
 
 /// Pending-dial channel. PEX-discovered peer addrs go through here so that
 /// `dial_peer` never recurses directly on itself (which the compiler cannot
