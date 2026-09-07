@@ -150,10 +150,41 @@ def dump_store(path):
     return out
 
 
+# Compteurs que le moteur fait avancer tout seul. La reference seme pendant le
+# banc, le candidat tourne avec HYDRA_ENGINE_NET=0 et reste fige sur la valeur
+# de reprise: les comparer, c est poser une question qui n a pas de reponse, et
+# la difference observee (512 Kio, 480 Kio -- des multiples de la taille de
+# bloc) mesure le temps qui passe, pas le portage. Une mutation qui toucherait
+# vraiment ces colonnes se verrait ailleurs: le banc rejoue chaque ecriture et
+# compare la REPONSE de la route.
+COMPTEURS_VIVANTS = ("total_uploaded", "total_downloaded", "seeding_time")
+
+
+def _sans_compteurs(rows):
+    """Les lignes sans les colonnes que le moteur fait avancer tout seul.
+
+    Applique AVANT la comparaison, pas seulement a l affichage: sinon la
+    difference est bien detectee, la table signalee, et le rapport n a plus
+    aucun champ a montrer -- un probleme qui ne dit pas ce qu il est.
+    """
+    out = []
+    for r in rows:
+        try:
+            d = json.loads(r) if isinstance(r, str) else dict(r)
+        except Exception:
+            out.append(r)
+            continue
+        for c in COMPTEURS_VIVANTS:
+            d.pop(c, None)
+        out.append(json.dumps(d, sort_keys=True))
+    return out
+
+
 def compare_store(a, b):
     findings = []
     for table in sorted(set(a) | set(b)):
-        rows_a, rows_b = a.get(table, []), b.get(table, [])
+        rows_a = _sans_compteurs(a.get(table, []))
+        rows_b = _sans_compteurs(b.get(table, []))
         if rows_a == rows_b:
             continue
         only_a = [r for r in rows_a if r not in rows_b]
@@ -167,6 +198,61 @@ def compare_store(a, b):
         })
     return findings
 
+
+
+def _cle_ligne(row):
+    """La cle qui identifie une ligne des deux cotes, si on la reconnait."""
+    for k in ("info_hash", "id", "key"):
+        if isinstance(row, dict) and k in row:
+            return "%s=%s" % (k, row[k])
+    return None
+
+
+def _pair_rows(only_a, only_b):
+    """Apparie les lignes qui portent la meme cle.
+
+    Une ligne presente des deux cotes avec un champ different apparait dans les
+    deux listes. Les apparier transforme "deux lignes mysterieuses" en "ce
+    champ-la a change", ce que le lecteur peut agir.
+    """
+    import json as _json
+    def charger(rows):
+        out = []
+        for r in rows:
+            try:
+                out.append(_json.loads(r) if isinstance(r, str) else r)
+            except Exception:
+                out.append(r)
+        return out
+
+    a, b = charger(only_a), charger(only_b)
+    index_b = {}
+    for row in b:
+        k = _cle_ligne(row)
+        if k:
+            index_b[k] = row
+    paired, restants_a = [], []
+    apparies_b = set()
+    for row in a:
+        k = _cle_ligne(row)
+        if k and k in index_b:
+            paired.append((k, row, index_b[k]))
+            apparies_b.add(k)
+        else:
+            restants_a.append(row if isinstance(row, str) else _json.dumps(row, sort_keys=True))
+    restants_b = [row if isinstance(row, str) else _json.dumps(row, sort_keys=True)
+                  for row in b if _cle_ligne(row) not in apparies_b]
+    return paired, restants_a, restants_b
+
+
+
+
+def _champs_divergents(a, b):
+    """Les cles dont la valeur differe entre deux lignes appariees."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return []
+    return sorted(k for k in set(a) | set(b)
+                  if k not in COMPTEURS_VIVANTS and a.get(k) != b.get(k))
 
 def main():
     parser = argparse.ArgumentParser()
@@ -244,10 +330,21 @@ def main():
         for finding in store_diffs:
             print("[diff ] table %s: %d lignes en A, %d en B"
                   % (finding["table"], finding["count_a"], finding["count_b"]))
-            for row in finding["only_in_a"]:
-                print("         seulement A: %s" % row[:160])
-            for row in finding["only_in_b"]:
-                print("         seulement B: %s" % row[:160])
+            # Nommer le champ qui diverge plutot qu imprimer une ligne
+            # coupee. Une ligne tronquee a 160 caracteres cache justement le
+            # champ fautif quand il est en fin d objet, et fait passer une
+            # divergence reelle pour un mystere.
+            paired, seuls_a, seuls_b = _pair_rows(finding["only_in_a"],
+                                                  finding["only_in_b"])
+            for key, row_a, row_b in paired:
+                champs = _champs_divergents(row_a, row_b)
+                print("         %s: %s" % (key, ", ".join(
+                    "%s A=%r B=%r" % (c, row_a.get(c), row_b.get(c))
+                    for c in champs) or "identiques apres normalisation"))
+            for row in seuls_a:
+                print("         seulement A: %s" % row[:400])
+            for row in seuls_b:
+                print("         seulement B: %s" % row[:400])
 
     print("\n%d probleme(s)" % failures)
     return 1 if failures else 0
