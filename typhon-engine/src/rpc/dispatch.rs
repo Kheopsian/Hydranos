@@ -40,10 +40,10 @@ pub fn dispatch(
         "set_trackers" => set_trackers(params, torrent_mgr),
         "get_files" => get_files(params, torrent_mgr),
         "get_availability" => get_availability(params, torrent_mgr),
-        "set_opt_flag" => set_opt_flag(params),
-        "get_opt_flags" => get_opt_flags(),
+        "set_opt_flag" => set_opt_flag(params, torrent_mgr),
+        "get_opt_flags" => get_opt_flags(torrent_mgr),
         "get_diagnostics" => get_diagnostics(torrent_mgr, config),
-        "set_listen_port" => set_listen_port(params),
+        "set_listen_port" => set_listen_port(params, torrent_mgr),
         "set_self_ips" => set_self_ips(params),
         "set_dials_paused" => set_dials_paused(params, torrent_mgr),
         "set_dial_limits" => set_dial_limits(params, torrent_mgr),
@@ -511,18 +511,18 @@ fn get_files(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
 /// Same rationale as the Go-side registry: each flag gates ONE change so an A/B
 /// ladder can measure it in isolation, and a restart to do that would cost real
 /// tracker credit.
-fn set_opt_flag(params: &Value) -> Value {
+fn set_opt_flag(params: &Value, torrent_mgr: &Arc<TorrentManager>) -> Value {
     let name = params.get("flag").and_then(|v| v.as_str()).unwrap_or("");
     match name {
         "session_pinning" => {
             let on = params.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
             crate::peer::set_session_pinning(on);
-            json!({"ok": true, "flags": opt_flags_map()})
+            json!({"ok": true, "flags": opt_flags_map(torrent_mgr)})
         }
         "block_mse" => {
             let on = params.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::peer::set_block_mse(on);
-            json!({"ok": true, "flags": opt_flags_map()})
+            torrent_mgr.policy().set_block_mse(on);
+            json!({"ok": true, "flags": opt_flags_map(torrent_mgr)})
         }
         "session_runtimes" => {
             let n = params.get("value").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -532,22 +532,22 @@ fn set_opt_flag(params: &Value) -> Value {
             if !crate::peer::set_session_runtimes(n) {
                 return json!({"error": "runtime pool already built; the size is fixed until restart"});
             }
-            json!({"ok": true, "flags": opt_flags_map()})
+            json!({"ok": true, "flags": opt_flags_map(torrent_mgr)})
         }
         _ => json!({"error": format!("unknown engine flag: {}", name)}),
     }
 }
 
-fn opt_flags_map() -> Value {
+fn opt_flags_map(torrent_mgr: &Arc<TorrentManager>) -> Value {
     json!({
         "session_pinning": crate::peer::session_pinning(),
-        "block_mse": crate::peer::block_mse(),
+        "block_mse": torrent_mgr.policy().block_mse(),
         "session_runtimes": crate::peer::session_runtimes_n(),
     })
 }
 
-fn get_opt_flags() -> Value {
-    json!({"flags": opt_flags_map()})
+fn get_opt_flags(torrent_mgr: &Arc<TorrentManager>) -> Value {
+    json!({"flags": opt_flags_map(torrent_mgr)})
 }
 
 /// Piece availability as seen from the swarm. Only download-mode torrents have
@@ -884,12 +884,12 @@ fn set_dial_limits(params: &Value, torrent_mgr: &Arc<TorrentManager>) -> Value {
 /// Hot-rebind the engine's TCP peer listener to a new port without a restart.
 /// Used by the Go orchestrator when a dynamic upstream port (e.g. gluetun /
 /// Proton port-forward) rotates. Torrents and live peer connections are kept.
-fn set_listen_port(params: &Value) -> Value {
+fn set_listen_port(params: &Value, torrent_mgr: &Arc<TorrentManager>) -> Value {
     let port = match params.get("port").and_then(|v| v.as_u64()) {
         Some(p) if p > 0 && p <= u16::MAX as u64 => p as u16,
         _ => return json!({"error": "invalid or missing port"}),
     };
-    if crate::peer::request_listen_rebind(port) {
+    if torrent_mgr.request_listen_rebind(port) {
         json!({"ok": true, "port": port})
     } else {
         json!({"error": "listener supervisor not ready"})

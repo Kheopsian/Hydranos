@@ -45,7 +45,15 @@ pub async fn fetch_from_peer(
     egress: crate::netpin::Egress,
 ) -> Result<Vec<u8>, String> {
     let (cs, _fast_ext, lt_ext, _remote_peer_id, _encrypted) =
-        crate::tracker::open_peer(addr, &utp_socket, &info_hash, &peer_id, &egress, false)
+        crate::tracker::open_peer(
+            addr,
+            &utp_socket,
+            &info_hash,
+            &peer_id,
+            &egress,
+            &crate::peer::extension::DEFAULT_POLICY,
+            false,
+        )
             .await
             .ok_or_else(|| "no connection".to_string())?;
     if !lt_ext {

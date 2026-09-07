@@ -202,18 +202,13 @@ async fn main() {
         config.socket_path = socket_override;
     }
 
-    // Apply extra trusted PROXY v2 sources from config (VPS v6 etc).
-    {
-        let extras: Vec<std::net::IpAddr> = config
-            .proxy_v2_trusted_sources
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        if !extras.is_empty() {
-            info!("[engine] trusting {} extra PROXY v2 source(s): {:?}", extras.len(), extras);
-            peer::set_trusted_proxy_sources(extras);
-        }
-    }
+    // Parsed here, applied once the manager exists: the allowlist belongs to
+    // the engine, not to the process.
+    let proxy_v2_extras: Vec<std::net::IpAddr> = config
+        .proxy_v2_trusted_sources
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
 
     // Seed the self-dial IP filter from env; Go refreshes it at runtime with the
     // observed public IP via the set_self_ips RPC (no more hard-coded staleness).
@@ -229,17 +224,12 @@ async fn main() {
         }
     });
 
-    // Configure outbound SOCKS5 proxy (used for v6 peer dials to avoid Free leak).
+    // The outbound SOCKS5 for v6 dials is carried by each binding's Egress
+    // (see Config::socks5_outbound); nothing to install here.
     if !config.socks5_outbound_host.is_empty() {
         info!(
             "[engine] v6 outbound dials via SOCKS5 {}:{}",
             config.socks5_outbound_host, config.socks5_outbound_port
-        );
-        peer::set_socks5_outbound(
-            config.socks5_outbound_host.clone(),
-            config.socks5_outbound_port,
-            config.socks5_outbound_user.clone(),
-            config.socks5_outbound_pass.clone(),
         );
     }
 
@@ -297,6 +287,15 @@ async fn main() {
         disk_mgr.clone(),
     ));
 
+    if !proxy_v2_extras.is_empty() {
+        info!(
+            "[engine] trusting {} extra PROXY v2 source(s): {:?}",
+            proxy_v2_extras.len(),
+            proxy_v2_extras
+        );
+        torrent_mgr.set_trusted_proxy_sources(proxy_v2_extras);
+    }
+
     // Load resume data
     let loaded = torrent_mgr.load_resume_data();
     info!("[engine] loaded {} torrents from resume data", loaded);
@@ -351,6 +350,7 @@ async fn main() {
     let egress = typhon_engine::netpin::Egress {
         fwmark: 0,
         device: config.bind_device.clone(),
+        socks5: None,
     };
     if let Some(dev) = egress.device() {
         info!("[engine] every socket is pinned to device {}", dev);
@@ -478,7 +478,7 @@ async fn main() {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             // Skip the whole scan when nobody listens — saves 13k atomic loads
             // per second on a system with no subscribers.
-            if rpc::events::bus().receiver_count() == 0 {
+            if tm_stats.bus().receiver_count() == 0 {
                 continue;
             }
             let mut changed: Vec<rpc::events::TorrentStatsMini> = Vec::new();
@@ -522,7 +522,7 @@ async fn main() {
                 }
             }
             if !changed.is_empty() {
-                rpc::events::publish(rpc::events::Event::StatsSnapshot { torrents: changed });
+                tm_stats.bus().publish(rpc::events::Event::StatsSnapshot { torrents: changed });
             }
         }
     });
@@ -539,7 +539,7 @@ async fn main() {
     // Persist completions as they happen, not on the next sweep.
     let tm_done = torrent_mgr.clone();
     tokio::spawn(async move {
-        if let Some(mut rx) = torrent::take_completion_receiver() {
+        if let Some(mut rx) = torrent_mgr.take_completion_receiver() {
             while let Some(ih) = rx.recv().await {
                 tm_done.persist_completed(&ih);
             }

@@ -21,39 +21,20 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 /// diagnostics via the Hydra /api/hoard/stats endpoint.
 pub static INCOMING_REJECTED_SELF: AtomicU64 = AtomicU64::new(0);
 
-static EXTRA_TRUSTED_PROXY_SOURCES: OnceLock<Vec<std::net::IpAddr>> = OnceLock::new();
-
-/// Register additional IPs whose PROXY v2 headers are trusted.
-/// FW must guarantee that only these sources can reach the PROXY v2 port.
-pub fn set_trusted_proxy_sources(ips: Vec<std::net::IpAddr>) {
-    let _ = EXTRA_TRUSTED_PROXY_SOURCES.set(ips);
-}
+// The trusted PROXY v2 sources live on the TorrentManager: the proxy-v2
+// listener is per engine, so its allowlist is too.
 
 /// (host, port, optional (user, pass)) for outbound SOCKS5 on v6 dials.
 pub type Socks5Config = (String, u16, Option<(String, String)>);
-pub static SOCKS5_OUTBOUND: OnceLock<Socks5Config> = OnceLock::new();
-
-pub fn set_socks5_outbound(host: String, port: u16, user: String, pass: String) {
-    if host.is_empty() {
-        return;
-    }
-    let auth = if !user.is_empty() { Some((user, pass)) } else { None };
-    let _ = SOCKS5_OUTBOUND.set((host, port, auth));
-}
+// The configured proxy travels inside each binding's Egress (see
+// `Config::socks5_outbound`), not in a global: it decides which address a peer
+// sees, and one process can carry two engines sent out different ways.
 
 /// Runtime listen-port rebind signal. The RPC `set_listen_port` sends the new
 /// port here; the supervisor in `listen()` rebinds the TCP accept socket(s)
 /// without restarting the engine (torrents + live peer connections untouched).
-pub static REBIND_TX: OnceLock<tokio::sync::watch::Sender<u16>> = OnceLock::new();
-
-/// Request a hot rebind of the TCP peer listener to `port`. Returns false when
-/// the listener supervisor is not up yet. uTP (if enabled) keeps its port.
-pub fn request_listen_rebind(port: u16) -> bool {
-    match REBIND_TX.get() {
-        Some(tx) => tx.send(port).is_ok(),
-        None => false,
-    }
-}
+// The rebind channel lives on the TorrentManager: one listener per engine, so
+// one channel per engine. See `TorrentManager::request_listen_rebind`.
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpSocket};
 use librqbit_utp::UtpSocketUdp;
@@ -87,7 +68,7 @@ pub async fn listen(
     // torrents or live peer connections. Seeded with the current port so the
     // first `.changed()` only fires on a real request.
     let (tx, mut rx) = tokio::sync::watch::channel(bindings[0].addr.port());
-    let _ = REBIND_TX.set(tx);
+    torrent_mgr.set_rebind_tx(tx);
 
     // uTP shares one UDP socket bound at startup (main.rs). It is NOT rebound
     // on a hot port change — raw UDP dial+listen share the socket, and TCP is
@@ -256,8 +237,6 @@ static SESSION_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 ///
 /// Off by default: refusing MSE turns away real peers, which is a trade to
 /// measure, not a default to assume.
-static BLOCK_MSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 pub fn session_pinning() -> bool {
     SESSION_PINNING.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -274,22 +253,6 @@ pub fn set_session_pinning(on: bool) {
     }
 }
 
-pub fn block_mse() -> bool {
-    BLOCK_MSE.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Flip the MSE block. Unlike session pinning this reaches live sessions too:
-/// the encrypted peers are precisely the long-lived ones, so gating only new
-/// handshakes would leave them running for hours and a measurement block would
-/// never reach a clean state. Live sessions notice on their next loop turn.
-pub fn set_block_mse(on: bool) {
-    BLOCK_MSE.store(on, std::sync::atomic::Ordering::Relaxed);
-    if on {
-        info!("[peer] MSE BLOCKED (inbound refused, outbound fallback skipped, encrypted sessions draining)");
-    } else {
-        info!("[peer] MSE allowed again");
-    }
-}
 
 /// Pool size for the next build. Refused once the pool exists: tearing down
 /// runtimes that carry live sessions is not worth it, and silently ignoring the
@@ -433,7 +396,7 @@ pub async fn listen_proxy_v2(
         // Docker private network (where the seedbox host socat relay sits).
         // An attacker forging a PROXY v2 header could otherwise claim any
         // peer IP and bypass per-IP rate limits or pollute PeerStats.
-        if !is_trusted_proxy_source(&wire_addr) {
+        if !is_trusted_proxy_source(&wire_addr, torrent_mgr.trusted_proxy_sources()) {
             warn!("[peer] proxy-v2 reject untrusted src {}", wire_addr);
             continue;
         }
@@ -465,13 +428,11 @@ pub async fn listen_proxy_v2(
 /// v4, ULA v6 (fd00::/8), IPv4-mapped-IPv6 of these. Anything else (including
 /// public IPs or peer-space LAN) is rejected since the PROXY v2 header carries
 /// an attacker-chosen peer IP.
-fn is_trusted_proxy_source(addr: &SocketAddr) -> bool {
+fn is_trusted_proxy_source(addr: &SocketAddr, extras: &[std::net::IpAddr]) -> bool {
     use std::net::{IpAddr, Ipv4Addr};
     // Config-driven allowlist (e.g. VPS haproxy public v6). FW restricts source.
-    if let Some(extras) = EXTRA_TRUSTED_PROXY_SOURCES.get() {
-        if extras.iter().any(|ip| *ip == addr.ip()) {
-            return true;
-        }
+    if extras.iter().any(|ip| *ip == addr.ip()) {
+        return true;
     }
     let v4 = match addr.ip() {
         IpAddr::V4(v) => v,
@@ -626,7 +587,7 @@ async fn handle_incoming(
         (CryptoStream::plain(stream), torrent, fast_ext, ext_proto, remote_pid, false)
     } else {
         // MSE handshake — first byte is part of DH public key
-        if block_mse() {
+        if torrent_mgr.policy().block_mse() {
             crate::tracker::MSE_INBOUND_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }

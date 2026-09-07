@@ -279,7 +279,7 @@ pub async fn commit_piece(
                 // Write it down now. Waiting for the five-minute sweep meant a
                 // restart inside that window lost the completion and
                 // re-downloaded the whole torrent.
-                crate::torrent::notify_completed(torrent.info_hash);
+                torrent.notify_completed();
             }
             true
         }
