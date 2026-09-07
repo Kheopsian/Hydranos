@@ -32,6 +32,9 @@ type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Imports in flight, by job id. An import outlives the request that
+    /// started it, so its progress lives where the later polls can find it.
+    pub imports: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<crate::importer::Progress>>>>,
     /// The live configuration.
     ///
     /// Swappable because the settings endpoints edit default.toml and the
@@ -4968,18 +4971,58 @@ async fn post_qbit_import_start(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
-    _body: String,
+    body: String,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
+
+    let Ok(creds) = serde_json::from_str::<crate::importer::QbitCreds>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body: url, username, password"})),
+        )
+            .into_response();
+    };
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    Json(serde_json::json!({"job_id": format!("imp-{nanos}")})).into_response()
+    let job_id = format!("imp-{nanos}");
+    let progress = Arc::new(crate::importer::Progress::default());
+    state.imports.lock().unwrap().insert(job_id.clone(), progress.clone());
+
+    // The engine that receives the library. A qBittorrent import is a
+    // takeover of a settled collection, which is a hoard, not a race.
+    let manager = state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.id == "hoard")
+        .map(|e| e.manager.clone());
+    let torrent_dir = state.config_path.parent().map(|p| p.join("hoard").join("torrents"));
+
+    tokio::spawn(async move {
+        crate::importer::run_import(creds, progress, move |t, bytes| {
+            let (Some(manager), Some(dir)) = (manager.as_ref(), torrent_dir.as_ref()) else {
+                return Err("no hoard engine to import into".into());
+            };
+            // The engine adds from a path, not from bytes: the .torrent has to
+            // be on disk anyway, because that is what a restart reads back.
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            let path = dir.join(format!("{}.torrent", t.hash));
+            std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+            // seed_mode: the data is already there, whole. Rechecking a
+            // quarter of a million imported torrents would read the entire
+            // library off disk before a single one could be served.
+            manager
+                .add_torrent(&path.to_string_lossy(), &t.save_path, false, true)
+                .map(|_| ())
+        })
+        .await;
+    });
+
+    Json(serde_json::json!({"job_id": job_id})).into_response()
 }
 
 async fn post_transmission_import_start(
@@ -5813,6 +5856,7 @@ mod tests {
             },
         );
         AppState {
+            imports: Default::default(),
             config: Arc::new(std::sync::RwLock::new(Arc::new(cfg))),
             config_path: std::path::PathBuf::from("/nonexistent.toml"),
             update_check: Arc::new(tokio::sync::Mutex::new(None)),
