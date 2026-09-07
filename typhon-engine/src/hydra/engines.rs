@@ -149,6 +149,12 @@ impl EngineHost {
                         },
                         engine.announce_cache.clone(),
                     );
+                    crate::workers::spawn_verify_throttle(engine.manager.clone());
+                    crate::workers::spawn_download_slots(
+                        engine.manager.clone(),
+                        engine.announce_cache.clone(),
+                        session.active_downloads,
+                    );
                     tracing::info!(
                         engine = %engine.id,
                         listen_port = session.listen_port,
