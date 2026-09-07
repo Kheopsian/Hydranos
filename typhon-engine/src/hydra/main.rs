@@ -24,6 +24,7 @@ mod store;
 mod tomledit;
 mod trackeredit;
 mod walrepair;
+mod web;
 mod benchdb;
 mod announce;
 mod health;
