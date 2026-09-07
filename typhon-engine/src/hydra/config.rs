@@ -51,16 +51,6 @@ pub struct Session {
     pub enable_pex: bool,
     #[serde(default)]
     pub enable_webseed: bool,
-    /// Put this engine on the network at all. True everywhere in production;
-    /// false builds the manager and loads its durable state without opening a
-    /// socket, which is what the differential bench runs against -- a bench
-    /// instance holding the production catalogue must not announce it.
-    ///
-    /// Read from the file, never written back: /api/settings echoes this
-    /// struct, and publishing a key 3.x does not have would change the answer
-    /// every client parses.
-    #[serde(default = "yes", skip_serializing)]
-    pub net: bool,
     #[serde(default)]
     pub aio_threads: Option<usize>,
     #[serde(default)]
@@ -263,9 +253,4 @@ user_agent = "qBittorrent/5.2.2"
         assert_eq!(cfg.announce_secondary_stats["seedpool.org"], "zero");
         assert_eq!(cfg.announce_ip_modes["gemini-tracker.org"], "v4");
     }
-}
-
-/// Serde default for a switch that is on unless the operator says otherwise.
-fn yes() -> bool {
-    true
 }

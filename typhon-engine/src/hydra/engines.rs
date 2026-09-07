@@ -16,9 +16,12 @@
 //! drift is silent -- a listener that binds differently, a switch applied to
 //! one and not the other.
 //!
-//! An engine only comes up on the network when its config says so. `net =
-//! false` on a session builds the manager and loads its state without opening
-//! a socket, which is what the differential bench runs against.
+//! `HYDRA_ENGINE_NET=0` holds every engine off the network: the managers are
+//! built and their state loaded, and no socket is opened. It is an environment
+//! variable and not a config key on purpose -- `/api/settings` echoes the
+//! config file back verbatim, so a key here would change an answer that has to
+//! stay byte-for-byte what 3.x sends, and 4.0.0 promises an unchanged config
+//! file. The differential bench runs its candidate this way.
 
 use std::sync::Arc;
 use typhon_engine::{disk::DiskManager, torrent::TorrentManager};
@@ -105,7 +108,7 @@ impl EngineHost {
                 "race" => &config.race,
                 _ => &config.hoard,
             };
-            if !session.net {
+            if !networking_enabled() {
                 tracing::warn!(
                     engine = %engine.id,
                     "net = false: state loaded, no listener, no announce, no DHT"
@@ -231,6 +234,36 @@ mod tests {
         assert_eq!(held([false, true]), vec!["hoard"]);
         assert!(held([false, false]).is_empty());
     }
+
+    /// The switch is off only for the three spellings a bench would use, and
+    /// on for everything else -- including an empty or misspelt value. An
+    /// engine that silently stayed offline because someone wrote `HYDRA_ENGINE_NET=no`
+    /// would look alive and seed nothing.
+    #[test]
+    fn only_an_explicit_off_holds_the_engines_back() {
+        for off in ["0", "false", "off"] {
+            unsafe { std::env::set_var("HYDRA_ENGINE_NET", off) };
+            assert!(!super::networking_enabled(), "{off} should hold the engines off");
+        }
+        for on in ["1", "true", "", "no", "yes"] {
+            unsafe { std::env::set_var("HYDRA_ENGINE_NET", on) };
+            assert!(super::networking_enabled(), "{on:?} must not be read as off");
+        }
+        unsafe { std::env::remove_var("HYDRA_ENGINE_NET") };
+        assert!(super::networking_enabled(), "unset means on");
+    }
+}
+
+/// Whether engines may open sockets at all.
+///
+/// Off only for a bench: an instance holding the production catalogue must be
+/// able to answer questions about it without telling 244k torrents' trackers
+/// about a machine nobody meant to publish.
+fn networking_enabled() -> bool {
+    !matches!(
+        std::env::var("HYDRA_ENGINE_NET").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    )
 }
 
 /// The engine-side config for one session.
@@ -259,3 +292,4 @@ fn engine_config(
     }))
     .ok()
 }
+

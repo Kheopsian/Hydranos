@@ -66,7 +66,6 @@ step "seeding both instances"
 mkdir -p "$STAGING/racemount"
 seed "$STAGING/go"
 seed "$STAGING/rust"
-offline "$STAGING/rust/default.toml"
 
 docker rm -f v4-go-a v4-rust >/dev/null 2>&1 || true
 
@@ -87,7 +86,7 @@ else
   prune_name v4-rust
   docker run -d --name v4-rust --network $NET \
     -v /mnt/v4build/target:/target:ro -v "$STAGING/rust":/configs \
-    -v "$STAGING/racemount":/race -e RUST_LOG=info \
+    -v "$STAGING/racemount":/race -e RUST_LOG=info -e HYDRA_ENGINE_NET=0 \
     --entrypoint /target/debug/hydra rust:1-bookworm --config /configs/default.toml >/dev/null
 fi
 

@@ -92,27 +92,10 @@ seed() {
   fi
 }
 
-# The candidate must not put the production catalogue on the wire. `net = false`
-# holds every engine offline: state loaded, no listener, no announce, no DHT.
-# The --internal docker network is the second lock, not the only one -- a bench
-# that leaks announces is one that tells 244k torrents' trackers about a machine
-# nobody meant to publish.
-offline() {
-  local toml="$1"
-  python3 - "$toml" <<'EOF'
-import re, sys
-p = sys.argv[1]
-t = open(p).read()
-for section in ("race", "hoard"):
-    t = re.sub(r"(?m)^\[%s\]\s*$" % section, "[%s]\nnet = false" % section, t)
-open(p, "w").write(t)
-EOF
-}
 
 step "seeding both instances from the fixture"
 seed "$STAGING/go"
 seed "$STAGING/rust"
-offline "$STAGING/rust/default.toml"
 
 # Both sides must stat the SAME filesystem for /api/drain/status to be
 # comparable. 3.x creates its race path at startup, so its container reports the
@@ -141,6 +124,7 @@ docker run -d --name v4-rust --network $NET \
   -v "$STAGING/rust":/configs \
   -v "$STAGING/racemount":/race \
   -e RUST_LOG=info \
+  -e HYDRA_ENGINE_NET=0 \
   --entrypoint /target/debug/hydra \
   rust:1-bookworm --config /configs/default.toml >/dev/null
 
