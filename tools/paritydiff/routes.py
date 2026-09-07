@@ -21,7 +21,13 @@ import re
 import sys
 
 GROUP = re.compile(r'^\s*(\w+)\s*:=\s*(?:(\w+)\.)?(?:\w+\.)*Group\("([^"]*)"')
-ROUTE = re.compile(r'^\s*(\w+)\.(GET|POST|PUT|DELETE|PATCH|HEAD|Any)\("([^"]*)"\s*,\s*([^)]*)')
+# The receiver may be several segments -- `router.GET`, but also
+# `s.router.GET`. Matching only one swallowed every route registered through a
+# field, which is how /api/login, /api/setup, /api/stats and /api/config stayed
+# out of the denominator while coverage reported 100%.
+ROUTE = re.compile(
+    r'^\s*(?:\w+\.)*?(\w+)\.(GET|POST|PUT|DELETE|PATCH|HEAD|Any)\("([^"]*)"\s*,\s*([^)]*)'
+)
 
 # Receivers that are the router itself rather than a group.
 ROOT_RECEIVERS = {"r", "router", "engine"}

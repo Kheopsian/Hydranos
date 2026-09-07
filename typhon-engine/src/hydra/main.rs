@@ -26,6 +26,7 @@ mod trackeredit;
 mod walrepair;
 mod web;
 mod benchdb;
+mod bootstrap;
 mod announce;
 mod health;
 mod importer;
