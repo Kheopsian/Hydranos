@@ -43,6 +43,39 @@ engine's own map, so there is nothing to refresh.
 | NAT-PMP port forwarding | unit tests |
 | WireGuard config parsing and redaction | unit tests |
 
+
+## The 74, one by one
+
+Counted with the same grep that produced this file: a `go` statement whose
+first forty lines contain a loop, a ticker or a context.
+
+| Where | n | What became of it |
+|---|---|---|
+| `cmd/hydra/main.go` | 10 | daemon startup: pprof, the HTTP server, the two engine launches, the self-IP refresh. `session.rs` and `main.rs` do this; spawning an engine process disappears with the architecture |
+| `internal/engine/hoard.go` | 8 | stagger start, verify throttle, download slots **ported**; two stats/list refresh loops **gone** (they fed the mirror); bootstrap and re-announce **covered by the scheduler** |
+| `cmd/hydra/agentonly.go` | 7 | the Windows agent, a separate mode of the binary. Out of scope for this deployment, still to do for that platform |
+| `internal/engine/race.go` | 6 | the announce loop **ported**; the two `onEvent` calls are the race recorder, **ported**; stats refresh **gone**; peer intel and tracker watchdog **covered** -- the watchdog was a seed keepalive the scheduler now performs |
+| `internal/api/vpn_speedtest.go` | 3 | **ported** |
+| `ltclient`, `grpcclient`, `engine_process` | 5 | the RPC client to the engine and its process. **Gone**: there is no socket and no second process |
+| `hoard_announce*`, `tracker_announce` | 4 | **ported**, in `announce/` |
+| `cmd/hydra/extrasmgr.go` | 2 | engine extras reconcile. **Still to do** |
+| `internal/agent/server.go` | 2 | Windows agent server. Out of scope, as above |
+| `internal/api/import_qbit.go` | 2 | **ported** |
+| `internal/api/race_timeline.go` | 2 | **ported** (`raceevents.rs`) |
+| `internal/api/routes_hydra.go` | 2 | request-scoped work; the handlers that need it spawn their own task |
+| `internal/api/enginenet.go` | 2 | engine network probes, request-scoped |
+| `drain`, `jobs`, `watchdog`, `wireguard`, `import_transmission` | 5 | **ported** |
+| `storerepair.go` | 1 | **ported** (`walrepair.rs`) |
+| `logs/hub.go` | 1 | **ported** (`logbuf.rs`) |
+| `snapshot_pusher.go` | 1 | **gone**: it pushed the mirror to clients |
+| `bench/db.go` | 1 | a cache warm-up off the request path |
+| `choking/choking.go` | 1 | disabled in 3.x since 2.4.13, and left that way |
+| `engine/pause.go` | 1 | user pause intent, applied inline |
+| remaining `internal/api/*` | 8 | one `go func` each on a request path: magnet resolve, reachability, tunnel stats, fleet stats, agent rows, agent config, engines management, SSE reconnect |
+
+**Ported: 12 subsystems. Gone with the architecture: 10. Covered elsewhere: 5.
+Request-scoped: 12. Windows agent: 9. Still to do: extras reconcile.**
+
 ## Still missing
 
 - Transmission import (the qBittorrent one is done; this is the same shape
