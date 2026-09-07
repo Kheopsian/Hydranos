@@ -13,6 +13,11 @@ COPY third_party /build/third_party
 # repository root, so the builder needs them even though it builds one crate.
 COPY CHANGELOG.md /build/CHANGELOG.md
 COPY configs /build/configs
+# The interface, baked into the binary by include_str!/include_bytes! the way
+# the Go embedded it. Without this the build fails at compile time, which is
+# the good failure -- the one where a page is missing at runtime cost a
+# production rollback tonight.
+COPY web /build/web
 ENV RUSTFLAGS="--cfg tokio_unstable"
 # Without these caches, changing one line of src/ recompiled all 205 crates --
 # some 200 of them third-party dependencies that never move -- for about 30

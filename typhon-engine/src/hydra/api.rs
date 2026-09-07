@@ -5808,6 +5808,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/benchmark/trackers/range", get(get_tracker_stats_range))
         // The interface. Not an API route, which is exactly why a bench that
         // compares /api/* answers cannot tell whether it is served at all.
+        // The four the interface calls before it can show anything. /api/setup
+        // is its very first request: unanswered, the page sits on
+        // "Initializing…" with every other route green.
+        .route("/api/setup", get(crate::bootstrap::setup_status)
+                             .post(crate::bootstrap::setup_password))
+        .route("/api/login", axum::routing::post(crate::bootstrap::login))
+        .route("/api/startup", get(crate::bootstrap::startup))
+        .route("/metrics", get(crate::bootstrap::metrics))
         .route("/", get(crate::web::index))
         .route("/static/*path", get(crate::web::static_file))
         .route("/api/status", get(get_status))
