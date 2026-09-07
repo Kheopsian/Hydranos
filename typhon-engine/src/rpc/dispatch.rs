@@ -45,8 +45,8 @@ pub fn dispatch(
         "get_diagnostics" => get_diagnostics(torrent_mgr, config),
         "set_listen_port" => set_listen_port(params),
         "set_self_ips" => set_self_ips(params),
-        "set_dials_paused" => set_dials_paused(params),
-        "set_dial_limits" => set_dial_limits(params),
+        "set_dials_paused" => set_dials_paused(params, torrent_mgr),
+        "set_dial_limits" => set_dial_limits(params, torrent_mgr),
         _ => json!({"error": format!("unknown method: {}", method)}),
     }
 }
@@ -708,15 +708,15 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
             "dials_skipped_self": crate::tracker::DIAL_SKIPPED_SELF.load(std::sync::atomic::Ordering::Relaxed),
         },
         "dial_governor": {
-            "live_connections": crate::tracker::dial_limiter::LIVE_CONNS.load(std::sync::atomic::Ordering::Relaxed),
-            "max_connections": crate::tracker::dial_limiter::max_connections(),
+            "live_connections": mgr.limiter().live_connections(),
+            "max_connections": mgr.limiter().max_connections(),
             // The live rate, which after a hot change is NOT what `settings`
             // above reports: that one still echoes the config file.
-            "max_dials_per_sec": crate::tracker::dial_limiter::max_dials_per_sec(),
-            "dials_paused": crate::tracker::dial_limiter::dials_paused(),
-            "skipped_conn_cap": crate::tracker::dial_limiter::DIAL_SKIPPED_CONN_CAP.load(std::sync::atomic::Ordering::Relaxed),
-            "skipped_paused": crate::tracker::dial_limiter::DIAL_SKIPPED_PAUSED.load(std::sync::atomic::Ordering::Relaxed),
-            "delayed": crate::tracker::dial_limiter::DIAL_DELAYED.load(std::sync::atomic::Ordering::Relaxed),
+            "max_dials_per_sec": mgr.limiter().max_dials_per_sec(),
+            "dials_paused": mgr.limiter().dials_paused(),
+            "skipped_conn_cap": mgr.limiter().skipped_conn_cap(),
+            "skipped_paused": mgr.limiter().skipped_paused(),
+            "delayed": mgr.limiter().delayed(),
         },
         "counters": Value::Object(counters),
     })
@@ -845,12 +845,12 @@ fn add_peers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
 /// to let a VPN user finish configuring before 20k torrents worth of peers hit
 /// the tunnel. Deliberately process-level: it never touches per-torrent paused
 /// state, so releasing it cannot resurrect torrents the user paused by hand.
-fn set_dials_paused(params: &Value) -> Value {
+fn set_dials_paused(params: &Value, torrent_mgr: &Arc<TorrentManager>) -> Value {
     let paused = match params.get("paused").and_then(|v| v.as_bool()) {
         Some(p) => p,
         None => return json!({"error": "missing or invalid 'paused' boolean"}),
     };
-    crate::tracker::dial_limiter::set_dials_paused(paused);
+    torrent_mgr.limiter().set_dials_paused(paused);
     info!("[peer] outbound dials {}", if paused { "PAUSED (startup pause held)" } else { "resumed" });
     json!({"ok": true, "paused": paused})
 }
@@ -860,24 +860,24 @@ fn set_dials_paused(params: &Value) -> Value {
 /// Both fields are optional so a caller can move one without having to know
 /// the other; omitting both is an error rather than a silent no-op, because a
 /// request that changes nothing is a bug at the caller and should say so.
-fn set_dial_limits(params: &Value) -> Value {
+fn set_dial_limits(params: &Value, torrent_mgr: &Arc<TorrentManager>) -> Value {
     let rate = params.get("max_dials_per_sec").and_then(|v| v.as_f64());
     let conns = params.get("max_connections").and_then(|v| v.as_u64());
     if rate.is_none() && conns.is_none() {
         return json!({"error": "need at least one of 'max_dials_per_sec' or 'max_connections'"});
     }
     if let Some(r) = rate {
-        crate::tracker::dial_limiter::set_max_dials_per_sec(r);
+        torrent_mgr.limiter().set_max_dials_per_sec(r);
         info!("[peer] outbound dial rate ceiling set to {}/s (0 = unlimited)", r);
     }
     if let Some(c) = conns {
-        crate::tracker::dial_limiter::set_max_connections(c as usize);
+        torrent_mgr.limiter().set_max_connections(c as usize);
         info!("[peer] live connection ceiling set to {} (0 = unlimited)", c);
     }
     json!({
         "ok": true,
-        "max_dials_per_sec": crate::tracker::dial_limiter::max_dials_per_sec(),
-        "max_connections": crate::tracker::dial_limiter::max_connections(),
+        "max_dials_per_sec": torrent_mgr.limiter().max_dials_per_sec(),
+        "max_connections": torrent_mgr.limiter().max_connections(),
     })
 }
 

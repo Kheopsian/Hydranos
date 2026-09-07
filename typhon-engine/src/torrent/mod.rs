@@ -39,6 +39,10 @@ pub struct TorrentManager {
     webseed: crate::webseed::WebseedState,
     /// Magnet resolutions in flight for this engine.
     magnet: Arc<crate::magnet::MagnetJobs>,
+    /// PEX and IPv6 for this engine. Handed to every torrent it owns.
+    policy: Arc<crate::peer::extension::PeerPolicy>,
+    /// Dial ceilings and gauges for this engine.
+    limiter: Arc<crate::tracker::dial_limiter::DialLimiter>,
     /// Durable per-torrent state. `None` only if SQLite could not be opened at
     /// all, in which case everything falls back to the legacy JSON directory
     /// so a broken database degrades into the old behaviour instead of losing
@@ -60,6 +64,16 @@ impl TorrentManager {
     /// Attach this engine's DHT node. Called once, after bootstrap.
     pub fn set_dht(&self, session: Arc<crate::dht::DhtSession>) {
         let _ = self.dht.set(session);
+    }
+
+    /// This engine's dial ceilings.
+    pub fn limiter(&self) -> &Arc<crate::tracker::dial_limiter::DialLimiter> {
+        &self.limiter
+    }
+
+    /// This engine's PEX / IPv6 policy.
+    pub fn policy(&self) -> &Arc<crate::peer::extension::PeerPolicy> {
+        &self.policy
     }
 
     /// This engine's magnet resolutions.
@@ -128,6 +142,8 @@ impl TorrentManager {
             dht: std::sync::OnceLock::new(),
             webseed: Default::default(),
             magnet: Default::default(),
+            policy: Default::default(),
+            limiter: Default::default(),
             state_db,
             last_saved: DashMap::new(),
             mirror_json,
@@ -247,6 +263,8 @@ impl TorrentManager {
             torrent_path.to_string(),
             seed_mode,
         );
+        let _ = state.policy.set(self.policy.clone());
+        let _ = state.limiter.set(self.limiter.clone());
 
         if stopped {
             state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
@@ -481,6 +499,8 @@ impl TorrentManager {
                 Some(rd.completed_time),
                 !rd.seed_mode && !already_complete,
             );
+            let _ = state.policy.set(self.policy.clone());
+        let _ = state.limiter.set(self.limiter.clone());
             // The resume record wins over the .torrent: an edited list lives
             // here, and the file on disk may be the original one. Empty means
             // the torrent predates tracker editing, so the parsed list stands.
@@ -770,6 +790,8 @@ impl TorrentManager {
             Some(rd.completed_time),
             !rd.seed_mode && !already_complete,
         );
+        let _ = state.policy.set(self.policy.clone());
+        let _ = state.limiter.set(self.limiter.clone());
         // An edited tracker list lives in the record, not in the .torrent on
         // disk. Dropping it here would silently undo the edit on every move.
         if !rd.trackers.is_empty() {

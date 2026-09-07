@@ -349,6 +349,7 @@ pub fn start_announce_loop(
     bindings: Vec<crate::config::ResolvedBinding>,
     utp_socket: Option<Arc<UtpSocketUdp>>,
     max_dials_per_sec: f64,
+    limiter: Arc<dial_limiter::DialLimiter>,
 ) {
     if bindings.is_empty() {
         warn!("[tracker] start_announce_loop called with no bindings — dials will use kernel default");
@@ -382,17 +383,17 @@ pub fn start_announce_loop(
                 // -- the next announce hands it back -- whereas queueing a
                 // paused hoard's worth of peers would grow without bound and
                 // then release the very burst the pause exists to prevent.
-                if dial_limiter::dials_paused() {
-                    dial_limiter::DIAL_SKIPPED_PAUSED.fetch_add(1, AtomicOrdering::Relaxed);
+                if limiter.dials_paused() {
+                    limiter.note_skipped_paused();
                     continue;
                 }
                 // Ceiling on live connections. Checked before pacing so a
                 // saturated engine sheds work instead of accumulating delay.
-                if dial_limiter::conn_cap_reached() {
-                    dial_limiter::DIAL_SKIPPED_CONN_CAP.fetch_add(1, AtomicOrdering::Relaxed);
+                if limiter.conn_cap_reached() {
+                    limiter.note_skipped_conn_cap();
                     continue;
                 }
-                pacer.acquire().await;
+                pacer.acquire(&limiter).await;
                 let d = disk_c.clone();
                 let u = utp_c.clone();
                 let b = pick_binding_for_dial(&bindings_c, addr);

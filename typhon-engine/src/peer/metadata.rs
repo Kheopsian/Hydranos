@@ -61,7 +61,7 @@ pub async fn fetch_from_peer(
     //
     // No metadata_size: we are the one asking. The id we advertise is what the
     // peer must use to send blocks back to us.
-    let hs = extension::build_extension_handshake(listen_port, None);
+    let hs = extension::build_extension_handshake(listen_port, None, &extension::DEFAULT_POLICY);
     framed
         .send(Message::Extended { ext_id: 0, payload: Bytes::from(hs) })
         .await
@@ -81,7 +81,7 @@ pub async fn fetch_from_peer(
                     // it would just duplicate every block in flight.
                     continue;
                 }
-                let peer_hs = extension::parse_extension_handshake_full(&payload)
+                let peer_hs = extension::parse_extension_handshake_full(&payload, &extension::DEFAULT_POLICY)
                     .ok_or_else(|| "unreadable extension handshake".to_string())?;
                 let their_id = peer_hs
                     .ut_metadata_id

@@ -137,7 +137,7 @@ pub async fn run(
         } else {
             None
         };
-        let payload = Bytes::from(extension::build_extension_handshake(listen_port, meta_size));
+        let payload = Bytes::from(extension::build_extension_handshake(listen_port, meta_size, torrent.policy()));
         framed.send(Message::Extended { ext_id: 0, payload }).await.ok();
         Some(PeerExt::new())
     } else {
@@ -397,8 +397,8 @@ pub async fn run(
                                                 .ok();
                                         }
                                     }
-                                } else if ext_id == OUR_UT_PEX_ID && extension::pex_enabled() {
-                                    let new_peers = extension::parse_pex(&payload);
+                                } else if ext_id == OUR_UT_PEX_ID && torrent.policy().pex() {
+                                    let new_peers = extension::parse_pex(&payload, torrent.policy());
                                     if !new_peers.is_empty() {
                                         torrent.pex_peers_discovered.fetch_add(
                                             new_peers.len() as u64,

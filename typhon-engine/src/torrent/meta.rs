@@ -189,7 +189,7 @@ impl PeerGuard {
         // Process-wide live connection count backing `max_connections`.
         // Maintained here rather than at the dial site so inbound sessions are
         // counted too, and so the decrement is RAII-guaranteed below.
-        crate::tracker::dial_limiter::LIVE_CONNS.fetch_add(1, Ordering::Relaxed);
+        torrent.limiter().connection_opened();
         // Connected-addr dedup: tracker/DHT both check `connected_addrs`
         // before dialing a peer to avoid spawning N parallel sockets to
         // the same address. This insert is the missing half — without it
@@ -218,7 +218,7 @@ impl Drop for PeerGuard {
     fn drop(&mut self) {
         self.torrent.peer_stats.remove(&self.addr);
         self.torrent.peers_connected.fetch_sub(1, Ordering::Relaxed);
-        crate::tracker::dial_limiter::LIVE_CONNS.fetch_sub(1, Ordering::Relaxed);
+        self.torrent.limiter().connection_closed();
         self.torrent.connected_addrs.remove(&self.addr);
         if self.was_interested.load(Ordering::Relaxed) {
             self.torrent.peers_interested.fetch_sub(1, Ordering::Relaxed);
@@ -274,6 +274,13 @@ pub struct TorrentState {
     /// per process: the diagnostics of one engine must not include the PEX
     /// traffic of the engine sharing its process.
     pub pex_peers_discovered: AtomicU64,
+    /// The policy of the engine that owns this torrent. Unset only for a
+    /// torrent built outside a manager (a magnet being resolved, a unit test),
+    /// which falls back to the constant default.
+    pub policy: std::sync::OnceLock<Arc<crate::peer::extension::PeerPolicy>>,
+    /// The dial ceilings of the engine that owns this torrent. Unset for a
+    /// torrent built outside a manager, which falls back to unlimited.
+    pub limiter: std::sync::OnceLock<Arc<crate::tracker::dial_limiter::DialLimiter>>,
     pub is_paused: AtomicBool,
     /// Anti-thrash: when true, this torrent serves no piece Requests
     /// (disk reads gated in peer::session), but stays connected and
@@ -346,6 +353,22 @@ pub struct TorrentState {
 }
 
 impl TorrentState {
+    /// The PEX / IPv6 policy this torrent runs under.
+    /// The dial ceilings this torrent runs under.
+    pub fn limiter(&self) -> &crate::tracker::dial_limiter::DialLimiter {
+        self.limiter
+            .get()
+            .map(|l| l.as_ref())
+            .unwrap_or(&crate::tracker::dial_limiter::DEFAULT_LIMITER)
+    }
+
+    pub fn policy(&self) -> &crate::peer::extension::PeerPolicy {
+        self.policy
+            .get()
+            .map(|p| p.as_ref())
+            .unwrap_or(&crate::peer::extension::DEFAULT_POLICY)
+    }
+
     /// The have-broadcast sender, creating the channel on first use.
     ///
     /// Only the download path calls this, and only when a piece completes, so
@@ -495,6 +518,8 @@ impl TorrentState {
             peers_connected: AtomicUsize::new(0),
             peers_interested: AtomicUsize::new(0),
             pex_peers_discovered: AtomicU64::new(0),
+            policy: std::sync::OnceLock::new(),
+            limiter: std::sync::OnceLock::new(),
             is_paused: AtomicBool::new(false),
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),

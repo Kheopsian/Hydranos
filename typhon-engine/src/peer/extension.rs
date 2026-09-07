@@ -70,10 +70,14 @@ impl PeerExt {
 /// they can fetch it from us). Pass `None` while resolving a magnet: we still
 /// advertise ut_metadata, because the id we publish here is the one peers must
 /// use to send data *back* to us.
-pub fn build_extension_handshake(listen_port: u16, metadata_size: Option<usize>) -> Vec<u8> {
+pub fn build_extension_handshake(
+    listen_port: u16,
+    metadata_size: Option<usize>,
+    policy: &PeerPolicy,
+) -> Vec<u8> {
     let mut m = BTreeMap::new();
     // Left out entirely when PEX is off, rather than advertised and ignored.
-    if pex_enabled() {
+    if policy.pex() {
         m.insert(b"ut_pex".to_vec(), Bencode::Int(OUR_UT_PEX_ID as i64));
     }
     m.insert(b"ut_metadata".to_vec(), Bencode::Int(OUR_UT_METADATA_ID as i64));
@@ -92,7 +96,7 @@ pub fn build_extension_handshake(listen_port: u16, metadata_size: Option<usize>)
 
 /// Parse a peer's extension handshake. Returns their ut_pex extended id if present.
 pub fn parse_extension_handshake(payload: &[u8]) -> Option<u8> {
-    parse_extension_handshake_full(payload)?.ut_pex_id
+    parse_extension_handshake_full(payload, &DEFAULT_POLICY)?.ut_pex_id
 }
 
 /// What a peer advertised in its BEP 10 handshake.
@@ -105,7 +109,7 @@ pub struct ExtHandshake {
 
 /// Parse a peer's extension handshake. Absent or zero ids mean "not offered":
 /// 0 is how a peer disables an extension it advertised earlier.
-pub fn parse_extension_handshake_full(payload: &[u8]) -> Option<ExtHandshake> {
+pub fn parse_extension_handshake_full(payload: &[u8], policy: &PeerPolicy) -> Option<ExtHandshake> {
     let bv = decode(payload).ok()?;
     let m = bv.dict_get(b"m")?.as_dict()?;
     let id_of = |key: &[u8]| -> Option<u8> {
@@ -120,7 +124,7 @@ pub fn parse_extension_handshake_full(payload: &[u8]) -> Option<ExtHandshake> {
     Some(ExtHandshake {
         // With PEX off the peer's id is dropped here, so no caller can reach
         // for it later and start a conversation the config forbade.
-        ut_pex_id: if pex_enabled() { id_of(b"ut_pex") } else { None },
+        ut_pex_id: if policy.pex() { id_of(b"ut_pex") } else { None },
         ut_metadata_id: id_of(b"ut_metadata"),
         metadata_size,
     })
@@ -182,36 +186,60 @@ pub fn build_metadata_data(piece: u32, total_size: usize, block: &[u8]) -> Vec<u
 /// Whether to take the IPv6 peers a PEX message offers. Off unless the engine
 /// was started with `enable_ipv6`: without a v6 listener, dialling them would
 /// mean advertising a return path we cannot serve.
-static ENABLE_IPV6: AtomicBool = AtomicBool::new(false);
-
-pub fn set_enable_ipv6(on: bool) {
-    ENABLE_IPV6.store(on, Ordering::Relaxed);
+///
+/// Both switches belong to an engine, not to the process. They were statics,
+/// which was accurate while one engine meant one process; with race and hoard
+/// sharing an address space the last engine to start would have set them for
+/// both, silently overriding a per-engine setting the operator had chosen.
+pub struct PeerPolicy {
+    pex: AtomicBool,
+    ipv6: AtomicBool,
 }
 
-/// Whether this engine takes part in BEP 11 peer exchange at all. On unless
-/// the config says otherwise, which is the behaviour every install has had.
-/// Off is enforced on both sides at once: we stop advertising `ut_pex`, and we
-/// forget a peer's ut_pex id. Advertising the extension and then dropping what
-/// arrives would still tell the swarm we trade peer lists.
-static ENABLE_PEX: AtomicBool = AtomicBool::new(true);
-
-pub fn set_enable_pex(on: bool) {
-    ENABLE_PEX.store(on, Ordering::Relaxed);
+impl Default for PeerPolicy {
+    /// PEX on, IPv6 off: what every install has run with.
+    fn default() -> Self {
+        Self { pex: AtomicBool::new(true), ipv6: AtomicBool::new(false) }
+    }
 }
 
-pub fn pex_enabled() -> bool {
-    ENABLE_PEX.load(Ordering::Relaxed)
+impl PeerPolicy {
+    pub fn set_pex(&self, on: bool) {
+        self.pex.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_ipv6(&self, on: bool) {
+        self.ipv6.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether this engine takes part in BEP 11 peer exchange at all. Off is
+    /// enforced on both sides at once: we stop advertising `ut_pex`, and we
+    /// forget a peer's ut_pex id. Advertising the extension and then dropping
+    /// what arrives would still tell the swarm we trade peer lists.
+    pub fn pex(&self) -> bool {
+        self.pex.load(Ordering::Relaxed)
+    }
+
+    pub fn ipv6(&self) -> bool {
+        self.ipv6.load(Ordering::Relaxed)
+    }
 }
+
+/// The policy a torrent with no engine behind it runs under: a magnet being
+/// resolved before it is added, and the unit tests. Never mutated -- it is a
+/// constant, not a setting.
+pub static DEFAULT_POLICY: std::sync::LazyLock<PeerPolicy> =
+    std::sync::LazyLock::new(PeerPolicy::default);
 
 /// Parse a BEP 11 PEX message payload. Returns the peers in `added`, plus
 /// those in `added6` when IPv6 is enabled. `dropped` is still ignored.
-pub fn parse_pex(payload: &[u8]) -> Vec<SocketAddr> {
+pub fn parse_pex(payload: &[u8], policy: &PeerPolicy) -> Vec<SocketAddr> {
     let bv = match decode(payload) { Ok(v) => v, Err(_) => return Vec::new() };
     let mut out = match bv.dict_get(b"added").and_then(|v| v.as_bytes()) {
         Some(b) => parse_compact_v4(b),
         None => Vec::new(),
     };
-    if ENABLE_IPV6.load(Ordering::Relaxed) {
+    if policy.ipv6() {
         if let Some(b) = bv.dict_get(b"added6").and_then(|v| v.as_bytes()) {
             out.extend(parse_compact_v6(b));
         }
@@ -276,41 +304,57 @@ fn encode_compact_v4(addrs: &[SocketAddr]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// Both directions of the PEX switch, in one test on purpose: ENABLE_PEX is
-    /// a process-wide static, so two tests toggling it would race each other.
+    /// Both directions of the PEX switch. They used to have to share one test
+    /// because ENABLE_PEX was a process-wide static and two tests toggling it
+    /// would race; a policy is a value, so they no longer can.
     #[test]
     fn pex_off_is_silent_on_the_wire_and_deaf_to_what_arrives() {
-        // A handshake as a peer that does advertise ut_pex would send it.
-        let peer_hs = build_extension_handshake(6881, None);
+        let on = PeerPolicy::default();
+        let off = PeerPolicy::default();
+        off.set_pex(false);
 
-        set_enable_pex(true);
-        let on = build_extension_handshake(6881, None);
+        // A handshake as a peer that does advertise ut_pex would send it.
+        let peer_hs = build_extension_handshake(6881, None, &on);
+
+        let ours = build_extension_handshake(6881, None, &on);
         assert!(
-            on.windows(6).any(|w| w == b"ut_pex"),
+            ours.windows(6).any(|w| w == b"ut_pex"),
             "PEX on but ut_pex is missing from our handshake"
         );
         assert_eq!(
-            parse_extension_handshake_full(&peer_hs).unwrap().ut_pex_id,
+            parse_extension_handshake_full(&peer_hs, &on).unwrap().ut_pex_id,
             Some(OUR_UT_PEX_ID),
             "PEX on but we dropped the peer's ut_pex id"
         );
 
-        set_enable_pex(false);
-        let off = build_extension_handshake(6881, None);
+        let quiet = build_extension_handshake(6881, None, &off);
         assert!(
-            !off.windows(6).any(|w| w == b"ut_pex"),
+            !quiet.windows(6).any(|w| w == b"ut_pex"),
             "PEX off but we still advertise ut_pex, which tells the swarm we trade peers"
         );
         assert!(
-            off.windows(11).any(|w| w == b"ut_metadata"),
+            quiet.windows(11).any(|w| w == b"ut_metadata"),
             "PEX off must not take ut_metadata down with it"
         );
         assert_eq!(
-            parse_extension_handshake_full(&peer_hs).unwrap().ut_pex_id,
+            parse_extension_handshake_full(&peer_hs, &off).unwrap().ut_pex_id,
             None,
             "PEX off but we kept the peer's ut_pex id"
         );
+    }
 
-        set_enable_pex(true);
+    /// The reason the switch stopped being a static. Race with PEX on and
+    /// hoard with PEX off, in one process: under the old design the second
+    /// engine to start decided for both.
+    #[test]
+    fn two_engines_hold_opposite_pex_settings_at_once() {
+        let race = PeerPolicy::default();
+        let hoard = PeerPolicy::default();
+        hoard.set_pex(false);
+
+        assert!(race.pex());
+        assert!(!hoard.pex());
+        assert!(build_extension_handshake(6881, None, &race).windows(6).any(|w| w == b"ut_pex"));
+        assert!(!build_extension_handshake(6881, None, &hoard).windows(6).any(|w| w == b"ut_pex"));
     }
 }
