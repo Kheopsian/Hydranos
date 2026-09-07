@@ -5816,7 +5816,8 @@ mod tests {
             config: Arc::new(std::sync::RwLock::new(Arc::new(cfg))),
             config_path: std::path::PathBuf::from("/nonexistent.toml"),
             update_check: Arc::new(tokio::sync::Mutex::new(None)),
-            engines: Arc::new(crate::engines::EngineHost::start(
+            // offline, not start: a unit test must not open a listener.
+            engines: Arc::new(crate::engines::EngineHost::offline(
                 &Config::default(),
                 std::path::Path::new("/tmp/hydra-test-engines"),
             )),

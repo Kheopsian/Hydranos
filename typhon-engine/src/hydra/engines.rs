@@ -10,10 +10,15 @@
 //! fall out of step: the class of bug where the UI showed a stale figure
 //! because a refresh had not run yet cannot be written any more.
 //!
-//! Networking is deliberately absent for now. The managers are built and their
-//! durable state is loaded, which is what the read endpoints need; listeners,
-//! DHT, PEX and webseed come with the slice that ports the announce path, and
-//! until then this process cannot talk to a peer even by accident.
+//! Each engine is then put on the network by `typhon_engine::session::start`,
+//! the same function the standalone engine binary calls. Sharing it is the
+//! point: two copies of "how an engine comes up" would drift, and the way they
+//! drift is silent -- a listener that binds differently, a switch applied to
+//! one and not the other.
+//!
+//! An engine only comes up on the network when its config says so. `net =
+//! false` on a session builds the manager and loads its state without opening
+//! a socket, which is what the differential bench runs against.
 
 use std::sync::Arc;
 use typhon_engine::{disk::DiskManager, torrent::TorrentManager};
@@ -31,6 +36,8 @@ pub struct Engine {
     pub start_paused: bool,
     pub enable_ipv6: bool,
     pub manager: Arc<TorrentManager>,
+    /// Kept so the engine can be put on the network after it is built.
+    pub disk: Arc<DiskManager>,
 }
 
 pub struct EngineHost {
@@ -47,7 +54,7 @@ impl EngineHost {
     /// engine, `<config_dir>/<engine>/resume` its resume data. An engine whose
     /// directory does not exist yet is still built -- a first run has no state
     /// and must not be an error.
-    pub fn start(config: &Config, config_dir: &std::path::Path) -> Self {
+    pub fn offline(config: &Config, config_dir: &std::path::Path) -> Self {
         let mut engines = Vec::new();
 
         for (id, session) in [("race", &config.race), ("hoard", &config.hoard)] {
@@ -58,7 +65,7 @@ impl EngineHost {
             let manager = Arc::new(TorrentManager::new(
                 data_dir.to_string_lossy().into_owned(),
                 resume_dir.to_string_lossy().into_owned(),
-                disk,
+                disk.clone(),
             ));
 
             let loaded = manager.load_resume_data();
@@ -72,10 +79,68 @@ impl EngineHost {
                 start_paused: session.start_paused,
                 enable_ipv6: session.enable_ipv6,
                 manager,
+                disk,
             });
         }
 
         Self { engines, released: std::sync::Mutex::new(Default::default()) }
+    }
+
+    /// Build the engines and put them on the network.
+    ///
+    /// Split from `offline` so the two halves are separable: the unit tests and
+    /// the differential bench want engines that hold the production catalogue
+    /// and open no socket, and that must not depend on remembering to set a
+    /// flag -- it is a different call.
+    pub async fn start(config: &Config, config_dir: &std::path::Path) -> Self {
+        let host = Self::offline(config, config_dir);
+        host.connect(config, config_dir).await;
+        host
+    }
+
+    /// Put every engine that asks for it on the network.
+    async fn connect(&self, config: &Config, config_dir: &std::path::Path) {
+        for engine in &self.engines {
+            let session = match engine.id.as_str() {
+                "race" => &config.race,
+                _ => &config.hoard,
+            };
+            if !session.net {
+                tracing::warn!(
+                    engine = %engine.id,
+                    "net = false: state loaded, no listener, no announce, no DHT"
+                );
+                continue;
+            }
+            let data_dir = config_dir.join(&engine.id);
+            let resume_dir = data_dir.join("resume");
+            match engine_config(session, &data_dir, &resume_dir) {
+                Some(engine_cfg) => {
+                    typhon_engine::session::start(
+                        engine.manager.clone(),
+                        engine.disk.clone(),
+                        &engine_cfg,
+                    )
+                    .await;
+                    tracing::info!(
+                        engine = %engine.id,
+                        listen_port = session.listen_port,
+                        dht = session.enable_dht,
+                        pex = session.enable_pex,
+                        "engine on the network"
+                    );
+                }
+                None => {
+                    // Refuse rather than come up half-configured: an engine
+                    // that cannot describe its own network is one that would
+                    // announce from somewhere nobody chose.
+                    tracing::error!(
+                        engine = %engine.id,
+                        "cannot build the engine network config -- staying offline"
+                    );
+                }
+            }
+        }
     }
 
     pub fn engines(&self) -> &[Engine] {
@@ -166,4 +231,31 @@ mod tests {
         assert_eq!(held([false, true]), vec!["hoard"]);
         assert!(held([false, false]).is_empty());
     }
+}
+
+/// The engine-side config for one session.
+///
+/// Built through serde rather than a struct literal on purpose: `EngineConfig`
+/// carries three dozen fields, nearly all with a documented default, and
+/// listing them here would fork those defaults into a second place that nobody
+/// updates. Only what the Hydra config actually decides is set.
+fn engine_config(
+    session: &crate::config::Session,
+    data_dir: &std::path::Path,
+    resume_dir: &std::path::Path,
+) -> Option<typhon_engine::config::EngineConfig> {
+    serde_json::from_value(serde_json::json!({
+        "data_dir": data_dir.to_string_lossy(),
+        "resume_dir": resume_dir.to_string_lossy(),
+        "listen_port": session.listen_port,
+        "bind_device": session.bind_interface,
+        "dht_enabled": session.enable_dht,
+        "pex_enabled": session.enable_pex,
+        "enable_webseed": session.enable_webseed,
+        "enable_ipv6": session.enable_ipv6,
+        "max_connections": session.max_connections.max(0),
+        "max_uploads_per_torrent": session.max_uploads_per_torrent,
+        "file_pool_size": session.file_pool_size(),
+    }))
+    .ok()
 }
