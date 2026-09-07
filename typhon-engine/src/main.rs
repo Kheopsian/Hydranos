@@ -317,14 +317,16 @@ async fn main() {
     // track_torrent calls that fire later on add/start/magnet return early by
     // themselves. Nothing else in the engine has to test this flag.
     if config.dht_enabled {
-        dht::start().await;
+        if let Some(session) = dht::DhtSession::start().await {
+            torrent_mgr.set_dht(session);
+        }
         for t in torrent_mgr.all().iter() {
             // Stopped torrents stay off the DHT until they are started again;
             // tracking them here would resurrect the very tasks stop_torrent kills.
             if t.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
                 continue;
             }
-            dht::track_torrent(t.clone());
+            torrent_mgr.track_in_dht(t.clone());
         }
     } else {
         info!("[engine] DHT disabled by config: no bootstrap, no get_peers, no peer discovery outside the trackers");

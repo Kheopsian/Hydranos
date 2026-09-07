@@ -29,6 +29,10 @@ pub struct TorrentManager {
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
+    /// This engine's DHT node, once it has bootstrapped. Per manager rather
+    /// than per process: two engines in one process each get their own node,
+    /// and an engine with `enable_dht = false` simply never sets it.
+    dht: std::sync::OnceLock<Arc<crate::dht::DhtSession>>,
     /// Durable per-torrent state. `None` only if SQLite could not be opened at
     /// all, in which case everything falls back to the legacy JSON directory
     /// so a broken database degrades into the old behaviour instead of losing
@@ -47,6 +51,30 @@ pub struct TorrentManager {
 }
 
 impl TorrentManager {
+    /// Attach this engine's DHT node. Called once, after bootstrap.
+    pub fn set_dht(&self, session: Arc<crate::dht::DhtSession>) {
+        let _ = self.dht.set(session);
+    }
+
+    /// This engine's DHT node, if it has one.
+    pub fn dht(&self) -> Option<&Arc<crate::dht::DhtSession>> {
+        self.dht.get()
+    }
+
+    /// Track a torrent in this engine's DHT. A no-op when the engine runs
+    /// without one, which is the normal state for a hoard.
+    pub fn track_in_dht(&self, torrent: Arc<TorrentState>) {
+        if let Some(dht) = self.dht.get() {
+            dht.track_torrent(torrent);
+        }
+    }
+
+    fn untrack_in_dht(&self, info_hash: &InfoHash) {
+        if let Some(dht) = self.dht.get() {
+            dht.untrack_torrent(info_hash);
+        }
+    }
+
     pub fn new(data_dir: String, resume_dir: String, disk: Arc<DiskManager>) -> Self {
         std::fs::create_dir_all(&resume_dir).ok();
         let mirror_json = std::env::var("TYPHON_RESUME_JSON").map(|v| v == "1").unwrap_or(false);
@@ -81,6 +109,7 @@ impl TorrentManager {
             download_rate: rate::RateTracker::new(),
             cached_unseeded_peers: std::sync::atomic::AtomicUsize::new(0),
             skey_index: DashMap::new(),
+            dht: std::sync::OnceLock::new(),
             state_db,
             last_saved: DashMap::new(),
             mirror_json,
@@ -234,7 +263,7 @@ impl TorrentManager {
         self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
         self.torrents.insert(ih, state_arc.clone());
         // Track in DHT (no-op for private torrents, see dht::track_torrent).
-        crate::dht::track_torrent(state_arc);
+        self.track_in_dht(state_arc);
         // Push event to subscribers (Go hydra cache). Silent if no subscribers.
         crate::rpc::events::publish(crate::rpc::events::Event::TorrentAdded {
             info_hash: hex_encode(&ih),
@@ -265,7 +294,7 @@ impl TorrentManager {
                 t.is_removed.store(true, Ordering::Relaxed);
                 // is_removed is only observed when the get_peers stream next
                 // yields, which may be never — cancel the task outright.
-                crate::dht::untrack_torrent(info_hash);
+                self.untrack_in_dht(info_hash);
                 if !keep_data {
                     let files: Vec<std::path::PathBuf> = t.meta.files.iter().map(|f| {
                         if t.meta.multi_file {
@@ -317,7 +346,7 @@ impl TorrentManager {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         t.is_paused.store(false, Ordering::Relaxed);
         // Resuming re-arms the DHT stream that stop_torrent cancelled.
-        crate::dht::track_torrent(t.clone());
+        self.track_in_dht(t.clone());
         // A recheck in progress owns the status. Don't let a start (e.g. from the
         // download slot manager filling a slot, or a resume) clobber Checking
         // with Downloading: that flips is_downloading() on and the torrent
@@ -348,7 +377,7 @@ impl TorrentManager {
         t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         // A stopped torrent must not keep a get_peers recursion alive: the
         // stream loop only checks is_removed, which a stop does not set.
-        crate::dht::untrack_torrent(info_hash);
+        self.untrack_in_dht(info_hash);
         Ok(())
     }
 
@@ -754,7 +783,7 @@ impl TorrentManager {
         let private = state.meta.private;
         self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
         self.torrents.insert(ih, state.clone());
-        crate::dht::track_torrent(state);
+        self.track_in_dht(state);
         // Durable here before the source is told to let go, so a crash in the
         // middle leaves the torrent in both engines rather than in neither.
         self.persist(&ih, rd);

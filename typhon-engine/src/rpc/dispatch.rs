@@ -18,7 +18,7 @@ pub fn dispatch(
     match method {
         "ping" => json!({"pong": true}),
         "add_torrent" => add_torrent(params, torrent_mgr),
-        "fetch_metadata" => fetch_metadata(params, config),
+        "fetch_metadata" => fetch_metadata(params, config, torrent_mgr),
         "get_metadata" => get_metadata(params),
         "remove_torrent" => remove_torrent(params, torrent_mgr),
         "start_torrent" => start_torrent(params, torrent_mgr),
@@ -79,7 +79,7 @@ fn add_torrent(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
 
 /// Kick off magnet resolution. Returns immediately: resolution is a background
 /// job, polled through `get_metadata`.
-fn fetch_metadata(params: &Value, config: &EngineConfig) -> Value {
+fn fetch_metadata(params: &Value, config: &EngineConfig, mgr: &Arc<TorrentManager>) -> Value {
     let ih = match get_info_hash(params) {
         Ok(ih) => ih,
         Err(e) => return e,
@@ -96,7 +96,7 @@ fn fetch_metadata(params: &Value, config: &EngineConfig) -> Value {
         .unwrap_or_default();
     let binding_id = params.get("binding_id").and_then(|v| v.as_u64()).map(|n| n as u32);
 
-    let started = crate::magnet::start(ih, trackers, peers, config, binding_id);
+    let started = crate::magnet::start(ih, trackers, peers, config, binding_id, mgr.dht().map(|d| d.handle()));
     json!({"info_hash": hex_encode(&ih), "started": started})
 }
 
@@ -665,9 +665,15 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     put_u!("pex_msgs_recv", crate::tracker::PEX_MSGS_RECV.load(Ordering::Relaxed));
     put_u!("pex_peers_discovered", crate::tracker::PEX_PEERS_DISCOVERED.load(Ordering::Relaxed));
     put_u!("pex_peers_dialed", crate::tracker::PEX_PEERS_DIALED.load(Ordering::Relaxed));
-    put_u!("dht_torrents_tracked", crate::dht::DHT_TORRENTS_TRACKED.load(Ordering::Relaxed));
-    put_u!("dht_peers_discovered", crate::dht::DHT_PEERS_DISCOVERED.load(Ordering::Relaxed));
-    put_u!("dht_peers_dialed", crate::dht::DHT_PEERS_DIALED.load(Ordering::Relaxed));
+    // This engine's node, not the process's: an engine without a DHT reports
+    // zeroes rather than its neighbour's traffic.
+    let (dht_tracked, dht_found, dht_dialed) = match mgr.dht() {
+        Some(d) => (d.torrents_tracked(), d.peers_discovered(), d.peers_dialed()),
+        None => (0, 0, 0),
+    };
+    put_u!("dht_torrents_tracked", dht_tracked);
+    put_u!("dht_peers_discovered", dht_found);
+    put_u!("dht_peers_dialed", dht_dialed);
 
     json!({
         "peer_analysis": {
