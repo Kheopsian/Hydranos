@@ -85,6 +85,10 @@ pub fn start(
     seed_peers: Vec<SocketAddr>,
     config: &EngineConfig,
     binding_id: Option<u32>,
+    // The engine's DHT node, if it has one. Passed in rather than read from a
+    // global: with two engines in one process, a magnet must be resolved
+    // through the node of the engine it was added to.
+    dht: Option<librqbit_dht::Dht>,
 ) -> bool {
     {
         let mut map = match jobs().lock() {
@@ -119,7 +123,7 @@ pub fn start(
     };
 
     tokio::spawn(async move {
-        let peers = discover(info_hash, &trackers, seed_peers, &peer_id, port).await;
+        let peers = discover(info_hash, &trackers, seed_peers, &peer_id, port, dht).await;
         if peers.is_empty() {
             warn!("[magnet] no peers found for {}", hex(&info_hash));
             set_state(info_hash, JobState::Failed("no peers found".into()));
@@ -160,6 +164,7 @@ async fn discover(
     seed_peers: Vec<SocketAddr>,
     peer_id: &[u8; 20],
     port: u16,
+    dht: Option<librqbit_dht::Dht>,
 ) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -206,7 +211,7 @@ async fn discover(
     }
 
     if out.len() < MAX_PEERS {
-        dht_peers(info_hash, &mut out, &mut seen).await;
+        dht_peers(info_hash, &mut out, &mut seen, dht).await;
     }
     out
 }
@@ -216,8 +221,9 @@ async fn dht_peers(
     info_hash: [u8; 20],
     out: &mut Vec<SocketAddr>,
     seen: &mut std::collections::HashSet<SocketAddr>,
+    dht: Option<librqbit_dht::Dht>,
 ) {
-    let Some(dht) = crate::dht::handle() else { return };
+    let Some(dht) = dht else { return };
     let mut stream = dht.get_peers(Id20::new(info_hash), None);
     let deadline = tokio::time::sleep(DISCOVERY_BUDGET);
     tokio::pin!(deadline);
