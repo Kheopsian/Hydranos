@@ -310,7 +310,7 @@ fn pick_binding_for_dial(
             id: 0,
             addr: "0.0.0.0:0".parse().unwrap(),
             peer_id: [0u8; 20],
-            fwmark: 0,
+            egress: Default::default(),
             advertised_port: 0,
             only_v6: false,
         };
@@ -396,7 +396,7 @@ pub fn start_announce_loop(
                 let u = utp_c.clone();
                 let b = pick_binding_for_dial(&bindings_c, addr);
                 tokio::spawn(async move {
-                    dial_peer(addr, t, d, b.peer_id, u, b.addr.port(), b.fwmark).await;
+                    dial_peer(addr, t, d, b.peer_id, u, b.addr.port(), &b.egress).await;
                 });
             }
         });
@@ -433,7 +433,7 @@ use crate::crypto::stream::CryptoStream;
 // Try TCP first, fall back to uTP if it fails (NAT-bound peers).
 async fn try_tcp(
     addr: std::net::SocketAddr,
-    source_fwmark: u32,
+    egress: &crate::netpin::Egress,
 ) -> Option<PeerTransport> {
     use crate::peer::SOCKS5_OUTBOUND;
     #[cfg(unix)]
@@ -466,18 +466,18 @@ async fn try_tcp(
         // The device is what steers a Proton-style setup, where every tunnel
         // shares 10.2.0.2 and a source address decides nothing.
         #[cfg(unix)]
-        if source_fwmark != 0 || crate::netpin::bind_device().is_some() {
+        if egress.is_steered() {
             let socket = if addr.is_ipv4() {
                 TcpSocket::new_v4().ok()?
             } else {
                 TcpSocket::new_v6().ok()?
             };
-            if crate::netpin::pin_fd(socket.as_raw_fd()).is_err() {
+            if crate::netpin::pin_fd(socket.as_raw_fd(), egress).is_err() {
                 // Fail the dial rather than let it leave by the default route.
                 return None;
             }
-            if source_fwmark != 0 {
-                let mark_val: libc::c_int = source_fwmark as libc::c_int;
+            if egress.fwmark != 0 {
+                let mark_val: libc::c_int = egress.fwmark as libc::c_int;
                 let rc = unsafe {
                     libc::setsockopt(
                         socket.as_raw_fd(),
@@ -564,7 +564,7 @@ pub(crate) async fn open_peer(
     utp_socket: &Option<Arc<UtpSocketUdp>>,
     info_hash: &[u8; 20],
     peer_id: &[u8; 20],
-    source_fwmark: u32,
+    egress: &crate::netpin::Egress,
     traced: bool,
 ) -> Option<(CryptoStream, bool, bool, [u8; 20], bool)> {
     // 2.7.11: PLAINTEXT-FIRST outbound dial. Most peers only *prefer* MSE
@@ -576,7 +576,7 @@ pub(crate) async fn open_peer(
     let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false)
         || crate::peer::block_mse();
     // TCP plaintext (preferred)
-    if let Some(mut t) = try_tcp(addr, source_fwmark).await {
+    if let Some(mut t) = try_tcp(addr, egress).await {
         match crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
             Ok(hs) => {
                 DIAL_PLAIN_OK.fetch_add(1, AtomicOrdering::Relaxed);
@@ -600,7 +600,7 @@ pub(crate) async fn open_peer(
         MSE_OUTBOUND_SKIPPED.fetch_add(1, AtomicOrdering::Relaxed);
     }
     if !skip_mse {
-        if let Some(mut t) = try_tcp(addr, source_fwmark).await {
+        if let Some(mut t) = try_tcp(addr, egress).await {
             DIAL_MSE_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
             match crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
                 Ok((enc, dec, hs)) => {
@@ -646,7 +646,7 @@ pub async fn dial_peer(
     peer_id: [u8; 20],
     utp_socket: Option<Arc<UtpSocketUdp>>,
     listen_port: u16,
-    source_fwmark: u32,
+    egress: &crate::netpin::Egress,
 ) {
     use tokio_util::codec::Framed;
     use crate::wire::codec::BtCodec;
@@ -688,7 +688,7 @@ pub async fn dial_peer(
 
     DIAL_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
 
-    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(addr, &utp_socket, &torrent.info_hash, &peer_id, source_fwmark, traced).await {
+    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(addr, &utp_socket, &torrent.info_hash, &peer_id, egress, traced).await {
         Some(v) => { DIAL_HANDSHAKE_OK.fetch_add(1, AtomicOrdering::Relaxed); v }
         None => {
             DIAL_HANDSHAKE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);

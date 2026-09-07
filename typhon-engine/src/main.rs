@@ -341,8 +341,13 @@ async fn main() {
     // Bumped to 4096 (2026-04-17 investigation: 70% of uTP fails were "error"=saturated).
     let listen_port = config.listen_port;
     // Before ANY socket is opened: every one of them is pinned to this device.
-    typhon_engine::netpin::set_bind_device(&config.bind_device);
-    if let Some(dev) = typhon_engine::netpin::bind_device() {
+    // The device travels inside each binding's Egress rather than a global, so
+    // a process carrying two engines pins each one to its own tunnel.
+    let egress = typhon_engine::netpin::Egress {
+        fwmark: 0,
+        device: config.bind_device.clone(),
+    };
+    if let Some(dev) = egress.device() {
         info!("[engine] every socket is pinned to device {}", dev);
     }
     // TYPHON_DISABLE_UTP=1 skips uTP entirely. uTP is raw UDP, cannot route via
@@ -358,7 +363,8 @@ async fn main() {
         // uTP is raw UDP and gets the same device pin as everything else.
         // Without it the tunnel steering would hold for TCP and leak for uTP,
         // which is the shape of leak nobody notices: it is the same swarm.
-        let utp_dev = typhon_engine::netpin::bind_device()
+        let utp_dev = egress
+            .device()
             .map(|d| d.parse::<librqbit_utp::BindDevice>())
             .transpose();
         let utp_dev = match utp_dev {

@@ -130,7 +130,7 @@ pub async fn listen(
             #[cfg(unix)]
             {
                 use std::os::fd::AsRawFd;
-                if let Err(e) = crate::netpin::pin_fd(socket.as_raw_fd()) {
+                if let Err(e) = crate::netpin::pin_fd(socket.as_raw_fd(), &b.egress) {
                     return Err(format!(
                         "cannot pin the peer listener to bind_device: {} — refusing to listen on the default route",
                         e

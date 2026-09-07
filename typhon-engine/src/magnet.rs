@@ -110,8 +110,8 @@ pub fn start(
         Some(want) => bindings.iter().find(|b| b.id == want).or_else(|| bindings.first()),
         None => bindings.first(),
     };
-    let (peer_id, fwmark, port) = match binding {
-        Some(b) => (b.peer_id, b.fwmark, b.advertised_port),
+    let (peer_id, egress, port) = match binding {
+        Some(b) => (b.peer_id, b.egress.clone(), b.advertised_port),
         None => {
             set_state(info_hash, JobState::Failed("no usable network binding".into()));
             return true;
@@ -135,7 +135,7 @@ pub fn start(
             // are not used as metadata sources.
             None,
             port,
-            fwmark,
+            egress,
             crate::peer::metadata::DEFAULT_CONCURRENCY,
         )
         .await;
