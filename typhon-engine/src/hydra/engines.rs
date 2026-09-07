@@ -63,7 +63,11 @@ impl EngineHost {
     pub fn offline(config: &Config, config_dir: &std::path::Path) -> Self {
         let mut engines = Vec::new();
 
-        for (id, session) in [("race", &config.race), ("hoard", &config.hoard)] {
+        // Whatever this node hosts, not a fixed race and hoard: an install
+        // can run one engine per tunnel, each presenting as its own agent.
+        for local in config.local_engines() {
+            let id = local.id.as_str();
+            let session = &local.session;
             let data_dir = config_dir.join(id);
             let resume_dir = data_dir.join("resume");
 
@@ -79,7 +83,7 @@ impl EngineHost {
 
             engines.push(Engine {
                 id: id.to_string(),
-                role: id.to_string(),
+                role: local.role.clone(),
                 listen_port: session.listen_port,
                 bind_interface: session.bind_interface.clone(),
                 start_paused: session.start_paused,
