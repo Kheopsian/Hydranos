@@ -26,6 +26,7 @@ mod walrepair;
 mod benchdb;
 mod announce;
 mod health;
+mod jobs;
 mod workers;
 mod raceevents;
 mod config;
