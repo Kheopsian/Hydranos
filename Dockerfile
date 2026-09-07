@@ -16,18 +16,10 @@ ENV RUSTFLAGS="--cfg tokio_unstable"
 # does not exist in the final layer, so the runtime stage cannot read from it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/typhon-engine/target,sharing=locked \
-    cargo build --release --bin typhon-engine \
-    && cp target/release/typhon-engine /usr/local/bin/typhon-engine
+    cargo build --release --bin hydra \
+    && cp target/release/hydra /usr/local/bin/hydra
 
-# Stage 2: Go builder.
-FROM golang:1.25-bookworm AS go-builder
-
-WORKDIR /build
-COPY . .
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o /hydra ./cmd/hydra
-
-# Stage 3: Runtime.
+# Stage 2: Runtime.
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -35,12 +27,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wireguard-tools gosu libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
-# jemalloc heap profiling on the Rust engine (low-overhead sampling every
-# 512KB). Dumps triggered on SIGUSR1 by the watchdog. Go (hydra) ignores it.
+# jemalloc heap profiling (low-overhead sampling every 512KB). Dumps triggered
+# on SIGUSR1 by the watchdog. One process now, so this covers all of it.
 ENV MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/config/jeprof
-COPY --from=typhon-builder /usr/local/bin/typhon-engine /usr/local/bin/hydra-engine
-
-COPY --from=go-builder /hydra /usr/local/bin/hydra
+# One binary. The front and the engines are the same process in 4.0.0, so
+# there is no hydra-engine to ship and no unix socket between them.
+COPY --from=typhon-builder /usr/local/bin/hydra /usr/local/bin/hydra
 COPY configs/ /app/configs/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -51,5 +43,4 @@ RUN groupadd -g 1000 hydra \
  && useradd -u 1000 -g 1000 -d /config -s /usr/sbin/nologin hydra
 
 WORKDIR /app
-ENV GOMEMLIMIT=8GiB
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

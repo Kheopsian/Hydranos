@@ -66,6 +66,7 @@ step "seeding both instances"
 mkdir -p "$STAGING/racemount"
 seed "$STAGING/go"
 seed "$STAGING/rust"
+offline "$STAGING/rust/default.toml"
 
 docker rm -f v4-go-a v4-rust >/dev/null 2>&1 || true
 

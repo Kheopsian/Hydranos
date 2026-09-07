@@ -55,7 +55,11 @@ pub struct Session {
     /// false builds the manager and loads its durable state without opening a
     /// socket, which is what the differential bench runs against -- a bench
     /// instance holding the production catalogue must not announce it.
-    #[serde(default = "yes")]
+    ///
+    /// Read from the file, never written back: /api/settings echoes this
+    /// struct, and publishing a key 3.x does not have would change the answer
+    /// every client parses.
+    #[serde(default = "yes", skip_serializing)]
     pub net: bool,
     #[serde(default)]
     pub aio_threads: Option<usize>,
