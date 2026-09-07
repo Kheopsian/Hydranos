@@ -149,6 +149,7 @@ impl EngineHost {
                         },
                         engine.announce_cache.clone(),
                     );
+                    crate::workers::spawn_stagger_start(engine.manager.clone());
                     crate::workers::spawn_verify_throttle(engine.manager.clone());
                     if engine.id == "race" {
                         crate::workers::spawn_race_drain(

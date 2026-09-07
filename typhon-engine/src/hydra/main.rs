@@ -158,11 +158,16 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Shared before the state is built: the reconcile task needs the same
+    // handle the handlers use, not a second connection to the same file.
+    let shared_store = Arc::new(std::sync::Mutex::new(store));
+    workers::spawn_store_reconcile(engine_host.clone(), shared_store.clone());
+
     let state = api::AppState {
         imports: Default::default(),
         config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
         engines: engine_host,
-        store: Arc::new(std::sync::Mutex::new(store)),
+        store: shared_store.clone(),
         public_ip: Arc::new(tokio::sync::Mutex::new((String::new(), String::new()))),
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -321,3 +321,99 @@ mod memory_tests {
         assert!(rss < (1 << 40));
     }
 }
+
+/// Bring every torrent up at boot, in batches.
+///
+/// Starting one is nearly free -- two atomic stores, no verify -- so the box
+/// serves inbound peers straight away: they find us through the tracker
+/// announce made before the restart, still valid for about half an hour. The
+/// announce ramp is paced separately by the scheduler and trails behind
+/// without holding seeding back.
+///
+/// Batched anyway, because 244k starts in one pass is a single burst of work
+/// on the runtime that starves everything else, including the HTTP handler
+/// that would tell an operator what is happening.
+pub fn spawn_stagger_start(manager: Arc<TorrentManager>) {
+    const BATCH: usize = 2000;
+    const PAUSE: Duration = Duration::from_millis(100);
+    tokio::spawn(async move {
+        let torrents = manager.all();
+        let total = torrents.len();
+        if total == 0 {
+            return;
+        }
+        let mut started = 0usize;
+        for (i, torrent) in torrents.iter().enumerate() {
+            // A torrent the operator stopped stays stopped. Starting it here
+            // would undo an intent every restart.
+            if torrent.is_paused.load(Ordering::Relaxed) {
+                continue;
+            }
+            if manager.start_torrent(&torrent.info_hash).is_ok() {
+                started += 1;
+            }
+            if (i + 1) % BATCH == 0 && i + 1 < total {
+                tracing::info!(started, total, pct = started * 100 / total, "stagger start");
+                tokio::time::sleep(PAUSE).await;
+            }
+        }
+        tracing::info!(started, total, "stagger start done");
+    });
+}
+
+/// Drop the store rows whose torrent no longer exists.
+///
+/// A row outlives its torrent whenever a removal is interrupted -- a crash
+/// between "the engine forgot it" and "the store forgot it" leaves one behind.
+/// One is nothing; years of them are a table that answers questions about
+/// torrents nobody holds, and counts that do not match the engine's.
+///
+/// Reconciled rather than deleted on the spot, because the engine is the
+/// authority on what exists and the store is not: comparing the two is the
+/// only way to tell an orphan from a torrent that is merely paused.
+pub fn spawn_store_reconcile(
+    engines: Arc<crate::engines::EngineHost>,
+    store: Arc<std::sync::Mutex<crate::store::Store>>,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
+        loop {
+            tick.tick().await;
+            // Per engine, because the store keys its rows by session: a
+            // hoard row is not an orphan just because the race does not hold
+            // that torrent.
+            for engine in engines.engines() {
+                let live: std::collections::HashSet<String> = engine
+                    .manager
+                    .all()
+                    .iter()
+                    .map(|t| t.info_hash.iter().map(|b| format!("{b:02x}")).collect())
+                    .collect();
+                // An engine that failed to load its resume data reports
+                // nothing, and taking that at face value would empty its half
+                // of the store. A reconcile with no live torrent is refused.
+                if live.is_empty() {
+                    tracing::warn!(engine = %engine.id, "store reconcile: no torrent, skipping");
+                    continue;
+                }
+                let store = store.lock().unwrap();
+                let known = match store.all_hashes(&engine.id) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!(engine = %engine.id, error = %e, "store reconcile: cannot list");
+                        continue;
+                    }
+                };
+                let mut dropped = 0usize;
+                for hash in known {
+                    if !live.contains(&hash) && store.delete_torrent(&hash).unwrap_or(false) {
+                        dropped += 1;
+                    }
+                }
+                if dropped > 0 {
+                    tracing::info!(engine = %engine.id, dropped, "store reconcile: rows without a torrent removed");
+                }
+            }
+        }
+    });
+}
