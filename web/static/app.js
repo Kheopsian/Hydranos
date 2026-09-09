@@ -1,5 +1,24 @@
 // Hydra WebUI - Dashboard
 
+// A key handed over in the URL FRAGMENT, by the fleet page of another Hydra
+// opening this one (`/node/<name>/open`). Consumed before anything reads
+// API_KEY, then stripped from the address bar with replaceState so a reload or
+// a bookmark does not carry it.
+//
+// The fragment is chosen over a query string because it is never sent to any
+// server: it appears in no access log and in no Referer. What it leaves behind
+// is an entry in THIS origin's localStorage -- the same place, and the same
+// exposure, as a key typed into the login box by hand.
+(function adoptKeyFromFragment() {
+    try {
+        const m = /(?:^|[#&])key=([^&]+)/.exec(location.hash || "");
+        if (!m) return;
+        const key = decodeURIComponent(m[1]);
+        if (key) localStorage.setItem("hydra_api_key", key);
+        history.replaceState(null, "", location.pathname + location.search);
+    } catch (e) { /* a hostile fragment must not stop the page loading */ }
+})();
+
 const API_KEY = localStorage.getItem("hydra_api_key") || "";
 let _provenance = null;
 const POLL_INTERVAL = 1000;
@@ -239,7 +258,7 @@ function _interfacesCardHTML(list) {
         : `<div class="settings-row"><div class="sr-desc">${t("No non-loopback interfaces detected.")}</div></div>`;
     return `<div class="settings-section" style="margin-bottom:18px">
         <div class="settings-section-title">${t("Network interfaces")}</div>
-        <div class="sr-desc" style="padding:0 0 8px">${t("Detected on this host. To pin an agent to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.")}</div>
+        <div class="sr-desc" style="padding:0 0 8px">${t("Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.")}</div>
         ${rows}
     </div>`;
 }
@@ -736,7 +755,27 @@ async function api(endpoint, options = {}) {
         promptLogin(t("Session invalid, please sign in again."));
         throw new Error("API error: 401");
     }
-    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    if (!res.ok) {
+        // Surface what the daemon actually said. It writes careful messages --
+        // "port 16372 is already taken by engine hoard", "no interface named
+        // wg9 is up" -- and throwing only the status code discarded every one
+        // of them, leaving the operator with "API error: 409" and no idea
+        // which engine or which port.
+        let detail = "";
+        try {
+            const body = await res.text();
+            if (body) {
+                try {
+                    const j = JSON.parse(body);
+                    detail = j && typeof j.error === "string" ? j.error : "";
+                } catch (_) {
+                    // Not JSON: a proxy error page, say. Keep it short.
+                    detail = body.slice(0, 200);
+                }
+            }
+        } catch (_) { /* a body we cannot read must not hide the status */ }
+        throw new Error(detail ? `${detail} (${res.status})` : `API error: ${res.status}`);
+    }
     return res.json();
 }
 
@@ -763,7 +802,7 @@ function _pendingEdits() {
     }
     if (_netState && _netOrig) {
         const cur = netModeCollect();
-        if (cur && JSON.stringify({ mode: _netState.mode, fields: cur }) !== _netOrig) {
+        if (cur && _stableJson({ mode: _netState.mode, fields: cur }) !== _netOrig) {
             count++;
             // The network mode rewrites the engines' listen and proxy keys,
             // which only take effect on restart.
@@ -835,7 +874,7 @@ function _activateTabNow(name) {
     if (name === "config") updateSettings();
     else if (name === "add") refreshCategoryOptions();
     else if (name === "changelog") loadChangelog();
-    else if (name === "agents") { updateAgents(); }
+    else if (name === "nodes") { updateNodes(); }
     else if (name === "trackers") { updateTrackers(); loadTrackerStats(); }
     else if (name === "logs") loadLogs();
     else if (name === "jobs") startJobsPolling();
@@ -864,7 +903,7 @@ window.addEventListener("DOMContentLoaded", () => {
         if (_hashTab === "race") await updateRaceTorrents();
         else if (_hashTab === "hoard") await updateHoardStats();
         else if (_hashTab === "categories") await updateCategories();
-        else if (_hashTab === "agents") { await updateAgents(); }
+        else if (_hashTab === "nodes") { await updateNodes(); }
         else if (_hashTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
         else if (_hashTab === "benchmark") await updateBenchmark();
         else if (_hashTab === "jobs") startJobsPolling();
@@ -904,7 +943,7 @@ async function showStoreRepairModal() {
     ov.innerHTML = `<div class="modal-box">
         <h3>${t("Hydra cannot open its database")}</h3>
         <p class="modal-desc">${t("Your data_dir now points at {kind} storage. The database was created on a local disk, so it uses a write-ahead log, and a network share cannot host one.", { kind: esc(st.filesystem || "network") })}</p>
-        <p class="modal-desc">${t("Nothing has been lost. Hydra has deliberately not started its agents: carrying on without the database is what would destroy your lifetime upload counters.")}</p>
+        <p class="modal-desc">${t("Nothing has been lost. Hydra has deliberately not started its engines: carrying on without the database is what would destroy your lifetime upload counters.")}</p>
         <p class="modal-desc">${t("Affected: {list}", { list: esc(targets.map(x => x.name).join(", ") || "-") })}</p>
         ${hot.length ? `<p class="modal-desc" style="color:var(--accent-orange)">${t("{list} still holds changes that were never written back. Start Hydra once on the machine it came from, stop it cleanly, then move it here.", { list: esc(hot.map(x => x.name).join(", ")) })}</p>` : ""}
         <p class="modal-desc">${t("Hydra can convert the database to the journal a share can host. Every file is copied to a .bak alongside it first, so the originals stay recoverable whatever happens.")}</p>
@@ -984,7 +1023,7 @@ async function showStoreRepairModal() {
     });
 }
 
-window.addEventListener("DOMContentLoaded", () => { _refreshCtxAgents(); });
+window.addEventListener("DOMContentLoaded", () => { _refreshCtxNodes(); });
 
 window.addEventListener("DOMContentLoaded", async () => {
     _refreshHoardPins();
@@ -2609,6 +2648,240 @@ function _searchMatches(t, search) {
     return q.split(_SEARCH_SEP).filter(Boolean).every(tok => hay.includes(tok));
 }
 
+// ── Nodes: this Hydra's engines, and the other Hydras in the fleet ──────────
+//
+// Two levels, because that is the model: a NODE is a whole Hydra, an ENGINE is
+// a session inside one. The old page called both "agent", which is why nobody
+// could say what either word meant.
+//
+// Every value below comes off the network and is escaped: a node name is chosen
+// by whoever owns that node, and a version string is whatever it chose to send.
+
+async function updateNodes() {
+    // The local engines first: this is the one place that says what this Hydra
+    // actually hosts. /api/status only ever names race and hoard.
+    try {
+        const engines = await api("/api/engines");
+        const tb = document.getElementById("local-engines-tbody");
+        if (tb) {
+            tb.innerHTML = (!engines || !engines.length)
+                ? `<tr><td colspan="8" class="empty">No engine</td></tr>`
+                : engines.map(e => {
+                    // race and hoard come from the [race] and [hoard] sections
+                    // every install has, not from a block that can be dropped.
+                    const removable = e.id !== "race" && e.id !== "hoard";
+                    return `<tr>
+                     <td><strong>${esc(e.id)}</strong></td>
+                     <td>${esc(e.role)}</td>
+                     <td>${e.listen_port || "-"}</td>
+                     <td>${esc(e.bind_interface || "any")}</td>
+                     <td>${e.enable_ipv6 ? "yes" : "no"}</td>
+                     <td>${e.listening
+                        ? `<span class="sev sev-green"></span><span class="sev-label">listening</span>`
+                        : `<span class="sev sev-red"></span><span class="sev-label">not listening</span>`}</td>
+                     <td>${e.torrents ?? 0}</td>
+                     <td>${removable ? `<button class="btn-small" onclick="removeEngine('${esc(e.id)}')">Remove</button>` : ""}</td>
+                   </tr>`;
+                  }).join("");
+        }
+    } catch (e) { /* the fleet list below is still worth showing */ }
+
+    try {
+        const nodes = await api("/api/nodes");
+        const tb = document.getElementById("nodes-tbody");
+        if (!tb) return;
+        if (!nodes || !nodes.length) {
+            tb.innerHTML = `<tr><td colspan="7" class="empty">No other node</td></tr>`;
+            return;
+        }
+        tb.innerHTML = nodes.map(n => {
+            const h = n.health || {};
+            // A node that is down says WHY. "offline" alone cannot tell a wrong
+            // key from a wrong address, and those need opposite fixes.
+            const status = h.online
+                ? `<span class="sev sev-green"></span><span class="sev-label">online</span>`
+                : `<span class="sev sev-red"></span><span class="sev-label">${esc(h.error || "offline")}</span>`;
+            const open = h.online
+                ? `<button class="btn-small" onclick="openNode('${esc(n.name)}')">Open</button>`
+                : "";
+            return `<tr>
+                <td><strong>${esc(n.name)}</strong></td>
+                <td class="sr-desc">${esc(n.url)}</td>
+                <td>${esc(h.version || "-")}</td>
+                <td>${esc((h.engines || []).join(", ") || "-")}</td>
+                <td>${h.torrents ?? 0}</td>
+                <td>${status}</td>
+                <td>${open} <button class="btn-small" onclick="removeNode('${esc(n.name)}')">Remove</button></td>
+            </tr>`;
+        }).join("");
+    } catch (e) {
+        console.error("nodes:", e);
+    }
+}
+
+function showEngineForm() {
+    const f = document.getElementById("engine-form");
+    if (f) f.style.display = "";
+    const r = document.getElementById("en-result");
+    if (r) { r.textContent = ""; r.className = "result-msg"; }
+}
+function hideEngineForm() {
+    const f = document.getElementById("engine-form");
+    if (f) f.style.display = "none";
+}
+
+/// Declare one more engine on this node.
+///
+/// The daemon refuses a port another engine already holds. It is worth saying
+/// why: an engine that shared a socket with another used to be accepted in
+/// silence, and the network tab would still have shown the port that was asked
+/// for rather than the one actually bound.
+async function saveEngine() {
+    const r = document.getElementById("en-result");
+    const body = {
+        id: (document.getElementById("en-id")?.value || "").trim(),
+        role: document.getElementById("en-role")?.value || "hoard",
+        listen_port: parseInt(document.getElementById("en-port")?.value || "0", 10),
+        bind_interface: (document.getElementById("en-iface")?.value || "").trim(),
+    };
+    try {
+        const res = await api("/api/engines", { method: "POST", body: JSON.stringify(body) });
+        hideEngineForm();
+        if (res && res.restart_required) {
+            const b = document.getElementById("engine-restart-banner");
+            if (b) b.style.display = "block";
+        }
+        await updateNodes();
+    } catch (e) {
+        r.textContent = String(e.message || e);
+        r.className = "result-msg error";
+    }
+}
+
+async function removeEngine(id) {
+    if (!await hydraConfirm(t("Remove engine {id}? Its data stays on disk.", { id }))) return;
+    try {
+        const res = await api("/api/engines/" + encodeURIComponent(id), { method: "DELETE" });
+        if (res && res.restart_required) {
+            const b = document.getElementById("engine-restart-banner");
+            if (b) b.style.display = "block";
+        }
+    } catch (e) {
+        hydraNotify(String(e.message || e));
+    }
+    await updateNodes();
+}
+
+/// Mint an enrolment token and show the one line that spends it.
+///
+/// The command is built server-side from the Host header, so it points back at
+/// the address the operator actually reached this Hydra on -- this process
+/// cannot know which of its addresses a third machine resolves.
+async function enrolNode() {
+    const card = document.getElementById("enrol-card");
+    const pre = document.getElementById("enrol-cmd");
+    const res = document.getElementById("enrol-result");
+    if (card) card.style.display = "";
+    if (res) { res.textContent = ""; res.className = "result-msg"; }
+    if (pre) pre.textContent = t("Requesting a token...");
+    try {
+        const d = await api("/api/nodes/enrol", { method: "POST" });
+        if (pre) pre.textContent = d.command;
+    } catch (e) {
+        if (pre) pre.textContent = "";
+        if (res) { res.textContent = String(e.message || e); res.className = "result-msg error"; }
+    }
+}
+
+function copyEnrol() {
+    const pre = document.getElementById("enrol-cmd");
+    const res = document.getElementById("enrol-result");
+    if (!pre || !pre.textContent) return;
+    // navigator.clipboard needs a secure context, which a LAN http:// page is
+    // not. The textarea fallback is what actually works here.
+    const ta = document.createElement("textarea");
+    ta.value = pre.textContent;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch (_) {}
+    document.body.removeChild(ta);
+    if (res) { res.textContent = t("Copied."); res.className = "result-msg success"; }
+}
+
+function showNodeForm() {
+    const f = document.getElementById("node-form");
+    if (f) f.style.display = "";
+    const r = document.getElementById("nd-result");
+    if (r) { r.textContent = ""; r.className = "result-msg"; }
+}
+function hideNodeForm() {
+    const f = document.getElementById("node-form");
+    if (f) f.style.display = "none";
+}
+
+function _nodeFormValues() {
+    return {
+        name: (document.getElementById("nd-name")?.value || "").trim(),
+        url: (document.getElementById("nd-url")?.value || "").trim(),
+        api_key: (document.getElementById("nd-key")?.value || "").trim(),
+    };
+}
+
+/// Probe without saving, so a typo is visible before it becomes a row.
+async function testNode() {
+    const v = _nodeFormValues();
+    const r = document.getElementById("nd-result");
+    if (!v.url) { r.textContent = t("URL is required"); r.className = "result-msg error"; return; }
+    r.textContent = t("Testing..."); r.className = "result-msg";
+    try {
+        const h = await api("/api/nodes/test", { method: "POST", body: JSON.stringify(v) });
+        if (h.online) {
+            r.textContent = `Hydra ${h.version}, ${(h.engines || []).join(", ")}, ${h.torrents} torrents`;
+            r.className = "result-msg success";
+        } else {
+            r.textContent = h.error || t("unreachable");
+            r.className = "result-msg error";
+        }
+    } catch (e) {
+        r.textContent = String(e.message || e);
+        r.className = "result-msg error";
+    }
+}
+
+async function saveNode() {
+    const v = _nodeFormValues();
+    const r = document.getElementById("nd-result");
+    try {
+        await api("/api/nodes", { method: "POST", body: JSON.stringify(v) });
+        hideNodeForm();
+        await updateNodes();
+    } catch (e) {
+        r.textContent = String(e.message || e);
+        r.className = "result-msg error";
+    }
+}
+
+async function removeNode(name) {
+    if (!await hydraConfirm(t("Remove node {name}? Its own data is untouched.", { name }))) return;
+    try {
+        await api("/api/nodes/" + encodeURIComponent(name), { method: "DELETE" });
+    } catch (e) {
+        hydraNotify(String(e.message || e));
+    }
+    await updateNodes();
+}
+
+/// Open a node's own front, already authenticated.
+///
+/// A real navigation to the remote ORIGIN, not an iframe or a proxied prefix:
+/// the front asks for absolute paths, which under a prefix this Hydra would
+/// answer itself. The server answers with a redirect carrying the remote key in
+/// the fragment, which no server ever sees.
+function openNode(name) {
+    const url = "/node/" + encodeURIComponent(name) + "/open?apikey=" + encodeURIComponent(API_KEY);
+    window.open(url, "_blank", "noopener");
+}
+
 function _hoardMatches(t, search, skip) {
     if (skip !== "search" && search && !_searchMatches(t, search)) return false;
     if (skip !== "cat") {
@@ -2684,19 +2957,23 @@ async function _selectAllFiltered() {
     if (_hoardTrackerExc.length) q.set("tracker_not", _hoardTrackerExc.join(","));
     if (_hoardStateFilter) q.set("state", _hoardStateFilter);
 
-    let hashes;
+    let copies = null;
     try {
         const d = await api("/api/hoard/page?" + q.toString());
-        hashes = Array.isArray(d && d.hashes) ? d.hashes : null;
-    } catch (e) { hashes = null; }
+        // `copies` carries the engine each hash was found in. `hashes` is the
+        // flat 3.x shape, kept for a node with a single hoard engine, where the
+        // two say the same thing.
+        if (Array.isArray(d && d.copies)) copies = d.copies;
+        else if (Array.isArray(d && d.hashes)) copies = d.hashes.map(h => ({ hash: h, agent: "local-hoard" }));
+    } catch (e) { copies = null; }
     // Fall back to what is on screen rather than selecting nothing: a Ctrl+A
     // that silently no-ops is worse than one that selects the visible page.
-    if (!hashes) hashes = _hoardFiltered.map(t => t.info_hash);
-    if (!hashes.length) return;
+    if (!copies) copies = _hoardFiltered.map(t => ({ hash: t.info_hash, agent: t.agent || "local-hoard" }));
+    if (!copies.length) return;
 
     _selected.clear();
-    for (const h of hashes) {
-        _selected.set(_selKeyOf(h, "local"), { hash: h, mode: "hoard", agent: "local" });
+    for (const c of copies) {
+        _selected.set(_selKeyOf(c.hash, c.agent), { hash: c.hash, mode: "hoard", agent: c.agent });
     }
     _anchorHash = null;
     _updateRowHighlights();
@@ -2836,7 +3113,7 @@ function _showCtxMenu(x, y) {
     // Refresh in the background, then re-apply: the first open of a session
     // would otherwise decide on an empty list and hide the Agent group until
     // the menu was opened a second time.
-    _refreshCtxAgents().then(() => {
+    _refreshCtxNodes().then(() => {
         if (document.getElementById("ctx-menu").style.display === "block") {
             _applyCtxGroups();
             _clampCtxMenuToViewport();
@@ -2856,81 +3133,145 @@ function _applyCtxGroups() {
     // the whole point of adding engines. This used to filter on kind and hid
     // the group entirely on a node with no remote agent, which is every node
     // that runs several engines and nothing else.
-    const sources = new Set([..._selected.values()].map(v => _selAgent(v)));
-    const showAgent = _ctxAgents.some(a =>
-        a.name && !(sources.size === 1 && sources.has(a.name)));
-    const agentGrp = document.getElementById("ctx-grp-agent");
-    const agentSep = document.getElementById("ctx-sep-agent");
-    if (agentGrp) agentGrp.style.display = showAgent ? "" : "none";
-    if (agentSep) agentSep.style.display = showAgent ? "" : "none";
+    // Shown as soon as one node is declared. It used to be decided from
+    // `/api/agents`, whose entries carry no `name`, so the test was against an
+    // always-empty list and the group's fate had nothing to do with the fleet.
+    const showNodes = (_ctxNodes || []).length > 0;
+    const nodeGrp = document.getElementById("ctx-grp-node");
+    const nodeSep = document.getElementById("ctx-sep-node");
+    if (nodeGrp) nodeGrp.style.display = showNodes ? "" : "none";
+    if (nodeSep) nodeSep.style.display = showNodes ? "" : "none";
 
     // A group whose every item is hidden must hide its heading too, or the
     // menu shows a title introducing nothing.
     document.querySelectorAll("#ctx-menu .ctx-group").forEach(grp => {
-        if (grp.id === "ctx-grp-agent") return; // decided above
+        if (grp.id === "ctx-grp-node") return; // decided above
         const anyVisible = [...grp.querySelectorAll(".ctx-item")]
             .some(it => it.style.display !== "none");
         grp.style.display = anyVisible ? "" : "none";
     });
 }
 
-// Known agents, cached so opening the menu stays synchronous.
-let _ctxAgents = [];
-
-async function _refreshCtxAgents() {
+// Known nodes, cached so opening the menu stays synchronous.
+async function _refreshCtxNodes() {
     try {
-        const list = await api("/api/agents");
-        if (Array.isArray(list)) _ctxAgents = list;
+        const list = await api("/api/nodes");
+        if (Array.isArray(list)) _ctxNodes = list;
     } catch (e) {
         // Leave the previous list in place: a failed poll is not evidence that
-        // the agents went away, and blanking it would make the menu flicker.
+        // the fleet went away, and blanking it would make the menu flicker.
     }
 }
 
-// _showAgentPicker lists the agents a selection can be sent to.
+// The ENGINES a selection can be sent to, grouped by the node that hosts them.
 //
-// mode is "duplicate" (both nodes keep it) or "move" (the source is released
-// once the target is verified and running). The destination path is not asked
-// for: it is what the torrent's category defines on that agent.
-async function _showAgentPicker(ev, mode) {
+// A torrent always lives in an engine; the node only says where that engine
+// runs. Offering "a node" was the wrong shape -- it left the daemon to guess
+// which engine, and a category can only name a MODE, never the third engine of
+// a multi-tunnel host.
+//
+// Replaces the agent picker, which was dead twice over: it read `/api/agents`,
+// whose entries carry no `name`, so the list filtered itself empty and always
+// said "no other agent to send to"; and it posted to `/api/jobs/move-remote`,
+// which refuses every request. Neither failure showed.
+async function _showEnginePicker(ev, then) {
     if (ev) ev.stopPropagation();
     const anchor = ev && ev.currentTarget;
     if (_selected.size === 0) return;
-    await _refreshCtxAgents();
 
-    const sources = new Set([..._selected.values()].map(v => _selAgent(v)));
-    // An engine of this machine is a legitimate destination too: a torrent can
-    // come back from an agent, or move between two local engines to leave by
-    // another tunnel. Only the agent it already sits on is excluded, and only
-    // when the whole selection agrees on one source.
-    //
-    // Duplicating onto this machine is refused, not offered and then rejected:
-    // two local engines share a filesystem, so a "copy" would be the same files
-    // twice -- two writers on the same bytes the first time either repairs a
-    // piece. The daemon refuses it as well; this only keeps the menu honest.
-    const targets = _ctxAgents
-        .filter(a => a.name)
-        .filter(a => !(sources.size === 1 && sources.has(a.name)))
-        .filter(a => !(mode === "duplicate" && a.kind === "local" && [...sources].every(_isLocalAgent)));
+    let nodes = [], locals = [];
+    try { nodes = await api("/api/nodes"); } catch (e) { nodes = []; }
+    try { locals = await api("/api/engines"); } catch (e) { locals = []; }
 
     const esc = s => String(s).replace(/[&<>"\']/g, ch =>
         ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\'":"&#39;"}[ch]));
 
-    let items;
-    if (!targets.length) {
-        items = `<div class="ctx-label">${t("No other agent to send to")}</div>`;
-    } else {
-        items = targets.map(a => {
-            const jsName = String(a.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
-            const off = a.online === false ? ` <span class="sr-desc">(${t("offline")})</span>` : "";
-            // Say which ones cost nothing: between two engines of this machine
-            // the payload never moves, the torrent changes hands where it lies.
-            const here = a.kind === "local" && [...sources].every(_isLocalAgent)
-                ? ` <span class="sr-desc">(${t("here, no copy")})</span>` : "";
-            return `<div class="ctx-item" onclick="_sendToAgentSelected(\'${jsName}\', \'${mode}\')">${esc(a.name)}${off}${here}</div>`;
-        }).join("");
+    let items = "";
+
+    // This node's own engines come first, and they are the common case: moving
+    // hoard to a VPN-bound engine to change which tunnel a torrent seeds from
+    // costs nothing, because both engines read the same files.
+    //
+    // DUPLICATE is refused here, and not out of tidiness: two local engines
+    // pointed at one set of files are two writers on the same bytes the first
+    // time either repairs a piece. Shown and explained rather than hidden --
+    // "why can I copy to another machine but not to the engine next door" is
+    // exactly the question this menu should answer.
+    const sources = new Set([..._selected.values()].map(v => _selAgent(v)));
+    // Local destinations only make sense for a selection that is HERE. Moving a
+    // remote row to a local engine would act on this node's own copy -- which
+    // may be a different torrent, or none at all. Bringing one back is a handoff
+    // in the other direction, and the far side would have to push it.
+    const allHere = [..._selected.values()].every(v => {
+        const a = _selAgent(v);
+        return a === "local" || a.startsWith("local-");
+    });
+    // Where the selection sits, when it agrees on one place.
+    const only = sources.size === 1 ? [...sources][0] : "";
+    const fromNode = (!allHere && only) ? only.split("-")[0] : "";
+    const fromEngine = only.includes("-") ? only.slice(only.indexOf("-") + 1) : "";
+
+    const localTargets = (locals || []).filter(e => !sources.has("local-" + e.id));
+    if (localTargets.length) {
+        items += `<div class="ctx-label">${t("This node")}</div>`;
+        for (const e of localTargets) {
+            const jsEng = String(e.id).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
+            if (!allHere) {
+                // The selection lives elsewhere: bringing it here is a pull, the
+                // exact mirror of a handoff. The metainfo comes over HTTP, the
+                // data over BitTorrent, and only the direction of the dial
+                // differs -- easier, in fact, since the far side's address IS
+                // the node URL and needs no working out.
+                if (!fromNode) continue;
+                const jsN = String(fromNode).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
+                const jsFE = String(fromEngine).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
+                items += `<div class="ctx-item" onclick="_fetchFromNode(\'${jsN}\', \'${jsFE}\', \'${jsEng}\')">local-${esc(e.id)} <span class="sr-desc">(${t("bring it here")})</span></div>`;
+            } else if (then === "remove") {
+                items += `<div class="ctx-item" onclick="_moveToLocalEngine(\'${jsEng}\')">local-${esc(e.id)} <span class="sr-desc">(${t("here, no copy")})</span></div>`;
+            } else {
+                // Seed the same files from a second engine: its own peer_id,
+                // its own port, its own tunnel. Nothing is copied on disk --
+                // both engines are pointed at the same payload -- so what this
+                // buys is a second identity in the swarm, which is what pays
+                // when the tunnel saturates before the leechers do.
+                items += `<div class="ctx-item" onclick="_copyToLocalEngine(\'${jsEng}\')">local-${esc(e.id)} <span class="sr-desc">(${t("same files, second identity")})</span></div>`;
+            }
+        }
     }
-    const verb = mode === "move" ? t("Move to agent") : t("Duplicate to agent");
+    for (const n of nodes) {
+        const h = n.health || {};
+        const jsNode = String(n.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
+        items += `<div class="ctx-label">${esc(n.name)}</div>`;
+        if (!h.online) {
+            // Named and refused rather than hidden: "why is it not in the list"
+            // is the question hiding it would create.
+            items += `<div class="ctx-item ctx-disabled">${t("offline")}</div>`;
+            continue;
+        }
+        const engines = h.engines || [];
+        if (!engines.length) {
+            items += `<div class="ctx-item ctx-disabled">${t("no engine")}</div>`;
+            continue;
+        }
+        for (const e of engines) {
+            // Not the engine it already sits on.
+            if (sources.has(n.name + "-" + e)) continue;
+            const jsEng = String(e).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
+            if (!allHere && n.name === fromNode) {
+                // Its own node's other engines: that node's local move, relayed.
+                // Nothing crosses the wire -- its engines share its filesystem
+                // exactly as ours do, and pulling the payload here to push it
+                // back would be absurd.
+                if (then !== "remove") continue;
+                items += `<div class="ctx-item" onclick="_moveOnNode(\'${jsNode}\', \'${jsEng}\')">${esc(n.name)}-${esc(e)} <span class="sr-desc">(${t("there, no copy")})</span></div>`;
+            } else if (allHere) {
+                items += `<div class="ctx-item" onclick="_sendToEngineSelected(\'${jsNode}\', \'${jsEng}\', \'${then}\')">${esc(n.name)}-${esc(e)}</div>`;
+            }
+        }
+    }
+    if (!items) items = `<div class="ctx-label">${t("Nowhere else to send it.")}</div>`;
+
+    const verb = then === "remove" ? t("Move to engine") : t("Duplicate to engine");
     const label = verb + ": " + tp(_selected.size, "{n} torrent", "{n} torrents");
     _openCtxSubmenu(
         `<div class="ctx-label">${label}</div>` +
@@ -2938,59 +3279,182 @@ async function _showAgentPicker(ev, mode) {
         `<div class="ctx-scroll">${items}</div>`, anchor);
 }
 
-// _rowAgent is which node currently holds a torrent, straight off the row.
-function _rowAgent(hash) {
-    const row = document.querySelector(`.t-row[data-hash="${hash}"]`);
-    return (row && row.dataset.agent) || "local";
-}
-
-async function _sendToAgentSelected(agentName, mode) {
+/// Bring a remote torrent here.
+///
+/// The mirror of a handoff: this node adds the torrent and is told the far side
+/// holds the data. Nothing is relayed through the API -- the bytes arrive over
+/// BitTorrent, hash-checked piece by piece like any other transfer.
+async function _fetchFromNode(nodeName, fromEngine, engine) {
     const entries = [..._selected.entries()];
     _hideCtxMenu();
-
-    let queued = 0;
+    let ok = 0;
     const errors = [];
     for (const [, sel] of entries) {
         const hash = _selHash(sel);
-        const source = _rowAgent(hash);
-        if (source === agentName) continue;
+        const row = (_hoardAllTorrents || []).find(x => x.info_hash === hash);
         try {
-            const r = await fetch("/api/jobs/move-remote", {
+            await api("/api/nodes/" + encodeURIComponent(nodeName) + "/fetch", {
                 method: "POST",
-                headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
                 body: JSON.stringify({
                     info_hash: hash,
-                    source_agent: source,
-                    target_agent: agentName,
-                    mode: mode,
+                    engine: engine,
+                    from_engine: fromEngine,
+                    category: (row && row.category) || "",
                 }),
             });
-            if (r.ok) {
-                queued++;
-            } else {
-                const body = await r.json().catch(() => ({}));
-                errors.push(`${hash.slice(0, 8)}: ${body.error || ("HTTP " + r.status)}`);
-            }
+            ok++;
         } catch (e) {
-            errors.push(`${hash.slice(0, 8)}: ${e.message}`);
+            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
         }
     }
-    if (errors.length > 0) {
-        hydraNotify(t("Send to agent"),
-            t("Sent {ok} to \"{agent}\", {failed} failure(s).",
-                { ok: queued, agent: agentName, failed: errors.length }) + "\n\n" + errors.join("\n"));
-    } else if (queued > 0) {
-        // Hours of transfer follow, so say where to watch it rather than
-        // leaving the row looking unchanged.
-        hydraNotify(mode === "move" ? t("Move to agent") : t("Duplicate to agent"), mode === "move"
-            ? tp(queued,
-                "Moving {n} torrent to \"{agent}\". It keeps seeding on this node until the copy is verified there; follow it in Jobs.",
-                "Moving {n} torrents to \"{agent}\". They keep seeding on this node until their copies are verified there; follow them in Jobs.",
-                { n: queued, agent: agentName })
-            : tp(queued,
-                "Duplicating {n} torrent to \"{agent}\". Both nodes will hold it; follow it in Jobs.",
-                "Duplicating {n} torrents to \"{agent}\". Both nodes will hold them; follow them in Jobs.",
-                { n: queued, agent: agentName }));
+    hydraNotify(t("Bring here"), errors.length
+        ? t("Fetched {ok} into \"{target}\", {failed} failure(s).",
+            { ok: ok, target: "local-" + engine, failed: errors.length }) + "\n\n" + errors.join("\n")
+        : t("Fetching {ok} into \"{target}\" from \"{node}\".",
+            { ok: ok, target: "local-" + engine, node: nodeName }));
+    fetchHoardPage(true);
+}
+
+/// Move a torrent between two engines of the node that already holds it.
+async function _moveOnNode(nodeName, engine) {
+    const entries = [..._selected.entries()];
+    _hideCtxMenu();
+    let ok = 0;
+    const errors = [];
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
+        try {
+            await api("/api/nodes/" + encodeURIComponent(nodeName) + "/move-engine", {
+                method: "POST",
+                body: JSON.stringify({ info_hash: hash, engine: engine }),
+            });
+            ok++;
+        } catch (e) {
+            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
+        }
+    }
+    hydraNotify(t("Move to engine"), errors.length
+        ? t("Moved {ok} to \"{target}\", {failed} failure(s).",
+            { ok: ok, target: nodeName + "-" + engine, failed: errors.length }) + "\n\n" + errors.join("\n")
+        : t("Moved {ok} to \"{target}\". The files did not move.",
+            { ok: ok, target: nodeName + "-" + engine }));
+    fetchHoardPage(true);
+}
+
+/// Seed the selection from a second engine of this node.
+///
+/// No transfer and no second copy on disk. The daemon adds it in seed mode,
+/// because the data is there and already verified.
+async function _copyToLocalEngine(engine) {
+    const entries = [..._selected.entries()];
+    _hideCtxMenu();
+    let ok = 0;
+    const errors = [];
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
+        try {
+            await api("/api/torrents/" + encodeURIComponent(hash) + "/copy", {
+                method: "POST",
+                body: JSON.stringify({ engine: engine }),
+            });
+            ok++;
+        } catch (e) {
+            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
+        }
+    }
+    hydraNotify(t("Duplicate to engine"), errors.length
+        ? t("Seeding {ok} more from \"{target}\", {failed} failure(s).",
+            { ok: ok, target: "local-" + engine, failed: errors.length }) + "\n\n" + errors.join("\n")
+        : t("Seeding {ok} more from \"{target}\". Same files, second identity in the swarm.",
+            { ok: ok, target: "local-" + engine }));
+    fetchHoardPage(true);
+    updateRaceTorrents();
+}
+
+/// Move the selection to another engine of THIS node.
+///
+/// Instant and lossless: nothing is transferred, the files do not move, only
+/// ownership changes. Separate from the handoff on purpose -- sending the same
+/// request over the network would copy bytes that are already in the right
+/// place.
+async function _moveToLocalEngine(engine) {
+    const entries = [..._selected.entries()];
+    _hideCtxMenu();
+    let moved = 0;
+    const errors = [];
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
+        try {
+            // The row that was clicked, so the right copy moves.
+            const from = encodeURIComponent(_selAgent(sel));
+            await api("/api/torrents/" + encodeURIComponent(hash) + "/engine?agent=" + from, {
+                method: "POST",
+                body: JSON.stringify({ engine: engine }),
+            });
+            moved++;
+        } catch (e) {
+            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
+        }
+    }
+    if (errors.length) {
+        hydraNotify(t("Move to engine"),
+            t("Moved {ok} to \"{target}\", {failed} failure(s).",
+                { ok: moved, target: "local-" + engine, failed: errors.length }) + "\n\n" + errors.join("\n"));
+    } else {
+        hydraNotify(t("Move to engine"),
+            t("Moved {ok} to \"{target}\". The files did not move.",
+                { ok: moved, target: "local-" + engine }));
+    }
+    _scheduleHoardRender();
+    fetchHoardPage(true);
+}
+
+/// `then` is "keep" to duplicate and "remove" to move.
+///
+/// A move cannot delete anything now: the target receives the metainfo long
+/// before the bytes. The daemon waits for the far side to report complete and
+/// only then drops the local copy, and it fails safe -- a timeout or a restart
+/// leaves both copies, which is a duplicate to clean up rather than data gone.
+async function _sendToEngineSelected(nodeName, engine, then) {
+    const entries = [..._selected.entries()];
+    _hideCtxMenu();
+
+    let sent = 0;
+    const errors = [];
+    for (const [, sel] of entries) {
+        const hash = _selHash(sel);
+        // The torrent's category travels with it: the far side routes by
+        // category, and one it does not know would land it in the wrong tier.
+        const row = (_hoardAllTorrents || []).find(x => x.info_hash === hash)
+                 || (_raceTorrents || []).find(x => x.info_hash === hash);
+        try {
+            await api("/api/nodes/" + encodeURIComponent(nodeName) + "/handoff", {
+                method: "POST",
+                body: JSON.stringify({
+                    info_hash: hash,
+                    engine: engine,
+                    category: (row && row.category) || "",
+                    then: then,
+                }),
+            });
+            sent++;
+        } catch (e) {
+            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
+        }
+    }
+    const target = nodeName + "-" + engine;
+    if (errors.length) {
+        hydraNotify(t("Send to engine"),
+            t("Sent {ok} to \"{target}\", {failed} failure(s).",
+                { ok: sent, target: target, failed: errors.length }) + "\n\n" + errors.join("\n"));
+    } else if (then === "remove") {
+        hydraNotify(t("Send to engine"),
+            t("Sent {ok} to \"{target}\". The local copy goes once the far side reports complete.",
+                { ok: sent, target: target }));
+    } else {
+        hydraNotify(t("Send to engine"),
+            t("Sent {ok} to \"{target}\". They fetch the data from here; this node keeps its copy.",
+                { ok: sent, target: target }));
     }
 }
 
@@ -3035,6 +3499,7 @@ function _hideCtxSubmenu() {
 // choice being made stays visibly attached to the action that opened it.
 // The row the open submenu belongs to. Kept so a submenu that re-renders
 // itself (adding a tag re-opens the tag panel) stays where it was.
+let _ctxNodes = [];
 let _ctxSubAnchor = null;
 
 function _openCtxSubmenu(html, anchor) {
@@ -3365,14 +3830,18 @@ async function _pauseSelected(paused) {
         }
     }
 
-    const byEngine = { hoard: [], race: [] };
+    // Grouped by the ENGINE the row actually sits in, not by its mode. The same
+    // torrent may be seeded by hoard and by vpn1 at once, and pausing the row
+    // the operator clicked must not pause the other.
+    const byEngine = {};
     const remote = [];
     for (const sel of _selected.values()) {
         const hash = _selHash(sel);
         const mode = _selMode(sel);
         const agent = _selAgent(sel);
         if (!_isLocalAgent(agent)) { remote.push({ hash, mode, agent }); continue; }
-        (byEngine[mode] || byEngine.hoard).push(hash);
+        const engine = agent.startsWith("local-") ? agent.slice("local-".length) : mode;
+        (byEngine[engine] = byEngine[engine] || []).push(hash);
     }
     // The bulk endpoint below is this node's own; an agent's copy would
     // otherwise be silently skipped, or worse, applied to the local twin.
@@ -3383,11 +3852,16 @@ async function _pauseSelected(paused) {
             console.error("Failed to " + action + " on " + r.agent, r.hash, err);
         }
     }
-    for (const engine of ["hoard", "race"]) {
+    for (const engine of Object.keys(byEngine)) {
         const hashes = byEngine[engine];
         if (!hashes.length) continue;
+        // hoard and race keep their literal routes, which 3.x published; any
+        // other engine goes through the one that names it.
+        const url = (engine === "hoard" || engine === "race")
+            ? `/api/${engine}/pause`
+            : `/api/engines/${encodeURIComponent(engine)}/pause`;
         try {
-            await fetch(`/api/${engine}/pause`, {
+            await fetch(url, {
                 method: "POST",
                 headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
                 body: JSON.stringify({ hashes, paused }),
@@ -3396,7 +3870,7 @@ async function _pauseSelected(paused) {
             console.error(`Failed to ${action} ${engine}`, err);
         }
     }
-    _markLocallyStopped(byEngine.hoard, paused);
+    _markLocallyStopped(byEngine.hoard || [], paused);
     updateHoardStats();
 }
 
@@ -6056,7 +6530,7 @@ async function saveSettings() {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ port: Number(ch.value) }),
                     });
-                    hotApplied.push(t("{agent} listen port", { agent: ch.section }));
+                    hotApplied.push(t("{engine} listen port", { engine: ch.section }));
                 } catch (e) { if (tier === "hot") tier = "engine"; } // fall back to restart
             }
         }
@@ -6068,7 +6542,7 @@ async function saveSettings() {
         } else {
             const what = (tier === "full")
                 ? t("Daemon/auth settings changed, a full restart is required.")
-                : t("Settings changed, restart the agents to apply.");
+                : t("Settings changed, restart the engines to apply.");
             banner.innerHTML = `${base} ${what} ` +
                 `<button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`;
             if (_kc) banner.innerHTML += ' <span style="color:var(--text-secondary)">' + t("(API key updated for this browser)") + '</span>';
@@ -6087,7 +6561,7 @@ async function resetSettings() {
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
         <h3>${t("Reset to defaults")}</h3>
-        <p class="modal-desc">${esc(t("Every setting goes back to what a fresh install ships: ports, network mode, tracker passkeys, client spoofs, agent tuning."))}</p>
+        <p class="modal-desc">${esc(t("Every setting goes back to what a fresh install ships: ports, network mode, tracker passkeys, client spoofs, engine tuning."))}</p>
         <p class="modal-desc">${esc(t("Your login, your API key and your data directory are kept, so you do not lock yourself out. A copy of the current config is saved next to it first."))}</p>
         <div class="modal-actions">
             <button class="btn-small" id="reset-cancel">${t("Cancel")}</button>
@@ -6641,8 +7115,8 @@ async function clearTrackerPasskey() {
 async function deleteEngine(id){
     // Named as the agent, because that is the row the button sits in and the
     // name every category placement refers to.
-    if(!await hydraConfirm(t("Delete agent local-{id}? It stops seeding right away.", { id: id }))) return;
-    hydraNotify(t("Stopping agent {id}...", { id: id }));
+    if(!await hydraConfirm(t("Delete engine {id}? It stops seeding right away.", { id: id }))) return;
+    hydraNotify(t("Stopping engine {id}...", { id: id }));
     try{
         const res = await api("/api/engines/" + encodeURIComponent(id), {method:"DELETE"});
         // Only a node that could not stop it asks for a restart now.
@@ -6837,7 +7311,11 @@ const TABLE_COLS = {
         { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "-"}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
-        { id: "agent", label: "Agent", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
+        // "Location", not "Agent": the value is `local-<engine>` for a row held here
+        // and the NODE name for one held elsewhere, so it answers "where does this
+        // torrent live" across both levels of the model. Unifying the two spellings
+        // is a separate decision -- a node does not know its own name today.
+        { id: "agent", label: "Location", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
     ],
     "race-table": [
         { id: "name", label: "Name", sort: "name", render: t => `<td title="${esc(t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
@@ -6851,7 +7329,11 @@ const TABLE_COLS = {
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "-")}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
-        { id: "agent", label: "Agent", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
+        // "Location", not "Agent": the value is `local-<engine>` for a row held here
+        // and the NODE name for one held elsewhere, so it answers "where does this
+        // torrent live" across both levels of the model. Unifying the two spellings
+        // is a separate decision -- a node does not know its own name today.
+        { id: "agent", label: "Location", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
     ],
 };
 const _COL_SORTFN = { "hoard-table": "sortHoard", "race-table": "sortRace" };
@@ -7167,7 +7649,7 @@ async function refreshStartupPause() {
     const engines = (st.held || []).join(", ");
     // textContent, so no esc(): escaping here would put the entities on screen.
     document.getElementById("startup-pause-title").textContent =
-        window.t("Startup pause: {agents} not announcing", { agents: engines });
+        window.t("Startup pause: {engines} not announcing", { engines: engines });
     document.getElementById("startup-pause-text").textContent =
         window.t("No announces or peer connections are leaving Hydra. Adjust your rate limits now if you need to, then start. Torrents you paused yourself stay paused.");
     el.style.display = "block";
@@ -7200,9 +7682,9 @@ window.addEventListener("DOMContentLoaded", refreshStartupPause);
 // only its fields, and saving clears the others.
 const NET_MODES = [
     { id: "direct", label: "Direct",
-      blurb: "No proxy. Each agent leaves by the interface you give it, or by the host's default route when you give it none. Use this when you build the tunnels yourself." },
+      blurb: "No proxy. Each engine leaves by the interface you give it, or by the host's default route when you give it none. Use this when you build the tunnels yourself." },
     { id: "wireguard", label: "WireGuard, managed by Hydra",
-      blurb: "Give each agent a provider .conf. Hydra creates the tunnel, pins the agent to it and asks the provider for an incoming port. Nothing to set up on the host." },
+      blurb: "Give each engine a provider .conf. Hydra creates the tunnel, pins the engine to it and asks the provider for an incoming port. Nothing to set up on the host." },
     { id: "gluetun", label: "Gluetun",
       blurb: "A gluetun container holds the tunnel and hands out a forwarded port. Hydra reads that port and follows it." },
     { id: "socks5", label: "SOCKS5 proxy",
@@ -7278,15 +7760,15 @@ function _netPortsHTML(f, skip) {
     const hidden = skip || {};
     let out = "";
     if (!hidden["race"]) {
-        out += _netField("net-race-port", "Race listen port", "number", f.race_listen_port, "Port the race agent accepts peers on.");
+        out += _netField("net-race-port", "Race listen port", "number", f.race_listen_port, "Port the race engine accepts peers on.");
     }
     if (!hidden["hoard"]) {
-        out += _netField("net-hoard-port", "Hoard listen port", "number", f.hoard_listen_port, "Port the hoard agent accepts peers on. It has to differ from the race one.");
+        out += _netField("net-hoard-port", "Hoard listen port", "number", f.hoard_listen_port, "Port the hoard engine accepts peers on. It has to differ from the race one.");
     }
     for (const e of _netExtras()) {
         if (hidden[e.id]) continue;
         out += _netField("net-extra-port-" + e.id, t("{id} listen port", { id: e.id }), "number", e.listen_port,
-            t("Port this agent accepts peers on. It has to differ from every other agent's."));
+            t("Port this engine accepts peers on. It has to differ from every other engine's."));
     }
     // IPv6 is never hidden: it is the operator's choice in every mode.
     return out + _netCheckbox("net-ipv6", "Listen over IPv6 too", f.enable_ipv6, "Only if this host really has working IPv6. Announcing an address nobody can reach costs you peers.");
@@ -7346,7 +7828,7 @@ async function netModeInit() {
         body.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
         return;
     }
-    _netOrig = JSON.stringify({ mode: _netState.mode, fields: _netState.fields });
+    _netOrig = _stableJson({ mode: _netState.mode, fields: _netState.fields });
     netModeRender();
 }
 
@@ -7383,13 +7865,13 @@ function netModeRender() {
         // identities, and a single shared field could not say so: it put both
         // on one tunnel while the page implied otherwise.
         const list = (_detectedIfaces || []).map(i => (i.name || i));
-        const hint = "The interface this agent leaves by. Peer connections AND tracker announces are both bound to it, so neither can travel outside it. Empty means the host's default route.";
-        fields += `<div class="settings-section"><div class="settings-section-title">${t("Interface per agent")}</div>
-            ${_netSelect("net-race-iface", "Race agent interface", f.race_bind_interface, list, hint)}
-            ${_netSelect("net-hoard-iface", "Hoard agent interface", f.hoard_bind_interface, list, hint)}
+        const hint = "The interface this engine leaves by. Peer connections AND tracker announces are both bound to it, so neither can travel outside it. Empty means the host's default route.";
+        fields += `<div class="settings-section"><div class="settings-section-title">${t("Interface per engine")}</div>
+            ${_netSelect("net-race-iface", "Race engine interface", f.race_bind_interface, list, hint)}
+            ${_netSelect("net-hoard-iface", "Hoard engine interface", f.hoard_bind_interface, list, hint)}
             ${_netExtras().map(e => _netSelect("net-extra-iface-" + e.id,
-                t("{id} agent interface ({role})", { id: e.id, role: e.role }), e.bind_interface, list, hint)).join("")}
-            <p class="sr-desc">${t("Give the agents different tunnels to spread them across several exit addresses, or the same one to keep them together. Leave them empty on a host with no VPN.")}</p>
+                t("{id} engine interface ({role})", { id: e.id, role: e.role }), e.bind_interface, list, hint)).join("")}
+            <p class="sr-desc">${t("Give the engines different tunnels to spread them across several exit addresses, or the same one to keep them together. Leave them empty on a host with no VPN.")}</p>
         </div>`;
     }
     if (mode === "gluetun") {
@@ -7397,8 +7879,8 @@ function netModeRender() {
             ${_netCheckbox("net-gluetun", "Take the listen port from gluetun", f.gluetun_port_forward, "Gluetun asks your provider for a forwarded port and that port changes with the lease. Hydra reads it, listens there, and follows it. Announces are held at startup until it knows the port, so no tracker is ever handed the wrong one.")}
             ${_netField("net-gluetun-url", "Gluetun control server", "text", f.gluetun_url, "Empty means http://127.0.0.1:8000, which is right when Hydra shares gluetun's network.")}
             ${_netField("net-gluetun-key", "Gluetun API key", "password", f.gluetun_api_key, "Recent gluetun versions refuse every request without one. The role needs the route GET /v1/portforward.")}
-            ${_netEngineSelect("net-gluetun-engine", "Agent that takes the port", f.gluetun_port_engine, "A provider forwards a single port, so one agent gets it. Hoard seeds around the clock, so being reachable pays off continuously; race needs peers fast on a fresh torrent.")}
-            <p class="sr-desc">${t("The other agent keeps its own listen port and stays unreachable.")}</p>
+            ${_netEngineSelect("net-gluetun-engine", "Engine that takes the port", f.gluetun_port_engine, "A provider forwards a single port, so one engine gets it. Hoard seeds around the clock, so being reachable pays off continuously; race needs peers fast on a fresh torrent.")}
+            <p class="sr-desc">${t("The other engines keep their own listen port and stay unreachable.")}</p>
         </div>`;
     }
     if (mode === "socks5" || mode === "proxy_v2") fields += _netSocksHTML(f);
@@ -7415,7 +7897,7 @@ function netModeRender() {
     const portsBody = _netPortsHTML(f, wgAuto);
     fields += `<div class="settings-section"><div class="settings-section-title">${t("Ports")}</div>${portsBody}${
         mode === "wireguard" && Object.keys(wgAuto).length
-            ? `<p class="sr-desc">${t("The agents not listed here take their port from their provider and follow it when the lease rotates; it is shown with their tunnel above.")}</p>`
+            ? `<p class="sr-desc">${t("The engines not listed here take their port from their provider and follow it when the lease rotates; it is shown with their tunnel above.")}</p>`
             : ""
     }</div>`;
 
@@ -7445,6 +7927,22 @@ function netModeRender() {
     // are doing right now, which is a different question from what the config
     // file says, and the two are worth seeing side by side.
     if (mode === "wireguard") netWgLoad();
+}
+
+// Compare two shapes by CONTENT, not by the order their keys happen to be in.
+//
+// The unsaved-changes check compared `JSON.stringify` of the server's payload
+// against `JSON.stringify` of an object this file builds by hand. Same keys,
+// same values, different order -- serde sorts them, the literal below does not
+// -- so opening Config reported unsaved changes before anything was touched,
+// and the leave prompt fired on the way out. Sorting first makes the comparison
+// about the values, and keeps it right if either side gains a key later.
+function _stableJson(v) {
+    if (Array.isArray(v)) return "[" + v.map(_stableJson).join(",") + "]";
+    if (v && typeof v === "object") {
+        return "{" + Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + _stableJson(v[k])).join(",") + "}";
+    }
+    return JSON.stringify(v);
 }
 
 function netModeCollect() {
@@ -7506,13 +8004,13 @@ async function netModeSave() {
         });
         let extra = "";
         for (const w of (r.warnings || [])) extra += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
-        _netOrig = JSON.stringify({ mode: _netState.mode, fields: fields });
+        _netOrig = _stableJson({ mode: _netState.mode, fields: fields });
         // Only a listen port still needs a restart -- it is the one setting a
         // running engine keeps across a config apply. Everything else on this
         // page reaches the engines in seconds, and a banner shown anyway taught
         // people to restart for changes that were already live.
         if (r.restart_required) {
-            _setRestartBanner(t("Saved. The agents need a restart to pick up the new listen port.") +
+            _setRestartBanner(t("Saved. The engines need a restart to pick up the new listen port.") +
                 ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`);
         } else {
             extra = `<div class="result-msg success" style="margin:.3em 0">${esc(t("Saved and applied, no restart needed."))}</div>` + extra;
@@ -7745,55 +8243,16 @@ function _agentAction(agent, engine, action, hash, extra) {
 // SSE carries this node's engines only, so rows on agents never move between
 // hydrations. A short poll of the agent slice alone keeps them current without
 // bringing back the full-list fetch that hydration replaced.
-const AGENT_POLL_INTERVAL = 5000;
-let _agentPollTimer = null;
-
-async function _pollAgentRows() {
-    if (!_ctxAgents.some(a => a.name && a.kind !== "local")) return;
-    if (document.hidden) return;
-    let rows;
-    try {
-        rows = await api("/api/agents/torrents");
-    } catch (e) {
-        return; // a failed poll is not evidence that anything changed
-    }
-    if (!Array.isArray(rows) || !_hoardAllTorrents) return;
-
-    const byKey = new Map(_hoardAllTorrents.map(t => [_rowKey(t), t]));
-    let changed = false;
-    const seen = new Set();
-    for (const r of rows) {
-        if ((r.mode || "hoard") !== "hoard") continue;
-        const k = _rowKey(r);
-        seen.add(k);
-        const cur = byKey.get(k);
-        if (!cur) {
-            _hoardAllTorrents.push(r);
-            changed = true;
-            continue;
-        }
-        // Upsert in place so sort order and selection survive the refresh.
-        Object.assign(cur, r);
-        changed = true;
-    }
-    // A torrent removed on an agent has to leave the list too.
-    for (const [k, t] of byKey) {
-        if (_isLocalAgent(t.agent)) continue;
-        if (!seen.has(k)) {
-            _hoardAllTorrents = _hoardAllTorrents.filter(x => _rowKey(x) !== k);
-            changed = true;
-        }
-    }
-    if (changed) {
-        try { _renderHoardCounts(); } catch (_) {}
-        _scheduleHoardRender();
-    }
-}
-
-window.addEventListener("DOMContentLoaded", () => {
-    if (_agentPollTimer) clearInterval(_agentPollTimer);
-    _agentPollTimer = setInterval(_pollAgentRows, AGENT_POLL_INTERVAL);
-});
+// The remote-row poller is gone: `/api/hoard/page` merges the fleet
+// server-side now, so the browser is handed one list that already holds every
+// node's rows.
+//
+// Leaving it in would have been worse than redundant. It read
+// `/api/agents/torrents` -- an `empty_list_route!` that always answers `[]` --
+// and then DROPPED every row whose agent was not local and not in that answer,
+// which is exactly the merged remote rows. It never ran only because its guard
+// tested a list that was always empty; pointing that guard at the real node
+// list would have made it delete the fleet from the table every five seconds.
 
 
 // ── The engines' network: one polygon, one vertex per engine ────────────────
@@ -7883,7 +8342,7 @@ function openNetPanel(from) {
                  <div class="nr-sub">${esc(e.role)} · ${where}${port}${e.detail ? " · " + esc(e.detail) : ""}</div></div>
             <div class="nr-ip">${ip}${ip6}</div>
         </div>`;
-    }).join("") || `<div class="net-row"><div></div><div class="nr-sub">${t("No agent measured yet")}</div><div></div></div>`;
+    }).join("") || `<div class="net-row"><div></div><div class="nr-sub">${t("No engine measured yet")}</div><div></div></div>`;
 
     const r = from.getBoundingClientRect();
     panel.style.visibility = "hidden";
@@ -8097,7 +8556,7 @@ async function netWgUpload() {
 
 async function netWgDeleteConfig(name) {
     const out = document.getElementById("net-wg-result");
-    if (!confirm(t("Remove {name}? The agent using it will not come up until another file is chosen.", { name }))) return;
+    if (!confirm(t("Remove {name}? The engine using it will not come up until another file is chosen.", { name }))) return;
     try {
         await api("/api/network/wireguard/configs/" + encodeURIComponent(name), { method: "DELETE" });
         await netWgLoad();
@@ -8134,7 +8593,7 @@ async function netWgSave() {
         for (const w of (r.warnings || [])) extra += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
         out.innerHTML = extra + `<div class="result-msg success">${esc(t(r.note || "Saved."))}</div>`;
         if (r.restart_required) {
-            _setRestartBanner(t("Saved. The tunnels come up at the next restart, before the agents start.") +
+            _setRestartBanner(t("Saved. The tunnels come up at the next restart, before the engines start.") +
                 ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply and restart")}</button>`);
         }
     } catch (e) {

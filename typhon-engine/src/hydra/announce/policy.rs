@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn a_spoofed_tracker_gets_the_claimed_client_and_no_second_announce() {
         let p = policy();
-        let r = prepare(&p, "https://mam.example/announce/K", &"ab".repeat(20), 16171, 0, 0, 0, "")
+        let r = prepare(&p, "https://mam.example/announce/K", &"ab".repeat(20), 16171, 0, 0, 0, "", None)
             .unwrap();
         assert!(r.url.contains("peer_id=-qB5220-abcdefghijkl"), "{}", r.url);
         assert_eq!(r.user_agent, "qBittorrent/5.2.2");
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn an_ordinary_tracker_keeps_our_identity_and_gets_a_second_announce() {
         let p = policy();
-        let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 1, 2, 3, "started")
+        let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 1, 2, 3, "started", None)
             .unwrap();
         assert!(r.url.starts_with("https://tr4ker.net/announce/NEWKEY?"), "{}", r.url);
         assert!(r.url.contains("peer_id=-TY0001-abcdefghijkl"));
@@ -264,7 +264,7 @@ mod tests {
     fn a_tracker_marked_off_gets_no_second_announce() {
         let mut p = policy();
         p.secondary_stats.insert("tr4ker.net".into(), "off".into());
-        let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 0, 0, 5, "")
+        let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 0, 0, 5, "", None)
             .unwrap();
         assert!(r.secondary_url.is_none());
     }

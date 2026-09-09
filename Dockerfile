@@ -12,6 +12,9 @@ COPY third_party /build/third_party
 # /changelog.md, and the default config a first run writes. They live at the
 # repository root, so the builder needs them even though it builds one crate.
 COPY CHANGELOG.md /build/CHANGELOG.md
+# Baked in like the changelog and the front: /install.sh is served to a machine
+# that is about to become a node, so it has to travel inside the binary.
+COPY install.sh /build/install.sh
 COPY configs /build/configs
 # The interface, baked into the binary by include_str!/include_bytes! the way
 # the Go embedded it. Without this the build fails at compile time, which is

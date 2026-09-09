@@ -909,6 +909,12 @@ input[type="file"] {
 }
 .sev-red { background: var(--accent-red); box-shadow: 0 0 6px rgba(248, 81, 73, 0.55); }
 .sev-amber { background: var(--accent-yellow); box-shadow: 0 0 6px rgba(227, 179, 65, 0.5); }
+/* An entry shown but not actionable: an offline node is worth naming, since
+   "why is it not in the list" is the question hiding it would create. */
+.ctx-item.ctx-disabled { opacity: .45; cursor: default; }
+.ctx-item.ctx-disabled:hover { background: none; }
+
+.sev-green { background: var(--accent-green, #3fb950); box-shadow: 0 0 6px rgba(63, 185, 80, 0.5); }
 .sev-muted { background: var(--text-muted); }
 .sev-label { font-size: 11px; color: var(--text-secondary); vertical-align: middle; }
 

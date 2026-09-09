@@ -38,6 +38,24 @@ pub struct Engine {
     /// reports these as "held": nothing announces or dials until released.
     pub start_paused: bool,
     pub enable_ipv6: bool,
+    /// The session this engine was actually configured with, already merged
+    /// from its role profile and its own overrides.
+    ///
+    /// `connect` used to re-derive this with `match id { "race" => config.race,
+    /// _ => config.hoard }`, which threw away everything `local_engines`
+    /// computed: a third engine -- one VPN tunnel per engine, the whole point
+    /// of "one agent, one engine" -- bound hoard's port and hoard's interface.
+    /// The fields below were right all along, but only `netprobe` read them,
+    /// so the network tab showed a port the socket was not listening on.
+    pub session: crate::config::Session,
+    /// Whether a peer listener is actually bound.
+    ///
+    /// Not "was asked to listen": an engine pinned to an interface that is not
+    /// there logs "session started" and "on the network, announcing", then a
+    /// fraction of a millisecond later logs that the listener failed. It holds
+    /// its catalogue, answers the API and accepts no peer. Published so the
+    /// fleet page can say so instead of drawing it like a healthy engine.
+    pub listening: Arc<std::sync::atomic::AtomicBool>,
     pub manager: Arc<TorrentManager>,
     /// Kept so the engine can be put on the network after it is built.
     pub disk: Arc<DiskManager>,
@@ -88,6 +106,8 @@ impl EngineHost {
                 bind_interface: session.bind_interface.clone(),
                 start_paused: session.start_paused,
                 enable_ipv6: session.enable_ipv6,
+                session: session.clone(),
+                listening: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 manager,
                 disk,
                 announce_cache: Default::default(),
@@ -112,10 +132,9 @@ impl EngineHost {
     /// Put every engine that asks for it on the network.
     async fn connect(&self, config: &Config, config_dir: &std::path::Path) {
         for engine in &self.engines {
-            let session = match engine.id.as_str() {
-                "race" => &config.race,
-                _ => &config.hoard,
-            };
+            // The engine's own merged session. NOT config.race / config.hoard:
+            // an engine that is neither is a legitimate configuration.
+            let session = &engine.session;
             if !networking_enabled() {
                 tracing::warn!(
                     engine = %engine.id,
@@ -131,6 +150,7 @@ impl EngineHost {
                         engine.manager.clone(),
                         engine.disk.clone(),
                         &engine_cfg,
+                        engine.listening.clone(),
                     )
                     .await;
                     // Nothing else in this process tells a tracker we exist.
@@ -146,7 +166,9 @@ impl EngineHost {
                             String::new(),
                         ),
                         session.listen_port,
-                        if engine.id == "race" {
+                        // By role: "race" is a behaviour, not a name. An engine
+                        // called vpn1 with role=race announces like a racer.
+                        if engine.role == "race" {
                             crate::announce::runner::Mode::Race
                         } else {
                             crate::announce::runner::Mode::Hoard
@@ -155,7 +177,7 @@ impl EngineHost {
                     );
                     crate::workers::spawn_stagger_start(engine.manager.clone());
                     crate::workers::spawn_verify_throttle(engine.manager.clone());
-                    if engine.id == "race" {
+                    if engine.role == "race" {
                         crate::workers::spawn_race_drain(
                             engine.manager.clone(),
                             config.race_drain.clone(),
@@ -167,12 +189,15 @@ impl EngineHost {
                         engine.announce_cache.clone(),
                         session.active_downloads,
                     );
+                    // Deliberately says "starting", not "on the network": the
+                    // listener binds in a task that has not run yet, so this
+                    // line cannot know. /api/engines publishes what happened.
                     tracing::info!(
                         engine = %engine.id,
                         listen_port = session.listen_port,
                         dht = session.enable_dht,
                         pex = session.enable_pex,
-                        "engine on the network, announcing"
+                        "engine starting, announcing"
                     );
                 }
                 None => {
@@ -278,6 +303,57 @@ mod tests {
         assert_eq!(held([true, true]), vec!["hoard", "race"]);
         assert_eq!(held([false, true]), vec!["hoard"]);
         assert!(held([false, false]).is_empty());
+    }
+
+    /// A third engine must keep ITS port and ITS interface.
+    ///
+    /// This is the multi-tunnel case -- one engine per VPN on one machine --
+    /// and it was broken: `connect` re-derived the session with
+    /// `match id { "race" => config.race, _ => config.hoard }`, so anything
+    /// that was not race got hoard's network. Two engines then bound the same
+    /// port, and the network tab still showed the configured one because
+    /// `netprobe` reads the (correct) `Engine` fields rather than the socket.
+    ///
+    /// The assertion is on `Engine::session`, which is what `connect` now
+    /// consumes: the previous code had no such field to read.
+    #[test]
+    fn an_extra_engine_keeps_its_own_network() {
+        let dir = std::env::temp_dir().join(format!("hydra-engtest-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut config = Config::default();
+        config.race.listen_port = 16171;
+        config.hoard.listen_port = 16172;
+        config.hoard.bind_interface = "eth0".into();
+
+        let mut over = toml::value::Table::new();
+        over.insert("listen_port".into(), toml::Value::Integer(16999));
+        over.insert("bind_interface".into(), toml::Value::String("wg1".into()));
+        config.agent.push(crate::config::Agent {
+            name: "vpn1".into(),
+            role: "hoard".into(),
+            engine_id: "vpn1".into(),
+            session: over,
+            ..Default::default()
+        });
+
+        let host = EngineHost::offline(&config, &dir);
+        let vpn1 = host
+            .engines()
+            .iter()
+            .find(|e| e.id == "vpn1")
+            .expect("the extra engine must exist");
+
+        assert_eq!(vpn1.session.listen_port, 16999, "took another engine's port");
+        assert_eq!(vpn1.session.bind_interface, "wg1", "took another engine's interface");
+        // What netprobe shows and what connect binds must be the same thing.
+        assert_eq!(vpn1.listen_port, vpn1.session.listen_port);
+        assert_eq!(vpn1.bind_interface, vpn1.session.bind_interface);
+        // And it must not have collided with hoard.
+        let hoard = host.engines().iter().find(|e| e.id == "hoard").unwrap();
+        assert_ne!(vpn1.session.listen_port, hoard.session.listen_port);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The switch is off only for the three spellings a bench would use, and

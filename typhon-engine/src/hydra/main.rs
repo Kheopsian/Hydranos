@@ -37,6 +37,7 @@ mod web;
 mod benchdb;
 mod benchsampler;
 mod netprobe;
+mod nodes;
 mod bootstrap;
 mod announce;
 mod health;
@@ -255,6 +256,15 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "hydra API listening");
-    axum::serve(listener, app).await?;
+    // with_connect_info so a handler can see who dialled it. One thing needs it:
+    // a node being handed a torrent has to be told where to fetch it from, and
+    // the sender cannot know which of ITS addresses the receiver can reach --
+    // tunnels, NAT, several interfaces. The receiver can: it is the address the
+    // request arrived from.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

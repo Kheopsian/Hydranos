@@ -17,6 +17,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -26,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.12.1";
+pub const HYDRA_VERSION: &str = "4.14.0";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -315,6 +316,671 @@ macro_rules! guard {
             return unauthorised();
         }
     };
+}
+
+// ---------------------------------------------------------------------------
+// The fleet
+// ---------------------------------------------------------------------------
+//
+// A node is another Hydra, addressed by URL and its own API key, both kept in
+// the store rather than in default.toml. Declaring one used to mean editing a
+// TOML over SSH, which is the single reason the agent model went unused.
+
+/// Every node, each probed live.
+///
+/// Probed concurrently: six unreachable nodes must cost one timeout, not six.
+/// The local instance is NOT in this list -- it is not something the operator
+/// can add or remove, and folding it in would invite a "delete" that cannot work.
+async fn get_nodes(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+
+    // The lock is released before any await: holding it across the network
+    // would serialise every other store reader behind the slowest node.
+    let nodes = {
+        let store = state.store.lock().unwrap();
+        store.nodes().unwrap_or_default()
+    };
+
+    let probes = nodes.iter().map(|n| {
+        let (url, key) = (n.url.clone(), n.api_key.clone());
+        async move { crate::nodes::probe(&url, &key).await }
+    });
+    let healths = futures::future::join_all(probes).await;
+
+    let out: Vec<serde_json::Value> = nodes
+        .iter()
+        .zip(healths)
+        .map(|(n, h)| {
+            serde_json::json!({
+                "name": n.name,
+                "url": n.url,
+                "enabled": n.enabled,
+                "added_at": n.added_at,
+                "health": h,
+            })
+        })
+        .collect();
+    Json(out).into_response()
+}
+
+/// Probe a node without saving it.
+///
+/// Separate from the add on purpose: the operator gets to see "key refused"
+/// before committing a row, instead of adding an entry that shows up broken.
+async fn post_node_test(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let url = v.get("url").and_then(|x| x.as_str()).unwrap_or_default();
+    if url.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "url is required"})))
+            .into_response();
+    }
+    let key = v.get("api_key").and_then(|x| x.as_str()).unwrap_or_default();
+    Json(crate::nodes::probe(url, key).await).into_response()
+}
+
+/// Add or update a node.
+///
+/// The probe runs FIRST and a failure is a 400: a node that was never reachable
+/// has nothing to offer the fleet, and storing it would only produce a row that
+/// is permanently red with no way to tell a typo from an outage.
+async fn post_node(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let url = v
+        .get("url")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let api_key = v.get("api_key").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    if name.is_empty() || url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "name and url are required"})),
+        )
+            .into_response();
+    }
+    // A node URL is used for two different things: this process probes it, and
+    // the operator's BROWSER is redirected to it by /node/<name>/open. A
+    // loopback address satisfies the first and can never satisfy the second --
+    // it would send the browser to its own machine. Reported from the bench,
+    // where `http://127.0.0.1:8499` probed green and opened nothing.
+    //
+    // Refused rather than papered over: a second Hydra on this very host is
+    // still reachable at the address other machines use, and that is the one
+    // that works for both jobs.
+    let host = url_host(&url);
+    if is_loopback_host(&host) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "{host} is this machine's own loopback: the browser could never reach the node there. Use the address other machines use."
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    // A name is a path segment in /node/<name>/open, so it may not carry one.
+    if name.contains('/') || name.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "name cannot contain / or .."})),
+        )
+            .into_response();
+    }
+
+    let health = crate::nodes::probe(&url, &api_key).await;
+    if !health.online {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": health.error, "health": health})),
+        )
+            .into_response();
+    }
+
+    let node = crate::store::Node {
+        name: name.clone(),
+        url,
+        api_key,
+        enabled: true,
+        added_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
+    {
+        let store = state.store.lock().unwrap();
+        if let Err(e) = store.put_node(&node) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    }
+    Json(serde_json::json!({"status": "ok", "name": name, "health": health})).into_response()
+}
+
+/// Remove a node, and say so only if one went.
+///
+/// The route this replaces, `delete_agent`, answered `{"status":"ok"}` without
+/// touching anything: the row vanished from the table and came back on reload,
+/// with nothing anywhere to explain it.
+async fn delete_node(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let removed = {
+        let store = state.store.lock().unwrap();
+        store.delete_node(&name).unwrap_or(false)
+    };
+    if !removed {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+            .into_response();
+    }
+    Json(serde_json::json!({"status": "ok"})).into_response()
+}
+
+/// The host part of a URL, however it was written.
+fn url_host(url: &str) -> String {
+    url.split("//")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .rsplit(':')
+        .last()
+        .unwrap_or_default()
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_string()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0") || host.starts_with("127.")
+}
+
+/// Mint a one-time enrolment token and the command that spends it.
+///
+/// This is how a node joins, and the direction matters: the new machine
+/// registers ITSELF. This Hydra never opens a session anywhere and never holds
+/// a credential for another host, so compromising its API cannot become code
+/// execution on the fleet. The operator pastes one line into the shell they
+/// already have open.
+///
+/// The command points back at the address the CALLER used to reach here, taken
+/// from the Host header: this process cannot otherwise know which of its
+/// addresses a third machine can resolve, and a guess would produce a command
+/// that installs a node and then fails to register it.
+async fn post_node_enrol(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let (token, expires) = {
+        let store = state.store.lock().unwrap();
+        // Thirty minutes: long enough to paste into a shell and watch an
+        // install, short enough that a token left in a scrollback is stale.
+        match store.create_enrol_token(1800) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            }
+        }
+    };
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("this-hydra:8199");
+    let base = format!("http://{host}");
+    Json(serde_json::json!({
+        "token": token,
+        "expires_at": expires,
+        "command": format!(
+            "curl -fsSL {base}/install.sh | sh -s -- --register-to {base} --token {token}"
+        ),
+    }))
+    .into_response()
+}
+
+/// A node registering itself, at the end of its own install.
+///
+/// Authenticated by the enrolment token ALONE, which is deliberate: the new
+/// machine has no API key of this one, and giving it one would be handing out
+/// exactly the credential this design exists to avoid moving around. The token
+/// is single use and expiring, and spending it is one conditional UPDATE so two
+/// machines racing on the same token cannot both win.
+async fn post_node_register(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let token = v
+        .get("token")
+        .and_then(|x| x.as_str())
+        .map(String::from)
+        .or_else(|| {
+            headers
+                .get("X-Enrol-Token")
+                .and_then(|h| h.to_str().ok())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let url = v
+        .get("url")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let api_key = v.get("api_key").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+
+    let bad = |m: &str| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response()
+    };
+    if token.is_empty() || name.is_empty() || url.is_empty() {
+        return bad("token, name and url are required");
+    }
+    if name.contains('/') || name.contains("..") {
+        return bad("name cannot contain / or ..");
+    }
+    if is_loopback_host(&url_host(&url)) {
+        return bad("a node cannot register itself at a loopback address");
+    }
+
+    // Spent BEFORE anything else is decided: a token must burn even on a
+    // request that then turns out to be a duplicate name, or it could be
+    // retried until one lands.
+    let spent = {
+        let store = state.store.lock().unwrap();
+        store.consume_enrol_token(&token).unwrap_or(false)
+    };
+    if !spent {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "enrolment token unknown, already used, or expired"})),
+        )
+            .into_response();
+    }
+
+    // An existing name is refused rather than overwritten: a token holder must
+    // not be able to repoint a node the operator already trusts.
+    let taken = {
+        let store = state.store.lock().unwrap();
+        store.node(&name).ok().flatten().is_some()
+    };
+    if taken {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("a node named {name} already exists")})),
+        )
+            .into_response();
+    }
+
+    let node = crate::store::Node {
+        name: name.clone(),
+        url,
+        api_key,
+        enabled: true,
+        added_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
+    {
+        let store = state.store.lock().unwrap();
+        if let Err(e) = store.put_node(&node) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    }
+    Json(serde_json::json!({"status": "ok", "name": name})).into_response()
+}
+
+/// The enrolment script, served so the command is one line.
+async fn get_install_script() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/x-shellscript")],
+        include_str!("../../../install.sh"),
+    )
+        .into_response()
+}
+
+/// Hand one torrent to a node.
+///
+/// Sends the metainfo, then tells the far side where to fetch the data from.
+/// This node keeps its copy: a handoff is a seed, and dropping the source is a
+/// separate decision the operator makes once the target reports complete.
+async fn post_node_handoff(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let info_hash = v
+        .get("info_hash")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let from = v.get("from").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let category = v.get("category").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    // Which engine ON the target. Empty lets its category decide, which is what
+    // an operator picking a node rather than an engine is asking for.
+    let engine = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+
+    if info_hash.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "info_hash is required"})),
+        )
+            .into_response();
+    }
+
+    // With no `from`, hand the target `auto:<port>` and let IT fill in the
+    // address: it is the only side that knows which of ours it can reach. The
+    // port is the listening port of the engine that actually holds the torrent,
+    // which is not necessarily the first engine on this node.
+    let from = if from.is_empty() {
+        let Some((engine_id, _)) = find_torrent(&state, &info_hash) else {
+            return not_found();
+        };
+        let port = state
+            .engines
+            .engines()
+            .iter()
+            .find(|e| e.id == engine_id)
+            .map(|e| e.listen_port)
+            .unwrap_or(0);
+        if port == 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "this engine has no listening port; pass `from` explicitly"
+                })),
+            )
+                .into_response();
+        }
+        format!("auto:{port}")
+    } else if from.parse::<std::net::SocketAddr>().is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{from} is not a host:port")})),
+        )
+            .into_response();
+    } else {
+        from
+    };
+
+    let node = {
+        let store = state.store.lock().unwrap();
+        store.node(&name).ok().flatten()
+    };
+    let Some(node) = node else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+            .into_response();
+    };
+    let blob = {
+        let store = state.store.lock().unwrap();
+        store.torrent_blob(&info_hash).ok().flatten()
+    };
+    let Some(blob) = blob else {
+        return not_found();
+    };
+
+    // "keep" duplicates, "remove" moves. A move cannot delete now: the target
+    // has the metainfo and none of the bytes yet. So it waits for the far side
+    // to report complete, and only then drops the local copy.
+    let then = v.get("then").and_then(|x| x.as_str()).unwrap_or("keep").to_string();
+
+    match crate::nodes::handoff(
+        &node.url, &node.api_key, &info_hash, blob, &from, &category, &engine,
+    )
+    .await
+    {
+        Ok(mut v) => {
+            if then == "remove" {
+                let (url, key) = (node.url.clone(), node.api_key.clone());
+                let (ih, eng) = (info_hash.clone(), engine.clone());
+                let st = state.clone();
+                tokio::spawn(async move {
+                    // Fails SAFE: a restart during the wait leaves both copies,
+                    // which is a duplicate to clean up rather than data gone.
+                    match crate::nodes::wait_until_complete(&url, &key, &ih, &eng).await {
+                        Ok(true) => {
+                            tracing::info!(hash = %ih, node = %url, "handoff complete, dropping the local copy");
+                            remove_torrent_everywhere(&st, &ih, true);
+                        }
+                        Ok(false) => tracing::warn!(
+                            hash = %ih, node = %url,
+                            "handoff did not complete in time; the local copy is kept"
+                        ),
+                        Err(e) => tracing::warn!(
+                            hash = %ih, node = %url, error = %e,
+                            "could not confirm the handoff; the local copy is kept"
+                        ),
+                    }
+                });
+            }
+            if let Some(o) = v.as_object_mut() {
+                o.insert("then".into(), serde_json::Value::String(then));
+            }
+            Json(v).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// Move a torrent between two engines OF A REMOTE node.
+///
+/// Relayed, not reimplemented: it is that node's own local move, which costs it
+/// nothing either -- its two engines share its filesystem exactly as ours do.
+/// Doing it from here would mean pulling the payload and pushing it back to the
+/// machine it never left.
+async fn post_node_move_engine(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let info_hash = v.get("info_hash").and_then(|x| x.as_str()).unwrap_or_default().to_lowercase();
+    let engine = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    if info_hash.is_empty() || engine.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "info_hash and engine are required"})),
+        )
+            .into_response();
+    }
+    let node = {
+        let store = state.store.lock().unwrap();
+        store.node(&name).ok().flatten()
+    };
+    let Some(node) = node else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+            .into_response();
+    };
+    let payload = serde_json::json!({ "engine": engine }).to_string();
+    match crate::nodes::forward(
+        &node.url,
+        &node.api_key,
+        reqwest::Method::POST,
+        &format!("api/torrents/{info_hash}/engine"),
+        payload.into_bytes(),
+    )
+    .await
+    {
+        Ok((status, body, _)) => {
+            let v: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::json!({"status": "ok"}));
+            (StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK), Json(v))
+                .into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// Pull a torrent FROM a node into an engine of this one.
+///
+/// The mirror of the handoff, and the same mechanism: the metainfo travels over
+/// HTTP, the data over BitTorrent. Only the direction of the dial changes -- we
+/// add the torrent here and are told that the far side holds it, instead of the
+/// other way round.
+async fn post_node_fetch(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let info_hash = v.get("info_hash").and_then(|x| x.as_str()).unwrap_or_default().to_lowercase();
+    let engine = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let from_engine = v.get("from_engine").and_then(|x| x.as_str()).unwrap_or("hoard").to_string();
+    let category = v.get("category").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+
+    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response();
+    if info_hash.is_empty() || engine.is_empty() {
+        return bad("info_hash and engine are required".into());
+    }
+    if !state.engines.engines().iter().any(|e| e.id == engine) {
+        return bad(format!("no engine named {engine} on this node"));
+    }
+    if find_torrent(&state, &info_hash).is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "this node already has that torrent"})),
+        )
+            .into_response();
+    }
+
+    let node = {
+        let store = state.store.lock().unwrap();
+        store.node(&name).ok().flatten()
+    };
+    let Some(node) = node else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+            .into_response();
+    };
+
+    let (blob, port) =
+        match crate::nodes::fetch_metainfo(&node.url, &node.api_key, &info_hash, &from_engine).await
+        {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response(),
+        };
+
+    let (hash, tname) = match add_torrent_bytes(&state, &blob, &category, "", "", false, false, &engine) {
+        Ok(v) => v,
+        Err(e) => return bad(e),
+    };
+
+    // Where to fetch it from. Unlike a push, no `auto:` is needed: the node's
+    // own URL is its address, and the engine list gave us the port.
+    let host = url_host(&node.url);
+    let mut queued = 0usize;
+    if let Some((_, torrent)) = find_torrent(&state, &hash) {
+        if let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() {
+            typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+            queued = 1;
+        } else if let Ok(mut it) = format!("{host}:{port}").to_socket_addrs() {
+            // A node declared by hostname still has to resolve to something.
+            if let Some(addr) = it.next() {
+                typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+                queued = 1;
+            }
+        }
+    }
+    Json(serde_json::json!({
+        "status": "ok", "info_hash": hash, "name": tname,
+        "engine": engine, "from": format!("{host}:{port}"), "peer_queued": queued
+    }))
+    .into_response()
+}
+
+/// Open a node's own front, already authenticated.
+///
+/// A redirect to the node's ORIGIN, with its key in the URL FRAGMENT. Not a
+/// path-prefixed proxy: the front asks for absolute paths (`/static/app.js`,
+/// `/api/hoard/page`), which under a `/node/<name>/` prefix would be served by
+/// this Hydra instead of the remote one.
+///
+/// The fragment is never sent to any server and never appears in a log or a
+/// Referer. app.js consumes it on load, moves it into that origin's
+/// localStorage and strips it -- which is the same place, and the same
+/// exposure, as a key the operator had typed into the login box by hand.
+async fn get_node_open(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let node = {
+        let store = state.store.lock().unwrap();
+        store.node(&name).ok().flatten()
+    };
+    let Some(node) = node else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+            .into_response();
+    };
+    let target = format!("{}/#key={}", node.url.trim_end_matches('/'), node.api_key);
+    (
+        StatusCode::TEMPORARY_REDIRECT,
+        [(axum::http::header::LOCATION, target)],
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +1562,23 @@ fn categories_map(state: &AppState) -> std::collections::BTreeMap<String, Catego
 ///
 /// An unknown category lands on race, which is what 3.x does and what every
 /// downstream client has been configured against.
-fn placement(state: &AppState, category: &str) -> (String, String) {
+fn placement(state: &AppState, category: &str, engine_override: &str) -> (String, String) {
+    let path = categories_map(state)
+        .get(category)
+        .map(|c| c.save_path.clone())
+        .unwrap_or_default();
+
+    // An explicit engine wins over the category's mode, and is the only way to
+    // reach an engine that is neither race nor hoard: a category carries a MODE
+    // ("hoard" or "race"), which names a behaviour, not one of the engines a
+    // node may host. Without this a torrent could never be placed in `vpn1`,
+    // whatever the config said.
+    if !engine_override.is_empty()
+        && state.engines.engines().iter().any(|e| e.id == engine_override)
+    {
+        return (engine_override.to_string(), path);
+    }
+
     match categories_map(state).get(category) {
         Some(cat) => {
             let engine =
@@ -921,12 +1603,13 @@ fn add_torrent_bytes(
     tags: &str,
     paused: bool,
     seed_mode: bool,
+    engine_override: &str,
 ) -> Result<(String, String), String> {
     let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
         .map_err(|e| format!("torrent file did not parse: {e}"))?;
     let hash = typhon_engine::torrent::hex_encode(&meta.info_hash);
 
-    let (engine_id, category_path) = placement(state, category);
+    let (engine_id, category_path) = placement(state, category, engine_override);
     // No inferred destination: with neither an explicit savepath nor a category
     // that names one, there is no correct answer, and picking one writes a
     // download somewhere the operator will not find it.
@@ -1273,13 +1956,13 @@ fn name_has_token(hay: &str, token: &str) -> bool {
     })
 }
 
-async fn get_engine_page(
+async fn engine_page_value(
     state: &AppState,
     engine_id: &str,
     query: &str,
-) -> Response {
+) -> serde_json::Value {
     let Some(engine) = state.engines.get(engine_id) else {
-        return Json(serde_json::json!({"total": 0, "filtered": 0, "rows": []})).into_response();
+        return serde_json::json!({"total": 0, "filtered": 0, "rows": []});
     };
 
     let param = |k: &str| query_param(query, k).unwrap_or_default();
@@ -1575,12 +2258,15 @@ async fn get_engine_page(
             .iter()
             .map(|(_, _, i)| typhon_engine::torrent::hex_encode(&torrents[*i as usize].info_hash))
             .collect();
-        return Json(serde_json::json!({
+        return serde_json::json!({
             "total": total,
             "filtered": filtered,
             "hashes": hashes,
-        }))
-        .into_response();
+            // Which engine answered. The selection universe has to carry it:
+            // the same hash may be held by two engines, and an action needs to
+            // know which copy was selected.
+            "engine": engine_id,
+        });
     }
 
     // Only the page window has to be in order. Partitioning around its end is
@@ -1645,15 +2331,318 @@ async fn get_engine_page(
         serde_json::Value::Null
     };
 
-    Json(serde_json::json!({
+    serde_json::json!({
         "total": total,
         "filtered": filtered,
         "offset": offset,
         "limit": limit,
         "rows": rows,
         "facets": facets,
+    })
+}
+
+/// The sort key of an emitted row, mirroring the one `engine_page_value` builds
+/// over its own structs.
+///
+/// It has to mirror it exactly, because the merge below interleaves pages that
+/// each node sorted for itself: a key that disagreed by one field would order
+/// two nodes' rows differently from the way each ordered its own, and rows
+/// would appear to jump between pages.
+fn row_sort_key(row: &serde_json::Value, sort: &str) -> (String, f64) {
+    let s = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let n = |k: &str| row.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    match sort {
+        "name" => (s("name").to_lowercase(), 0.0),
+        "state" => (s("state").to_lowercase(), 0.0),
+        "tracker_host" => (s("tracker_host").to_lowercase(), 0.0),
+        "category" => (s("category").to_lowercase(), 0.0),
+        // A seeding torrent sorts as complete whatever its stored progress,
+        // which is what the local path does when it builds its key.
+        "progress" => (
+            String::new(),
+            if s("state") == "seeding" { 1.0 } else { n("progress") },
+        ),
+        "total_size" | "ratio" | "upload_rate" | "download_rate" | "num_peers"
+        | "total_upload" | "total_download" | "completed_time" | "seeding_time" => {
+            (String::new(), n(sort))
+        }
+        _ => (String::new(), n("added_time")),
+    }
+}
+
+/// Interleave pages that are each already sorted.
+///
+/// Every node sorts and pages its OWN catalogue; nothing ships a whole library
+/// across the network. To answer "row 500 to 999 of the fleet" each node is
+/// asked for its first `offset + limit` rows -- that is the most of any single
+/// node that can appear in the window -- and the merge takes the slice.
+fn merge_pages(
+    pages: Vec<serde_json::Value>,
+    sort: &str,
+    asc: bool,
+    offset: usize,
+    limit: usize,
+) -> serde_json::Value {
+    let mut total = 0i64;
+    let mut filtered = 0i64;
+    let mut all: Vec<serde_json::Value> = Vec::new();
+    for p in pages {
+        total += p.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+        filtered += p.get("filtered").and_then(|v| v.as_i64()).unwrap_or(0);
+        if let Some(rows) = p.get("rows").and_then(|v| v.as_array()) {
+            all.extend(rows.iter().cloned());
+        }
+    }
+
+    let textual = matches!(sort, "name" | "state" | "tracker_host" | "category");
+    all.sort_by(|a, b| {
+        let (ka, na) = row_sort_key(a, sort);
+        let (kb, nb) = row_sort_key(b, sort);
+        let ord = if textual {
+            ka.cmp(&kb)
+        } else {
+            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        let ord = if asc { ord } else { ord.reverse() };
+        // Same tie-break as the single-node path, on the hex hash: without it
+        // two rows that compare equal could swap between requests and the same
+        // torrent would show up on two pages, or on none.
+        ord.then_with(|| {
+            let ha = a.get("info_hash").and_then(|v| v.as_str()).unwrap_or_default();
+            let hb = b.get("info_hash").and_then(|v| v.as_str()).unwrap_or_default();
+            ha.cmp(hb)
+        })
+    });
+
+    let rows: Vec<serde_json::Value> =
+        all.into_iter().skip(offset).take(limit).collect();
+    serde_json::json!({
+        "total": total,
+        "filtered": filtered,
+        "offset": offset,
+        "limit": limit,
+        "rows": rows,
+        // Facets are the local node's. Summing chip counts across nodes would
+        // need every node to agree on the category and tag vocabulary, and they
+        // do not have to: that is a separate decision, not a merge detail.
+        "facets": serde_json::Value::Null,
+    })
+}
+
+/// Replace `offset` and `limit` in a query string, keeping everything else.
+fn with_window(query: &str, offset: usize, limit: usize) -> String {
+    let mut parts: Vec<String> = query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .filter(|p| {
+            let k = p.split('=').next().unwrap_or("");
+            k != "offset" && k != "limit"
+        })
+        .map(|p| p.to_string())
+        .collect();
+    parts.push(format!("offset={offset}"));
+    parts.push(format!("limit={limit}"));
+    parts.join("&")
+}
+
+/// One engine's page across the whole fleet.
+///
+/// With no nodes declared this is exactly the single-node path and costs
+/// nothing extra -- the common case must not pay for a feature it does not use.
+async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -> serde_json::Value {
+    let nodes: Vec<crate::store::Node> = {
+        let store = state.store.lock().unwrap();
+        store.nodes().unwrap_or_default()
+    }
+    .into_iter()
+    .filter(|n| n.enabled)
+    .collect();
+
+    // `fields=hash` answers the SELECTION universe, not a page, and merging it
+    // would mean pulling every matching hash off every node just to hand the
+    // browser a set it can only act on one node at a time anyway. Selecting
+    // across the fleet is a feature of its own; until it exists, Ctrl+A means
+    // "everything here".
+    // Every LOCAL engine playing this role, not just the one whose id matches.
+    // A node running `hoard` and `vpn1` seeds hoard content from both, and a
+    // page bound to the id showed only half of it -- the vpn1 copy existed,
+    // seeded, and was invisible.
+    //
+    // Role-mates are merged exactly like remote nodes rather than folded into
+    // `engine_page_value`: that function is the tightest path in the build, and
+    // reusing the merge keeps one set of sorting and paging rules instead of
+    // two that would drift.
+    let local_ids: Vec<String> = {
+        let role = state
+            .engines
+            .engines()
+            .iter()
+            .find(|e| e.id == engine_id)
+            .map(|e| e.role.clone())
+            .unwrap_or_else(|| engine_id.to_string());
+        state
+            .engines
+            .engines()
+            .iter()
+            .filter(|e| e.id == engine_id || e.role == role)
+            .map(|e| e.id.clone())
+            .collect()
+    };
+
+    if nodes.is_empty() && local_ids.len() <= 1 {
+        return engine_page_value(state, engine_id, query).await;
+    }
+    // The selection universe, gathered across every engine of this role.
+    //
+    // Returned as (hash, agent) PAIRS as well as the flat hash list 3.x
+    // published: with a torrent held by two engines the hash alone does not say
+    // which copy was selected, and an action on the wrong one is invisible
+    // until something is paused or deleted that should not have been.
+    if query_param(query, "fields").as_deref() == Some("hash") {
+        if local_ids.len() <= 1 && nodes.is_empty() {
+            return engine_page_value(state, engine_id, query).await;
+        }
+        let mut hashes: Vec<serde_json::Value> = Vec::new();
+        let mut copies: Vec<serde_json::Value> = Vec::new();
+        let (mut total, mut filtered) = (0i64, 0i64);
+        for id in &local_ids {
+            let page = engine_page_value(state, id, query).await;
+            total += page.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+            filtered += page.get("filtered").and_then(|v| v.as_i64()).unwrap_or(0);
+            if let Some(hs) = page.get("hashes").and_then(|v| v.as_array()) {
+                for h in hs {
+                    if let Some(hs) = h.as_str() {
+                        copies.push(serde_json::json!({"hash": hs, "agent": format!("local-{id}")}));
+                    }
+                    hashes.push(h.clone());
+                }
+            }
+        }
+
+        // The fleet's share of the selection universe. A node answers with its
+        // OWN engines' labels (`local-<engine>`), so the prefix is swapped for
+        // the node's name -- the same rewrite the row merge does, and for the
+        // same reason: an action has to reach the copy that was selected.
+        let remote_sets = futures::future::join_all(nodes.iter().map(|n| {
+            let (url, key, name) = (n.url.clone(), n.api_key.clone(), n.name.clone());
+            let path = format!("api/{engine_id}/page?{query}");
+            async move {
+                match crate::nodes::forward(&url, &key, reqwest::Method::GET, &path, Vec::new()).await {
+                    Ok((status, body, _)) if status.is_success() => {
+                        serde_json::from_slice::<serde_json::Value>(&body)
+                            .ok()
+                            .map(|v| (name, v))
+                    }
+                    _ => None,
+                }
+            }
+        }))
+        .await;
+        for (name, page) in remote_sets.into_iter().flatten() {
+            total += page.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+            filtered += page.get("filtered").and_then(|v| v.as_i64()).unwrap_or(0);
+            match page.get("copies").and_then(|v| v.as_array()) {
+                Some(cs) => {
+                    for c in cs {
+                        let h = c.get("hash").and_then(|v| v.as_str()).unwrap_or_default();
+                        let a = c.get("agent").and_then(|v| v.as_str()).unwrap_or("local");
+                        let engine = a.strip_prefix("local-").unwrap_or(a);
+                        copies.push(serde_json::json!({
+                            "hash": h, "agent": format!("{name}-{engine}")
+                        }));
+                        hashes.push(serde_json::Value::String(h.to_string()));
+                    }
+                }
+                // An older node answers the flat shape only; its engine is the
+                // one we asked for.
+                None => {
+                    if let Some(hs) = page.get("hashes").and_then(|v| v.as_array()) {
+                        for h in hs {
+                            if let Some(hs) = h.as_str() {
+                                copies.push(serde_json::json!({
+                                    "hash": hs, "agent": format!("{name}-{engine_id}")
+                                }));
+                            }
+                            hashes.push(h.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        return serde_json::json!({
+            "total": total, "filtered": filtered, "hashes": hashes, "copies": copies,
+        });
+    }
+
+    let offset = query_param(query, "offset")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = query_param(query, "limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(500)
+        .clamp(1, 5000);
+    let sort = query_param(query, "sort").unwrap_or_else(|| "added_time".into());
+    let asc = query_param(query, "order").as_deref() == Some("asc");
+
+    let need = offset + limit;
+    let windowed = with_window(query, 0, need);
+
+    let mut pages: Vec<serde_json::Value> = Vec::new();
+    for id in &local_ids {
+        pages.push(engine_page_value(state, id, &windowed).await);
+    }
+    let remote = futures::future::join_all(nodes.iter().map(|n| {
+        let (url, key, name) = (n.url.clone(), n.api_key.clone(), n.name.clone());
+        let path = format!("api/{engine_id}/page?{windowed}");
+        async move {
+            match crate::nodes::forward(&url, &key, reqwest::Method::GET, &path, Vec::new()).await {
+                Ok((status, body, _)) if status.is_success() => {
+                    let mut v: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                    // Tag every row with the node it lives on. The front already
+                    // reads `agent` to decide where an action must be sent, so a
+                    // remote row that claimed to be local would be acted on here.
+                    if let Some(rows) = v.get_mut("rows").and_then(|r| r.as_array_mut()) {
+                        for row in rows.iter_mut() {
+                            if let Some(o) = row.as_object_mut() {
+                                // `<node>-<engine>`, not just `<node>`: a torrent
+                                // always lives in an ENGINE, and a remote one is
+                                // no different -- the node only says where that
+                                // engine runs. The remote row already names its
+                                // own engine as `local-<engine>`; swapping the
+                                // prefix keeps both halves of the answer.
+                                let here = o
+                                    .get("agent")
+                                    .and_then(|a| a.as_str())
+                                    .unwrap_or("local");
+                                let engine = here.strip_prefix("local-").unwrap_or(here);
+                                let label = if engine == "local" || engine.is_empty() {
+                                    name.clone()
+                                } else {
+                                    format!("{name}-{engine}")
+                                };
+                                o.insert("agent".into(), serde_json::Value::String(label));
+                            }
+                        }
+                    }
+                    v
+                }
+                // A node that is down contributes nothing. Failing the whole
+                // page instead would make one unreachable node hide a library
+                // that is sitting right here.
+                _ => serde_json::Value::Null,
+            }
+        }
     }))
-    .into_response()
+    .await;
+
+    pages.extend(remote.into_iter().filter(|v| !v.is_null()));
+    merge_pages(pages, &sort, asc, offset, limit)
+}
+
+async fn get_engine_page(state: &AppState, engine_id: &str, query: &str) -> Response {
+    Json(fleet_page(state, engine_id, query).await).into_response()
 }
 
 async fn get_hoard_page(
@@ -1833,6 +2822,16 @@ async fn get_hoard_stats(
 /// Hot engines added at runtime. The two built-in engines are NOT listed here:
 /// 3.x answers an empty list on a node that has only race and hoard, and a row
 /// claiming otherwise sends per-engine actions at something nobody registered.
+/// Every engine this node hosts.
+///
+/// Was a hardcoded `[]`, which made a node look like it ran nothing. It is the
+/// one route that answers "what does this Hydra actually host", so the fleet
+/// page needs it: `/api/status` names only `race` and `hoard`, and its shape
+/// has to stay what 3.x published, so a third engine can never appear there.
+///
+/// Read from the running EngineHost rather than from the config: what is
+/// listening is the answer, not what was asked for. An engine that failed to
+/// come up would otherwise be reported as present.
 async fn get_engines(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -1840,8 +2839,25 @@ async fn get_engines(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(serde_json::Value::Array(vec![])).into_response()
+    let out: Vec<serde_json::Value> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "role": e.role,
+                "listen_port": e.listen_port,
+                "bind_interface": e.bind_interface,
+                "enable_ipv6": e.enable_ipv6,
+                "start_paused": e.start_paused,
+                // What the socket did, not what the config asked for.
+                "listening": e.listening.load(std::sync::atomic::Ordering::Relaxed),
+                "torrents": e.manager.all().len(),
+            })
+        })
+        .collect();
+    Json(out).into_response()
 }
 
 
@@ -2276,12 +3292,31 @@ async fn get_network_mode(
         extra_engines: Vec<serde_json::Value>,
     }
 
+    // Every engine that is neither race nor hoard. This was a `vec![]` literal,
+    // so a node running one engine per tunnel -- the entire point of the model
+    // -- showed two of them in the network panel and hid the rest. The front
+    // has rendered and collected these rows all along; nothing ever filled them.
+    let extra_engines: Vec<serde_json::Value> = state
+        .engines
+        .engines()
+        .iter()
+        .filter(|e| e.id != "race" && e.id != "hoard")
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "role": e.role,
+                "bind_interface": e.bind_interface,
+                "listen_port": e.listen_port,
+            })
+        })
+        .collect();
+
     Json(NetworkMode {
         mode,
         fields,
         env_overrides: None,
         warnings: None,
-        extra_engines: vec![],
+        extra_engines,
     })
     .into_response()
 }
@@ -3736,7 +4771,7 @@ fn set_paused(state: &AppState, form: &Fields, paused: bool) {
     let store = state.store.lock().unwrap();
     for prefix in hashes {
         if let Some(hash) = store.resolve_hash(&prefix) {
-            let _ = store.set_paused(&hash, paused);
+            let _ = store.set_paused_everywhere(&hash, paused);
         }
     }
 }
@@ -3779,9 +4814,9 @@ use axum::extract::Path;
 /// The message differs per route and that is not cosmetic: "torrent not found"
 /// and "torrent not in hoard: X" tell an operator two different things, and the
 /// UI shows the string.
-fn resolve_in_hoard(state: &AppState, prefix: &str, message: &str) -> Result<String, Response> {
+fn resolve_in_hoard(state: &AppState, engine: &str, prefix: &str, message: &str) -> Result<String, Response> {
     let store = state.store.lock().unwrap();
-    store.resolve_hash_in("hoard", prefix).ok_or_else(|| {
+    store.resolve_hash_in(engine, prefix).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": message.replace("{}", prefix)})),
@@ -3802,31 +4837,35 @@ macro_rules! torrent_write {
             let query = query.unwrap_or_default();
             guard!(state, headers, query);
     let cfg = state.cfg();
-            let hash = match resolve_in_hoard(&state, &info_hash, $message) {
+            // Which copy. `?agent=` carries the row the operator clicked, so a
+            // torrent seeded from three engines is paused in the one they
+            // pointed at instead of whichever the lookup happened to find.
+            let engine = engine_param(&query, "hoard");
+            let hash = match resolve_in_hoard(&state, &engine, &info_hash, $message) {
                 Ok(h) => h,
                 Err(response) => return response,
             };
-            let apply: fn(&AppState, &str, &str) = $body;
-            apply(&state, &hash, &body);
+            let apply: fn(&AppState, &str, &str, &str) = $body;
+            apply(&state, &hash, &body, &engine);
             let ok: fn(&str) -> serde_json::Value = $ok;
             Json(ok(&info_hash)).into_response()
         }
     };
 }
 
-torrent_write!(hoard_pause_one, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str| {
+torrent_write!(hoard_pause_one, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
     let store = state.store.lock().unwrap();
-    let _ = store.set_paused(hash, true);
+    let _ = store.set_paused(hash, engine, true);
 });
 
-torrent_write!(hoard_resume_one, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str| {
+torrent_write!(hoard_resume_one, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
     let store = state.store.lock().unwrap();
-    let _ = store.set_paused(hash, false);
+    let _ = store.set_paused(hash, engine, false);
 });
 
-torrent_write!(hoard_pin_one, "torrent not in hoard: {}", |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}), |state: &AppState, hash: &str, _body: &str| {
+torrent_write!(hoard_pin_one, "torrent not in hoard: {}", |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
     let store = state.store.lock().unwrap();
-    let _ = store.set_pinned(hash, true);
+    let _ = store.set_pinned(hash, engine, true);
 });
 
 /// Unpin, which unlike pin accepts a torrent from ANY session.
@@ -3847,7 +4886,7 @@ async fn hoard_unpin_one(
 
     let store = state.store.lock().unwrap();
     if let Some(hash) = store.resolve_hash(&info_hash) {
-        let _ = store.set_pinned(&hash, false);
+        let _ = store.set_pinned_everywhere(&hash, false);
     }
     Json(serde_json::json!({
         "info_hash": info_hash, "pinned": false, "status": "ok",
@@ -3855,7 +4894,7 @@ async fn hoard_unpin_one(
     .into_response()
 }
 
-torrent_write!(set_torrent_category, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str| {
+torrent_write!(set_torrent_category, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
     // The body is {"category": "..."} on the native API.
     let category = serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -3865,7 +4904,7 @@ torrent_write!(set_torrent_category, "torrent not found", |_ih: &str| serde_json
     let _ = store.set_category(hash, &category);
 });
 
-torrent_write!(set_torrent_tags, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str| {
+torrent_write!(set_torrent_tags, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
     // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
     // here: the caller sends the state it wants, not a delta.
     let tags: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
@@ -4379,7 +5418,7 @@ async fn pause_bulk(state: &AppState, engine: &str, body: &str) -> Response {
             let exists = store
                 .resolve_hash_in(engine, hash)
                 .is_some_and(|found| found == hash.to_lowercase());
-            if exists && store.set_paused(&hash.to_lowercase(), req.paused).is_ok() {
+            if exists && store.set_paused(&hash.to_lowercase(), engine, req.paused).is_ok() {
                 applied += 1;
             }
         }
@@ -4388,6 +5427,31 @@ async fn pause_bulk(state: &AppState, engine: &str, body: &str) -> Response {
     // than refetching, and needs to know which way it went.
     Json(serde_json::json!({"status": "ok", "applied": applied, "paused": req.paused}))
         .into_response()
+}
+
+/// Pause or resume a set of hashes in ONE named engine.
+///
+/// `hoard` and `race` have literal routes because 3.x published them; this one
+/// exists so a third engine is reachable at all. Without it, pausing the copy
+/// held by `vpn1` had no endpoint to call, and the interface fell back to the
+/// hoard route -- which paused a different copy.
+async fn engine_pause_bulk(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    if !state.engines.engines().iter().any(|e| e.id == id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no engine named {id} on this node")})),
+        )
+            .into_response();
+    }
+    pause_bulk(&state, &id, &body).await
 }
 
 async fn hoard_pause_bulk(
@@ -4846,6 +5910,157 @@ fn find_torrent(
     None
 }
 
+/// The .torrent file itself.
+///
+/// The metainfo has to travel before the data can: a node cannot be told to
+/// fetch a torrent it has never been given. Served from the store rather than
+/// rebuilt, so the info dict stays byte-identical and the info hash with it.
+async fn get_torrent_file(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let blob = {
+        let store = state.store.lock().unwrap();
+        store.torrent_blob(&info_hash).ok().flatten()
+    };
+    match blob {
+        Some(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/x-bittorrent")],
+            bytes,
+        )
+            .into_response(),
+        None => not_found(),
+    }
+}
+
+/// Tell a torrent about peers it has not been given by a tracker.
+///
+/// This is the piece a cross-node handoff needs: the receiving Hydra adds the
+/// torrent, is told that the sending one has the data, and pulls it over
+/// BitTorrent. Nothing relays bytes through the control plane, and every piece
+/// is hash-checked on arrival because that is what the protocol already does.
+///
+/// The same door DHT already comes through -- `enqueue_dial` is what
+/// `dht.rs` calls for every peer it discovers, so an injected peer is dialled
+/// on exactly the path a discovered one is.
+async fn post_torrent_peers(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(caller): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    // The copy the caller means. A peer injected into the wrong engine dials
+    // from the wrong tunnel, which is the failure this whole model exists to
+    // avoid; and with the copies paused differently it may dial from one that
+    // is not running at all.
+    let want = engine_param(&query, "");
+    let torrent = if want.is_empty() {
+        match find_torrent(&state, &info_hash) {
+            Some((_, t)) => t,
+            None => return not_found(),
+        }
+    } else {
+        match find_copy(&state, &want, &info_hash) {
+            Some(t) => t,
+            None => return not_found(),
+        }
+    };
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let list = v.get("peers").and_then(|p| p.as_array()).cloned().unwrap_or_default();
+    if list.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "peers is required and must be a non-empty list"})),
+        )
+            .into_response();
+    }
+
+    let mut queued = 0usize;
+    let mut rejected: Vec<String> = Vec::new();
+    for p in list {
+        let Some(text) = p.as_str() else { continue };
+        // Named and reported rather than skipped: a typo in one address must
+        // not look like a handoff that quietly did nothing.
+        // `auto:<port>` means "whoever is asking, on this port". A handing-off
+        // node cannot know which of its addresses this one can reach, but this
+        // one knows exactly where the request came from -- so the answer is
+        // resolved on the side that has it rather than guessed on the side
+        // that does not.
+        let resolved = match text.strip_prefix("auto:") {
+            Some(port) => port
+                .parse::<u16>()
+                .ok()
+                .map(|p| std::net::SocketAddr::new(caller.ip(), p)),
+            None => text.parse::<std::net::SocketAddr>().ok(),
+        };
+        match resolved {
+            Some(addr) => {
+                typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+                queued += 1;
+            }
+            None => rejected.push(text.to_string()),
+        }
+    }
+    Json(serde_json::json!({"queued": queued, "rejected": rejected})).into_response()
+}
+
+/// Which engine a per-copy request means.
+///
+/// The same torrent may now be held by several engines, so "pause it" without
+/// naming one is three different requests. The front labels a row
+/// `local-<engine>` when it is here and `<node>-<engine>` when it is not, and
+/// the selection carries that label through as `agent`.
+///
+/// A `<node>-...` label is deliberately left unstripped: it will match no local
+/// engine, and the handler refuses rather than acting on this node's own copy,
+/// which is a DIFFERENT copy than the one the operator clicked.
+fn engine_param(query: &str, fallback: &str) -> String {
+    let raw = query_param(query, "engine")
+        .or_else(|| query_param(query, "agent"))
+        .unwrap_or_default();
+    if raw.is_empty() || raw == "local" {
+        return fallback.to_string();
+    }
+    raw.strip_prefix("local-").unwrap_or(&raw).to_string()
+}
+
+/// The copy a request is about: the one `?agent=` names, or the first found.
+///
+/// Used by the routes whose ANSWER differs between copies -- live rates, peers,
+/// progress, and the reannounce, which each copy makes with its own peer_id from
+/// its own port. Routes that read the metainfo (files, tracker list) are left
+/// alone: two copies of one torrent are the same file on disk and the same
+/// announce URLs, so there is nothing to choose between.
+fn find_selected(
+    state: &AppState,
+    query: &str,
+    info_hash: &str,
+) -> Option<(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)> {
+    let want = engine_param(query, "");
+    if want.is_empty() {
+        return find_torrent(state, info_hash);
+    }
+    find_copy(state, &want, info_hash).map(|t| (want, t))
+}
+
+/// The copy of a torrent held by one named engine.
+fn find_copy(
+    state: &AppState,
+    engine_id: &str,
+    info_hash: &str,
+) -> Option<std::sync::Arc<typhon_engine::torrent::meta::TorrentState>> {
+    let key = typhon_engine::torrent::hex_decode(&info_hash.to_lowercase()).ok()?;
+    state.engines.get(engine_id).and_then(|e| e.manager.get(&key))
+}
+
 fn not_found() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -5078,7 +6293,7 @@ fn set_one_paused(state: &AppState, engine: &str, prefix: &str, paused: bool) ->
     let store = state.store.lock().unwrap();
     match store.resolve_hash_in(engine, prefix) {
         Some(hash) => {
-            let _ = store.set_paused(&hash, paused);
+            let _ = store.set_paused_everywhere(&hash, paused);
             Json(serde_json::json!({"status": "ok"})).into_response()
         }
         None => (
@@ -5169,7 +6384,7 @@ async fn bulk_action(state: &AppState, engine: &str, body: &str) -> Response {
             // The store row may not exist -- see the count gap above. The
             // engine still counts it as applied, because the pause landed on
             // the engine; only the durable half is missing.
-            let _ = store.set_paused(hash, stop);
+            let _ = store.set_paused_everywhere(hash, stop);
             applied += 1;
         }
     }
@@ -5738,7 +6953,7 @@ async fn hoard_verify_one(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let _ = cfg;
-    match resolve_in_hoard(&state, &info_hash, "torrent not found") {
+    match resolve_in_hoard(&state, &engine_param(&query, "hoard"), &info_hash, "torrent not found") {
         Ok(_) => Json(serde_json::json!({"status": "ok"})).into_response(),
         Err(response) => response,
     }
@@ -5761,7 +6976,7 @@ async fn reannounce_one(
     let cfg = state.cfg();
     let _ = cfg;
 
-    match find_torrent(&state, &info_hash) {
+    match find_selected(&state, &query, &info_hash) {
         Some(_) => Json(serde_json::json!({"status": "ok"})).into_response(),
         None => (
             StatusCode::NOT_FOUND,
@@ -5947,8 +7162,6 @@ macro_rules! refuse {
 }
 
 refuse!(post_agent_create, StatusCode::BAD_REQUEST, "name and addr are required");
-refuse!(post_engine_create, StatusCode::BAD_REQUEST,
-        "id required; role must be \"race\" or \"hoard\"");
 refuse!(post_qbit_import_preview, StatusCode::BAD_REQUEST, "empty qBittorrent URL");
 refuse!(post_move_remote, StatusCode::BAD_REQUEST, "info_hash is required");
 refuse!(post_wireguard_engines, StatusCode::BAD_REQUEST, "no agents in the request");
@@ -6161,10 +7374,19 @@ async fn get_race_torrent(
     let _ = cfg;
 
     let hash = info_hash.to_lowercase();
-    let Some((engine_id, torrent)) = find_torrent(&state, &hash) else {
+    let Some((engine_id, torrent)) = find_selected(&state, &query, &hash) else {
         return not_found();
     };
-    if engine_id != "race" {
+    // By ROLE, not by id. `race` is a behaviour, and a node may run several
+    // engines that have it -- one per tunnel. Comparing the id refused the
+    // detail panel of every copy held by any of them, which is the same
+    // mistake `connect` made when it handed those engines hoard's network.
+    let is_race = state
+        .engines
+        .engines()
+        .iter()
+        .any(|e| e.id == engine_id && e.role == "race");
+    if !is_race {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "torrent not in race"})),
@@ -6268,14 +7490,21 @@ async fn get_hoard_torrent(
     let _ = cfg;
     // The store resolves a prefix to a full hash and proves the torrent is
     // hoard's; the engine then supplies the live half of the panel.
-    let hash = match resolve_in_hoard(&state, &info_hash, "torrent not found") {
+    let hash = match resolve_in_hoard(&state, &engine_param(&query, "hoard"), &info_hash, "torrent not found") {
         Ok(hash) => hash,
         Err(response) => return response,
     };
-    let Some((engine_id, torrent)) = find_torrent(&state, &hash) else {
+    let Some((engine_id, torrent)) = find_selected(&state, &query, &hash) else {
         return not_found();
     };
-    if engine_id != "hoard" {
+    // By ROLE, as on the race side: a node may run several hoard engines, one
+    // per tunnel, and only one of them is called "hoard".
+    let is_hoard = state
+        .engines
+        .engines()
+        .iter()
+        .any(|e| e.id == engine_id && e.role == "hoard");
+    if !is_hoard {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "torrent not in hoard"})),
@@ -6335,6 +7564,7 @@ async fn post_torrent_add(
         &s("tags"),
         paused,
         seed_mode,
+        &s("engine"),
     ) {
         Ok((hash, name)) => {
             Json(serde_json::json!({"info_hash": hash, "name": name})).into_response()
@@ -6395,7 +7625,7 @@ async fn qbit_torrent_add(
     let mut failed = 0;
     for bytes in &files {
         if let Err(e) =
-            add_torrent_bytes(&state, bytes, &category, &save_path, &tags, paused, seed_mode)
+            add_torrent_bytes(&state, bytes, &category, &save_path, &tags, paused, seed_mode, "")
         {
             // "already added" is not a failure to a client that retries a
             // release it has seen before; qBit answers Ok. for it too.
@@ -6414,7 +7644,70 @@ async fn qbit_torrent_add(
 }
 
 
-refuse!(post_torrent_upload, StatusCode::BAD_REQUEST, "no torrent file in request");
+/// Add a torrent from an uploaded .torrent file.
+///
+/// Was a `refuse!` stub, which is what broke the farm's `sw_fill` and left a
+/// handoff no way to name the engine it wants: the qBit shim routes by
+/// category, and a category names a MODE, not one of the engines a node hosts.
+/// This route takes an explicit `engine`, so a torrent can be placed in `vpn1`.
+async fn post_torrent_upload(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+
+    let mut bytes: Vec<u8> = Vec::new();
+    let (mut category, mut save_path, mut tags, mut engine) =
+        (String::new(), String::new(), String::new(), String::new());
+    let (mut paused, mut seed_mode) = (false, false);
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or_default().to_string();
+        if name == "torrents" || name == "torrent" || name == "file" {
+            bytes = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+            continue;
+        }
+        let value = field.text().await.unwrap_or_default();
+        match name.as_str() {
+            "category" => category = value,
+            "savepath" | "save_path" => save_path = value,
+            "tags" => tags = value,
+            "engine" => engine = value,
+            "paused" | "stopped" => paused = value == "true" || value == "1",
+            "skip_checking" | "seed_mode" => seed_mode = value == "true" || value == "1",
+            _ => {}
+        }
+    }
+    if bytes.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no torrent file in request"})),
+        )
+            .into_response();
+    }
+    // A named engine that does not exist is refused rather than quietly
+    // falling back: silently landing in race is how a hoard torrent changes
+    // tier without anyone noticing.
+    if !engine.is_empty() && !state.engines.engines().iter().any(|e| e.id == engine) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("no engine named {engine} on this node")})),
+        )
+            .into_response();
+    }
+    match add_torrent_bytes(
+        &state, &bytes, &category, &save_path, &tags, paused, seed_mode, &engine,
+    ) {
+        Ok((hash, name)) => Json(serde_json::json!({
+            "info_hash": hash, "name": name, "engine": engine
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
 refuse!(post_transmission_preview, StatusCode::BAD_REQUEST,
         "no torrents folder at : open : no such file or directory");
 
@@ -6457,32 +7750,285 @@ async fn delete_torrent(
         .unwrap_or(false);
     let keep_data = !delete_files;
 
+    // WHICH copy. Removing every engine's copy when the operator selected one
+    // row would delete the other tunnels' seeds too, and the files with them if
+    // delete_files is set. An unqualified request still means all of them --
+    // that is what the qBit shim asks for, and what "remove this torrent" meant
+    // before a torrent could be in two places.
+    let want = engine_param(&query, "");
+    let sessions: Vec<String> = if want.is_empty() {
+        let store = state.store.lock().unwrap();
+        store.sessions_of(&hash)
+    } else {
+        vec![want.clone()]
+    };
+    if !want.is_empty() && find_copy(&state, &want, &hash).is_none() {
+        return not_found();
+    }
+
     // The engine first: dropping the store row alone leaves a torrent that
     // still seeds, still announces, and comes back at the next restart from the
     // engine's own state -- present to the network, invisible to the interface.
-    if let Some((_, torrent)) = find_torrent(&state, &hash) {
+    //
+    // The files go only with the LAST copy: two engines seeding one payload
+    // share it, so deleting it with the first would leave the others seeding
+    // nothing.
+    let remaining = {
+        let store = state.store.lock().unwrap();
+        store.sessions_of(&hash).len()
+    };
+    let mut dropped = 0usize;
+    for session in &sessions {
+        let Some(engine) = state.engines.get(session) else { continue };
+        let Some(torrent) = find_copy(&state, session, &hash) else { continue };
+        let last = dropped + 1 >= remaining;
+        let keep = if delete_files && last { false } else { true };
+        if let Err(e) = engine.manager.remove_torrent(&torrent.info_hash, keep) {
+            tracing::warn!(hash = %hash, session, "engine refused removal: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+        engine.announce_cache.forget(&hash);
+        dropped += 1;
+    }
+
+    {
+        let store = state.store.lock().unwrap();
+        if want.is_empty() {
+            let _ = store.delete_torrent(&hash);
+        } else {
+            let _ = store.delete_copy(&hash, &want);
+        }
+    }
+    tracing::info!(hash = %hash, delete_files, copies = dropped, "torrent removed");
+    Json(serde_json::json!({"status": "ok"})).into_response()
+}
+
+/// Seed the same torrent from a SECOND engine of this node.
+///
+/// No transfer and no second copy on disk: both engines are pointed at the same
+/// files. What it buys is a second identity in the swarm -- its own peer_id, its
+/// own listening port, its own tunnel -- which is worth having when the tunnel
+/// is what saturates rather than the leechers. Three tunnels are three egress
+/// paths, and the payload is paid for once.
+///
+/// Added in seed mode: the data is there and already verified, and rechecking a
+/// large payload to learn what the first engine already knows would cost hours
+/// of disk for nothing.
+async fn post_torrent_copy(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let target = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let hash = info_hash.to_lowercase();
+
+    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response();
+    if target.is_empty() {
+        return bad("engine is required".into());
+    }
+    if !state.engines.engines().iter().any(|e| e.id == target) {
+        return bad(format!("no engine named {target} on this node"));
+    }
+    if find_copy(&state, &target, &hash).is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("{target} already seeds it")})),
+        )
+            .into_response();
+    }
+
+    // The source copy supplies the save path: two engines seeding one payload
+    // must be pointed at the SAME files, or the second downloads its own and
+    // the whole point is lost.
+    let (existing, save_path, category, added) = {
+        let store = state.store.lock().unwrap();
+        let sessions = store.sessions_of(&hash);
+        let Some(first) = sessions.first().cloned() else {
+            return not_found();
+        };
+        let facts = store.facts_for_session(&first).unwrap_or_default();
+        let f = facts.get(&hash).cloned().unwrap_or_default();
+        (first, f.save_path, f.category, f.added_time as f64)
+    };
+    let blob = {
+        let store = state.store.lock().unwrap();
+        store.torrent_blob(&hash).ok().flatten()
+    };
+    let Some(blob) = blob else { return not_found() };
+    let cfg = state.cfg();
+    let path = std::path::Path::new(&cfg.daemon.data_dir)
+        .join("uploads")
+        .join(format!("{hash}.torrent"));
+    if !path.exists() {
+        if std::fs::write(&path, &blob).is_err() {
+            return bad("the .torrent could not be written".into());
+        }
+    }
+
+    let Some(dst) = state.engines.get(&target) else { return not_found() };
+    if let Err(e) = dst.manager.add_torrent(&path.to_string_lossy(), &save_path, false, true) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("the engine refused it: {e}")})),
+        )
+            .into_response();
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let _ = store.insert_torrent(&hash, &target, &blob, &save_path, &category, added, false, "");
+    }
+    tracing::info!(hash = %hash, from = %existing, to = %target, "torrent now seeded from a second engine");
+    Json(serde_json::json!({"status": "ok", "engine": target, "save_path": save_path}))
+        .into_response()
+}
+
+/// Move a torrent to another engine OF THIS NODE.
+///
+/// No transfer: both engines read the same filesystem, so the payload stays
+/// exactly where it is and only ownership changes. That is the difference with
+/// a handoff, and it is why this is instant -- moving hoard to a VPN-bound
+/// engine to change which tunnel it seeds from costs nothing.
+///
+/// Duplicating locally is NOT offered, and the reason is not tidiness: two
+/// engines pointed at one set of files are two writers on the same bytes the
+/// first time either repairs a piece.
+async fn post_torrent_engine(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let target = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+
+    let hash = info_hash.to_lowercase();
+    // WHICH copy moves. With the same torrent in two engines, "move it" without
+    // naming the source would move whichever the lookup met first.
+    let asked = engine_param(&query, "");
+    let (current, torrent) = if asked.is_empty() {
+        match find_torrent(&state, &hash) {
+            Some(v) => v,
+            None => return not_found(),
+        }
+    } else {
+        match find_copy(&state, &asked, &hash) {
+            Some(t) => (asked.clone(), t),
+            None => return not_found(),
+        }
+    };
+    if target.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "engine is required"})))
+            .into_response();
+    }
+    if target == current {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("already in {current}")})),
+        )
+            .into_response();
+    }
+    if !state.engines.engines().iter().any(|e| e.id == target) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("no engine named {target} on this node")})),
+        )
+            .into_response();
+    }
+
+    let (save_path, paused) = {
+        let store = state.store.lock().unwrap();
+        store
+            .facts_for_session(&current)
+            .ok()
+            .and_then(|m| m.get(&hash).map(|f| (f.save_path.clone(), f.user_paused)))
+            .unwrap_or_default()
+    };
+    let cfg = state.cfg();
+    let path = std::path::Path::new(&cfg.daemon.data_dir)
+        .join("uploads")
+        .join(format!("{hash}.torrent"));
+    if !path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "the .torrent is not on disk; cannot re-add it elsewhere"})),
+        )
+            .into_response();
+    }
+
+    // Source first, and KEEPING the data: the files are the whole point of not
+    // transferring anything.
+    let ih = torrent.info_hash;
+    if let Some(src) = state.engines.get(&current) {
+        if let Err(e) = src.manager.remove_torrent(&ih, true) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("the source engine refused: {e}")})),
+            )
+                .into_response();
+        }
+        src.announce_cache.forget(&hash);
+    }
+    let Some(dst) = state.engines.get(&target) else { return not_found() };
+    // seed_mode: the data is already there and already verified. Rechecking a
+    // large payload for a move that touched nothing would cost hours of disk.
+    if let Err(e) = dst
+        .manager
+        .add_torrent(&path.to_string_lossy(), &save_path, paused, true)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("the target engine refused it, and the source has let it go: {e}")
+            })),
+        )
+            .into_response();
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let _ = store.set_session(&hash, &current, &target);
+    }
+    tracing::info!(hash = %hash, from = %current, to = %target, "torrent moved between engines");
+    Json(serde_json::json!({"status": "ok", "from": current, "to": target})).into_response()
+}
+
+/// Drop a torrent from this node, engine first then store.
+///
+/// Same order as `delete_torrent`, and for the same reason: removing the store
+/// row alone leaves a torrent that still seeds, still announces, and comes back
+/// at the next restart from the engine's own state -- present to the network,
+/// invisible to the interface.
+fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bool) {
+    let hash = info_hash.to_lowercase();
+    let keep_data = !delete_files;
+    if let Some((_, torrent)) = find_torrent(state, &hash) {
         let ih = torrent.info_hash;
         for engine in state.engines.engines() {
             if engine.manager.get(&ih).is_some() {
                 if let Err(e) = engine.manager.remove_torrent(&ih, keep_data) {
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": e})),
-                    )
-                        .into_response();
+                    return;
                 }
                 engine.announce_cache.forget(&hash);
             }
         }
     }
-
     {
         let store = state.store.lock().unwrap();
         let _ = store.delete_torrent(&hash);
     }
     tracing::info!(hash = %hash, delete_files, "torrent removed");
-    Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
 /// Purge a race torrent: remove it and free its slot.
@@ -6638,7 +8184,7 @@ async fn get_race_timeline(
         return (StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "info_hash required"}))).into_response();
     }
-    let state_str = find_torrent(&state, &hash)
+    let state_str = find_selected(&state, &query, &hash)
         .map(|(_, torrent)| {
             typhon_engine::rpc::dispatch::torrent_to_json(&torrent)
                 .get("state")
@@ -7133,7 +8679,135 @@ async fn post_network_mode(
         )
             .into_response();
     }
-    Json(serde_json::json!({"status": "ok"})).into_response()
+
+    // Everything below used to be missing: this handler validated the race port
+    // and answered {"status":"ok"} without touching the file. The panel reported
+    // a saved network configuration that had never been written anywhere, which
+    // is worse than refusing -- the operator walks away believing it took.
+    let f = parsed.get("fields").cloned().unwrap_or_default();
+    let num = |k: &str| f.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+    let txt = |k: &str| {
+        f.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let flag = |k: &str| f.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let q = crate::tomledit::quote_toml_key;
+
+    let hoard_port = f
+        .get("hoard_listen_port")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    if !(1..=65535).contains(&hoard_port) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":
+                "the hoard listen port must be between 1 and 65535"})),
+        )
+            .into_response();
+    }
+    // Two engines on one port is the failure this build already had once, from
+    // the other direction: refuse it here rather than write it and find out at
+    // the next boot, in a log nobody is reading.
+    if race_port == hoard_port {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":
+                "race and hoard cannot share a listen port"})),
+        )
+            .into_response();
+    }
+
+    let trusted = f
+        .get("proxy_v2_trusted_sources")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(q)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+
+    let shared = |port: i64, iface: &str, pv2: i64| -> Vec<(String, String)> {
+        vec![
+            ("listen_port".into(), port.to_string()),
+            ("bind_interface".into(), q(iface)),
+            ("enable_ipv6".into(), flag("enable_ipv6").to_string()),
+            ("listen_port_proxy_v2".into(), pv2.to_string()),
+            ("listen_addr_proxy_v2".into(), q(&txt("proxy_v2_listen_addr"))),
+            ("proxy_v2_trusted_sources".into(), format!("[{trusted}]")),
+            ("socks5_outbound_host".into(), q(&txt("socks5_host"))),
+            ("socks5_outbound_port".into(), num("socks5_port").to_string()),
+            ("socks5_outbound_user".into(), q(&txt("socks5_user"))),
+            ("socks5_outbound_pass".into(), q(&txt("socks5_pass"))),
+        ]
+    };
+
+    let mut race_kv = shared(
+        race_port,
+        &txt("race_bind_interface"),
+        num("race_proxy_v2_port"),
+    );
+    let mut hoard_kv = shared(
+        hoard_port,
+        &txt("hoard_bind_interface"),
+        num("hoard_proxy_v2_port"),
+    );
+    // Gluetun forwards one port, so it belongs to one engine. The other must be
+    // written as OFF, or switching the choice would leave both following it.
+    let gl_engine = txt("gluetun_port_engine");
+    for (name, kv) in [("race", &mut race_kv), ("hoard", &mut hoard_kv)] {
+        let mine = gl_engine == name;
+        kv.push((
+            "gluetun_port_forward".into(),
+            (mine && flag("gluetun_port_forward")).to_string(),
+        ));
+        kv.push(("gluetun_url".into(), q(&txt("gluetun_url"))));
+        kv.push(("gluetun_api_key".into(), q(&txt("gluetun_api_key"))));
+    }
+
+    let extras: Vec<serde_json::Value> = parsed
+        .get("extra_engines")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let ok = edit_config(&state, |doc| {
+        let mut out = crate::tomledit::set_toml_table(doc, "race", &race_kv)?;
+        out = crate::tomledit::set_toml_table(&out, "hoard", &hoard_kv)?;
+        for e in &extras {
+            let Some(id) = e.get("id").and_then(|v| v.as_str()) else { continue };
+            if let Some(p) = e.get("listen_port").and_then(|v| v.as_i64()) {
+                if (1..=65535).contains(&p) {
+                    if let Some(next) =
+                        crate::tomledit::set_agent_session_key(&out, id, "listen_port", &p.to_string())
+                    {
+                        out = next;
+                    }
+                }
+            }
+            if let Some(i) = e.get("bind_interface").and_then(|v| v.as_str()) {
+                if let Some(next) =
+                    crate::tomledit::set_agent_session_key(&out, id, "bind_interface", &q(i))
+                {
+                    out = next;
+                }
+            }
+        }
+        Ok(out)
+    });
+    if !ok {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "the config could not be written"})),
+        )
+            .into_response();
+    }
+    // Engines read their network once, at boot.
+    Json(serde_json::json!({"status": "ok", "restart_required": true})).into_response()
 }
 
 /// Remove torrents the *arr stack no longer tracks.
@@ -7244,19 +8918,144 @@ async fn delete_agent(
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
+/// Declare one more engine on THIS node.
+///
+/// Writes a `[[agent]]` block and asks for a restart: engines are built once,
+/// at boot, from the config. Nothing is started here.
+///
+/// The port check is the point. `connect` used to hand every engine that was
+/// not race the hoard session, so two engines quietly shared one socket; that
+/// is fixed, but a form that lets the operator ASK for the same port would
+/// reproduce it by another road, and the failure would again be silent.
+async fn post_engine_create(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let role = v.get("role").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let port = v.get("listen_port").and_then(|x| x.as_i64()).unwrap_or(0);
+    let iface = v
+        .get("bind_interface")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let bad = |m: &str| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response()
+    };
+    // An id becomes a directory name under the config dir, and a TOML key.
+    if id.is_empty()
+        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return bad("id must be non-empty and only letters, digits, - or _");
+    }
+    if role != "race" && role != "hoard" {
+        return bad("role must be \"race\" or \"hoard\"");
+    }
+    if !(1..=65535).contains(&port) {
+        return bad("listen_port is required");
+    }
+
+    for e in state.engines.engines() {
+        if e.id == id {
+            return bad("an engine with that id already exists");
+        }
+        if e.listen_port as i64 == port {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("port {port} is already taken by engine {}", e.id)
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // An interface that is not up binds nothing, and the engine says nothing:
+    // measured on this build, `bind_interface = "wg9"` with no such device
+    // logged "session started, listen=0.0.0.0:16379" and "on the network,
+    // announcing" while `ss` showed no listener at all. That failure mode is
+    // invisible in production -- an engine that seeds nothing while claiming to
+    // be online -- so the declaration is refused here instead.
+    if !iface.is_empty() {
+        let known: Vec<String> = interfaces()
+            .iter()
+            .filter_map(|i| i.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        if !known.iter().any(|n| n == &iface) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("no interface named {iface} is up"),
+                    "interfaces": known,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let mut session: Vec<(String, String)> = vec![("listen_port".into(), port.to_string())];
+    if !iface.is_empty() {
+        session.push((
+            "bind_interface".into(),
+            crate::tomledit::quote_toml_key(&iface),
+        ));
+    }
+    let ok = edit_config(&state, |doc| {
+        Ok(crate::tomledit::append_agent_block(doc, &id, &role, &session))
+    });
+    if !ok {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "the config could not be written"})),
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({"status": "ok", "id": id, "restart_required": true}))
+        .into_response()
+}
+
 /// Removing an engine is NOT idempotent: an unknown one is 404.
+///
+/// `race` and `hoard` are refused: they come from the `[race]` and `[hoard]`
+/// sections that every install has, not from a block that can be dropped, and
+/// deleting one would leave a node that cannot describe its own tiers.
+///
+/// The data is left where it is. An engine declaration is not its catalogue.
 async fn delete_engine(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown agent"})))
-        .into_response()
+    if id == "race" || id == "hoard" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "race and hoard cannot be removed"})),
+        )
+            .into_response();
+    }
+    let mut found = false;
+    let ok = edit_config(&state, |doc| match crate::tomledit::delete_agent_block(doc, &id) {
+        Some(edited) => {
+            found = true;
+            Ok(edited)
+        }
+        None => Err("unknown engine".to_string()),
+    });
+    if !found || !ok {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown engine"})))
+            .into_response();
+    }
+    Json(serde_json::json!({"status": "ok", "restart_required": true})).into_response()
 }
 
 /// Removing a WireGuard config echoes the name back.
@@ -7543,6 +9342,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/import/transmission/preview", axum::routing::post(post_transmission_preview))
         .route("/api/v2/torrents/delete", axum::routing::post(qbit_delete))
         .route("/api/v2/torrents/add", axum::routing::post(qbit_torrent_add))
+        .route("/api/nodes", get(get_nodes).post(post_node))
+        .route("/api/nodes/test", axum::routing::post(post_node_test))
+        .route("/api/nodes/enrol", axum::routing::post(post_node_enrol))
+        .route("/api/nodes/register", axum::routing::post(post_node_register))
+        .route("/install.sh", get(get_install_script))
+        .route("/api/nodes/:name", axum::routing::delete(delete_node))
+        .route("/api/nodes/:name/handoff", axum::routing::post(post_node_handoff))
+        .route("/api/nodes/:name/fetch", axum::routing::post(post_node_fetch))
+        .route("/api/nodes/:name/move-engine", axum::routing::post(post_node_move_engine))
+        .route("/node/:name/open", get(get_node_open))
         .route("/api/agents", get(get_agents).post(post_agent_create))
         .route("/api/agents/:name", axum::routing::put(put_agent).delete(delete_agent))
         .route("/api/engines/:id", axum::routing::delete(delete_engine))
@@ -7568,6 +9377,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hoard/pause-all", axum::routing::post(hoard_pause_all))
         .route("/api/hoard/resume-all", axum::routing::post(hoard_resume_all))
         .route("/api/hoard/pause", axum::routing::post(hoard_pause_bulk))
+        // Any engine, not just the two with a literal route. A node running one
+        // engine per tunnel has to be able to pause the copy on ONE of them.
+        .route("/api/engines/:id/pause", axum::routing::post(engine_pause_bulk))
         .route("/api/race/pause", axum::routing::post(race_pause_bulk))
         .route("/api/race/torrents/:info_hash/pause", axum::routing::post(race_pause_one))
         .route("/api/race/torrents/:info_hash/resume", axum::routing::post(race_resume_one))
@@ -7588,6 +9400,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/torrents/trackers", axum::routing::any(qbit_torrent_trackers))
         .route("/api/v2/torrents/properties", axum::routing::any(qbit_torrent_properties))
         .route("/api/torrents/:info_hash/files", get(get_torrent_files))
+        .route("/api/torrents/:info_hash/torrent", get(get_torrent_file))
+        .route("/api/torrents/:info_hash/peers", axum::routing::post(post_torrent_peers))
+        .route("/api/torrents/:info_hash/engine", axum::routing::post(post_torrent_engine))
+        .route("/api/torrents/:info_hash/copy", axum::routing::post(post_torrent_copy))
         .route("/api/torrents/:info_hash/trackers", get(get_torrent_trackers).post(post_torrent_trackers))
         .route("/api/torrents/:info_hash/add-tracker", axum::routing::post(post_add_tracker))
         .route("/api/trackers", get(get_trackers))
@@ -7669,6 +9485,108 @@ pub fn router(state: AppState) -> Router {
                 .gzip(true)
                 .compress_when(tower_http::compression::predicate::SizeAbove::new(32)),
         )
+}
+
+#[cfg(test)]
+mod fleet_tests {
+    use super::*;
+
+    /// The host extraction has to survive every shape a URL arrives in, since
+    /// a wrong answer here either blocks a legitimate node or lets a loopback
+    /// one through.
+    #[test]
+    fn loopback_is_recognised_whatever_the_url_looks_like() {
+        let host_of = |url: &str| -> String {
+            url.split("//").nth(1).unwrap_or(url)
+                .split('/').next().unwrap_or_default()
+                .rsplit(':').last().unwrap_or_default()
+                .trim_matches(|c| c == '[' || c == ']')
+                .to_string()
+        };
+        assert_eq!(host_of("http://127.0.0.1:8499"), "127.0.0.1");
+        assert_eq!(host_of("http://localhost:8199/"), "localhost");
+        assert_eq!(host_of("http://192.168.99.200:8499"), "192.168.99.200");
+        assert_eq!(host_of("https://seedbox.example.net:8199"), "seedbox.example.net");
+        // A LAN address must NOT be mistaken for loopback.
+        assert!(!host_of("http://192.168.99.200:8499").starts_with("127."));
+    }
+
+    fn page(rows: &[(&str, f64)]) -> serde_json::Value {
+        serde_json::json!({
+            "total": rows.len(),
+            "filtered": rows.len(),
+            "rows": rows.iter().map(|(h, t)| serde_json::json!({
+                "info_hash": h, "added_time": t, "name": h, "state": "seeding"
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn hashes(v: &serde_json::Value) -> Vec<String> {
+        v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["info_hash"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn two_sorted_pages_interleave_and_the_counts_add_up() {
+        let a = page(&[("aa", 30.0), ("bb", 10.0)]);
+        let b = page(&[("cc", 20.0), ("dd", 5.0)]);
+        let out = merge_pages(vec![a, b], "added_time", false, 0, 10);
+        assert_eq!(hashes(&out), vec!["aa", "cc", "bb", "dd"]);
+        assert_eq!(out["total"].as_i64(), Some(4));
+        assert_eq!(out["filtered"].as_i64(), Some(4));
+    }
+
+    /// The property that matters: paging the fleet must not duplicate a torrent
+    /// or lose one. Two pages of two, read back to back, must be the whole set
+    /// in order and each row exactly once.
+    #[test]
+    fn consecutive_windows_are_disjoint_and_complete() {
+        let mk = || vec![
+            page(&[("aa", 30.0), ("bb", 10.0)]),
+            page(&[("cc", 20.0), ("dd", 5.0)]),
+        ];
+        let first = hashes(&merge_pages(mk(), "added_time", false, 0, 2));
+        let second = hashes(&merge_pages(mk(), "added_time", false, 2, 2));
+        assert_eq!(first, vec!["aa", "cc"]);
+        assert_eq!(second, vec!["bb", "dd"]);
+        let mut all = first.clone();
+        all.extend(second);
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 4, "a row was duplicated or dropped between pages");
+    }
+
+    /// Rows that compare equal still need a total order, or the same torrent
+    /// lands on two pages -- or on none -- as soon as the sort is not unique.
+    #[test]
+    fn equal_keys_are_broken_by_hash_so_the_order_is_total() {
+        let a = page(&[("bb", 10.0)]);
+        let b = page(&[("aa", 10.0)]);
+        let out = merge_pages(vec![a, b], "added_time", true, 0, 10);
+        assert_eq!(hashes(&out), vec!["aa", "bb"]);
+    }
+
+    #[test]
+    fn a_seeding_row_sorts_as_complete_whatever_its_progress() {
+        let seeding = serde_json::json!({"state": "seeding", "progress": 0.2, "info_hash": "aa"});
+        let leeching = serde_json::json!({"state": "downloading", "progress": 0.9, "info_hash": "bb"});
+        assert_eq!(row_sort_key(&seeding, "progress").1, 1.0);
+        assert_eq!(row_sort_key(&leeching, "progress").1, 0.9);
+    }
+
+    #[test]
+    fn the_window_is_replaced_and_every_other_filter_survives() {
+        let q = with_window("search=demo&offset=500&limit=500&sort=name", 0, 1000);
+        assert!(q.contains("search=demo"), "{q}");
+        assert!(q.contains("sort=name"), "{q}");
+        assert!(q.contains("offset=0"), "{q}");
+        assert!(q.contains("limit=1000"), "{q}");
+        assert!(!q.contains("offset=500"), "the old window must go: {q}");
+    }
 }
 
 #[cfg(test)]
