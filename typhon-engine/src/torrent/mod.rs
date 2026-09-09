@@ -26,6 +26,15 @@ pub struct TorrentManager {
     pub upload_rate: rate::RateTracker,
     pub download_rate: rate::RateTracker,
     pub cached_unseeded_peers: std::sync::atomic::AtomicUsize,
+    /// Live swarm gauges for this engine, refreshed by `update_rates` every 2s.
+    ///
+    /// Cached rather than computed per request: the header polls them and a
+    /// fresh walk of 300k torrents on every poll is the kind of O(N) the idle
+    /// work was cut to avoid. `update_rates` already walks the map, so keeping
+    /// these costs nothing beyond the adds.
+    pub cached_active_peers: std::sync::atomic::AtomicUsize,
+    pub cached_torrents_with_peers: std::sync::atomic::AtomicUsize,
+    pub cached_torrents_uploading: std::sync::atomic::AtomicUsize,
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
@@ -191,6 +200,9 @@ impl TorrentManager {
             upload_rate: rate::RateTracker::new(),
             download_rate: rate::RateTracker::new(),
             cached_unseeded_peers: std::sync::atomic::AtomicUsize::new(0),
+            cached_active_peers: std::sync::atomic::AtomicUsize::new(0),
+            cached_torrents_with_peers: std::sync::atomic::AtomicUsize::new(0),
+            cached_torrents_uploading: std::sync::atomic::AtomicUsize::new(0),
             skey_index: DashMap::new(),
             dht: std::sync::OnceLock::new(),
             webseed: Default::default(),
@@ -622,12 +634,26 @@ impl TorrentManager {
     pub fn update_rates(&self) {
         let mut total_ul = 0u64;
         let mut total_dl = 0u64;
+        let mut active_peers = 0usize;
+        let mut with_peers = 0usize;
+        let mut uploading = 0usize;
         for entry in self.torrents.iter() {
             let t = entry.value();
             let ul = t.total_uploaded.load(Ordering::Relaxed);
             let dl = t.total_downloaded.load(Ordering::Relaxed);
             total_ul += ul;
             total_dl += dl;
+            // Gauges are summed before the cold-skip below: a torrent with no
+            // peers still has to be counted as zero, and one that is uploading
+            // is never cold, so the skip cannot hide either figure.
+            let peers = t.peers_connected.load(Ordering::Relaxed);
+            active_peers += peers;
+            if peers > 0 {
+                with_peers += 1;
+            }
+            if t.upload_rate.get() > 0 {
+                uploading += 1;
+            }
             // Cold torrents (no peers, rate already 0) moved no bytes since the
             // last tick -> skip the EMA update so per-tick cost tracks the hot
             // set, not total N. One-tick under-report on wake is harmless.
@@ -642,6 +668,9 @@ impl TorrentManager {
         }
         self.upload_rate.update(total_ul);
         self.download_rate.update(total_dl);
+        self.cached_active_peers.store(active_peers, Ordering::Relaxed);
+        self.cached_torrents_with_peers.store(with_peers, Ordering::Relaxed);
+        self.cached_torrents_uploading.store(uploading, Ordering::Relaxed);
     }
 
     // NOTE: per-peer rate tracking removed — on-demand compute done in

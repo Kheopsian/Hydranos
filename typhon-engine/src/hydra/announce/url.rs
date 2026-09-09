@@ -22,6 +22,13 @@ pub struct Announce<'a> {
     /// BEP-7 `ip=`: the address we want handed to other peers. Empty when the
     /// source address the tracker sees is already the right one.
     pub public_ip: &'a str,
+    /// Ask for peers even on a complete torrent.
+    ///
+    /// Set only by the periodic announce self-check: a seeding torrent asks for
+    /// `numwant=0` because it has nothing to dial, but a list of zero peers
+    /// also cannot tell us whether the tracker is handing OUR address out.
+    /// Once in a while we ask for a small list and look for ourselves in it.
+    pub numwant_override: Option<u32>,
 }
 
 /// The twenty bytes of an info hash, percent-encoded.
@@ -92,7 +99,7 @@ pub fn build(a: &Announce) -> Option<String> {
     // A complete torrent asks for no peers: we are reachable and leechers dial
     // us. Asking for 200 anyway would make the tracker do work for a list we
     // would throw away.
-    let numwant = if a.left == 0 { 0 } else { 200 };
+    let numwant = a.numwant_override.unwrap_or(if a.left == 0 { 0 } else { 200 });
     url.push_str("&compact=1&numwant=");
     url.push_str(&numwant.to_string());
     if !a.event.is_empty() {
@@ -153,6 +160,7 @@ mod tests {
             left: 0,
             event: "",
             public_ip: "",
+            numwant_override: None,
         };
         let u = build(&a).unwrap();
         assert!(u.contains("&numwant=0"), "a complete torrent wants no peers: {u}");
@@ -172,6 +180,7 @@ mod tests {
             left: 100,
             event: "started",
             public_ip: "203.0.113.7",
+            numwant_override: None,
         };
         let u = build(&a).unwrap();
         assert!(u.starts_with("https://tr4ker.net/announce?passkey=SECRET&info_hash="));

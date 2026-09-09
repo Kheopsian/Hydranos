@@ -99,9 +99,13 @@ let _netEngines = [];
 
 let ipScrambleTimer = null;
 // Slot-machine scramble on the exit-IP text while a manual refresh is in flight.
+// What the field held before the animation covered it, so the animation can
+// never be the final state.
+let _ipScramblePrev = null;
 function startIpScramble(el) {
     if (!el) return;
     stopIpScramble();
+    _ipScramblePrev = el.innerHTML;
     const chars = "0123456789.";
     el.style.fontFamily = "ui-monospace, monospace";
     ipScrambleTimer = setInterval(() => {
@@ -111,9 +115,15 @@ function startIpScramble(el) {
     }, 45);
 }
 function stopIpScramble() {
+    const running = ipScrambleTimer !== null;
     if (ipScrambleTimer) { clearInterval(ipScrambleTimer); ipScrambleTimer = null; }
     const el = document.getElementById("header-exit-ip");
     if (el) el.style.fontFamily = "";
+    // Put back what was there. Whoever has a fresh address overwrites this a
+    // moment later; without it, any path that stops the animation without
+    // rendering leaves random digits in the header as the finished result.
+    if (running && el && _ipScramblePrev !== null) el.innerHTML = _ipScramblePrev;
+    _ipScramblePrev = null;
 }
 
 async function fetchPublicIp(force) {
@@ -845,6 +855,11 @@ window.addEventListener("DOMContentLoaded", () => {
     const _hashTab = window.location.hash.replace("#", "");
     if (!_hashTab || !document.getElementById("tab-" + _hashTab)) return;
     activateTab(_hashTab);
+    // Start the list request HERE, in parallel with the startup overlay, rather
+    // than after it fades. The overlay, its 750 ms fade-out and the first poll
+    // all happen before anything used to ask for rows, so the table sat empty
+    // for a second or two of otherwise idle waiting.
+    if (_hashTab === "hoard") { try { fetchHoardPage(true); } catch (_) {} }
     window.addEventListener("load", async () => {
         if (_hashTab === "race") await updateRaceTorrents();
         else if (_hashTab === "hoard") await updateHoardStats();
@@ -1209,8 +1224,11 @@ async function updateRecords(force) {
 
 async function updateOverview() {
     try {
-        _renderStatus(await api("/api/status"));
+        // Started before the await, not after it: the two are independent, and
+        // chaining them made the Records card wait on a request it does not
+        // need -- and skipped it entirely whenever /api/status threw.
         updateRecords();
+        _renderStatus(await api("/api/status"));
     } catch (e) {
         console.error("Failed to update overview:", e);
     }
@@ -1251,62 +1269,107 @@ let _hoardAllTorrents = [];
 let _hoardLastFetch = 0;
 let _hoardStatsPainted = false;
 let _hoardStateFilter = "";
-let _hoardCatFilter = "";
-let _hoardTrackerFilter = "";
-let _hoardTagFilter = "";
+// Two lists per facet family instead of one value. Include is OR inside a
+// family, exclude wins over include, families are ANDed. Left click owns the
+// include list, right click owns the exclude list -- one polarity per button,
+// each a plain toggle, so clearing costs the same single click that set it.
+let _hoardCatInc = [], _hoardCatExc = [];
+let _hoardTrackerInc = [], _hoardTrackerExc = [];
+let _hoardTagInc = [], _hoardTagExc = [];
+
+function _toggleFacet(inc, exc, value, negative) {
+    const mine = negative ? exc : inc, other = negative ? inc : exc;
+    const i = mine.indexOf(value);
+    if (i >= 0) { mine.splice(i, 1); return; }
+    const j = other.indexOf(value);
+    if (j >= 0) other.splice(j, 1);
+    mine.push(value);
+}
+
+function _paintChips(sel, key, inc, exc) {
+    document.querySelectorAll(sel).forEach(c => {
+        const v = c.dataset[key];
+        c.classList.toggle("active", inc.includes(v));
+        c.classList.toggle("excluded", exc.includes(v));
+    });
+}
 let _hoardSortCol = localStorage.getItem("hydra_hoard_sort_col") || "added_time";
 let _hoardSortAsc = localStorage.getItem("hydra_hoard_sort_asc") === "1";
 const HOARD_FETCH_INTERVAL = 30000; // bumped 2026-04-19: SSE /api/events fournit le live, ce poll reste un backstop statique (name, category, scrape)
 const HOARD_RENDER_LIMIT = 500;
 
+let _raceTorrents = [];
+
 async function updateRaceTorrents() {
     loadRacePolicy();
     try {
-        let torrents = await api("/api/race/torrents");
-        const tbody = document.getElementById("race-tbody");
+        _raceTorrents = await api("/api/race/torrents");
+        renderRaceTable();
+    } catch (e) {
+        console.error("Failed to update race torrents:", e);
+    }
+}
 
-        // Sort indicator
-        document.querySelectorAll("#race-table thead th").forEach(h => {
-            h.classList.remove("sort-asc", "sort-desc");
-            if (h.dataset.col === _raceSortCol) h.classList.add(_raceSortAsc ? "sort-asc" : "sort-desc");
-        });
+// Split out of the fetch so the search box can re-render from the rows already
+// in hand. Race is served whole, so a keystroke is a filter, not a request --
+// unlike hoard, where the server decides which rows exist at all.
+function renderRaceTable() {
+    const tbody = document.getElementById("race-tbody");
+    if (!tbody) return;
+    const raceCount = document.getElementById("race-filter-count");
 
-        if (torrents.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">No race torrents</td></tr>`;
-            return;
+    // Sort indicator
+    document.querySelectorAll("#race-table thead th").forEach(h => {
+        h.classList.remove("sort-asc", "sort-desc");
+        if (h.dataset.col === _raceSortCol) h.classList.add(_raceSortAsc ? "sort-asc" : "sort-desc");
+    });
+
+    const torrents = _raceTorrents || [];
+    if (torrents.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">No race torrents</td></tr>`;
+        if (raceCount) raceCount.textContent = "";
+        return;
+    }
+
+    // Sort
+    const col = _raceSortCol;
+    const asc = _raceSortAsc;
+    const sorted = [...torrents].sort((a, b) => {
+        let va = a[col] ?? 0, vb = b[col] ?? 0;
+        if (typeof va === "string") {
+            const cmp = va.localeCompare(vb);
+            if (cmp !== 0) return asc ? cmp : -cmp;
+        } else {
+            const diff = asc ? va - vb : vb - va;
+            if (diff !== 0) return diff;
         }
+        return (a.info_hash || "").localeCompare(b.info_hash || "");
+    });
 
-        // Sort
-        const col = _raceSortCol;
-        const asc = _raceSortAsc;
-        torrents = [...torrents].sort((a, b) => {
-            let va = a[col] ?? 0, vb = b[col] ?? 0;
-            if (typeof va === "string") {
-                const cmp = va.localeCompare(vb);
-                if (cmp !== 0) return asc ? cmp : -cmp;
-            } else {
-                const diff = asc ? va - vb : vb - va;
-                if (diff !== 0) return diff;
-            }
-            return (a.info_hash || "").localeCompare(b.info_hash || "");
-        });
+    // Filter the RENDER only. The stats below describe the race tier as a
+    // whole, so computing them over the filtered set would make Avg Share move
+    // with whatever is typed in the search box.
+    const query = (document.getElementById("race-search")?.value || "").trim().toLowerCase();
+    const visible = query ? sorted.filter(t => _searchMatches(t, query)) : sorted;
+    if (raceCount) raceCount.textContent = query ? `${visible.length} / ${torrents.length}` : "";
 
-        tbody.innerHTML = torrents.map(t => {
+    if (visible.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">No match</td></tr>`;
+    } else {
+        tbody.innerHTML = visible.map(t => {
             const detailSel = selectedTorrent === t.info_hash ? ' selected' : '';
             return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="race" data-agent="${t.agent || 'local'}" onclick="handleRowClick(event,'${t.info_hash}','race')" oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','race')">${renderRowCells("race-table", t)}</tr>`;
         }).join("");
-        _updateRowHighlights();
+    }
+    _updateRowHighlights();
 
-        // Avg Share = ratio / (swarm_seeds - 1) for completed torrents with seeds > 1
-        const completed = torrents.filter(t => t.progress >= 1.0 && t.swarm_seeds > 1 && t.ratio > 0);
-        if (completed.length > 0) {
-            const avgShare = completed.reduce((sum, t) => sum + t.ratio / (t.swarm_seeds - 1), 0) / completed.length;
-            document.getElementById("race-avg-share").textContent = (avgShare * 100).toFixed(1) + "%";
-        } else {
-            document.getElementById("race-avg-share").textContent = "-";
-        }
-    } catch (e) {
-        console.error("Failed to update race torrents:", e);
+    // Avg Share = ratio / (swarm_seeds - 1) for completed torrents with seeds > 1
+    const completed = torrents.filter(t => t.progress >= 1.0 && t.swarm_seeds > 1 && t.ratio > 0);
+    if (completed.length > 0) {
+        const avgShare = completed.reduce((sum, t) => sum + t.ratio / (t.swarm_seeds - 1), 0) / completed.length;
+        document.getElementById("race-avg-share").textContent = (avgShare * 100).toFixed(1) + "%";
+    } else {
+        document.getElementById("race-avg-share").textContent = "-";
     }
 }
 
@@ -1899,11 +1962,11 @@ async function refreshDetail() {
                 const seeds = ep ? ep.scrape_complete : -1;
                 const leechers = ep ? ep.scrape_incomplete : -1;
                 const statusHtml = hasErr
-                    ? `<span class="tracker-err" title="${msg}">${msg.substring(0, 60) || "error"}</span>`
-                    : `<span class="tracker-ok">${msg || "OK"}</span>`;
+                    ? `<span class="tracker-err" title="${esc(msg)}">${esc(msg.substring(0, 60) || "error")}</span>`
+                    : `<span class="tracker-ok">${esc(msg || "OK")}</span>`;
                 const nextStr = nextAnn > 0 ? `${Math.floor(nextAnn/60)}m${nextAnn%60}s` : nextAnn === 0 ? "now" : "-";
                 const scrapeStr = seeds >= 0 ? `${seeds}s/${leechers}l` : "";
-                return `<tr><td class="mono" title="${t.url}">${domain}</td><td>${statusHtml}</td><td class="mono">${formatAgo(lastAnn)}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
+                return `<tr><td class="mono" title="${esc(t.url)}">${domain}</td><td>${statusHtml}</td><td class="mono">${formatAgo(lastAnn)}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
             }).join("");
         } else {
             ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
@@ -2028,29 +2091,33 @@ async function saveTrackerEditor() {
 function setHoardStateFilter(el, value) {
     _hoardStateFilter = value;
     document.querySelectorAll(".chip-state").forEach(c => c.classList.toggle("active", c === el));
-    renderHoardTable();
-    _renderHoardCounts();
+    // The filter is applied by the server now: refetch instead of
+    // re-filtering a page that only holds the previous selection.
+    fetchHoardPage(true);
 }
 
-function setHoardCatFilter(el, value) {
-    _hoardCatFilter = _hoardCatFilter === value ? "" : value;
-    document.querySelectorAll(".chip-cat").forEach(c => c.classList.toggle("active", c.dataset.cat === _hoardCatFilter && _hoardCatFilter !== ""));
-    renderHoardTable();
-    _renderHoardCounts();
+function setHoardCatFilter(el, value, negative) {
+    _toggleFacet(_hoardCatInc, _hoardCatExc, value, !!negative);
+    _paintChips(".chip-cat", "cat", _hoardCatInc, _hoardCatExc);
+    // The filter is applied by the server now: refetch instead of
+    // re-filtering a page that only holds the previous selection.
+    fetchHoardPage(true);
 }
 
-function setHoardTrackerFilter(el, value) {
-    _hoardTrackerFilter = _hoardTrackerFilter === value ? "" : value;
-    document.querySelectorAll(".chip-tracker").forEach(c => c.classList.toggle("active", c.dataset.tracker === _hoardTrackerFilter && _hoardTrackerFilter !== ""));
-    renderHoardTable();
-    _renderHoardCounts();
+function setHoardTrackerFilter(el, value, negative) {
+    _toggleFacet(_hoardTrackerInc, _hoardTrackerExc, value, !!negative);
+    _paintChips(".chip-tracker", "tracker", _hoardTrackerInc, _hoardTrackerExc);
+    // The filter is applied by the server now: refetch instead of
+    // re-filtering a page that only holds the previous selection.
+    fetchHoardPage(true);
 }
 
-function setHoardTagFilter(el, value) {
-    _hoardTagFilter = _hoardTagFilter === value ? "" : value;
-    document.querySelectorAll(".chip-tag").forEach(c => c.classList.toggle("active", c.dataset.tag === _hoardTagFilter && _hoardTagFilter !== ""));
-    renderHoardTable();
-    _renderHoardCounts();
+function setHoardTagFilter(el, value, negative) {
+    _toggleFacet(_hoardTagInc, _hoardTagExc, value, !!negative);
+    _paintChips(".chip-tag", "tag", _hoardTagInc, _hoardTagExc);
+    // The filter is applied by the server now: refetch instead of
+    // re-filtering a page that only holds the previous selection.
+    fetchHoardPage(true);
 }
 
 // --- Tags context-menu editor (hoard-only, multi-select) ---
@@ -2126,7 +2193,10 @@ function sortHoard(th) {
         h.classList.remove("sort-asc", "sort-desc");
     });
     th.classList.add(_hoardSortAsc ? "sort-asc" : "sort-desc");
-    renderHoardTable();
+    // Sorting is a server question now: the page in hand is the top 500 of the
+    // PREVIOUS order, so re-sorting it locally would just reorder those 500 and
+    // silently claim to have sorted the library.
+    fetchHoardPage(true);
 }
 
 // Comparator for the hoard table. The tie-break used to be a localeCompare on
@@ -2182,6 +2252,100 @@ function _heapSiftDown(h, i, n, cmp) {
     }
 }
 
+// Totals as the SERVER counted them, over the whole library rather than over
+// the page in hand. Without these the footer would report "500 / 500", because
+// the client can only count what it was sent.
+let _hoardServerTotal = 0;
+let _hoardServerFiltered = 0;
+let _hoardFacets = null;
+let _hoardPageSeq = 0;
+// Highest sequence number whose answer has been rendered.
+let _hoardPageApplied = 0;
+let _hoardPageBusy = false;
+
+// Ask the server for the rows the current sort and filters select.
+//
+// The filtering and sorting happen next to the data; what comes back is already
+// the page to draw. renderHoardTable() still runs its own filter and sort over
+// those rows, which is a no-op on an already-filtered, already-sorted 500 -- it
+// is left in place so a stale page never renders rows that no longer match.
+// How long a page stays good enough for a background refresh to be skipped.
+// Row figures move over SSE (stats_snapshot) and adds/removes arrive as their
+// own events, so re-running a 300k scan on every poll bought nothing and kept
+// the server scanning continuously.
+const HOARD_REFRESH_MS = 20000;
+let _hoardInFlightQuery = "";
+let _hoardLastFetchAt = 0;
+
+function _hoardPageQuery() {
+    const q = new URLSearchParams();
+    q.set("limit", String(HOARD_RENDER_LIMIT));
+    q.set("facets", "1");
+    q.set("sort", _hoardSortCol);
+    q.set("order", _hoardSortAsc ? "asc" : "desc");
+    const search = document.getElementById("hoard-search")?.value || "";
+    if (search) q.set("search", search);
+    if (_hoardCatInc.length) q.set("category", _hoardCatInc.join(","));
+    if (_hoardCatExc.length) q.set("category_not", _hoardCatExc.join(","));
+    if (_hoardTagInc.length) q.set("tag", _hoardTagInc.join(","));
+    if (_hoardTagExc.length) q.set("tag_not", _hoardTagExc.join(","));
+    if (_hoardTrackerInc.length) q.set("tracker", _hoardTrackerInc.join(","));
+    if (_hoardTrackerExc.length) q.set("tracker_not", _hoardTrackerExc.join(","));
+    if (_hoardStateFilter) q.set("state", _hoardStateFilter);
+    return q.toString();
+}
+
+async function fetchHoardPage(force) {
+    const qs = _hoardPageQuery();
+    // Never ask twice for the SAME thing at once. Two entry points fire at
+    // startup and both force; without this they raced each other for the
+    // store and each took twice as long as one would have.
+    if (_hoardPageBusy && qs === _hoardInFlightQuery) return;
+    if (_hoardPageBusy && !force) return;
+    // Background refreshes are rate limited; anything the user did is not.
+    if (!force && Date.now() - _hoardLastFetchAt < HOARD_REFRESH_MS) return;
+
+    _hoardPageBusy = true;
+    _hoardInFlightQuery = qs;
+    try {
+        await _fetchHoardPageInner(qs);
+    } finally {
+        _hoardPageBusy = false;
+        _hoardInFlightQuery = "";
+        _hoardLastFetchAt = Date.now();
+    }
+}
+
+async function _fetchHoardPageInner(qs) {
+    const seq = ++_hoardPageSeq;
+    let d;
+    try { d = await api("/api/hoard/page?" + qs); } catch (e) { return; }
+    // Drop an answer only if a NEWER one has already been applied. Comparing
+    // against the latest request INSTEAD starved the list completely: the
+    // request takes about a second, poll() starts another before it lands, so
+    // every response found a newer one in flight and discarded itself.
+    if (!d || seq <= _hoardPageApplied) return;
+    _hoardPageApplied = seq;
+    _hoardServerTotal = d.total || 0;
+    _hoardServerFiltered = d.filtered || 0;
+    if (d.facets) _hoardFacets = d.facets;
+    const rows = Array.isArray(d.rows) ? d.rows : [];
+    for (const t of rows) {
+        if (t.total_size > 0 && t.total_done > 0) t.ratio = t.total_upload / t.total_done;
+    }
+    _hoardAllTorrents = rows;
+    _hydMap = null;
+    _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
+    renderHoardTable();
+}
+
+// Debounced, for the search box: one request per pause, not one per keystroke.
+let _hoardPageTimer = null;
+function scheduleHoardPage(delay) {
+    if (_hoardPageTimer) clearTimeout(_hoardPageTimer);
+    _hoardPageTimer = setTimeout(() => { _hoardPageTimer = null; fetchHoardPage(true); }, delay || 0);
+}
+
 function renderHoardTable() {
     const search = (document.getElementById("hoard-search")?.value || "").toLowerCase();
 
@@ -2195,15 +2359,24 @@ function renderHoardTable() {
     const visible = _topKSorted(filtered, HOARD_RENDER_LIMIT, _hoardCmp(_hoardSortCol, _hoardSortAsc));
     const countEl = document.getElementById("hoard-filter-count");
     if (countEl) {
-        if (filtered.length > HOARD_RENDER_LIMIT)
-            countEl.textContent = t("{shown} / {matched} ({total} total)", { shown: HOARD_RENDER_LIMIT, matched: filtered.length, total: _hoardAllTorrents.length });
+        // Counted by the server over the whole library. `filtered` here only
+        // ever describes the page in hand, so reporting it would say "500 / 500"
+        // on a 300k library.
+        const matched = _hoardServerFiltered || filtered.length;
+        const total = _hoardServerTotal || _hoardAllTorrents.length;
+        if (matched > HOARD_RENDER_LIMIT)
+            countEl.textContent = t("{shown} / {matched} ({total} total)", { shown: Math.min(visible.length, HOARD_RENDER_LIMIT), matched, total });
         else
-            countEl.textContent = `${filtered.length} / ${_hoardAllTorrents.length}`;
+            countEl.textContent = `${matched} / ${total}`;
     }
 
     const tbody = document.getElementById("hoard-tbody");
     if (!visible.length) {
-        tbody.innerHTML = `<tr><td colspan="${_visibleCols("hoard-table").length}" class="empty">No hoard torrents</td></tr>`;
+        // "None" and "not asked yet" are different answers, and saying the
+        // first while the first page is still in flight reads as an empty
+        // library for as long as the request takes.
+        const msg = _hoardPageApplied === 0 ? t("Loading…") : t("No hoard torrents");
+        tbody.innerHTML = `<tr><td colspan="${_visibleCols("hoard-table").length}" class="empty">${msg}</td></tr>`;
         return;
     }
     tbody.innerHTML = visible.map(t => {
@@ -2217,22 +2390,22 @@ function renderHoardTable() {
 // (30s backstop fetch, torrent_added/removed), not on each stats snapshot.
 function _renderHoardCounts() {
     if (!_hoardAllTorrents) return;
+    // Without server facets there is nothing honest to put on the chips.
+    if (!_hoardFacets) return;
     // Faceted: every group is counted with the OTHER groups applied, never its
     // own. Selecting a category makes each tracker report what it holds inside
     // that category, while the tracker list itself stays whole and switchable.
-    const search = (document.getElementById("hoard-search")?.value || "").toLowerCase();
-    const forState = _hoardAllTorrents.filter(t => _hoardMatches(t, search, "state"));
-    const forCat = _hoardAllTorrents.filter(t => _hoardMatches(t, search, "cat"));
-    const forTrk = _hoardAllTorrents.filter(t => _hoardMatches(t, search, "tracker"));
-    const forTag = _hoardAllTorrents.filter(t => _hoardMatches(t, search, "tag"));
-
-    const stateCounts = {};
-    forState.forEach(t => { stateCounts[t.state] = (stateCounts[t.state] || 0) + 1; });
-    const nAll = forState.length;
-    const nActive = forState.filter(t => t.state === "seeding" && t.upload_rate > 0).length;
-    const nTrackerErr = forState.filter(t => t.tracker_error).length;
-    const nTorrentErr = forState.filter(t => t.torrent_error).length;
-    const nPinned = forState.filter(t => _hoardPinned.has(t.info_hash)).length;
+    // Counted by the server, over the WHOLE library. This page holds 500 rows,
+    // so counting them here would label every chip with a number bounded by the
+    // page size -- "All 500" on a 300k library, and category chips that appear
+    // and vanish depending on which rows the sort happened to bring back.
+    const F = _hoardFacets;
+    const stateCounts = F ? (F.state || {}) : {};
+    const nAll = F ? (F.all || 0) : 0;
+    const nActive = F ? (F.active || 0) : 0;
+    const nTrackerErr = F ? (F.tracker_error || 0) : 0;
+    const nTorrentErr = F ? (F.torrent_error || 0) : 0;
+    const nPinned = F ? (F.pinned || 0) : 0;
     document.querySelector(".chip-state[data-state='']").innerHTML = `All <span class="chip-count">${nAll}</span>`;
     document.querySelector(".chip-state[data-state='seeding']").innerHTML = `Seeding <span class="chip-count">${stateCounts["seeding"] || 0}</span>`;
     document.querySelector(".chip-state[data-state='__active__']").innerHTML = `Actively Seeding <span class="chip-count">${nActive}</span>`;
@@ -2246,48 +2419,42 @@ function _renderHoardCounts() {
     document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `Tracker Error <span class="chip-count">${nTrackerErr}</span>`;
     document.querySelector(".chip-state[data-state='__error__']").innerHTML = `Error <span class="chip-count">${nTorrentErr}</span>`;
 
-    const catCounts = {};
-    forCat.forEach(t => {
-        const c = t.category || "";
-        if (c) catCounts[c] = (catCounts[c] || 0) + 1;
-    });
+    const catCounts = F ? (F.category || {}) : {};
     const cats = Object.keys(catCounts).sort();
-    const nUncat = forCat.filter(t => !(t.category)).length;
+    const nUncat = F ? (F.uncategorized || 0) : 0;
     const container = document.getElementById("hoard-cat-chips");
     if (container) {
         let html = cats.map(c =>
-            `<button class="chip chip-cat${c === _hoardCatFilter ? " active" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')">${esc(incoCat(c))} <span class="chip-count">${catCounts[c]}</span></button>`
+            `<button class="chip chip-cat${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')" oncontextmenu="setHoardCatFilter(this,'${c}',true);return false" title="Click to include, right-click to exclude">${esc(incoCat(c))} <span class="chip-count">${catCounts[c]}</span></button>`
         ).join("");
         // Meta-filter: only meaningful when at least one real category exists and
         // some torrents lack one (e.g. after a category was deleted).
         if (cats.length > 0 && nUncat > 0) {
-            html = `<button class="chip chip-cat chip-none${_hoardCatFilter === "__none__" ? " active" : ""}" data-cat="__none__" style="font-style:italic;opacity:.85" onclick="setHoardCatFilter(this,'__none__')">Uncategorized <span class="chip-count">${nUncat}</span></button>` + html;
+            html = `<button class="chip chip-cat chip-none${_hoardCatInc.includes("__none__") ? " active" : ""}${_hoardCatExc.includes("__none__") ? " excluded" : ""}" data-cat="__none__" style="font-style:italic;opacity:.85" onclick="setHoardCatFilter(this,'__none__')" oncontextmenu="setHoardCatFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Uncategorized <span class="chip-count">${nUncat}</span></button>` + html;
         }
         container.innerHTML = html;
     }
 
-    const trkCounts = {};
-    forTrk.forEach(t => { const h = t.tracker_host || ""; if (h) trkCounts[h] = (trkCounts[h] || 0) + 1; });
+    const trkCounts = F ? (F.tracker || {}) : {};
     const trks = Object.keys(trkCounts).sort();
     const trkContainer = document.getElementById("hoard-tracker-chips");
     if (trkContainer) {
         trkContainer.innerHTML = trks.map(h =>
-            `<button class="chip chip-tracker${h === _hoardTrackerFilter ? " active" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')">${esc(h)} <span class="chip-count">${trkCounts[h]}</span></button>`
+            `<button class="chip chip-tracker${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(h)} <span class="chip-count">${trkCounts[h]}</span></button>`
         ).join("");
     }
 
-    const tagCounts = {};
-    forTag.forEach(t => { (t.tags || []).forEach(tg => { tagCounts[tg] = (tagCounts[tg] || 0) + 1; }); });
+    const tagCounts = F ? (F.tag || {}) : {};
     const tagNames = Object.keys(tagCounts).sort();
-    const nUntagged = forTag.filter(t => !(t.tags && t.tags.length)).length;
+    const nUntagged = F ? (F.untagged || 0) : 0;
     const tagContainer = document.getElementById("hoard-tag-chips");
     if (tagContainer) {
         let html = tagNames.map(tg =>
-            `<button class="chip chip-tag${tg === _hoardTagFilter ? " active" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')">${esc(tg)} <span class="chip-count">${tagCounts[tg]}</span></button>`
+            `<button class="chip chip-tag${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')" oncontextmenu="setHoardTagFilter(this,'${tg}',true);return false" title="Click to include, right-click to exclude">${esc(tg)} <span class="chip-count">${tagCounts[tg]}</span></button>`
         ).join("");
         // Untagged meta-filter: only when tags are actually in use.
         if (tagNames.length > 0 && nUntagged > 0) {
-            html = `<button class="chip chip-tag chip-none${_hoardTagFilter === "__none__" ? " active" : ""}" data-tag="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTagFilter(this,'__none__')">Untagged <span class="chip-count">${nUntagged}</span></button>` + html;
+            html = `<button class="chip chip-tag chip-none${_hoardTagInc.includes("__none__") ? " active" : ""}${_hoardTagExc.includes("__none__") ? " excluded" : ""}" data-tag="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTagFilter(this,'__none__')" oncontextmenu="setHoardTagFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Untagged <span class="chip-count">${nUntagged}</span></button>` + html;
         }
         tagContainer.innerHTML = html;
     }
@@ -2302,8 +2469,7 @@ function _renderHoardCounts() {
 function _renderHoardStatsHeader(data) {
     if (!data) return;
     const total = data.total_torrents || 1;
-        document.getElementById("hoard-bar-uploading").style.width = (data.torrents_uploading / total * 100).toFixed(1) + "%";
-        document.getElementById("hoard-bar-with-peers").style.width = (data.torrents_with_peers / total * 100).toFixed(1) + "%";
+        // The bar is gone; the numbers below carry the same two figures.
         const announced = data.torrents_announced ?? data.total_torrents;
         const annPct = data.total_torrents ? Math.round(announced / data.total_torrents * 100) : 100;
         const annText = annPct >= 100 ? t("all announced") : t("{done}/{total} announced ({pct}%)", { done: announced, total: data.total_torrents, pct: annPct });
@@ -2344,6 +2510,9 @@ async function updateHoardStats() {
             _renderHoardStatsHeader(stats);
             _hoardStatsPainted = true;
         }
+        // And the rows themselves: the stream no longer carries them, so
+        // opening the tab is what asks for the first page.
+        fetchHoardPage();
     } catch (e) {
         console.error("Failed to update hoard stats:", e);
     }
@@ -2420,16 +2589,43 @@ async function _refreshHoardPins() {
 // chip counts so the two can never drift. `skip` names a group to ignore, which
 // is what makes the counts faceted: a group must not shrink its own numbers, or
 // picking one tracker would zero every other tracker and trap you there.
+const _SEARCH_SEP = /[\s._-]+/;
+
+// Mirror of the search block of `get_engine_page` in api.rs -- the two MUST
+// agree. The server decides which rows of the library come back; this decides
+// which of those survive the live SSE mutations between two fetches. A row the
+// server matched and this rejected would be fetched and then hidden, which
+// reads as a search that finds nothing while the counter says it found some.
+function _searchMatches(t, search) {
+    const q = (search || "").trim().toLowerCase();
+    if (!q) return true;
+    const hash = (t.info_hash || "").toLowerCase();
+    // A pasted hash matches even when the torrent has a name.
+    if (q.length >= 6 && /^[0-9a-f]+$/.test(q) && hash.includes(q)) return true;
+    // Separators in the name and in the query both collapse to spaces, so
+    // "demo music" and "demo.music" both find "demo_03_music.bin". Terms are
+    // ANDed and order does not matter.
+    const hay = (t.name || hash).toLowerCase().split(_SEARCH_SEP).join(" ");
+    return q.split(_SEARCH_SEP).filter(Boolean).every(tok => hay.includes(tok));
+}
+
 function _hoardMatches(t, search, skip) {
-    if (skip !== "search" && search && !(t.name || t.info_hash).toLowerCase().includes(search)) return false;
+    if (skip !== "search" && search && !_searchMatches(t, search)) return false;
     if (skip !== "cat") {
-        if (_hoardCatFilter === "__none__") { if (t.category) return false; }
-        else if (_hoardCatFilter && (t.category || "") !== _hoardCatFilter) return false;
+        const cv = t.category || "__none__";
+        if (_hoardCatInc.length && !_hoardCatInc.includes(cv)) return false;
+        if (_hoardCatExc.includes(cv)) return false;
     }
-    if (skip !== "tracker" && _hoardTrackerFilter && (t.tracker_host || "") !== _hoardTrackerFilter) return false;
+    if (skip !== "tracker") {
+        const tv = t.tracker_host || "";
+        if (_hoardTrackerInc.length && !_hoardTrackerInc.includes(tv)) return false;
+        if (_hoardTrackerExc.includes(tv)) return false;
+    }
     if (skip !== "tag") {
-        if (_hoardTagFilter === "__none__") { if (t.tags && t.tags.length) return false; }
-        else if (_hoardTagFilter && !(t.tags || []).includes(_hoardTagFilter)) return false;
+        const tags = t.tags || [];
+        const has = v => v === "__none__" ? tags.length === 0 : tags.includes(v);
+        if (_hoardTagInc.length && !_hoardTagInc.some(has)) return false;
+        if (_hoardTagExc.some(has)) return false;
     }
     if (skip !== "state") {
         const s = _hoardStateFilter;
@@ -2473,11 +2669,34 @@ async function _pinSelected(on) {
 // screen. With 100k torrents the table renders a capped slice, so selecting
 // "all" off the DOM would silently mean "the first 500", which is exactly the
 // bulk-action trap this avoids.
-function _selectAllFiltered() {
-    if (!_hoardFiltered.length) return;
+async function _selectAllFiltered() {
+    // The selection universe is every torrent the FILTER matches, which is no
+    // longer what this page holds -- it holds 500 of them. Ask the server for
+    // the hashes alone: rows for 300k would undo the paging this replaced.
+    const q = new URLSearchParams({ fields: "hash" });
+    const search = document.getElementById("hoard-search")?.value || "";
+    if (search) q.set("search", search);
+    if (_hoardCatInc.length) q.set("category", _hoardCatInc.join(","));
+    if (_hoardCatExc.length) q.set("category_not", _hoardCatExc.join(","));
+    if (_hoardTagInc.length) q.set("tag", _hoardTagInc.join(","));
+    if (_hoardTagExc.length) q.set("tag_not", _hoardTagExc.join(","));
+    if (_hoardTrackerInc.length) q.set("tracker", _hoardTrackerInc.join(","));
+    if (_hoardTrackerExc.length) q.set("tracker_not", _hoardTrackerExc.join(","));
+    if (_hoardStateFilter) q.set("state", _hoardStateFilter);
+
+    let hashes;
+    try {
+        const d = await api("/api/hoard/page?" + q.toString());
+        hashes = Array.isArray(d && d.hashes) ? d.hashes : null;
+    } catch (e) { hashes = null; }
+    // Fall back to what is on screen rather than selecting nothing: a Ctrl+A
+    // that silently no-ops is worse than one that selects the visible page.
+    if (!hashes) hashes = _hoardFiltered.map(t => t.info_hash);
+    if (!hashes.length) return;
+
     _selected.clear();
-    for (const t of _hoardFiltered) {
-        _selected.set(_selKeyOf(t.info_hash, t.agent), { hash: t.info_hash, mode: "hoard", agent: t.agent || "local" });
+    for (const h of hashes) {
+        _selected.set(_selKeyOf(h, "local"), { hash: h, mode: "hoard", agent: "local" });
     }
     _anchorHash = null;
     _updateRowHighlights();
@@ -2878,7 +3097,7 @@ async function _showCategoryPicker(ev, move) {
         const safePath = esc(c.save_path || "");
         // category name is embedded as a JS string literal, escape quotes.
         const jsName = String(c.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
-        return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\', ${move ? "true" : "false"})" title="${safePath}">${safeName}</div>`;
+        return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\', ${move ? "true" : "false"})" title="${esc(safePath)}">${safeName}</div>`;
     }).join("");
     const verb = move ? t("Move to category") : t("Set category (no move)");
     const label = verb + ": " + tp(_selected.size, "{n} torrent", "{n} torrents");
@@ -3186,9 +3405,9 @@ async function _pauseSelected(paused) {
 function _currentHoardFilter() {
     return {
         search: (document.getElementById("hoard-search")?.value || ""),
-        category: _hoardCatFilter || "",
-        tracker: _hoardTrackerFilter || "",
-        tag: _hoardTagFilter || "",
+        category: _hoardCatInc.join(",")
+        , tracker: _hoardTrackerInc.join(",")
+        , tag: _hoardTagInc.join(","),
         state: _hoardStateFilter || "",
     };
 }
@@ -3317,11 +3536,11 @@ async function refreshHoardDetail() {
                 const seeds = ep ? ep.scrape_complete : -1;
                 const leechers = ep ? ep.scrape_incomplete : -1;
                 const statusHtml = hasErr
-                    ? `<span class="tracker-err" title="${msg}">${msg.substring(0, 60) || "error"}</span>`
-                    : `<span class="tracker-ok">${msg || "OK"}</span>`;
+                    ? `<span class="tracker-err" title="${esc(msg)}">${esc(msg.substring(0, 60) || "error")}</span>`
+                    : `<span class="tracker-ok">${esc(msg || "OK")}</span>`;
                 const nextStr = nextAnn > 0 ? `${Math.floor(nextAnn/60)}m${nextAnn%60}s` : nextAnn === 0 ? "now" : "-";
                 const scrapeStr = seeds >= 0 ? `${seeds}s/${leechers}l` : "";
-                return `<tr><td class="mono" title="${t.url}">${domain}</td><td>${statusHtml}</td><td class="mono">${formatAgo(lastAnn)}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
+                return `<tr><td class="mono" title="${esc(t.url)}">${domain}</td><td>${statusHtml}</td><td class="mono">${formatAgo(lastAnn)}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
             }).join("");
         } else {
             ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
@@ -3345,10 +3564,10 @@ function buildSeedboxBadge(p) {
     ].join("\n");
 
     if (p.is_seedbox) {
-        return `<span class="badge-seedbox" title="${checks}">SEEDBOX ℹ</span>`;
+        return `<span class="badge-seedbox" title="${esc(checks)}">SEEDBOX ℹ</span>`;
     }
     const failed = [!speedOk && "speed", !reliabilityOk && "reliability", !sessionsOk && "sessions"].filter(Boolean).join(", ");
-    return `<span class="badge-no" title="${checks}">✗ ${failed}</span>`;
+    return `<span class="badge-no" title="${esc(checks)}">✗ ${failed}</span>`;
 }
 
 // ─── Remove torrent ─────────────────────────────────────
@@ -5001,6 +5220,14 @@ document.querySelectorAll(".tab").forEach(tab => {
 
 // ─── Startup restore polling ─────────────────────────────────
 function _startNormalPolling() {
+    // Records FIRST, and on its own. It used to be chained behind
+    // /api/status inside updateOverview(), so it only left the browser once
+    // that had resolved -- by which time poll() and the SSE stream had taken
+    // the connections, and it queued behind a stream that never ends. The
+    // answer is served from cache in about a millisecond; the wait was entirely
+    // in the ordering. It self-throttles to one call a minute, so the call
+    // updateOverview() still makes is a no-op.
+    updateRecords();
     // Immediate header paint while SSE is establishing.
     updateOverview();
     // poll() already fetches what the active tab needs, categories included.
@@ -5021,6 +5248,14 @@ function _startNormalPolling() {
         setInterval(fetchPublicIp, 2 * 60 * 1000);
     }
     fetchPortForward();
+    // The badge counts trackers needing attention, and its only caller used to
+    // be updateTrackers() -- which runs solely while the Trackers tab is open.
+    // Reloading anywhere else left the tab bare until you went and looked,
+    // which is the one moment an indicator is supposed to save you. It owns its
+    // own /api/announce/health call, so it does not need the tab's data; it is
+    // kept off the 1s poll because nothing here moves at that rate.
+    updateTabBadges();
+    setInterval(updateTabBadges, 30 * 1000);
     setInterval(poll, POLL_INTERVAL);
     setInterval(fetchPortForward, 60 * 1000);
     setupHoardSSE();
@@ -5046,6 +5281,12 @@ async function _checkStartup() {
         }
 
         if (d.ready) {
+            // The engine is up: ask for the rows now, so the request overlaps
+            // the fade-out instead of starting once it is over.
+            const activeTab = document.querySelector(".tab.active");
+            if (activeTab && activeTab.dataset.tab === "hoard") {
+                try { fetchHoardPage(true); } catch (_) {}
+            }
             if (overlay) {
                 overlay.classList.add("fade-out");
                 setTimeout(() => overlay.remove(), 750);
@@ -5094,6 +5335,11 @@ function setupHoardSSE() {
     // events resume, without re-streaming ~100k rows on every tab focus.
     const _q = [];
     if (API_KEY) _q.push("apikey=" + encodeURIComponent(API_KEY));
+    // The list is paged through /api/hoard/page now, so this stream carries the
+    // live half only: status, per-row stats, adds and removes. Streaming the
+    // library here as well was 250 MB and twenty seconds per hard refresh, to
+    // let the browser work out which 500 rows to draw.
+    _q.push("hydrate=0");
     if (_syncCursor && Array.isArray(_hoardAllTorrents) && _hoardAllTorrents.length > 0) _q.push("since=" + _syncCursor);
     const url = "/api/events" + (_q.length ? ("?" + _q.join("&")) : "");
     try {
@@ -6125,25 +6371,98 @@ async function spoofAllTrackers(clear) {
     }
 }
 
+// Acknowledge a tracker, or take the acknowledgement back.
+async function muteTracker(host, muted) {
+    try {
+        await api("/api/announce/mute", { method: "POST", body: JSON.stringify({ host, muted }) });
+        _trackersSig = "";
+        await updateTrackers();
+    } catch (e) { console.error("mute failed:", e); }
+}
+
+// Tab badges. Counted in distinct trackers, never in errors, and muted hosts
+// are excluded: an indicator that is always lit teaches you to ignore it.
+async function updateTabBadges() {
+    try {
+        const h = await api("/api/announce/health");
+        const b = (h && h.badges) || {};
+        const el = document.querySelector('.tab[data-tab="trackers"]');
+        if (!el) return;
+        let dot = el.querySelector(".tab-badge");
+        const n = (b.trackers_red || 0) + (b.trackers_amber || 0);
+        if (!n) { if (dot) dot.remove(); return; }
+        if (!dot) {
+            dot = document.createElement("span");
+            dot.className = "tab-badge";
+            el.appendChild(dot);
+        }
+        dot.textContent = String(n);
+        dot.className = "tab-badge " + (b.trackers_red ? "red" : "amber");
+        dot.title = (b.trackers_red || 0) + " needing action, " + (b.trackers_amber || 0) + " throttled or unreachable";
+    } catch (e) { /* the tab still works without its badge */ }
+}
+
 async function updateTrackers() {
     try {
-        const rows = await api("/api/trackers");
+        // Two sources: /api/trackers carries the per-host settings and the LAST
+        // error, /api/announce/health carries every error grouped by class plus
+        // the announce self-check. One last error tells you a tracker is
+        // unhappy; the breakdown tells you whether to back off, fix the
+        // account, or drop the torrents.
+        const [rows, health] = await Promise.all([
+            api("/api/trackers"),
+            api("/api/announce/health").catch(() => null),
+        ]);
+        // Both engines are merged: a tracker is a tracker, and whoever reads
+        // this row does not care which engine hit it.
+        const agg = {};
+        if (health) {
+            Object.values(health).forEach(eng => {
+                Object.entries((eng && eng.hosts) || {}).forEach(([host, h]) => {
+                    const a = agg[host] = agg[host] || { errors: {}, verify: null };
+                    (h.errors || []).forEach(e => {
+                        a.errors[e.class] = (a.errors[e.class] || 0) + e.count;
+                    });
+                    if (h.verify) a.verify = h.verify;
+                    if (h.severity && h.severity !== "none") a.severity = h.severity;
+                    if (h.muted) a.muted = true;
+                });
+            });
+        }
         const tbody = document.getElementById("trackers-tbody");
         if (!rows || !rows.length) {
             tbody.innerHTML = `<tr><td colspan="8" class="empty">${t("No tracker known yet. They appear here once a torrent announces, or as soon as you give one a setting.")}</td></tr>`;
             return;
         }
         const _thtml = rows.map(r => {
-            const status = r.ok
+            let status = r.ok
                 ? '<span class="mode-tag mode-hoard">ok</span>'
                 : '<span class="mode-tag mode-race">error</span>';
+            // The self-check verdict, when one has been taken. "unknown" is a
+            // real answer and is left grey: a tracker usually omits the asking
+            // peer from its own reply, so an absence alone proves nothing. What
+            // does prove something is v4_missing / v6_missing, an asymmetry.
+            const vv = agg[r.host] && agg[r.host].verify;
+            if (vv) {
+                const cls = vv.verdict === "ok" ? "mode-hoard"
+                    : (vv.verdict === "unknown" ? "" : "mode-race");
+                status += ' <span class="mode-tag ' + cls + '" title="'
+                    + esc("announce self-check, " + vv.age_secs + "s ago, swarm " + vv.swarm)
+                    + '">' + esc(vv.verdict) + '</span>';
+            }
             const spoof = r.spoofed
                 ? `<span class="mode-tag mode-hoard">${esc(r.peer_id_prefix || "spoof")}</span>`
                 : '<span class="sr-desc">-</span>';
             const passkey = r.passkey_set
                 ? '<span class="mode-tag mode-hoard">set</span>'
                 : '<span class="sr-desc">-</span>';
-            const err = r.last_error ? esc(r.last_error) : "-";
+            const hh = agg[r.host];
+            const counts = hh ? Object.entries(hh.errors).sort((a, b) => b[1] - a[1]) : [];
+            // The breakdown replaces the last error when there is one: it says
+            // strictly more, and the raw message stays in the tooltip.
+            const err = counts.length
+                ? esc(counts.map(([c, n]) => c + " x" + n).join(", "))
+                : (r.last_error ? esc(r.last_error) : "-");
             // Read-only here on purpose: this row carries a torrent count and a
             // last-announce time, so it is rewritten on every poll. A control
             // living in it would be torn out from under the pointer mid-click.
@@ -6152,8 +6471,27 @@ async function updateTrackers() {
             const ipmode = cur !== "auto"
                 ? `<span class="mode-tag mode-hoard">${esc(cur)}</span>`
                 : '<span class="sr-desc">auto</span>';
-            return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td><button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}')">Edit</button></td></tr>`;
+            const sev = (agg[r.host] && agg[r.host].severity) || "none";
+            const muted = !!(agg[r.host] && agg[r.host].muted);
+            const SEV = {
+                red:   ["sev-red",   "needs action"],
+                amber: ["sev-amber", "unreachable"],
+                muted: ["sev-muted", "acknowledged"],
+            };
+            const dot = "";
+            const mute = `<button class="btn-small" onclick="muteTracker('${esc(r.host)}',${muted ? "false" : "true"})">${muted ? "Unmute" : "Mute"}</button>`;
+            // The severity replaces the bare ok/error tag: two words saying the
+            // same thing in one cell is noise. Tooltip on the whole row, so the
+            // pointer aims at the wording rather than at a 9px circle.
+            if (SEV[sev]) {
+                status = `<span class="sev ${SEV[sev][0]}"></span><span class="sev-label">${SEV[sev][1]}</span>`;
+            }
+            const rowTip = SEV[sev]
+                ? esc(r.host + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
+                : esc(r.last_error || "");
+            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}')">Edit</button></td></tr>`;
         }).join("");
+        updateTabBadges();
         if (_thtml === _trackersSig) return;
         _trackersSig = _thtml;
         tbody.innerHTML = _thtml;
@@ -6320,27 +6658,61 @@ async function restartHydra(){
 
 
 // ── Resizable torrent table columns (drag the right edge; widths persist) ──
+//
+// Two things have to hold for a drag to move ONE column:
+//
+//  1. Every column must carry a pinned width. renderTableHeader only emits
+//     `data-col` for SORTABLE columns, so selecting on it missed Tags, which
+//     stayed elastic and became the table's shock absorber: it soaked up each
+//     resize and collapsed to zero before the real columns began to give way.
+//     `data-colid` is emitted for every column, so that is the key.
+//
+//  2. The table must not be pinned to `width: 100%`. Under `table-layout:
+//     fixed` a percentage width makes the column widths a RATIO of the
+//     container, not pixels -- so widening one column necessarily takes the
+//     pixels from the others. An explicit total lets the table grow instead,
+//     and the page scrolls sideways as it already does when the columns are
+//     naturally wider than the window.
+//
+// The trade this makes: shrinking columns can leave the table narrower than
+// the viewport instead of stretching to fill it. Filling would mean scaling
+// the columns back up, which is the very behaviour being removed.
 function initResizableColumns(table, key) {
     if (!table || table._colResizeInit) return;
     table._colResizeInit = true;
-    const ths = Array.from(table.querySelectorAll("thead th[data-col]"));
+    const ths = Array.from(table.querySelectorAll("thead th[data-colid], thead th[data-col]"));
     if (!ths.length) return;
+    const colKey = th => th.dataset.colid || th.dataset.col;
+
+    // Called on mousedown, so the table is on screen and measurable.
     const goFixed = () => {
         if (table._colFixed) return;
-        // Snapshot current widths while visible, then lock the layout so a drag
-        // only moves the grabbed column instead of reflowing the whole table.
-        ths.forEach(th => { th.style.width = th.offsetWidth + "px"; });
+        const w = ths.map(th => th.offsetWidth);
+        const total = table.offsetWidth;
+        ths.forEach((th, i) => { if (!th.style.width) th.style.width = w[i] + "px"; });
+        if (!table.style.width) table.style.width = total + "px";
         table.style.tableLayout = "fixed";
         table._colFixed = true;
     };
+
     // Restore saved widths (works even while the tab is hidden: no measuring).
     const saved = JSON.parse(localStorage.getItem(key) || "{}");
     let anySaved = false;
     ths.forEach(th => {
-        const w = saved[th.dataset.col];
+        const w = saved[colKey(th)];
         if (w) { th.style.width = w + "px"; anySaved = true; }
     });
-    if (anySaved) { table.style.tableLayout = "fixed"; table._colFixed = true; }
+    if (anySaved) {
+        table.style.tableLayout = "fixed";
+        // Only claim the layout is settled once EVERY column has a width; a
+        // partial restore still needs goFixed to pin the rest, and pinning the
+        // total from an incomplete sum would squeeze whatever it left out.
+        if (ths.every(th => saved[colKey(th)])) {
+            table.style.width = ths.reduce((sum, th) => sum + saved[colKey(th)], 0) + "px";
+            table._colFixed = true;
+        }
+    }
+
     ths.forEach(th => {
         if (getComputedStyle(th).position === "static") th.style.position = "relative";
         const grip = document.createElement("div");
@@ -6350,14 +6722,22 @@ function initResizableColumns(table, key) {
             e.preventDefault();
             e.stopPropagation();
             goFixed();
-            const startX = e.pageX, startW = th.offsetWidth;
-            const move = ev => { th.style.width = Math.max(40, startW + ev.pageX - startX) + "px"; };
+            const startX = e.pageX, startW = th.offsetWidth, startTableW = table.offsetWidth;
+            const move = ev => {
+                const w = Math.max(40, startW + ev.pageX - startX);
+                th.style.width = w + "px";
+                // Give the table the same delta, so the width comes from the
+                // page rather than from the neighbouring columns.
+                table.style.width = (startTableW + (w - startW)) + "px";
+            };
             const up = () => {
                 document.removeEventListener("mousemove", move);
                 document.removeEventListener("mouseup", up);
                 document.body.style.cursor = "";
+                // Persist every column, not just the dragged one, so the next
+                // restore has a complete set and can pin the total itself.
                 const s = JSON.parse(localStorage.getItem(key) || "{}");
-                s[th.dataset.col] = th.offsetWidth;
+                ths.forEach(x => { s[colKey(x)] = x.offsetWidth; });
                 localStorage.setItem(key, JSON.stringify(s));
             };
             document.addEventListener("mousemove", move);
@@ -6443,9 +6823,9 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
 // are persisted per-table in localStorage (hydra_colcfg_<table>).
 const TABLE_COLS = {
     "hoard-table": [
-        { id: "name", label: "Name", sort: "name", render: t => `<td title="${t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
+        { id: "name", label: "Name", sort: "name", render: t => `<td title="${esc(t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash))}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
-        { id: "state", label: "State", sort: "state", render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${d.title}">${d.label}</span></td>`; } },
+        { id: "state", label: "State", sort: "state", render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${esc(d.title)}">${d.label}</span></td>`; } },
         { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
@@ -6460,7 +6840,7 @@ const TABLE_COLS = {
         { id: "agent", label: "Agent", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
     ],
     "race-table": [
-        { id: "name", label: "Name", sort: "name", render: t => `<td title="${t.info_hash}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
+        { id: "name", label: "Name", sort: "name", render: t => `<td title="${esc(t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
         { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },

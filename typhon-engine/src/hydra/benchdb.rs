@@ -33,7 +33,44 @@ CREATE TABLE IF NOT EXISTS race_snapshots (
     ratio REAL DEFAULT 0, peers_json TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_race_snap_ts ON race_snapshots(ts);
 CREATE INDEX IF NOT EXISTS idx_race_snap_hash ON race_snapshots(info_hash);
+CREATE TABLE IF NOT EXISTS bench_samples (
+    ts REAL NOT NULL,
+    race_upload_rate REAL DEFAULT 0, race_download_rate REAL DEFAULT 0,
+    race_peers REAL DEFAULT 0, race_torrents REAL DEFAULT 0,
+    hoard_upload_rate REAL DEFAULT 0, hoard_peers REAL DEFAULT 0,
+    hoard_active REAL DEFAULT 0, hoard_with_peers REAL DEFAULT 0,
+    hoard_uploading REAL DEFAULT 0, iowait_pct REAL DEFAULT 0,
+    arc_size_bytes REAL DEFAULT 0, arc_hit_rate_pct REAL DEFAULT 0,
+    arc_demand_hit_rate_pct REAL DEFAULT 0, arc_miss_per_sec REAL DEFAULT 0,
+    arc_demand_miss_per_sec REAL DEFAULT 0, arc_ghost_hits_per_sec REAL DEFAULT 0,
+    race_uploading REAL DEFAULT 0, race_avg_share REAL DEFAULT 0,
+    open_fds REAL DEFAULT 0, hoard_session_uploaded INTEGER DEFAULT 0,
+    race_session_uploaded INTEGER DEFAULT 0, global_uploaded INTEGER DEFAULT 0,
+    global_downloaded INTEGER DEFAULT 0, race_announce_rate REAL DEFAULT 0,
+    hoard_announce_rate REAL DEFAULT 0, race_announce_fail_rate REAL DEFAULT 0,
+    hoard_announce_fail_rate REAL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_bench_ts ON bench_samples(ts);
+CREATE TABLE IF NOT EXISTS tracker_samples (
+    ts REAL NOT NULL, engine TEXT NOT NULL, tracker TEXT NOT NULL,
+    upload_rate REAL DEFAULT 0, download_rate REAL DEFAULT 0,
+    peers REAL DEFAULT 0, active REAL DEFAULT 0, torrents REAL DEFAULT 0,
+    cum_uploaded INTEGER DEFAULT 0, cum_downloaded INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_tracker_samples_ts ON tracker_samples(ts);
+CREATE INDEX IF NOT EXISTS idx_tracker_samples_trk ON tracker_samples(tracker);
 ";
+
+/// The columns of `bench_samples`, in the order the graphs read them.
+///
+/// Written out rather than `SELECT *` so a future migration adding a column
+/// cannot silently shift what each position means.
+pub const BENCH_COLUMNS: &str = "ts, race_upload_rate, race_download_rate, race_peers, \
+     race_torrents, hoard_upload_rate, hoard_peers, hoard_active, hoard_with_peers, \
+     hoard_uploading, iowait_pct, arc_size_bytes, arc_hit_rate_pct, \
+     arc_demand_hit_rate_pct, arc_miss_per_sec, arc_demand_miss_per_sec, \
+     arc_ghost_hits_per_sec, race_uploading, race_avg_share, open_fds, \
+     hoard_session_uploaded, race_session_uploaded, global_uploaded, \
+     global_downloaded, race_announce_rate, hoard_announce_rate, \
+     race_announce_fail_rate, hoard_announce_fail_rate";
 
 /// One recorded moment in a torrent's life.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -66,6 +103,71 @@ pub struct RaceEvent {
 
 fn is_zero(n: &i64) -> bool {
     *n == 0
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// "Jan 2", the short form the Records card puts under each label.
+fn day_date(ts: f64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_, m, d) = civil_from_days((ts as i64).div_euclid(86_400));
+    format!("{} {}", MONTHS[(m as usize).saturating_sub(1).min(11)], d)
+}
+
+/// "2026-09-08", the form the milestone rows and the ETA use.
+fn iso_date(ts: f64) -> String {
+    let (y, m, d) = civil_from_days((ts as i64).div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Howard Hinnant's civil_from_days, the standard branch-free conversion.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// The gap between two milestones, in the words the card uses.
+fn human_dur(sec: f64) -> String {
+    let d = sec / 86_400.0;
+    if d >= 365.0 {
+        let y = d / 365.0;
+        format!("~{:.1} year{}", y, if y < 2.0 { "" } else { "s" })
+    } else if d >= 60.0 {
+        format!("~{:.0} months", d / 30.44)
+    } else {
+        format!("~{d:.0} days")
+    }
+}
+
+/// One `tracker_samples` row as the tracker stats table and chart read it.
+fn tracker_row_json(row: &rusqlite::Row) -> serde_json::Value {
+    let f = |i: usize| -> f64 { row.get(i).unwrap_or(0.0) };
+    let s = |i: usize| -> String { row.get(i).unwrap_or_default() };
+    let n = |i: usize| -> i64 { row.get(i).unwrap_or(0) };
+    serde_json::json!({
+        "ts": crate::row::num_json(f(0)),
+        "engine": s(1),
+        "tracker": s(2),
+        "upload_rate": crate::row::num_json(f(3)),
+        "download_rate": crate::row::num_json(f(4)),
+        "peers": crate::row::num_json(f(5)),
+        "active": crate::row::num_json(f(6)),
+        "torrents": crate::row::num_json(f(7)),
+        "cum_uploaded": n(8),
+        "cum_downloaded": n(9),
+    })
 }
 
 /// Turns repeated sightings of a torrent into the few moments worth recording.
@@ -160,6 +262,16 @@ impl BenchDb {
         Ok(Self { conn })
     }
 
+    /// A second, read-only handle on the same file.
+    ///
+    /// The records pass reads 1.7M rows and takes seconds. Running it on the
+    /// writer's connection would hold that mutex for the whole scan, and the
+    /// sampler writing every five seconds would queue behind it.
+    pub fn open_read_only(path: &Path) -> anyhow::Result<Self> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(Self { conn })
+    }
+
     pub fn open_in_memory() -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
@@ -195,6 +307,289 @@ impl BenchDb {
             ],
         )?;
         Ok(())
+    }
+
+    /// Append one performance sample.
+    ///
+    /// The sampler is the only writer; 3.x wrote a row every 5s and the graphs
+    /// assume that spacing. The values arrive as a JSON object keyed by column
+    /// name so the caller does not have to keep 28 positional arguments in the
+    /// same order as the schema.
+    pub fn record_sample(&self, sample: &serde_json::Value) -> anyhow::Result<()> {
+        let cols: Vec<&str> = BENCH_COLUMNS.split(',').map(|c| c.trim()).collect();
+        let placeholders: Vec<String> =
+            (1..=cols.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "INSERT INTO bench_samples ({}) VALUES ({})",
+            cols.join(", "),
+            placeholders.join(", ")
+        );
+        let values: Vec<f64> = cols
+            .iter()
+            .map(|c| sample.get(*c).and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .collect();
+        let params: Vec<&dyn rusqlite::ToSql> =
+            values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+        self.conn.execute(&sql, params.as_slice())?;
+        Ok(())
+    }
+
+    /// Performance samples between two instants, oldest first.
+    ///
+    /// Returned as JSON objects keyed by column so the route can hand them to
+    /// the graphs unchanged.
+    pub fn samples_in_range(&self, start: f64, end: f64) -> anyhow::Result<Vec<serde_json::Value>> {
+        let cols: Vec<&str> = BENCH_COLUMNS.split(',').map(|c| c.trim()).collect();
+        let sql = format!(
+            "SELECT {BENCH_COLUMNS} FROM bench_samples WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![start, end], |row| {
+            let mut out = serde_json::Map::new();
+            for (i, name) in cols.iter().enumerate() {
+                let v: f64 = row.get(i).unwrap_or(0.0);
+                out.insert((*name).to_string(), crate::row::num_json(v));
+            }
+            Ok(serde_json::Value::Object(out))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Append one per-tracker sample.
+    pub fn record_tracker_sample(
+        &self,
+        ts: f64,
+        engine: &str,
+        tracker: &str,
+        peers: f64,
+        active: f64,
+        torrents: f64,
+        cum_uploaded: i64,
+        cum_downloaded: i64,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO tracker_samples
+                 (ts, engine, tracker, upload_rate, download_rate, peers, active,
+                  torrents, cum_uploaded, cum_downloaded)
+             VALUES (?1,?2,?3,0,0,?4,?5,?6,?7,?8)",
+            rusqlite::params![ts, engine, tracker, peers, active, torrents,
+                              cum_uploaded, cum_downloaded],
+        )?;
+        Ok(())
+    }
+
+    /// The most recent sample for each tracker, for the tracker stats table.
+    pub fn tracker_samples_latest(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.ts, s.engine, s.tracker, s.upload_rate, s.download_rate, s.peers,
+                    s.active, s.torrents, s.cum_uploaded, s.cum_downloaded
+               FROM tracker_samples s
+               JOIN (SELECT tracker, MAX(ts) AS ts FROM tracker_samples GROUP BY tracker) m
+                 ON m.tracker = s.tracker AND m.ts = s.ts
+              ORDER BY s.tracker",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(tracker_row_json(row)))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// One tracker's samples between two instants, oldest first.
+    pub fn tracker_samples_in_range(
+        &self,
+        tracker: &str,
+        start: f64,
+        end: f64,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, engine, tracker, upload_rate, download_rate, peers, active,
+                    torrents, cum_uploaded, cum_downloaded
+               FROM tracker_samples
+              WHERE tracker = ?1 AND ts >= ?2 AND ts <= ?3
+              ORDER BY ts",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![tracker, start, end], |row| {
+            Ok(tracker_row_json(row))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Everything the Records card and the milestone list render.
+    ///
+    /// Mirrors what 3.x computed, including the part that is not obvious: the
+    /// lifetime counter has been carried across clients and its lineage shows
+    /// up as a jump of more than 100 TiB between two consecutive samples. Every
+    /// figure derived from a delta is measured only after the LAST such jump,
+    /// or a single lineage change would be published as the best upload day
+    /// this node ever had.
+    pub fn records_payload(&self) -> anyhow::Result<serde_json::Value> {
+        const PIB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0;
+        const TIB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0;
+        const JUMP_CAP: f64 = 100.0 * TIB;
+
+        // The first clean sample: the one after the last lineage jump.
+        let (mut t_clean, mut first_ts) = (0.0f64, 0.0f64);
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT ts, global_uploaded FROM bench_samples ORDER BY ts")?;
+            let mut rows = stmt.query([])?;
+            let mut prev: Option<f64> = None;
+            let mut have_first = false;
+            while let Some(row) = rows.next()? {
+                let ts: f64 = row.get(0).unwrap_or(0.0);
+                let v: f64 = row.get(1).unwrap_or(0.0);
+                if !have_first {
+                    first_ts = ts;
+                    have_first = true;
+                }
+                if let Some(p) = prev {
+                    if v - p > JUMP_CAP {
+                        t_clean = ts;
+                    }
+                }
+                prev = Some(v);
+            }
+        }
+        if t_clean == 0.0 {
+            t_clean = first_ts;
+        }
+
+        let now: f64 = self
+            .conn
+            .query_row("SELECT MAX(ts) FROM bench_samples", [], |r| r.get(0))
+            .unwrap_or(0.0);
+
+        let peak = |expr: &str| -> Option<(f64, f64)> {
+            let sql = format!(
+                "SELECT ts, ({expr}) v FROM bench_samples WHERE ({expr}) IS NOT NULL \
+                 ORDER BY v DESC LIMIT 1"
+            );
+            self.conn
+                .query_row(&sql, [], |r| Ok((r.get(0).unwrap_or(0.0), r.get(1).unwrap_or(0.0))))
+                .ok()
+        };
+        let rec = |label: &str, value: f64, unit: &str, ts: f64, hi: bool| {
+            serde_json::json!({
+                "label": label,
+                "value": crate::row::num_json(round2(value)),
+                "unit": unit,
+                "date": day_date(ts),
+                "hi": hi,
+            })
+        };
+
+        let mut records = Vec::new();
+        if let Some((ts, v)) = peak("race_upload_rate + hoard_upload_rate") {
+            records.push(rec("Peak upload", v * 8.0 / 1e9, "Gbps", ts, true));
+        }
+        if let Some((ts, v)) = peak("race_download_rate") {
+            records.push(rec("Peak download", v * 8.0 / 1e9, "Gbps", ts, false));
+        }
+        if let Some((ts, v)) = peak("race_peers + hoard_peers") {
+            records.push(rec("Peak swarm peers", v.round(), "", ts, false));
+        }
+        if let Ok((ts, delta)) = self.conn.query_row(
+            "SELECT MAX(ts) ts, MAX(global_uploaded)-MIN(global_uploaded) delta \
+               FROM bench_samples WHERE ts>=?1 \
+              GROUP BY CAST(ts/86400 AS INT) ORDER BY delta DESC LIMIT 1",
+            rusqlite::params![t_clean],
+            |r| Ok((r.get::<_, f64>(0).unwrap_or(0.0), r.get::<_, f64>(1).unwrap_or(0.0))),
+        ) {
+            records.push(rec("Best upload day", delta / TIB, "TiB", ts, true));
+        }
+        if let Some((ts, v)) = peak("hoard_uploading + race_uploading") {
+            records.push(rec("Peak live seeds", v.round(), "", ts, false));
+        }
+        if let Ok((ts, ul)) = self.conn.query_row(
+            "SELECT ts, ul_mbps FROM vpn_speedtest ORDER BY ul_mbps DESC LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, f64>(0).unwrap_or(0.0), r.get::<_, f64>(1).unwrap_or(0.0))),
+        ) {
+            records.push(rec("Best line test", ul / 1000.0, "Gbps", ts, false));
+        }
+
+        // Milestones. A petabyte the counter was ALREADY past when the clean
+        // period opened was not witnessed here; it is marked unobserved and the
+        // card credits it to the previous client rather than to Hydra.
+        let g_max: f64 = self
+            .conn
+            .query_row("SELECT MAX(global_uploaded) FROM bench_samples", [], |r| r.get(0))
+            .unwrap_or(0.0);
+        let g_min_clean: f64 = self
+            .conn
+            .query_row(
+                "SELECT MIN(global_uploaded) FROM bench_samples WHERE ts>=?1",
+                rusqlite::params![t_clean],
+                |r| r.get(0),
+            )
+            .unwrap_or(0.0);
+
+        let mut milestones: Vec<serde_json::Value> = Vec::new();
+        let mut observed_ts: Vec<Option<f64>> = Vec::new();
+        let mut k = 1i64;
+        while (k as f64) * PIB <= g_max {
+            let thr = (k as f64) * PIB;
+            let mut m = serde_json::Map::new();
+            m.insert("pib".into(), k.into());
+            if g_min_clean < thr {
+                let mts: f64 = self
+                    .conn
+                    .query_row(
+                        "SELECT MIN(ts) FROM bench_samples WHERE global_uploaded>=?1 AND ts>=?2",
+                        rusqlite::params![thr, t_clean],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0.0);
+                m.insert("observed".into(), true.into());
+                m.insert("ts".into(), crate::row::num_json(mts));
+                m.insert("date".into(), iso_date(mts).into());
+                observed_ts.push(Some(mts));
+            } else {
+                m.insert("observed".into(), false.into());
+                observed_ts.push(None);
+            }
+            milestones.push(serde_json::Value::Object(m));
+            k += 1;
+        }
+        for i in 1..milestones.len() {
+            if let (Some(cur), Some(prev)) = (observed_ts[i], observed_ts[i - 1]) {
+                milestones[i]["since_prev"] = human_dur(cur - prev).into();
+            }
+        }
+
+        // Projection from the last seven days of movement.
+        let next_pib = (g_max / PIB).floor() as i64 + 1;
+        let mut out = serde_json::json!({
+            "records": records,
+            "milestones": milestones,
+            "current_pib": crate::row::num_json((g_max / PIB * 1000.0).round() / 1000.0),
+            "next_pib": next_pib,
+        });
+        if let Ok((w0, w1, wt0, wt1)) = self.conn.query_row(
+            "SELECT MIN(global_uploaded),MAX(global_uploaded),MIN(ts),MAX(ts) \
+               FROM bench_samples WHERE ts>=?1",
+            rusqlite::params![now - 7.0 * 86400.0],
+            |r| {
+                Ok((
+                    r.get::<_, f64>(0).unwrap_or(0.0),
+                    r.get::<_, f64>(1).unwrap_or(0.0),
+                    r.get::<_, f64>(2).unwrap_or(0.0),
+                    r.get::<_, f64>(3).unwrap_or(0.0),
+                ))
+            },
+        ) {
+            if wt1 > wt0 {
+                let rate = (w1 - w0) / (wt1 - wt0);
+                if rate > 0.0 {
+                    let togo = (next_pib as f64) * PIB - g_max;
+                    out["rate_tib_day"] =
+                        crate::row::num_json(round2(rate * 86400.0 / TIB));
+                    out["next_eta_days"] =
+                        crate::row::num_json(round2(togo / rate / 86400.0));
+                    out["next_eta_date"] = iso_date(now + togo / rate).into();
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn read(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> anyhow::Result<Vec<RaceEvent>> {

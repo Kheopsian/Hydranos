@@ -70,6 +70,89 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at INTEGER NOT NULL DEFAULT 0);
 ";
 
+
+/// Split a `tags` column into tag names.
+///
+/// The column is comma-separated, EXCEPT that some rows were written with a
+/// JSON array literal in it -- `["cross-seed"]` -- by an earlier importer. Read
+/// literally those become a tag whose name includes the brackets and quotes,
+/// which is what put `["cross-seed"]`, `["upload"]` and `cross-seed` side by
+/// side in the tag chips as three different tags. Normalising on READ fixes
+/// every consumer at once and leaves the stored data untouched.
+fn split_tags(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('[') {
+        if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+    }
+    trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// One torrent's share of `SlimFacts`: eight bytes, no allocation.
+#[derive(Clone, Copy, Default)]
+pub struct SlimFact {
+    /// Index into `SlimFacts::categories`; 0 means uncategorised.
+    pub category_id: u16,
+    /// One bit per index into `SlimFacts::tags`; 0 means untagged.
+    pub tag_bits: u64,
+    pub user_paused: bool,
+}
+
+/// The whole session's slim facts, with the text interned once.
+#[derive(Default)]
+pub struct SlimFacts {
+    pub by_hash: std::collections::HashMap<[u8; 20], SlimFact>,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+impl SlimFacts {
+    pub fn get(&self, hash: &[u8; 20]) -> SlimFact {
+        self.by_hash.get(hash).copied().unwrap_or_default()
+    }
+
+    pub fn category(&self, id: u16) -> &str {
+        self.categories.get(id as usize).map(String::as_str).unwrap_or("")
+    }
+
+    /// The id of a category by name, or None when the library has none such --
+    /// which makes a filter on it match nothing, as it should.
+    pub fn category_id(&self, name: &str) -> Option<u16> {
+        self.categories.iter().position(|c| c == name).map(|i| i as u16)
+    }
+
+    pub fn tag_bit(&self, name: &str) -> Option<u64> {
+        self.tags.iter().position(|t| t == name).map(|i| 1u64 << i)
+    }
+}
+
+/// A 40-character hex info hash as its 20 raw bytes.
+fn hex20(hex: &str) -> Option<[u8; 20]> {
+    if hex.len() != 40 {
+        return None;
+    }
+    let bytes = hex.as_bytes();
+    let mut out = [0u8; 20];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let hi = (bytes[i * 2] as char).to_digit(16)?;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)?;
+        *slot = (hi * 16 + lo) as u8;
+    }
+    Some(out)
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -103,6 +186,37 @@ impl Store {
     /// written by 3.x, which is the whole point.
     pub fn ensure_schema(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(SCHEMA)?;
+        self.ensure_cover_index()?;
+        Ok(())
+    }
+
+    /// An index that carries the columns the list reads.
+    ///
+    /// The `torrents` table holds the .torrent BLOB beside the metadata, so it
+    /// is 4.7 GB at 300k torrents. Reading nine small columns from it means
+    /// walking pages that are mostly torrent files: measured at 21 seconds for
+    /// one session, 16.7 of them in the kernel. An index holding those columns
+    /// answers from itself and never opens the table -- the same query drops to
+    /// 0.5 seconds.
+    ///
+    /// Additive, and invisible to 3.x: a rollback reads the same database and
+    /// simply never uses this index. Built once, in about five seconds.
+    fn ensure_cover_index(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_torrents_cover
+             ON torrents(session, info_hash, category, save_path, added_time,
+                         completed_time, seeding_time, tags, paused, content_folder);",
+        )?;
+        // `pinned` is deliberately NOT in the index above, and asking for the
+        // pinned list therefore fell back to the table -- 4.7 GB of .torrent
+        // BLOBs walked to read one flag per row, six seconds to answer with an
+        // empty list. A PARTIAL index holds only the rows that are pinned,
+        // which is a handful and usually none, so it costs almost nothing and
+        // answers from itself.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_torrents_pinned
+             ON torrents(session, info_hash) WHERE pinned <> 0;",
+        )?;
         Ok(())
     }
 
@@ -236,12 +350,7 @@ impl Store {
                     added_time: r.get::<_, f64>(3)? as i64,
                     completed_time: r.get::<_, f64>(4)? as i64,
                     seeding_time: r.get(5)?,
-                    tags: tags
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .collect(),
+                    tags: split_tags(&tags),
                     user_paused: r.get::<_, i64>(7)? != 0,
                     // -1 is "unset" in the column, and unset must stay absent
                     // from the JSON rather than becoming false.
@@ -265,6 +374,130 @@ impl Store {
     /// Read in one query and handed to the row builder as a map: doing it per
     /// torrent would be 486 statements to answer one listing, which is the kind
     /// of thing that only shows up as "the UI got slow" at 243k.
+    /// The same facts, for a named set of torrents.
+    ///
+    /// One query per batch instead of one for the whole session. The total I/O
+    /// is the same -- 300k rows have to come off a 4.7 GB database either way,
+    /// and that read is 21 seconds of it -- but the page paints from the first
+    /// batch instead of after the last. Lookups go through the primary key
+    /// rather than the session index, which also spares the row fetch.
+    pub fn facts_for_hashes(
+        &self,
+        hashes: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, crate::row::StoreFacts>> {
+        let mut out = std::collections::HashMap::with_capacity(hashes.len());
+        if hashes.is_empty() {
+            return Ok(out);
+        }
+        // Placeholders rather than an interpolated list: an info hash comes
+        // from a torrent file, and a query built by concatenation is one that
+        // can be steered by its input.
+        let holes = std::iter::repeat("?").take(hashes.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT info_hash, category, save_path, added_time, completed_time,
+                    seeding_time, tags, paused, content_folder
+             FROM torrents WHERE info_hash IN ({holes})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let info_hash: String = row.get(0)?;
+            let tags: String = row.get(6)?;
+            let content_folder: i64 = row.get(8)?;
+            Ok((
+                info_hash,
+                crate::row::StoreFacts {
+                    category: row.get(1)?,
+                    save_path: row.get(2)?,
+                    added_time: row.get::<_, f64>(3)? as i64,
+                    completed_time: row.get::<_, f64>(4)? as i64,
+                    seeding_time: row.get(5)?,
+                    tags: split_tags(&tags),
+                    user_paused: row.get::<_, i64>(7)? != 0,
+                    // -1 is the column's "unset" default, and unset must stay
+                    // absent from the JSON rather than become false.
+                    content_folder: if content_folder < 0 {
+                        None
+                    } else {
+                        Some(content_folder != 0)
+                    },
+                },
+            ))
+        })?;
+        for row in rows {
+            let (hash, facts) = row?;
+            out.insert(hash, facts);
+        }
+        Ok(out)
+    }
+
+    /// The three facts the list pass needs about every torrent, interned.
+    ///
+    /// `facts_by_session` builds a `StoreFacts` per torrent -- three Strings and
+    /// a Vec each, keyed by a 40-character hex String. At 300k that is roughly
+    /// 270 MB of transient allocation to answer one page of 500 rows, measured
+    /// against a control run. Here the key is the raw 20-byte info hash and the
+    /// two text fields are interned into small tables, because a library has a
+    /// couple of dozen categories and a handful of tags however many torrents it
+    /// holds. Same information, a few MB instead.
+    pub fn slim_facts(&self, session: &str) -> anyhow::Result<SlimFacts> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT info_hash, category, tags, paused FROM torrents WHERE session = ?1")?;
+        let mut out = SlimFacts::default();
+        // Index 0 is "no category" / "no tags", so the common case stores a
+        // zero and never touches the intern tables.
+        out.categories.push(String::new());
+        let mut cat_ids: std::collections::HashMap<String, u16> = Default::default();
+        let mut tag_ids: std::collections::HashMap<String, u16> = Default::default();
+
+        let mut rows = stmt.query([session])?;
+        while let Some(row) = rows.next()? {
+            let hash: String = row.get(0)?;
+            let Some(key) = hex20(&hash) else { continue };
+            let category: String = row.get(1)?;
+            let tags_raw: String = row.get(2)?;
+            let paused: i64 = row.get(3)?;
+
+            let category_id = if category.is_empty() {
+                0
+            } else if let Some(id) = cat_ids.get(&category) {
+                *id
+            } else {
+                let id = out.categories.len() as u16;
+                out.categories.push(category.clone());
+                cat_ids.insert(category, id);
+                id
+            };
+
+            let mut tag_bits: u64 = 0;
+            for tag in split_tags(&tags_raw) {
+                let id = if let Some(id) = tag_ids.get(&tag) {
+                    *id
+                } else {
+                    // 64 distinct tags is the ceiling of the bitset. Beyond it
+                    // the extra tags stop being counted rather than corrupting
+                    // the ones already there.
+                    if out.tags.len() >= 64 {
+                        continue;
+                    }
+                    let id = out.tags.len() as u16;
+                    out.tags.push(tag.clone());
+                    tag_ids.insert(tag, id);
+                    id
+                };
+                tag_bits |= 1u64 << id;
+            }
+
+            out.by_hash.insert(
+                key,
+                SlimFact { category_id, tag_bits, user_paused: paused != 0 },
+            );
+        }
+        Ok(out)
+    }
+
     pub fn facts_by_session(
         &self,
         session: &str,
@@ -289,12 +522,7 @@ impl Store {
                     added_time: row.get::<_, f64>(3)? as i64,
                     completed_time: row.get::<_, f64>(4)? as i64,
                     seeding_time: row.get(5)?,
-                    tags: tags
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .collect(),
+                    tags: split_tags(&tags),
                     user_paused: row.get::<_, i64>(7)? != 0,
                     // -1 is the column's "unset" default, and unset must stay
                     // absent from the JSON rather than become false.
@@ -343,11 +571,8 @@ impl Store {
             .prepare("SELECT tags FROM torrents WHERE session = ?1 AND tags <> ''")?;
         let mut set = std::collections::BTreeSet::new();
         for row in stmt.query_map([session], |r| r.get::<_, String>(0))? {
-            for tag in row?.split(',') {
-                let tag = tag.trim();
-                if !tag.is_empty() {
-                    set.insert(tag.to_string());
-                }
+            for tag in split_tags(&row?) {
+                set.insert(tag);
             }
         }
         Ok(set.into_iter().collect())
@@ -510,6 +735,43 @@ impl Store {
         self.conn.execute(
             "UPDATE torrents SET pinned = ?2 WHERE info_hash = ?1",
             rusqlite::params![info_hash, i64::from(pinned)],
+        )?;
+        Ok(())
+    }
+
+    /// Record a newly added torrent, metadata and file together.
+    ///
+    /// The BLOB is the .torrent itself: this table is what a rebuild reads, and
+    /// a row without it is a torrent the node can list but never re-add. The
+    /// insert is `OR IGNORE` because the engine has already refused a duplicate
+    /// by the time we get here -- racing two adds of the same hash should leave
+    /// the first row alone rather than overwrite its category and added_time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_torrent(
+        &self,
+        info_hash: &str,
+        session: &str,
+        torrent: &[u8],
+        save_path: &str,
+        category: &str,
+        added_time: f64,
+        paused: bool,
+        tags: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO torrents
+                 (info_hash, session, torrent, save_path, category, added_time, paused, tags)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![
+                info_hash,
+                session,
+                torrent,
+                save_path,
+                category,
+                added_time,
+                if paused { 1 } else { 0 },
+                tags
+            ],
         )?;
         Ok(())
     }

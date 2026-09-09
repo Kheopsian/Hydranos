@@ -37,6 +37,10 @@ pub struct Policy {
     pub user_agent: String,
     /// BEP-7 `ip=`. Empty when the source address is already right.
     pub public_ip: String,
+    /// host -> "v4" | "v6" | "auto". Absent means auto: announce from both
+    /// families, as libtorrent does. A tracker that overwrites instead of
+    /// merging the two addresses should be pinned to one family here.
+    pub ip_modes: BTreeMap<String, String>,
 }
 
 /// The passkey this tracker should be given, if it is not the one already in
@@ -45,6 +49,20 @@ pub fn passkey_for<'a>(policy: &'a Policy, tracker_url: &str) -> Option<&'a str>
     let host = override_host(tracker_url);
     let key = longest_override_key(&host, policy.passkeys.keys().map(|s| s.as_str()))?;
     policy.passkeys.get(key).map(|s| s.as_str())
+}
+
+/// Which address families to announce from for this tracker.
+///
+/// Auto by default, which is two announces with the SAME peer id -- one peer
+/// with two addresses, per BEP 7. Pin a host to one family when the tracker
+/// keys peers by id and overwrites rather than merging: the symptom is our
+/// address appearing in one of `peers`/`peers6` and never the other.
+pub fn ip_mode_for(policy: &Policy, tracker_url: &str) -> typhon_engine::tracker::http::IpMode {
+    let host = override_host(tracker_url);
+    match longest_override_key(&host, policy.ip_modes.keys().map(|s| s.as_str())) {
+        Some(k) => typhon_engine::tracker::http::IpMode::parse(&policy.ip_modes[k]),
+        None => typhon_engine::tracker::http::IpMode::Auto,
+    }
 }
 
 /// The client to impersonate for this tracker, if any.
@@ -97,6 +115,8 @@ pub fn apply_passkey(tracker_url: &str, passkey: &str) -> String {
 pub struct Request {
     pub url: String,
     pub user_agent: String,
+    /// Which families to announce from for this tracker.
+    pub ip_mode: typhon_engine::tracker::http::IpMode,
     /// The URL of the secondary announce, when one is wanted. Its peer id has
     /// its last byte flipped so a tracker that dedups by peer id keeps both
     /// entries instead of overwriting the first.
@@ -113,6 +133,7 @@ pub fn prepare(
     downloaded: i64,
     left: i64,
     event: &str,
+    numwant_override: Option<u32>,
 ) -> Option<Request> {
     let url_with_key = match passkey_for(policy, tracker_url) {
         Some(k) => apply_passkey(tracker_url, k),
@@ -139,6 +160,7 @@ pub fn prepare(
         left,
         event,
         public_ip: &policy.public_ip,
+        numwant_override,
     };
     let primary = url::build(&a)?;
 
@@ -151,7 +173,8 @@ pub fn prepare(
         None
     };
 
-    Some(Request { url: primary, user_agent, secondary_url })
+    let ip_mode = ip_mode_for(policy, tracker_url);
+    Some(Request { url: primary, user_agent, secondary_url, ip_mode })
 }
 
 /// The same peer id with its last byte flipped.

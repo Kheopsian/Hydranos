@@ -60,6 +60,21 @@ fn num(value: f64) -> Value {
 /// hold from a user pressing stop. The intent flag is authoritative because the
 /// engine may still be reporting the state it had a tick before the stop
 /// landed.
+/// `derive_state` without the allocation.
+///
+/// Every value it can return is one of a fixed set, so the list pass -- which
+/// runs this 300k times per request -- has no reason to build a String each
+/// time. The owned version stays for the row builders, which need one anyway.
+pub fn derive_state_static(raw: &'static str, user_stopped: bool) -> &'static str {
+    match raw {
+        "paused" | STATE_STOPPED | STATE_QUEUED | "" => {
+            if user_stopped { STATE_STOPPED } else { STATE_QUEUED }
+        }
+        _ if user_stopped => STATE_STOPPED,
+        other => other,
+    }
+}
+
 pub fn derive_state(raw: &str, user_stopped: bool) -> String {
     match raw {
         "paused" | STATE_STOPPED | STATE_QUEUED | "" => {

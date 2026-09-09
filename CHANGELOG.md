@@ -3,6 +3,557 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v4.12.1 -- the listing answers the category it was asked for
+
+`/api/v2/torrents/info` ignored every argument it was given. The V4 port read
+the query string only to authenticate, then built a row for every torrent in
+every engine, so a client that asked for one category got the whole library.
+
+Sonarr and Radarr treat that answer as their own queue. With four Hydra
+download clients configured, Sonarr was tracking 1 231 919 items and Radarr
+298 971 -- the same 301 224 torrents counted once per client, ebooks and all,
+each one failing an import on a title that was never a series or a film.
+
+`filter`, `category`, `tag`, `hashes`, `sort`, `reverse`, `limit` and `offset`
+all work again, on the query string or as a POST form. The category and hash
+filters run before a row is built rather than over the finished list: building
+a row serialises a torrent, and cross-seed, autobrr and the *arr stack each
+poll this endpoint several times a minute.
+
+A torrent with no category of its own is filtered under its engine name, which
+is the name the listing reports it under.
+
+## v4.12.0 -- a seeding torrent announces left=0 again
+
+The V4 port derived the announce `left` from `total_downloaded`, a traffic
+counter, instead of from what we actually hold:
+
+    let left = (torrent.meta.total_size as i64 - downloaded).max(0);
+
+A torrent seeded from data already on disk -- an inject, a cross-seed, one of
+our own uploads -- never downloaded a byte through Hydra, so its counter is 0
+and the announce claimed `left` = the full size: a 0%-complete leecher that
+happens to be uploading. Measured on prod before the fix: **112 948 of the
+295 288 complete hoard torrents (38%)** announced themselves as leechers,
+including 22 103 on announce.v3x.club and 10 752 on tk.tr4ker.net. Trackers
+stopped counting them as seeds and seed points collapsed.
+
+A second effect rode along: `numwant` is `if left == 0 { 0 } else { 200 }`, so
+those 112k torrents asked for 200 peers on every announce instead of none.
+
+A seeding torrent is complete by definition -- the same rule `row.rs` already
+applies to `progress`. This is the mirror image of the 2.8.4 fix, which had to
+stop `left` being hardcoded to 0; the port swung it the other way.
+
+## v4.11.2 -- resizing a column stops moving the others
+
+Dragging one column edge redistributed the rest. Two causes, both needed
+fixing before the drag was local.
+
+**Tags was the shock absorber.** `renderTableHeader` emits `data-col` only for
+SORTABLE columns, and the resizer selected on it -- so Tags, the one column
+with no sort, never got a pinned width and absorbed every resize on its own.
+Measured on the hoard table at 2560px: widening Size by 120px took 102.7px
+straight out of Tags, crushing it from 102.7px to zero. Past that point the
+real columns start giving way. The resizer now keys off `data-colid`, which
+every column carries, so Tags is pinned like the rest -- and gains a grip of
+its own.
+
+**`width: 100%` made the widths proportional.** Under `table-layout: fixed` a
+percentage table width turns the column widths into a ratio of the container
+rather than pixels, so any pixel one column gains is a pixel the others lose.
+The table now carries an explicit pixel width, and a drag adds its delta to
+that total: the space comes from the page, which scrolls sideways exactly as
+it already did when the columns were naturally wider than the window.
+
+Widths for every column are persisted on each drag, not just the dragged one,
+so a restore has the complete set and can pin the total without measuring --
+which matters because the restore runs while the tab may still be hidden.
+
+The trade: shrinking columns can now leave the table narrower than the
+viewport rather than stretching to fill it. Stretching would mean scaling the
+columns back up, which is the behaviour being removed.
+
+## v4.11.1 -- the tracker badge is a circle, and it is there on load
+
+Two faults in the same indicator, both reported from a screenshot.
+
+**It was never round.** The box was `min-width: 18px` against
+`line-height: 17px`, so it measured 18 by 17 and the 9px radius drew an
+ellipse. Height is now pinned equal to the minimum width, and the radius is
+large enough to stay fully rounded when a three-digit count widens it into a
+pill. The count is centred with flex instead of leading: `line-height` centres
+the line box, and digits have no descender, which is what left the glyph
+sitting high.
+
+**It only appeared once you opened the tab it warns about.** `updateTabBadges`
+had a single caller, inside `updateTrackers`, which runs only while the
+Trackers tab is open or active. Reloading on any other tab left the badge
+missing until you went and looked -- the one moment an indicator exists to
+spare you. It is now called at startup and every 30s; it already made its own
+`/api/announce/health` request, so it never needed the tab's data. It stays off
+the 1s poll, where nothing it counts moves that fast.
+
+## v4.11.0 -- race gets a search box
+
+Race had none. The tab fetches the whole tier from `/api/race/torrents` and
+renders every row, so finding one torrent among a few hundred meant reading the
+list. `/api/race/page` -- the paginated, searchable endpoint hoard uses -- was
+already registered on the server and had never been called by the front.
+
+The box filters client-side rather than going through that endpoint: race is
+served whole and already sits in the browser, so a keystroke is a filter, not a
+request. It shares `_searchMatches` with hoard, so both boxes answer a query the
+same way, including the tokenizing that v4.10.0 added.
+
+`updateRaceTorrents` was split into a fetch and a `renderRaceTable`, so typing
+re-renders the rows in hand instead of refetching the tier on every keystroke.
+
+Filtering applies to the RENDER only. The stats bar describes the tier, and
+computing Avg Share over the filtered set would have made it move with whatever
+was typed in the box.
+
+## v4.10.0 -- search that answers the query you typed
+
+The filter box did one literal `contains` over the name, lowercased. Three
+consequences, all measured on a demo library before touching anything:
+
+**Two words found nothing.** Release names are punctuated, not spaced, so
+`demo music` was looked up verbatim inside `demo_03_music.bin` and missed --
+as would `jujutsu 1080p` against `Jujutsu.Kaisen.S02.1080p.BluRay`. Typing two
+words is the reflex, and it returned an empty table on a library that held the
+rows. Queries are now split on whitespace, `.`, `_` and `-`; the terms are
+ANDed and their order does not matter, and the same collapsing applies to the
+name, so `demo.03` and `demo 03` both find `demo_03`.
+
+**A pasted info_hash found nothing.** The hash was only ever consulted for
+torrents with an EMPTY name, and every torrent has a name, so that branch was
+unreachable in practice. A query of six or more hex characters is now matched
+against the hash as well, whatever the name. Six is the floor: below it,
+ordinary words would start colliding with hashes.
+
+**The name was lowercased once per row per keystroke**, on a request path
+built to not allocate per field -- 300k transient Strings per request on the
+production catalogue. The ASCII path now compares in place and allocates
+nothing; only names carrying non-ASCII still fold, so `CAFÉ` stays findable
+by `café`.
+
+`_hoardMatches` in app.js applies the same predicate, and has to: the server
+picks which rows come back, the client re-checks them so live SSE arrivals
+cannot bypass the active filter. Had only the server learned to tokenize, the
+extra rows would have been fetched and then hidden by the client, showing a
+count with no rows under it.
+
+## v4.6.0 -- why a tracker is unhappy, and whether it still lists us
+
+Two instruments, both missing when they were needed.
+
+**Failures now have a class.** `announces_failed` was one number for the whole
+engine, so a node being rate limited by one tracker looked exactly like a node
+announcing deleted torrents to another. Failures are counted per
+`(host, class)`: `rate_limited`, `timeout`, `invalid_passkey`,
+`unknown_torrent`, `dns`, `connect`, `http_error`, `other`. The class is derived
+from the REDACTED message -- a raw reqwest error embeds the announce URL, and
+that URL carries the passkey. On the production catalogue this would have said,
+at a glance, that 107k torrents point at an archive.org that times out on every
+single announce and 72k at a calewood that answers 429.
+
+**Announces now check themselves.** One announce in 64, on a torrent that is
+already seeding, asks for `numwant=50` instead of the usual zero and looks for
+our own listen port in the answer. The family it appears under is the whole
+point: seen on an IPv4 address, on an IPv6 one, on both, or on neither.
+
+The verdict has three states, deliberately. A tracker usually omits the
+announcing peer from its own answer, so a bare absence proves nothing. What
+proves something is an ASYMMETRY -- present in one family and not the other
+means the tracker kept one address and dropped the other, either because it
+dedups by peer id or because one family never reached it. An absence is only
+reported at all when the tracker returned fewer peers than we asked for, which
+is what makes the list whole rather than truncated.
+
+That is the failure 4.5.0 fixed, found by hand from a VPN: announces succeeded,
+scrapes came back correct, and the tracker served our address to half the swarm.
+Nothing inside the process could see it. Now something can.
+
+Exposed at `GET /api/announce/health`, per engine and per host.
+
+## v4.4.7 -- one announce client, not ninety a second
+
+`send_announce` is new in 4.x: the Go announcer's port needed an entry point and
+got one that calls `reqwest::Client::builder().build()` on every announce. That
+allocates a connection pool, a resolver and a fresh load of the root certificate
+store per call, and nothing it builds survives the call. reqwest documents the
+client as the thing you build once and clone. `V6_PROXY_CLIENT`, twenty lines
+above in the same file, already does exactly that; only the primary path was
+missed.
+
+Both versions run the same scheduler, the same 512 workers
+(`hoardSchedWorkers` in Go, `WORKERS` here) and the same intervals -- the port
+copied all four constants faithfully. What changed is latency per announce:
+about 2.0s in 3.x against 5.7s in 4.x, inferred from the sustained rate through
+a fixed pool.
+
+The arithmetic that makes this an upload bug rather than a cosmetic one: 300674
+torrents at the 2659s average interval the trackers actually ask for need 113
+announces/s just to stay in their swarms. 3.x sustained 172-315/s. 4.x sustained
+45-99/s -- permanently below replacement. Torrents slid past their deadline,
+trackers stopped handing our address to leechers, and the node ended up present
+in 2% of the swarms that had leechers at all: 3192 such torrents in a spread
+sample, peers on 70. Upload followed the presence, not the serving path, which
+was never at fault -- a torrent we are actually in still pushes 1.5-2 MB/s,
+exactly as it did in 3.x. 74 GB/h against a 460 GB/h median for the same hour
+the week before.
+
+HTTP/1.1 is forced on the shared client. Sharing one client is what makes h2
+negotiation dangerous here: every worker aimed at one tracker would land on a
+single connection and serialise, trading this bottleneck for a quieter one. A
+tracker announce is one small GET; h2 buys nothing.
+
+## v4.4.6 -- pieces reserved and never given back
+
+A second leak, uncovered by fixing the first: with the glibc allocator gone,
+1.29 GB/h of real application heap became visible under what had been 11 GB/h of
+allocator retention.
+
+Two heap profiles 26 minutes apart name it exactly.
+`PiecePicker::start_piece` accounts for 459.7 MB of 457.8 MB of growth -- all of
+it -- reached through `peer::session::run` -> `DownloadState::get_requests`. The
+webseed pool, which shares the same picker, was NEGATIVE over the window: it
+releases correctly on all three of its failure paths. It was the first suspect
+and it was innocent.
+
+`start_piece` inserts a `PendingPiece` holding `vec![0u8; piece_size]`. A peer's
+reservations are tracked in `started_pieces` and released by `on_disconnect`,
+which is a plain method called from exactly one place: the end of
+`session::run`. There is no destructor. Every other way out -- an early return,
+a panic in the session task, cancellation at an await point -- kept a
+piece-sized buffer per reserved piece, forever, and the piece was never
+re-picked either. An engine accepting 76 inbound connections a second, a third
+of them refused at the MSE handshake, takes those exits constantly.
+
+`Drop` now calls `on_disconnect`, so ending the session is what releases the
+pieces, not remembering to. The bug was never a missing call; it was that
+correctness depended on reaching one.
+
+`on_disconnect` had to become idempotent to be called twice: `started_pieces` is
+drained, but `remove_bitfield` decrements availability counters, and running it
+twice would understate the rarity of every piece the peer held. The bitfield is
+cleared once removed.
+
+## v4.4.5 -- the announce answer nobody wrote down
+
+Four symptoms, one cause: seeders and leechers reading 0 on all 300k torrents,
+"last announce" and "next announce" showing a dash, every tracker reporting
+Success while the log filled with refusals, and the header's peer ratio stuck at
+exactly 100.0%.
+
+`TorrentState` carries `scrape_seeders`, `scrape_leechers`, `last_announce_at`,
+`next_announce_at`, `last_announce_ok` and `last_announce_error`. Every reader in
+the process consults them -- the detail panel, the list rows, the qBit shim.
+Nothing has ever written them, in 3.x or 4.x: they were filled by the Go front,
+which owned the announce loop. 4.0.0 moved that loop into `hydra/announce/` and
+recorded each answer in `cache`, which no reader consults. Both halves worked;
+they were not connected.
+
+The runner now publishes onto the torrent as well as the cache. `last_announce_at`
+moves only on success, as its doc comment always said it should -- a fresh
+timestamp next to an error would be the wrong reading. Errors are redacted the
+same way the log redacts them: the raw message embeds the announce URL, and that
+URL carries the passkey.
+
+The header ratio is separate and was worse: `swarm_leechers` and `unseeded_peers`
+were served as the same value, so the UI divided a number by itself. The
+denominator now comes from what the trackers actually report, summed in the
+announce cache as a running total (`record` has the displaced entry in hand, so
+it costs nothing and needs no periodic recount over 300k entries).
+
+## v4.4.4 -- the dial that never gave up
+
+`peer/handshake.rs` contains no timeout of any kind, and never has -- the file
+is byte-identical in 3.x. `outgoing()` sends our 68-byte handshake and then
+calls `read_exact` on the reply with nothing bounding it. A peer that accepts
+the TCP connection and then says nothing holds that socket ESTABLISHED for the
+life of the process.
+
+Found on production while diagnosing something else: 3960 sockets to one peer,
+every one showing `bytes_sent:68  data_segs_out:1` and no traffic for 47
+minutes, accumulating at about 85 per minute. The accept path was bounded long
+ago and its comment describes this exact failure from the other side -- *"a peer
+that connects and then says nothing used to park a task in read_exact forever
+[...] 20758 established sockets for 10874 peers"*. The fix was applied inline in
+`peer/mod.rs` and never reached the four dial sites.
+
+All four combos in `open_peer` (TCP/plain, TCP/MSE, uTP/plain, uTP/MSE) now use
+the same 30 s the accept path allows, and `dial_hs_timed_out` counts what they
+drop, so the cost of the leak stays measurable after it stops.
+
+This is not a 4.x regression: 3.x leaked these sockets too. It does not explain
+the upload collapse dated to the 4.0.0 cutover, and it was deliberately kept out
+of 4.4.3 so the peer table would measure the swarm as it stood. Bundled here to
+spend one restart instead of two.
+
+## v4.4.3 -- the peer table, reconnected
+
+`rpc::dispatch::get_peers` computes everything the peer panel needs -- per-peer
+`interested`, `choked`, `is_seed`, the `iUEFS` flag string, rates and connection
+age. 4.0.0 shipped it orphaned: no HTTP route reaches it, and the detail payload
+hard-codes `"peers": []`.
+
+That left the node with no way to answer the one question a stalled upload
+turns on. Measured on production the same day: 87% of inbound peers (706 of 814)
+received under 10 KB -- handshake, bitfield or HaveAll, unchoke, then nothing.
+A peer that has been told we hold every piece and stays silent is either
+interested and choked by us, or a seed with nothing to ask for. Those two have
+opposite fixes, and nothing on the running node could tell them apart --
+`unseeded_peers` cannot help, it is `active_peers` under another name.
+
+Splits the body into `peers_json()` and fills the detail payload from it. No
+behaviour change to the engine: this reads state that was already maintained.
+
+## v4.4.2 -- the allocator the port left behind
+
+`#[global_allocator]` is a per-binary attribute. 4.0.0 merged the Go front and
+the Rust engine into one process by writing a new `src/hydra/main.rs` beside the
+existing `src/main.rs`, and the attribute stayed on the old one. Every 4.x
+release up to 4.4.1 therefore ran on the glibc allocator, while the Dockerfile
+and the container environment both still set `MALLOC_CONF` -- which glibc
+ignores. Nothing warned; the binary simply had no jemalloc in it.
+
+glibc gives each thread its own arena, up to `8 x nproc`, and never returns a
+secondary arena's pages to the kernel: there is no equivalent of
+`dirty_decay_ms`. On the 300k-torrent production node that meant 728 arenas
+across 630 threads and an RSS that did not stop climbing. Measured: 3.x held a
+flat 14.4 GiB for 36 hours at the same torrent count; 4.x reached 100 GiB in
+seven hours and had to be restarted.
+
+Restores the allocator, and with it the SIGUSR1 heap dump, the SIGUSR2 decay
+purge and the five-minute `allocated/active/resident/mapped/retained` line --
+the instruments that separate a real leak from pages the allocator is holding.
+They are shared between the two binaries now, in `src/hydra/allocdiag.rs`.
+
+## v4.3.3 -- the exit IP refresh button
+
+Clicking it left random digits in the header. The button scrambles the text
+while it measures, and the page only renders the process address back when NO
+engine reports an exit of its own -- a guard that was never true before 4.1.3,
+because the per-engine measurement did not exist. It exists now, but
+`/api/network/engines` still answered `"exits": []`, so the other renderer had
+nothing to draw either. Both paths declined, and the animation was left as the
+finished result.
+
+- `exits` is now the DISTINCT set of local engine exit addresses, and
+  `exit_ip_v6` is the v6 belonging to that same engine rather than the
+  process's. One exit means the header can print it; several mean it cannot,
+  and it says how many instead.
+- `stopIpScramble()` restores what the field held before it started. Whoever
+  has a fresh address overwrites it a moment later, but no path can leave the
+  animation on screen as the final state again.
+
+## v4.3.2 -- three the interface was showing wrong
+
+- **Every header counter froze after its first paint.** The stream sent its
+  status frame as `"status"`; the page dispatches on `"status_snapshot"` and
+  ignores anything else. The frames were arriving on time, twice a second, and
+  being dropped. Painted once by the direct /api/status fetch, then still.
+- **The Queued chip counted zero** while rows beside it read "queued". The
+  paging projection used the engine's RAW state, but a row's state comes from
+  `derive_state`, which turns paused/stopped/queued into "stopped" or "queued"
+  depending on whether the USER stopped it -- a flag that lives in the store.
+  The projection derives it the same way now.
+- **Tags rendered as `["cross-seed"]`, `["upload"]` and `cross-seed`**, three
+  chips for two tags. The `tags` column is comma-separated except in rows an
+  earlier importer wrote as a JSON array literal. Normalised on READ, so every
+  consumer agrees and the stored data is left alone.
+
+## v4.3.0 -- the list is paged end to end
+
+The interface now reads its hoard list from `/api/hoard/page` instead of
+receiving the whole library over the event stream. Sorting, filtering, search
+and the facet counts all happen next to the data.
+
+- The stream takes `hydrate=0` and carries only the live half: status, per-row
+  stats, adds and removes. It still sends one empty terminal batch per mode,
+  because the page waits for `done` before it stops showing the list as loading.
+- Sorting a column, changing a filter chip and typing in the search box each
+  refetch (search debounced 250 ms, answers applied in order so a slow early
+  request cannot overwrite a newer one).
+- **Facet counts are computed server-side**, each group counted with the OTHER
+  groups applied and never its own -- the semantics the chips had when they
+  could see the whole library. Counting the page instead would have labelled
+  every chip with a number bounded by the page size: "All 500" on 300k, and
+  category chips appearing and vanishing with the sort.
+- Ctrl+A asks for `fields=hash`: the selection universe is every torrent the
+  filter matches, and that is not what the page holds.
+
+## v4.2.6 -- the pinned list stops reading the whole table
+
+`/api/hoard/pinned` took six seconds to answer with an empty list. The covering
+index carries `paused` but not `pinned`, so the query fell back to the table --
+4.7 GB of .torrent BLOBs walked to read one flag per row. Same shape as the
+21-second hydration the covering index was added for, one column short.
+
+Fixed with a PARTIAL index (`WHERE pinned <> 0`), which holds only the rows
+that are actually pinned -- a handful, usually none. Additive and invisible to
+3.x, like the covering index: a rollback reads the same database and never uses
+it. 6.35 s -> 0.9 ms.
+
+## v4.2.5 -- the Records request leaves at once
+
+4.2.4 made `/api/benchmark/records` answer in a millisecond, and the card still
+took four seconds to appear. The wait had moved: the request was chained behind
+`await api("/api/status")` inside `updateOverview()`, so it only left the
+browser once that had resolved -- by which time `poll()` and the event stream
+had taken the connections, and it queued behind a stream that never ends.
+
+It is now fired first and on its own, and started before the await rather than
+after it, which also means a failing `/api/status` no longer skips it. It
+self-throttles to one call a minute, so the call `updateOverview()` still makes
+costs nothing.
+
+## v4.2.3 -- the Records card no longer holds up the header
+
+`/api/benchmark/records` took 5.4 to 5.9 seconds, every call. It reads every
+row of `bench_samples` -- 1.7 million of them -- and the overview header does
+not paint until that request returns, so the whole page waited on it.
+
+3.x served a cached copy and refreshed it in the background; the port carried
+over the computation and not the cache. Restored: same 30 minute TTL, refreshed
+off the request path, and warmed at startup so the first load of a new process
+does not pay for it either. The refresh opens its own READ-ONLY handle, so the
+five second scan cannot queue the sampler writing every five seconds behind it.
+
+A failed scan keeps the previous answer: an empty Records card is worse than
+one that is half an hour old.
+
+## v4.2.0 -- server-side paging
+
+`/api/hoard/page` and `/api/race/page` filter, sort and slice on the server:
+`?offset&limit&sort&order&search&category&tag&tracker&state`, answering
+`{total, filtered, offset, limit, rows}`.
+
+The page already drew only its top 500 rows. The cost was never the rendering,
+it was shipping the other 299500 to the browser so it could work out which 500
+those were -- 250 MB per hard refresh. That decision now happens next to the
+data, over a flat projection (`project_for_list`) that reads atomics instead of
+building a forty-field JSON value per torrent; full rows are built for the page
+alone.
+
+Filter and sort semantics mirror `_hoardMatches` and `_hoardCmp` in app.js
+exactly, tie-break on info_hash included: a page boundary that ordered ties
+differently from the client would duplicate or drop rows between pages, which
+reads as data loss. Store facts are only read up front when the FILTER needs
+them (category, tag, pinned); otherwise the page's own hashes are looked up at
+the end.
+
+## v4.1.3 -- the version label, and a header that does not wait for the library
+
+- `/health` was missing from the main router: only the rescue surface had one,
+  so it answered 404. The page fills BOTH version labels from it, which is why
+  the header showed none and the footer sat on its hardcoded `v0.1.0`. Two
+  visible bugs, one absent route.
+- The event stream sent the whole library before its first status frame. At 300k
+  torrents that is seconds of a blank header on every hard refresh, while the
+  same figures were available in under a hundred milliseconds. Status and the
+  hoard header now go out first, hydration second.
+
+## v4.1.2 -- "today" is a day again, not a lifetime
+
+`day_uploaded` read 321 TB. The engines' per-torrent counters are LIFETIME
+totals loaded from resume data -- they do not reset at boot -- and the port
+published them straight into the fields labelled `session_*` and `day_*`. Every
+one of the three figures was the same number wearing a different name.
+
+- `session_*` is now the delta from a mark taken once the engines have loaded,
+  so it starts at zero each boot.
+- `day_*` is the delta from a baseline re-taken at the first local midnight
+  after it was set, on a one-minute ticker rather than on the next request:
+  3.x only rolled on a GET, so a dashboard opened in the afternoon showed
+  yesterday's baseline until that moment.
+- `global_*` still uses the lifetime totals. That column feeds the petabyte
+  milestones, and subtracting this boot's mark from it would walk them backwards
+  at every restart.
+- Removing a torrent takes its lifetime bytes out of the sum, which can drop the
+  total below the mark. The marks follow it down instead of publishing a
+  negative day.
+
+## v4.1.1 -- deleting a torrent reaches the engine
+
+`DELETE /api/torrents/{hash}` dropped the store row and stopped there. The
+torrent kept seeding and announcing, invisible to the interface, and came back
+at the next restart from the engine's own state -- a ghost with a live socket.
+It also ignored `delete_files` entirely, so a delete-with-data answered "ok"
+and kept every byte.
+
+⚠ The two sides disagree on polarity: the API asks whether to DELETE the files,
+the engine is told whether to KEEP them. This is the direction that costs data
+if it is passed through unflipped, so it is flipped explicitly and commented
+where it happens.
+
+## v4.1.0 -- torrents can be added again
+
+Both add routes shipped in 4.0.0 as validation-only: they ignored their body
+and refused everything. Nothing could reach this node -- autobrr had been
+logging `unexpected status code: 400` for every release since the switch.
+
+- `/api/v2/torrents/add` parses its multipart body and honours `category`,
+  `savepath`, `tags`, `paused` and `skip_checking`, answering `Ok.`/`Fails.`
+  the way qBit does, because the clients match on that body.
+- `/api/torrents/add` accepts a `torrent_path` on this node. `magnet_uri` is
+  still refused: resolution is a background job with its own polling contract,
+  and answering "added" for metadata that never arrives is worse than a refusal.
+- An add with neither a savepath nor a known category is refused rather than
+  placed somewhere inferred. There is no correct guess, and the wrong one puts
+  a download where its owner will not look for it.
+- Adding writes all three things that have to agree: the .torrent where the
+  engine's resume records point (by rename, never half-written), the engine's
+  own state, and the store row the interface lists from.
+
+## v4.0.2 -- records, milestones and announce rates
+
+- The Records card and the milestone list render the fields the page actually
+  reads (`date`, `unit`, `observed`, `since_prev`) and reuse 3.x's clean-period
+  rule, which ignores everything before the last lineage jump in the lifetime
+  counter. Publishing the raw peaks would have credited a counter change as the
+  best upload day the node ever had, and marked every petabyte as pre-Hydra.
+- The announce-rate graph has counters behind it again: each engine counts its
+  own successful and failed announces, and the sampler differences them.
+
+## v4.0.1 -- the interface reports what the engine is doing
+
+4.0.0 moved the API into the engine's process, and a set of routes were left
+answering a literal zero or an empty list until their slice was ported. On a
+node seeding at 300 Mbit/s across a thousand peers, that is not a rough edge:
+every live counter in the interface read zero, and nothing said why.
+
+- **Live counters.** `/api/status`, `/api/hoard/stats` and
+  `/api/benchmark/current` published hardcoded zeros for every rate, peer and
+  swarm figure. They now read gauges the engine maintains. The gauges
+  themselves are new: `update_rates` already walked the torrent map every two
+  seconds, so counting peers and uploading torrents in the same pass costs
+  nothing.
+- **The list never updated.** After hydration the event stream sent only a
+  status frame every two seconds, so every row kept the figures it was painted
+  with. Each engine's delta-filtered stats emitter is now bridged to the
+  stream. That emitter skips its whole scan while nobody subscribes, which is
+  why nothing was being computed either.
+- **The detail panel was empty for hoard.** `/api/hoard/torrents/{hash}`
+  answered `{"status":"ok"}`. It now serves the same payload as race, from one
+  shared builder so the two cannot drift again.
+- **The trackers tab showed one row.** It listed only hosts carrying a client
+  override. It now merges those with the trackers torrents actually announce
+  to, with per-tracker counts and the last answer's time.
+- **The benchmark tab was empty.** Nothing had written `bench_samples` since
+  the 4.0.0 switch, and the range and records routes were stubs. A sampler
+  writes the same five-second rows 3.x did, and the graphs, records and
+  petabyte milestones read them.
+- **No exit address anywhere.** Nothing ever filled the public IP cache. It is
+  measured again, per engine through that engine's own binding -- an engine
+  whose probe does not answer reports no address rather than borrowing the
+  default route's, which is the whole point of the measurement.
+- **Two O(N) paths on a polled route.** `session_totals` serialised all 300k
+  torrents to JSON to add two integers, and `find_torrent` did the same to
+  compare one hash. Both read the counters and the index directly now.
+
 ## v4.0.0 -- one process, one language
 
 Hydra 3.x ran as two processes: a Go front that served the HTTP API, and the

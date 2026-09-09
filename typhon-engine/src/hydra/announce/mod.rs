@@ -40,6 +40,7 @@ pub fn policy_from_config(config: &Config, peer_id: String, public_ip: String) -
             })
             .collect(),
         secondary_stats: config.announce_secondary_stats.clone(),
+        ip_modes: config.announce_ip_modes.clone(),
         peer_id,
         // The User-Agent carries the version, as 3.x did: a tracker operator
         // asking "which client is this" gets an answer.

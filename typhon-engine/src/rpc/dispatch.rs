@@ -256,15 +256,15 @@ pub fn torrent_to_json_slim(t: &Arc<crate::torrent::meta::TorrentState>) -> Valu
 
 /// State, progress and bytes-done, shared by the full and slim projections so
 /// they cannot drift apart.
-struct TorrentCore {
-    state: &'static str,
-    progress: f64,
-    total_done: u64,
-    is_paused: bool,
-    status_u8: u8,
+pub struct TorrentCore {
+    pub state: &'static str,
+    pub progress: f64,
+    pub total_done: u64,
+    pub is_paused: bool,
+    pub status_u8: u8,
 }
 
-fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
+pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
     let status_u8 = t.status.load(Ordering::Relaxed);
     let is_paused = t.is_paused.load(Ordering::Relaxed);
     let state = if status_u8 == TorrentStatus::Error as u8 {
@@ -313,6 +313,20 @@ fn get_peers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
         Some(t) => t,
         None => return json!({"error": "torrent not found"}),
     };
+    json!({"peers": peers_json(&t)})
+}
+
+/// The live peer table for one torrent: one row per connected peer, carrying
+/// the flags that say what each connection is actually doing.
+///
+/// Split out of `get_peers` so the HTTP layer can serve it too. 4.0.0 left the
+/// detail panel's `"peers"` hard-coded to `[]` and wired no route to this code,
+/// so the one instrument that separates "the peer is interested and we are
+/// choking it" from "the peer is a seed with nothing to ask for" did not exist
+/// on a running node. The upload collapse of 2026-09-08 was diagnosed blind for
+/// want of it: 87% of inbound peers received under 10 KB and never requested a
+/// block, and nothing on the node could say why.
+pub fn peers_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let now = std::time::SystemTime::now();
     let total_pieces = t.meta.num_pieces();
     // Iterate DashMap snapshot — called on-demand when user opens peer panel
@@ -357,7 +371,7 @@ fn get_peers(params: &Value, mgr: &Arc<TorrentManager>) -> Value {
             "connection_duration": dur,
         })
     }).collect();
-    json!({"peers": peers})
+    Value::Array(peers)
 }
 
 fn get_session_stats(mgr: &Arc<TorrentManager>) -> Value {
@@ -609,6 +623,7 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     put_u!("dial_mse_ok", crate::tracker::DIAL_MSE_OK.load(Ordering::Relaxed));
     put_u!("dial_mse_fail", crate::tracker::DIAL_MSE_FAIL.load(Ordering::Relaxed));
     put_u!("inbound_accepted", crate::peer::INBOUND_ACCEPTED.load(Ordering::Relaxed));
+    put_u!("dial_hs_timed_out", crate::tracker::DIAL_HS_TIMED_OUT.load(Ordering::Relaxed));
     put_u!("seed_seed_dropped", crate::peer::SEED_SEED_DROPPED.load(Ordering::Relaxed));
     put_u!("mse_inbound_refused", crate::tracker::MSE_INBOUND_REFUSED.load(Ordering::Relaxed));
     put_u!("mse_outbound_skipped", crate::tracker::MSE_OUTBOUND_SKIPPED.load(Ordering::Relaxed));
@@ -725,7 +740,7 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
 /// tracker_host_of extracts the bare host from a tracker announce URL, e.g.
 /// "https://tk.tr4ker.net/announce/KEY" -> "tk.tr4ker.net". Lets the list view
 /// label each torrent with its (static) tracker without a per-torrent RPC.
-fn tracker_host_of(url: &str) -> String {
+pub fn tracker_host_of(url: &str) -> String {
     let s = url.split("://").nth(1).unwrap_or(url);
     s.split(|c| c == '/' || c == ':').next().unwrap_or("").to_string()
 }

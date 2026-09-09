@@ -212,6 +212,14 @@ pub struct Config {
     /// tracker host -> "v4" | "v6" | ...
     #[serde(default)]
     pub announce_ip_modes: BTreeMap<String, String>,
+    /// Trackers whose faults the operator has seen and accepted.
+    ///
+    /// A badge that is always lit is not a badge. This node points 107k torrents
+    /// at an archive.org it cannot reach and 6k at a gemini that refuses it:
+    /// without a way to say "I know", the Trackers tab would be red forever and
+    /// the day a working tracker breaks it would say nothing new.
+    #[serde(default)]
+    pub announce_muted: BTreeMap<String, String>,
 
     /// tracker host -> passkey substituted into the announce URL.
     #[serde(default)]

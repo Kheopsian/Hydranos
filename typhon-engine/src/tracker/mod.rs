@@ -11,6 +11,15 @@ use crate::disk::DiskManager;
 use crate::torrent::meta::TorrentState;
 
 pub static DIAL_ATTEMPTED: AtomicU64 = AtomicU64::new(0);
+/// Dials where the TCP connect succeeded but the peer never sent its half of
+/// the handshake. Before 4.4.3 these parked forever: `handshake.rs` has no
+/// timeout of its own, so `read_exact` waited on a socket that stayed
+/// ESTABLISHED for the life of the process. Measured on production 2026-09-08:
+/// 3960 such sockets to a single peer, each showing bytes_sent:68 (our
+/// handshake, nothing more) and no traffic for 47 minutes. The inbound path was
+/// bounded long ago -- see HS_TIMEOUT in peer/mod.rs, whose comment describes
+/// this same failure from the other direction -- but the dial path never was.
+pub static DIAL_HS_TIMED_OUT: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_TCP_OK: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_TCP_FAIL: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_UTP_OK: AtomicU64 = AtomicU64::new(0);
@@ -572,6 +581,10 @@ async fn try_utp(addr: std::net::SocketAddr, sock: &Arc<UtpSocketUdp>) -> Option
 /// an info hash rather than a TorrentState: resolving a magnet has no torrent
 /// and no disk yet.
 // Each combo returns the full handshake result so the session gets the remote peer_id.
+/// Same 30 s the accept path allows. A peer that has not answered a handshake
+/// in that time is not going to.
+const DIAL_HS_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(crate) async fn open_peer(
     addr: std::net::SocketAddr,
     utp_socket: &Option<Arc<UtpSocketUdp>>,
@@ -591,7 +604,17 @@ pub(crate) async fn open_peer(
         || policy.block_mse();
     // TCP plaintext (preferred)
     if let Some(mut t) = try_tcp(addr, egress).await {
-        match crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
+        let hs_res = match tokio::time::timeout(
+            DIAL_HS_TIMEOUT,
+            crate::peer::handshake::outgoing(&mut t, info_hash, peer_id),
+        ).await {
+            Ok(r) => r,
+            Err(_) => {
+                DIAL_HS_TIMED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
+                Err("handshake timeout".to_string())
+            }
+        };
+        match hs_res {
             Ok(hs) => {
                 DIAL_PLAIN_OK.fetch_add(1, AtomicOrdering::Relaxed);
                 if traced {
@@ -616,7 +639,17 @@ pub(crate) async fn open_peer(
     if !skip_mse {
         if let Some(mut t) = try_tcp(addr, egress).await {
             DIAL_MSE_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
-            match crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
+            let mse_res = match tokio::time::timeout(
+                DIAL_HS_TIMEOUT,
+                crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id),
+            ).await {
+                Ok(r) => r,
+                Err(_) => {
+                    DIAL_HS_TIMED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
+                    Err("MSE handshake timeout".to_string())
+                }
+            };
+            match mse_res {
                 Ok((enc, dec, hs)) => {
                     DIAL_MSE_OK.fetch_add(1, AtomicOrdering::Relaxed);
                     if traced {
@@ -636,14 +669,20 @@ pub(crate) async fn open_peer(
     if let Some(sock) = utp_socket.as_ref() {
         // uTP plaintext (preferred)
         if let Some(mut t) = try_utp(addr, sock).await {
-            if let Ok(hs) = crate::peer::handshake::outgoing(&mut t, info_hash, peer_id).await {
+            if let Ok(Ok(hs)) = tokio::time::timeout(
+                DIAL_HS_TIMEOUT,
+                crate::peer::handshake::outgoing(&mut t, info_hash, peer_id),
+            ).await {
                 return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
             }
         }
         // uTP MSE (fallback)
         if !skip_mse {
             if let Some(mut t) = try_utp(addr, sock).await {
-                if let Ok((enc, dec, hs)) = crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id).await {
+                if let Ok(Ok((enc, dec, hs))) = tokio::time::timeout(
+                    DIAL_HS_TIMEOUT,
+                    crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id),
+                ).await {
                     return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
                 }
             }

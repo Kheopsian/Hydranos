@@ -31,3 +31,7 @@ typhon-engine.prev*
 
 # Bytecode Python de l outillage de banc : genere, jamais lu par un humain.
 tools/paritydiff/__pycache__/
+
+# Cargo cache kept beside the worktree so a container build can reuse it.
+# 330 MB of downloaded crates: a build artefact, not source.
+/.cargo-home/

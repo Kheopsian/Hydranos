@@ -26,9 +26,146 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.0.0";
+pub const HYDRA_VERSION: &str = "4.12.1";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
+
+/// The process's own public addresses, (v4, v6).
+pub type PublicIp = Arc<tokio::sync::Mutex<(String, String)>>;
+
+/// The Records card's answer, and when it was computed.
+///
+/// Computing it reads every row of `bench_samples` -- 1.7M of them, some six
+/// seconds. 3.x served a cached copy and refreshed it in the background; the
+/// port did the computation on every request instead, and the overview header
+/// does not paint until this answers. Hence: same cache, same 30 minute TTL.
+#[derive(Default)]
+pub struct RecordsCache {
+    pub value: Option<serde_json::Value>,
+    pub at: Option<std::time::Instant>,
+    pub computing: bool,
+}
+
+pub type Records = Arc<std::sync::Mutex<RecordsCache>>;
+
+/// How long a computed answer stays good. All-time records do not move often,
+/// and a stale figure here is invisible next to a six second stall.
+const RECORDS_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Recompute the records off the request path, on a read-only connection.
+///
+/// Returns immediately if another refresh is already running: two concurrent
+/// scans of the same 1.7M rows would only make each other slower.
+pub fn refresh_records(path: std::path::PathBuf, cache: Records) {
+    {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if c.computing {
+            return;
+        }
+        c.computing = true;
+    }
+    tokio::task::spawn_blocking(move || {
+        // `computing` is cleared through a guard, not at the end of the happy
+        // path: a panic here would otherwise leave the flag set and every later
+        // refresh would return early, so the card would stay empty forever with
+        // nothing in the log to say why.
+        struct Clear(Records);
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).computing = false;
+            }
+        }
+        let _clear = Clear(cache.clone());
+
+        let computed = crate::benchdb::BenchDb::open_read_only(&path)
+            .and_then(|db| db.records_payload());
+        match computed {
+            Ok(value) => {
+                let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+                c.value = Some(value);
+                c.at = Some(std::time::Instant::now());
+                tracing::info!("records refreshed");
+            }
+            // Keep the previous answer: an empty Records card is worse than one
+            // that is half an hour old. But say so -- a silent failure here is
+            // what made the card look merely slow instead of broken.
+            Err(e) => tracing::warn!(path = %path.display(), "records refresh failed: {e:#}"),
+        }
+    });
+}
+
+/// What the engines had already moved when this process started, and at the
+/// last midnight, so "this session" and "today" can be told from "ever".
+///
+/// The engines' per-torrent counters are LIFETIME totals loaded from resume
+/// data -- they do not reset at boot. Publishing them directly is what made
+/// `day_uploaded` read 321 TB: the whole history of every loaded torrent,
+/// labelled as one day.
+#[derive(Default)]
+pub struct Odometer {
+    /// Session totals at startup. `session_* = totals - this`.
+    pub session_offset: (i64, i64),
+    /// Session totals at the last Europe/Paris midnight rollover.
+    pub day_baseline: (i64, i64),
+    /// The date that baseline belongs to, `YYYY-MM-DD` in Europe/Paris.
+    pub day_date: String,
+}
+
+pub type Odo = Arc<std::sync::Mutex<Odometer>>;
+
+/// Today's date in the daemon's local zone, `YYYY-MM-DD`.
+///
+/// Local, not UTC: the operator's day ends at midnight where they are, and the
+/// container is given TZ=Europe/Paris for exactly this.
+fn local_date() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now as *const i64, &mut tm) };
+    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+}
+
+/// Bytes this session and today, from the engines' lifetime counters.
+///
+/// Rolls the day baseline when the local date changes, so calling it on a timer
+/// is what keeps the figure honest on a node nobody is looking at -- 3.x reset
+/// only on the first request of the new day, and the counter sat on yesterday's
+/// baseline until someone opened the page.
+pub fn session_and_day(state: &AppState) -> ((i64, i64), (i64, i64), (i64, i64)) {
+    let (total_up, total_down) = state.engines.session_totals();
+    let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Totals below the mark mean torrents were removed, taking their lifetime
+    // bytes out of the sum. Follow them down rather than publishing a negative
+    // day: the alternative is a counter that reads zero until the engines have
+    // re-earned everything the removed torrent had ever uploaded.
+    if total_up < odo.session_offset.0 || total_down < odo.session_offset.1 {
+        odo.session_offset = (total_up, total_down);
+    }
+    let session = (
+        (total_up - odo.session_offset.0).max(0),
+        (total_down - odo.session_offset.1).max(0),
+    );
+
+    let today = local_date();
+    if odo.day_date != today {
+        odo.day_date = today;
+        odo.day_baseline = session;
+    }
+    if session.0 < odo.day_baseline.0 || session.1 < odo.day_baseline.1 {
+        odo.day_baseline = (0, 0);
+    }
+    let day = (
+        (session.0 - odo.day_baseline.0).max(0),
+        (session.1 - odo.day_baseline.1).max(0),
+    );
+    // Lifetime totals returned too: every caller needs them alongside, and
+    // summing 300k counters twice per frame is the kind of waste that only
+    // shows up as a warm CPU.
+    ((total_up, total_down), session, day)
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -53,7 +190,15 @@ pub struct AppState {
     /// The durable store, shared with 3.x and opened on the same file.
     pub store: Arc<std::sync::Mutex<crate::store::Store>>,
     /// Last known public addresses, (v4, v6). Empty until a lookup succeeds.
-    pub public_ip: Arc<tokio::sync::Mutex<(String, String)>>,
+    pub public_ip: PublicIp,
+    /// Last per-engine exit measurement, and when it was taken.
+    pub net_engines: crate::netprobe::Snapshot,
+    /// Marks that turn the engines' lifetime counters into session and day.
+    pub odometer: Odo,
+    /// Cached Records card, refreshed off the request path.
+    pub records: Records,
+    /// Where bench.db lives, so a refresh can open its own read-only handle.
+    pub bench_path: std::path::PathBuf,
     /// Unix time this process started, for the uptime figure.
     pub started_at: i64,
     /// Recent log lines, for the Logs tab and its stream.
@@ -190,6 +335,155 @@ async fn get_clients(
     guard!(state, headers, query);
     let cfg = state.cfg();
     Json(&cfg.announce_clients).into_response()
+}
+
+/// Why each tracker is unhappy, and whether it still hands out our address.
+///
+/// Two questions the trackers tab could not answer before 4.6.0. "Failed" was
+/// one number for the whole engine, so a node being rate limited by one tracker
+/// looked exactly like a node announcing deleted torrents to another. And
+/// nothing at all reported whether an announce actually put us in the peer list
+/// -- the failure that cost three days of upload in September 2026 produced
+/// successful announces, correct scrapes, and an address the tracker only ever
+/// served to half the swarm.
+/// Accept a tracker's faults, or stop accepting them.
+///
+/// Body: `{"host": "...", "muted": true}`. Persisted next to the ip modes, so
+/// it survives a restart: an operator who has decided that archive.org is not
+/// coming back should not have to decide it again every morning.
+async fn set_announce_mute(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    #[derive(serde::Deserialize)]
+    struct Req {
+        host: String,
+        #[serde(default)]
+        muted: bool,
+    }
+    let Ok(req) = serde_json::from_str::<Req>(&body) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"})))
+            .into_response();
+    };
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "host is required"})))
+            .into_response();
+    }
+    let value = if req.muted { "1" } else { "" };
+    let persisted = set_host_entry(&state, "announce_muted", &host, value);
+    Json(serde_json::json!({
+        "host": host,
+        "muted": req.muted,
+        "persisted": persisted,
+    }))
+    .into_response()
+}
+
+async fn get_announce_health(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let cfg = state.cfg();
+    let mut out = serde_json::Map::new();
+    // Counted in DISTINCT TRACKERS, never in errors: "2" has to mean two
+    // trackers to look at, not 1321 timeouts from one of them.
+    let (mut red, mut amber) = (0u32, 0u32);
+    for id in ["hoard", "race"] {
+        let Some(engine) = state.engines.get(id) else { continue };
+        let cache = &engine.announce_cache;
+        let errs = cache.error_breakdown();
+        let vers = cache.verifications();
+        let mut hosts: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        let mut names: std::collections::BTreeSet<String> = errs.keys().cloned().collect();
+        names.extend(vers.keys().cloned());
+        for h in names {
+            let mut o = serde_json::Map::new();
+            if let Some(v) = errs.get(&h) {
+                o.insert(
+                    "errors".into(),
+                    serde_json::json!(v
+                        .iter()
+                        .map(|(class, n)| serde_json::json!({"class": class, "count": n}))
+                        .collect::<Vec<_>>()),
+                );
+            }
+            // Severity, so the interface does not have to re-derive it and two
+            // readers cannot disagree about what "a problem" means.
+            //
+            // red   : acts on it today. A passkey the tracker rejects, or a
+            //         self-check saying we are in one family's peer list only.
+            // amber : reachability or throttling. Often our own doing --
+            //         `announce_rate_limit = 0.0` is what earns the 429s.
+            // muted : seen and accepted, kept out of every count.
+            // Torrents the tracker deleted are NOT a fault: nothing to fix.
+            let muted = cfg.announce_muted.contains_key(&h);
+            let classes: Vec<&str> = errs
+                .get(&h)
+                .map(|v| v.iter().map(|(c, _)| c.as_str()).collect())
+                .unwrap_or_default();
+            let verdict = vers.get(&h).map(|v| v.verdict()).unwrap_or("");
+            let severity = if muted {
+                "muted"
+            } else if classes.contains(&"invalid_passkey")
+                || matches!(verdict, "v4_missing" | "v6_missing" | "absent")
+            {
+                "red"
+            } else if classes
+                .iter()
+                .any(|c| matches!(*c, "rate_limited" | "timeout" | "dns" | "connect"))
+            {
+                "amber"
+            } else {
+                "none"
+            };
+            o.insert("severity".into(), serde_json::json!(severity));
+            o.insert("muted".into(), serde_json::json!(muted));
+            if let Some(v) = vers.get(&h) {
+                o.insert(
+                    "verify".into(),
+                    serde_json::json!({
+                        "verdict": v.verdict(),
+                        "v4": v.v4,
+                        "v6": v.v6,
+                        "conclusive": v.conclusive,
+                        "swarm": v.swarm,
+                        "age_secs": v.at.elapsed().as_secs(),
+                    }),
+                );
+            }
+            hosts.insert(h, serde_json::Value::Object(o));
+        }
+        let (ok, failed) = cache.outcomes();
+        for v in hosts.values() {
+            match v.get("severity").and_then(|x| x.as_str()) {
+                Some("red") => red += 1,
+                Some("amber") => amber += 1,
+                _ => {}
+            }
+        }
+        out.insert(
+            id.to_string(),
+            serde_json::json!({
+                "announces_ok": ok,
+                "announces_failed": failed,
+                "hosts": hosts,
+            }),
+        );
+    }
+    out.insert(
+        "badges".into(),
+        serde_json::json!({"trackers_red": red, "trackers_amber": amber}),
+    );
+    Json(serde_json::Value::Object(out)).into_response()
 }
 
 async fn get_ip_modes(
@@ -580,6 +874,118 @@ async fn get_categories(
     Json(out).into_response()
 }
 
+/// The configured categories, by name.
+///
+/// Same two sources the listing route reads, in the same order: the store's
+/// document first, the file beside it as a fallback.
+fn categories_map(state: &AppState) -> std::collections::BTreeMap<String, Category> {
+    let cfg = state.cfg();
+    let raw = {
+        let store = state.store.lock().unwrap();
+        store.meta_doc("categories")
+    }
+    .filter(|doc| !doc.is_empty())
+    .or_else(|| {
+        let path = std::path::Path::new(&cfg.daemon.data_dir).join("categories.json");
+        std::fs::read_to_string(path).ok()
+    });
+    raw.and_then(|doc| serde_json::from_str(&doc).ok()).unwrap_or_default()
+}
+
+/// Which engine a category belongs to, and where it puts its files.
+///
+/// An unknown category lands on race, which is what 3.x does and what every
+/// downstream client has been configured against.
+fn placement(state: &AppState, category: &str) -> (String, String) {
+    match categories_map(state).get(category) {
+        Some(cat) => {
+            let engine =
+                if cat.mode == "hoard" { "hoard".to_string() } else { "race".to_string() };
+            (engine, cat.save_path.clone())
+        }
+        None => ("race".to_string(), String::new()),
+    }
+}
+
+/// Add one torrent from its bytes: the single path every add funnels through.
+///
+/// Three things have to happen together, and 4.0.0 did none of them -- both add
+/// routes were validation-only, so nothing could reach this node at all:
+/// the file is written where the engine's resume records point, the engine is
+/// told about it, and the store gets the row the interface lists from.
+fn add_torrent_bytes(
+    state: &AppState,
+    bytes: &[u8],
+    category: &str,
+    save_path_override: &str,
+    tags: &str,
+    paused: bool,
+    seed_mode: bool,
+) -> Result<(String, String), String> {
+    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+        .map_err(|e| format!("torrent file did not parse: {e}"))?;
+    let hash = typhon_engine::torrent::hex_encode(&meta.info_hash);
+
+    let (engine_id, category_path) = placement(state, category);
+    // No inferred destination: with neither an explicit savepath nor a category
+    // that names one, there is no correct answer, and picking one writes a
+    // download somewhere the operator will not find it.
+    let save_path = if !save_path_override.is_empty() {
+        save_path_override.to_string()
+    } else if !category_path.is_empty() {
+        category_path
+    } else {
+        return Err(format!(
+            "no save path: category {category:?} is unknown and no savepath was given"
+        ));
+    };
+
+    let Some(engine) = state.engines.get(&engine_id) else {
+        return Err(format!("no engine {engine_id}"));
+    };
+
+    // Written before the engine is told, and by rename: the engine records this
+    // path in its resume data, and a half-written file there is a torrent that
+    // vanishes at the next restart.
+    let cfg = state.cfg();
+    let dir = std::path::Path::new(&cfg.daemon.data_dir).join("uploads");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("uploads dir: {e}"))?;
+    let path = dir.join(format!("{hash}.torrent"));
+    let tmp = dir.join(format!("{hash}.torrent.part"));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write torrent: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("install torrent: {e}"))?;
+
+    let (info_hash, name) = engine
+        .manager
+        .add_torrent(&path.to_string_lossy(), &save_path, paused, seed_mode)
+        .map_err(|e| {
+            // The engine refused it, so nothing owns this file.
+            let _ = std::fs::remove_file(&path);
+            e
+        })?;
+
+    // Data already on disk (cross-seed, a re-add) is hash-checked rather than
+    // overwritten -- unless the caller asked to skip, which is what
+    // skip_checking means and why cross-seed sets it.
+    if !seed_mode && !paused && engine.manager.any_file_exists(&info_hash) {
+        let _ = engine.manager.recheck(&info_hash);
+    }
+
+    let added_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    {
+        let store = state.store.lock().unwrap();
+        store
+            .insert_torrent(&hash, &engine_id, bytes, &save_path, category, added_time, paused, tags)
+            .map_err(|e| format!("store: {e}"))?;
+    }
+
+    tracing::info!(engine = %engine_id, category = %category, hash = %hash, "torrent added");
+    Ok((hash, name))
+}
+
 /// Where the current library came from, when it was imported from another client.
 async fn get_provenance(
     State(state): State<AppState>,
@@ -722,6 +1128,72 @@ fn local_agent(engine_id: &str) -> String {
     format!("local-{engine_id}")
 }
 
+/// How many of an engine's torrents a tracker has answered about.
+///
+/// From the announce cache, which is the only place that knows: an announce is
+/// the sole moment a tracker says anything, and a hardcoded zero here made the
+/// interface report "0/300597 announced (0%)" while announces were going out.
+fn announced_count(state: &AppState, engine_id: &str) -> usize {
+    state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.id == engine_id)
+        .map(|e| e.announce_cache.len())
+        .unwrap_or(0)
+}
+
+/// The live swarm figures for one engine, as the header renders them.
+///
+/// Every field is a gauge the engine already maintains; they were hardcoded to
+/// zero while the slice was being ported, which made a node moving 300 Mbit/s
+/// across ~1000 peers report a flat zero on every counter. Reading them costs
+/// four atomic loads, so the status route can stay a cheap poll.
+#[derive(Default)]
+struct LiveStats {
+    upload_rate: i64,
+    download_rate: i64,
+    active_peers: i64,
+    torrents_with_peers: i64,
+    torrents_uploading: i64,
+    unseeded_peers: i64,
+}
+
+/// Leechers the trackers report across the hoard, summed from the announce
+/// cache.
+///
+/// This is the denominator of the header's "connected / available" reading. It
+/// used to be `unseeded_peers`, which is the numerator under another name -- so
+/// the ratio was 100.0% by construction on every node, and said nothing.
+fn swarm_leechers_total(state: &AppState) -> i64 {
+    state
+        .engines
+        .get("hoard")
+        .map(|e| e.announce_cache.swarm_totals().1)
+        .unwrap_or(0)
+}
+
+fn live_stats(state: &AppState, engine_id: &str) -> LiveStats {
+    use std::sync::atomic::Ordering;
+    let Some(engine) = state.engines.get(engine_id) else {
+        return LiveStats::default();
+    };
+    let m = &engine.manager;
+    LiveStats {
+        upload_rate: m.upload_rate.get() as i64,
+        download_rate: m.download_rate.get() as i64,
+        active_peers: m.cached_active_peers.load(Ordering::Relaxed) as i64,
+        torrents_with_peers: m.cached_torrents_with_peers.load(Ordering::Relaxed) as i64,
+        torrents_uploading: m.cached_torrents_uploading.load(Ordering::Relaxed) as i64,
+        unseeded_peers: m.cached_unseeded_peers.load(Ordering::Relaxed) as i64,
+    }
+}
+
+/// The store's facts for one session, from cache when it is warm.
+///
+/// Filled on first use and refreshed by a worker. A hydration that reads
+/// SQLite directly costs 21 seconds of I/O for 300k rows, and the page shows
+/// nothing until the last batch -- the front paints once, at `done`.
 fn engine_rows(state: &AppState, engine_id: &str) -> Vec<serde_json::Value> {
     let Some(engine) = state.engines.get(engine_id) else {
         return Vec::new();
@@ -745,6 +1217,463 @@ fn engine_rows(state: &AppState, engine_id: &str) -> Vec<serde_json::Value> {
             crate::row::build(&raw, facts.get(hash).unwrap_or(&empty), &agent)
         })
         .collect()
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// One page of an engine's list: filtered, sorted and sliced on the server.
+///
+/// Replaces streaming the whole library to the browser. At 300k torrents that
+/// was 250 MB per hard refresh, and the cost was never the rendering -- the
+/// page already drew only its top 500 -- it was moving and parsing the other
+/// 299500 rows so it could decide which 500 those were. That decision happens
+/// here now, over a flat projection that touches no allocator per field.
+///
+/// The filter and sort semantics mirror `_hoardMatches` and `_hoardCmp` in
+/// app.js exactly, including the info_hash tie-break: a page boundary that
+/// ordered ties differently from the client would duplicate or drop rows
+/// between pages, which reads as data loss.
+/// The separators that punctuate release names. `Jujutsu.Kaisen.S02.1080p` has
+/// to answer to the query "jujutsu 1080p", which a single literal `contains`
+/// cannot do: the space the user typed exists nowhere in the name.
+fn is_search_sep(c: char) -> bool {
+    c.is_whitespace() || c == '.' || c == '_' || c == '-'
+}
+
+/// True when `token` occurs inside one word of `hay`. `token` is already
+/// lowercase and, by construction, free of separators -- so it can never span
+/// a word boundary, which is what makes the word-wise walk equivalent to a
+/// `contains` over the fully normalized string.
+///
+/// That equivalence is the point: `_searchMatches` in app.js lowercases the
+/// name, collapses its separators to spaces and calls `includes`. This gets
+/// the same answer without the per-row String, which cost one allocation per
+/// torrent per keystroke -- 300k of them on this library, on a request path
+/// whose whole design is to not allocate per field.
+fn name_has_token(hay: &str, token: &str) -> bool {
+    hay.split(is_search_sep).any(|word| {
+        if word.len() < token.len() {
+            return false;
+        }
+        if word.is_ascii() {
+            word.as_bytes()
+                .windows(token.len())
+                .any(|w| w.eq_ignore_ascii_case(token.as_bytes()))
+        } else {
+            // Real Unicode folding, so "CAFÉ" stays findable by "café". Only
+            // the rows that actually carry non-ASCII pay the allocation; the
+            // branch above never does.
+            word.to_lowercase().contains(token)
+        }
+    })
+}
+
+async fn get_engine_page(
+    state: &AppState,
+    engine_id: &str,
+    query: &str,
+) -> Response {
+    let Some(engine) = state.engines.get(engine_id) else {
+        return Json(serde_json::json!({"total": 0, "filtered": 0, "rows": []})).into_response();
+    };
+
+    let param = |k: &str| query_param(query, k).unwrap_or_default();
+    let search_raw = param("search").trim().to_lowercase();
+    // Tokens are ANDed and order-free, so "demo music" and "music demo" both
+    // find "demo_03_music.bin". Split once per request, never per row.
+    let search_tokens: Vec<String> = search_raw
+        .split(is_search_sep)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    // A pasted info_hash is matched against the hash even when the torrent has
+    // a name. The previous code only ever looked at the hash for NAMELESS
+    // torrents, so with every torrent named it was unreachable: pasting a hash
+    // returned nothing. Six hex chars is the floor, below which short words
+    // like "added" would start matching hashes by accident.
+    let search_is_hex =
+        search_raw.len() >= 6 && search_raw.bytes().all(|b| b.is_ascii_hexdigit());
+    let cat_filter = param("category");
+    let tag_filter = param("tag");
+    let tracker_filter = param("tracker");
+    let state_filter = param("state");
+    let sort = {
+        let s = param("sort");
+        if s.is_empty() { "added_time".to_string() } else { s }
+    };
+    let asc = param("order") == "asc";
+    let offset = param("offset").parse::<usize>().unwrap_or(0);
+    let limit = param("limit").parse::<usize>().unwrap_or(500).clamp(1, 5000);
+
+    // Facts are only needed up front when the FILTER depends on them. In every
+    // other case the page's own 500 hashes are looked up at the end, which is
+    // an indexed lookup instead of a walk of the whole session.
+    // Facet chips are counted over the WHOLE library, so their inputs are
+    // needed whenever they are asked for -- not only when a filter uses them.
+    let want_facets = param("facets") == "1";
+
+    // Interned, keyed by the raw 20-byte hash. The full `facts_by_session`
+    // built a StoreFacts per torrent -- three Strings and a Vec each, under a
+    // 40-char String key -- which measured ~270 MB of transient allocation per
+    // request at 300k, against a control run. This is the same information in
+    // a few MB, and it is needed on every request because a row's STATE is
+    // derived from the store's paused flag.
+    let facts = {
+        let store = state.store.lock().unwrap();
+        store.slim_facts(engine_id).unwrap_or_default()
+    };
+    let pinned: std::collections::HashSet<String> =
+        if state_filter == "__pinned__" || want_facets {
+            let store = state.store.lock().unwrap();
+            store.pinned(engine_id).unwrap_or_default().into_iter().collect()
+        } else {
+            Default::default()
+        };
+
+    // Each facet family takes a comma-separated list to include and another to
+    // exclude: `category=movies,series&category_not=animes`. A single value
+    // still works, so old links keep their meaning.
+    //
+    // Include is OR within a family, exclude wins over include, and the
+    // families are ANDed together. On a library where 185k torrents hang off
+    // two dead trackers, "everything except those two" is the query that makes
+    // the list usable at all, and one exclusion was not enough for it.
+    let split = |v: &str| -> Vec<String> {
+        v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+    };
+    let cat_inc = split(&cat_filter);
+    let cat_exc = split(&param("category_not"));
+    let tag_inc = split(&tag_filter);
+    let tag_exc = split(&param("tag_not"));
+    let trk_inc = split(&tracker_filter);
+    let trk_exc = split(&param("tracker_not"));
+
+    // "__none__" is uncategorised / untagged: a state, not a name, so it is
+    // resolved separately from the ids.
+    let cat_none_inc = cat_inc.iter().any(|c| c == "__none__");
+    let cat_none_exc = cat_exc.iter().any(|c| c == "__none__");
+    let cat_ids_inc: Vec<u16> = cat_inc.iter().filter(|c| c.as_str() != "__none__")
+        .filter_map(|c| facts.category_id(c)).collect();
+    let cat_ids_exc: Vec<u16> = cat_exc.iter().filter(|c| c.as_str() != "__none__")
+        .filter_map(|c| facts.category_id(c)).collect();
+    let tag_none_inc = tag_inc.iter().any(|t| t == "__none__");
+    let tag_none_exc = tag_exc.iter().any(|t| t == "__none__");
+    let tag_mask_inc: u64 = tag_inc.iter().filter(|t| t.as_str() != "__none__")
+        .filter_map(|t| facts.tag_bit(t)).fold(0u64, |m, b| m | b);
+    let tag_mask_exc: u64 = tag_exc.iter().filter(|t| t.as_str() != "__none__")
+        .filter_map(|t| facts.tag_bit(t)).fold(0u64, |m, b| m | b);
+
+    let torrents = engine.manager.all();
+    let total = torrents.len();
+
+    // Tracker hosts interned as we go, for the same reason: a few dozen
+    // distinct hosts across the whole library, one String each instead of one
+    // per torrent.
+    let mut tracker_names: Vec<String> = vec![String::new()];
+    let mut tracker_ids: std::collections::HashMap<String, u16> = Default::default();
+    // Grown in step with `tracker_names`, so the per-torrent test is an index
+    // rather than a walk over the filter list 300k times. Slot 0 is "no
+    // tracker", which no filter can name.
+    let mut trk_flag_inc: Vec<bool> = vec![false];
+    let mut trk_flag_exc: Vec<bool> = vec![false];
+
+    let mut f_state: std::collections::BTreeMap<&'static str, i64> = Default::default();
+    let mut f_cat: std::collections::BTreeMap<u16, i64> = Default::default();
+    let mut f_tracker: std::collections::BTreeMap<u16, i64> = Default::default();
+    let mut f_tag: [i64; 64] = [0; 64];
+    let (mut n_all, mut n_active, mut n_trk_err, mut n_err, mut n_pinned) = (0i64, 0, 0, 0, 0);
+    let (mut n_uncat, mut n_untagged) = (0i64, 0i64);
+
+    // Kept rows are INDICES into `torrents`. Nothing per-torrent is copied out:
+    // the sort keys are read back through the index for the few that survive.
+    let mut kept: Vec<u32> = Vec::new();
+    let mut host_buf = String::new();
+
+    for (idx, t) in torrents.iter().enumerate() {
+        let core = typhon_engine::rpc::dispatch::torrent_core(t);
+        let f = facts.get(&t.info_hash);
+        let row_state = crate::row::derive_state_static(core.state, f.user_paused);
+        let upload_rate = t.upload_rate.get() as i64;
+
+        // The host, interned. Read under the lock into a reused buffer so a
+        // torrent that shares a host with 100k others costs no allocation.
+        host_buf.clear();
+        if let Some(url) = t.live_trackers.read().iter().flatten().next() {
+            host_buf.push_str(&typhon_engine::rpc::dispatch::tracker_host_of(url));
+        }
+        let tracker_id: u16 = if host_buf.is_empty() {
+            0
+        } else if let Some(id) = tracker_ids.get(&host_buf) {
+            *id
+        } else {
+            let id = tracker_names.len() as u16;
+            trk_flag_inc.push(trk_inc.iter().any(|x| x == &host_buf));
+            trk_flag_exc.push(trk_exc.iter().any(|x| x == &host_buf));
+            tracker_names.push(host_buf.clone());
+            tracker_ids.insert(host_buf.clone(), id);
+            id
+        };
+
+        let tracker_error = !t
+            .last_announce_error
+            .lock()
+            .map(|s| s.is_empty())
+            .unwrap_or(true);
+        let torrent_error =
+            core.status_u8 == typhon_engine::torrent::meta::TorrentStatus::Error as u8;
+
+        let m_search = search_tokens.is_empty() || {
+            if search_is_hex
+                && typhon_engine::torrent::hex_encode(&t.info_hash).contains(&search_raw)
+            {
+                true
+            } else if t.meta.name.is_empty() {
+                let hex = typhon_engine::torrent::hex_encode(&t.info_hash);
+                search_tokens.iter().all(|tok| hex.contains(tok.as_str()))
+            } else {
+                search_tokens
+                    .iter()
+                    .all(|tok| name_has_token(&t.meta.name, tok))
+            }
+        };
+        let m_tracker = (trk_inc.is_empty() || trk_flag_inc[tracker_id as usize])
+            && !trk_flag_exc[tracker_id as usize];
+        let hash_hex_needed = state_filter == "__pinned__" || (want_facets && !pinned.is_empty());
+        let is_pinned = hash_hex_needed
+            && pinned.contains(&typhon_engine::torrent::hex_encode(&t.info_hash));
+        let m_state = match state_filter.as_str() {
+            "" => true,
+            "__active__" => row_state == "seeding" && upload_rate > 0,
+            "__tracker_err__" => tracker_error,
+            "__error__" => torrent_error,
+            "__pinned__" => is_pinned,
+            want => row_state == want,
+        };
+        let m_cat = {
+            let inc_ok = cat_inc.is_empty()
+                || (cat_none_inc && f.category_id == 0)
+                || cat_ids_inc.contains(&f.category_id);
+            let exc_hit = (cat_none_exc && f.category_id == 0)
+                || cat_ids_exc.contains(&f.category_id);
+            inc_ok && !exc_hit
+        };
+        let m_tag = {
+            let inc_ok = tag_inc.is_empty()
+                || (tag_none_inc && f.tag_bits == 0)
+                || (tag_mask_inc != 0 && f.tag_bits & tag_mask_inc != 0);
+            let exc_hit = (tag_none_exc && f.tag_bits == 0)
+                || (tag_mask_exc != 0 && f.tag_bits & tag_mask_exc != 0);
+            inc_ok && !exc_hit
+        };
+
+        if want_facets {
+            if m_search && m_cat && m_tag && m_tracker {
+                n_all += 1;
+                *f_state.entry(row_state).or_insert(0) += 1;
+                if row_state == "seeding" && upload_rate > 0 { n_active += 1; }
+                if tracker_error { n_trk_err += 1; }
+                if torrent_error { n_err += 1; }
+                if is_pinned { n_pinned += 1; }
+            }
+            if m_search && m_state && m_tag && m_tracker {
+                if f.category_id == 0 { n_uncat += 1; } else { *f_cat.entry(f.category_id).or_insert(0) += 1; }
+            }
+            if m_search && m_state && m_cat && m_tag && tracker_id != 0 {
+                *f_tracker.entry(tracker_id).or_insert(0) += 1;
+            }
+            if m_search && m_state && m_cat && m_tracker {
+                if f.tag_bits == 0 {
+                    n_untagged += 1;
+                } else {
+                    for i in 0..64 {
+                        if f.tag_bits & (1u64 << i) != 0 { f_tag[i] += 1; }
+                    }
+                }
+            }
+        }
+
+        if m_search && m_state && m_cat && m_tag && m_tracker {
+            kept.push(idx as u32);
+        }
+    }
+
+    let filtered = kept.len();
+
+    // Decorate once, then sort. Building the key inside the comparator instead
+    // cost a String allocation per COMPARISON -- some five million of them for
+    // a name sort over 300k, which was most of the two seconds this took.
+    let textual = matches!(sort.as_str(), "name" | "state" | "tracker_host" | "category");
+    let mut keyed: Vec<(String, f64, u32)> = kept
+        .iter()
+        .map(|&idx| {
+            let t = &torrents[idx as usize];
+            let core = typhon_engine::rpc::dispatch::torrent_core(t);
+            let f = facts.get(&t.info_hash);
+            let key = if textual {
+                match sort.as_str() {
+                    "name" => t.meta.name.to_lowercase(),
+                    "state" => crate::row::derive_state_static(core.state, f.user_paused).to_string(),
+                    "tracker_host" => t
+                        .live_trackers
+                        .read()
+                        .iter()
+                        .flatten()
+                        .next()
+                        .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u).to_lowercase())
+                        .unwrap_or_default(),
+                    _ => facts.category(f.category_id).to_lowercase(),
+                }
+            } else {
+                String::new()
+            };
+            let total_upload = t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
+            let total_download =
+                t.total_downloaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
+            let completed = t.completed_time.load(std::sync::atomic::Ordering::Relaxed);
+            let n = match sort.as_str() {
+                "total_size" => t.meta.total_size as f64,
+                "progress" => if core.state == "seeding" { 1.0 } else { core.progress },
+                "ratio" => if total_download > 0 { total_upload as f64 / total_download as f64 } else { 0.0 },
+                "upload_rate" => t.upload_rate.get() as f64,
+                "download_rate" => t.download_rate.get() as f64,
+                "num_peers" => t.peers_connected.load(std::sync::atomic::Ordering::Relaxed) as f64,
+                "total_upload" => total_upload as f64,
+                "total_download" => total_download as f64,
+                "completed_time" => completed as f64,
+                "seeding_time" => if completed > 0 { (now_secs() - completed).max(0) as f64 } else { 0.0 },
+                _ => t.added_time as f64,
+            };
+            (key, n, idx)
+        })
+        .collect();
+
+    let cmp = |a: &(String, f64, u32), b: &(String, f64, u32)| {
+        let ord = if textual {
+            a.0.cmp(&b.0)
+        } else {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        let ord = if asc { ord } else { ord.reverse() };
+        // Tie-break on the raw hash bytes: same total order as the hex string
+        // the client uses, without building one per comparison.
+        ord.then_with(|| {
+            torrents[a.2 as usize].info_hash.cmp(&torrents[b.2 as usize].info_hash)
+        })
+    };
+
+    // `fields=hash` answers the selection universe: every hash the filter
+    // matches, with no rows built. Ctrl+A needs the whole set and none of its
+    // contents, and shipping full rows for it would undo the paging.
+    if param("fields") == "hash" {
+        keyed.sort_by(cmp);
+        let hashes: Vec<String> = keyed
+            .iter()
+            .map(|(_, _, i)| typhon_engine::torrent::hex_encode(&torrents[*i as usize].info_hash))
+            .collect();
+        return Json(serde_json::json!({
+            "total": total,
+            "filtered": filtered,
+            "hashes": hashes,
+        }))
+        .into_response();
+    }
+
+    // Only the page window has to be in order. Partitioning around its end is
+    // O(N) and leaves everything past it unordered, which nobody reads.
+    let end = offset.saturating_add(limit).min(keyed.len());
+    if end < keyed.len() {
+        keyed.select_nth_unstable_by(end, cmp);
+    }
+    let window = &mut keyed[..end];
+    window.sort_by(cmp);
+
+    // Full rows for the page alone, and the only place the rich StoreFacts are
+    // read: 500 indexed lookups instead of a walk of the whole session.
+    let page: Vec<&std::sync::Arc<typhon_engine::torrent::meta::TorrentState>> =
+        window.iter().skip(offset).map(|(_, _, i)| &torrents[*i as usize]).collect();
+    let page_hashes: Vec<String> = page
+        .iter()
+        .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
+        .collect();
+    let rich = {
+        let store = state.store.lock().unwrap();
+        store.facts_for_hashes(&page_hashes).unwrap_or_default()
+    };
+    let empty_facts = crate::row::StoreFacts::default();
+    let agent = local_agent(engine_id);
+    let rows: Vec<serde_json::Value> = page
+        .iter()
+        .map(|t| {
+            let raw = typhon_engine::rpc::dispatch::torrent_to_json(t);
+            let hash = raw.get("info_hash").and_then(|v| v.as_str()).unwrap_or("");
+            crate::row::build(&raw, rich.get(hash).unwrap_or(&empty_facts), &agent)
+        })
+        .collect();
+
+    let facets = if want_facets {
+        serde_json::json!({
+            "all": n_all,
+            "active": n_active,
+            "tracker_error": n_trk_err,
+            "torrent_error": n_err,
+            "pinned": n_pinned,
+            "uncategorized": n_uncat,
+            "untagged": n_untagged,
+            "state": f_state,
+            "category": f_cat
+                .iter()
+                .map(|(id, n)| (facts.category(*id).to_string(), *n))
+                .collect::<std::collections::BTreeMap<String, i64>>(),
+            "tracker": f_tracker
+                .iter()
+                .map(|(id, n)| (tracker_names[*id as usize].clone(), *n))
+                .collect::<std::collections::BTreeMap<String, i64>>(),
+            "tag": facts
+                .tags
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| f_tag[*i] > 0)
+                .map(|(i, name)| (name.clone(), f_tag[i]))
+                .collect::<std::collections::BTreeMap<String, i64>>(),
+        })
+    } else {
+        serde_json::Value::Null
+    };
+
+    Json(serde_json::json!({
+        "total": total,
+        "filtered": filtered,
+        "offset": offset,
+        "limit": limit,
+        "rows": rows,
+        "facets": facets,
+    }))
+    .into_response()
+}
+
+async fn get_hoard_page(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    get_engine_page(&state, "hoard", &query).await
+}
+
+async fn get_race_page(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    get_engine_page(&state, "race", &query).await
 }
 
 async fn get_race_torrents(
@@ -793,15 +1722,18 @@ async fn get_baseline(
         let store = state.store.lock().unwrap();
         store.counter("global")
     };
-    let (session_up, session_down) = state.engines.session_totals();
+    let ((total_up, total_down), (session_up, session_down), _) = session_and_day(&state);
 
     Json(serde_json::json!({
         "baseline_uploaded": base_up,
         "baseline_downloaded": base_down,
         "session_uploaded": session_up,
         "session_downloaded": session_down,
-        "global_uploaded": base_up + session_up,
-        "global_downloaded": base_down + session_down,
+        // The global is the stored baseline plus the LIFETIME totals, not the
+        // session delta: subtracting this boot's mark here would erase every
+        // byte moved before the last restart.
+        "global_uploaded": base_up + total_up,
+        "global_downloaded": base_down + total_down,
     }))
     .into_response()
 }
@@ -836,6 +1768,9 @@ async fn get_public_ip(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
+    if query_param(&query, "refresh").as_deref() == Some("1") {
+        crate::netprobe::measure(&state.engines, &state.net_engines, &state.public_ip).await;
+    }
     let cache = state.public_ip.lock().await;
     Json(serde_json::json!({"ip": cache.0.clone(), "ip_v6": cache.1.clone()})).into_response()
 }
@@ -873,22 +1808,24 @@ async fn get_hoard_stats(
         .map(|e| e.manager.all().len() as i64)
         .unwrap_or(0);
 
+    let live = live_stats(&state, "hoard");
+
     Json(serde_json::json!({
-        "active_download_rate": 0,
-        "active_peers": 0,
-        "active_upload_rate": 0,
+        "active_download_rate": live.download_rate,
+        "active_peers": live.active_peers,
+        "active_upload_rate": live.upload_rate,
         "engine": "hoard",
         "listen_port": cfg.hoard.listen_port,
         "running": true,
         "session_downloaded": 0,
         "session_uploaded": 0,
         "stagger_complete": true,
-        "swarm_leechers": 0,
-        "torrents_announced": 0,
-        "torrents_uploading": 0,
-        "torrents_with_peers": 0,
+        "swarm_leechers": swarm_leechers_total(&state),
+        "torrents_announced": announced_count(&state, "hoard"),
+        "torrents_uploading": live.torrents_uploading,
+        "torrents_with_peers": live.torrents_with_peers,
         "total_torrents": torrents,
-        "unseeded_peers": 0,
+        "unseeded_peers": live.unseeded_peers,
     }))
     .into_response()
 }
@@ -1166,6 +2103,18 @@ struct TrackerRow {
 /// The zero time Go marshals for a tracker that has never answered.
 const GO_ZERO_TIME: &str = "0001-01-01T00:00:00Z";
 
+/// A wall-clock timestamp for something that happened `age` ago.
+///
+/// The announce cache times its entries with an Instant, which is monotonic
+/// and has no epoch; the tab needs a date, so the age is subtracted from now.
+fn iso8601_ago(age: std::time::Duration) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::logbuf::rfc3339_at(now - age.as_secs() as i64)
+}
+
 async fn get_trackers(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -1175,30 +2124,72 @@ async fn get_trackers(
     guard!(state, headers, query);
     let cfg = state.cfg();
 
-    // Only hosts carrying a client override are listed: a tracker is known here
-    // because the operator declared an identity for it, not because a torrent
-    // happens to announce to it.
-    let rows: Vec<TrackerRow> = cfg
-        .announce_clients
-        .iter()
-        .map(|(host, client)| TrackerRow {
-            host: host.clone(),
-            torrents: 0,
-            ok: false,
-            last_error: String::new(),
-            last_announce: GO_ZERO_TIME.to_string(),
-            announces: 0,
-            errors: 0,
-            spoofed: true,
-            peer_id_prefix: client.peer_id_prefix.clone(),
-            user_agent: client.user_agent.clone(),
-            passkey_set: cfg.announce_passkeys.contains_key(host),
-            ip_mode: cfg
-                .announce_ip_modes
-                .get(host)
-                .cloned()
-                .unwrap_or_else(|| "auto".to_string()),
-            sources: vec!["config".to_string()],
+    // A tracker belongs on this tab because torrents announce to it, and
+    // separately because the operator declared a client identity for it. The
+    // two sets are merged: listing only the declared ones showed a single row
+    // on a node announcing to several trackers.
+    let mut observed: std::collections::HashMap<String, (i64, std::time::Duration)> =
+        std::collections::HashMap::new();
+    for engine in state.engines.engines() {
+        for (host, (count, age)) in engine.announce_cache.per_tracker() {
+            let slot = observed.entry(host).or_insert((0, age));
+            slot.0 += count;
+            if age < slot.1 {
+                slot.1 = age;
+            }
+        }
+    }
+
+    let mut hosts: std::collections::BTreeSet<String> = observed.keys().cloned().collect();
+    hosts.extend(cfg.announce_clients.keys().cloned());
+    // And the trackers that have only ever FAILED.
+    //
+    // `per_tracker` is built from the announce cache, which is written on
+    // success only, so a tracker that times out on every announce or refuses us
+    // outright had no row at all -- the ones most worth looking at were the
+    // only ones missing. Measured on production: archive.org holds 107k
+    // torrents and answers none of them, gemini refuses us on all 6k.
+    for engine in state.engines.engines() {
+        for host in engine.announce_cache.error_breakdown().into_keys() {
+            hosts.insert(host);
+        }
+    }
+
+    let rows: Vec<TrackerRow> = hosts
+        .into_iter()
+        .map(|host| {
+            let client = cfg.announce_clients.get(&host);
+            let seen = observed.get(&host);
+            let mut sources = Vec::new();
+            if seen.is_some() {
+                sources.push("torrents".to_string());
+            }
+            if client.is_some() {
+                sources.push("config".to_string());
+            }
+            TrackerRow {
+                torrents: seen.map(|(n, _)| *n).unwrap_or(0),
+                // An announce landed in the cache only because the tracker
+                // answered, so a host we have seen is a host that is working.
+                ok: seen.is_some(),
+                last_error: String::new(),
+                last_announce: seen
+                    .map(|(_, age)| iso8601_ago(*age))
+                    .unwrap_or_else(|| GO_ZERO_TIME.to_string()),
+                announces: seen.map(|(n, _)| *n).unwrap_or(0),
+                errors: 0,
+                spoofed: client.is_some(),
+                peer_id_prefix: client.map(|c| c.peer_id_prefix.clone()).unwrap_or_default(),
+                user_agent: client.map(|c| c.user_agent.clone()).unwrap_or_default(),
+                passkey_set: cfg.announce_passkeys.contains_key(&host),
+                ip_mode: cfg
+                    .announce_ip_modes
+                    .get(&host)
+                    .cloned()
+                    .unwrap_or_else(|| "auto".to_string()),
+                sources,
+                host,
+            }
         })
         .collect();
     Json(rows).into_response()
@@ -1410,15 +2401,103 @@ async fn get_bench_records(
     let cfg = state.cfg();
     // next_pib is 1 rather than 0: the next milestone after nothing is the
     // first petabyte, not "no milestone".
-    Json(serde_json::json!({
+    let empty = serde_json::json!({
         "current_pib": 0, "milestones": [], "next_pib": 1, "records": [],
-    }))
-    .into_response()
+    });
+
+    if state.bench.is_none() {
+        return Json(empty).into_response();
+    }
+
+    // Answer from the cache and never block on the scan: the overview header
+    // does not paint until this request returns, so computing it here put six
+    // seconds in front of every page load.
+    let (cached, stale) = {
+        let c = state.records.lock().unwrap_or_else(|e| e.into_inner());
+        let stale = match c.at {
+            None => true,
+            Some(at) => at.elapsed() >= RECORDS_TTL,
+        };
+        (c.value.clone(), stale)
+    };
+    if stale {
+        refresh_records(state.bench_path.clone(), state.records.clone());
+    }
+
+    // Before the first pass completes there is genuinely nothing to show. The
+    // empty shape is the same one 3.x sends, so the card renders blank rather
+    // than erroring, and fills in on the next poll.
+    Json(cached.unwrap_or(empty)).into_response()
 }
 
-empty_list_route!(get_bench_range);
-empty_list_route!(get_tracker_stats_range);
 empty_list_route!(get_agents_torrents);
+
+/// Performance samples over a window, for the benchmark graphs.
+async fn get_bench_range(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let Some(bench) = state.bench.as_ref() else {
+        return Json(serde_json::json!([])).into_response();
+    };
+    let db = match bench.lock() {
+        Ok(db) => db,
+        Err(e) => e.into_inner(),
+    };
+    let (start, end) = range_params(&query);
+    match db.samples_in_range(start, end) {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => {
+            tracing::warn!("bench range query failed: {e}");
+            Json(serde_json::json!([])).into_response()
+        }
+    }
+}
+
+/// One tracker's samples over a window.
+async fn get_tracker_stats_range(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let Some(bench) = state.bench.as_ref() else {
+        return Json(serde_json::json!([])).into_response();
+    };
+    let db = match bench.lock() {
+        Ok(db) => db,
+        Err(e) => e.into_inner(),
+    };
+    let tracker = query_param(&query, "tracker").unwrap_or_default();
+    let (start, end) = range_params(&query);
+    match db.tracker_samples_in_range(&tracker, start, end) {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => {
+            tracing::warn!("tracker range query failed: {e}");
+            Json(serde_json::json!([])).into_response()
+        }
+    }
+}
+
+/// The `start`/`end` window a graph asks for.
+///
+/// Unparseable values land on a default 24h window rather than an error: the
+/// graph asks for a picture, and an empty one because a parameter was malformed
+/// is indistinguishable from a node that recorded nothing.
+fn range_params(query: &str) -> (f64, f64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let f = |k: &str| query_param(query, k).and_then(|v| v.parse::<f64>().ok());
+    let end = f("end").filter(|v| *v > 0.0).unwrap_or(now);
+    let start = f("start").filter(|v| *v > 0.0).unwrap_or(end - 86_400.0);
+    (start, end)
+}
 /// The network interfaces an engine can be bound to.
 ///
 /// Read from sysfs rather than through a netlink crate: the set of names is
@@ -1522,8 +2601,61 @@ async fn get_network_engines(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
+    let _ = cfg;
+
+    // `refresh=1` is the header's refresh button. It re-measures rather than
+    // serving the cached pass, which is the only way an operator can confirm a
+    // tunnel came back without waiting out the three-minute timer.
+    if query_param(&query, "refresh").as_deref() == Some("1") {
+        crate::netprobe::measure(&state.engines, &state.net_engines, &state.public_ip).await;
+    }
+
+    let (rows, measured_at) = {
+        let slot = state.net_engines.lock().await;
+        slot.clone()
+    };
+
+    // The DISTINCT exit addresses. This is what decides whether the header can
+    // honestly print an address at all: one means it can, several mean the
+    // engines leave by different routes and naming one of them would label the
+    // node with an address most of its traffic does not use.
+    //
+    // Leaving this empty while `engines[].exit_ip` was filled is what broke the
+    // refresh button: the page skips its own fallback as soon as any engine
+    // reports an exit, then finds no exit here to render, and the scrambling
+    // animation it had started was left on screen as the final state.
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    for row in &rows {
+        let local = row.get("local").and_then(|v| v.as_bool()).unwrap_or(false);
+        if let (true, Some(ip)) = (local, row.get("exit_ip").and_then(|v| v.as_str())) {
+            if !ip.is_empty() {
+                seen.insert(ip.to_string());
+            }
+        }
+    }
+    let exits: Vec<String> = seen.into_iter().collect();
+
+    // The v6 that belongs to THAT exit, not the process's own: with a single
+    // exit the header prints the pair, and they have to be the same engine's.
+    let exit_ip_v6 = if exits.len() == 1 {
+        rows.iter()
+            .find(|row| {
+                row.get("local").and_then(|v| v.as_bool()).unwrap_or(false)
+                    && row.get("exit_ip").and_then(|v| v.as_str()) == Some(exits[0].as_str())
+                    && row.get("exit_ip_v6").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty())
+            })
+            .and_then(|row| row.get("exit_ip_v6").and_then(|v| v.as_str()))
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        String::new()
+    };
+
     Json(serde_json::json!({
-        "engines": [], "exit_ip_v6": "", "exits": [], "measured_at": 0,
+        "engines": rows,
+        "exit_ip_v6": exit_ip_v6,
+        "exits": exits,
+        "measured_at": measured_at,
     }))
     .into_response()
 }
@@ -1558,7 +2690,15 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         let store = state.store.lock().unwrap();
         store.counter("global")
     };
-    let (session_up, session_down) = state.engines.session_totals();
+    // Three different things, and mixing them is what put a lifetime figure in
+    // a field labelled "day": `total_*` is every byte the loaded torrents have
+    // ever moved, `session_*` is since this process started, `day_*` since the
+    // last local midnight. Only `total_*` belongs in the global sum.
+    // `session_and_day` walks the same counters, so it hands back the totals it
+    // already summed rather than being asked for them a second time: this runs
+    // once a second per open tab, over every torrent.
+    let ((total_up, total_down), (session_up, session_down), (day_up, day_down)) =
+        session_and_day(state);
 
     // Per-state counts, read from the engines rather than from a cache: this is
     // the header an operator refreshes to see whether anything is moving.
@@ -1568,8 +2708,9 @@ fn status_payload(state: &AppState) -> serde_json::Value {
     if let Some(race) = state.engines.get("race") {
         for torrent in race.manager.all().iter() {
             race_torrents += 1;
-            let row = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
-            match row.get("state").and_then(|v| v.as_str()).unwrap_or("") {
+            // The engine's own state word, not a forty-field JSON object built
+            // and thrown away to read one string out of it.
+            match typhon_engine::rpc::dispatch::torrent_core(torrent).state {
                 "seeding" => seeds += 1,
                 "downloading" => downloading += 1,
                 _ => {}
@@ -1592,24 +2733,33 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    let hoard_live = live_stats(state, "hoard");
+    let race_live = live_stats(state, "race");
+
     serde_json::json!({
         "baseline": {
-            "global_downloaded": base_down + session_down,
-            "global_uploaded": base_up + session_up,
+            "global_downloaded": base_down + total_down,
+            "global_uploaded": base_up + total_up,
             "session_downloaded": session_down,
             "session_uploaded": session_up,
             "total_downloaded": base_down,
             "total_uploaded": base_up,
         },
-        "day_downloaded": session_down,
-        "day_uploaded": session_up,
+        "day_downloaded": day_down,
+        "day_uploaded": day_up,
         "hoard": {
-            "active_download_rate": 0, "active_peers": 0, "active_upload_rate": 0,
+            "active_download_rate": hoard_live.download_rate,
+            "active_peers": hoard_live.active_peers,
+            "active_upload_rate": hoard_live.upload_rate,
             "engine": "hoard", "listen_port": cfg.hoard.listen_port,
             "running": true, "session_downloaded": 0, "session_uploaded": 0,
-            "stagger_complete": true, "swarm_leechers": 0, "torrents_announced": 0,
-            "torrents_uploading": 0, "torrents_with_peers": 0,
-            "total_torrents": hoard_torrents, "unseeded_peers": 0,
+            "stagger_complete": true,
+            "swarm_leechers": swarm_leechers_total(state),
+            "torrents_announced": announced_count(state, "hoard"),
+            "torrents_uploading": hoard_live.torrents_uploading,
+            "torrents_with_peers": hoard_live.torrents_with_peers,
+            "total_torrents": hoard_torrents,
+            "unseeded_peers": hoard_live.unseeded_peers,
         },
         "race": {
             "active_downloads": downloading,
@@ -1619,10 +2769,10 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "session_ratio": crate::row::num_json(ratio),
             "session_uploaded": session_up,
             "torrents": race_torrents,
-            "torrents_with_peers": 0,
-            "total_download_rate": 0,
-            "total_peers": 0,
-            "total_upload_rate": 0,
+            "torrents_with_peers": race_live.torrents_with_peers,
+            "total_download_rate": race_live.download_rate,
+            "total_peers": race_live.active_peers,
+            "total_upload_rate": race_live.upload_rate,
         },
         "server_ts": now,
         "tunnels": [],
@@ -1676,18 +2826,99 @@ async fn stream_events(
     let cfg = state.cfg();
 
     let stream = async_stream::stream! {
-        // Hydration first, and in batches. This is the ONLY path that fills
+        // The header BEFORE the library. Hydration takes seconds at 300k
+        // torrents, and the status frame used to come after it: every figure in
+        // the header stayed blank until the whole list had streamed, so a hard
+        // refresh showed an empty header for ten seconds while the answer had
+        // been available in under a hundred milliseconds.
+        {
+            let payload = serde_json::json!({
+                "data": status_payload(&state),
+                // "status_snapshot", not "status": the page dispatches on this
+                // exact string and silently ignores anything else, so the wrong
+                // name freezes every header counter after its first paint while
+                // the frames keep arriving on time.
+                "event": "status_snapshot",
+            });
+            yield Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default()
+                    .data(serde_json::to_string(&payload).unwrap_or_default()),
+            );
+            let live = live_stats(&state, "hoard");
+            let cfg = state.cfg();
+            let hoard = serde_json::json!({
+                "event": "hoard_stats_snapshot",
+                "data": {
+                    "active_download_rate": live.download_rate,
+                    "active_peers": live.active_peers,
+                    "active_upload_rate": live.upload_rate,
+                    "engine": "hoard",
+                    "listen_port": cfg.hoard.listen_port,
+                    "running": true,
+                    "session_downloaded": 0,
+                    "session_uploaded": 0,
+                    "stagger_complete": true,
+                    "swarm_leechers": swarm_leechers_total(&state),
+                    "torrents_announced": announced_count(&state, "hoard"),
+                    "torrents_uploading": live.torrents_uploading,
+                    "torrents_with_peers": live.torrents_with_peers,
+                    "total_torrents": state
+                        .engines
+                        .get("hoard")
+                        .map(|e| e.manager.all().len() as i64)
+                        .unwrap_or(0),
+                    "unseeded_peers": live.unseeded_peers,
+                },
+            });
+            yield Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default()
+                    .data(serde_json::to_string(&hoard).unwrap_or_default()),
+            );
+        }
+
+        // `hydrate=0`: the client pages the list itself through
+        // /api/{engine}/page and wants only the live half of this stream. It
+        // still gets an empty terminal batch per mode, because the page waits
+        // for `done` before it stops showing the list as loading.
+        let hydrate = query_param(&query, "hydrate").as_deref() != Some("0");
+        if !hydrate {
+            for engine in state.engines.engines() {
+                let payload = serde_json::json!({
+                    "event": "torrent_batch",
+                    "data": {"mode": engine.role.clone(), "torrents": [], "done": true},
+                });
+                yield Ok::<_, std::convert::Infallible>(
+                    axum::response::sse::Event::default()
+                        .data(serde_json::to_string(&payload).unwrap_or_default()),
+                );
+            }
+        }
+
+        // Hydration second, and in batches. This is the ONLY path that fills
         // the list: the page stopped reading /api/hoard/torrents when
         // hydration moved to SSE, and that endpoint answers 249 MB in thirty
         // seconds at 300k torrents -- a browser gives up long before.
         const CHUNK: usize = 1000;
-        for engine in state.engines.engines() {
+        for engine in state.engines.engines().iter().filter(|_| hydrate) {
             let mode = engine.role.clone();
-            // The same builder the list endpoint uses: 33 keys, verified
-            // byte-for-byte against 3.x. Writing a second one here is how the
-            // two drift.
-            let rows: Vec<serde_json::Value> = engine_rows(&state, &engine.id);
-            let total = rows.len();
+            // Built a batch at a time, not all at once. Materialising 300k rows
+            // before sending the first one is 250 MB held and fifty seconds of
+            // blank page: the browser waits for work it cannot see. The store
+            // is still queried once for the whole session -- that part was
+            // never the cost.
+            let agent = local_agent(&engine.id);
+            let empty = crate::row::StoreFacts::default();
+            // Straight from the store. This was 21 seconds and briefly earned
+            // itself a cache; the cost was the .torrent BLOBs sharing the table,
+            // and a covering index answers the same query in half a second. A
+            // cache here would have grown with the catalogue -- the exact thing
+            // this release exists to remove.
+            let facts = {
+                let store = state.store.lock().unwrap();
+                store.facts_by_session(&engine.id).unwrap_or_default()
+            };
+            let torrents = engine.manager.all();
+            let total = torrents.len();
             if total == 0 {
                 let payload = serde_json::json!({
                     "event": "torrent_batch",
@@ -1699,7 +2930,18 @@ async fn stream_events(
                 );
                 continue;
             }
-            for (i, batch) in rows.chunks(CHUNK).enumerate() {
+            for (i, slice) in torrents.chunks(CHUNK).enumerate() {
+                let batch: Vec<serde_json::Value> = slice
+                    .iter()
+                    .map(typhon_engine::rpc::dispatch::torrent_to_json)
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(|raw| {
+                        let hash =
+                            raw.get("info_hash").and_then(|v| v.as_str()).unwrap_or("");
+                        crate::row::build(raw, facts.get(hash).unwrap_or(&empty), &agent)
+                    })
+                    .collect();
                 // `done` only on the very last batch of a mode: the page keeps
                 // appending until it is told the mode is complete.
                 let done = (i + 1) * CHUNK >= total;
@@ -1717,16 +2959,113 @@ async fn stream_events(
             }
         }
 
-        loop {
-            let payload = serde_json::json!({
-                "data": status_payload(&state),
-                "event": "status",
+        // Live updates. Without this the list is painted once and then frozen:
+        // hydration is a snapshot, and a status frame every two seconds moves
+        // the header while every row keeps the figures it was born with.
+        //
+        // The engines already compute the delta -- `session` runs a
+        // delta-filtered emitter on each engine's bus, which skips its whole
+        // scan while nobody subscribes. Subscribing here is what turns it on.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(64);
+        for engine in state.engines.engines() {
+            let mut bus = engine.manager.bus().subscribe();
+            let tx = tx.clone();
+            let mode = engine.role.clone();
+            tokio::spawn(async move {
+                loop {
+                    match bus.recv().await {
+                        Ok(ev) => {
+                            let payload = match ev {
+                                typhon_engine::rpc::events::Event::StatsSnapshot { torrents } => {
+                                    if torrents.is_empty() {
+                                        continue;
+                                    }
+                                    serde_json::json!({
+                                        "event": "stats_snapshot",
+                                        "data": {"mode": mode, "torrents": torrents},
+                                    })
+                                }
+                                typhon_engine::rpc::events::Event::TorrentRemoved { info_hash } => {
+                                    serde_json::json!({
+                                        "event": "torrent_removed",
+                                        "data": {"mode": mode, "info_hash": info_hash},
+                                    })
+                                }
+                                // Other events carry no field the list reads.
+                                _ => continue,
+                            };
+                            if tx.send(payload).await.is_err() {
+                                return;
+                            }
+                        }
+                        // Lagged means the client could not keep up; the next
+                        // snapshot is a full picture of what moved, so dropping
+                        // the gap loses nothing a later frame does not carry.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => return,
+                    }
+                }
             });
+        }
+        drop(tx);
+
+        // 1 Hz, the cadence 3.x pushed at (`startSnapshotPusher`). The port used
+        // two seconds, which halved how often every header figure moved -- not
+        // visible as a bug, just as an interface that feels a beat behind.
+        let mut status_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            let payload = tokio::select! {
+                // Biased so a burst of engine frames can never starve the
+                // status frame the header lives on.
+                biased;
+                _ = status_tick.tick() => {
+                    serde_json::json!({
+                        "data": status_payload(&state),
+                        "event": "status_snapshot",
+                    })
+                }
+                Some(update) = rx.recv() => update,
+                else => break,
+            };
+            let is_status =
+                payload.get("event").and_then(|v| v.as_str()) == Some("status_snapshot");
             yield Ok::<_, std::convert::Infallible>(
                 axum::response::sse::Event::default()
                     .data(serde_json::to_string(&payload).unwrap_or_default()),
             );
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // The hoard header reads its own frame, not the status one.
+            if is_status {
+                let live = live_stats(&state, "hoard");
+                let cfg = state.cfg();
+                let hoard = serde_json::json!({
+                    "event": "hoard_stats_snapshot",
+                    "data": {
+                        "active_download_rate": live.download_rate,
+                        "active_peers": live.active_peers,
+                        "active_upload_rate": live.upload_rate,
+                        "engine": "hoard",
+                        "listen_port": cfg.hoard.listen_port,
+                        "running": true,
+                        "session_downloaded": 0,
+                        "session_uploaded": 0,
+                        "stagger_complete": true,
+                        "swarm_leechers": swarm_leechers_total(&state),
+                        "torrents_announced": announced_count(&state, "hoard"),
+                        "torrents_uploading": live.torrents_uploading,
+                        "torrents_with_peers": live.torrents_with_peers,
+                        "total_torrents": state
+                            .engines
+                            .get("hoard")
+                            .map(|e| e.manager.all().len() as i64)
+                            .unwrap_or(0),
+                        "unseeded_peers": live.unseeded_peers,
+                    },
+                });
+                yield Ok::<_, std::convert::Infallible>(
+                    axum::response::sse::Event::default()
+                        .data(serde_json::to_string(&hoard).unwrap_or_default()),
+                );
+            }
         }
     };
 
@@ -1789,7 +3128,9 @@ async fn get_bench_current(
         let store = state.store.lock().unwrap();
         store.counter("global")
     };
-    let (session_up, session_down) = state.engines.session_totals();
+    // Lifetime totals for the global figure -- the petabyte milestones are
+    // derived from this column and must never step back at a restart.
+    let ((total_up, total_down), (session_up, _session_down), _) = session_and_day(&state);
     let race_torrents = state
         .engines
         .get("race")
@@ -1800,28 +3141,75 @@ async fn get_bench_current(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    let hoard_live = live_stats(&state, "hoard");
+    let race_live = live_stats(&state, "race");
+    let arc = arc_stats();
+
     Json(serde_json::json!({
-        "arc_demand_hit_rate_pct": 0, "arc_demand_miss_per_sec": 0,
-        "arc_ghost_hits_per_sec": 0, "arc_hit_rate_pct": 0,
-        "arc_miss_per_sec": 0, "arc_size_bytes": 0,
-        "global_downloaded": base_down + session_down,
-        "global_uploaded": base_up + session_up,
-        "hoard_active": 0, "hoard_announce_fail_rate": 0, "hoard_announce_rate": 0,
-        "hoard_peers": 0, "hoard_session_uploaded": 0, "hoard_upload_rate": 0,
-        "hoard_uploading": 0, "hoard_with_peers": 0,
+        "arc_demand_hit_rate_pct": crate::row::num_json(arc.demand_hit_rate_pct),
+        "arc_demand_miss_per_sec": 0,
+        "arc_ghost_hits_per_sec": 0,
+        "arc_hit_rate_pct": crate::row::num_json(arc.hit_rate_pct),
+        "arc_miss_per_sec": 0,
+        "arc_size_bytes": arc.size_bytes,
+        "global_downloaded": base_down + total_down,
+        "global_uploaded": base_up + total_up,
+        "hoard_active": hoard_live.torrents_with_peers,
+        "hoard_announce_fail_rate": 0, "hoard_announce_rate": 0,
+        "hoard_peers": hoard_live.active_peers,
+        "hoard_session_uploaded": 0,
+        "hoard_upload_rate": hoard_live.upload_rate,
+        "hoard_uploading": hoard_live.torrents_uploading,
+        "hoard_with_peers": hoard_live.torrents_with_peers,
         "iowait_pct": 0, "open_fds": open_fd_count(),
         "race_announce_fail_rate": 0, "race_announce_rate": 0, "race_avg_share": 0,
-        "race_download_rate": 0,
+        "race_download_rate": race_live.download_rate,
         // Not a peer count: 3.x publishes the torrent count here, and its own
         // source comments call it approximate. Reproduced rather than corrected,
         // because a graph reading this field would step the day it changed.
         "race_peers": race_torrents,
         "race_session_uploaded": session_up,
         "race_torrents": race_torrents,
-        "race_upload_rate": 0, "race_uploading": 0,
+        "race_upload_rate": race_live.upload_rate,
+        "race_uploading": race_live.torrents_uploading,
         "ts": now,
     }))
     .into_response()
+}
+
+/// The host's ZFS ARC figures, read from kstat.
+///
+/// Host-wide and not this process's, which is why the bench excludes them from
+/// its comparison -- but the operator reads them next to the hoard's hit rate,
+/// and an unconditional zero there looks like a cache that is not working.
+#[derive(Default)]
+struct ArcStats {
+    size_bytes: i64,
+    hit_rate_pct: f64,
+    demand_hit_rate_pct: f64,
+}
+
+fn arc_stats() -> ArcStats {
+    let Ok(text) = std::fs::read_to_string("/proc/spl/kstat/zfs/arcstats") else {
+        return ArcStats::default();
+    };
+    let mut field = |name: &str| -> f64 {
+        text.lines()
+            .find(|l| l.split_whitespace().next() == Some(name))
+            .and_then(|l| l.split_whitespace().nth(2))
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    let hits = field("hits");
+    let misses = field("misses");
+    let dhits = field("demand_data_hits") + field("demand_metadata_hits");
+    let dmisses = field("demand_data_misses") + field("demand_metadata_misses");
+    let pct = |h: f64, m: f64| if h + m > 0.0 { h / (h + m) * 100.0 } else { 0.0 };
+    ArcStats {
+        size_bytes: field("size") as i64,
+        hit_rate_pct: pct(hits, misses),
+        demand_hit_rate_pct: pct(dhits, dmisses),
+    }
 }
 
 fn open_fd_count() -> i64 {
@@ -3216,27 +4604,222 @@ async fn qbit_logout() -> Response {
 /// category. This is the endpoint the *arr stack reads on a timer, so it is
 /// built from the engines directly -- in 3.x it was rebuilt from a cached copy
 /// of a copy, which is where 618 MB of the Go heap lived.
+/// Does a qBittorrent state belong to a named filter?
+///
+/// Ported from filterStateMatch. `paused` and `stopped` name the same set:
+/// qBittorrent 5 renamed the filter and we still answer the old spelling for
+/// everything written before it.
+fn qbit_filter_matches(state: &str, filter: &str) -> bool {
+    match filter {
+        "all" => true,
+        "downloading" => matches!(
+            state,
+            "downloading" | "stalledDL" | "checkingDL" | "queuedDL" | "allocating"
+        ),
+        "seeding" => matches!(state, "uploading" | "stalledUP" | "queuedUP" | "checkingUP"),
+        "completed" => matches!(
+            state,
+            "uploading" | "stalledUP" | "pausedUP" | "stoppedUP" | "queuedUP" | "checkingUP"
+        ),
+        "paused" | "stopped" => {
+            matches!(state, "pausedDL" | "pausedUP" | "stoppedDL" | "stoppedUP")
+        }
+        "active" => matches!(state, "downloading" | "uploading"),
+        "inactive" => matches!(
+            state,
+            "stalledDL" | "stalledUP" | "pausedDL" | "pausedUP" | "stoppedDL" | "stoppedUP"
+        ),
+        "stalled" => matches!(state, "stalledDL" | "stalledUP"),
+        "stalled_uploading" => state == "stalledUP",
+        "stalled_downloading" => state == "stalledDL",
+        "errored" => state == "error",
+        "resumed" | "running" => !matches!(
+            state,
+            "pausedDL" | "pausedUP" | "stoppedDL" | "stoppedUP"
+        ),
+        // An unknown filter name lists everything, as qBittorrent does. Hiding
+        // every torrent instead would read to a client as "the queue is empty".
+        _ => true,
+    }
+}
+
+/// Order two listing values the way compareValues did: same-typed values on
+/// their own terms, anything else on its rendered form.
+fn qbit_value_cmp(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
+    use serde_json::Value;
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&y.as_f64().unwrap_or(0.0))
+            .unwrap_or(Ordering::Equal),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        _ => a.to_string().cmp(&b.to_string()),
+    }
+}
+
+/// One engine's torrents in the qBittorrent shape, with the listing's category
+/// and hash filters applied *before* each row is built.
+///
+/// Filtering here rather than over the finished list is the whole point.
+/// Building a row serialises a torrent to JSON, so an unfiltered build is the
+/// entire library every time -- and the *arr stack, cross-seed and autobrr each
+/// poll this endpoint several times a minute. The category a row is filtered on
+/// is the one it will be reported under, engine-name fallback included, so a
+/// client that asks for what it sees gets it back.
+fn engine_qbit_rows(
+    state: &AppState,
+    engine_id: &str,
+    now: i64,
+    category: Option<&str>,
+    hashes: Option<&std::collections::HashSet<String>>,
+) -> Vec<serde_json::Value> {
+    let Some(engine) = state.engines.get(engine_id) else {
+        return Vec::new();
+    };
+
+    // One query for the whole session, not one per torrent.
+    let facts = {
+        let store = state.store.lock().unwrap();
+        store.facts_by_session(engine_id).unwrap_or_default()
+    };
+
+    let agent = local_agent(engine_id);
+    let empty = crate::row::StoreFacts::default();
+    let mut rows = Vec::new();
+    for torrent in engine.manager.all().iter() {
+        let hash = typhon_engine::torrent::hex_encode(&torrent.info_hash);
+        if let Some(wanted) = hashes {
+            if !wanted.contains(&hash) {
+                continue;
+            }
+        }
+        let torrent_facts = facts.get(&hash).unwrap_or(&empty);
+        if let Some(wanted) = category {
+            let effective = if torrent_facts.category.is_empty() {
+                engine_id
+            } else {
+                torrent_facts.category.as_str()
+            };
+            if effective != wanted {
+                continue;
+            }
+        }
+        let raw = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
+        let native = crate::row::build(&raw, torrent_facts, &agent);
+        rows.push(crate::qbitrow::build(&native, engine_id, now));
+    }
+    rows
+}
+
+/// The qBittorrent listing.
+///
+/// The filter arguments are not decoration. Every client of this endpoint is
+/// configured with one category and assumes the answer is scoped to it: Sonarr
+/// and Radarr treat what comes back as *their own queue*, and a listing that
+/// ignores `category` hands each of them the whole library -- 300k torrents,
+/// ebooks included -- to fail an import on, one row at a time.
 async fn qbit_torrents_info(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
+    body: String,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+    // The route answers any verb, and qBittorrent takes these either on the
+    // query string or as a POST form, so both are read. On a GET the body is
+    // empty and the second lookup costs nothing.
+    let param = |name: &str| {
+        query_param(&query, name)
+            .filter(|v| !v.is_empty())
+            .or_else(|| query_param(&body, name).filter(|v| !v.is_empty()))
+    };
+
+    let filter = param("filter").unwrap_or_else(|| "all".to_string());
+    let category = param("category");
+    let tag = param("tag");
+    let sort_field = param("sort").unwrap_or_else(|| "added_on".to_string());
+    let reverse = param("reverse").as_deref() == Some("true");
+    let limit = param("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let offset = param("offset")
+        .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
 
-    let mut rows = Vec::new();
+    // "all" is qBittorrent's word for "no hash filter"; taken literally it is a
+    // hash that matches nothing, which reads to a client as an empty queue.
+    let hashes = param("hashes")
+        .filter(|raw| raw != "all")
+        .map(|raw| {
+            raw.split(['|', ','])
+                .map(|h| h.trim().to_lowercase())
+                .filter(|h| !h.is_empty())
+                .collect::<std::collections::HashSet<String>>()
+        });
+
+    let now = now_secs();
+
+    // Non-empty by construction: an empty listing must marshal as [], never
+    // null. Clients dereference the array directly -- cross-seed calls
+    // torrents.find(...) straight on the parsed body -- so a null throws there
+    // instead of reading as "no torrents".
+    let mut rows: Vec<serde_json::Value> = Vec::new();
     for engine in ["race", "hoard"] {
-        for native in engine_rows(&state, engine) {
-            rows.push(crate::qbitrow::build(&native, engine, now));
-        }
+        rows.extend(engine_qbit_rows(
+            &state,
+            engine,
+            now,
+            category.as_deref(),
+            hashes.as_ref(),
+        ));
     }
+
+    if filter != "all" {
+        rows.retain(|row| {
+            let state = row.get("state").and_then(serde_json::Value::as_str).unwrap_or("");
+            qbit_filter_matches(state, &filter)
+        });
+    }
+
+    if let Some(wanted) = tag.as_deref() {
+        rows.retain(|row| {
+            row.get("tags")
+                .and_then(serde_json::Value::as_str)
+                .map(|tags| tags.split(',').any(|t| t.trim() == wanted))
+                .unwrap_or(false)
+        });
+    }
+
+    let null = serde_json::Value::Null;
+    rows.sort_by(|a, b| {
+        let ordering = qbit_value_cmp(
+            a.get(&sort_field).unwrap_or(&null),
+            b.get(&sort_field).unwrap_or(&null),
+        );
+        if reverse {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+
+    if offset > 0 {
+        rows = if offset < rows.len() {
+            rows.split_off(offset)
+        } else {
+            // Past the end is an empty page, not the whole list again.
+            Vec::new()
+        };
+    }
+    if limit > 0 && limit < rows.len() {
+        rows.truncate(limit);
+    }
+
     Json(rows).into_response()
 }
 
@@ -3250,13 +4833,14 @@ fn find_torrent(
     state: &AppState,
     info_hash: &str,
 ) -> Option<(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)> {
+    // Keyed lookup, not a scan: the map is already indexed by info hash, and
+    // the scan this replaced serialized every one of 300k torrents to JSON to
+    // compare one string -- seconds of CPU to open a detail panel.
     let wanted = info_hash.to_lowercase();
+    let key = typhon_engine::torrent::hex_decode(&wanted).ok()?;
     for engine in state.engines.engines() {
-        for torrent in engine.manager.all().iter() {
-            let row = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
-            if row.get("info_hash").and_then(|v| v.as_str()) == Some(wanted.as_str()) {
-                return Some((engine.id.clone(), torrent.clone()));
-            }
+        if let Some(torrent) = engine.manager.get(&key) {
+            return Some((engine.id.clone(), torrent));
         }
     }
     None
@@ -4462,10 +6046,9 @@ async fn download_slots_write(
 /// every fallback a torrent had, and a caller doing read-modify-write on this
 /// list would have written the hidden ones out of existence.
 ///
-/// ⚠ The announce fields (last_error, last_announce, next_announce) come from
-/// the engine's announce loop, which this build does not run. They report
-/// "never" until the network slice lands; the SHAPE is exact, the content is
-/// not yet.
+/// The announce fields (last_error, last_announce, next_announce) are written
+/// by the announce runner onto the torrent as of 4.4.5. Before that nothing
+/// wrote them and this panel reported "never" on a node announcing normally.
 fn tracker_rows(
     torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
 ) -> Vec<serde_json::Value> {
@@ -4589,13 +6172,27 @@ async fn get_race_torrent(
             .into_response();
     }
 
-    let raw = typhon_engine::rpc::dispatch::torrent_to_json(&torrent);
+    Json(detail_payload(&state, "race", &hash, &torrent)).into_response()
+}
+
+/// The detail panel's view of one torrent, for either engine.
+///
+/// Shared so the two engines cannot drift: the hoard route used to answer a
+/// bare `{"status":"ok"}`, which rendered an empty panel for the 300k torrents
+/// that live there while race showed a full one.
+fn detail_payload(
+    state: &AppState,
+    engine_id: &str,
+    hash: &str,
+    torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+) -> serde_json::Value {
+    let raw = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
     let facts = {
         let store = state.store.lock().unwrap();
-        store.facts_by_session("race").unwrap_or_default()
+        store.facts_by_session(engine_id).unwrap_or_default()
     };
     let empty = crate::row::StoreFacts::default();
-    let row = crate::row::build(&raw, facts.get(&hash).unwrap_or(&empty), "");
+    let row = crate::row::build(&raw, facts.get(hash).unwrap_or(&empty), "");
 
     let i = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
     let total_download = i(&row, "total_download");
@@ -4606,7 +6203,7 @@ async fn get_race_torrent(
         0.0
     };
 
-    Json(serde_json::json!({
+    serde_json::json!({
         // 0, not the engine's real figure: 3.x fills this from its IPC status,
         // which does not carry active_time, so it publishes zero. Sending the
         // true value would be an improvement AND a difference -- one to make on
@@ -4630,7 +6227,7 @@ async fn get_race_torrent(
         "num_seeds": i(&row, "num_seeds"),
         // Empty rather than absent: the panel iterates it, and null would make
         // it render nothing at all instead of "no peers".
-        "peers": [],
+        "peers": typhon_engine::rpc::dispatch::peers_json(torrent),
         "piece_length": torrent.meta.piece_length,
         // null, not []: "not computed" and "computed, all zero" are different
         // things to the availability bar.
@@ -4651,11 +6248,10 @@ async fn get_race_torrent(
         "total_upload": total_upload,
         "tracker_error": row.get("tracker_error").cloned().unwrap_or(serde_json::Value::Bool(false)),
         "tracker_host": row.get("tracker_host").cloned().unwrap_or_else(|| "".into()),
-        "trackers": tracker_rows(&torrent),
+        "trackers": tracker_rows(torrent),
         "upload_rate": i(&row, "upload_rate"),
         "uploads_limit": 0,
-    }))
-    .into_response()
+    })
 }
 
 /// One hoard torrent in detail. Scoped to hoard: a race torrent is not found
@@ -4670,50 +6266,151 @@ async fn get_hoard_torrent(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let _ = cfg;
-    match resolve_in_hoard(&state, &info_hash, "torrent not found") {
-        Ok(_) => Json(serde_json::json!({"status": "ok"})).into_response(),
-        Err(response) => response,
+    // The store resolves a prefix to a full hash and proves the torrent is
+    // hoard's; the engine then supplies the live half of the panel.
+    let hash = match resolve_in_hoard(&state, &info_hash, "torrent not found") {
+        Ok(hash) => hash,
+        Err(response) => return response,
+    };
+    let Some((engine_id, torrent)) = find_torrent(&state, &hash) else {
+        return not_found();
+    };
+    if engine_id != "hoard" {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "torrent not in hoard"})),
+        )
+            .into_response();
     }
+    Json(detail_payload(&state, "hoard", &hash, &torrent)).into_response()
 }
 
-/// Add a torrent, native API.
+/// Add a torrent, native API: a `torrent_path` already on this node's disk.
 ///
-/// ⚠ Validation-only: adding needs the metainfo parser and the engine's add
-/// path. The refusal is exact, including the per-target breakdown the UI reads
-/// to say WHICH engine refused.
+/// The refusal keeps the per-target breakdown the UI reads to say WHICH engine
+/// refused. `magnet_uri` is still not accepted here -- resolution is a
+/// background job with its own polling contract, and answering "added" for a
+/// magnet whose metadata never arrives would be worse than refusing it.
 async fn post_torrent_add(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
-    _body: String,
+    body: String,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    let message = "race: torrent_path or magnet_uri required";
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({
-            "error": message,
-            "targets": [{"agent": "local", "error": message}],
-        })),
-    )
-        .into_response()
+
+    let refuse = |message: String| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": message,
+                "targets": [{"agent": "local", "error": message}],
+            })),
+        )
+            .into_response()
+    };
+
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let s = |k: &str| {
+        payload.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    };
+    let torrent_path = s("torrent_path");
+    if torrent_path.is_empty() {
+        return refuse("race: torrent_path or magnet_uri required".to_string());
+    }
+
+    let bytes = match std::fs::read(&torrent_path) {
+        Ok(b) => b,
+        Err(e) => return refuse(format!("race: {torrent_path}: {e}")),
+    };
+    let paused = payload.get("stopped").and_then(|v| v.as_bool()).unwrap_or(false);
+    let seed_mode = payload.get("seed_mode").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    match add_torrent_bytes(
+        &state,
+        &bytes,
+        &s("category"),
+        &s("save_path"),
+        &s("tags"),
+        paused,
+        seed_mode,
+    ) {
+        Ok((hash, name)) => {
+            Json(serde_json::json!({"info_hash": hash, "name": name})).into_response()
+        }
+        Err(e) => refuse(format!("race: {e}")),
+    }
 }
 
-/// qBittorrent's add. Plain text on refusal, as qBit answers.
+/// qBittorrent's add: multipart, one or more `torrents` file parts.
+///
+/// This is the route autobrr, cross-seed and the *arrs use, so it is the one
+/// that decides whether anything can reach this node at all. It answers plain
+/// "Ok."/"Fails." like qBit, because those clients match on the body.
 async fn qbit_torrent_add(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
-    _body: String,
+    mut multipart: axum::extract::Multipart,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    (StatusCode::BAD_REQUEST, "Bad request").into_response()
+
+    let mut files: Vec<Vec<u8>> = Vec::new();
+    let mut category = String::new();
+    let mut save_path = String::new();
+    let mut tags = String::new();
+    let mut paused = false;
+    // skip_checking is qBit's "trust the data on disk"; cross-seed relies on it
+    // and treating it as false would re-hash every cross-seeded torrent.
+    let mut seed_mode = false;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "torrents" | "file" | "fileselect" => {
+                if let Ok(data) = field.bytes().await {
+                    files.push(data.to_vec());
+                }
+            }
+            _ => {
+                let value = field.text().await.unwrap_or_default();
+                match name.as_str() {
+                    "category" => category = value,
+                    "savepath" => save_path = value,
+                    "tags" => tags = value,
+                    "paused" | "stopped" => paused = value == "true" || value == "1",
+                    "skip_checking" => seed_mode = value == "true" || value == "1",
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Bad request").into_response();
+    }
+
+    let mut failed = 0;
+    for bytes in &files {
+        if let Err(e) =
+            add_torrent_bytes(&state, bytes, &category, &save_path, &tags, paused, seed_mode)
+        {
+            // "already added" is not a failure to a client that retries a
+            // release it has seen before; qBit answers Ok. for it too.
+            if e.contains("already added") {
+                continue;
+            }
+            tracing::warn!(error = %e, "qbit add refused");
+            failed += 1;
+        }
+    }
+
+    if failed == files.len() {
+        return (StatusCode::BAD_REQUEST, "Fails.").into_response();
+    }
+    (StatusCode::OK, "Ok.").into_response()
 }
 
 
@@ -4739,21 +6436,52 @@ async fn delete_torrent(
     let _ = cfg;
 
     let hash = info_hash.to_lowercase();
-    let existed = {
+    let resolved = {
         let store = state.store.lock().unwrap();
-        store.resolve_hash(&hash).is_some()
+        store.resolve_hash(&hash)
     };
-    if !existed {
+    let Some(hash) = resolved else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "torrent not found"})),
         )
             .into_response();
+    };
+
+    // ⚠ INVERTED POLARITY, and it is the dangerous direction: the API asks
+    // whether to DELETE the files, the engine is told whether to KEEP them.
+    // Passing this through unflipped drains the payload of every torrent the
+    // user meant to keep.
+    let delete_files = query_param(&query, "delete_files")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let keep_data = !delete_files;
+
+    // The engine first: dropping the store row alone leaves a torrent that
+    // still seeds, still announces, and comes back at the next restart from the
+    // engine's own state -- present to the network, invisible to the interface.
+    if let Some((_, torrent)) = find_torrent(&state, &hash) {
+        let ih = torrent.info_hash;
+        for engine in state.engines.engines() {
+            if engine.manager.get(&ih).is_some() {
+                if let Err(e) = engine.manager.remove_torrent(&ih, keep_data) {
+                    tracing::warn!(hash = %hash, "engine refused removal: {e}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": e})),
+                    )
+                        .into_response();
+                }
+                engine.announce_cache.forget(&hash);
+            }
+        }
     }
+
     {
         let store = state.store.lock().unwrap();
         let _ = store.delete_torrent(&hash);
     }
+    tracing::info!(hash = %hash, delete_files, "torrent removed");
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
@@ -5732,8 +7460,29 @@ pub fn rescue_router(state: RescueState) -> Router {
         .with_state(state)
 }
 
+/// Liveness, and where the interface reads its own version from.
+///
+/// Public, like 3.x: it is what a probe hits, and it must answer before the
+/// operator has a key. The port left it out of the main router entirely -- only
+/// the rescue surface had one -- so `/health` 404'd, and the page that fills
+/// both version labels from it silently left the header blank and the footer on
+/// its hardcoded placeholder.
+async fn get_health(State(state): State<AppState>) -> Response {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Json(serde_json::json!({
+        "status": "healthy",
+        "version": HYDRA_VERSION,
+        "uptime": (now - state.started_at) as f64,
+    }))
+    .into_response()
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/health", get(get_health))
         .route("/api/announce/clients", get(get_clients).post(set_announce_client))
         .route("/api/announce/secondary-stats", get(get_secondary_stats).post(set_secondary_stats))
         .route("/api/torrents/add-defaults", get(get_add_defaults))
@@ -5748,6 +7497,8 @@ pub fn router(state: AppState) -> Router {
         .route("/changelog.md", get(get_changelog))
         .route("/api/race/torrents", get(get_race_torrents))
         .route("/api/hoard/torrents", get(get_hoard_torrents))
+        .route("/api/hoard/page", get(get_hoard_page))
+        .route("/api/race/page", get(get_race_page))
         .route("/api/stats/baseline", get(get_baseline).post(post_baseline))
         .route("/api/tags", get(get_tags))
         .route("/api/public-ip", get(get_public_ip))
@@ -5895,15 +7646,115 @@ pub fn router(state: AppState) -> Router {
         .route("/api/race/torrents/:info_hash/category", axum::routing::post(set_torrent_category))
         .route("/api/categories", axum::routing::post(category_create))
         .route("/api/announce/ip-modes", get(get_ip_modes).post(set_announce_ip_mode))
+        .route("/api/announce/health", get(get_announce_health))
+        .route("/api/announce/mute", axum::routing::post(set_announce_mute))
         .route("/api/announce/passkeys", get(get_passkeys).post(set_announce_passkey))
         .route("/api/categories/:name", axum::routing::put(category_update).delete(category_delete))
         .with_state(state)
+        // gzip, as 3.x does on this stream. Hydration is ~250 MB of JSON at
+        // 300k torrents: a browser will not sit through that uncompressed, and
+        // the list stays empty while it tries.
+        // gzip, as 3.x does on this stream. Hydration is ~250 MB of JSON at
+        // 300k torrents: a browser will not sit through that uncompressed, and
+        // the list stays empty while it tries.
+        //
+        // The default predicate excludes text/event-stream, on the reasoning
+        // that buffering breaks a live stream. It does not here: the body is
+        // flushed per frame, which is exactly what the Go side does with its
+        // own gzip writer. So the predicate is replaced by the size floor
+        // alone -- compressing a 32-byte keepalive would cost more than it
+        // saves.
+        .layer(
+            tower_http::compression::CompressionLayer::new()
+                .gzip(true)
+                .compress_when(tower_http::compression::predicate::SizeAbove::new(32)),
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::AnnounceClient;
+
+    /// The arithmetic behind session/day, without an engine.
+    ///
+    /// Written as a pure function of the same three marks `session_and_day`
+    /// keeps, because the bug it guards is not a crash: it is a lifetime total
+    /// published in a field labelled "day", which reads as a plausible number.
+    fn split(odo: &mut Odometer, totals: (i64, i64), today: &str) -> ((i64, i64), (i64, i64)) {
+        if totals.0 < odo.session_offset.0 || totals.1 < odo.session_offset.1 {
+            odo.session_offset = totals;
+        }
+        let session = (
+            (totals.0 - odo.session_offset.0).max(0),
+            (totals.1 - odo.session_offset.1).max(0),
+        );
+        if odo.day_date != today {
+            odo.day_date = today.to_string();
+            odo.day_baseline = session;
+        }
+        if session.0 < odo.day_baseline.0 || session.1 < odo.day_baseline.1 {
+            odo.day_baseline = (0, 0);
+        }
+        let day = (
+            (session.0 - odo.day_baseline.0).max(0),
+            (session.1 - odo.day_baseline.1).max(0),
+        );
+        (session, day)
+    }
+
+    #[test]
+    fn a_lifetime_total_is_not_todays_traffic() {
+        // A library that has moved 321 TB before this process ever started.
+        let mut odo = Odometer {
+            session_offset: (321_000, 90_000),
+            day_baseline: (0, 0),
+            day_date: "2026-09-08".into(),
+        };
+        // Nothing has moved yet this boot.
+        let (session, day) = split(&mut odo, (321_000, 90_000), "2026-09-08");
+        assert_eq!(session, (0, 0), "a fresh boot has moved nothing");
+        assert_eq!(day, (0, 0), "and today is not the whole history");
+
+        // 500 units later.
+        let (session, day) = split(&mut odo, (321_500, 90_000), "2026-09-08");
+        assert_eq!(session, (500, 0));
+        assert_eq!(day, (500, 0));
+    }
+
+    #[test]
+    fn midnight_resets_the_day_but_not_the_session() {
+        let mut odo = Odometer {
+            session_offset: (1000, 0),
+            day_baseline: (0, 0),
+            day_date: "2026-09-08".into(),
+        };
+        let (session, day) = split(&mut odo, (1700, 0), "2026-09-08");
+        assert_eq!((session.0, day.0), (700, 700));
+
+        // The date rolls; the session keeps counting, the day starts over.
+        let (session, day) = split(&mut odo, (1900, 0), "2026-09-09");
+        assert_eq!(session.0, 900, "the session survives midnight");
+        assert_eq!(day.0, 0, "the day does not");
+
+        let (session, day) = split(&mut odo, (2000, 0), "2026-09-09");
+        assert_eq!((session.0, day.0), (1000, 100));
+    }
+
+    #[test]
+    fn removing_a_torrent_never_makes_the_counters_negative() {
+        let mut odo = Odometer {
+            session_offset: (1000, 0),
+            day_baseline: (0, 0),
+            day_date: "2026-09-08".into(),
+        };
+        let _ = split(&mut odo, (1500, 0), "2026-09-08");
+        // A torrent carrying 1.2k lifetime bytes is removed: the sum drops
+        // below the mark taken at boot.
+        let (session, day) = split(&mut odo, (300, 0), "2026-09-08");
+        assert_eq!(session, (0, 0), "follow the totals down, never go negative");
+        assert_eq!(day, (0, 0));
+    }
 
     fn state(key: &str, password_hash: &str) -> AppState {
         let mut cfg = Config::default();
@@ -5930,6 +7781,10 @@ mod tests {
                 crate::store::Store::open_in_memory().unwrap(),
             )),
             public_ip: Arc::new(tokio::sync::Mutex::new((String::new(), String::new()))),
+            net_engines: Arc::new(tokio::sync::Mutex::new((Vec::new(), 0))),
+            odometer: Default::default(),
+            records: Default::default(),
+            bench_path: std::path::PathBuf::new(),
             started_at: 0,
             logs: crate::logbuf::LogBuffer::new(),
             reconnect: Default::default(),
