@@ -196,6 +196,20 @@ pub struct Config {
     #[serde(default)]
     pub agent: Vec<Agent>,
 
+    /// The engines this node hosts, under the name that says what they are.
+    ///
+    /// `[[agent]]` meant two different things at once -- an engine started here
+    /// and a machine reached over the network -- which is why nobody could say
+    /// what either word meant. A node is now a whole Hydra, held in the store,
+    /// and an engine is a session inside one; this block is only ever the
+    /// latter.
+    ///
+    /// `[[agent]]` is still read, and read FIRST, so an existing file keeps
+    /// working and a rollback finds what it left behind. Same id in both means
+    /// `[[engine]]` wins: it is the newer spelling, so it is the deliberate one.
+    #[serde(default)]
+    pub engine: Vec<Agent>,
+
     #[serde(default)]
     pub auth: Auth,
 
@@ -334,7 +348,7 @@ impl Config {
             LocalEngine { id: "hoard".into(), role: "hoard".into(), session: self.hoard.clone() },
         ];
 
-        for agent in &self.agent {
+        for agent in self.agent.iter().chain(self.engine.iter()) {
             // An addr means the engine lives elsewhere. A missing role means we
             // do not know what it is, and guessing would start a remote node's
             // engine here.

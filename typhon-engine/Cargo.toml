@@ -43,7 +43,7 @@ libc = "0.2"
 # The admin password is stored as a bcrypt hash by 3.x; /api/login has to
 # verify against that same hash, so an upgrade keeps the account.
 bcrypt = "0.15"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "cookies", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "cookies", "json", "multipart"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"

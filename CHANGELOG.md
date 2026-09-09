@@ -3,6 +3,434 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+## v4.14.0 -- a torrent lives in an engine, and may live in several
+
+`torrents` was keyed on `info_hash` alone, so one torrent was one row naming one
+engine. That is the wrong shape. A node running one engine per tunnel has a real
+reason to seed the same content from several at once: three tunnels are three
+egress paths, and when the tunnel is what saturates, three copies are three
+times the upload. They cost nothing extra on disk, because they are the same
+files.
+
+The table is now keyed on `(info_hash, session)`. SQLite cannot alter a primary
+key, so this rebuilds it inside a transaction: either the new table is complete
+or the old one is untouched, and a failure cannot leave a half-copied catalogue.
+Measured on a real database: 27 rows, sub-second, catalogue intact and re-keyed.
+Production's is 4.5 GB, so budget minutes and that much free space.
+
+⚠ This ends the 3.x rollback. 3.x reads the same file and assumes one row per
+hash; two rows would show it the same torrent twice. The V4 lineage is the
+rollback path from here.
+
+**Actions name the copy they act on.** The selection has always carried
+`(hash, engine)`; the API took only the hash, and `find_torrent` answered with
+whichever engine it met first. With one torrent in three engines that is three
+different requests wearing one URL. Every per-copy route now reads `?agent=` --
+the label the row already carries -- and a `<node>-...` label is deliberately
+left unmatched, so acting on a remote row cannot silently hit this node's own
+copy instead.
+
+Deletion follows the same rule, with one addition: the FILES go only with the
+last copy. Two engines seeding one payload share it, so removing it with the
+first would leave the others seeding nothing.
+
+`POST /api/torrents/:ih/copy` seeds an existing torrent from a second engine.
+No transfer and nothing extra on disk -- both engines are pointed at the same
+files -- so what it buys is a second identity in the swarm: its own peer_id, its
+own port, its own tunnel. That is what pays when the tunnel saturates before the
+leechers do, which is the case a multi-tunnel node exists for.
+
+`POST /api/engines/:id/pause` exists because `hoard` and `race` had literal
+routes and nothing else did: pausing the copy held by `vpn1` had no endpoint to
+call, and the interface fell back to the hoard route, which paused a different
+copy.
+
+**The selection universe spans the fleet.** Ctrl+A asked only this node; the
+other nodes' copies were never in it, so selecting everything and acting on it
+quietly skipped them. Remote answers are merged with their labels rewritten from
+`local-<engine>` to `<node>-<engine>`, the same rewrite the row merge does and
+for the same reason. Measured on the bench: 29 copies, 22 here and 7 on the
+other node.
+
+**Two membership checks compared an ID where they meant a ROLE.** The detail
+panel answered "torrent not in race" for every copy held by an engine that plays
+race without being called `race` -- which is every extra tunnel. Same mistake
+`connect` made this morning when it handed those engines hoard's network, in a
+different file. Both now compare the role, and each copy reports its own state:
+one `stopped`, the other `seeding`, from the same torrent.
+
+**Ctrl+A keeps the engine.** The selection universe answered a flat list of
+hashes and the interface rebuilt it with `agent: "local"` hardcoded, so
+selecting everything and pausing it acted on whichever copy the lookup met
+first. It now returns `(hash, agent)` pairs across every engine of the role, and
+keeps the flat list for a node with one hoard engine, where the two say the same
+thing.
+
+**Peer injection and engine moves name their copy too.** A peer injected into
+the wrong engine dials from the wrong tunnel -- the exact failure this model
+exists to avoid -- and may dial from one that is paused. A move without a named
+source moves whichever copy was found first.
+
+**The counter worry was unfounded, and worth saying so.** `total_uploaded` on
+the torrents table is neither read nor written; it is a column carried for 3.x.
+What the interface shows comes from the engine, which now means per copy, which
+is correct without any change. Only a per-torrent aggregate across copies would
+need summing, and nothing asks for one.
+
+**The lists show every engine of a role.** A page bound to the engine ID showed
+`hoard` and hid `vpn1`, whose copies existed, seeded and were invisible.
+Role-mates are merged exactly like remote nodes rather than folded into
+`engine_page_value`: that function is the tightest path in the build, and reusing
+the merge keeps one set of sorting and paging rules instead of two that drift.
+Measured on the bench: the race page reports `local-race` 3 and `local-vpn7` 3,
+and a duplicated torrent shows twice -- running in one engine, stopped in the
+other.
+
+The store methods split along a rule worth stating, because it decides what
+happens to every field: **what identifies the torrent is shared, what describes
+its execution is per copy.** Category, tags and the .torrent blob are the same
+whichever engine holds it. Pause and pin are not -- a torrent held back on one
+tunnel keeps seeding on the other. `set_session` now takes the SOURCE engine,
+since "set its session" has no single meaning once there are several copies and
+updating them all would silently collapse three into one. `delete_copy` drops
+one and leaves the rest.
+
+The qBit shim keeps a torrent-wide form: Sonarr and Radarr have no notion of
+engines, and "stop this torrent" means all of them.
+
+Six tests cover the rebuild, its idempotence, two copies coexisting, pause not
+leaking between them, deleting one, and moving one. The pause test earned its
+keep immediately: the signature had gained a `session` while the SQL still said
+`WHERE info_hash = ?1`, which compiles -- the parameter is merely unused -- and
+pauses every copy. A rename that builds and lies is the failure this class of
+change is made of.
+
+
+## v4.13.0 -- a node is a whole Hydra, and an engine keeps its own network
+
+**An extra engine bound the wrong socket.** `local_engines` merges each
+engine's session from its role profile and its own overrides, and `connect`
+threw that away: `match id { "race" => config.race, _ => config.hoard }`. So
+anything that was neither race nor hoard -- one engine per VPN tunnel, the
+entire point of "one agent, one engine" -- listened on hoard's port and hoard's
+interface. Two engines would have collided in silence, and the network tab
+would still have shown the configured port, because `netprobe` reads the
+`Engine` fields, which were right all along. `Engine` now carries its merged
+session and `connect` uses it. The announce mode and the race drain follow the
+ROLE too, not the id: an engine named `vpn1` with `role = "race"` is a racer.
+
+**The fleet is a list of Hydras, not of agents.** `/api/nodes` holds other
+whole Hydra instances, each addressed by URL and its own API key, and reached
+over the ordinary HTTP API this build already serves. There is no private
+protocol: a remote capability is the same route as the local one and cannot rot
+apart from it -- which is precisely what happened to the agent surface, where
+eleven handlers ended up answering a plausible error and doing nothing.
+
+The registry lives in the STORE, not in `default.toml`. Declaring a remote node
+used to mean hand-editing a TOML over SSH, which is the single reason nobody
+used it. Nodes are probed concurrently, so six dead ones cost one timeout, and
+an unreachable node reports WHY -- a refused key and a refused connection need
+opposite fixes and looked identical before.
+
+`DELETE /api/nodes/:name` answers 404 when there was nothing to remove.
+Its predecessor `delete_agent` returned `{"status":"ok"}` unconditionally
+while doing nothing, so the row disappeared from the table and came back on the
+next reload with no error to explain it.
+
+**`/node/:name/open` opens a node's own front, already authenticated.** A
+redirect to the remote ORIGIN carrying its key in the URL fragment, not a
+path-prefixed proxy: the front asks for absolute paths, which under a prefix
+this Hydra would answer itself. A fragment reaches no server, no access log and
+no Referer; app.js moves it into that origin's localStorage and strips it,
+leaving the key exactly where typing it by hand would have put it.
+
+**A node's engines can send data BOTH ways.** Pulling is the mirror of a
+handoff, and the easier direction: to pull we already know where the far side is,
+because its address is the node URL, where pushing had to hand the target
+`auto:<port>` and let it work out ours. `POST /api/nodes/:name/fetch` takes the
+metainfo over HTTP, adds the torrent into a named local engine, and dials the
+remote engine on the port its own `/api/engines` reports -- read, not assumed,
+since an engine on its own tunnel listens where its own session says.
+
+A remote row can also be moved between two engines of the node that already
+holds it. Relayed rather than reimplemented: it is that node's own local move,
+which costs it nothing either. Doing it here would mean pulling the payload and
+pushing it back to the machine it never left.
+
+Verified as a round trip: a torrent deleted here with its files, then pulled
+back from the other node into `vpn7` -- `[download] complete!`, 28672 bytes on
+disk, dialled at `192.168.99.200:16472`.
+
+**Local duplication is refused for a different reason than first stated.** The
+old code called it a filesystem hazard -- two engines on one set of files, two
+writers the first time either repairs a piece. That is only true while a torrent
+is incomplete or being repaired; seeding the same complete files from two
+engines is a legitimate thing to want, and it is what two separate clients on
+one machine already do.
+
+The real obstacle is the store: `torrents.info_hash` is the PRIMARY KEY, so
+there is one row per torrent and it names one `session`. The schema cannot say a
+torrent lives in two engines. Allowing it means keying on `(info_hash, session)`
+-- a migration of the table 3.x also reads, and every per-hash lookup with it.
+The menu now says so instead of claiming a hazard that is not the blocker.
+
+**A torrent can move between two engines of THIS node, and that is the cheap
+case.** The picker only listed remote engines, so the most ordinary move -- hoard
+to a VPN-bound engine, to change which tunnel a torrent seeds from -- could not
+be made from the interface at all.
+
+`POST /api/torrents/:ih/engine` re-homes it without transferring anything: both
+engines read the same filesystem, so the payload stays exactly where it is and
+only ownership changes. The target is added in seed mode, since rechecking a
+payload that did not move would cost hours of disk for nothing. The store's
+`session` column is updated directly -- `insert_torrent` is an INSERT OR IGNORE
+and would have left the row pointing at the old engine, which is how a torrent
+ends up running in one engine and listed under another.
+
+Duplicating locally is refused, shown and explained rather than hidden: two
+engines pointed at one set of files are two writers on the same bytes the first
+time either repairs a piece. "Why can I copy to another machine but not to the
+engine next door" is exactly the question the menu should answer.
+
+Destinations now match where the selection actually lives. A remote row is
+offered its own fleet's other engines only: moving it to a local engine would
+act on this node's own copy, which may be a different torrent or none at all.
+And nothing is ever offered the engine it already sits on.
+
+**The torrent context menu sends to an ENGINE, grouped by node.** A torrent
+always lives in an engine; the node only says where that engine runs. Offering
+"a node" was the wrong shape -- it left the far side to guess which engine, and
+a category can only name a MODE, never the third engine of a multi-tunnel host.
+The group is called Node, and inside it every entry reads `node2-vpn1`.
+
+Both verbs are back. Duplicate hands the torrent over and keeps the local copy.
+Move does the same, then waits for the far side to report complete before
+dropping it here -- a move cannot delete now, because the target receives the
+metainfo long before the bytes. The wait is bounded at six hours and fails safe:
+a timeout, a network fault or a restart of this process leaves both copies,
+which is a duplicate to clean up rather than data gone.
+
+It replaces a menu that was dead twice over: it read `/api/agents`, whose
+entries carry no `name`, so its list filtered itself empty and it always
+answered "no other agent to send to"; and it posted to `/api/jobs/move-remote`,
+which refuses every request. The group's own visibility was decided from that
+same empty list, so whether it appeared had nothing to do with the fleet.
+
+**`POST /api/torrents/upload` works, and takes an engine.** It was a `refuse!`
+stub -- the route the farm's `sw_fill` uses. `placement` collapsed a category to
+`race` or `hoard`, so no add path could reach any other engine whatever the
+config said; it now honours an explicit engine, and an engine that does not
+exist is refused rather than quietly landing the torrent in race.
+
+**The Location column names the engine, not just the node.** A remote row reads
+`node2-hoard`, because a remote torrent is in a remote ENGINE. The remote page
+already labels its own rows `local-<engine>`; the merge swaps the prefix.
+
+Removed with it: the five-second poller that fetched `/api/agents/torrents` --
+an `empty_list_route!` answering `[]` -- and then dropped every row whose agent
+was not local and not in that answer. That is exactly the merged remote rows. It
+never ran only because its guard tested the same always-empty list; pointing
+that guard at the real node list would have deleted the fleet from the table
+every five seconds.
+
+**The interface says engine where it means engine.** "Agent" was made to carry
+both an engine and a machine, which is why neither could be explained. Twenty-nine
+visible strings now say engine: the overview cards, the whole network panel, the
+restart notices, the startup-pause line, the WireGuard wording.
+
+The torrent tables' `Agent` column is called **Location**, because that is what
+it answers. Its value is `local-<engine>` for a row held here and the NODE name
+for one held elsewhere -- it spans both levels of the model, and calling it
+either one would be wrong. Unifying the two spellings is a separate decision: a
+node does not know its own name today.
+
+Translations move with the keys rather than being dropped, so de, es, fr, it and
+nl keep their sentences instead of falling back to English. The French wording
+was rewritten to say moteur; the other five still read agent until a translator
+passes.
+
+Two groups were deliberately left alone. The old Agents-page form strings are
+unreachable -- the tab is gone -- and renaming dead code is noise. The context
+menu's "Move to agent" and its siblings drive `/api/agents` and the
+`post_move_remote` route, which still refuses everything: renaming them would
+promise a working feature. Both want deleting, not translating.
+
+**Config no longer claims unsaved changes on arrival.** Opening Config and
+leaving it without touching anything raised "Unsaved settings: 1 setting(s)
+changed and not saved". The unsaved check compared `JSON.stringify` of the
+server's payload against `JSON.stringify` of an object this file builds by hand:
+same seventeen keys, same values, different ORDER, because serde sorts them and
+a JS object literal keeps its own. `JSON.stringify` is order sensitive, so the
+two strings differed on the first render. Comparison is now by content, sorting
+keys first, which also keeps it right if either side gains a key later.
+
+Measured both ways: on 4.12.1 the pending count is 1 with nothing touched and
+the prompt fires on the way out; here it is 0 and no prompt appears.
+
+**The network panel shows every engine, and saving it writes.** `extra_engines`
+was a `vec![]` literal, so a node running one engine per tunnel -- the point of
+the whole model -- showed race and hoard and hid the rest. The front had
+rendered and collected those rows all along; nothing ever filled them.
+
+Worse, `post_network_mode` validated the race port and answered
+`{"status":"ok"}` without touching the file. The panel reported a saved network
+configuration that had never been written anywhere, which is worse than
+refusing: the operator walks away believing it took. It now writes the ports,
+interfaces, IPv6, SOCKS5, gluetun and PROXY-v2 keys into `[race]` and `[hoard]`,
+and each extra engine's port and interface into its own block.
+
+Two guards while writing. Race and hoard sharing a listen port is refused --
+this build already had two engines on one socket once, from the other
+direction. And the edit is targeted text, not parse-and-reserialise: the config
+carries pages of comments explaining each knob, and a round trip through the
+decoder would delete every one of them. Verified: race port 16471 to 16475, an
+engine's interface written into its `[engine.session]`, its other keys intact,
+and all 30 comment lines still there.
+
+**Local engines are declared under `[[engine]]`.** `[[agent]]` meant two things
+at once -- a session started here and a machine reached over the network -- which
+is why neither word could be explained. A node is a whole Hydra, held in the
+store; an engine is a session inside one. Existing files keep working:
+`[[agent]]` is still read, and read first, so a rollback finds what it left.
+Nothing new is written under the old name.
+
+Its sub-table has to match the array it belongs to. `[agent.session]` under a
+`[[engine]]` header parses as a map where a sequence is expected and the daemon
+refuses to boot -- found by renaming a block by hand and watching a bench die.
+
+**A handoff no longer needs to be told where to fetch from.** `from` is now
+optional: the sender hands the target `auto:<port>` and the RECEIVER fills in the
+address, because it is the only side that knows which of the sender's addresses
+it can actually reach. The port is that of the engine holding the torrent, not
+of the first engine on the node. Verified: a handoff with no `from` resolved to
+`auto:16372`, one peer queued, `[download] complete!`, 114688 bytes on disk.
+
+**The install script covers machines without docker.** Static musl binary for
+x86_64 and aarch64, plus a systemd unit. A host with neither docker nor systemd
+is told so and the script stops, rather than leaving a binary on disk the
+operator believes is running.
+
+**The cost of merging, measured against a control window.** One node registered:
+3.9 to 7.2 ms. No node at all, same request: 2.4 to 3.1 ms. So a node costs a
+few milliseconds, nearly all of it the HTTP round trip.
+
+The merge is O(nodes x (offset + limit)) and does NOT grow with the catalogue --
+each node sorts and pages its own, and only a window crosses the wire. What does
+grow is DEEP paging: page 100 of 500 asks every node for its first 50000 rows.
+Shallow paging, which is what a UI does, is unaffected.
+
+**A machine enrols itself into the fleet.** `POST /api/nodes/enrol` mints a
+single-use token and hands back one line to paste on the machine that is to
+become a node. The script it fetches installs Hydra, generates that node its own
+API key, starts it, and calls `POST /api/nodes/register` to join.
+
+The direction is the whole point. The controlling Hydra never opens a session
+anywhere and never holds a credential for another host, so compromising its API
+cannot become code execution across the fleet. Putting an SSH client and a
+private key behind a torrent daemon's web form would have done exactly that --
+this build's own default API key is still the placeholder, and there has been an
+auth bypass in it before.
+
+The token is the only authority that crosses, and it is single use, expires in
+thirty minutes, and is spent by one conditional UPDATE so two machines racing on
+the same token cannot both register. Registering cannot overwrite an existing
+node either: a token holder must not be able to repoint one the operator already
+trusts.
+
+The command points back at the address the CALLER reached this Hydra on, read
+from the Host header. This process cannot otherwise know which of its addresses
+a third machine resolves, and a guess produces a node that installs and then
+fails to register.
+
+**A torrent can be handed to another node, and BitTorrent moves the bytes.**
+`POST /api/nodes/:name/handoff` sends the metainfo over HTTP, then tells the far
+side that this node holds the data. The data itself never touches the control
+plane: the receiving Hydra pulls it over the protocol both ends already speak,
+parallel, resumable, throttled by the same knobs as any other transfer, and
+hash-checked piece by piece. 3.x relayed every byte through `read_piece` on one
+side and `write_piece` on the other -- twice over the wire, with a correctness
+argument to make from scratch.
+
+Two primitives were missing and are now there. `GET /api/torrents/:ih/torrent`
+serves the .torrent from the store rather than re-encoding it, so the info dict
+stays byte-identical and the info hash with it. `POST /api/torrents/:ih/peers`
+injects peers through `enqueue_dial`, the same door DHT already comes through,
+and names the addresses it rejected instead of quietly queueing fewer than it
+was given.
+
+`from` is required and never inferred: this node cannot know which of its
+addresses the target can reach -- tunnels, NAT, several interfaces with
+different fates -- and a guess would produce a handoff that reports success and
+transfers nothing. Verified end to end on the bench: metainfo accepted, one peer
+queued, `[download] complete!`, 114688 bytes on the target's disk, seeding.
+
+**A node URL may not be loopback.** It is used for two different jobs: this
+process probes it, and the operator's browser is redirected to it. `127.0.0.1`
+satisfies the first and can never satisfy the second. Reported from the bench,
+where a node probed green and opened nothing.
+
+**An engine now says whether it is actually listening.** Pin one to an
+interface that is not there and it logs, in this order and within a fraction of
+a millisecond: "session started, listen=0.0.0.0:16480", "on the network,
+announcing", then "peer listener failed: cannot pin the peer listener to
+bind_device: No such device". Two lines of INFO stating the opposite of the
+ERROR that follows them, because the listener binds in a task that has not run
+when they are written. `/api/engines` reported it exactly like a healthy engine.
+
+`peer::listen` now raises a flag once a round of binds has succeeded, lowers it
+if the listener dies, and `/api/engines` publishes it as `listening`. The fleet
+page shows it per engine. The daemon-side line says "engine starting" rather
+than "on the network", because at that point it does not know.
+
+This matters for one engine per tunnel: a WireGuard interface that is not up
+yet leaves an engine holding its catalogue, answering the API and accepting no
+peer at all. Measured on the bench: three engines `listening: true` beside one
+`listening: false`, `ss` agreeing with all four.
+
+**The lists span the fleet.** `/api/hoard/page` and `/api/race/page` now ask
+every declared node for the same window, and interleave the answers. Each node
+sorts and pages its OWN catalogue: nothing ships a library across the network,
+which is the only shape that survives 300k torrents. To answer rows 500 to 999
+each node is asked for its first 1000 -- the most any single node can contribute
+to that window -- and the merge takes the slice.
+
+The merge repeats the single-node sort key exactly, tie-break on the hash
+included. Without that tie-break two rows that compare equal could swap between
+requests, and the same torrent would appear on two pages or on none. Tested:
+three pages of ten over a 27-torrent fleet return 27 rows, all distinct.
+
+Every remote row carries the node it came from in `agent`, which is the field
+the front already reads to decide where an action goes. A node that does not
+answer contributes nothing rather than failing the request: one unreachable
+machine must not hide a library that is sitting right here. Verified by stopping
+a node mid-flight -- the page fell to the local 23 and came back to 27.
+
+Facets stay the local node's, and `fields=hash` -- the Ctrl+A selection
+universe -- is not merged. Both need the fleet to agree on a vocabulary, or on
+what selecting across machines even means, and neither is a merge detail.
+
+**Engines can be declared from the page that shows them.** `POST /api/engines`
+writes a `[[agent]]` block and asks for a restart; `DELETE /api/engines/:id`
+removes one and answers 404 when there was nothing to remove. Both were stubs:
+create refused everything, delete returned "unknown agent" whatever you asked
+for. `race` and `hoard` are refused, since they come from the sections every
+install has rather than from a block that can be dropped, and the data of a
+removed engine is left where it is.
+
+Two refusals are worth the code. A port another engine already holds is a 409
+naming that engine: the collision `connect` used to create in silence must not
+come back through a form. And an interface that is not up is a 400 listing the
+ones that are, because binding to a missing device fails WITHOUT saying so --
+measured here, `bind_interface = "wg9"` logged "session started,
+listen=0.0.0.0:16379" and "on the network, announcing" while `ss` showed no
+listener at all. An engine that seeds nothing while reporting itself online is
+the failure this project can least afford to ship.
+
+Also fixed: three call sites in `announce/policy.rs` still passed eight
+arguments to a `prepare` that takes nine, so `cargo test` did not compile at
+all on this tree. 141 tests pass.
+
+
 ## v4.12.1 -- the listing answers the category it was asked for
 
 `/api/v2/torrents/info` ignored every argument it was given. The V4 port read

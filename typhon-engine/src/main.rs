@@ -302,7 +302,13 @@ async fn main() {
 
     // Everything that puts this engine on the network. Shared with Hydra 4,
     // which brings up two of these in one process.
-    typhon_engine::session::start(torrent_mgr.clone(), disk_mgr.clone(), &config).await;
+    typhon_engine::session::start(
+        torrent_mgr.clone(),
+        disk_mgr.clone(),
+        &config,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await;
 
     // Start RPC server (blocks until it dies or a shutdown signal arrives).
     //

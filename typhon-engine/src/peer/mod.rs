@@ -52,12 +52,21 @@ use crate::peer::transport::PeerTransport;
 /// `bindings` is the resolved list (see config::resolved_bindings()). Empty
 /// is treated as a startup error: we never want to silently come up with
 /// no listener.
+/// `listening` is raised once a round of binds has actually succeeded, and is
+/// the only honest answer to "is this engine reachable".
+///
+/// Every early return below happens BEFORE it is raised, which is the point:
+/// the caller logs "session started" and "on the network, announcing" from a
+/// spawned task's point of view, so those lines were printed before the bind
+/// was even attempted and a failure arrived a fraction of a millisecond later,
+/// contradicting them. The flag is what `/api/engines` publishes instead.
 pub async fn listen(
     bindings: Vec<crate::config::ResolvedBinding>,
     default_port: u16,
     torrent_mgr: Arc<TorrentManager>,
     disk_mgr: Arc<DiskManager>,
     utp_socket: Option<Arc<UtpSocketUdp>>,
+    listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if bindings.is_empty() {
         return Err("no bindings to listen on (config error)".into());
@@ -171,6 +180,11 @@ pub async fn listen(
                 tcp_accept_loop(listener, tm, dm, pid, u, advertised_port).await;
             }));
         }
+
+        // Every socket of this round is bound and accepting. Raised here and
+        // not before: a rebind that failed would otherwise leave the engine
+        // claiming to listen on a port it just lost.
+        listening.store(!handles.is_empty(), std::sync::atomic::Ordering::Relaxed);
 
         tokio::select! {
             changed = rx.changed() => {

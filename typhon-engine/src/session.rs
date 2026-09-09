@@ -16,7 +16,12 @@ use crate::torrent::TorrentManager;
 /// Start listening, announcing and discovering for one engine.
 ///
 /// Returns once everything is spawned; the tasks outlive the call.
-pub async fn start(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, config: &EngineConfig) {
+pub async fn start(
+    mgr: Arc<TorrentManager>,
+    disk: Arc<DiskManager>,
+    config: &EngineConfig,
+    listening: Arc<std::sync::atomic::AtomicBool>,
+) {
     // DHT (BEP 5) and PEX (BEP 11) are the two ways this engine finds peers
     // without a tracker. Both default to on and both already skip `private`
     // torrents, but an operator who wants to talk to nothing but their
@@ -126,8 +131,17 @@ pub async fn start(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, config: &En
     let dm = disk.clone();
     let utp_for_listen = utp_socket.clone();
     let bindings_for_listen = resolved_bindings.clone();
+    let listening_for_listen = listening.clone();
     tokio::spawn(async move {
-        if let Err(e) = crate::peer::listen(bindings_for_listen, listen_port, tm, dm, utp_for_listen).await {
+        let flag = listening_for_listen.clone();
+        if let Err(e) =
+            crate::peer::listen(bindings_for_listen, listen_port, tm, dm, utp_for_listen, flag).await
+        {
+            // Lower it again: the engine is up, holds its catalogue and answers
+            // the API, and accepts no peer at all. That state has a name now
+            // instead of being a line of ERROR under two lines of INFO saying
+            // the opposite.
+            listening_for_listen.store(false, std::sync::atomic::Ordering::Relaxed);
             error!("[engine] peer listener failed: {}", e);
         }
     });

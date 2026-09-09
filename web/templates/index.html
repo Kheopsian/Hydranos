@@ -111,7 +111,7 @@
         <button class="tab" data-tab="race">Race</button>
         <button class="tab" data-tab="hoard">Hoard</button>
         <button class="tab" data-tab="categories">Categories</button>
-        <button class="tab" data-tab="agents">Agents</button>
+        <button class="tab" data-tab="nodes">Nodes</button>
         <button class="tab" data-tab="trackers">Trackers</button>
         <button class="tab" data-tab="config">Config</button>
         <button class="tab" data-tab="benchmark">Benchmark</button>
@@ -149,7 +149,7 @@
 
                 <!-- Race Engine -->
                 <div class="card">
-                    <h3>Race agent <span class="tag" style="color:var(--accent-race)">burst</span></h3>
+                    <h3>Race engine <span class="tag" style="color:var(--accent-race)">burst</span></h3>
                     <div class="card-body">
                         <div class="metric"><span>Torrents</span><span id="race-count">0</span></div>
                         <div class="metric"><span>With peers</span><span id="race-with-peers">0</span></div>
@@ -162,7 +162,7 @@
 
                 <!-- Hoard Engine -->
                 <div class="card">
-                    <h3>Hoard agent <span class="tag" style="color:var(--accent-hoard)">long-term</span></h3>
+                    <h3>Hoard engine <span class="tag" style="color:var(--accent-hoard)">long-term</span></h3>
                     <div class="card-body">
                         <div class="metric"><span>Torrents</span><span id="hoard-total">0</span></div>
                         <div class="metric"><span>With peers</span><span id="hoard-with-peers">0</span></div>
@@ -259,7 +259,7 @@
                         <th data-col="tracker_host" onclick="sortRace(this)">Tracker</th>
                         <th data-col="added_time" onclick="sortRace(this)">Added</th>
                         <th data-col="completed_time" onclick="sortRace(this)">Completed</th>
-                        <th data-col="agent" onclick="sortRace(this)">Agent</th>
+                        <th data-col="agent" onclick="sortRace(this)">Location</th>
                     </tr>
                 </thead>
                 <tbody id="race-tbody">
@@ -484,7 +484,7 @@
                         <th>Tags</th>
                         <th data-col="added_time" onclick="sortHoard(this)">Added</th>
                         <th data-col="completed_time" onclick="sortHoard(this)">Completed</th>
-                        <th data-col="agent" onclick="sortHoard(this)">Agent</th>
+                        <th data-col="agent" onclick="sortHoard(this)">Location</th>
                     </tr>
                 </thead>
                 <tbody id="hoard-tbody">
@@ -656,68 +656,112 @@
 
         <!-- Config -->
         <!-- Agents -->
-        <section id="tab-agents" class="tab-content">
+        <section id="tab-nodes" class="tab-content">
             <div class="section-header">
-                <h2>Agents</h2>
-                <button class="btn-small" onclick="showAgentForm()">+ New</button>
+                <h2>Nodes</h2>
+                <button class="btn-small" onclick="enrolNode()">+ Enrol a machine</button>
+                <button class="btn-small" onclick="showNodeForm()">+ Declare an existing one</button>
             </div>
-            <div id="agent-form" class="card" style="display:none; margin-bottom:16px">
+            <p class="sr-desc" style="margin:0 0 16px">
+                A node is a whole Hydra. This one runs the engines listed below; the others are
+                separate instances reached over their own API. An engine is a session inside a node,
+                and a node can run as many as it has tunnels to leave by.
+            </p>
+
+            <div id="enrol-card" class="card" style="display:none; margin-bottom:16px">
+                <div class="card-body">
+                    <p class="sr-desc" style="margin:0 0 10px">
+                        Run this on the machine that is to become a node. It installs Hydra, gives it
+                        its own key, and registers itself here. This Hydra never opens a session on
+                        it and never holds a credential for it. The token works once, for 30 minutes.
+                    </p>
+                    <pre id="enrol-cmd" style="white-space:pre-wrap;word-break:break-all"></pre>
+                    <div class="cat-form-actions">
+                        <button class="btn-small" onclick="copyEnrol()">Copy</button>
+                        <button class="btn-cancel" onclick="document.getElementById('enrol-card').style.display='none'">Close</button>
+                    </div>
+                    <div id="enrol-result" class="result-msg"></div>
+                </div>
+            </div>
+
+            <div id="node-form" class="card" style="display:none; margin-bottom:16px">
                 <div class="card-body">
                     <div class="cat-form-grid">
                         <div class="form-group">
-                            <label>Where it runs</label>
-                            <select id="ag-kind" onchange="agentKindChanged()">
-                                <option value="remote">Another machine</option>
-                                <option value="local">This machine</option>
-                            </select>
+                            <label>Name</label>
+                            <input type="text" id="nd-name" placeholder="seedbox-de" autocomplete="off">
                         </div>
                         <div class="form-group">
-                            <label>Name</label>
-                            <input type="text" id="ag-name" placeholder="seedbox-de" autocomplete="off">
-                            <span class="sr-desc" id="ag-name-hint"></span>
+                            <label>URL</label>
+                            <input type="text" id="nd-url" placeholder="http://10.0.0.2:8199" autocomplete="off">
                         </div>
-                        <div class="form-group ag-remote-only">
-                            <label>Address (host:port)</label>
-                            <input type="text" id="ag-addr" placeholder="10.0.0.2:9090" autocomplete="off">
-                        </div>
-                        <div class="form-group ag-local-only" style="display:none">
-                            <label>Role</label>
-                            <select id="ag-role"><option value="hoard">hoard</option><option value="race">race</option></select>
-                        </div>
-                        <div class="form-group ag-local-only" style="display:none">
-                            <label>Listen port <span class="sr-desc">empty = pick one</span></label>
-                            <input type="number" id="ag-port" placeholder="auto" style="width:110px">
-                        </div>
-                        <div class="form-group ag-remote-only">
-                            <label>Token <span class="sr-desc">bearer, optional</span></label>
-                            <input type="text" id="ag-token" placeholder="(none)" autocomplete="off">
-                        </div>
-                        <div class="form-group ag-remote-only">
-                            <label>TLS CA path <span class="sr-desc">on the front, optional</span></label>
-                            <input type="text" id="ag-tlsca" placeholder="(plaintext)" autocomplete="off">
+                        <div class="form-group">
+                            <label>API key <span class="sr-desc">the remote's own</span></label>
+                            <input type="text" id="nd-key" placeholder="" autocomplete="off">
                         </div>
                     </div>
                     <div class="cat-form-actions">
-                        <button class="btn-small" id="ag-test-btn" onclick="testAgent()">Test</button>
-                        <button class="btn-primary" id="ag-save-btn" onclick="saveAgent()">Save</button>
-                        <button class="btn-cancel" onclick="hideAgentForm()">Cancel</button>
+                        <button class="btn-small" onclick="testNode()">Test</button>
+                        <button class="btn-primary" onclick="saveNode()">Add</button>
+                        <button class="btn-cancel" onclick="hideNodeForm()">Cancel</button>
                     </div>
-                    <div id="ag-result" class="result-msg"></div>
+                    <div id="nd-result" class="result-msg"></div>
                 </div>
             </div>
-            <p class="sr-desc" style="margin:0 0 12px">One agent runs one torrent process. The ones on this machine are started here and each can leave by its own tunnel; the others run somewhere else and are reached over the network. A category sends its torrents to whichever ones you name.</p>
-            <table id="agents-table">
+
+            <div class="section-header" style="margin-top:18px">
+                <h3 style="margin:0;font-size:15px">This node</h3>
+                <button class="btn-small" onclick="showEngineForm()">+ Add an engine</button>
+            </div>
+            <div id="engine-form" class="card" style="display:none; margin-bottom:12px">
+                <div class="card-body">
+                    <div class="cat-form-grid">
+                        <div class="form-group">
+                            <label>Id</label>
+                            <input type="text" id="en-id" placeholder="vpn1" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Role <span class="sr-desc">how it behaves</span></label>
+                            <select id="en-role"><option value="hoard">hoard</option><option value="race">race</option></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Listen port</label>
+                            <input type="number" id="en-port" placeholder="16473" style="width:120px">
+                        </div>
+                        <div class="form-group">
+                            <label>Interface <span class="sr-desc">its tunnel, optional</span></label>
+                            <input type="text" id="en-iface" placeholder="wg1" autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="cat-form-actions">
+                        <button class="btn-primary" onclick="saveEngine()">Add</button>
+                        <button class="btn-cancel" onclick="hideEngineForm()">Cancel</button>
+                    </div>
+                    <div id="en-result" class="result-msg"></div>
+                </div>
+            </div>
+            <table id="local-engines-table">
                 <thead>
-                    <tr><th>Name</th><th>Agent</th><th>Where</th><th>Exit IP</th><th>Status</th><th>Actions</th></tr>
+                    <tr><th>Engine</th><th>Role</th><th>Listen port</th><th>Interface</th><th>IPv6</th><th>Socket</th><th>Torrents</th><th>Actions</th></tr>
                 </thead>
-                <tbody id="agents-tbody">
-                    <tr><td colspan="6" class="empty">No agents</td></tr>
+                <tbody id="local-engines-tbody">
+                    <tr><td colspan="8" class="empty">Loading...</td></tr>
                 </tbody>
             </table>
-            <div id="agents-removed" class="agents-removed"></div>
-            <div id="restart-banner" style="display:none;margin-top:8px;padding:8px;background:#3a2a00;border-radius:4px">
-                Config changed, restart to apply. <button class="btn-small" onclick="restartHydra()">Restart now</button>
+            <div id="engine-restart-banner" style="display:none;margin-top:8px;padding:8px;background:#3a2a00;border-radius:4px">
+                The config changed. Engines are built at boot, so this takes a restart.
+                <button class="btn-small" onclick="restartHydra()">Restart now</button>
             </div>
+
+            <h3 style="margin:26px 0 8px;font-size:15px">Other nodes</h3>
+            <table id="nodes-table">
+                <thead>
+                    <tr><th>Name</th><th>URL</th><th>Version</th><th>Engines</th><th>Torrents</th><th>Status</th><th>Actions</th></tr>
+                </thead>
+                <tbody id="nodes-tbody">
+                    <tr><td colspan="7" class="empty">No other node</td></tr>
+                </tbody>
+            </table>
         </section>
 
         <section id="tab-trackers" class="tab-content">
@@ -789,10 +833,10 @@
 
             <div class="card" style="margin-top:20px">
                 <h3>Per-tracker stats</h3>
-                <p class="sr-desc" style="margin:0 0 12px">Upload/download split by tracker across both agents. Sampled every few seconds; cumulative totals are lifetime.</p>
+                <p class="sr-desc" style="margin:0 0 12px">Upload/download split by tracker across all engines. Sampled every few seconds; cumulative totals are lifetime.</p>
                 <table id="trkstats-table">
                     <thead>
-                        <tr><th>Tracker</th><th>Agent</th><th>&#8593; rate</th><th>&#8595; rate</th><th>Peers</th><th>Active/Total</th><th>&#8593; total</th><th>&#8595; total</th><th>Ratio</th></tr>
+                        <tr><th>Tracker</th><th>Engine</th><th>&#8593; rate</th><th>&#8595; rate</th><th>Peers</th><th>Active/Total</th><th>&#8593; total</th><th>&#8595; total</th><th>Ratio</th></tr>
                     </thead>
                     <tbody id="trkstats-tbody">
                         <tr><td colspan="9" class="empty">No tracker stats yet</td></tr>
@@ -1201,11 +1245,11 @@
             <div class="ctx-item" id="ctx-change-category-move" onclick="_showCategoryPicker(event,true)">Change category + move files &rsaquo;</div>
             <div class="ctx-item" id="ctx-edit-tags" onclick="_showTagPicker(event)">Edit tags &rsaquo;</div>
         </div>
-        <div class="ctx-separator" id="ctx-sep-agent" style="display:none"></div>
-        <div class="ctx-group" id="ctx-grp-agent" style="display:none">
-            <div class="ctx-group-title">Agent</div>
-            <div class="ctx-item" id="ctx-agent-duplicate" onclick="_showAgentPicker(event,'duplicate')">Duplicate to agent &rsaquo;</div>
-            <div class="ctx-item" id="ctx-agent-move" onclick="_showAgentPicker(event,'move')">Move to agent &rsaquo;</div>
+        <div class="ctx-separator" id="ctx-sep-node" style="display:none"></div>
+        <div class="ctx-group" id="ctx-grp-node" style="display:none">
+            <div class="ctx-group-title">Node</div>
+            <div class="ctx-item" id="ctx-node-duplicate" onclick="_showEnginePicker(event,'keep')">Duplicate to engine &rsaquo;</div>
+            <div class="ctx-item" id="ctx-node-move" onclick="_showEnginePicker(event,'remove')">Move to engine &rsaquo;</div>
         </div>
         <div class="ctx-separator"></div>
         <div class="ctx-group" id="ctx-grp-remove">

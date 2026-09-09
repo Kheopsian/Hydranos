@@ -49,6 +49,24 @@ pub struct Job {
     pub updated_at: i64,
 }
 
+/// One Hydra in the fleet, other than this one.
+///
+/// A node is an ENTIRE Hydra reached over its normal HTTP API -- not an agent
+/// speaking a private protocol. That is the whole point of the model: every
+/// route the fleet needs is a route this build already serves and already
+/// tests, so a remote capability cannot rot separately from the local one.
+#[derive(Debug, Clone, Default)]
+pub struct Node {
+    pub name: String,
+    /// Origin only, no trailing slash: `http://10.0.0.5:8199`.
+    pub url: String,
+    /// The remote's own API key. It stays here and is injected server-side by
+    /// the relay, so it never reaches a browser and never sits in a URL.
+    pub api_key: String,
+    pub enabled: bool,
+    pub added_at: i64,
+}
+
 /// The frozen schema, as the production database has it.
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS torrents (
@@ -187,6 +205,10 @@ impl Store {
     pub fn ensure_schema(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(SCHEMA)?;
         self.ensure_cover_index()?;
+        self.ensure_nodes_table()?;
+        self.ensure_enrol_table()?;
+        // After the tables exist, and before anything reads them.
+        self.migrate_composite_key()?;
         Ok(())
     }
 
@@ -217,6 +239,219 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_torrents_pinned
              ON torrents(session, info_hash) WHERE pinned <> 0;",
         )?;
+        Ok(())
+    }
+
+    /// The fleet registry.
+    ///
+    /// Deliberately in the store and NOT in the TOML. Declaring a remote node
+    /// used to mean hand-editing a config file over SSH, which is the single
+    /// thing that made the old agent model unusable in practice. State that
+    /// the UI creates belongs where the UI can write it.
+    ///
+    /// Additive and invisible to any older build, exactly like the covering
+    /// index: a rollback opens the same database and never reads this table.
+    fn ensure_nodes_table(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS nodes (
+                 name TEXT PRIMARY KEY,
+                 url TEXT NOT NULL,
+                 api_key TEXT NOT NULL DEFAULT '',
+                 enabled INTEGER NOT NULL DEFAULT 1,
+                 added_at INTEGER NOT NULL DEFAULT 0);",
+        )?;
+        Ok(())
+    }
+
+    /// The .torrent itself, as it was added.
+    ///
+    /// Needed to hand a torrent to another node: the receiving Hydra has to be
+    /// given the metainfo before it can be told where to fetch the data from.
+    /// Reading it here rather than re-encoding from the parsed metadata keeps
+    /// the info dict byte-identical, and therefore the info hash with it.
+    pub fn torrent_blob(&self, info_hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT torrent FROM torrents WHERE info_hash = ?1 LIMIT 1")?;
+        let mut rows = stmt.query([info_hash.to_lowercase()])?;
+        match rows.next()? {
+            Some(r) => Ok(Some(r.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// One-time enrolment tokens.
+    ///
+    /// A node enrols itself: the operator never hands this Hydra a credential
+    /// for another machine, and this Hydra never opens a session on one. The
+    /// token is the whole authority, so it is single use, short lived, and the
+    /// only thing that can be replayed if it leaks -- once, within its window,
+    /// to register a node the operator will see in the list.
+    fn ensure_enrol_table(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS enrol_tokens (
+                 token TEXT PRIMARY KEY,
+                 created_at INTEGER NOT NULL DEFAULT 0,
+                 expires_at INTEGER NOT NULL DEFAULT 0,
+                 used_at INTEGER NOT NULL DEFAULT 0);",
+        )?;
+        Ok(())
+    }
+
+    pub fn create_enrol_token(&self, ttl_secs: i64) -> anyhow::Result<(String, i64)> {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let token: String = (0..32)
+            .map(|_| {
+                const HEX: &[u8] = b"0123456789abcdef";
+                HEX[rng.gen_range(0..16)] as char
+            })
+            .collect();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let expires = now + ttl_secs;
+        self.conn.execute(
+            "INSERT INTO enrol_tokens (token, created_at, expires_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![token, now, expires],
+        )?;
+        Ok((token, expires))
+    }
+
+    /// Spend a token, or say why it cannot be spent.
+    ///
+    /// The UPDATE carries the conditions rather than a read-then-write: two
+    /// nodes racing on the same token would both pass a check done separately,
+    /// and both would register.
+    pub fn consume_enrol_token(&self, token: &str) -> anyhow::Result<bool> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let n = self.conn.execute(
+            "UPDATE enrol_tokens SET used_at = ?2
+             WHERE token = ?1 AND used_at = 0 AND expires_at > ?2",
+            rusqlite::params![token, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn nodes(&self) -> anyhow::Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, url, api_key, enabled, added_at FROM nodes ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Node {
+                name: r.get(0)?,
+                url: r.get(1)?,
+                api_key: r.get(2)?,
+                enabled: r.get::<_, i64>(3)? != 0,
+                added_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn node(&self, name: &str) -> anyhow::Result<Option<Node>> {
+        Ok(self.nodes()?.into_iter().find(|n| n.name == name))
+    }
+
+    pub fn put_node(&self, n: &Node) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO nodes (name, url, api_key, enabled, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(name) DO UPDATE SET
+                 url = excluded.url,
+                 api_key = excluded.api_key,
+                 enabled = excluded.enabled",
+            rusqlite::params![
+                n.name,
+                n.url,
+                n.api_key,
+                if n.enabled { 1 } else { 0 },
+                n.added_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns whether a row actually went away.
+    ///
+    /// The caller needs this to answer honestly. The route it replaces,
+    /// `delete_agent`, returned `{"status":"ok"}` unconditionally while doing
+    /// nothing at all -- so the UI struck the entry off and it came back on the
+    /// next reload, with no error anywhere to explain it.
+    pub fn delete_node(&self, name: &str) -> anyhow::Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM nodes WHERE name = ?1", [name])?;
+        Ok(n > 0)
+    }
+
+    /// Re-key `torrents` on `(info_hash, session)`.
+    ///
+    /// One torrent, one row was the wrong shape: a torrent lives in an ENGINE,
+    /// and a node running one engine per tunnel has a real reason to seed the
+    /// same content from several of them at once. Three tunnels are three
+    /// separate egress paths, so three copies are three times the upload when
+    /// the tunnel is what saturates -- and they cost nothing extra on disk,
+    /// because they are the same files.
+    ///
+    /// SQLite cannot alter a primary key, so this rebuilds the table. It runs
+    /// inside a transaction: either the new table is complete or the old one is
+    /// still there, and a failure cannot leave a half-copied catalogue.
+    ///
+    /// ⚠ This is the change that ends the 3.x rollback. 3.x reads this same
+    /// file and assumes one row per info hash; two rows would show it the same
+    /// torrent twice. The V4 lineage is the rollback path from here on.
+    fn migrate_composite_key(&self) -> anyhow::Result<()> {
+        let sql: String = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='torrents'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        if sql.is_empty() || sql.contains("PRIMARY KEY (info_hash, session)") {
+            return Ok(());
+        }
+
+        let rows: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM torrents", [], |r| r.get(0))
+            .unwrap_or(0);
+        tracing::warn!(
+            rows,
+            "re-keying the torrents table on (info_hash, session); this rewrites it and \
+             ends the 3.x rollback"
+        );
+        let started = std::time::Instant::now();
+
+        self.conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE torrents_v2 (
+                 info_hash TEXT NOT NULL, session TEXT NOT NULL, torrent BLOB NOT NULL,
+                 save_path TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '',
+                 added_time REAL NOT NULL DEFAULT 0, completed_time REAL NOT NULL DEFAULT 0,
+                 total_uploaded INTEGER NOT NULL DEFAULT 0, total_downloaded INTEGER NOT NULL DEFAULT 0,
+                 paused INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '',
+                 content_folder INTEGER NOT NULL DEFAULT -1, pinned INTEGER NOT NULL DEFAULT 0,
+                 seeding_time INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (info_hash, session));
+             INSERT INTO torrents_v2
+                 SELECT info_hash, session, torrent, save_path, category, added_time,
+                        completed_time, total_uploaded, total_downloaded, paused, tags,
+                        content_folder, pinned, seeding_time
+                 FROM torrents;
+             DROP TABLE torrents;
+             ALTER TABLE torrents_v2 RENAME TO torrents;
+             COMMIT;",
+        )?;
+        // The covering index went with the old table.
+        self.ensure_cover_index()?;
+        tracing::warn!(rows, seconds = started.elapsed().as_secs(), "torrents table re-keyed");
         Ok(())
     }
 
@@ -662,7 +897,7 @@ impl Store {
     pub fn tags_of(&self, info_hash: &str) -> Vec<String> {
         let raw: String = self
             .conn
-            .query_row("SELECT tags FROM torrents WHERE info_hash = ?1", [info_hash], |r| r.get(0))
+            .query_row("SELECT tags FROM torrents WHERE info_hash = ?1 LIMIT 1", [info_hash], |r| r.get(0))
             .unwrap_or_default();
         raw.split(',')
             .map(str::trim)
@@ -679,10 +914,12 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_paused(&self, info_hash: &str, paused: bool) -> anyhow::Result<()> {
+    /// Per COPY: a torrent seeded from two engines can be paused in one and
+    /// running in the other. Pause describes an execution, not the content.
+    pub fn set_paused(&self, info_hash: &str, session: &str, paused: bool) -> anyhow::Result<()> {
         self.conn.execute(
-            "UPDATE torrents SET paused = ?2 WHERE info_hash = ?1",
-            rusqlite::params![info_hash, i64::from(paused)],
+            "UPDATE torrents SET paused = ?3 WHERE info_hash = ?1 AND session = ?2",
+            rusqlite::params![info_hash, session, i64::from(paused)],
         )?;
         Ok(())
     }
@@ -715,7 +952,7 @@ impl Store {
     pub fn has_torrent_blob(&self, info_hash: &str) -> bool {
         self.conn
             .query_row(
-                "SELECT length(torrent) FROM torrents WHERE info_hash = ?1",
+                "SELECT length(torrent) FROM torrents WHERE info_hash = ?1 LIMIT 1",
                 [info_hash],
                 |r| r.get::<_, i64>(0),
             )
@@ -731,10 +968,31 @@ impl Store {
         Ok(n > 0)
     }
 
-    pub fn set_pinned(&self, info_hash: &str, pinned: bool) -> anyhow::Result<()> {
+    /// EVERY copy. For callers that name a torrent and not an engine -- the
+    /// qBit shim, which Sonarr and Radarr speak, has no notion of engines and
+    /// means "stop this torrent" whichever engines hold it.
+    pub fn set_paused_everywhere(&self, info_hash: &str, paused: bool) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE torrents SET paused = ?2 WHERE info_hash = ?1",
+            rusqlite::params![info_hash, if paused { 1 } else { 0 }],
+        )?;
+        Ok(())
+    }
+
+    /// EVERY copy, for the same reason.
+    pub fn set_pinned_everywhere(&self, info_hash: &str, pinned: bool) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE torrents SET pinned = ?2 WHERE info_hash = ?1",
-            rusqlite::params![info_hash, i64::from(pinned)],
+            rusqlite::params![info_hash, if pinned { 1 } else { 0 }],
+        )?;
+        Ok(())
+    }
+
+    /// Per COPY: a download slot is held by one engine, not by the torrent.
+    pub fn set_pinned(&self, info_hash: &str, session: &str, pinned: bool) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE torrents SET pinned = ?3 WHERE info_hash = ?1 AND session = ?2",
+            rusqlite::params![info_hash, session, i64::from(pinned)],
         )?;
         Ok(())
     }
@@ -774,6 +1032,49 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Re-home a torrent to another engine of this node.
+    ///
+    /// `session` is what every per-engine query filters on, so this one column
+    /// decides which list a torrent appears in. `insert_torrent` is an
+    /// INSERT OR IGNORE and would leave it pointing at the old engine, which is
+    /// how a moved torrent ends up running in one engine and listed under
+    /// another.
+    /// Move ONE copy from one engine to another.
+    ///
+    /// Takes the source: with several copies of a torrent, "set its session"
+    /// has no single meaning, and updating them all would silently collapse
+    /// three copies into one.
+    pub fn set_session(&self, info_hash: &str, from: &str, to: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE torrents SET session = ?3 WHERE info_hash = ?1 AND session = ?2",
+            rusqlite::params![info_hash, from, to],
+        )?;
+        Ok(())
+    }
+
+    /// Drop ONE copy, leaving the others.
+    pub fn delete_copy(&self, info_hash: &str, session: &str) -> anyhow::Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM torrents WHERE info_hash = ?1 AND session = ?2",
+            rusqlite::params![info_hash, session],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Which engines hold this torrent.
+    pub fn sessions_of(&self, info_hash: &str) -> Vec<String> {
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT session FROM torrents WHERE info_hash = ?1 ORDER BY session")
+        else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([info_hash], |r| r.get::<_, String>(0)) else {
+            return Vec::new();
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     pub fn set_category(&self, info_hash: &str, category: &str) -> anyhow::Result<()> {
@@ -829,6 +1130,153 @@ impl Store {
         Ok(rows)
     }
 }
+
+#[cfg(test)]
+mod composite_key_tests {
+    use super::*;
+
+    fn blob() -> Vec<u8> { b"d4:infod6:lengthi1eee".to_vec() }
+
+    /// The migration must keep every row and change only the key.
+    ///
+    /// Run against a store created with the OLD schema, which is what a
+    /// production database is until this build opens it.
+    #[test]
+    fn the_rebuild_keeps_every_row_and_re_keys_the_table() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "movies", 1.0, false, "x").unwrap();
+        s.insert_torrent("bb", "race", &blob(), "/race", "", 2.0, true, "").unwrap();
+
+        s.migrate_composite_key().unwrap();
+
+        let sql: String = s.conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='torrents'", [], |r| r.get(0),
+        ).unwrap();
+        assert!(sql.contains("PRIMARY KEY (info_hash, session)"), "{sql}");
+
+        let n: i64 = s.conn.query_row("SELECT COUNT(*) FROM torrents", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "a row was lost in the rebuild");
+        // Columns came across, not just the keys.
+        let cat: String = s.conn.query_row(
+            "SELECT category FROM torrents WHERE info_hash='aa'", [], |r| r.get(0)).unwrap();
+        assert_eq!(cat, "movies");
+        assert_eq!(s.torrent_blob("aa").unwrap().unwrap(), blob());
+    }
+
+    /// Running it twice must be a no-op, because it runs at every boot.
+    #[test]
+    fn migrating_an_already_migrated_table_does_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.migrate_composite_key().unwrap();
+        s.migrate_composite_key().unwrap();
+        let n: i64 = s.conn.query_row("SELECT COUNT(*) FROM torrents", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// The point of the whole change: one torrent, two engines.
+    #[test]
+    fn one_torrent_can_live_in_two_engines() {
+        let s = Store::open_in_memory().unwrap();
+        s.migrate_composite_key().unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "movies", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "vpn1", &blob(), "/data", "movies", 1.0, false, "").unwrap();
+        assert_eq!(s.sessions_of("aa"), vec!["hoard", "vpn1"]);
+    }
+
+    /// Pause describes an execution, so it must not leak between copies: a
+    /// torrent held back on one tunnel keeps seeding on the other.
+    #[test]
+    fn pausing_one_copy_leaves_the_other_running() {
+        let s = Store::open_in_memory().unwrap();
+        s.migrate_composite_key().unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "").unwrap();
+
+        s.set_paused("aa", "hoard", true).unwrap();
+        let paused = |sess: &str| -> i64 {
+            s.conn.query_row(
+                "SELECT paused FROM torrents WHERE info_hash='aa' AND session=?1",
+                [sess], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(paused("hoard"), 1);
+        assert_eq!(paused("vpn1"), 0, "the other copy was paused too");
+
+        // And the shim's torrent-wide form reaches both.
+        s.set_paused_everywhere("aa", true).unwrap();
+        assert_eq!(paused("vpn1"), 1);
+    }
+
+    #[test]
+    fn deleting_one_copy_leaves_the_other() {
+        let s = Store::open_in_memory().unwrap();
+        s.migrate_composite_key().unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "").unwrap();
+        assert!(s.delete_copy("aa", "hoard").unwrap());
+        assert_eq!(s.sessions_of("aa"), vec!["vpn1"]);
+        assert!(!s.delete_copy("aa", "hoard").unwrap(), "already gone");
+    }
+
+    /// A move takes the source, or three copies would collapse into one.
+    #[test]
+    fn moving_a_copy_moves_only_that_copy() {
+        let s = Store::open_in_memory().unwrap();
+        s.migrate_composite_key().unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.set_session("aa", "hoard", "vpn2").unwrap();
+        assert_eq!(s.sessions_of("aa"), vec!["vpn1", "vpn2"]);
+    }
+}
+
+#[cfg(test)]
+mod enrol_tests {
+    use super::*;
+
+    fn store() -> Store {
+        let s = Store::open_in_memory().unwrap();
+        s.ensure_enrol_table().unwrap();
+        s.ensure_nodes_table().unwrap();
+        s
+    }
+
+    /// A token is authority to join the fleet, so spending it twice must be
+    /// impossible: a token left in a shell scrollback would otherwise enrol a
+    /// second machine nobody asked for.
+    #[test]
+    fn a_token_can_only_be_spent_once() {
+        let s = store();
+        let (token, _) = s.create_enrol_token(1800).unwrap();
+        assert!(s.consume_enrol_token(&token).unwrap(), "first use must work");
+        assert!(!s.consume_enrol_token(&token).unwrap(), "second use must not");
+    }
+
+    #[test]
+    fn an_expired_token_is_refused() {
+        let s = store();
+        // Minted already stale: the window is what limits a leaked token, so
+        // the check has to be on the clock and not on a flag someone forgot.
+        let (token, _) = s.create_enrol_token(-1).unwrap();
+        assert!(!s.consume_enrol_token(&token).unwrap());
+    }
+
+    #[test]
+    fn an_unknown_token_is_refused() {
+        let s = store();
+        assert!(!s.consume_enrol_token("0000000000000000").unwrap());
+    }
+
+    #[test]
+    fn two_tokens_are_not_the_same_token() {
+        let s = store();
+        let (a, _) = s.create_enrol_token(60).unwrap();
+        let (b, _) = s.create_enrol_token(60).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 32, "short enough to paste, long enough not to guess");
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
