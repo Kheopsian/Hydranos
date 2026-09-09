@@ -276,22 +276,130 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
 /// The URL is built by the caller. Policy -- passkeys, client spoofing, the
 /// `ip=` parameter, rate limiting -- belongs to the announcer, not here; this
 /// only has to put a request on the wire and read the answer.
-pub async fn send_announce(url: &str, user_agent: &str) -> Result<AnnounceResponse, String> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent(user_agent.to_string());
-    if let Some(px) = primary_proxy() {
-        builder = builder.proxy(px.clone());
-    }
-    let client = builder
-        .build()
-        .map_err(|e| format!("http client: {}", fmt_err_chain(&e)))?;
+/// Which address families an announce is sent from.
+///
+/// libtorrent opens one listen socket per family and announces from each, with
+/// the SAME peer id: BEP 7 describes one peer holding two addresses, not two
+/// peers. A tracker that merges them lists us in `peers` and `peers6` both, so
+/// an IPv4-only leecher can still reach us. That is the behaviour this mirrors.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IpMode {
+    /// Both families, one announce each. The default.
+    Auto,
+    V4,
+    V6,
+}
 
-    let resp = client
+impl IpMode {
+    pub fn parse(s: &str) -> IpMode {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "v4" | "ipv4" | "4" => IpMode::V4,
+            "v6" | "ipv6" | "6" => IpMode::V6,
+            _ => IpMode::Auto,
+        }
+    }
+}
+
+/// One client per address family, built once.
+///
+/// Binding the socket to the unspecified address of a family is what pins the
+/// connection to it -- the equivalent of 3.x's `ipv4Network()`, which narrowed
+/// the dial network before handing it to the Go transport.
+///
+/// Two things were wrong before this. `send_announce` built a whole
+/// `Client` per announce -- a connection pool, a resolver and a fresh load of
+/// the root certificate store, ninety times a second. And it constrained no
+/// family at all, so happy eyeballs took IPv6 on every dual-stack tracker and
+/// the tracker recorded only our v6 address. Verified from a VPN on 2026-09-08:
+/// announcing as a leecher to a tracker we seed returned our
+/// `[2a01:...]:16172` in `peers6` and nothing of ours in `peers`. Every
+/// IPv4-only leecher in those swarms could not see us at all.
+static ANNOUNCE_CLIENT_V4: OnceLock<reqwest::Client> = OnceLock::new();
+static ANNOUNCE_CLIENT_V6: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn family_client(v6: bool) -> &'static reqwest::Client {
+    let cell = if v6 { &ANNOUNCE_CLIENT_V6 } else { &ANNOUNCE_CLIENT_V4 };
+    cell.get_or_init(|| {
+        let bind = if v6 {
+            std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+        } else {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        };
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .http1_only()
+            .pool_max_idle_per_host(64)
+            .local_address(bind);
+        if let Some(px) = primary_proxy() {
+            builder = builder.proxy(px.clone());
+        }
+        builder.build().unwrap_or_else(|e| {
+            eprintln!("[tracker] announce client build failed ({e}), falling back to default");
+            reqwest::Client::new()
+        })
+    })
+}
+
+/// One announce, from one family.
+async fn send_announce_family(
+    url: &str,
+    user_agent: &str,
+    v6: bool,
+) -> Result<AnnounceResponse, String> {
+    let resp = family_client(v6)
         .get(url)
+        .header(reqwest::header::USER_AGENT, user_agent)
         .send()
         .await
         .map_err(|e| format!("http request: {}", fmt_err_chain(&e)))?;
+    finish_announce(resp).await
+}
+
+/// Merge two answers about the same swarm.
+///
+/// The counts come from the tracker and are identical either way, so the v4
+/// answer is the base and v6 only contributes peers the v4 list did not carry.
+/// One family failing is not a failure: an A-only tracker has no v6 to reach
+/// and a AAAA-only one has no v4, and both are normal.
+fn merge_announce(
+    v4: Result<AnnounceResponse, String>,
+    v6: Result<AnnounceResponse, String>,
+) -> Result<AnnounceResponse, String> {
+    match (v4, v6) {
+        (Ok(mut a), Ok(b)) => {
+            for p in b.peers {
+                if !a.peers.contains(&p) {
+                    a.peers.push(p);
+                }
+            }
+            Ok(a)
+        }
+        (Ok(a), Err(_)) => Ok(a),
+        (Err(_), Ok(b)) => Ok(b),
+        (Err(e4), Err(e6)) => Err(format!("v4: {e4} | v6: {e6}")),
+    }
+}
+
+pub async fn send_announce(
+    url: &str,
+    user_agent: &str,
+    mode: IpMode,
+) -> Result<AnnounceResponse, String> {
+    match mode {
+        IpMode::V4 => return send_announce_family(url, user_agent, false).await,
+        IpMode::V6 => return send_announce_family(url, user_agent, true).await,
+        IpMode::Auto => {}
+    }
+    // Same peer id on both, as libtorrent does: one peer, two addresses.
+    let (a, b) = tokio::join!(
+        send_announce_family(url, user_agent, false),
+        send_announce_family(url, user_agent, true),
+    );
+    return merge_announce(a, b);
+}
+
+/// Parse one tracker answer. Shared by both families.
+async fn finish_announce(resp: reqwest::Response) -> Result<AnnounceResponse, String> {
 
     if !resp.status().is_success() {
         let st = resp.status();

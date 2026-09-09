@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydra - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.2.23">
+    <link rel="stylesheet" href="/static/style.css?v=1.2.25">
     <script src="/static/chart.umd.min.js"></script>
 </head>
 <body>
@@ -237,6 +237,14 @@
                 <div class="rp2-grad" id="rp-grad"></div>
                 <div class="rp2-hist" id="rp-hist" style="display:none"></div>
             </div>
+            <!-- Race is served whole to the browser and rendered whole, so this
+                 filter is client-side: the rows are already here, and a round
+                 trip would buy nothing at this tier's size. It shares
+                 _searchMatches with hoard so both boxes answer the same way. -->
+            <div class="race-filter-bar">
+                <input type="text" id="race-search" placeholder="Search…" oninput="renderRaceTable()">
+                <span id="race-filter-count"></span>
+            </div>
             <table id="race-table">
                 <thead>
                     <tr>
@@ -425,19 +433,13 @@
                     <span id="hoard-summary-text"></span>
                 </div>
             </div>
-            <div class="hoard-stats-bar">
-                <div class="hoard-bar-uploading" id="hoard-bar-uploading"></div>
-                <div class="hoard-bar-with-peers" id="hoard-bar-with-peers"></div>
-            </div>
-            <div class="hoard-stats-legend">
-                <span class="legend-uploading">Uploading</span>
-                <span class="legend-with-peers">With Peers</span>
-            </div>
+            <!-- The progress bar is gone. At 300k torrents "19 uploading" and
+                 "945 with peers" are sub-pixel slivers: the bar read as full and
+                 said nothing the summary line above does not say in numbers. -->
             <div class="hoard-filter-bar">
-                <input type="text" id="hoard-search" placeholder="Search…" oninput="renderHoardTable()">
+                <input type="text" id="hoard-search" placeholder="Search…" oninput="scheduleHoardPage(250)">
                 <span id="hoard-filter-count"></span>
-            </div>
-            <div class="hoard-chips-row">
+                <div class="hoard-chips-row hoard-chips-state">
                 <button class="chip chip-state active" data-state="" onclick="setHoardStateFilter(this, '')">All</button>
                 <button class="chip chip-state" data-state="seeding" onclick="setHoardStateFilter(this, 'seeding')">Seeding</button>
                 <button class="chip chip-state chip-active-seed" data-state="__active__" onclick="setHoardStateFilter(this, '__active__')">Actively Seeding</button>
@@ -448,10 +450,23 @@
                 <button class="chip chip-state" data-state="checking_files" onclick="setHoardStateFilter(this, 'checking_files')">Checking</button>
                 <button class="chip chip-state chip-tracker-err" data-state="__tracker_err__" onclick="setHoardStateFilter(this, '__tracker_err__')">Tracker Error</button>
                 <button class="chip chip-state chip-torrent-err" data-state="__error__" onclick="setHoardStateFilter(this, '__error__')">Error</button>
+                </div>
             </div>
-            <div class="hoard-chips-row hoard-chips-trackers" id="hoard-tracker-chips"></div>
-            <div class="hoard-chips-row hoard-chips-cats" id="hoard-cat-chips"></div>
-            <div class="hoard-chips-row hoard-chips-tags" id="hoard-tag-chips"></div>
+            <!-- The three facet families used the same chip with nothing between
+                 them, so a row of trackers ran straight into a row of
+                 categories. The label is what separates them. -->
+            <div class="facet-group" id="facet-trackers">
+                <span class="facet-label">Trackers</span>
+                <div class="hoard-chips-row hoard-chips-trackers" id="hoard-tracker-chips"></div>
+            </div>
+            <div class="facet-group" id="facet-cats">
+                <span class="facet-label">Categories</span>
+                <div class="hoard-chips-row hoard-chips-cats" id="hoard-cat-chips"></div>
+            </div>
+            <div class="facet-group" id="facet-tags">
+                <span class="facet-label">Tags</span>
+                <div class="hoard-chips-row hoard-chips-tags" id="hoard-tag-chips"></div>
+            </div>
             <table id="hoard-table">
                 <thead>
                     <tr>
@@ -473,7 +488,7 @@
                     </tr>
                 </thead>
                 <tbody id="hoard-tbody">
-                    <tr><td colspan="14" class="empty">No hoard torrents</td></tr>
+                    <tr><td colspan="14" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
 
@@ -1213,6 +1228,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.3.128"></script>
+    <script src="/static/app.js?v=1.5.5"></script>
 </body>
 </html>

@@ -97,6 +97,26 @@ impl<S: tracing::Subscriber> Layer<S> for LogLayer {
     }
 }
 
+/// RFC 3339 to the second for a Unix timestamp, as Go marshals a time.Time
+/// that carries no sub-second part.
+///
+/// The trackers tab renders this: an announce is timed to the second and a
+/// nanosecond field there would only be noise.
+pub(crate) fn rfc3339_at(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let time_of_day = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        month,
+        day,
+        time_of_day / 3600,
+        (time_of_day % 3600) / 60,
+        time_of_day % 60,
+    )
+}
+
 /// RFC 3339 with nanoseconds, as Go's time.Time marshals it.
 fn now_rfc3339() -> String {
     let now = std::time::SystemTime::now()

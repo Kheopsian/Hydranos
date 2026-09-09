@@ -306,8 +306,13 @@ nav {
 /* Main */
 main {
     flex: 1;
-    padding: 24px;
-    width: 90%;
+    /* Fixed gutters, not a percentage. `width: 90%` cost 75px a side at 1500px
+       and 192px a side on a 4K panel: the wider the screen, the more was thrown
+       away, which is backwards for a table that wants 3179px and was being
+       given 1302. Every column was truncated -- "192....", "trac...", "09/0..."
+       -- while 13% of the viewport went to empty margin. */
+    padding: 24px 32px;
+    width: 100%;
     margin: 0 auto;
 }
 
@@ -460,14 +465,16 @@ tr:hover td {
 }
 
 /* Hoard bar */
-.hoard-filter-bar {
+.hoard-filter-bar,
+.race-filter-bar {
     display: flex;
     align-items: center;
     gap: 10px;
     margin: 12px 0 6px;
 }
 
-.hoard-filter-bar input[type="text"] {
+.hoard-filter-bar input[type="text"],
+.race-filter-bar input[type="text"] {
     flex: 1;
     max-width: 280px;
     padding: 5px 10px;
@@ -831,6 +838,104 @@ input[type="file"] {
 }
 
 /* Seedbox badge */
+/* Tracker severity: a bare dot, never a letter inside it, with the wording
+   next to it. A glyph in a 9px circle reads as a lottery ball. */
+/* Search and the state filter share one line: the states are a single
+   exclusive choice, the rows below are additive facets. Putting them on
+   different lines is what tells them apart. */
+.hoard-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.hoard-chips-state {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex: 1 1 auto;
+    /* Inherited from .hoard-chips-row, and it is the MARGIN box that a flex
+       parent centres: 22px of chips plus 6px underneath, centred in 28px,
+       lifts what you actually see by 3px. Visible to the eye against the
+       search field next to it. */
+    margin-bottom: 0;
+}
+
+.facet-group {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-top: 8px;
+}
+/* One owner for the vertical rhythm. The rows carry margins of their own from
+   the old layout -- 6px, and 12px on the categories row, which used to double
+   as the separator before the tags. Added to the group's own margin that made
+   the gap under Categories half again as tall as the one under Trackers. */
+.facet-group .hoard-chips-row {
+    margin-bottom: 0;
+}
+/* Air before the table.
+   NOT `.facet-group:last-of-type`: that pseudo-class counts by ELEMENT TYPE
+   among siblings, and a later <div> in the section claimed it, so the rule
+   silently matched nothing. The table is the stable anchor -- the gap belongs
+   between the facets and the list, whatever sits in between. */
+#hoard-table {
+    margin-top: 16px;
+}
+.facet-label {
+    flex: none;
+    min-width: 74px;
+    padding-top: 6px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+/* Excluded facet: struck through, dimmed. Right-click sets it. */
+.chip.excluded {
+    text-decoration: line-through;
+    opacity: 0.5;
+}
+
+.sev {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    margin-right: 7px;
+    vertical-align: middle;
+}
+.sev-red { background: var(--accent-red); box-shadow: 0 0 6px rgba(248, 81, 73, 0.55); }
+.sev-amber { background: var(--accent-yellow); box-shadow: 0 0 6px rgba(227, 179, 65, 0.5); }
+.sev-muted { background: var(--text-muted); }
+.sev-label { font-size: 11px; color: var(--text-secondary); vertical-align: middle; }
+
+/* Tab counter: a filled pill, not a digit stuck to the label. */
+.tab-badge {
+    /* A circle for one digit, a pill beyond. The old box was min-width 18 by
+       line-height 17: never square, so the 9px radius drew an ellipse. Height
+       is now pinned equal to the min-width, and the count is centred by flex
+       rather than by leading -- line-height centres the line BOX, and digits
+       carry no descender, which is what left the glyph riding high. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    min-width: 18px;
+    height: 18px;
+    margin-left: 8px;
+    padding: 0 5px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    vertical-align: middle;
+}
+.tab-badge.red { background: var(--accent-red); color: #fff; }
+.tab-badge.amber { background: var(--accent-yellow); color: #241a00; }
+
 .badge-seedbox, .badge-no {
     padding: 2px 8px;
     border-radius: 10px;
@@ -1565,8 +1670,10 @@ footer {
     .detail-grid { grid-template-columns: 1fr !important; }
 
     /* Hoard filter */
-    .hoard-filter-bar input[type="text"] { max-width: 100%; }
-    .hoard-filter-bar { flex-wrap: wrap; }
+    .hoard-filter-bar input[type="text"],
+    .race-filter-bar input[type="text"] { max-width: 100%; }
+    .hoard-filter-bar,
+    .race-filter-bar { flex-wrap: wrap; }
 
     /* Startup track */
     .startup-track { width: 85vw; }

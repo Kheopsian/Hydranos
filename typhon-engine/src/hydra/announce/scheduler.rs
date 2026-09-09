@@ -35,6 +35,14 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MIN_INTERVAL: Duration = Duration::from_secs(60);
 /// Let the engine finish loading its resume data before the first announce.
 const BOOT_DELAY: Duration = Duration::from_secs(5);
+/// How many torrents may JOIN the schedule per reconcile cycle.
+///
+/// Anti thundering-herd, and the number is not arbitrary: 500 per ten seconds
+/// is fifty announces a second, which trackers tolerate. Admitting the whole
+/// catalogue at once makes every torrent due at the same instant -- 300k
+/// announces in a burst, which is how a tracker answers 429 and how an account
+/// gets noticed.
+const MAX_NEW_PER_CYCLE: usize = 500;
 
 /// What one torrent owes the scheduler.
 struct State {
@@ -198,11 +206,18 @@ fn reconcile_now<C: Catalogue>(
 ) {
     let live = catalogue.hashes();
     let mut seen = std::collections::HashSet::with_capacity(live.len());
+    let mut added = 0usize;
     for hash in live {
         seen.insert(hash.clone());
         if states.contains_key(&hash) {
             continue;
         }
+        // The rest join on the next cycle. `seen` already holds them, so they
+        // are not mistaken for departures in the meantime.
+        if added >= MAX_NEW_PER_CYCLE {
+            continue;
+        }
+        added += 1;
         states.insert(
             hash.clone(),
             State { info_hash: hash.clone(), first_announce: true, in_flight: false },
@@ -241,6 +256,22 @@ mod tests {
         let a = Deadline { at: now, info_hash: "aaa".into() };
         let b = Deadline { at: now, info_hash: "bbb".into() };
         assert!(a < b);
+    }
+
+    /// ⭐ The catalogue joins the schedule in slices, not all at once.
+    ///
+    /// Production answered 429 on the first switch because every torrent was
+    /// admitted with a deadline of "now": 300k announces in one burst. Fifty a
+    /// second is what a tracker tolerates.
+    #[test]
+    fn no_more_than_a_slice_of_the_catalogue_joins_per_cycle() {
+        assert_eq!(MAX_NEW_PER_CYCLE, 500);
+        let per_second = MAX_NEW_PER_CYCLE as f64 / RECONCILE.as_secs_f64();
+        assert!(per_second <= 50.0, "{per_second}/s is more than a tracker tolerates");
+        // And a catalogue of 300k takes a bounded, knowable time to enter.
+        let cycles = 300_000_f64 / MAX_NEW_PER_CYCLE as f64;
+        let minutes = cycles * RECONCILE.as_secs_f64() / 60.0;
+        assert!(minutes < 120.0, "{minutes} minutes to admit the catalogue is too slow");
     }
 
     /// A tracker asking for a one-second interval is broken or hostile, and

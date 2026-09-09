@@ -207,16 +207,50 @@ impl DownloadState {
     /// but not finished, so other peers can pick them up. Without this, any
     /// piece in `started_pieces` leaks into the picker's `pending` map and
     /// is never re-picked — the torrent stalls near completion.
+    ///
+    /// Called explicitly at the end of a session, and again by `Drop` for every
+    /// other way out. Draining `started_pieces` makes the second call a no-op.
     pub fn on_disconnect(&mut self) {
         if let Some(picker) = self.torrent.picker.get() {
             let mut p = picker.lock().unwrap();
             if !self.peer_bitfield.is_empty() {
                 p.remove_bitfield(&self.peer_bitfield);
+                // Idempotence, and it is not optional: this runs once from
+                // `session::run` and once more from `Drop`. `started_pieces`
+                // is drained so the piece half replays harmlessly, but
+                // `remove_bitfield` DECREMENTS availability counters -- running
+                // it twice would understate how rare every piece this peer held
+                // is, and rarest-first picks on those counters.
+                self.peer_bitfield.clear();
             }
             for piece in self.started_pieces.drain() {
                 p.cancel_piece(piece);
             }
         }
+    }
+}
+
+/// Release reserved pieces however the session ends.
+///
+/// `on_disconnect` is reached from exactly one place -- the end of
+/// `session::run` -- so any other way out kept every piece this peer had
+/// started in the picker's `pending` map, each holding a full piece-sized
+/// buffer that nothing would ever free or re-pick. Early returns, a panic in
+/// the session task, and task cancellation at an await point all take that
+/// path, and an engine accepting 76 inbound connections a second takes it
+/// often.
+///
+/// Measured on production 2026-09-08, two heap profiles 26 minutes apart:
+/// `PiecePicker::start_piece` accounted for 459.7 MB of 457.8 MB of growth --
+/// 100% of it -- reached through `session::run` -> `get_requests`. The webseed
+/// pool, which shares the picker, was NEGATIVE over the same window: it
+/// releases correctly, on all three of its failure paths.
+///
+/// A destructor rather than another call site: the bug was never a missing
+/// call, it was that correctness depended on reaching one.
+impl Drop for DownloadState {
+    fn drop(&mut self) {
+        self.on_disconnect();
     }
 }
 

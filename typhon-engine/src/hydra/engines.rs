@@ -232,13 +232,16 @@ impl EngineHost {
     /// account for. Added to the stored baseline it gives the lifetime figure,
     /// and the two must be kept separate -- collapsing them is how a restart
     /// used to appear to erase petabytes.
+    /// Read straight from the counters rather than through `torrent_to_json`:
+    /// the status route polls this, and serializing 300k torrents to JSON to
+    /// add up two integers made every poll a multi-second walk.
     pub fn session_totals(&self) -> (i64, i64) {
+        use std::sync::atomic::Ordering;
         let (mut up, mut down) = (0i64, 0i64);
         for engine in &self.engines {
             for t in engine.manager.all().iter() {
-                let row = typhon_engine::rpc::dispatch::torrent_to_json(t);
-                up += row.get("total_upload").and_then(|v| v.as_i64()).unwrap_or(0);
-                down += row.get("total_download").and_then(|v| v.as_i64()).unwrap_or(0);
+                up += t.total_uploaded.load(Ordering::Relaxed) as i64;
+                down += t.total_downloaded.load(Ordering::Relaxed) as i64;
             }
         }
         (up, down)

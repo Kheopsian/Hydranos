@@ -14,6 +14,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+// Per BINARY, not per crate. `typhon-engine`'s main.rs carries this attribute;
+// this binary was written beside it in 4.0.0 without it, so every 4.x release
+// up to 4.4.1 ran on glibc malloc while MALLOC_CONF sat inert in the
+// environment. See allocdiag for what that cost.
+#[cfg(not(windows))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+mod allocdiag;
 mod api;
 mod engines;
 mod logbuf;
@@ -26,6 +35,8 @@ mod trackeredit;
 mod walrepair;
 mod web;
 mod benchdb;
+mod benchsampler;
+mod netprobe;
 mod bootstrap;
 mod announce;
 mod health;
@@ -95,6 +106,11 @@ async fn rescue(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Before anything allocates in anger: the signal handlers and the
+    // five-minute stats line are the only instruments that can tell a real
+    // leak from pages the allocator is holding.
+    allocdiag::spawn();
+
     // Every event goes both to stderr and to the in-memory ring the Logs tab
     // reads. Registering the ring as a layer rather than scraping stderr keeps
     // the level and the message as fields instead of a line to re-parse.
@@ -166,12 +182,51 @@ async fn main() -> anyhow::Result<()> {
     let shared_store = Arc::new(std::sync::Mutex::new(store));
     workers::spawn_store_reconcile(engine_host.clone(), shared_store.clone());
 
+    // The benchmark graphs read what this writes and nothing else does: with no
+    // sampler the whole tab is empty while the node is at full throughput.
+    if let Some(shared) = bench.clone() {
+        benchsampler::spawn(engine_host.clone(), shared, shared_store.clone());
+    }
+
+    // Exit addresses for the header. Nothing filled these before, so every IP
+    // the interface showed was blank however the node was routed.
+    let public_ip: api::PublicIp =
+        Arc::new(tokio::sync::Mutex::new((String::new(), String::new())));
+    let net_engines: netprobe::Snapshot =
+        Arc::new(tokio::sync::Mutex::new((Vec::new(), 0)));
+    netprobe::spawn(engine_host.clone(), net_engines.clone(), public_ip.clone());
+
+    // Warm the Records card before anyone asks. The scan takes seconds and the
+    // overview header waits on its request, so computing it lazily meant the
+    // first page load of every process paid for it.
+    let records: api::Records = Default::default();
+    if bench.is_some() {
+        api::refresh_records(bench_path.clone(), records.clone());
+    }
+
+    // The mark that separates "this session" and "today" from "ever". Taken
+    // here, once the engines have loaded their resume data: their per-torrent
+    // counters are lifetime totals, so without this mark `day_uploaded`
+    // publishes the entire history of the library as one day's work.
+    let odometer: api::Odo = {
+        let (up, down) = engine_host.session_totals();
+        Arc::new(std::sync::Mutex::new(api::Odometer {
+            session_offset: (up, down),
+            day_baseline: (0, 0),
+            day_date: String::new(),
+        }))
+    };
+
     let state = api::AppState {
         imports: Default::default(),
         config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
         engines: engine_host,
         store: shared_store.clone(),
-        public_ip: Arc::new(tokio::sync::Mutex::new((String::new(), String::new()))),
+        public_ip: public_ip.clone(),
+        net_engines: net_engines.clone(),
+        odometer: odometer.clone(),
+        records: records.clone(),
+        bench_path: bench_path.clone(),
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -182,6 +237,20 @@ async fn main() -> anyhow::Result<()> {
         update_check: Arc::new(tokio::sync::Mutex::new(None)),
         bench,
     };
+    // Roll the day counters on a timer, not only when somebody asks. 3.x reset
+    // on the first request of the new day, so a dashboard opened in the
+    // afternoon had been showing yesterday's baseline until that moment.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let _ = api::session_and_day(&state);
+            }
+        });
+    }
+
     let app = api::router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
