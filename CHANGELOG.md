@@ -17,6 +17,21 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.19.1 -- the light theme, actually light
+
+Driving the new panel in a real browser rather than trusting the CSS: Daylight
+painted the page white and left the header and the tab bar dark, with a white
+"HYDRANOS" on a white background. The colours were right; five literals in the
+header were never tokens.
+
+- `--logo-text`, `--logo-glow`, `--logo-subtitle`, `--nav-bg` and the two
+  hairline stops are theme variables now. Abyss keeps its exact values, so the
+  default is unchanged to the byte.
+- Daylight sets `--logo-glow: none`. A text glow on a light background is a
+  smudge, not a highlight.
+- The Tabs list showed a checkbox labelled "Trackers7": `textContent` on the
+  tab swept up its count badge. It reads the text nodes only.
+
 ## v4.19.0 -- Hydranos, an honest tracker row, and a page you can shape
 
 Three things, none of which change what the daemon does to your torrents.

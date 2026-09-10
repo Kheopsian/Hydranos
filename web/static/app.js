@@ -287,7 +287,14 @@ function renderPersonalisation() {
         const tabs = Array.from(document.querySelectorAll("nav .tab"));
         tabBox.innerHTML = tabs.map(tab => {
             const id = tab.dataset.tab;
-            const label = tab.textContent.trim();
+            // Not textContent: the Trackers tab carries a count badge inside
+            // it, and reading the whole node gave a checkbox labelled
+            // "Trackers7". Take the text nodes only.
+            const label = Array.from(tab.childNodes)
+                .filter(n => n.nodeType === Node.TEXT_NODE)
+                .map(n => n.nodeValue)
+                .join("")
+                .trim() || id;
             const locked = UNHIDEABLE_TABS.includes(id);
             const shown = !hidden.includes(id);
             return `<label class="perso-tab${locked ? " locked" : ""}"${locked ? ` title="${esc(t("Always shown: this is the way back to these settings."))}"` : ""}>
