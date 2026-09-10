@@ -112,6 +112,7 @@
         <button class="tab" data-tab="hoard">Hoard</button>
         <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="nodes">Nodes</button>
+        <button class="tab" data-tab="workflows">Workflows</button>
         <button class="tab" data-tab="trackers">Trackers</button>
         <button class="tab" data-tab="config">Config</button>
         <button class="tab" data-tab="benchmark">Benchmark</button>
@@ -762,6 +763,91 @@
                     <tr><td colspan="7" class="empty">No other node</td></tr>
                 </tbody>
             </table>
+        </section>
+
+        <section id="tab-workflows" class="tab-content">
+            <div class="section-header">
+                <h2>Workflows</h2>
+                <button class="btn-small" onclick="newWorkflow()">+ New workflow</button>
+            </div>
+            <p class="sr-desc" style="margin:0 0 16px">
+                Conditions in, actions out, checked on a timer. What people otherwise write as a
+                script: file a torrent under another category once it finishes, seed for two days
+                then stop. A new workflow starts disabled, and Preview shows what it would do
+                before it is allowed to do anything.
+            </p>
+
+            <div id="wf-form" class="card" style="display:none; margin-bottom:16px">
+                <div class="card-body">
+                    <div class="cat-form-grid">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" id="wf-name" placeholder="Seed two days then stop" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Runs every <span class="sr-desc">seconds, minimum 60</span></label>
+                            <input type="number" id="wf-interval" value="900" min="60" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>At most <span class="sr-desc">torrents per pass</span></label>
+                            <input type="number" id="wf-cap" value="500" min="1" autocomplete="off">
+                        </div>
+                    </div>
+
+                    <h3 style="margin:16px 0 6px">When</h3>
+                    <div class="form-group" style="margin-bottom:8px">
+                        <label>Match
+                            <select id="wf-join">
+                                <option value="all">all of these (AND)</option>
+                                <option value="any">any of these (OR)</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div id="wf-conds"></div>
+                    <button class="btn-small" onclick="addCondRow()">+ Condition</button>
+
+                    <h3 style="margin:16px 0 6px">Then</h3>
+                    <div id="wf-actions"></div>
+                    <button class="btn-small" onclick="addActionRow()">+ Action</button>
+
+                    <div class="cat-form-actions" style="margin-top:16px">
+                        <button class="btn-small" onclick="previewWorkflow()">Preview</button>
+                        <button class="btn-small" onclick="saveWorkflow()">Save</button>
+                        <button class="btn-cancel" onclick="hideWorkflowForm()">Cancel</button>
+                    </div>
+                    <div id="wf-result" class="result-msg"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Enabled</th><th>Name</th><th>Every</th>
+                                <th>Last run</th><th>Actions</th><th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="wf-list"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="section-header" style="margin-top:24px"><h2>Activity</h2></div>
+            <p class="sr-desc" style="margin:0 0 8px">
+                The last seven days. Refusals are kept with their reason: "why did my rule not
+                fire" is the question this answers.
+            </p>
+            <div class="card">
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr><th>When</th><th>Workflow</th><th>Torrent</th><th>Action</th><th>Outcome</th><th>Detail</th></tr>
+                        </thead>
+                        <tbody id="wf-activity"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
         </section>
 
         <section id="tab-trackers" class="tab-content">

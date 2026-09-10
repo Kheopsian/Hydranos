@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.16.1";
+pub const HYDRA_VERSION: &str = "4.17.1";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -9573,6 +9573,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/announce/mute", axum::routing::post(set_announce_mute))
         .route("/api/announce/passkeys", get(get_passkeys).post(set_announce_passkey))
         .route("/api/categories/:name", axum::routing::put(category_update).delete(category_delete))
+        // Workflows carry their own routes, so this file does not grow another
+        // six handlers. Merged before with_state so they share it.
+        .merge(crate::rulesapi::routes())
         .with_state(state)
         // gzip, as 3.x does on this stream. Hydration is ~250 MB of JSON at
         // 300k torrents: a browser will not sit through that uncompressed, and
