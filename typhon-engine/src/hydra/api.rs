@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.17.1";
+pub const HYDRA_VERSION: &str = "4.17.2";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -7080,14 +7080,32 @@ async fn reannounce_one(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
 
-    match find_selected(&state, &query, &info_hash) {
-        Some(_) => Json(serde_json::json!({"status": "ok"})).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "torrent not found or reannounce failed"})),
+    // Until 4.17.2 this route found the torrent and answered ok without
+    // announcing anything: there was no way to ask for an announce at all, so
+    // the button in the Trackers tab had never done a thing. The scheduler owns
+    // the queue, so asking is sending it a message.
+    let Some((engine_id, _torrent)) = find_selected(&state, &query, &info_hash) else {
+        return not_found();
+    };
+    let Some(engine) = state.engines.get(&engine_id) else {
+        return not_found();
+    };
+    let Some(bump) = engine.bump.get() else {
+        // Loaded but not on the network: no announce loop to jump.
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "engine is not announcing"})),
+        )
+            .into_response();
+    };
+    // try_send, never send: this runs on a request, and a scheduler too busy to
+    // read is a reason to refuse the click, not to hold the connection open.
+    match bump.try_send(info_hash.to_lowercase()) {
+        Ok(()) => Json(serde_json::json!({"status": "ok", "engine": engine_id})).into_response(),
+        Err(_) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "announce queue is busy, try again"})),
         )
             .into_response(),
     }

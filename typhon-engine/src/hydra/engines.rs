@@ -48,6 +48,14 @@ pub struct Engine {
     /// The fields below were right all along, but only `netprobe` read them,
     /// so the network tab showed a port the socket was not listening on.
     pub session: crate::config::Session,
+    /// Hands one torrent to the head of this engine's announce queue.
+    ///
+    /// Per engine, never a global: a `OnceLock` shared by the process is
+    /// exactly how the egress setting leaked between two engines, and a bump
+    /// sent to the wrong scheduler announces the wrong catalogue. Empty until
+    /// `connect` puts the engine on the network -- an offline engine has no
+    /// announce loop to jump.
+    pub bump: std::sync::OnceLock<tokio::sync::mpsc::Sender<String>>,
     /// Whether a peer listener is actually bound.
     ///
     /// Not "was asked to listen": an engine pinned to an interface that is not
@@ -111,6 +119,7 @@ impl EngineHost {
                 manager,
                 disk,
                 announce_cache: Default::default(),
+                bump: std::sync::OnceLock::new(),
             });
         }
 
@@ -158,7 +167,7 @@ impl EngineHost {
                     // every tracker forgets the whole catalogue within one
                     // announce interval.
                     let peer_id = engine_cfg.peer_id();
-                    crate::announce::runner::start(
+                    let bump = crate::announce::runner::start(
                         engine.manager.clone(),
                         crate::announce::policy_from_config(
                             config,
@@ -175,6 +184,8 @@ impl EngineHost {
                         },
                         engine.announce_cache.clone(),
                     );
+                    // Set once, when this engine joins the network.
+                    let _ = engine.bump.set(bump);
                     crate::workers::spawn_stagger_start(engine.manager.clone());
                     crate::workers::spawn_verify_throttle(engine.manager.clone());
                     if engine.role == "race" {
