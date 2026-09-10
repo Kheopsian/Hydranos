@@ -875,6 +875,7 @@ function _activateTabNow(name) {
     else if (name === "add") refreshCategoryOptions();
     else if (name === "changelog") loadChangelog();
     else if (name === "nodes") { updateNodes(); }
+    else if (name === "workflows") { updateWorkflows(); }
     else if (name === "trackers") { updateTrackers(); loadTrackerStats(); }
     else if (name === "logs") loadLogs();
     else if (name === "jobs") startJobsPolling();
@@ -8599,4 +8600,275 @@ async function netWgSave() {
     } catch (e) {
         out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workflows
+// ---------------------------------------------------------------------------
+//
+// Conditions in, actions out. The field catalogue is fetched from the daemon
+// rather than duplicated here: rules::FIELDS is the one source, so a field
+// cannot exist in the editor and be rejected on save.
+//
+// ⚠️ Every value below is interpolated through esc(), including inside
+// attributes. Torrent names and tracker messages are hostile input -- a table
+// column once grew to 1798px because a tracker error closed an attribute and
+// the rest was reinjected as markup.
+
+let _wfFields = null;
+let _wfEditing = null;
+
+async function loadWorkflowFields() {
+    if (_wfFields) return _wfFields;
+    const d = await api("/api/workflows/fields");
+    _wfFields = d.fields || [];
+    return _wfFields;
+}
+
+async function updateWorkflows() {
+    await loadWorkflowFields();
+    const body = document.getElementById("wf-list");
+    try {
+        const rows = await api("/api/workflows");
+        if (!rows.length) {
+            body.innerHTML = `<tr><td colspan="6" class="sr-desc">No workflow yet.</td></tr>`;
+        } else {
+            body.innerHTML = rows.map(w => {
+                const acts = (w.then || []).map(a => a.type).join(", ");
+                const last = w.last_run ? new Date(w.last_run * 1000).toLocaleString() : "never";
+                return `<tr>
+                    <td><input type="checkbox" ${w.enabled ? "checked" : ""}
+                        onchange="toggleWorkflow('${esc(w.id)}', this.checked)"></td>
+                    <td><strong>${esc(w.name)}</strong></td>
+                    <td>${esc(String(w.interval_secs))}s</td>
+                    <td>${esc(last)}</td>
+                    <td>${esc(acts)}</td>
+                    <td>
+                        <button class="btn-small" onclick="runWorkflow('${esc(w.id)}', true)">Dry-run</button>
+                        <button class="btn-small" onclick="runWorkflow('${esc(w.id)}', false)">Run now</button>
+                        <button class="btn-small" onclick="editWorkflow('${esc(w.id)}')">Edit</button>
+                        <button class="btn-small" onclick="deleteWorkflow('${esc(w.id)}')">Delete</button>
+                    </td>
+                </tr>`;
+            }).join("");
+        }
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`;
+    }
+    loadWorkflowActivity();
+}
+
+async function loadWorkflowActivity() {
+    const body = document.getElementById("wf-activity");
+    try {
+        const d = await api("/api/workflows/activity");
+        const rows = d.activity || [];
+        if (!rows.length) {
+            body.innerHTML = `<tr><td colspan="6" class="sr-desc">Nothing yet.</td></tr>`;
+            return;
+        }
+        body.innerHTML = rows.map(e => `<tr>
+            <td>${esc(new Date(e.at * 1000).toLocaleString())}</td>
+            <td>${esc(e.workflow_name)}</td>
+            <td title="${esc(e.torrent_name)}">${esc((e.torrent_name || "").substring(0, 48))}</td>
+            <td>${esc(e.action)}</td>
+            <td>${esc(e.outcome)}</td>
+            <td>${esc(e.detail)}</td>
+        </tr>`).join("");
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`;
+    }
+}
+
+function newWorkflow() {
+    _wfEditing = null;
+    document.getElementById("wf-name").value = "";
+    document.getElementById("wf-interval").value = 900;
+    document.getElementById("wf-cap").value = 500;
+    document.getElementById("wf-join").value = "all";
+    document.getElementById("wf-conds").innerHTML = "";
+    document.getElementById("wf-actions").innerHTML = "";
+    document.getElementById("wf-result").textContent = "";
+    addCondRow();
+    addActionRow();
+    document.getElementById("wf-form").style.display = "";
+}
+
+function hideWorkflowForm() {
+    document.getElementById("wf-form").style.display = "none";
+}
+
+function addCondRow(cond) {
+    const wrap = document.getElementById("wf-conds");
+    const i = wrap.children.length;
+    const opts = _wfFields.map(f =>
+        `<option value="${esc(f.name)}" ${cond && cond.field === f.name ? "selected" : ""}>${esc(f.name)}</option>`
+    ).join("");
+    const div = document.createElement("div");
+    div.className = "cat-form-grid";
+    div.style.marginBottom = "6px";
+    div.innerHTML = `
+        <select class="wf-c-field" onchange="syncCondOps(${i})">${opts}</select>
+        <select class="wf-c-op"></select>
+        <input type="text" class="wf-c-val" placeholder="value"
+               value="${esc(cond ? cond.value : "")}" autocomplete="off">
+        <span class="sr-desc wf-c-hint"></span>
+        <button class="btn-cancel" onclick="this.parentElement.remove()">x</button>`;
+    wrap.appendChild(div);
+    if (cond) div.querySelector(".wf-c-op").dataset.want = cond.op;
+    syncCondOps(i);
+}
+
+// The operators offered follow the field's kind, so a duration never gets
+// "contains" and a tag never gets ">=".
+function syncCondOps(i) {
+    const row = document.getElementById("wf-conds").children[i];
+    if (!row) return;
+    const name = row.querySelector(".wf-c-field").value;
+    const f = _wfFields.find(x => x.name === name);
+    if (!f) return;
+    const sel = row.querySelector(".wf-c-op");
+    const want = sel.dataset.want || sel.value;
+    sel.innerHTML = f.operators.map(o =>
+        `<option value="${esc(o)}" ${o === want ? "selected" : ""}>${esc(o)}</option>`
+    ).join("");
+    delete sel.dataset.want;
+    row.querySelector(".wf-c-hint").textContent = f.hint || "";
+}
+
+const WF_ACTIONS = ["pause", "resume", "set_category", "add_tags", "remove_tags", "delete"];
+
+function addActionRow(act) {
+    const wrap = document.getElementById("wf-actions");
+    const div = document.createElement("div");
+    div.className = "cat-form-grid";
+    div.style.marginBottom = "6px";
+    const opts = WF_ACTIONS.map(a =>
+        `<option value="${esc(a)}" ${act && act.type === a ? "selected" : ""}>${esc(a)}</option>`
+    ).join("");
+    let arg = "";
+    if (act) {
+        if (act.to) arg = act.to;
+        else if (act.tags) arg = act.tags.join(",");
+        else if (act.with_files) arg = "with_files";
+    }
+    div.innerHTML = `
+        <select class="wf-a-type">${opts}</select>
+        <input type="text" class="wf-a-arg" placeholder="category / tags / with_files"
+               value="${esc(arg)}" autocomplete="off">
+        <span class="sr-desc">delete must be the only action</span>
+        <button class="btn-cancel" onclick="this.parentElement.remove()">x</button>`;
+    wrap.appendChild(div);
+}
+
+function _wfCollect() {
+    const conds = [...document.getElementById("wf-conds").children].map(r => ({
+        kind: "cond",
+        field: r.querySelector(".wf-c-field").value,
+        op: r.querySelector(".wf-c-op").value,
+        value: r.querySelector(".wf-c-val").value,
+    }));
+    const then = [...document.getElementById("wf-actions").children].map(r => {
+        const type = r.querySelector(".wf-a-type").value;
+        const arg = r.querySelector(".wf-a-arg").value.trim();
+        if (type === "set_category") return { type, to: arg };
+        if (type === "add_tags" || type === "remove_tags") {
+            return { type, tags: arg.split(",").map(s => s.trim()).filter(Boolean) };
+        }
+        if (type === "delete") return { type, with_files: arg === "with_files" };
+        return { type };
+    });
+    const join = document.getElementById("wf-join").value;
+    return {
+        id: _wfEditing || "",
+        name: document.getElementById("wf-name").value.trim(),
+        enabled: false,
+        interval_secs: parseInt(document.getElementById("wf-interval").value, 10) || 900,
+        cap: parseInt(document.getElementById("wf-cap").value, 10) || 500,
+        when: { kind: join, of: conds },
+        then,
+    };
+}
+
+// Preview runs the same evaluate() the pass runs, so what it shows is what
+// would happen -- not a second implementation that could disagree.
+async function previewWorkflow() {
+    const out = document.getElementById("wf-result");
+    out.textContent = "Checking...";
+    try {
+        const d = await api("/api/workflows/preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(_wfCollect()),
+        });
+        const names = (d.sample || []).slice(0, 10).map(s => s.name).join(", ");
+        let msg = `${d.matched} matched, ${d.would_apply} would change, ${d.skipped} already as asked`;
+        if (d.capped) msg += " (capped)";
+        if (d.freed_bytes > 0) msg += ` -- would free ${(d.freed_bytes / 1e9).toFixed(1)} GB`;
+        out.textContent = msg + (names ? ` :: ${names}` : "");
+    } catch (e) {
+        out.textContent = e.message;
+    }
+}
+
+async function saveWorkflow() {
+    const out = document.getElementById("wf-result");
+    try {
+        await api("/api/workflows", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(_wfCollect()),
+        });
+        hideWorkflowForm();
+        updateWorkflows();
+    } catch (e) {
+        out.textContent = e.message;
+    }
+}
+
+async function editWorkflow(id) {
+    const rows = await api("/api/workflows");
+    const w = rows.find(x => x.id === id);
+    if (!w) return;
+    newWorkflow();
+    _wfEditing = id;
+    document.getElementById("wf-name").value = w.name;
+    document.getElementById("wf-interval").value = w.interval_secs;
+    document.getElementById("wf-cap").value = w.cap || 500;
+    const when = w.when || {};
+    document.getElementById("wf-join").value = when.kind === "any" ? "any" : "all";
+    document.getElementById("wf-conds").innerHTML = "";
+    (when.of || []).forEach(c => addCondRow(c));
+    document.getElementById("wf-actions").innerHTML = "";
+    (w.then || []).forEach(a => addActionRow(a));
+}
+
+async function toggleWorkflow(id, enabled) {
+    const rows = await api("/api/workflows");
+    const w = rows.find(x => x.id === id);
+    if (!w) return;
+    w.enabled = enabled;
+    await api("/api/workflows", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(w),
+    });
+    updateWorkflows();
+}
+
+async function runWorkflow(id, dry) {
+    try {
+        const d = await api(`/api/workflows/${encodeURIComponent(id)}/run${dry ? "?dry=1" : ""}`,
+                            { method: "POST" });
+        alert(JSON.stringify(d));
+        updateWorkflows();
+    } catch (e) {
+        alert(e.message);
+    }
+}
+
+async function deleteWorkflow(id) {
+    if (!confirm("Delete this workflow?")) return;
+    await api(`/api/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
+    updateWorkflows();
 }

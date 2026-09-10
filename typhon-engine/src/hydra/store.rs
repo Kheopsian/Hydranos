@@ -67,6 +67,57 @@ pub struct Node {
     pub added_at: i64,
 }
 
+/// The store's half of a torrent's facts, for a workflow pass.
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowFacts {
+    pub category: String,
+    pub save_path: String,
+    pub added_time: f64,
+    pub completed_time: f64,
+    pub seeding_time: i64,
+    pub tags: Vec<String>,
+    pub paused: bool,
+}
+
+/// A workflow as the database holds it: metadata in columns, rule in JSON.
+#[derive(Debug, Clone, Default)]
+pub struct StoredWorkflow {
+    pub id: String,
+    pub name: String,
+    /// The serialised `rules::Workflow`. Opaque here on purpose -- the store
+    /// does not need to understand a condition tree to keep one.
+    pub body: String,
+    pub enabled: bool,
+    pub position: i64,
+    pub interval_secs: i64,
+    pub last_run: i64,
+}
+
+/// One line of what a workflow did, or refused to do.
+///
+/// The failures matter more than the successes: "why did my rule not fire" is
+/// the question this table exists to answer, so a refusal is recorded with its
+/// reason rather than dropped.
+#[derive(Debug, Clone, Default)]
+pub struct ActivityEntry {
+    pub at: i64,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub info_hash: String,
+    pub torrent_name: String,
+    pub action: String,
+    /// `applied`, `skipped`, `failed`, `preview`, or `dry_run_no_match`.
+    pub outcome: String,
+    pub detail: String,
+}
+
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// The frozen schema, as the production database has it.
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS torrents (
@@ -207,6 +258,7 @@ impl Store {
         self.ensure_cover_index()?;
         self.ensure_nodes_table()?;
         self.ensure_enrol_table()?;
+        self.ensure_workflows_table()?;
         // After the tables exist, and before anything reads them.
         self.migrate_composite_key()?;
         Ok(())
@@ -261,6 +313,183 @@ impl Store {
                  added_at INTEGER NOT NULL DEFAULT 0);",
         )?;
         Ok(())
+    }
+
+    /// Workflows, and the log of what they did.
+    ///
+    /// The rule BODY is one opaque JSON column. Only what the daemon has to sort
+    /// or filter on gets a column of its own -- `enabled`, `position`,
+    /// `interval_secs`, `last_run`. Modelling a condition tree in SQL would buy
+    /// nothing and cost a migration every time an operator is added.
+    ///
+    /// Additive like the nodes table, so a rollback to a build without
+    /// workflows reads the same database and simply never looks here.
+    fn ensure_workflows_table(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workflows (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 body TEXT NOT NULL,
+                 enabled INTEGER NOT NULL DEFAULT 0,
+                 position INTEGER NOT NULL DEFAULT 0,
+                 interval_secs INTEGER NOT NULL DEFAULT 900,
+                 last_run INTEGER NOT NULL DEFAULT 0,
+                 created_at INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS workflow_activity (
+                 at INTEGER NOT NULL,
+                 workflow_id TEXT NOT NULL DEFAULT '',
+                 workflow_name TEXT NOT NULL DEFAULT '',
+                 info_hash TEXT NOT NULL DEFAULT '',
+                 torrent_name TEXT NOT NULL DEFAULT '',
+                 action TEXT NOT NULL DEFAULT '',
+                 outcome TEXT NOT NULL DEFAULT '',
+                 detail TEXT NOT NULL DEFAULT '');
+             CREATE INDEX IF NOT EXISTS idx_workflow_activity_at
+                 ON workflow_activity(at DESC);",
+        )?;
+        Ok(())
+    }
+
+    /// Everything the store knows about one session's torrents, for a pass.
+    ///
+    /// Every column named here is in `idx_torrents_cover`, so this is an
+    /// index-only scan and never opens the 4.7 GB table -- the same reason the
+    /// listing is half a second instead of twenty-one.
+    ///
+    /// Keyed by info hash so the caller can join it to the engine's own view
+    /// without a second query per torrent.
+    pub fn workflow_facts(
+        &self,
+        session: &str,
+    ) -> anyhow::Result<std::collections::HashMap<String, WorkflowFacts>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT info_hash, category, save_path, added_time, completed_time,
+                    seeding_time, tags, paused
+             FROM torrents WHERE session = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                WorkflowFacts {
+                    category: r.get(1)?,
+                    save_path: r.get(2)?,
+                    added_time: r.get(3)?,
+                    completed_time: r.get(4)?,
+                    seeding_time: r.get(5)?,
+                    tags: split_tags(&r.get::<_, String>(6)?),
+                    paused: r.get::<_, i64>(7)? != 0,
+                },
+            ))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn workflows(&self) -> anyhow::Result<Vec<StoredWorkflow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, body, enabled, position, interval_secs, last_run
+             FROM workflows ORDER BY position, created_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredWorkflow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                body: r.get(2)?,
+                enabled: r.get::<_, i64>(3)? != 0,
+                position: r.get(4)?,
+                interval_secs: r.get(5)?,
+                last_run: r.get(6)?,
+            })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn workflow(&self, id: &str) -> anyhow::Result<Option<StoredWorkflow>> {
+        Ok(self.workflows()?.into_iter().find(|w| w.id == id))
+    }
+
+    pub fn put_workflow(&self, w: &StoredWorkflow) -> anyhow::Result<()> {
+        let now = now_secs();
+        self.conn.execute(
+            "INSERT INTO workflows (id, name, body, enabled, position, interval_secs, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = ?2, body = ?3, enabled = ?4, position = ?5, interval_secs = ?6",
+            rusqlite::params![
+                w.id,
+                w.name,
+                w.body,
+                i64::from(w.enabled),
+                w.position,
+                w.interval_secs,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_workflow(&self, id: &str) -> anyhow::Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM workflows WHERE id = ?1", rusqlite::params![id])?;
+        Ok(n > 0)
+    }
+
+    /// Stamp a workflow as having run, so its own interval is measured from
+    /// when it last ran and not from when the daemon started.
+    pub fn mark_workflow_run(&self, id: &str, at: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE workflows SET last_run = ?2 WHERE id = ?1",
+            rusqlite::params![id, at],
+        )?;
+        Ok(())
+    }
+
+    pub fn log_workflow_activity(&self, e: &ActivityEntry) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO workflow_activity
+                 (at, workflow_id, workflow_name, info_hash, torrent_name, action, outcome, detail)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![
+                e.at,
+                e.workflow_id,
+                e.workflow_name,
+                e.info_hash,
+                e.torrent_name,
+                e.action,
+                e.outcome,
+                e.detail
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn workflow_activity(&self, limit: i64) -> anyhow::Result<Vec<ActivityEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT at, workflow_id, workflow_name, info_hash, torrent_name, action, outcome, detail
+             FROM workflow_activity ORDER BY at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], |r| {
+            Ok(ActivityEntry {
+                at: r.get(0)?,
+                workflow_id: r.get(1)?,
+                workflow_name: r.get(2)?,
+                info_hash: r.get(3)?,
+                torrent_name: r.get(4)?,
+                action: r.get(5)?,
+                outcome: r.get(6)?,
+                detail: r.get(7)?,
+            })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Seven days, the window qui keeps. An unbounded log of every action on a
+    /// 300k catalogue is a database that grows without anybody deciding to.
+    pub fn prune_workflow_activity(&self, older_than: i64) -> anyhow::Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM workflow_activity WHERE at < ?1",
+            rusqlite::params![older_than],
+        )?)
     }
 
     /// The .torrent itself, as it was added.

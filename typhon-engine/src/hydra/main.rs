@@ -49,6 +49,9 @@ mod portfwd;
 mod raceevents;
 mod reconnect;
 mod config;
+mod rules;
+mod rulesrun;
+mod rulesapi;
 
 use config::Config;
 
@@ -291,6 +294,11 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+
+    // The workflow timer, before the router takes ownership of the state.
+    // It waits two minutes of its own so it never fires against a catalogue
+    // that is still loading.
+    rulesapi::spawn(state.clone());
 
     let app = api::router(state);
 

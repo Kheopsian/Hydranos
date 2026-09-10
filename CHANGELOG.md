@@ -17,6 +17,48 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.17.1 -- workflows
+
+The automation people otherwise write as a cron script, in the app: conditions
+in, actions out, checked on a timer. File a torrent under another category once
+it finishes; seed for two days then stop.
+
+Conditions form a tree of AND/OR groups rather than a flat list. A flat list
+forces the same rule to be written three times the first moment somebody wants
+"tracker A or tracker B", which is the shape qui settled on and the reason.
+
+- **29 fields**, each with the operators its kind allows -- a duration is never
+  offered "contains", a tag never ">=". The catalogue is one constant the
+  compiler validates against and the editor builds its dropdowns from, so a
+  field cannot exist in one and be missing from the other.
+- **Preview before enable.** A new workflow starts disabled, and preview runs
+  the same evaluation the pass runs. A preview computed separately would be a
+  preview of something else.
+- **Convergence**: a torrent already in the state a rule asks for is matched but
+  not acted on, so a workflow settles instead of rewriting the same tag every
+  fifteen minutes.
+- **A cap per pass**, reported when it bites, so a mistyped rule cannot touch a
+  whole catalogue in one go and the operator can see why only some moved.
+- **Its own interval per workflow**, measured from its own last run rather than
+  from startup, with a sixty-second floor.
+- **Seven days of activity**, refusals included with their reason.
+- `delete` may not share a workflow with another action.
+
+`seeding_time` is deliberately absent from the field list. The column exists in
+the store and 4.x never writes it -- the 3.x seedtime counter was not ported --
+so it reads zero for every torrent. Offering it would hand out a condition that
+looks right and silently never fires. "Seed for two days then stop" is
+`completed_age >= 2d`, which is a real measurement.
+
+Conditions compile once into closures. A pass looks at every torrent, and
+parsing "500GiB" per torrent per rule is the difference between a background
+task and a stall. `500GB` and `500GiB` are different numbers and neither is
+reinterpreted.
+
+A duration that has not happened -- the completion age of a torrent that never
+finished -- is NaN, not a sentinel. Every finite stand-in satisfies "completed
+less than a day ago", which would match the entire unfinished catalogue.
+
 ## v4.16.1 -- pause stops the transfer, not just the row
 
 Pausing a torrent wrote a column and nothing else. The transfer carried on:
