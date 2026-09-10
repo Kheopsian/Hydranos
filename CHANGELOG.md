@@ -17,6 +17,38 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.20.0 -- docker stop actually stops
+
+`docker stop -t 300 hydra-go` was in every deployment script in this repository
+and it had never once been graceful. The daemon is PID 1 in its container, and
+PID 1 does not get the default disposition of SIGTERM: with no handler
+installed, the kernel **discards** the signal. So the stop sent a SIGTERM that
+nothing received, waited out the full timeout while the daemon carried on
+accepting peers, and then SIGKILLed a 300k-torrent instance. The script printed
+"stopped" and moved on.
+
+It was visible the whole time and nothing looked wrong: `docker stop` exits 0
+whether it drained or shot the process. What gave it away was the log -- new
+inbound peers, four minutes after the stop began.
+
+3.x saved on the way out (`src/main.rs` still does). The port to a single Rust
+process dropped that path along with the binary that held it, so from 4.0.0
+every deploy threw away up to five minutes of resume state -- piece progress and
+byte counters, written by the five-minute sweep -- and the next start re-checked
+what it lost.
+
+- **SIGTERM and SIGINT are handled**, through axum's `with_graceful_shutdown`:
+  the listener drains, then every engine writes its resume state.
+- **Bounded, and honest about it.** `HYDRA_STOP_TIMEOUT` (default 120s) is a
+  budget, not a guarantee; the alternative to a partial sweep is the SIGKILL
+  that follows, so a sweep cut short is still strictly better than none. It
+  logs how long it took and warns when it overran.
+- **One thread per engine**, so a slow disk on one does not spend another's
+  share of the budget.
+- A handler that fails to install leaves its branch pending rather than
+  resolving, so a failed SIGINT registration cannot fake a shutdown or mask
+  SIGTERM.
+
 ## v4.19.1 -- the light theme, actually light
 
 Driving the new panel in a real browser rather than trusting the CSS: Daylight
