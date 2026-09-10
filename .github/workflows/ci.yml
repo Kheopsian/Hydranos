@@ -53,6 +53,30 @@ jobs:
       - name: Test
         run: go test -mod=vendor -race ./...
 
+  # The version constant, the changelog and the tags, held to the same story.
+  #
+  # Cheap on purpose -- no toolchain, no cache, seconds -- because it guards
+  # the three mistakes that actually shipped: a release with no changelog
+  # entry, a PR numbering itself against a main that had moved on, and a peer
+  # fingerprint that was not eight bytes. See .github/scripts/version_guard.py.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tags ARE the check: rule 2 compares this branch's version
+          # against every version already released. A shallow clone fetches
+          # none of them, and the rule would pass by having nothing to compare.
+          fetch-depth: 0
+          fetch-tags: true
+      # The checker is checked first. A guard that silently stopped matching
+      # its own regexes would go green on anything, which is worse than not
+      # having it: this asserts it still rejects each input it must reject.
+      - name: Self-test the guard
+        run: python3 .github/scripts/version_guard.py --self-test
+      - name: Version, changelog and tags agree
+        run: python3 .github/scripts/version_guard.py
+
   # entrypoint.sh is the first thing every container runs and it is not covered
   # by any Go test: a syntax error in it turns into a container that exits
   # before hydra is even reached.
