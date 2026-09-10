@@ -187,6 +187,42 @@ async fn main() -> anyhow::Result<()> {
     let shared_store = Arc::new(std::sync::Mutex::new(store));
     workers::spawn_store_reconcile(engine_host.clone(), shared_store.clone());
 
+    // Put the operator's pauses back into the engines, then start the manager
+    // that must not undo them.
+    //
+    // Both need the store, which is why neither happens where the engines are
+    // built: the catalogue comes up from each engine's resume file, which does
+    // not carry the intent. Without this a restart silently resumed everything
+    // the operator had stopped.
+    //
+    // `stop_torrent` rather than a flag, because the stagger start may already
+    // have started some of them -- it runs from a task spawned moments ago. It
+    // is idempotent and self-correcting either way.
+    for engine in engine_host.engines() {
+        let hashes = match shared_store.lock() {
+            Ok(store) => store.paused_hashes(&engine.id).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let mut restored = 0usize;
+        for hash in &hashes {
+            if let Some(info_hash) = store::hex20(hash) {
+                if engine.manager.stop_torrent(&info_hash).is_ok() {
+                    restored += 1;
+                }
+            }
+        }
+        if restored > 0 {
+            tracing::info!(engine = %engine.id, restored, "pause: restored user intent");
+        }
+        workers::spawn_download_slots(
+            engine.manager.clone(),
+            engine.announce_cache.clone(),
+            engine.session.active_downloads,
+            shared_store.clone(),
+            engine.id.clone(),
+        );
+    }
+
     // The benchmark graphs read what this writes and nothing else does: with no
     // sampler the whole tab is empty while the node is at full throughput.
     if let Some(shared) = bench.clone() {

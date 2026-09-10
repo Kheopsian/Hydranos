@@ -297,6 +297,12 @@ pub async fn run(
                                     || length > 16384
                                     || we_choke
                                     || torrent.serving_suspended.load(Ordering::Relaxed)
+                                    // A paused torrent serves nothing either.
+                                    // Same gap as the request side: the flag
+                                    // was set and never read here, so a paused
+                                    // seed kept uploading to the peers it was
+                                    // already connected to.
+                                    || torrent.is_paused.load(Ordering::Relaxed)
                                 {
                                     if fast_ext {
                                         framed

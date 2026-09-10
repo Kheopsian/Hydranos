@@ -57,7 +57,13 @@ pub fn spawn_verify_throttle(manager: Arc<TorrentManager>) {
 /// connected peers -- which is what the engine itself knows -- made the
 /// priority effectively random: a torrent nobody is talking to yet reports
 /// none, and those are exactly the ones asking for a slot.
-pub fn spawn_download_slots(manager: Arc<TorrentManager>, cache: Arc<Cache>, max_slots: i64) {
+pub fn spawn_download_slots(
+    manager: Arc<TorrentManager>,
+    cache: Arc<Cache>,
+    max_slots: i64,
+    store: Arc<std::sync::Mutex<crate::store::Store>>,
+    engine_id: String,
+) {
     if max_slots <= 0 {
         tracing::info!("download slots: no ceiling configured, every torrent may download");
         return;
@@ -67,19 +73,47 @@ pub fn spawn_download_slots(manager: Arc<TorrentManager>, cache: Arc<Cache>, max
         tracing::info!(max = max_slots, "download slot manager started");
         loop {
             tokio::time::sleep(DOWNLOAD_SLOT_INTERVAL).await;
-            enforce_download_slots(&manager, &cache, max_slots as usize);
+            // Read once per pass, not once per torrent: this is a ceiling of a
+            // few dozen slots against a catalogue of hundreds of thousands.
+            let paused: std::collections::HashSet<String> = match store.lock() {
+                Ok(store) => store
+                    .paused_hashes(&engine_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+                Err(_) => Default::default(),
+            };
+            enforce_download_slots(&manager, &cache, max_slots as usize, &paused);
         }
     });
 }
 
 /// One pass: start the best candidates, stop the excess.
-fn enforce_download_slots(manager: &Arc<TorrentManager>, cache: &Cache, max_slots: usize) {
+///
+/// A torrent the operator paused is not a candidate and not an excess: it is
+/// invisible here. It frees its slot for something that will actually finish,
+/// and comes back into the queue when the operator resumes it -- which is why
+/// a resume can show "queued" before it shows "downloading".
+///
+/// Skipping it is not a nicety. This loop used to call `start_torrent` on any
+/// incomplete torrent inside the ceiling without asking whose decision stopped
+/// it, so it undid every manual pause within one interval, silently.
+fn enforce_download_slots(
+    manager: &Arc<TorrentManager>,
+    cache: &Cache,
+    max_slots: usize,
+    user_paused: &std::collections::HashSet<String>,
+) {
     let mut incomplete: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, i64, bool)> = manager
         .all()
         .into_iter()
         .filter(|t| {
             let status = t.status.load(Ordering::Relaxed);
             status != TorrentStatus::Seeding as u8 && status != TorrentStatus::Error as u8
+        })
+        .filter(|t| {
+            let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
+            !user_paused.contains(&hash)
         })
         .filter(|t| {
             t.total_downloaded.load(Ordering::Relaxed) < t.meta.total_size

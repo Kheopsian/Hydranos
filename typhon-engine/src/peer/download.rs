@@ -132,6 +132,17 @@ impl DownloadState {
     /// piece) — otherwise only the first 16 blocks were ever requested and
     /// pieces never completed.
     pub fn get_requests(&mut self) -> Vec<(u32, u32, u32)> {
+        // A paused torrent asks for nothing. This is the single choke point
+        // for the download side: `stop_torrent` sets the flag and untracks the
+        // DHT, but it does not tear down sessions that are already connected,
+        // and nothing else on this path consulted the flag -- so a paused
+        // torrent kept requesting blocks from every peer it already had and
+        // went on downloading at full speed while the interface said stopped.
+        // Blocks already in flight still arrive; the pipeline is bounded, so
+        // that is a handful of them and then silence.
+        if self.torrent.is_paused.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
         if !self.is_downloading() || self.peer_choking {
             return Vec::new();
         }
