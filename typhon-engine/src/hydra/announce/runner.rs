@@ -112,13 +112,17 @@ fn hex(hash: &[u8; 20]) -> String {
 
 /// Start announcing this engine's torrents. Returns immediately; the scheduler
 /// and its workers outlive the call.
+/// Returns the handle the API uses to jump the queue for one torrent.
+///
+/// The scheduler owns its heap and never shares it; a bump is a message like
+/// any other, which is why this is a channel and not a lock.
 pub fn start(
     manager: Arc<TorrentManager>,
     policy: Policy,
     port: u16,
     mode: Mode,
     cache: Arc<Cache>,
-) {
+) -> tokio::sync::mpsc::Sender<String> {
     let catalogue = Arc::new(EngineCatalogue { manager: manager.clone() });
     let policy = Arc::new(policy);
     // One breaker for the engine, not one per torrent: an outage belongs to the
@@ -133,9 +137,13 @@ pub fn start(
         async move { announce_one(&manager, &policy, &breaker, &cache, port, mode, job).await }
     });
 
+    // Small on purpose: this carries hand-pressed buttons, not traffic. A full
+    // queue means something is looping and must be refused, not buffered.
+    let (bump_tx, bump_rx) = tokio::sync::mpsc::channel::<String>(64);
     tokio::spawn(async move {
-        scheduler::run(catalogue, announce).await;
+        scheduler::run(catalogue, announce, bump_rx).await;
     });
+    bump_tx
 }
 
 /// One torrent, every tracker it carries, in tier order.

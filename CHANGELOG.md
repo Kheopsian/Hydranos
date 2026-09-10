@@ -17,6 +17,38 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.17.2 -- the reannounce button announces
+
+Pressing Reannounce did nothing, and said it had worked. `reannounce_one`
+looked the torrent up, found it, and returned `{"status": "ok"}` without asking
+anyone to announce anything -- there was no way to request an announce at all,
+so the button had never worked since the Rust port. Every report of "the
+tracker is not updating" had no lever to pull.
+
+- **The scheduler takes bumps.** It owns its heap of deadlines and never shares
+  it, so a bump is a message on a channel like everything else: the hash is
+  pushed with a deadline of now and comes out of the heap first.
+- **A bump carries an epoch, and a stale deadline is dropped.** The torrent
+  already had a deadline sitting in the heap; pushing a second one without a way
+  to tell them apart meant the old one fired later and announced a second time.
+  A `BinaryHeap` cannot remove from the middle, so the superseded deadline is
+  discarded when it surfaces.
+- **A torrent the scheduler has not admitted yet can still be bumped.** The
+  catalogue joins 500 per ten seconds, so a fresh torrent in a 300k install can
+  be over an hour from its turn, and "wait an hour" is not an answer to someone
+  pressing the button.
+- **One bump per torrent per minute.** The button jumps the queue; it must not
+  become a hammer. A private tracker notices an account announcing the same hash
+  ten times a minute, and that is the only harm this could do. Same floor the
+  scheduler already applies between two announces.
+- **The channel is per engine, never a global.** A `OnceLock` shared by the
+  process is exactly how the egress setting leaked between two engines, and a
+  bump delivered to the wrong scheduler announces the wrong catalogue.
+
+The route now answers 404 for a hash nobody holds, 503 for an engine that is
+loaded but not on the network, and 429 when the scheduler is too busy to read
+its channel -- rather than "ok" for all four.
+
 ## v4.17.1 -- workflows
 
 The automation people otherwise write as a cron script, in the app: conditions

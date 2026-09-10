@@ -43,12 +43,31 @@ const BOOT_DELAY: Duration = Duration::from_secs(5);
 /// announces in a burst, which is how a tracker answers 429 and how an account
 /// gets noticed.
 const MAX_NEW_PER_CYCLE: usize = 500;
+/// Floor between two manual reannounces of the same torrent.
+///
+/// The button exists to jump the queue, not to become a hammer: a private
+/// tracker notices an account that announces the same hash ten times a minute,
+/// and that is the one cost this feature could inflict. Same value as
+/// `MIN_INTERVAL` on purpose -- the scheduler already treats a minute as the
+/// shortest honest gap between two announces of one torrent.
+const BUMP_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// What one torrent owes the scheduler.
 struct State {
     info_hash: String,
     first_announce: bool,
     in_flight: bool,
+    /// Bumped every time this torrent is rescheduled out of band.
+    ///
+    /// A manual reannounce pushes a second deadline for a hash that already has
+    /// one in the heap. Without a way to tell them apart the old deadline fires
+    /// later and announces a second time, so the button would cost two
+    /// announces instead of one. Deadlines carry the epoch they were made with
+    /// and a stale one is dropped on the way out -- lazy deletion, because a
+    /// BinaryHeap cannot remove from the middle.
+    epoch: u64,
+    /// When this torrent was last bumped by hand, for `BUMP_COOLDOWN`.
+    last_bump: Option<Instant>,
 }
 
 /// A deadline in the heap. Ordered by time only; the hash breaks ties so the
@@ -57,11 +76,15 @@ struct State {
 struct Deadline {
     at: Instant,
     info_hash: String,
+    epoch: u64,
 }
 
 impl Ord for Deadline {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.at.cmp(&other.at).then_with(|| self.info_hash.cmp(&other.info_hash))
+        self.at
+            .cmp(&other.at)
+            .then_with(|| self.info_hash.cmp(&other.info_hash))
+            .then_with(|| self.epoch.cmp(&other.epoch))
     }
 }
 
@@ -97,7 +120,11 @@ pub trait Catalogue: Send + Sync + 'static {
 /// `announce` is called on a worker for one torrent, and returns when to come
 /// back. It is given no lock and no shared state on purpose: everything the
 /// scheduler owns stays on this task.
-pub async fn run<C, F, Fut>(catalogue: Arc<C>, announce: Arc<F>)
+pub async fn run<C, F, Fut>(
+    catalogue: Arc<C>,
+    announce: Arc<F>,
+    mut bump_rx: mpsc::Receiver<String>,
+)
 where
     C: Catalogue,
     F: Fn(Job) -> Fut + Send + Sync + 'static,
@@ -157,6 +184,17 @@ where
                         heap.pop();
                         continue;
                     };
+                    // A deadline made before a bump: its replacement is already
+                    // in the heap, so firing this one would announce twice.
+                    if d.epoch != state.epoch {
+                        heap.pop();
+                        continue;
+                    }
+                    // A worker still holds it. Its Outcome will reschedule.
+                    if state.in_flight {
+                        heap.pop();
+                        continue;
+                    }
                     let job = Job { info_hash: d.info_hash.clone(), first: state.first_announce };
                     // try_send, not send: a full queue means the workers are
                     // behind, and blocking here would stop the scheduler from
@@ -188,7 +226,11 @@ where
                 heap.push(Reverse(Deadline {
                     at: Instant::now() + wait,
                     info_hash: outcome.info_hash,
+                    epoch: state.epoch,
                 }));
+            }
+            Some(hash) = bump_rx.recv() => {
+                bump_now(&mut states, &mut heap, hash);
             }
             _ = reconcile.tick() => {
                 reconcile_now(&catalogue, &mut states, &mut heap);
@@ -220,16 +262,61 @@ fn reconcile_now<C: Catalogue>(
         added += 1;
         states.insert(
             hash.clone(),
-            State { info_hash: hash.clone(), first_announce: true, in_flight: false },
+            State {
+                info_hash: hash.clone(),
+                first_announce: true,
+                in_flight: false,
+                epoch: 0,
+                last_bump: None,
+            },
         );
         // A torrent that has just appeared announces now: it is either newly
         // added or the engine has just started, and both want the tracker told
         // rather than a thirty-minute wait.
-        heap.push(Reverse(Deadline { at: Instant::now(), info_hash: hash }));
+        heap.push(Reverse(Deadline { at: Instant::now(), info_hash: hash, epoch: 0 }));
     }
     // A torrent in flight is left alone: its worker still holds it, and its
     // result will remove it.
     states.retain(|h, s| seen.contains(h) || s.in_flight);
+}
+
+/// Move one torrent to the head of the queue, out of band.
+///
+/// Returns whether it was actually scheduled: a caller too soon after the last
+/// bump, or one whose torrent is already being announced, is told no rather
+/// than silently dropped.
+///
+/// A torrent the scheduler has never seen is admitted here and now, deliberately
+/// outside `MAX_NEW_PER_CYCLE`: that quota exists to stop a whole catalogue
+/// arriving at once, and one person pressing one button is not a herd.
+fn bump_now(
+    states: &mut HashMap<String, State>,
+    heap: &mut BinaryHeap<Reverse<Deadline>>,
+    hash: String,
+) -> bool {
+    let now = Instant::now();
+    let state = states.entry(hash.clone()).or_insert_with(|| State {
+        info_hash: hash.clone(),
+        first_announce: true,
+        in_flight: false,
+        epoch: 0,
+        last_bump: None,
+    });
+    if let Some(last) = state.last_bump {
+        if now.duration_since(last) < BUMP_COOLDOWN {
+            return false;
+        }
+    }
+    // Already with a worker: the announce the caller wants is in progress.
+    if state.in_flight {
+        return false;
+    }
+    // The epoch moves first: every deadline made before this one is now stale
+    // and will be dropped when it surfaces.
+    state.epoch += 1;
+    state.last_bump = Some(now);
+    heap.push(Reverse(Deadline { at: now, info_hash: hash, epoch: state.epoch }));
+    true
 }
 
 #[cfg(test)]
@@ -240,9 +327,9 @@ mod tests {
     fn deadlines_come_out_earliest_first() {
         let mut heap = BinaryHeap::new();
         let now = Instant::now();
-        heap.push(Reverse(Deadline { at: now + Duration::from_secs(30), info_hash: "c".into() }));
-        heap.push(Reverse(Deadline { at: now + Duration::from_secs(10), info_hash: "a".into() }));
-        heap.push(Reverse(Deadline { at: now + Duration::from_secs(20), info_hash: "b".into() }));
+        heap.push(Reverse(Deadline { at: now + Duration::from_secs(30), info_hash: "c".into(), epoch: 0 }));
+        heap.push(Reverse(Deadline { at: now + Duration::from_secs(10), info_hash: "a".into(), epoch: 0 }));
+        heap.push(Reverse(Deadline { at: now + Duration::from_secs(20), info_hash: "b".into(), epoch: 0 }));
         let order: Vec<String> =
             std::iter::from_fn(|| heap.pop().map(|Reverse(d)| d.info_hash)).collect();
         assert_eq!(order, ["a", "b", "c"], "a min-heap, not a max-heap");
@@ -253,8 +340,8 @@ mod tests {
         // Without the tie-break the ordering would be by insertion luck, and a
         // heap that is not a total order can loop on peek/pop.
         let now = Instant::now();
-        let a = Deadline { at: now, info_hash: "aaa".into() };
-        let b = Deadline { at: now, info_hash: "bbb".into() };
+        let a = Deadline { at: now, info_hash: "aaa".into(), epoch: 0 };
+        let b = Deadline { at: now, info_hash: "bbb".into(), epoch: 0 };
         assert!(a < b);
     }
 
@@ -272,6 +359,80 @@ mod tests {
         let cycles = 300_000_f64 / MAX_NEW_PER_CYCLE as f64;
         let minutes = cycles * RECONCILE.as_secs_f64() / 60.0;
         assert!(minutes < 120.0, "{minutes} minutes to admit the catalogue is too slow");
+    }
+
+    fn fresh(hash: &str) -> State {
+        State {
+            info_hash: hash.into(),
+            first_announce: false,
+            in_flight: false,
+            epoch: 0,
+            last_bump: None,
+        }
+    }
+
+    /// ⭐ The whole point of the button: skip the queue.
+    #[test]
+    fn a_bump_goes_to_the_head_of_the_queue() {
+        let mut states = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        states.insert("a".to_string(), fresh("a"));
+        states.insert("b".to_string(), fresh("b"));
+        let now = Instant::now();
+        // "a" is not due for half an hour.
+        heap.push(Reverse(Deadline { at: now + DEFAULT_INTERVAL, info_hash: "a".into(), epoch: 0 }));
+        heap.push(Reverse(Deadline { at: now + Duration::from_secs(60), info_hash: "b".into(), epoch: 0 }));
+
+        assert!(bump_now(&mut states, &mut heap, "a".into()));
+
+        let Reverse(head) = heap.peek().expect("a deadline");
+        assert_eq!(head.info_hash, "a", "the bumped torrent must come out first");
+        assert!(head.at <= Instant::now(), "and it must be due now, not later");
+    }
+
+    /// Without the epoch this test fails by announcing twice: the deadline the
+    /// bump replaced is still in the heap and nothing marks it as superseded.
+    #[test]
+    fn a_deadline_made_before_a_bump_is_stale() {
+        let mut states = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        states.insert("a".to_string(), fresh("a"));
+        heap.push(Reverse(Deadline { at: Instant::now(), info_hash: "a".into(), epoch: 0 }));
+
+        assert!(bump_now(&mut states, &mut heap, "a".into()));
+
+        let epoch = states["a"].epoch;
+        assert_eq!(epoch, 1);
+        let stale = heap.iter().filter(|Reverse(d)| d.epoch != epoch).count();
+        let live = heap.iter().filter(|Reverse(d)| d.epoch == epoch).count();
+        assert_eq!((stale, live), (1, 1), "one superseded deadline, one current");
+    }
+
+    /// The button must not become a hammer on a private tracker.
+    #[test]
+    fn a_second_bump_inside_the_cooldown_is_refused() {
+        let mut states = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        states.insert("a".to_string(), fresh("a"));
+
+        assert!(bump_now(&mut states, &mut heap, "a".into()), "first press works");
+        assert!(!bump_now(&mut states, &mut heap, "a".into()), "second press is refused");
+        assert_eq!(heap.len(), 1, "and schedules nothing extra");
+    }
+
+    /// A torrent still waiting its turn to join must be announceable by hand:
+    /// at 500 per cycle a 300k catalogue takes over an hour to be admitted, and
+    /// "wait an hour" is not an answer to someone pressing reannounce.
+    #[test]
+    fn a_bump_admits_a_torrent_the_scheduler_has_never_seen() {
+        let mut states = HashMap::new();
+        let mut heap = BinaryHeap::new();
+
+        assert!(bump_now(&mut states, &mut heap, "new".into()));
+
+        assert!(states.contains_key("new"), "admitted outside MAX_NEW_PER_CYCLE");
+        assert!(states["new"].first_announce, "and it announces as a first announce");
+        assert_eq!(heap.len(), 1);
     }
 
     /// A tracker asking for a one-second interval is broken or hostile, and
