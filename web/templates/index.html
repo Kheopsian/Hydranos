@@ -3,16 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hydra - Torrent Daemon</title>
+    <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.2.25">
+    <link rel="stylesheet" href="/static/style.css?v=1.3.0">
+    <!-- Before the stylesheet paints anything. app.js loads at the end of the
+         body, so choosing the theme there means a dark flash on a light theme
+         and a navy one on every other. Inline and tiny on purpose. -->
+    <script>
+        try {
+            var _th = localStorage.getItem("hydra_theme");
+            if (_th && /^[a-z]+$/.test(_th)) document.documentElement.setAttribute("data-theme", _th);
+        } catch (e) {}
+    </script>
     <script src="/static/chart.umd.min.js"></script>
 </head>
 <body>
     <div id="startup-overlay">
         <div class="startup-content">
-            <img src="/static/hydra-logo.png" alt="Hydra" class="startup-logo">
-            <h1 class="startup-title">HYDRA</h1>
+            <img src="/static/hydra-logo.png" alt="Hydranos" class="startup-logo">
+            <h1 class="startup-title">HYDRANOS</h1>
             <p class="startup-phase" id="startup-phase">Initializing…</p>
             <div class="startup-track">
                 <div class="startup-bar" id="startup-bar"></div>
@@ -28,9 +37,9 @@
 
     <header>
         <div class="logo">
-            <img src="/static/hydra-logo.png" alt="Hydra" class="logo-icon">
+            <img src="/static/hydra-logo.png" alt="Hydranos" class="logo-icon">
             <div class="logo-text">
-                <h1>HYDRA</h1>
+                <h1>HYDRANOS</h1>
                 <span class="subtitle">Torrent Daemon <span id="header-version"></span><span id="update-badge"></span></span>
             </div>
         </div>
@@ -80,7 +89,7 @@
                  right while a node was race + hoard; they cannot grow, and an
                  engine added from the Agents page had no dot at all. -->
             <button id="net-poly" class="net-poly" type="button" onclick="openNetPanel(this)"
-                    aria-label="Network of the agents" title="Network"></button>
+                    aria-label="Network of the engines" title="Network"></button>
         </div>
     </header>
 
@@ -143,7 +152,7 @@
                         <div class="accel" id="ov-accel">
                             <div class="lead"></div>
                             <div class="ar"><span class="when">1st pebibyte</span><span class="via">libtorrent (C++) &middot; qBittorrent</span><span class="dur">~2.5 years</span></div>
-                            <div class="ar hot"><span class="when">2nd pebibyte</span><span class="via">Typhon (Rust) &middot; Hydra</span><span class="dur">10 months</span></div>
+                            <div class="ar hot"><span class="when">2nd pebibyte</span><span class="via">Typhon (Rust) &middot; Hydranos</span><span class="dur">10 months</span></div>
                         </div>
                     </div>
                 </div>
@@ -218,7 +227,7 @@
                 <div class="rp2-row rp2-drain-result" id="rp-drain-result" style="display:none"></div>
                 <div class="rp2-row rp2-warn" id="rp-warn" style="display:none"></div>
                 <div class="rp2-row">
-                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSaveEnabled(this.checked)"><span class="rp2-sl"></span></label>Emergency drain<span class="rp2-info">i<span class="rp2-tip">Every <b>check</b>s Hydra looks at the /race disk. Above the <b>start</b> mark it deletes the <b>oldest</b> torrents (never younger than the floor) until usage drops to <b>down&nbsp;to</b>. The data is erased - this is the safety valve, not graduation.</span></span></div>
+                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSaveEnabled(this.checked)"><span class="rp2-sl"></span></label>Emergency drain<span class="rp2-info">i<span class="rp2-tip">Every <b>check</b>s Hydranos looks at the /race disk. Above the <b>start</b> mark it deletes the <b>oldest</b> torrents (never younger than the floor) until usage drops to <b>down&nbsp;to</b>. The data is erased - this is the safety valve, not graduation.</span></span></div>
                     <div class="rp2-body" id="rp-body-drain">
                         <div class="rp2-f">start <input type="number" id="rp-high" min="1" max="100" onchange="_rpSave('high_watermark_pct', parseInt(this.value))">%</div>
                         <div class="rp2-f">down to <input type="number" id="rp-low" min="1" max="100" onchange="_rpSave('low_watermark_pct', parseInt(this.value))">%</div>
@@ -664,7 +673,7 @@
                 <button class="btn-small" onclick="showNodeForm()">+ Declare an existing one</button>
             </div>
             <p class="sr-desc" style="margin:0 0 16px">
-                A node is a whole Hydra. This one runs the engines listed below; the others are
+                A node is a whole Hydranos. This one runs the engines listed below; the others are
                 separate instances reached over their own API. An engine is a session inside a node,
                 and a node can run as many as it has tunnels to leave by.
             </p>
@@ -672,8 +681,8 @@
             <div id="enrol-card" class="card" style="display:none; margin-bottom:16px">
                 <div class="card-body">
                     <p class="sr-desc" style="margin:0 0 10px">
-                        Run this on the machine that is to become a node. It installs Hydra, gives it
-                        its own key, and registers itself here. This Hydra never opens a session on
+                        Run this on the machine that is to become a node. It installs Hydranos, gives it
+                        its own key, and registers itself here. This Hydranos never opens a session on
                         it and never holds a credential for it. The token works once, for 30 minutes.
                     </p>
                     <pre id="enrol-cmd" style="white-space:pre-wrap;word-break:break-all"></pre>
@@ -948,6 +957,32 @@
                         <div class="sr-field"><input type="password" id="newpass-input" class="sr-input" placeholder="New password (min 6)"><button class="btn-small btn-accent" onclick="changePassword()" style="margin-left:6px">Change</button></div>
                     </div>
                     <div id="newpass-result" class="result-msg" style="margin-top:8px"></div>
+                </div>
+            </div>
+            <!-- Personalisation. This browser only, applied instantly, saved to
+                 localStorage: nothing here is a daemon setting, so nothing here
+                 needs a restart or shows up in the dirty-settings count. -->
+            <div class="card">
+                <div class="card-header-row">
+                    <h3>Personalisation</h3>
+                    <button class="btn-small" onclick="resetPersonalisation()">Reset to defaults</button>
+                </div>
+                <div class="card-body">
+                    <div class="settings-row">
+                        <div class="sr-label">
+                            <span class="sr-key">Theme</span>
+                            <span class="sr-desc">Applies immediately, to this browser only. Other people using this instance keep theirs.</span>
+                        </div>
+                    </div>
+                    <div id="perso-themes" class="theme-grid"></div>
+
+                    <div class="settings-row" style="margin-top:18px">
+                        <div class="sr-label">
+                            <span class="sr-key">Tabs</span>
+                            <span class="sr-desc">Untick a tab to take it out of the bar. It hides the link, not the feature: nothing stops working and no endpoint closes. Overview and Config always stay, because Config is the way back here.</span>
+                        </div>
+                    </div>
+                    <div id="perso-tabs" class="perso-tab-grid"></div>
                 </div>
             </div>
             <div class="card">
@@ -1305,7 +1340,7 @@
     </div>
 
     <footer>
-        <span>Hydra Torrent Daemon <span id="footer-version">v0.1.0</span></span>
+        <span>Hydranos Torrent Daemon <span id="footer-version">v0.1.0</span></span>
         <span id="last-update">Last update: --</span>
     </footer>
 
@@ -1358,6 +1393,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.5.5"></script>
+    <script src="/static/app.js?v=1.6.0"></script>
 </body>
 </html>

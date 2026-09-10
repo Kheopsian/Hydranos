@@ -1,17 +1,17 @@
-# Hydra
+# Hydranos
 
 A self-hosted BitTorrent daemon built for **scale and seeding**: a Go control
-plane driving a purpose-built Rust engine ("Typhon"). Hydra holds **100k+
+plane driving a purpose-built Rust engine ("Typhon"). Hydranos holds **100k+
 torrents** in a single instance, exposes a live web UI, a native REST API, and a
 qBittorrent-compatible shim so your existing `*arr` / autobrr / cross-seed setup
 just works.
 
-> Status: Hydra is being opened up from a private homelab project. It is used in
+> Status: Hydranos is being opened up from a private homelab project. It is used in
 > production but some rough edges remain; issues and PRs welcome.
 
 ---
 
-## Why Hydra?
+## Why Hydranos?
 
 - **Two engine roles.** A **race** session (aggressive, low-latency, for hot
   downloads) and a **hoard** session (upload-optimized, for long-term seeding),
@@ -25,11 +25,11 @@ just works.
   one front; route new torrents per-category with placement/strategy and a
   save-path per agent.
 - **Data-aware adds.** Add a torrent whose data is already on disk (a re-add, a
-  cross-seed, or a half-finished download) and Hydra hash-checks what's there
+  cross-seed, or a half-finished download) and Hydranos hash-checks what's there
   instead of blindly re-downloading over it: verified pieces are kept and
   served, the rest is fetched.
 - **Drop-in.** A qBittorrent v2 API shim means autobrr, Sonarr/Radarr,
-  cross-seed, etc. talk to Hydra unchanged.
+  cross-seed, etc. talk to Hydranos unchanged.
 
 ---
 
@@ -62,15 +62,15 @@ box sustains.
 
 ---
 
-## Give Hydra time to stop
+## Give Hydranos time to stop
 
-On SIGTERM Hydra saves its store and then asks each engine to flush its resume
+On SIGTERM Hydranos saves its store and then asks each engine to flush its resume
 data. Docker kills a container ten seconds after SIGTERM by default, which is
 not enough to get through both engines: the flush is cut short and the next
 start re-checks pieces that were already complete.
 
 The bundled [`docker-compose.yml`](docker-compose.yml) sets
-`stop_grace_period: 30s` for you. If you run Hydra with a plain `docker run`,
+`stop_grace_period: 30s` for you. If you run Hydranos with a plain `docker run`,
 pass the same budget yourself:
 
 ```bash
@@ -106,8 +106,8 @@ API reference: [`docs/API.md`](docs/API.md). Companion VPS relay:
 
 ## License
 
-Hydra is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0).
+Hydranos is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0).
 See [`LICENSE`](LICENSE). In short: you're free to run, study, modify, and
 share it, including self-hosting a modified version, but if you offer a modified
-Hydra to others over a network, you must make your source available under the
+Hydranos to others over a network, you must make your source available under the
 same license.

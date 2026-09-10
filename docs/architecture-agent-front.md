@@ -1,4 +1,4 @@
-# Hydra — architecture distribuée agent / front (Phase C)
+# Hydranos — architecture distribuée agent / front (Phase C)
 
 Statut : DESIGN (2026-07-24). Décisions arrêtées avec the operator. Transport agent↔front = gRPC.
 

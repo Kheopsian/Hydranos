@@ -56,6 +56,13 @@ pub struct Engine {
     /// `connect` puts the engine on the network -- an offline engine has no
     /// announce loop to jump.
     pub bump: std::sync::OnceLock<tokio::sync::mpsc::Sender<String>>,
+    /// How far this engine's scheduler has got through the catalogue.
+    ///
+    /// Per engine for the same reason `bump` is: two engines admit at their own
+    /// pace, and one number for both would tell the hoard's story about a race
+    /// torrent. Zeroed until `connect` starts the scheduler, which reads as
+    /// "nothing admitted" and is exactly right for an engine that is offline.
+    pub admission: Arc<crate::announce::scheduler::Admission>,
     /// Whether a peer listener is actually bound.
     ///
     /// Not "was asked to listen": an engine pinned to an interface that is not
@@ -120,6 +127,7 @@ impl EngineHost {
                 disk,
                 announce_cache: Default::default(),
                 bump: std::sync::OnceLock::new(),
+                admission: Default::default(),
             });
         }
 
@@ -183,6 +191,7 @@ impl EngineHost {
                             crate::announce::runner::Mode::Hoard
                         },
                         engine.announce_cache.clone(),
+                        engine.admission.clone(),
                     );
                     // Set once, when this engine joins the network.
                     let _ = engine.bump.set(bump);

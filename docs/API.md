@@ -1,4 +1,4 @@
-# Hydra — API HTTP
+# Hydranos — API HTTP
 
 Deux interfaces sur le même daemon. **Lis ça avant de deviner un endpoint.**
 
@@ -126,7 +126,7 @@ La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DIS
 
 ---
 
-## tracker-x2 (API externe, ≠ Hydra)
+## tracker-x2 (API externe, ≠ Hydranos)
 - Base `https://api.tracker-x2.net/api/v1`. Bearer = `/tmp/token.txt`. Passkey = `/tmp/passkey.txt`.
 - `GET /users/me` → profil (jeton_balance, passkey, total_*_bytes).
 - `GET /torrents/search?uploader=<username>&limit=100&page=N` → **filtre uploader OK** (`total_count`, `total_pages`, `torrents[]`). (≠ `/torrents?...` qui n'expose pas `uploader` et cap à 20.)

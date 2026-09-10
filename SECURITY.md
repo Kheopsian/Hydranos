@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Hydra ships from a single active line. Only the latest release receives fixes.
+Hydranos ships from a single active line. Only the latest release receives fixes.
 If you are running anything older, upgrade before opening a bug report: the
 first question on any issue will be whether it reproduces on the current tag.
 
@@ -31,6 +31,6 @@ Open a [security advisory](https://github.com/Kheopsian/Hydra/security/advisorie
 rather than a public issue. Include the version, your topology (direct,
 proxied or agent) and the steps to reproduce.
 
-Hydra speaks BitTorrent to untrusted peers by design. Reports about peer
+Hydranos speaks BitTorrent to untrusted peers by design. Reports about peer
 handling, the tracker client, the qBittorrent shim and the authentication
 layer are the most valuable.
