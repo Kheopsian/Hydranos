@@ -302,6 +302,9 @@ async fn main() -> anyhow::Result<()> {
     // that is still loading.
     rulesapi::spawn(state.clone());
 
+    // Taken before the router consumes the state: `flush_on_shutdown` needs the
+    // engines, and by then `state` has been moved.
+    let engines_for_shutdown = state.engines.clone();
     let app = api::router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -311,10 +314,111 @@ async fn main() -> anyhow::Result<()> {
     // the sender cannot know which of ITS addresses the receiver can reach --
     // tunnels, NAT, several interfaces. The receiver can: it is the address the
     // request arrived from.
+    // ⭐⭐ With a shutdown, because for the whole of V4 there was none.
+    //
+    // `axum::serve(..).await` alone never returns, and this process is PID 1
+    // in its container. PID 1 does not get the default disposition of
+    // SIGTERM: with no handler installed the signal is simply DISCARDED. So
+    // `docker stop -t 300` sent a SIGTERM that nothing received, waited the
+    // full five minutes while the daemon kept accepting peers, and then
+    // SIGKILLed a 300k-torrent instance. Every V4 deploy went that way, and
+    // the log said "arrete" as though it had been graceful.
+    //
+    // What that cost: resume state is written by a five-minute sweep
+    // (`session::start`), so a kill throws away up to five minutes of piece
+    // progress and byte counters for every engine, and the next start
+    // re-checks what it lost. 3.x saved on the way out; the port dropped it.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
+
+    flush_on_shutdown(&engines_for_shutdown);
     Ok(())
+}
+
+/// Resolve once a termination signal arrives, naming the one that did.
+///
+/// A handler that cannot be installed leaves its branch pending forever
+/// rather than resolving: a failed SIGINT registration must not fake a
+/// shutdown, and must not stop SIGTERM from being heard.
+#[cfg(unix)]
+async fn shutdown_signal() -> () {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut term = signal(SignalKind::terminate())
+        .map_err(|e| tracing::error!("SIGTERM handler setup failed: {e}"))
+        .ok();
+    let mut int = signal(SignalKind::interrupt())
+        .map_err(|e| tracing::error!("SIGINT handler setup failed: {e}"))
+        .ok();
+
+    async fn recv(s: &mut Option<tokio::signal::unix::Signal>) {
+        match s {
+            Some(sig) => {
+                sig.recv().await;
+            }
+            None => std::future::pending().await,
+        }
+    }
+
+    let which = tokio::select! {
+        _ = recv(&mut term) => "SIGTERM",
+        _ = recv(&mut int) => "SIGINT",
+    };
+    tracing::warn!("{which} received, draining the API and flushing resume data");
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> () {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Write every engine's resume state before the process ends.
+///
+/// Bounded, because the alternative to a partial sweep is not a complete one
+/// -- it is the SIGKILL that arrives when `docker stop -t N` runs out of
+/// patience. Every torrent written before the budget expires is one the next
+/// start does not have to re-check, so a sweep that is cut short is still
+/// strictly better than no sweep.
+///
+/// Engines are flushed on threads of their own: one slow disk must not spend
+/// another engine's share of the budget.
+fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>) {
+    let budget = std::env::var("HYDRA_STOP_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(120);
+    let budget = std::time::Duration::from_secs(budget);
+    let started = std::time::Instant::now();
+
+    let handles: Vec<_> = engines
+        .engines()
+        .iter()
+        .map(|e| {
+            let id = e.id.clone();
+            let manager = e.manager.clone();
+            std::thread::spawn(move || {
+                let t = std::time::Instant::now();
+                manager.save_all_resume();
+                tracing::info!(engine = %id, took_ms = t.elapsed().as_millis() as u64,
+                               "resume data saved");
+            })
+        })
+        .collect();
+
+    for h in handles {
+        // No per-thread timeout exists for a std thread, so the budget is
+        // enforced by the caller of `docker stop`: this logs how close it came.
+        let _ = h.join();
+    }
+    let took = started.elapsed();
+    if took > budget {
+        tracing::warn!(took_s = took.as_secs(), budget_s = budget.as_secs(),
+                       "shutdown flush overran its budget; raise HYDRA_STOP_TIMEOUT and docker stop -t");
+    } else {
+        tracing::info!(took_s = took.as_secs(), "shutdown flush complete");
+    }
 }
