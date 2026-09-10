@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.20.0";
+pub const HYDRA_VERSION: &str = "4.20.1";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -9779,6 +9779,32 @@ pub fn router(state: AppState) -> Router {
                 .gzip(true)
                 .compress_when(tower_http::compression::predicate::SizeAbove::new(32)),
         )
+        .layer(axum::middleware::from_fn(qbit_refusal_shape))
+}
+
+/// Answer an unauthenticated qBittorrent call the way qBittorrent answers it.
+///
+/// ⭐⭐ qBittorrent's WebUI returns **403 Forbidden** when there is no session,
+/// not 401. Sonarr and Radarr rely on that: `QBittorrentProxySelector` probes
+/// `/api/v2/app/webapiVersion` *before* logging in, reads a 403 as "log in
+/// first", and treats anything else as the server not being a qBittorrent at
+/// all. Against a 401 the test failed with "Unable to connect to qBittorrent"
+/// -- with the network fine and the credentials correct, which is as
+/// misleading as an error message gets.
+///
+/// Only the shim. The native API keeps 401, which is the right code and what
+/// its own callers expect; this is compatibility with one client's reading of
+/// another server's quirk, and it is scoped to the paths that imitate it.
+async fn qbit_refusal_shape(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let is_shim = req.uri().path().starts_with("/api/v2/");
+    let res = next.run(req).await;
+    if is_shim && res.status() == StatusCode::UNAUTHORIZED {
+        return (StatusCode::FORBIDDEN, "Forbidden.").into_response();
+    }
+    res
 }
 
 #[cfg(test)]

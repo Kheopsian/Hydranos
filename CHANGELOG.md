@@ -17,6 +17,25 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.20.1 -- 403, because that is what qBittorrent says
+
+With 4.19.0 deployed and the right credentials saved, Sonarr and Radarr still
+refused their own connection test: **"Unable to connect to qBittorrent"** --
+while `curl` from inside the Sonarr container logged in and read the version
+without trouble. The network was fine and the credentials were right.
+
+qBittorrent's WebUI answers **403 Forbidden** to a call with no session. The
+shim answered 401. Sonarr's `QBittorrentProxySelector` probes
+`/api/v2/app/webapiVersion` *before* logging in and reads a 403 as "log in
+first"; anything else it reads as "this is not a qBittorrent", and reports it
+as a connection failure. So the one code that meant "authenticate, then retry"
+was the one code the shim did not send.
+
+A small middleware turns a 401 into `403 Forbidden.` on `/api/v2/*` only. The
+native API keeps 401, which is the correct code and what its own callers
+expect; this is compatibility with one client's reading of another server's
+quirk, and it is scoped to the paths that imitate it.
+
 ## v4.20.0 -- docker stop actually stops
 
 `docker stop -t 300 hydra-go` was in every deployment script in this repository
