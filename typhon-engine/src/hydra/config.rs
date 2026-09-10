@@ -266,9 +266,144 @@ impl Config {
     }
 }
 
+/// The placeholder shipped in configs/default.toml.
+///
+/// Published in the repository, so an install that kept it has a key that
+/// every reader of the source already knows.
+pub const PLACEHOLDER_API_KEY: &str = "change-me-in-production";
+
+/// A key no one else can guess: 24 bytes of system entropy, hex encoded.
+///
+/// Same shape and same source as `install.sh` uses when it enrols a node
+/// (`head -c 24 /dev/urandom`), so a key looks the same whichever path made it.
+fn fresh_api_key() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 24];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Give this instance an API key of its own before it serves anything.
+///
+/// 3.x generated one on first boot and persisted it; the port dropped that
+/// step while keeping a template that ships `api_key = ""`. The result was an
+/// install whose expected key was the empty string -- and `authorised` matched
+/// it against a caller who sent no key at all, so the whole API answered
+/// unauthenticated. `authorised` now fails closed on an empty key, which makes
+/// generating one here the thing that keeps a fresh install usable.
+///
+/// The placeholder is treated as absent for the same reason: it is a published
+/// constant, not a secret.
+///
+/// Written back to the TOML so it survives a restart and so a headless
+/// operator can read it out of the file. If the file cannot be written the old
+/// value is kept rather than replaced by a key that would change at every
+/// boot -- an instance whose key rotates behind the operator's back is worse
+/// than one still carrying the placeholder, and the warning says so.
+///
+/// Returns whether a key was generated, so the caller can log it once.
+pub fn ensure_api_key(config: &mut Config, path: &Path) -> bool {
+    let current = config.daemon.api_key.as_str();
+    let placeholder = current == PLACEHOLDER_API_KEY;
+    if !current.is_empty() && !placeholder {
+        return false;
+    }
+
+    let key = fresh_api_key();
+    let Ok(doc) = std::fs::read_to_string(path) else {
+        tracing::error!(
+            path = %path.display(),
+            "cannot read the config to store a generated API key; the API stays closed"
+        );
+        return false;
+    };
+    let quoted = crate::tomledit::quote_toml_key(&key);
+    let edited = match crate::tomledit::set_toml_value(&doc, "daemon", "api_key", &quoted) {
+        Ok(edited) => edited,
+        Err(e) => {
+            tracing::error!(error = %e, "cannot set daemon.api_key; the API stays closed");
+            return false;
+        }
+    };
+    if let Err(e) = std::fs::write(path, &edited) {
+        tracing::error!(
+            error = %e,
+            path = %path.display(),
+            "cannot persist a generated API key; the API stays closed"
+        );
+        return false;
+    }
+
+    config.daemon.api_key = key;
+    if placeholder {
+        tracing::warn!(
+            path = %path.display(),
+            "the configured API key was the published placeholder and has been replaced by a \
+             generated one -- clients configured with the old value must be updated; the new \
+             key is in the config file, or from POST /api/login with the admin account"
+        );
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            "no API key was configured; a new one has been generated and written to the config"
+        );
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_tmp(name: &str, body: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("hydra-cfgtest-{name}-{}.toml", std::process::id()));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// The shipped template has `api_key = ""`. Booting on it used to leave the
+    /// expected key empty, which `authorised` matched against a caller sending
+    /// no key at all -- the whole API, unauthenticated, on a fresh install.
+    #[test]
+    fn a_fresh_install_generates_and_persists_a_key() {
+        let path = write_tmp("fresh", "[daemon]\napi_key = \"\"\ndata_dir = \"/config\"\n");
+        let mut cfg = Config::load(&path).unwrap();
+        assert!(ensure_api_key(&mut cfg, &path), "an empty key must be filled");
+        assert_eq!(cfg.daemon.api_key.len(), 48, "24 random bytes, hex encoded");
+
+        // Persisted, not just in memory: a key that lived only in this process
+        // would change at every restart and lock every client out.
+        let reloaded = Config::load(&path).unwrap();
+        assert_eq!(reloaded.daemon.api_key, cfg.daemon.api_key);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The placeholder is published in this repository, so it is not a secret.
+    #[test]
+    fn the_published_placeholder_is_replaced() {
+        let path = write_tmp("placeholder", &format!("[daemon]\napi_key = \"{PLACEHOLDER_API_KEY}\"\n"));
+        let mut cfg = Config::load(&path).unwrap();
+        assert!(ensure_api_key(&mut cfg, &path));
+        assert_ne!(cfg.daemon.api_key, PLACEHOLDER_API_KEY);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// An operator's own key is never touched: rotating it behind their back
+    /// would break every client on a restart they did not ask for.
+    #[test]
+    fn a_configured_key_is_left_alone() {
+        let path = write_tmp("configured", "[daemon]\napi_key = \"mine\"\n");
+        let mut cfg = Config::load(&path).unwrap();
+        assert!(!ensure_api_key(&mut cfg, &path), "nothing to generate");
+        assert_eq!(cfg.daemon.api_key, "mine");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Two instances must not come up with the same key.
+    #[test]
+    fn generated_keys_differ() {
+        assert_ne!(fresh_api_key(), fresh_api_key());
+    }
 
     // The capitalised field names are the contract, so a test pins them: this
     // is the kind of detail that breaks the *arr stack silently rather than

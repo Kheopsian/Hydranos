@@ -57,13 +57,72 @@ pub async fn setup_password(
         )
             .into_response();
     }
-    let _ = body;
-    // Writing the account belongs with the settings writer, which edits the
-    // TOML in place rather than re-serialising the operator's file.
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({"error": "first-run setup is not wired yet"})),
-    )
+    #[derive(serde::Deserialize)]
+    struct Setup {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        password: String,
+    }
+    let Ok(req) = serde_json::from_str::<Setup>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
+    };
+    // The floor 3.x enforced. Short enough not to annoy, long enough that the
+    // bcrypt cost is doing real work.
+    if req.password.chars().count() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "password must be at least 8 characters"})),
+        )
+            .into_response();
+    }
+    let username = if req.username.trim().is_empty() {
+        "admin".to_string()
+    } else {
+        req.username.trim().to_string()
+    };
+    let Ok(hash) = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot hash the password"})),
+        )
+            .into_response();
+    };
+
+    // Written through the settings writer, which edits the TOML in place
+    // rather than re-serialising it: the file carries the operator's comments.
+    // Quoted by the TOML writer's own helper, not by Rust's Debug: they agree
+    // on the common cases and disagree on the escapes, and a username is
+    // operator input.
+    let pairs = vec![
+        (
+            "username".to_string(),
+            crate::tomledit::quote_toml_key(&username),
+        ),
+        ("password_hash".to_string(), crate::tomledit::quote_toml_key(&hash)),
+    ];
+    let written = crate::api::edit_config(&state, move |doc| {
+        crate::tomledit::set_toml_table(doc, "auth", &pairs)
+    });
+    if !written {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot write the config"})),
+        )
+            .into_response();
+    }
+
+    // The key comes back with the account because this is the only moment the
+    // browser can learn it: it is generated at boot and written to a file the
+    // page cannot read. Safe to return here and nowhere else -- this route
+    // answers exactly once, then 409s forever.
+    let key = state.cfg().daemon.api_key.clone();
+    tracing::info!(%username, "first-run setup completed, admin account created");
+    Json(serde_json::json!({"status": "ok", "username": username, "api_key": key}))
         .into_response()
 }
 

@@ -130,7 +130,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config_path = parse_args();
-    let config = Config::load(&config_path)?;
+    let mut config = Config::load(&config_path)?;
+    // Before anything is served: an install with no key of its own would
+    // otherwise answer every caller who sends no key. See config::ensure_api_key.
+    config::ensure_api_key(&mut config, &config_path);
+    let config = config;
 
     let host = if config.daemon.api_host.is_empty() {
         "0.0.0.0".to_string()
