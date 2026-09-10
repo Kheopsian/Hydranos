@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Hydra are documented here. This project follows
+All notable changes to Hydranos are documented here. This project follows
 [semantic versioning](https://semver.org).
 
 This file is compiled into the binary and served at `/api/changelog`, so a
@@ -16,6 +16,68 @@ Two ways to title a new entry:
   day, so a number chosen while writing a branch is often taken by the time
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
+
+## v4.19.0 -- Hydranos, an honest tracker row, and a page you can shape
+
+Three things, none of which change what the daemon does to your torrents.
+
+**The name.** Hydra is taken: `apt install hydra` gets you THC-Hydra in six of
+the seven package repositories that carry the name, which makes "install Hydra"
+an instruction that does the wrong thing. Every user-facing string, the page
+title, the header, the README and the docs now say **Hydranos**.
+
+Deliberately NOT renamed, because each one would break a running install for
+no gain: the `HYDRA_*` environment variables, the `hydra` binary and its
+config paths, the `hydra_*` browser storage keys (renaming those signs
+everyone out), the SQLite files, and the GitHub repository. The peer id
+prefix never carried the name at all -- it mimics qBittorrent on purpose --
+so nothing a tracker sees changes.
+
+**A tracker row says which of three things happened.** The detail panel
+reported "Success" for a tracker it had never spoken to. `last_error` being
+empty was read as "it went well", when on a fresh boot it means "nothing has
+happened yet" -- and on a 300k catalogue that is every torrent, for about an
+hour, because the scheduler admits 500 per ten seconds on purpose.
+
+- The API now sends `status`: `never`, `ok` or `error`. Empty is no longer
+  evidence of success.
+- A torrent still queued shows **not announced yet**, in a muted style: not an
+  error, not a success.
+- Its next announce is no longer a dash. The scheduler publishes how much of
+  the catalogue it has yet to admit, and the row shows the drain time as an
+  upper bound -- `~1h40m max` -- captioned as an estimate for the queue, not a
+  time for that torrent.
+- The row was rendered by two identical copies, one per panel. It is one
+  function now; three states and an estimate is not something to keep in step
+  by hand.
+
+**Personalisation, in Config.** A theme picker -- Abyss (unchanged, the
+default), Slate, Ember, Kelp, Daylight -- and a list of the top tabs with a
+checkbox each, so an instance that never races or never uses workflows can
+stop carrying the tab. Overview and Config always stay, because Config is the
+way back to the panel.
+
+Both live in this browser's storage, not in `default.toml`: it is one person's
+view of one browser, and an operator hiding a tab must not hide it for
+everyone on the instance. Hiding a tab hides the link and nothing else -- no
+endpoint closes, nothing stops running. It is not a permission.
+
+The theme is applied by a four-line inline script in `<head>`, before the
+stylesheet paints, because choosing it from `app.js` at the end of the body is
+a dark flash on every light theme.
+
+**The qBittorrent login also takes the API key.** 4.18.0 gave the *arr stack a
+way in through the admin account, which is correct and still works -- but it
+means an operator whose clients are already broken has to know a password
+nobody wrote down, when every one of those clients is holding the API key
+right now in a field the daemon had stopped reading. The password box accepts
+either. It is not a weaker credential: it is the same secret the header
+carries, over the same connection, and a caller holding it can already drive
+the whole API. Compared in constant time, never echoed back, and an instance
+with neither a key nor an admin account still authorises nobody.
+
+**Also:** the header polygon's tooltip said "3 agents". The dots are engines,
+one vertex each, and every other word on that panel already said so.
 
 ## v4.18.0 -- the *arr stack can log in
 

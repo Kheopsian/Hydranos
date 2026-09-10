@@ -1,6 +1,6 @@
-// Hydra WebUI - Dashboard
+// Hydranos WebUI - Dashboard
 
-// A key handed over in the URL FRAGMENT, by the fleet page of another Hydra
+// A key handed over in the URL FRAGMENT, by the fleet page of another Hydranos
 // opening this one (`/node/<name>/open`). Consumed before anything reads
 // API_KEY, then stripped from the address bar with replaceState so a reload or
 // a bookmark does not carry it.
@@ -191,6 +191,134 @@ async function fetchPublicIp(force) {
 
 // ─── Utilities ──────────────────────────────────────────
 
+// ─── Personalisation: themes, and which tabs you actually want ─────────────
+//
+// Both live in localStorage, next to the unit and incognito preferences that
+// were already there. Deliberately NOT in default.toml: this is one person's
+// view of one browser, and writing it to the daemon config would make an
+// operator hiding the Race tab hide it for everyone on the instance -- and
+// would need a restart banner to change a colour.
+//
+// The daemon serves the same page to everyone either way; hiding a tab hides
+// a link, not an endpoint. Nothing here is a permission.
+
+const THEMES = [
+    { id: "abyss",    name: "Abyss",    swatch: ["#080c14", "#58a6ff", "#f0883e"] },
+    { id: "slate",    name: "Slate",    swatch: ["#0d0d0f", "#7dd3fc", "#fb923c"] },
+    { id: "ember",    name: "Ember",    swatch: ["#120e0b", "#e0b062", "#ff9d4d"] },
+    { id: "kelp",     name: "Kelp",     swatch: ["#06110d", "#4fd1a5", "#f0a03e"] },
+    { id: "daylight", name: "Daylight", swatch: ["#f4f6fa", "#1f6feb", "#c2601a"] },
+];
+const DEFAULT_THEME = "abyss";
+
+// Config is never hideable: it is the only way back to this panel, and a user
+// who hid it would have to clear their browser storage to undo it.
+const UNHIDEABLE_TABS = ["overview", "config"];
+
+function currentTheme() {
+    const v = localStorage.getItem("hydra_theme") || DEFAULT_THEME;
+    return THEMES.some(t => t.id === v) ? v : DEFAULT_THEME;
+}
+
+function applyTheme(id) {
+    document.documentElement.setAttribute("data-theme", currentThemeSet(id));
+}
+
+// Stores and returns, so applyTheme stays the one place that touches the DOM.
+function currentThemeSet(id) {
+    if (id && THEMES.some(t => t.id === id)) {
+        localStorage.setItem("hydra_theme", id);
+        return id;
+    }
+    return currentTheme();
+}
+
+function hiddenTabs() {
+    try {
+        const raw = JSON.parse(localStorage.getItem("hydra_hidden_tabs") || "[]");
+        return Array.isArray(raw) ? raw.filter(x => !UNHIDEABLE_TABS.includes(x)) : [];
+    } catch (_) {
+        return [];
+    }
+}
+
+function setHiddenTabs(list) {
+    localStorage.setItem("hydra_hidden_tabs", JSON.stringify(list.filter(x => !UNHIDEABLE_TABS.includes(x))));
+    applyHiddenTabs();
+}
+
+function applyHiddenTabs() {
+    const hidden = hiddenTabs();
+    document.querySelectorAll("nav .tab").forEach(tab => {
+        tab.style.display = hidden.includes(tab.dataset.tab) ? "none" : "";
+    });
+    // Landing on a hidden tab -- from a bookmarked #hash, or from hiding the
+    // one you are standing on -- would leave the page on a section with no way
+    // back to it. Step off it rather than leave a tab active and invisible.
+    const active = document.querySelector(".tab.active");
+    if (active && hidden.includes(active.dataset.tab)) {
+        activateTab("overview");
+    }
+}
+
+// Rendered into the Config page every time it opens, so it always agrees with
+// what is stored even if another tab of the same browser changed it.
+function renderPersonalisation() {
+    const themeBox = document.getElementById("perso-themes");
+    if (themeBox) {
+        const active = currentTheme();
+        themeBox.innerHTML = THEMES.map(th => `
+            <button type="button" class="theme-card${th.id === active ? " active" : ""}"
+                    data-theme-id="${esc(th.id)}" onclick="chooseTheme('${esc(th.id)}')"
+                    aria-pressed="${th.id === active}">
+                <span class="theme-swatch">
+                    ${th.swatch.map(c => `<i style="background:${esc(c)}"></i>`).join("")}
+                </span>
+                <span class="theme-name">${esc(th.name)}</span>
+            </button>`).join("");
+    }
+
+    const tabBox = document.getElementById("perso-tabs");
+    if (tabBox) {
+        const hidden = hiddenTabs();
+        // Read the tabs off the page rather than from a second list here: a
+        // tab added to the nav and forgotten here would be one nobody could
+        // hide, and worse, one this panel would silently drop.
+        const tabs = Array.from(document.querySelectorAll("nav .tab"));
+        tabBox.innerHTML = tabs.map(tab => {
+            const id = tab.dataset.tab;
+            const label = tab.textContent.trim();
+            const locked = UNHIDEABLE_TABS.includes(id);
+            const shown = !hidden.includes(id);
+            return `<label class="perso-tab${locked ? " locked" : ""}"${locked ? ` title="${esc(t("Always shown: this is the way back to these settings."))}"` : ""}>
+                <input type="checkbox" data-tab-id="${esc(id)}" ${shown ? "checked" : ""} ${locked ? "disabled" : ""}
+                       onchange="toggleTabVisible(this)">
+                <span>${esc(label)}</span>
+            </label>`;
+        }).join("");
+    }
+}
+
+function chooseTheme(id) {
+    applyTheme(id);
+    renderPersonalisation();
+}
+
+function toggleTabVisible(input) {
+    const id = input.dataset.tabId;
+    const hidden = new Set(hiddenTabs());
+    if (input.checked) hidden.delete(id); else hidden.add(id);
+    setHiddenTabs(Array.from(hidden));
+}
+
+function resetPersonalisation() {
+    localStorage.removeItem("hydra_theme");
+    localStorage.removeItem("hydra_hidden_tabs");
+    applyTheme(DEFAULT_THEME);
+    applyHiddenTabs();
+    renderPersonalisation();
+}
+
 function _unitSize() { return localStorage.getItem("hydra_unit_size") || "binary"; }
 function _unitSpeed() { return localStorage.getItem("hydra_unit_speed") || "bytes"; }
 function setUnitPref(kind, value) {
@@ -289,20 +417,20 @@ function formatUptime(seconds) {
 
 let _setupOpen = false;
 // Ecran de premier lancement : aucun compte admin n existe encore, l humain
-// choisit son mot de passe. Hydra n en genere plus aucun -> rien a perdre si le
+// choisit son mot de passe. Hydranos n en genere plus aucun -> rien a perdre si le
 // demarrage echoue en route. POST /api/setup renvoie l API key comme /api/login.
 function promptFirstRunSetup(networkStorage) {
     if (_setupOpen) return;
     _setupOpen = true;
     const warn = networkStorage ? `<p class="modal-desc" style="color:var(--accent-orange)">
-        Config on network storage detected (${esc(networkStorage)}). Hydra can handle this,
+        Config on network storage detected (${esc(networkStorage)}). Hydranos can handle this,
         but the database cannot use its safest journal mode there: if the share drops
         mid-write it can be corrupted. Keep backups of your data_dir, or move data_dir
         to a local disk (your downloads can stay on the share).</p>` : "";
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
-        <h3>${t("Welcome to Hydra")}</h3>
+        <h3>${t("Welcome to Hydranos")}</h3>
         <label class="setup-lang-row">${t("Language")}
             <select id="setup-lang">${I18N.languages.map(l =>
                 `<option value="${l.code}"${l.code === I18N.current() ? " selected" : ""}>${l.label}</option>`
@@ -366,7 +494,7 @@ async function promptLogin(reason) {
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
-        <h3>Hydra login</h3>
+        <h3>Hydranos login</h3>
         <p class="modal-desc" id="login-msg">${esc(reason || "Sign in to continue.")}</p>
         <input type="text" id="login-user" placeholder="Username" autocomplete="username" value="admin" style="width:100%;margin-bottom:8px">
         <input type="password" id="login-pass" placeholder="Password" autocomplete="current-password" style="width:100%">
@@ -435,7 +563,7 @@ function promptApiKey(reason) {
 
 // ── qBittorrent import wizard ─────────────────────────────────────────────
 // Onboarding: connect to a running qBittorrent WebUI and seed its library into
-// Hydra (hoard). 3 steps: credentials → preview → live progress (SSE).
+// Hydranos (hoard). 3 steps: credentials → preview → live progress (SSE).
 // Opened two ways, and the exit button is not the same thing in each: from the
 // first-run prompt it is "Skip", which also means "stop asking me"; from
 // Settings the user went looking for the wizard, so it is a plain "Cancel" that
@@ -456,7 +584,7 @@ function importWizard(opts) {
 
     function stepSource() {
         box.innerHTML = `<h3>Import an existing library</h3>
-            <p class="modal-desc">Hydra seeds the data already on your disk, completed torrents skip the hash-check, so nothing is re-downloaded.</p>
+            <p class="modal-desc">Hydranos seeds the data already on your disk, completed torrents skip the hash-check, so nothing is re-downloaded.</p>
             <div style="display:flex;gap:8px;margin:12px 0">
                 <button class="btn-primary" id="src-qbit" style="flex:1">qBittorrent</button>
                 <button class="btn-primary" id="src-tr" style="flex:1">Transmission</button>
@@ -475,9 +603,9 @@ function importWizard(opts) {
     // Transmission is already stopped, usually the case during a migration.
     function stepTransmission(prefill) {
         box.innerHTML = `<h3>${t("Import from Transmission")}</h3>
-            <p class="modal-desc">${t("Hydra reads Transmission's <b>config folder</b>, the one holding <code>torrents/</code> and <code>resume/</code>. Transmission does not need to be running.")}</p>
+            <p class="modal-desc">${t("Hydranos reads Transmission's <b>config folder</b>, the one holding <code>torrents/</code> and <code>resume/</code>. Transmission does not need to be running.")}</p>
             <input type="text" id="tr-dir" placeholder="/config/transmission or ~/.config/transmission-daemon" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.dir || "")}">
-            <p class="modal-desc" style="margin:6px 0">${t("Not visible from Hydra? Upload a zip of that folder instead:")}</p>
+            <p class="modal-desc" style="margin:6px 0">${t("Not visible from Hydranos? Upload a zip of that folder instead:")}</p>
             <input type="file" id="tr-zip" accept=".zip" style="width:100%;margin-bottom:8px">
             <label style="display:block;margin-bottom:4px"><input type="checkbox" id="tr-cats" checked> ${t("Create one category per destination folder")}</label>
             <label style="display:block"><input type="checkbox" id="tr-labels" checked> ${t("Import labels as tags")}</label>
@@ -537,7 +665,7 @@ function importWizard(opts) {
             <p class="modal-desc">${t("Categories to create: {list}, all as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
             ${probs ? `<p class="modal-desc" style="color:var(--accent-red)">${t("{n} file(s) unreadable, they will be skipped.", { n: probs })}</p>` : ""}
             ${d.without_resume ? `<p class="modal-desc">${t("{n} torrent(s) have no resume file: no save path, they will be skipped.", { n: d.without_resume })}</p>` : ""}
-            <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (Transmission path → what Hydra sees):")}</p>
+            <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (Transmission path → what Hydranos sees):")}</p>
             <div style="max-height:150px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
             <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="tr-msg2" style="min-height:1em"></p>
@@ -572,7 +700,7 @@ function importWizard(opts) {
 
     function stepCreds(prefill) {
         box.innerHTML = `<h3>${t("Import from qBittorrent")}</h3>
-            <p class="modal-desc">${t("Point Hydra at your qBittorrent WebUI. Hydra seeds the data already on disk (completed torrents skip the hash-check), so nothing is re-downloaded.")}</p>
+            <p class="modal-desc">${t("Point Hydranos at your qBittorrent WebUI. Hydranos seeds the data already on disk (completed torrents skip the hash-check), so nothing is re-downloaded.")}</p>
             <input type="text" id="qb-url" placeholder="http://qbittorrent:8080" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.url || "")}">
             <input type="text" id="qb-user" placeholder="${t("Username")}" autocomplete="off" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.user || "admin")}">
             <input type="password" id="qb-pass" placeholder="${t("Password")}" autocomplete="off" style="width:100%">
@@ -616,7 +744,7 @@ function importWizard(opts) {
         box.innerHTML = `<h3>${t("Import preview")}</h3>
             <p class="modal-desc">${t("<b>{total}</b> torrents · <b>{complete}</b> complete (seed-mode) · <b>{partial}</b> partial (verify + resume) · carried upload <b>{carried}</b>", { total: d.total, complete: d.completed, partial: d.incomplete, carried: formatBytes(d.carried_uploaded_bytes) })}</p>
             <p class="modal-desc">${t("Categories: {list}, all imported as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
-            <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydra sees). Fix these if Hydra mounts the data elsewhere:")}</p>
+            <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydranos sees). Fix these if Hydranos mounts the data elsewhere:")}</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
                 <p class="modal-desc" id="qb-data" style="margin:0;flex:1${d.data_checked && d.data_found === 0 ? ";color:var(--accent-red);font-weight:600" : ""}">${!d.data_checked ? "" : (d.data_found === 0
@@ -657,10 +785,10 @@ function importWizard(opts) {
                 const bad = inputs.length - good;
                 if (bad === 0) {
                     info.style.color = "var(--accent-green)";
-                    info.textContent = t("All {n} mapped folders are reachable by Hydra.", { n: good });
+                    info.textContent = t("All {n} mapped folders are reachable by Hydranos.", { n: good });
                 } else {
                     info.style.color = "var(--accent-red)"; info.style.fontWeight = "600";
-                    info.textContent = t("{bad} of {n} mapped folders are not reachable by Hydra. Those torrents would restart from zero.", { bad: bad, n: inputs.length });
+                    info.textContent = t("{bad} of {n} mapped folders are not reachable by Hydranos. Those torrents would restart from zero.", { bad: bad, n: inputs.length });
                 }
             } catch (e) {
                 info.style.color = "var(--accent-red)";
@@ -871,7 +999,7 @@ function _activateTabNow(name) {
     // The hoard table skips its render while off screen, so pay the deferred
     // one now rather than leaving a stale table until the next snapshot.
     if (name === "hoard" && _hoardRenderDirty) _scheduleHoardRender();
-    if (name === "config") updateSettings();
+    if (name === "config") { updateSettings(); renderPersonalisation(); }
     else if (name === "add") refreshCategoryOptions();
     else if (name === "changelog") loadChangelog();
     else if (name === "nodes") { updateNodes(); }
@@ -892,6 +1020,9 @@ document.querySelectorAll(".tab").forEach(tab => {
 // ReferenceError ("Cannot access '_logsInit' before initialization"), the fetch
 // never fires, and the Logs tab stays stuck on "Loading..." after a refresh.
 window.addEventListener("DOMContentLoaded", () => {
+    // Before the hash is honoured: a bookmark pointing at a hidden tab has to
+    // land somewhere visible, and applyHiddenTabs is what decides that.
+    applyHiddenTabs();
     const _hashTab = window.location.hash.replace("#", "");
     if (!_hashTab || !document.getElementById("tab-" + _hashTab)) return;
     activateTab(_hashTab);
@@ -942,12 +1073,12 @@ async function showStoreRepairModal() {
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
-        <h3>${t("Hydra cannot open its database")}</h3>
+        <h3>${t("Hydranos cannot open its database")}</h3>
         <p class="modal-desc">${t("Your data_dir now points at {kind} storage. The database was created on a local disk, so it uses a write-ahead log, and a network share cannot host one.", { kind: esc(st.filesystem || "network") })}</p>
-        <p class="modal-desc">${t("Nothing has been lost. Hydra has deliberately not started its engines: carrying on without the database is what would destroy your lifetime upload counters.")}</p>
+        <p class="modal-desc">${t("Nothing has been lost. Hydranos has deliberately not started its engines: carrying on without the database is what would destroy your lifetime upload counters.")}</p>
         <p class="modal-desc">${t("Affected: {list}", { list: esc(targets.map(x => x.name).join(", ") || "-") })}</p>
-        ${hot.length ? `<p class="modal-desc" style="color:var(--accent-orange)">${t("{list} still holds changes that were never written back. Start Hydra once on the machine it came from, stop it cleanly, then move it here.", { list: esc(hot.map(x => x.name).join(", ")) })}</p>` : ""}
-        <p class="modal-desc">${t("Hydra can convert the database to the journal a share can host. Every file is copied to a .bak alongside it first, so the originals stay recoverable whatever happens.")}</p>
+        ${hot.length ? `<p class="modal-desc" style="color:var(--accent-orange)">${t("{list} still holds changes that were never written back. Start Hydranos once on the machine it came from, stop it cleanly, then move it here.", { list: esc(hot.map(x => x.name).join(", ")) })}</p>` : ""}
+        <p class="modal-desc">${t("Hydranos can convert the database to the journal a share can host. Every file is copied to a .bak alongside it first, so the originals stay recoverable whatever happens.")}</p>
         <p class="modal-desc" id="repair-msg" style="min-height:1em"></p>
         <div class="modal-actions">
             <button class="btn-primary" id="repair-go">${t("Back up and convert")}</button>
@@ -965,16 +1096,16 @@ async function showStoreRepairModal() {
         msg.style.color = "var(--accent-green, #3a9)";
         msg.innerHTML = (results || []).map(r =>
             t("{name}: converted. Backup kept at {backup}", { name: esc(r.name), backup: esc(r.backup || "-") })
-        ).join("<br>") + "<br>" + t("Restart Hydra to finish.");
+        ).join("<br>") + "<br>" + t("Restart Hydranos to finish.");
         const fresh = btn.cloneNode(true); // drops the convert handler
-        fresh.textContent = t("Restart Hydra");
+        fresh.textContent = t("Restart Hydranos");
         fresh.disabled = false;
         btn.replaceWith(fresh);
         btn = fresh;
         btn.addEventListener("click", async () => {
             btn.disabled = true;
             try { await fetch("/api/settings/restart", { method: "POST", headers: { "X-Api-Key": API_KEY } }); } catch (_) {}
-            msg.textContent = t("Hydra is stopping. Under Docker or systemd it comes back on its own; if you started it by hand, start it again.");
+            msg.textContent = t("Hydranos is stopping. Under Docker or systemd it comes back on its own; if you started it by hand, start it again.");
             setTimeout(() => location.reload(), 8000);
         });
     };
@@ -990,7 +1121,7 @@ async function showStoreRepairModal() {
     btn.addEventListener("click", async () => {
         btn.disabled = true;
         msg.style.color = "";
-        msg.textContent = t("Backing up, then converting. Do not stop Hydra.");
+        msg.textContent = t("Backing up, then converting. Do not stop Hydranos.");
         let res, body = {};
         try {
             res = await fetch("/api/store/repair", { method: "POST", headers: { "X-Api-Key": API_KEY } });
@@ -1008,7 +1139,7 @@ async function showStoreRepairModal() {
             // into is worse than no login box. Signing in ends in a reload,
             // which brings this screen straight back, key in hand.
             ov.remove();
-            promptLogin(t("Signing in lets Hydra repair the database."));
+            promptLogin(t("Signing in lets Hydranos repair the database."));
             return;
         }
         const results = body.results || [];
@@ -1045,7 +1176,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     const bar = document.createElement("div");
     bar.style.cssText = "padding:10px 14px;background:var(--accent-orange,#c87f0a);color:#fff;" +
         "font-size:13px;display:flex;gap:12px;align-items:center;justify-content:center";
-    bar.innerHTML = "<span>" + t("Config on network storage detected ({kind}). Hydra can handle this, but the database cannot use its safest journal mode there: a share that drops mid-write can corrupt it. <b>Keep backups of your data_dir</b>, or move data_dir to a local disk (your downloads can stay on the share).", { kind: esc(kind) }) + "</span>";
+    bar.innerHTML = "<span>" + t("Config on network storage detected ({kind}). Hydranos can handle this, but the database cannot use its safest journal mode there: a share that drops mid-write can corrupt it. <b>Keep backups of your data_dir</b>, or move data_dir to a local disk (your downloads can stay on the share).", { kind: esc(kind) }) + "</span>";
     const btn = document.createElement("button");
     btn.textContent = t("Got it");
     btn.className = "btn-secondary";
@@ -1244,12 +1375,12 @@ async function updateRecords(force) {
         d.milestones.forEach((m, i) => {
             if (!m.observed) {
                 rows.push('<div class="ar"><span class="when">' + label(m.pib) +
-                    '</span><span class="via">libtorrent (C++) &middot; qBittorrent</span><span class="dur">pre-Hydra</span></div>');
+                    '</span><span class="via">libtorrent (C++) &middot; qBittorrent</span><span class="dur">pre-Hydranos</span></div>');
             } else {
                 const hot = (i === d.milestones.length - 1) ? " hot" : "";
                 const dur = m.since_prev || "-";
                 rows.push('<div class="ar' + hot + '"><span class="when">' + label(m.pib) +
-                    '</span><span class="via">Typhon (Rust) &middot; Hydra &middot; ' + m.date +
+                    '</span><span class="via">Typhon (Rust) &middot; Hydranos &middot; ' + m.date +
                     '</span><span class="dur">' + dur + '</span></div>');
             }
         });
@@ -1991,23 +2122,7 @@ async function refreshDetail() {
         const ttbody = document.getElementById("detail-trackers-tbody");
         if (trackerEditorIsOpen()) return;
         if (d.trackers && d.trackers.length > 0) {
-            ttbody.innerHTML = d.trackers.map(t => {
-                let domain = t.url;
-                try { domain = new URL(t.url).hostname; } catch (_) {}
-                const ep = t.endpoints && t.endpoints[0];
-                const hasErr = ep && ep.last_error && ep.last_error !== "Success";
-                const msg = ep ? (ep.message || ep.last_error || "") : "";
-                const nextAnn = ep && ep.next_announce !== undefined ? ep.next_announce : -1;
-                const lastAnn = ep && ep.last_announce !== undefined ? ep.last_announce : -1;
-                const seeds = ep ? ep.scrape_complete : -1;
-                const leechers = ep ? ep.scrape_incomplete : -1;
-                const statusHtml = hasErr
-                    ? `<span class="tracker-err" title="${esc(msg)}">${esc(msg.substring(0, 60) || "error")}</span>`
-                    : `<span class="tracker-ok">${esc(msg || "OK")}</span>`;
-                const nextStr = nextAnn > 0 ? `${Math.floor(nextAnn/60)}m${nextAnn%60}s` : nextAnn === 0 ? "now" : "-";
-                const scrapeStr = seeds >= 0 ? `${seeds}s/${leechers}l` : "";
-                return `<tr><td class="mono" title="${esc(t.url)}">${domain}</td><td>${statusHtml}</td><td class="mono">${formatAgo(lastAnn)}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
-            }).join("");
+            ttbody.innerHTML = d.trackers.map(trackerRowHtml).join("");
         } else {
             ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
         }
@@ -2032,6 +2147,65 @@ async function refreshDetail() {
 // disagree. -1 means the engine has no answer (never announced, or a tracker
 // it has not reached yet) and reads as a dash, which is not the same claim as
 // "0 seconds ago".
+// One tracker row, for the race panel and the hoard panel alike.
+//
+// It was written twice, identically, which is how the two panels were expected
+// to stay in step. They would not have: this row now has three states and an
+// estimate, and a second copy is a second chance to keep reporting "Success"
+// about a tracker nobody has spoken to.
+function trackerRowHtml(tr) {
+    let domain = tr.url;
+    try { domain = new URL(tr.url).hostname; } catch (_) {}
+    const ep = (tr.endpoints && tr.endpoints[0]) || {};
+    // Fall back to the old two-state reading for a daemon that predates
+    // `status`: no error meant OK there, and pretending otherwise would make
+    // every row of an older node say "not announced yet".
+    const status = ep.status || ((ep.last_error && ep.last_error !== "Success") ? "error" : "ok");
+    const msg = ep.message || ep.last_error || "";
+    const nextAnn = ep.next_announce !== undefined ? ep.next_announce : -1;
+    const lastAnn = ep.last_announce !== undefined ? ep.last_announce : -1;
+    const etaMax = ep.next_announce_eta_max !== undefined ? ep.next_announce_eta_max : -1;
+    const seeds = ep.scrape_complete !== undefined ? ep.scrape_complete : -1;
+    const leechers = ep.scrape_incomplete !== undefined ? ep.scrape_incomplete : -1;
+
+    // "Not announced yet" is its own state, drawn in the muted style: it is
+    // not an error -- nothing has gone wrong -- and it is not a success.
+    const statusHtml =
+        status === "error"
+            ? `<span class="tracker-err" title="${esc(msg)}">${esc(msg.substring(0, 60) || t("error"))}</span>`
+        : status === "never"
+            ? `<span class="tracker-pending" title="${esc(t("Hydranos has not announced this torrent to the tracker yet. At startup the catalogue joins the announce queue in slices, so this clears on its own."))}">${esc(t("not announced yet"))}</span>`
+            : `<span class="tracker-ok">${esc(msg || "OK")}</span>`;
+
+    const nextStr =
+        nextAnn > 0 ? fmtCountdown(nextAnn)
+        : nextAnn === 0 ? t("now")
+        // No deadline and no announce: it is queued. Say roughly how long the
+        // queue is rather than a dash, which reads as "never".
+        : etaMax > 0 ? `~${fmtCountdown(etaMax)} ${t("max")}`
+        : etaMax === 0 && status === "never" ? t("any moment")
+        : "-";
+    const nextTitle = (nextAnn <= 0 && etaMax >= 0)
+        ? ` title="${esc(t("Estimated from the announce queue, not scheduled yet: an upper bound for the whole queue, not a time for this torrent."))}"`
+        : "";
+
+    const scrapeStr = seeds >= 0 ? `${seeds}s/${leechers}l` : "";
+    return `<tr><td class="mono" title="${esc(tr.url)}">${esc(domain)}</td>`
+        + `<td>${statusHtml}</td>`
+        + `<td class="mono">${formatAgo(lastAnn)}</td>`
+        + `<td class="mono"${nextTitle}>${esc(nextStr)}</td>`
+        + `<td class="mono">${scrapeStr}</td></tr>`;
+}
+
+// Seconds as the trackers table writes them: minutes and seconds under an
+// hour, hours and minutes above it. An hour-long queue printed as "6012m11s"
+// is a number nobody reads.
+function fmtCountdown(secs) {
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m${secs % 60}s`;
+    return `${Math.floor(secs / 3600)}h${String(Math.floor((secs % 3600) / 60)).padStart(2, "0")}m`;
+}
+
 function formatAgo(secs) {
     if (secs === undefined || secs === null || secs < 0) return "-";
     if (secs < 60) return secs + "s " + t("ago");
@@ -2649,9 +2823,9 @@ function _searchMatches(t, search) {
     return q.split(_SEARCH_SEP).filter(Boolean).every(tok => hay.includes(tok));
 }
 
-// ── Nodes: this Hydra's engines, and the other Hydras in the fleet ──────────
+// ── Nodes: this Hydranos's engines, and the other nodes in the fleet ──────────
 //
-// Two levels, because that is the model: a NODE is a whole Hydra, an ENGINE is
+// Two levels, because that is the model: a NODE is a whole Hydranos, an ENGINE is
 // a session inside one. The old page called both "agent", which is why nobody
 // could say what either word meant.
 //
@@ -2659,7 +2833,7 @@ function _searchMatches(t, search) {
 // by whoever owns that node, and a version string is whatever it chose to send.
 
 async function updateNodes() {
-    // The local engines first: this is the one place that says what this Hydra
+    // The local engines first: this is the one place that says what this Hydranos
     // actually hosts. /api/status only ever names race and hoard.
     try {
         const engines = await api("/api/engines");
@@ -2776,7 +2950,7 @@ async function removeEngine(id) {
 /// Mint an enrolment token and show the one line that spends it.
 ///
 /// The command is built server-side from the Host header, so it points back at
-/// the address the operator actually reached this Hydra on -- this process
+/// the address the operator actually reached this Hydranos on -- this process
 /// cannot know which of its addresses a third machine resolves.
 async function enrolNode() {
     const card = document.getElementById("enrol-card");
@@ -2837,7 +3011,7 @@ async function testNode() {
     try {
         const h = await api("/api/nodes/test", { method: "POST", body: JSON.stringify(v) });
         if (h.online) {
-            r.textContent = `Hydra ${h.version}, ${(h.engines || []).join(", ")}, ${h.torrents} torrents`;
+            r.textContent = `Hydranos ${h.version}, ${(h.engines || []).join(", ")}, ${h.torrents} torrents`;
             r.className = "result-msg success";
         } else {
             r.textContent = h.error || t("unreachable");
@@ -2875,7 +3049,7 @@ async function removeNode(name) {
 /// Open a node's own front, already authenticated.
 ///
 /// A real navigation to the remote ORIGIN, not an iframe or a proxied prefix:
-/// the front asks for absolute paths, which under a prefix this Hydra would
+/// the front asks for absolute paths, which under a prefix this Hydranos would
 /// answer itself. The server answers with a redirect carrying the remote key in
 /// the fragment, which no server ever sees.
 function openNode(name) {
@@ -4000,23 +4174,7 @@ async function refreshHoardDetail() {
         if (trackerEditorIsOpen()) return;
         const ttbody = document.getElementById("h-detail-trackers-tbody");
         if (d.trackers && d.trackers.length > 0) {
-            ttbody.innerHTML = d.trackers.map(t => {
-                let domain = t.url;
-                try { domain = new URL(t.url).hostname; } catch (_) {}
-                const ep = t.endpoints && t.endpoints[0];
-                const hasErr = ep && ep.last_error && ep.last_error !== "Success";
-                const msg = ep ? (ep.message || ep.last_error || "") : "";
-                const nextAnn = ep && ep.next_announce !== undefined ? ep.next_announce : -1;
-                const lastAnn = ep && ep.last_announce !== undefined ? ep.last_announce : -1;
-                const seeds = ep ? ep.scrape_complete : -1;
-                const leechers = ep ? ep.scrape_incomplete : -1;
-                const statusHtml = hasErr
-                    ? `<span class="tracker-err" title="${esc(msg)}">${esc(msg.substring(0, 60) || "error")}</span>`
-                    : `<span class="tracker-ok">${esc(msg || "OK")}</span>`;
-                const nextStr = nextAnn > 0 ? `${Math.floor(nextAnn/60)}m${nextAnn%60}s` : nextAnn === 0 ? "now" : "-";
-                const scrapeStr = seeds >= 0 ? `${seeds}s/${leechers}l` : "";
-                return `<tr><td class="mono" title="${esc(t.url)}">${domain}</td><td>${statusHtml}</td><td class="mono">${formatAgo(lastAnn)}</td><td class="mono">${nextStr}</td><td class="mono">${scrapeStr}</td></tr>`;
-            }).join("");
+            ttbody.innerHTML = d.trackers.map(trackerRowHtml).join("");
         } else {
             ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
         }
@@ -5588,7 +5746,7 @@ async function _rpSave(key, value) {
     _rpUpdateDrainBtn();
 }
 async function _rpRestart() {
-    if (!await hydraConfirm(t("Restart Hydra now to apply the race drain settings?"))) return;
+    if (!await hydraConfirm(t("Restart Hydranos now to apply the race drain settings?"))) return;
     try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
 }
 async function _rpDrainNow(btn) {
@@ -5778,7 +5936,7 @@ async function _checkStartup() {
 _checkStartup();
 
 
-// ---- Hydra SSE live updates (2026-04-19) ----
+// ---- Hydranos SSE live updates (2026-04-19) ----
 // Push-based live stats from Typhon via /api/events. Replaces part of the
 // 3-second poll for the hoard table: upload_rate / download_rate / peers /
 // state are updated in-place within ~1s of the engine emitting them.
@@ -6586,7 +6744,7 @@ async function resetSettings() {
 }
 
 async function restartDaemon(skipConfirm) {
-    if (!skipConfirm && !await hydraConfirm(t("Restart the Hydra daemon now? (running torrents resume on boot)"))) return;
+    if (!skipConfirm && !await hydraConfirm(t("Restart the Hydranos daemon now? (running torrents resume on boot)"))) return;
     const banner = document.getElementById("settings-restart-banner");
     try {
         await api("/api/settings/restart", { method: "POST" });
@@ -6598,7 +6756,7 @@ async function restartDaemon(skipConfirm) {
     }
 }
 
-if (!API_KEY) promptLogin(t("Sign in to Hydra."));
+if (!API_KEY) promptLogin(t("Sign in to Hydranos."));
 if (API_KEY) maybeOfferImport();
 
 
@@ -7126,7 +7284,7 @@ async function deleteEngine(id){
     }catch(err){ hydraNotify(t("Delete failed: {err}", { err: err })); }
 }
 async function restartHydra(){
-    if(!await hydraConfirm(t("Restart Hydra to apply the changes? (~40s)"))) return;
+    if(!await hydraConfirm(t("Restart Hydranos to apply the changes? (~40s)"))) return;
     try{ await api("/api/restart", {method:"POST"}); }catch(err){}
     hydraNotify(t("Restarting, reconnect in ~40s."));
 }
@@ -7623,7 +7781,7 @@ function updateIssueLink() {
 
 // ─── Startup pause ──────────────────────────────────────
 //
-// While `start_paused` holds an engine, Hydra sends no announces and dials no
+// While `start_paused` holds an engine, Hydranos sends no announces and dials no
 // peers. That is indistinguishable from a broken daemon from the outside, so
 // the banner is permanent and undismissable for as long as the hold lasts.
 // The hold is process-level: releasing it does not touch any torrent's own
@@ -7652,7 +7810,7 @@ async function refreshStartupPause() {
     document.getElementById("startup-pause-title").textContent =
         window.t("Startup pause: {engines} not announcing", { engines: engines });
     document.getElementById("startup-pause-text").textContent =
-        window.t("No announces or peer connections are leaving Hydra. Adjust your rate limits now if you need to, then start. Torrents you paused yourself stay paused.");
+        window.t("No announces or peer connections are leaving Hydranos. Adjust your rate limits now if you need to, then start. Torrents you paused yourself stay paused.");
     el.style.display = "block";
     // Another browser tab, or the API, can release it: keep checking so this
     // banner cannot outlive the hold it describes.
@@ -7684,10 +7842,10 @@ window.addEventListener("DOMContentLoaded", refreshStartupPause);
 const NET_MODES = [
     { id: "direct", label: "Direct",
       blurb: "No proxy. Each engine leaves by the interface you give it, or by the host's default route when you give it none. Use this when you build the tunnels yourself." },
-    { id: "wireguard", label: "WireGuard, managed by Hydra",
-      blurb: "Give each engine a provider .conf. Hydra creates the tunnel, pins the engine to it and asks the provider for an incoming port. Nothing to set up on the host." },
+    { id: "wireguard", label: "WireGuard, managed by Hydranos",
+      blurb: "Give each engine a provider .conf. Hydranos creates the tunnel, pins the engine to it and asks the provider for an incoming port. Nothing to set up on the host." },
     { id: "gluetun", label: "Gluetun",
-      blurb: "A gluetun container holds the tunnel and hands out a forwarded port. Hydra reads that port and follows it." },
+      blurb: "A gluetun container holds the tunnel and hands out a forwarded port. Hydranos reads that port and follows it." },
     { id: "socks5", label: "SOCKS5 proxy",
       blurb: "Outgoing connections go through a SOCKS5 proxy: peer dials and tracker announces both. Nobody can connect to you from outside." },
     { id: "proxy_v2", label: "SOCKS5 + PROXY-v2 relay",
@@ -7806,7 +7964,7 @@ function _netExtras() {
 
 function _netSocksHTML(f) {
     return `<div class="settings-section"><div class="settings-section-title">${t("SOCKS5 proxy")}</div>
-        <p class="sr-desc" style="margin:.2em 0 .8em">${t("This proxy carries everything that leaves Hydra: the connections to peers and the announces to trackers. Both go through it, so neither can reveal your real address.")}</p>
+        <p class="sr-desc" style="margin:.2em 0 .8em">${t("This proxy carries everything that leaves Hydranos: the connections to peers and the announces to trackers. Both go through it, so neither can reveal your real address.")}</p>
         ${_netField("net-socks-host", "Proxy host", "text", f.socks5_host, "IP or hostname of the SOCKS5 server.")}
         ${_netField("net-socks-port", "Proxy port", "number", f.socks5_port || "", "")}
         ${_netField("net-socks-user", "Username", "text", f.socks5_user, "Leave both credentials empty for an open proxy.")}
@@ -7857,7 +8015,7 @@ function netModeRender() {
     let fields = "";
     if (mode === "wireguard") {
         // Deliberately no interface picker and no gluetun block. The interface
-        // is created by Hydra and named by Hydra; offering a box to type one
+        // is created by Hydranos and named by Hydranos; offering a box to type one
         // in would offer a value that is overwritten at the next boot.
         fields += `<div id="net-wg-body"><p class="sr-desc">${t("Loading…")}</p></div>`;
     }
@@ -7877,8 +8035,8 @@ function netModeRender() {
     }
     if (mode === "gluetun") {
         fields += `<div class="settings-section"><div class="settings-section-title">${t("Gluetun")}</div>
-            ${_netCheckbox("net-gluetun", "Take the listen port from gluetun", f.gluetun_port_forward, "Gluetun asks your provider for a forwarded port and that port changes with the lease. Hydra reads it, listens there, and follows it. Announces are held at startup until it knows the port, so no tracker is ever handed the wrong one.")}
-            ${_netField("net-gluetun-url", "Gluetun control server", "text", f.gluetun_url, "Empty means http://127.0.0.1:8000, which is right when Hydra shares gluetun's network.")}
+            ${_netCheckbox("net-gluetun", "Take the listen port from gluetun", f.gluetun_port_forward, "Gluetun asks your provider for a forwarded port and that port changes with the lease. Hydranos reads it, listens there, and follows it. Announces are held at startup until it knows the port, so no tracker is ever handed the wrong one.")}
+            ${_netField("net-gluetun-url", "Gluetun control server", "text", f.gluetun_url, "Empty means http://127.0.0.1:8000, which is right when Hydranos shares gluetun's network.")}
             ${_netField("net-gluetun-key", "Gluetun API key", "password", f.gluetun_api_key, "Recent gluetun versions refuse every request without one. The role needs the route GET /v1/portforward.")}
             ${_netEngineSelect("net-gluetun-engine", "Engine that takes the port", f.gluetun_port_engine, "A provider forwards a single port, so one engine gets it. Hoard seeds around the clock, so being reachable pays off continuously; race needs peers fast on a fresh torrent.")}
             <p class="sr-desc">${t("The other engines keep their own listen port and stay unreachable.")}</p>
@@ -8161,7 +8319,7 @@ async function cancelJob(id) {
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────
 //
-// Hydra's own modal, never native hydraNotify()/await hydraConfirm(): those cannot be styled,
+// Hydranos's own modal, never native hydraNotify()/await hydraConfirm(): those cannot be styled,
 // they freeze the page, and an alert gives the reader no way out but OK, which
 // is wrong for anything they might want to back out of.
 
@@ -8214,7 +8372,7 @@ function hydraDialog(title, body, buttons) {
 // hydraNotify states something that has already happened: one way out.
 // Called with a single argument it is a drop-in for hydraNotify().
 function hydraNotify(title, body) {
-    if (body === undefined) { body = title; title = t("Hydra"); }
+    if (body === undefined) { body = title; title = t("Hydranos"); }
     return hydraDialog(title, body, [{ label: t("OK"), value: true, kind: "keep" }]);
 }
 
@@ -8304,7 +8462,10 @@ async function updateNetPoly() {
     const worst = _netEngines.some(e => e.state === "bad") ? "bad"
         : _netEngines.some(e => e.state === "off") ? "off"
         : _netEngines.some(e => e.state === "warn") ? "warn" : "ok";
-    el.title = tp(_netEngines.length, "{n} agent", "{n} agents", { n: _netEngines.length })
+    // "engine", not "agent". The dots ARE the engines -- one vertex each --
+    // and this panel lists them by engine id, so the tooltip was the only
+    // place still using the 3.x word for them.
+    el.title = tp(_netEngines.length, "{n} engine", "{n} engines", { n: _netEngines.length })
         + " — " + _netStateWord(worst);
 
     // The address only when there is ONE. Several engines behind several
@@ -8367,7 +8528,7 @@ function closeNetPanel() {
 }
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeNetPanel(); });
 
-// --- WireGuard, managed by Hydra ------------------------------------------
+// --- WireGuard, managed by Hydranos ------------------------------------------
 //
 // One engine, one configuration file, one tunnel. The page is built around
 // that: there is no global tunnel to turn on, only a row per engine, because
@@ -8492,14 +8653,14 @@ function netWgRender() {
                 "netWgProviderChanged('" + esc(e.id) + "')")}
             <div id="wg-manual-${esc(e.id)}" style="${manual ? "" : "display:none"}">
                 ${_netField("wg-port-" + e.id, "Port given by the provider", "number", cur.manual_port || "",
-                    "This provider assigns the port on its own website, so Hydra cannot ask for it. Type the one you were given.")}
+                    "This provider assigns the port on its own website, so Hydranos cannot ask for it. Type the one you were given.")}
             </div>
         </div>`;
     }
 
     body.innerHTML = `${status}
         <div class="settings-section"><div class="settings-section-title">${t("Configuration files")}</div>
-            <p class="sr-desc" style="margin:.2em 0 .8em">${t("A file is stored on this node and never shown again: it carries the tunnel's private key. Hydra reads the address, the peer and the keys from it, and decides the routing itself, so your host keeps its own default route.")}</p>
+            <p class="sr-desc" style="margin:.2em 0 .8em">${t("A file is stored on this node and never shown again: it carries the tunnel's private key. Hydranos reads the address, the peer and the keys from it, and decides the routing itself, so your host keeps its own default route.")}</p>
             ${fileRows}
             <div class="settings-row"><div class="sr-label"><span class="sr-key">${t("Add a file")}</span></div>
             <div class="sr-field"><input type="file" id="wg-upload" accept=".conf"> <button class="btn-small" onclick="netWgUpload()">${t("Upload")}</button></div></div>

@@ -1,11 +1,11 @@
 #!/bin/sh
-# Hydra node enrolment.
+# Hydranos node enrolment.
 #
-# Run on the machine that is to become a node. It installs Hydra, gives it a
+# Run on the machine that is to become a node. It installs Hydranos, gives it a
 # freshly generated API key, starts it, and then REGISTERS ITSELF with the
-# Hydra that handed out the token.
+# Hydranos that handed out the token.
 #
-# The direction is the point. The controlling Hydra never opens a session here
+# The direction is the point. The controlling Hydranos never opens a session here
 # and never holds a credential for this machine, so compromising its API cannot
 # become code execution on the fleet. The only authority that crosses the wire
 # is a token that is single use and expires in thirty minutes.
@@ -104,7 +104,7 @@ else
     if command -v systemctl >/dev/null 2>&1; then
         cat > /etc/systemd/system/hydra.service <<UNIT
 [Unit]
-Description=Hydra torrent daemon
+Description=Hydranos torrent daemon
 After=network-online.target
 Wants=network-online.target
 

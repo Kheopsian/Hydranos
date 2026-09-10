@@ -1,6 +1,19 @@
-/* Hydra WebUI - Dark Theme */
+/* Hydra WebUI - themes
+ *
+ * Every colour in this file is a custom property, which is what makes a theme
+ * a block of variables rather than a second stylesheet. A theme sets the same
+ * names; nothing below :root needs to know which one is on.
+ *
+ * The two glow ellipses on <body> were hardcoded rgba() and stayed navy under
+ * every theme, which is the one thing that made a re-skin look broken rather
+ * than different. They are tokens now: --glow-a, --glow-b.
+ *
+ * The default is Abyss, and it is the palette Hydra has always had, byte for
+ * byte -- a user who never opens Personalisation must not see a single pixel
+ * move. */
 
-:root {
+:root,
+html[data-theme="abyss"] {
     color-scheme: dark;
     --bg-primary: #080c14;
     --bg-secondary: rgba(14, 20, 36, 0.75);
@@ -20,6 +33,112 @@
     --accent-blue: #58a6ff;
     --bg-card: rgba(255, 255, 255, 0.03);
     --card-bg: #111d30;
+    --header-bg: rgba(8, 12, 22, 0.85);
+    --glow-a: rgba(30, 80, 180, 0.2);
+    --glow-b: rgba(20, 50, 140, 0.14);
+}
+
+/* Slate: the same room with the lights off. No blue cast, for anyone who
+   reads this page for hours. */
+html[data-theme="slate"] {
+    color-scheme: dark;
+    --bg-primary: #0d0d0f;
+    --bg-secondary: rgba(24, 24, 27, 0.75);
+    --bg-tertiary: #1a1a1e;
+    --border: rgba(255, 255, 255, 0.09);
+    --text-primary: #e4e4e7;
+    --text-secondary: #8b8b94;
+    --text-muted: #4a4a52;
+    --accent-race: #fb923c;
+    --accent-hoard: #7dd3fc;
+    --accent-green: #4ade80;
+    --accent-red: #f87171;
+    --accent-purple: #c4b5fd;
+    --radius: 8px;
+    --accent-yellow: #facc15;
+    --accent-blue: #7dd3fc;
+    --bg-card: rgba(255, 255, 255, 0.035);
+    --card-bg: #1a1a1e;
+    --header-bg: rgba(13, 13, 15, 0.88);
+    --glow-a: rgba(120, 120, 130, 0.10);
+    --glow-b: rgba(90, 90, 100, 0.07);
+}
+
+/* Ember: warm, low blue light. The one to run at night. */
+html[data-theme="ember"] {
+    color-scheme: dark;
+    --bg-primary: #120e0b;
+    --bg-secondary: rgba(32, 24, 18, 0.75);
+    --bg-tertiary: #1e1712;
+    --border: rgba(255, 220, 180, 0.10);
+    --text-primary: #f2e4d6;
+    --text-secondary: #a89078;
+    --text-muted: #5c4a3a;
+    --accent-race: #ff9d4d;
+    --accent-hoard: #e0b062;
+    --accent-green: #9bbf5a;
+    --accent-red: #e5605a;
+    --accent-purple: #c99ad6;
+    --radius: 8px;
+    --accent-yellow: #f0c04a;
+    --accent-blue: #e0b062;
+    --bg-card: rgba(255, 220, 180, 0.04);
+    --card-bg: #1e1712;
+    --header-bg: rgba(18, 14, 11, 0.88);
+    --glow-a: rgba(200, 110, 40, 0.16);
+    --glow-b: rgba(160, 70, 30, 0.12);
+}
+
+/* Kelp: deep green, the quiet one. */
+html[data-theme="kelp"] {
+    color-scheme: dark;
+    --bg-primary: #06110d;
+    --bg-secondary: rgba(14, 32, 26, 0.75);
+    --bg-tertiary: #0f2019;
+    --border: rgba(180, 255, 220, 0.09);
+    --text-primary: #ddf0e6;
+    --text-secondary: #79a894;
+    --text-muted: #3a5c4c;
+    --accent-race: #f0a03e;
+    --accent-hoard: #4fd1a5;
+    --accent-green: #57d97a;
+    --accent-red: #ef6d63;
+    --accent-purple: #a5b4fc;
+    --radius: 8px;
+    --accent-yellow: #d9c34a;
+    --accent-blue: #4fd1a5;
+    --bg-card: rgba(180, 255, 220, 0.035);
+    --card-bg: #0f2019;
+    --header-bg: rgba(6, 17, 13, 0.88);
+    --glow-a: rgba(30, 150, 110, 0.16);
+    --glow-b: rgba(20, 110, 90, 0.11);
+}
+
+/* Daylight: the light one. Kept last because it is the one that shows any
+   colour left hardcoded anywhere -- if something looks wrong here, it is a
+   literal that should have been a token. */
+html[data-theme="daylight"] {
+    color-scheme: light;
+    --bg-primary: #f4f6fa;
+    --bg-secondary: rgba(255, 255, 255, 0.85);
+    --bg-tertiary: #ffffff;
+    --border: rgba(10, 25, 50, 0.12);
+    --text-primary: #16202e;
+    --text-secondary: #5a6b80;
+    --text-muted: #93a1b3;
+    --accent-race: #c2601a;
+    --accent-hoard: #1f6feb;
+    --accent-green: #1a7f37;
+    --accent-red: #cf222e;
+    --accent-purple: #8250df;
+    --radius: 8px;
+    --accent-yellow: #9a6700;
+    --accent-blue: #1f6feb;
+    --bg-card: rgba(10, 25, 50, 0.03);
+    --card-bg: #ffffff;
+    --header-bg: rgba(255, 255, 255, 0.9);
+    --glow-a: rgba(80, 130, 220, 0.14);
+    --glow-b: rgba(120, 90, 200, 0.09);
 }
 
 * {
@@ -31,8 +150,8 @@
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
     background:
-        radial-gradient(ellipse 900px 500px at 15% -5%, rgba(30, 80, 180, 0.2) 0%, transparent 65%),
-        radial-gradient(ellipse 700px 400px at 85% 105%, rgba(20, 50, 140, 0.14) 0%, transparent 65%),
+        radial-gradient(ellipse 900px 500px at 15% -5%, var(--glow-a) 0%, transparent 65%),
+        radial-gradient(ellipse 700px 400px at 85% 105%, var(--glow-b) 0%, transparent 65%),
         var(--bg-primary);
     background-attachment: fixed;
     color: var(--text-primary);
@@ -47,8 +166,8 @@ header {
     justify-content: space-between;
     align-items: center;
     padding: 8px 24px;
-    background: rgba(8, 12, 22, 0.85);
-    border-bottom: 1px solid rgba(88, 166, 255, 0.1);
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--border);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     position: relative;
@@ -1994,6 +2113,10 @@ footer {
 
 .tracker-ok { color: var(--accent-green); font-size: 12px; }
 .tracker-err { color: var(--accent-red); font-size: 12px; }
+/* Not announced yet: neither green nor red, because nothing has gone wrong
+   and nothing has gone right. Muted and italic so the eye reads it as a
+   state that is still resolving. */
+.tracker-pending { color: var(--text-secondary); font-size: 12px; font-style: italic; }
 .tracker-warn {
     display: inline-block;
     background: var(--accent-red);
@@ -3066,3 +3189,72 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     cursor: default;
     user-select: none;
 }
+
+
+/* ─── Personalisation ─────────────────────────────────────────────────────
+   The theme cards show the palette rather than naming it: three swatches --
+   background, primary accent, race accent -- are what a person actually
+   chooses between, and they stay honest when a palette is edited. */
+
+.theme-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 4px;
+}
+
+.theme-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px;
+    min-width: 112px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+}
+
+.theme-card:hover { border-color: var(--accent-hoard); color: var(--text-primary); }
+
+.theme-card.active {
+    border-color: var(--accent-hoard);
+    color: var(--text-primary);
+    box-shadow: 0 0 0 1px var(--accent-hoard) inset;
+}
+
+.theme-swatch {
+    display: flex;
+    width: 100%;
+    height: 26px;
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+.theme-swatch i { flex: 1; display: block; }
+.theme-name { font-weight: 600; letter-spacing: 0.02em; }
+
+.perso-tab-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin-top: 4px;
+}
+
+.perso-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+/* A locked tab is shown, not omitted: leaving it out of the list would look
+   like the panel had lost track of it. */
+.perso-tab.locked { color: var(--text-muted); cursor: default; }

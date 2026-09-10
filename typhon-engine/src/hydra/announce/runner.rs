@@ -122,6 +122,7 @@ pub fn start(
     port: u16,
     mode: Mode,
     cache: Arc<Cache>,
+    admission: Arc<scheduler::Admission>,
 ) -> tokio::sync::mpsc::Sender<String> {
     let catalogue = Arc::new(EngineCatalogue { manager: manager.clone() });
     let policy = Arc::new(policy);
@@ -141,7 +142,7 @@ pub fn start(
     // queue means something is looping and must be refused, not buffered.
     let (bump_tx, bump_rx) = tokio::sync::mpsc::channel::<String>(64);
     tokio::spawn(async move {
-        scheduler::run(catalogue, announce, bump_rx).await;
+        scheduler::run(catalogue, announce, bump_rx, admission).await;
     });
     bump_tx
 }

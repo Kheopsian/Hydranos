@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.18.0";
+pub const HYDRA_VERSION: &str = "4.19.0";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -5791,18 +5791,8 @@ async fn qbit_login(State(state): State<AppState>, body: String) -> Response {
     let username = form_field(&body, "username").unwrap_or_default();
     let password = form_field(&body, "password").unwrap_or_default();
 
-    // No admin account means no credentials can be right. Refusing here rather
-    // than falling through keeps a half-configured instance from handing out a
-    // session to whoever asks first.
-    if cfg.auth.password_hash.is_empty() {
-        tracing::warn!("qBittorrent login refused: no admin account configured yet");
-        return (StatusCode::OK, "Fails.").into_response();
-    }
-
-    let ok = username == cfg.auth.username
-        && bcrypt::verify(&password, &cfg.auth.password_hash).unwrap_or(false);
-    if !ok {
-        // One answer for a wrong name and a wrong password alike.
+    if !qbit_credentials_ok(&cfg, &username, &password) {
+        // One answer for a wrong name, a wrong password and a wrong key alike.
         tracing::warn!(%username, "qBittorrent login refused: invalid credentials");
         return (StatusCode::OK, "Fails.").into_response();
     }
@@ -5820,6 +5810,37 @@ async fn qbit_login(State(state): State<AppState>, body: String) -> Response {
         "Ok.",
     )
         .into_response()
+}
+
+/// Whether these credentials may open a qBittorrent session.
+///
+/// Two ways in, because the clients have one password field and there are two
+/// things worth putting in it:
+///
+///  1. **The admin account**, as the WebUI signs in at `/api/login`.
+///  2. **The API key**, typed into the password box.
+///
+/// The second exists so nobody has to rotate anything to fix an install that
+/// is already broken: every one of these clients holds the API key today, in a
+/// field the daemon stopped reading. It is not a weaker credential -- it is
+/// the SAME secret the header carries, over the same connection, and a caller
+/// who has it can already drive the whole API. It is compared in constant time
+/// for that reason, and never echoed back the way `/api/login` echoes it to
+/// the WebUI.
+///
+/// An instance with neither a key nor an admin account authorises nobody. That
+/// guard is not decoration: without it an empty password would compare equal
+/// to an empty expected key, which is the 4.14 hole in a new doorway.
+fn qbit_credentials_ok(cfg: &crate::config::Config, username: &str, password: &str) -> bool {
+    if cfg.daemon.api_key.is_empty() && cfg.auth.password_hash.is_empty() {
+        return false;
+    }
+    let by_password = !cfg.auth.password_hash.is_empty()
+        && username == cfg.auth.username
+        && bcrypt::verify(password, &cfg.auth.password_hash).unwrap_or(false);
+    let by_key = !password.is_empty()
+        && constant_time_eq(password.as_bytes(), cfg.daemon.api_key.as_bytes());
+    by_password || by_key
 }
 
 /// End the session this request carries, and tell the client to drop it.
@@ -7475,8 +7496,20 @@ async fn download_slots_write(
 /// The announce fields (last_error, last_announce, next_announce) are written
 /// by the announce runner onto the torrent as of 4.4.5. Before that nothing
 /// wrote them and this panel reported "never" on a node announcing normally.
+///
+/// ⭐ Three states, not two. `last_error.is_empty()` used to mean "Success",
+/// which made a torrent nobody had announced yet -- every torrent, for the
+/// first hour of a 300k boot -- report a healthy tracker it had never spoken
+/// to. "No error" and "it went well" are not the same claim, and the panel had
+/// no way to tell them apart because this function did not send one.
+///
+/// `admission` is the engine's own scheduler progress, used only to say how
+/// long a torrent still waiting its turn might wait. It is an upper bound for
+/// the queue as a whole -- see `Admission::drain_seconds` -- so it is reported
+/// as a separate field the UI can hedge, never as `next_announce`.
 fn tracker_rows(
     torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+    admission: &crate::announce::scheduler::Admission,
 ) -> Vec<serde_json::Value> {
     use std::sync::atomic::Ordering;
 
@@ -7485,7 +7518,6 @@ fn tracker_rows(
         .lock()
         .map(|g| g.clone())
         .unwrap_or_default();
-    let ok = last_error.is_empty();
     let seeders = torrent.scrape_seeders.load(Ordering::Relaxed) as i64;
     let leechers = torrent.scrape_leechers.load(Ordering::Relaxed) as i64;
 
@@ -7500,6 +7532,27 @@ fn tracker_rows(
     let last_announce = if last_at > 0 { (now - last_at).max(0) } else { -1 };
     let next_announce = if next_at > 0 { (next_at - now).max(0) } else { -1 };
 
+    // An announce that has never happened cannot have succeeded and cannot
+    // have failed. A tracker that answered with an error keeps saying so even
+    // once the attempt is old, which is why the error is checked first.
+    let status = if !last_error.is_empty() {
+        "error"
+    } else if last_at > 0 {
+        "ok"
+    } else {
+        "never"
+    };
+    let ok = status == "ok";
+
+    // Only for a torrent with no announce and no deadline: it is waiting for
+    // the scheduler to reach it. Anything else already has a real answer, and
+    // an estimate next to a fact reads as though the fact were an estimate.
+    let eta = if status == "never" && next_at == 0 {
+        admission.drain_seconds()
+    } else {
+        -1
+    };
+
     let mut rows = Vec::new();
     for (tier, urls) in torrent.live_trackers.read().iter().enumerate() {
         for url in urls {
@@ -7508,10 +7561,15 @@ fn tracker_rows(
                 "tier": tier,
                 "verified": ok,
                 "endpoints": [{
+                    // "" rather than "Success" when nothing has happened:
+                    // an older client reading last_error sees "no error",
+                    // which is true, instead of a success that never was.
                     "last_error": if ok { "Success".to_string() } else { last_error.clone() },
                     "message": if ok { String::new() } else { last_error.clone() },
+                    "status": status,
                     "last_announce": last_announce,
                     "next_announce": next_announce,
+                    "next_announce_eta_max": eta,
                     "scrape_complete": seeders,
                     "scrape_incomplete": leechers,
                 }],
@@ -7607,7 +7665,26 @@ async fn get_race_torrent(
             .into_response();
     }
 
-    Json(detail_payload(&state, "race", &hash, &torrent)).into_response()
+    Json(detail_payload(&state, "race", &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
+}
+
+/// This engine's scheduler progress, by its real id.
+///
+/// By ID and not by role: a node runs one engine per tunnel and they admit at
+/// their own pace, so the wrong handle would answer with another engine's
+/// backlog. An engine that is offline, or one that has gone since the lookup,
+/// has admitted nothing, and a default `Admission` says exactly that.
+fn admission_of(
+    state: &AppState,
+    engine_id: &str,
+) -> std::sync::Arc<crate::announce::scheduler::Admission> {
+    state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.id == engine_id)
+        .map(|e| e.admission.clone())
+        .unwrap_or_default()
 }
 
 /// The detail panel's view of one torrent, for either engine.
@@ -7620,6 +7697,7 @@ fn detail_payload(
     engine_id: &str,
     hash: &str,
     torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+    admission: &crate::announce::scheduler::Admission,
 ) -> serde_json::Value {
     let raw = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
     let facts = {
@@ -7683,7 +7761,7 @@ fn detail_payload(
         "total_upload": total_upload,
         "tracker_error": row.get("tracker_error").cloned().unwrap_or(serde_json::Value::Bool(false)),
         "tracker_host": row.get("tracker_host").cloned().unwrap_or_else(|| "".into()),
-        "trackers": tracker_rows(torrent),
+        "trackers": tracker_rows(torrent, admission),
         "upload_rate": i(&row, "upload_rate"),
         "uploads_limit": 0,
     })
@@ -7724,7 +7802,7 @@ async fn get_hoard_torrent(
         )
             .into_response();
     }
-    Json(detail_payload(&state, "hoard", &hash, &torrent)).into_response()
+    Json(detail_payload(&state, "hoard", &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
 }
 
 /// Add a torrent, native API: a `torrent_path` already on this node's disk.
@@ -9894,6 +9972,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.daemon.api_key = key.into();
         cfg.auth.password_hash = password_hash.into();
+        cfg.auth.username = "admin".into();
         cfg.announce_clients.insert(
             "t.myanonamouse.net".into(),
             AnnounceClient {
@@ -9988,6 +10067,45 @@ mod tests {
         let open = state("", "$2a$hash");
         let sid = open.sessions.create();
         assert!(!authorised(&open, &with_cookie(&format!("SID={sid}")), ""));
+    }
+
+    /// The login accepts the key, and the key alone is not a blank cheque.
+    ///
+    /// This is what let the seven broken clients be fixed by typing what they
+    /// already held into a field they already had, instead of rotating an
+    /// admin password nobody had written down.
+    #[test]
+    fn the_api_key_is_accepted_where_a_password_is_expected() {
+        // bcrypt("hunter2"), so the admin path is real and not stubbed.
+        let hash = bcrypt::hash("hunter2", 4).unwrap();
+        let s = state("secret-key", &hash);
+
+        assert!(qbit_creds_ok(&s, "admin", "hunter2"), "the admin account works");
+        assert!(qbit_creds_ok(&s, "admin", "secret-key"), "so does the API key");
+        // Any username with the key: the clients let people type anything
+        // there, and the key is what is being checked.
+        assert!(qbit_creds_ok(&s, "whatever", "secret-key"));
+
+        assert!(!qbit_creds_ok(&s, "admin", "wrong"), "a wrong password is refused");
+        assert!(!qbit_creds_ok(&s, "notadmin", "hunter2"), "the right password under the wrong name is refused");
+        assert!(!qbit_creds_ok(&s, "admin", ""), "an empty password is refused");
+    }
+
+    /// An instance with nothing configured authorises nobody here either.
+    ///
+    /// Without the empty guard, an empty password would compare equal to an
+    /// empty key and log anyone in -- the 4.14 hole, in a new doorway.
+    #[test]
+    fn an_unconfigured_instance_issues_no_session() {
+        let fresh = state("", "");
+        assert!(!qbit_creds_ok(&fresh, "admin", ""));
+        assert!(!qbit_creds_ok(&fresh, "admin", "anything"));
+        assert!(!qbit_creds_ok(&fresh, "", ""));
+    }
+
+    /// The real decision `qbit_login` makes, called directly.
+    fn qbit_creds_ok(state: &AppState, username: &str, password: &str) -> bool {
+        qbit_credentials_ok(&state.cfg(), username, password)
     }
 
     #[test]

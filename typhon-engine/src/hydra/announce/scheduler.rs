@@ -18,6 +18,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -115,6 +116,41 @@ pub trait Catalogue: Send + Sync + 'static {
     fn hashes(&self) -> Vec<String>;
 }
 
+/// How far the scheduler has got admitting the catalogue.
+///
+/// A 300k catalogue joins at `MAX_NEW_PER_CYCLE` per `RECONCILE`, so for the
+/// first hour or so of a boot most torrents have no deadline yet and no
+/// announce behind them. Nothing published that, so the detail panel had to
+/// guess -- and guessed "Success", which is the one answer that is certainly
+/// wrong about a tracker nobody has spoken to.
+///
+/// The scheduler owns its `states` map and shares nothing, so this is a
+/// snapshot it publishes, not a lock anyone takes.
+#[derive(Default)]
+pub struct Admission {
+    /// Torrents the scheduler has taken on.
+    pub admitted: AtomicU64,
+    /// Torrents the catalogue holds that it has not reached yet.
+    pub waiting: AtomicU64,
+}
+
+impl Admission {
+    /// Seconds before the last torrent still waiting can expect its turn.
+    ///
+    /// An upper bound for the whole queue, not a promise for one torrent: the
+    /// scheduler admits in catalogue order and this side does not know where
+    /// in that order any given hash sits. "At most this long" is the honest
+    /// claim, and it is the one worth showing.
+    pub fn drain_seconds(&self) -> i64 {
+        let waiting = self.waiting.load(Ordering::Relaxed);
+        if waiting == 0 {
+            return 0;
+        }
+        let cycles = waiting.div_ceil(MAX_NEW_PER_CYCLE as u64);
+        (cycles * RECONCILE.as_secs()) as i64
+    }
+}
+
 /// Run the scheduler until the process ends.
 ///
 /// `announce` is called on a worker for one torrent, and returns when to come
@@ -124,6 +160,7 @@ pub async fn run<C, F, Fut>(
     catalogue: Arc<C>,
     announce: Arc<F>,
     mut bump_rx: mpsc::Receiver<String>,
+    admission: Arc<Admission>,
 )
 where
     C: Catalogue,
@@ -162,7 +199,7 @@ where
     let mut heap: BinaryHeap<Reverse<Deadline>> = BinaryHeap::new();
     let mut reconcile = tokio::time::interval(RECONCILE);
 
-    reconcile_now(&catalogue, &mut states, &mut heap);
+    reconcile_now(&catalogue, &mut states, &mut heap, &admission);
 
     loop {
         // Sleep until the next deadline, or an hour if there is nothing to do.
@@ -233,7 +270,7 @@ where
                 bump_now(&mut states, &mut heap, hash);
             }
             _ = reconcile.tick() => {
-                reconcile_now(&catalogue, &mut states, &mut heap);
+                reconcile_now(&catalogue, &mut states, &mut heap, &admission);
             }
         }
     }
@@ -245,8 +282,10 @@ fn reconcile_now<C: Catalogue>(
     catalogue: &Arc<C>,
     states: &mut HashMap<String, State>,
     heap: &mut BinaryHeap<Reverse<Deadline>>,
+    admission: &Admission,
 ) {
     let live = catalogue.hashes();
+    let total = live.len() as u64;
     let mut seen = std::collections::HashSet::with_capacity(live.len());
     let mut added = 0usize;
     for hash in live {
@@ -278,6 +317,11 @@ fn reconcile_now<C: Catalogue>(
     // A torrent in flight is left alone: its worker still holds it, and its
     // result will remove it.
     states.retain(|h, s| seen.contains(h) || s.in_flight);
+
+    // Published after the retain, so the two numbers describe the same moment.
+    let admitted = states.len() as u64;
+    admission.admitted.store(admitted, Ordering::Relaxed);
+    admission.waiting.store(total.saturating_sub(admitted), Ordering::Relaxed);
 }
 
 /// Move one torrent to the head of the queue, out of band.
@@ -350,6 +394,63 @@ mod tests {
     /// Production answered 429 on the first switch because every torrent was
     /// admitted with a deadline of "now": 300k announces in one burst. Fifty a
     /// second is what a tracker tolerates.
+    #[test]
+    /// ⭐ An estimate that says "at most", and says nothing when there is
+    /// nothing to wait for.
+    ///
+    /// The panel puts this next to real timings, so a zero backlog has to read
+    /// as "no wait" rather than as a small one.
+    #[test]
+    fn the_drain_estimate_bounds_the_queue_and_is_zero_when_it_is_empty() {
+        let a = Admission::default();
+        assert_eq!(a.drain_seconds(), 0, "nothing waiting is no wait, not 10s");
+
+        // One short cycle still costs a whole cycle: the scheduler admits on a
+        // tick, not continuously.
+        a.waiting.store(1, Ordering::Relaxed);
+        assert_eq!(a.drain_seconds(), RECONCILE.as_secs() as i64);
+
+        a.waiting.store(MAX_NEW_PER_CYCLE as u64, Ordering::Relaxed);
+        assert_eq!(a.drain_seconds(), RECONCILE.as_secs() as i64);
+
+        a.waiting.store(MAX_NEW_PER_CYCLE as u64 + 1, Ordering::Relaxed);
+        assert_eq!(a.drain_seconds(), 2 * RECONCILE.as_secs() as i64);
+
+        // The number that made this worth showing: a 300k catalogue at boot.
+        a.waiting.store(300_000, Ordering::Relaxed);
+        let minutes = a.drain_seconds() as f64 / 60.0;
+        assert!((99.0..=101.0).contains(&minutes), "{minutes} minutes for 300k");
+    }
+
+    /// The scheduler publishes what it admitted, and what is still queued.
+    ///
+    /// Without this the API can only guess, and its guess was "Success".
+    #[test]
+    fn admission_is_published_as_the_catalogue_joins() {
+        struct Big(usize);
+        impl Catalogue for Big {
+            fn hashes(&self) -> Vec<String> {
+                (0..self.0).map(|i| format!("{i:040x}")).collect()
+            }
+        }
+        let catalogue = Arc::new(Big(MAX_NEW_PER_CYCLE * 3));
+        let admission = Admission::default();
+        let mut states = HashMap::new();
+        let mut heap = BinaryHeap::new();
+
+        reconcile_now(&catalogue, &mut states, &mut heap, &admission);
+        assert_eq!(admission.admitted.load(Ordering::Relaxed), MAX_NEW_PER_CYCLE as u64);
+        assert_eq!(admission.waiting.load(Ordering::Relaxed), (MAX_NEW_PER_CYCLE * 2) as u64);
+
+        reconcile_now(&catalogue, &mut states, &mut heap, &admission);
+        assert_eq!(admission.admitted.load(Ordering::Relaxed), (MAX_NEW_PER_CYCLE * 2) as u64);
+        assert_eq!(admission.waiting.load(Ordering::Relaxed), MAX_NEW_PER_CYCLE as u64);
+
+        reconcile_now(&catalogue, &mut states, &mut heap, &admission);
+        assert_eq!(admission.waiting.load(Ordering::Relaxed), 0, "the whole catalogue is in");
+        assert_eq!(admission.drain_seconds(), 0);
+    }
+
     #[test]
     fn no_more_than_a_slice_of_the_catalogue_joins_per_cycle() {
         assert_eq!(MAX_NEW_PER_CYCLE, 500);
