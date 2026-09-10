@@ -17,6 +17,40 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.18.0 -- the *arr stack can log in
+
+Sonarr, Radarr, autobrr and cross-seed configure a "qBittorrent" with a host, a
+port, a username and a password. None of them can set `X-Api-Key` and none of
+them can add a query parameter, so the API key -- the only credential this
+daemon accepted -- was one they had no field for.
+
+They were never *asked* for one either. Until 4.15 an instance that kept the
+published placeholder key authorised every caller outright, so the clients
+worked by walking through an open door. Closing that door in 4.15 left them
+with no door at all, and the failure was silent in the worst way: they POST to
+`/api/v2/auth/login`, which answered `Ok.` to any credentials and set no
+cookie, and then took a 401 on every request after it. A client that has just
+been told its login succeeded reports "cannot connect" and nothing says why.
+
+- **`/api/v2/auth/login` is a real login.** It verifies the username and the
+  bcrypt password hash of the admin account -- the same account the WebUI signs
+  in with at `/api/login` -- and answers `Ok.` or `Fails.` with a 200 either
+  way, because that is what qBittorrent answers and the clients parse the body,
+  not the status.
+- **A session is a cookie, and `authorised` accepts it.** `SID`, 32 bytes of
+  system entropy, `HttpOnly` and `SameSite=Lax`, valid for an hour of
+  inactivity. Deliberately not `Secure`: the *arr stack speaks plain HTTP over
+  the LAN, and a cookie it can never send back is not a session.
+- **Sessions live in memory and nowhere else.** A restart logs every client
+  out and every client logs back in, which is also what qBittorrent does, and
+  it stops a stolen cookie outliving the process.
+- **A session is not a way past the key rules.** An instance with no key
+  configured still authorises nobody, cookie or not; that is asserted, because
+  a second branch in `authorised` is a second place for the 4.14 hole to come
+  back.
+- **`/api/v2/auth/logout` ends the session** instead of returning 200 and
+  leaving it live.
+
 ## v4.17.2 -- the reannounce button announces
 
 Pressing Reannounce did nothing, and said it had worked. `reannounce_one`

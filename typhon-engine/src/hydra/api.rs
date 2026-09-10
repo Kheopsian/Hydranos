@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.17.2";
+pub const HYDRA_VERSION: &str = "4.18.0";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -213,6 +213,11 @@ pub struct AppState {
     /// observability, and losing it must never cost the seedbox. Every route
     /// that reads it then answers empty, exactly as 3.x does.
     pub bench: Option<crate::benchdb::Shared>,
+    /// Live cookie sessions for the qBittorrent shim.
+    ///
+    /// The *arr stack has a username and a password and no way to set a
+    /// header, so it logs in and rides a cookie. See `crate::session`.
+    pub sessions: crate::session::Sessions,
 }
 
 impl AppState {
@@ -276,7 +281,26 @@ pub fn authorised(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
         .or_else(|| query_param(query, "apikey"))
         .unwrap_or_default();
 
-    constant_time_eq(provided.as_bytes(), expected.as_bytes())
+    if !provided.is_empty() && constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+        return true;
+    }
+
+    // A caller that logged in carries a cookie instead. This is the only path
+    // the *arr stack has: its qBittorrent form holds a username and a password
+    // and has nowhere to put a key.
+    match session_of(headers) {
+        Some(sid) => state.sessions.validate(&sid),
+        None => false,
+    }
+}
+
+/// The session id this request carries, if it carries one.
+fn session_of(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| crate::session::cookie_value(v, crate::session::COOKIE_NAME))
+        .filter(|v| !v.is_empty())
 }
 
 /// Compare two secrets without returning early on the first difference.
@@ -284,7 +308,7 @@ pub fn authorised(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
 /// The length is not itself secret -- the generated key has a fixed one -- so
 /// an early return on a length mismatch is fine; what must not vary with the
 /// input is the time taken to reject a key of the *right* length.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -5748,14 +5772,78 @@ async fn qbit_stop(
 
 /// qBittorrent's session login.
 ///
-/// Hydra authenticates with an API key, so this exists only so a client that
-/// insists on logging in first can proceed. It answers what qBit answers.
-async fn qbit_login() -> Response {
-    (StatusCode::OK, "Ok.").into_response()
+/// This is the *arr stack's only way in. Sonarr, Radarr, autobrr and
+/// cross-seed configure a "qBittorrent" with a host, a port, a username and a
+/// password; none of them can set `X-Api-Key`, and none of them can add a
+/// query parameter. They POST here and then carry the `SID` cookie.
+///
+/// It used to answer `Ok.` to anything and set no cookie, which was harmless
+/// only for as long as the instance authorised everyone anyway. Once the
+/// placeholder key stopped being a free pass, every one of those clients
+/// started taking a silent 401 on the request *after* a login that had told
+/// them it worked.
+///
+/// The credentials are the admin account -- the same one the WebUI signs in
+/// with at `/api/login`. Answers `Ok.` / `Fails.` with a 200 either way,
+/// because that is what qBittorrent answers and the clients parse the body.
+async fn qbit_login(State(state): State<AppState>, body: String) -> Response {
+    let cfg = state.cfg();
+    let username = form_field(&body, "username").unwrap_or_default();
+    let password = form_field(&body, "password").unwrap_or_default();
+
+    // No admin account means no credentials can be right. Refusing here rather
+    // than falling through keeps a half-configured instance from handing out a
+    // session to whoever asks first.
+    if cfg.auth.password_hash.is_empty() {
+        tracing::warn!("qBittorrent login refused: no admin account configured yet");
+        return (StatusCode::OK, "Fails.").into_response();
+    }
+
+    let ok = username == cfg.auth.username
+        && bcrypt::verify(&password, &cfg.auth.password_hash).unwrap_or(false);
+    if !ok {
+        // One answer for a wrong name and a wrong password alike.
+        tracing::warn!(%username, "qBittorrent login refused: invalid credentials");
+        return (StatusCode::OK, "Fails.").into_response();
+    }
+
+    let sid = state.sessions.create();
+    tracing::info!(%username, "qBittorrent client logged in");
+    // `HttpOnly` because no page of ours reads it, `SameSite=Lax` because no
+    // cross-site form should be able to drive the API with it. Deliberately no
+    // `Secure`: the *arr stack talks to this over plain HTTP on the LAN, and a
+    // cookie marked Secure would simply never come back.
+    let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Lax", crate::session::COOKIE_NAME, sid);
+    (
+        StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        "Ok.",
+    )
+        .into_response()
 }
 
-async fn qbit_logout() -> Response {
-    (StatusCode::OK, "").into_response()
+/// End the session this request carries, and tell the client to drop it.
+async fn qbit_logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(sid) = session_of(&headers) {
+        state.sessions.revoke(&sid);
+    }
+    let cookie = format!("{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", crate::session::COOKIE_NAME);
+    (StatusCode::OK, [(axum::http::header::SET_COOKIE, cookie)], "").into_response()
+}
+
+/// Pull one field out of an `application/x-www-form-urlencoded` body.
+///
+/// The same shape as `query_param`, against a body rather than a query string;
+/// qBittorrent's login is a form POST and the clients all send it that way.
+fn form_field(body: &str, name: &str) -> Option<String> {
+    for pair in body.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            if key == name {
+                return Some(percent_decode(value));
+            }
+        }
+    }
+    None
 }
 
 
@@ -9835,6 +9923,7 @@ mod tests {
             logs: crate::logbuf::LogBuffer::new(),
             reconnect: Default::default(),
             bench: None,
+            sessions: Default::default(),
         }
     }
 
@@ -9842,6 +9931,73 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("X-Api-Key", value.parse().unwrap());
         h
+    }
+
+    fn with_cookie(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::COOKIE, value.parse().unwrap());
+        h
+    }
+
+    /// The *arr stack's path in, asserted from the outside.
+    ///
+    /// Sonarr, Radarr, autobrr and cross-seed configure a "qBittorrent" with a
+    /// username and a password and cannot set a header, so a session cookie is
+    /// the only credential they can present. Before this, `/api/v2/auth/login`
+    /// answered `Ok.` to anything and set no cookie, and the very next request
+    /// took a silent 401 -- which is exactly how it looked in production when
+    /// the placeholder key stopped being a free pass.
+    #[test]
+    fn a_live_session_cookie_authorises_and_nothing_else_does() {
+        let s = state("secret", "$2a$hash");
+        let sid = s.sessions.create();
+
+        assert!(
+            authorised(&s, &with_cookie(&format!("SID={sid}")), ""),
+            "a minted session must pass without any key"
+        );
+        assert!(
+            authorised(&s, &with_cookie(&format!("other=1; SID={sid}; x=2")), ""),
+            "and must still be found among other cookies"
+        );
+        assert!(
+            !authorised(&s, &with_cookie("SID=deadbeef"), ""),
+            "an invented session must be refused"
+        );
+        assert!(
+            !authorised(&s, &with_cookie("SID="), ""),
+            "an empty session must be refused"
+        );
+        assert!(
+            !authorised(&s, &with_cookie("XSID=".to_string().as_str()), ""),
+            "a cookie that merely ends in SID is not the session cookie"
+        );
+
+        // Logging out must actually end it, or a stolen cookie outlives the
+        // client that dropped it.
+        s.sessions.revoke(&sid);
+        assert!(!authorised(&s, &with_cookie(&format!("SID={sid}")), ""));
+    }
+
+    /// A cookie is a credential, so it cannot rescue an instance that has none.
+    ///
+    /// Without this, `authorised` returning on the session branch would be a
+    /// second way past the empty-key rule the test above pins down.
+    #[test]
+    fn a_session_cannot_open_an_instance_with_no_key() {
+        let open = state("", "$2a$hash");
+        let sid = open.sessions.create();
+        assert!(!authorised(&open, &with_cookie(&format!("SID={sid}")), ""));
+    }
+
+    #[test]
+    fn a_form_body_is_split_like_a_query() {
+        assert_eq!(form_field("username=admin&password=p", "username").as_deref(), Some("admin"));
+        assert_eq!(form_field("username=admin&password=p", "password").as_deref(), Some("p"));
+        // The passwords people actually use.
+        assert_eq!(form_field("password=a%2Bb%26c", "password").as_deref(), Some("a+b&c"));
+        assert_eq!(form_field("password=a+b", "password").as_deref(), Some("a b"));
+        assert_eq!(form_field("username=admin", "password"), None);
     }
 
     #[test]
