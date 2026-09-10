@@ -184,11 +184,10 @@ impl EngineHost {
                             config_dir.join("race"),
                         );
                     }
-                    crate::workers::spawn_download_slots(
-                        engine.manager.clone(),
-                        engine.announce_cache.clone(),
-                        session.active_downloads,
-                    );
+                    // The download slot manager is NOT started here. It has to
+                    // read the paused column to know which stops are the
+                    // operator's, and the store is opened after the engines
+                    // are up. main.rs starts it once the store exists.
                     // Deliberately says "starting", not "on the network": the
                     // listener binds in a task that has not run yet, so this
                     // line cannot know. /api/engines publishes what happened.

@@ -157,7 +157,7 @@ impl SlimFacts {
 }
 
 /// A 40-character hex info hash as its 20 raw bytes.
-fn hex20(hex: &str) -> Option<[u8; 20]> {
+pub(crate) fn hex20(hex: &str) -> Option<[u8; 20]> {
     if hex.len() != 40 {
         return None;
     }
@@ -933,6 +933,20 @@ impl Store {
         Ok(changed)
     }
 
+    /// The info hashes of one session the operator has paused.
+    ///
+    /// Read by the download slot manager on every pass. The intent lives here
+    /// and nowhere else, so a scheduler that does not ask cannot tell "the
+    /// human stopped this" from "I parked this myself" -- and will happily
+    /// restart the first, which is the bug this exists to prevent.
+    pub fn paused_hashes(&self, session: &str) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT info_hash FROM torrents WHERE session = ?1 AND paused <> 0",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
     /// Every info hash of one session, sorted.
     pub fn all_hashes(&self, session: &str) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
@@ -1281,6 +1295,35 @@ mod enrol_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the download slot manager asks on every pass.
+    ///
+    /// It must see the operator's pauses and only those: a scheduler that
+    /// cannot tell "the human stopped this" from "I parked this myself"
+    /// restarts the first, which is exactly how a paused torrent kept
+    /// downloading at 8 MB/s while the interface said stopped.
+    #[test]
+    fn paused_hashes_names_the_stopped_of_that_session_only() {
+        let store = fresh();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let c = "c".repeat(40);
+        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, true, "").unwrap();
+        store.insert_torrent(&b, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+        // Same decision, different engine: asking for hoard must not return it.
+        store.insert_torrent(&c, "race", b"x", "", "", 0.0, true, "").unwrap();
+
+        let mut paused = store.paused_hashes("hoard").unwrap();
+        paused.sort();
+        assert_eq!(paused, vec![a.clone()], "only the paused hoard torrent");
+
+        assert_eq!(store.paused_hashes("race").unwrap(), vec![c]);
+
+        // And it follows the intent rather than caching it.
+        store.set_paused(&b, "hoard", true).unwrap();
+        store.set_paused(&a, "hoard", false).unwrap();
+        assert_eq!(store.paused_hashes("hoard").unwrap(), vec![b]);
+    }
 
     fn fresh() -> Store {
         let conn = Connection::open_in_memory().unwrap();

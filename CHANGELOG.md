@@ -17,6 +17,47 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.16.1 -- pause stops the transfer, not just the row
+
+Pausing a torrent wrote a column and nothing else. The transfer carried on:
+`9d0e5efc` was measured going from 54% to 70% in forty seconds, at 8 MB/s,
+while the interface showed `stoppedDL` throughout. It finished its 2.1 GB
+download in that state.
+
+Nothing disagreed anywhere, which is why this survived. The displayed state is
+derived from the stored intent (`row::derive_state`), so it reported the click
+rather than the disk, and every screen agreed with every other one.
+
+Three independent defects, each enough on its own:
+
+- **The decision never reached the engine.** Every pause path -- the native
+  routes, the bulk routes, pause-all, and the qBittorrent shim -- wrote
+  `torrents.paused` and stopped there. `stop_torrent()` existed and worked;
+  nothing outside the scheduler ever called it.
+- **The scheduler would have undone it anyway.** The download slot manager
+  started any incomplete torrent inside its ceiling without asking whose
+  decision had stopped it, so it lifted manual pauses within one interval. The
+  3.x design had a gate for this that was not carried over.
+- **The engine's own stop did not stop a transfer.** `stop_torrent` sets a
+  flag, sets the status and drops the torrent off the DHT -- but nothing on the
+  peer path ever read that flag. Sessions already connected went on requesting
+  blocks and went on serving them, so a pause halted new peer discovery and
+  nothing else. Only the webseed path checked it.
+
+Now: a pause reaches the engine; the engine stops asking for blocks and stops
+serving them, which is what makes the bytes stop; the slot manager treats a
+paused torrent as invisible rather than as a candidate, so it frees its slot
+instead of holding one; and the intent is restored into the engines at startup,
+which a restart used to silently discard.
+
+Blocks already in flight when the pause lands still arrive -- the request
+pipeline is bounded, so that is a few dozen kilobytes and then silence. Peers
+stay connected and choked rather than being dropped.
+
+A resumed torrent re-enters the queue like any other and can show `queued`
+before `downloading` when the ceiling is full. That is the queue working, not
+the resume failing.
+
 ## v4.15.0 -- an instance with no key authorises nobody
 
 ⚠️ **Security. Read the upgrade note: a client that sent no API key and worked

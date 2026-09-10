@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.15.0";
+pub const HYDRA_VERSION: &str = "4.16.1";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -4792,13 +4792,66 @@ async fn qbit_remove_tags(
 }
 
 /// Pause or resume. The store carries the user's intent; the engine follows.
+/// Carry a pause decision down to the engine that is moving the bytes.
+///
+/// The store column is the durable INTENT; `is_paused` on the engine is what
+/// actually stops a transfer. Writing only the first is what let a paused
+/// torrent keep downloading at 8 MB/s while the interface said "stopped": the
+/// state shown is derived from the intent (`row::derive_state`), so it agreed
+/// with the click and not with the disk, and nothing anywhere disagreed.
+///
+/// Quiet when the torrent is not in that engine. A row can name a session this
+/// process does not run -- a catalogue outlives a config change -- and that is
+/// not an error worth a log line on every bulk pause.
+pub(crate) fn apply_pause_to_engine(state: &AppState, engine_id: &str, hash: &str, paused: bool) {
+    let Some(info_hash) = crate::store::hex20(hash) else {
+        return;
+    };
+    let Some(engine) = state.engines.engines().iter().find(|e| e.id == engine_id) else {
+        return;
+    };
+    let _ = if paused {
+        engine.manager.stop_torrent(&info_hash)
+    } else {
+        engine.manager.start_torrent(&info_hash)
+    };
+}
+
+/// Apply one decision to every engine holding a copy of this torrent.
+///
+/// The qBittorrent shim has no engine to name: *arr clients do not know
+/// engines exist, and the store keeps one row per copy. Pausing the intent
+/// everywhere while stopping only one copy would leave the others seeding
+/// under a row that says stopped.
+fn apply_pause_everywhere(state: &AppState, hash: &str, paused: bool) {
+    let ids: Vec<String> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| e.id.clone())
+        .collect();
+    for id in ids {
+        apply_pause_to_engine(state, &id, hash, paused);
+    }
+}
+
 fn set_paused(state: &AppState, form: &Fields, paused: bool) {
     let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
-    let store = state.store.lock().unwrap();
-    for prefix in hashes {
-        if let Some(hash) = store.resolve_hash(&prefix) {
-            let _ = store.set_paused_everywhere(&hash, paused);
-        }
+    let resolved: Vec<String> = {
+        let store = state.store.lock().unwrap();
+        hashes
+            .into_iter()
+            .filter_map(|prefix| store.resolve_hash(&prefix))
+            .inspect(|hash| {
+                let _ = store.set_paused_everywhere(hash, paused);
+            })
+            .collect()
+    };
+    // Outside the store lock: stopping a torrent touches the engine and the
+    // DHT, and holding the database while doing it would serialise every other
+    // request behind a bulk pause.
+    for hash in resolved {
+        apply_pause_everywhere(state, &hash, paused);
     }
 }
 
@@ -4880,13 +4933,19 @@ macro_rules! torrent_write {
 }
 
 torrent_write!(hoard_pause_one, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
-    let store = state.store.lock().unwrap();
-    let _ = store.set_paused(hash, engine, true);
+    {
+        let store = state.store.lock().unwrap();
+        let _ = store.set_paused(hash, engine, true);
+    }
+    apply_pause_to_engine(state, engine, hash, true);
 });
 
 torrent_write!(hoard_resume_one, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
-    let store = state.store.lock().unwrap();
-    let _ = store.set_paused(hash, engine, false);
+    {
+        let store = state.store.lock().unwrap();
+        let _ = store.set_paused(hash, engine, false);
+    }
+    apply_pause_to_engine(state, engine, hash, false);
 });
 
 torrent_write!(hoard_pin_one, "torrent not in hoard: {}", |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
@@ -5389,10 +5448,16 @@ async fn pause_all(state: &AppState, engine: &str, paused: bool) -> Response {
         )
             .into_response();
     }
-    let count = {
+    let (count, hashes) = {
         let store = state.store.lock().unwrap();
-        store.set_paused_all(engine, paused).unwrap_or(0)
+        let count = store.set_paused_all(engine, paused).unwrap_or(0);
+        (count, store.all_hashes(engine).unwrap_or_default())
     };
+    // The engine, not just the intent. Outside the lock: this walks a whole
+    // session, and holding the database across it would stall every request.
+    for hash in &hashes {
+        apply_pause_to_engine(state, engine, hash, paused);
+    }
     let key = if paused { "paused" } else { "resumed" };
     Json(serde_json::json!({"status": "ok", key: count})).into_response()
 }
@@ -5438,6 +5503,7 @@ async fn pause_bulk(state: &AppState, engine: &str, body: &str) -> Response {
     // rather than a silent match on whichever torrent happened to share those
     // twelve characters.
     let mut applied = 0usize;
+    let mut touched: Vec<String> = Vec::new();
     {
         let store = state.store.lock().unwrap();
         for hash in &req.hashes {
@@ -5446,8 +5512,13 @@ async fn pause_bulk(state: &AppState, engine: &str, body: &str) -> Response {
                 .is_some_and(|found| found == hash.to_lowercase());
             if exists && store.set_paused(&hash.to_lowercase(), engine, req.paused).is_ok() {
                 applied += 1;
+                touched.push(hash.to_lowercase());
             }
         }
+    }
+    // The intent is written; now stop the transfers it describes.
+    for hash in &touched {
+        apply_pause_to_engine(state, engine, hash, req.paused);
     }
     // `paused` is echoed back: the UI updates the row from the answer rather
     // than refetching, and needs to know which way it went.
@@ -6316,10 +6387,20 @@ async fn race_resume_one(
 }
 
 fn set_one_paused(state: &AppState, engine: &str, prefix: &str, paused: bool) -> Response {
-    let store = state.store.lock().unwrap();
-    match store.resolve_hash_in(engine, prefix) {
+    let resolved = {
+        let store = state.store.lock().unwrap();
+        match store.resolve_hash_in(engine, prefix) {
+            Some(hash) => {
+                let _ = store.set_paused_everywhere(&hash, paused);
+                Some(hash)
+            }
+            None => None,
+        }
+    };
+    match resolved {
         Some(hash) => {
-            let _ = store.set_paused_everywhere(&hash, paused);
+            // The intent covers every copy, so the stop has to as well.
+            apply_pause_everywhere(state, &hash, paused);
             Json(serde_json::json!({"status": "ok"})).into_response()
         }
         None => (
