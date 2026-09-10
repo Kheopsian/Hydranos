@@ -3,6 +3,65 @@
 All notable changes to Hydra are documented here. This project follows
 [semantic versioning](https://semver.org).
 
+This file is compiled into the binary and served at `/api/changelog`, so a
+release with no entry here is a release that cannot describe itself. CI checks
+that the top entry matches `HYDRA_VERSION` (`.github/scripts/version_guard.py`).
+
+Two ways to title a new entry:
+
+- `## v<major>.<minor>.<patch> -- title`, matching `HYDRA_VERSION`, when you
+  know the number this will ship as.
+- `## Unreleased -- title`, when you do not. Preferred for a branch that will
+  sit for a while: this repository has merged as many as four minor bumps in a
+  day, so a number chosen while writing a branch is often taken by the time
+  anyone reviews it. Whoever tags the release renames the heading and sets
+  `HYDRA_VERSION` in the same commit.
+
+## v4.15.0 -- an instance with no key authorises nobody
+
+⚠️ **Security. Read the upgrade note: a client that sent no API key and worked
+anyway will now get 401.**
+
+A fresh Docker install served its entire API, and its entire configuration, to
+anyone who could reach the port. Proven on a 4.14.0 container with a virgin
+`/config`: `/api/status`, `/api/settings`, `/api/engines` and `/api/categories`
+all answered 200 with no credentials at all, while a *wrong* key was correctly
+refused with 401. Sending nothing succeeded; sending something failed.
+
+Two ported defects met. 3.x generated a random API key on first boot and
+persisted it; the Rust port dropped that step while still shipping a template
+carrying `api_key = ""`. And `authorised()` ended in `provided == expected`,
+where a missing header becomes `""` -- so the absence of a key matched the
+absence of a key. `/api/settings` returns the whole TOML, which is to say
+`password_hash`, `agent_token`, `api_key` and the Sonarr/Radarr keys, in one
+unauthenticated request.
+
+- **`authorised()` fails closed.** An empty configured key now refuses every
+  caller rather than admitting the one who sends nothing.
+- **The daemon generates its own key at first boot**, 24 bytes of system
+  entropy written back into the config file -- the 3.x behaviour, restored.
+- **The published placeholder is no longer a bypass.** `change-me-in-production`
+  used to switch authentication off entirely once an admin password existed,
+  which is the state production ran in, so production authenticated nothing. It
+  is now compared like any other key, and replaced at boot on any install still
+  carrying it.
+- **Keys compare in constant time.** A bearer secret checked with `==` leaks its
+  prefix to anyone willing to time enough requests.
+- **`POST /api/setup` is wired.** It answered 501 and pointed at a
+  `hydra reset-password` command that does not exist, so no fresh install could
+  create its admin account: the only way in was writing a bcrypt hash into the
+  TOML by hand. It now creates the account and returns the generated key, which
+  is the one moment the browser can learn it. It still refuses a non-local
+  caller, and still 409s once an account exists.
+
+### Upgrading
+
+Both the `/api/v2/*` qBittorrent shim and the native API sit behind this one
+check, so this is the release where a client with no credentials stops working.
+Give Sonarr, Radarr, autobrr and cross-seed the API key from your config file.
+If yours still said `change-me-in-production`, it was replaced on this boot --
+the startup log says so, and the new value is in the file.
+
 ## v4.14.0 -- a torrent lives in an engine, and may live in several
 
 `torrents` was keyed on `info_hash` alone, so one torrent was one row naming one

@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.14.0";
+pub const HYDRA_VERSION: &str = "4.15.0";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -233,29 +233,39 @@ impl AppState {
 
 /// The placeholder key shipped in the default config.
 ///
-/// Its presence is what puts the daemon in "dev mode": see `authorised`.
+/// The placeholder key shipped in the default config.
+///
+/// Known to everyone who has read the repository, so it is a key in name only.
+/// `ensure_api_key` replaces it at boot on any install that still carries it.
 const DEFAULT_API_KEY: &str = "change-me-in-production";
 
-/// Decide whether a request may proceed, reproducing the Go middleware exactly.
+/// Decide whether a request may proceed.
 ///
-/// The rules were read off `apiKeyAuth` rather than guessed, because two of them
-/// are invisible from the outside until they bite:
+/// Two rules, and one deliberate departure from the Go middleware this was
+/// ported from:
 ///
-///  1. If the configured key is still the shipped placeholder AND an admin
-///     password has been set, no key is checked at all. That is deliberate on
-///     the Go side -- a developer install should not need a key -- but it does
-///     mean an instance that kept the default key serves its whole API to
-///     anyone who can reach the port. The condition on the password hash is
-///     what stops a brand new install from being wide open before setup.
+///  1. **An instance with no key authorises nobody.** The Go side had an
+///     escape hatch -- placeholder key plus an admin password meant no key was
+///     checked at all -- and the port inherited it while losing the first-boot
+///     key generation that kept `api_key` from being empty. The two together
+///     were a hole: `provided == expected` made *sending nothing* match
+///     *having nothing*, so a fresh Docker install served its whole API, and
+///     its whole configuration, to any caller who simply omitted the header.
+///     Sending a wrong key was refused; sending none succeeded. Failing closed
+///     here is what makes the absence of a key a refusal instead of a pass.
 ///  2. The key may arrive either in the X-Api-Key header or as an `apikey`
 ///     query parameter. Dropping the query fallback would break every caller
 ///     that cannot set headers.
+///
+/// The comparison is constant-time: the key is a bearer secret, and a plain
+/// `==` returns as soon as two bytes differ, which leaks its prefix to anyone
+/// willing to time enough requests.
 pub fn authorised(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
     let cfg = state.cfg();
     let expected = cfg.daemon.api_key.as_str();
 
-    if expected == DEFAULT_API_KEY && !cfg.auth.password_hash.is_empty() {
-        return true;
+    if expected.is_empty() {
+        return false;
     }
 
     let provided = headers
@@ -266,7 +276,23 @@ pub fn authorised(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
         .or_else(|| query_param(query, "apikey"))
         .unwrap_or_default();
 
-    provided == expected
+    constant_time_eq(provided.as_bytes(), expected.as_bytes())
+}
+
+/// Compare two secrets without returning early on the first difference.
+///
+/// The length is not itself secret -- the generated key has a fixed one -- so
+/// an early return on a length mismatch is fine; what must not vary with the
+/// input is the time taken to reject a key of the *right* length.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Pull one parameter out of a raw query string.
@@ -5002,7 +5028,7 @@ async fn category_delete(
 /// The reload is what makes the change visible to the next GET; without it a
 /// write followed by a read returns the old value, which looks exactly like a
 /// write that failed.
-fn edit_config<F>(state: &AppState, mutate: F) -> bool
+pub(crate) fn edit_config<F>(state: &AppState, mutate: F) -> bool
 where
     F: FnOnce(&str) -> Result<String, String>,
 {
@@ -9732,26 +9758,68 @@ mod tests {
         assert!(!authorised(&s, &HeaderMap::new(), "apikey=wrong"));
     }
 
-    // The placeholder key disables the check, but only once an admin password
-    // exists. Both halves are asserted: an install that is still unconfigured
-    // must NOT be wide open, and that is the half a refactor would quietly drop.
+    /// The hole this closes, asserted from the outside.
+    ///
+    /// A fresh Docker install had `api_key = ""` from the shipped template.
+    /// `provided == expected` then made *sending nothing* equal *having
+    /// nothing*: no key got 200, a wrong key got 401. Measured on 4.14.0
+    /// against a container with a virgin /config.
+    ///
+    /// Both halves matter. That an empty key refuses a caller who sends
+    /// nothing is the fix; that it also refuses one who sends the empty string
+    /// is what stops the same equality sneaking back in another spelling.
     #[test]
-    fn the_placeholder_key_disables_the_check_only_after_setup() {
-        let configured = state(DEFAULT_API_KEY, "$2a$hash");
+    fn an_instance_with_no_key_authorises_nobody() {
+        let open = state("", "$2a$hash");
         assert!(
-            authorised(&configured, &HeaderMap::new(), ""),
-            "placeholder + password set = dev mode, no key needed"
+            !authorised(&open, &HeaderMap::new(), ""),
+            "no key configured must refuse a caller who sends none"
+        );
+        assert!(
+            !authorised(&open, &with_key(""), ""),
+            "nor one who sends an empty key"
+        );
+        assert!(
+            !authorised(&open, &HeaderMap::new(), "apikey="),
+            "nor one who sends an empty key in the query"
+        );
+        assert!(
+            !authorised(&open, &with_key("anything"), ""),
+            "nor anyone else"
         );
 
-        let fresh = state(DEFAULT_API_KEY, "");
+        // Same before setup: an unconfigured install must not be wide open
+        // either, which is the half a refactor would quietly drop.
+        let fresh = state("", "");
+        assert!(!authorised(&fresh, &HeaderMap::new(), ""));
+    }
+
+    /// The placeholder is a key, not a bypass.
+    ///
+    /// It used to switch the check off entirely once an admin password
+    /// existed -- which production had, so production authenticated nothing.
+    /// It is now compared like any other value; `config::ensure_api_key`
+    /// replaces it at boot so an install should never reach this state.
+    #[test]
+    fn the_placeholder_key_is_no_longer_a_bypass() {
+        let configured = state(DEFAULT_API_KEY, "$2a$hash");
         assert!(
-            !authorised(&fresh, &HeaderMap::new(), ""),
-            "placeholder with no admin password must still refuse"
+            !authorised(&configured, &HeaderMap::new(), ""),
+            "placeholder + password set must NOT wave a keyless caller through"
         );
         assert!(
-            authorised(&fresh, &with_key(DEFAULT_API_KEY), ""),
-            "and must accept the placeholder itself as the key"
+            authorised(&configured, &with_key(DEFAULT_API_KEY), ""),
+            "it is still the configured key, so it still opens the door"
         );
+    }
+
+    #[test]
+    fn keys_compare_in_constant_time_but_still_compare() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secrey"));
+        assert!(!constant_time_eq(b"secret", b"secret-longer"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     // The trap this guards: "3.9.0" is lexically greater than "3.180.0", so a
