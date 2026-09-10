@@ -52,6 +52,7 @@ mod config;
 mod rules;
 mod rulesrun;
 mod rulesapi;
+mod session;
 
 use config::Config;
 
@@ -280,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
         config_path: config_path.clone(),
         update_check: Arc::new(tokio::sync::Mutex::new(None)),
         bench,
+        sessions: Default::default(),
     };
     // Roll the day counters on a timer, not only when somebody asks. 3.x reset
     // on the first request of the new day, so a dashboard opened in the
