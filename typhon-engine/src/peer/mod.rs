@@ -591,7 +591,9 @@ async fn handle_incoming(
         res[5] |= 0x10; // BEP 10
         reply.extend_from_slice(&res);
         reply.extend_from_slice(&info_hash);
-        reply.extend_from_slice(&peer_id);
+        // The torrent's identity, not the binding's: on a private tracker the
+        // announce may have been spoofed, and this is what its peers compare.
+        reply.extend_from_slice(&torrent.handshake_pid(&peer_id));
         match tokio::time::timeout(HS_TIMEOUT, stream.write_all(&reply)).await {
             Ok(Ok(_)) => {}
             Ok(Err(_)) => return,
@@ -623,6 +625,7 @@ async fn handle_incoming(
                 first[0],
                 &ya_rest,
                 &peer_id,
+                // resolved per torrent below, same rule as the plaintext path
                 |req2_hash| tm_clone.lookup_skey(req2_hash),
             ),
         ).await;

@@ -199,6 +199,18 @@ async fn announce_one(
         && VERIFY_TICK.fetch_add(1, Ordering::Relaxed) % VERIFY_EVERY == 0;
     let numwant_this = if verify_this { Some(VERIFY_NUMWANT) } else { None };
 
+    // Keep the handshake identity in step with what we are about to announce.
+    // Done here, before the announce, because this is the one place that sees
+    // both the torrent and the policy -- and it re-runs on every cycle, so an
+    // override added or removed at runtime takes effect without a restart.
+    {
+        let want = policy::handshake_prefix(policy, &torrent.meta.trackers);
+        let mut slot = torrent.handshake_prefix.write();
+        if *slot != want {
+            *slot = want;
+        }
+    }
+
     let mut interval = Duration::from_secs(30 * 60);
     let mut announced_at_all = false;
     for tier in &torrent.meta.trackers {

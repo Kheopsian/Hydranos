@@ -35,6 +35,41 @@ them:
   worker cannot tell them apart. The existing guard only caught an engine that
   loaded NOTHING; this catches the one that loaded almost everything.
 
+## v4.26.0 -- the peer id tells the truth, and tells the same story twice
+
+### It said 2.4.3.0
+
+`-HY2430-` has been the fingerprint since the first public commit, on a daemon
+now at 4.x. The four characters of an Azureus-style peer id ARE the version --
+every client that decodes them, ours included, read a number that was never
+true, and published a build number besides.
+
+It is derived from `HYDRA_VERSION` now. One character per component means base
+36, not decimal: qBittorrent writes 5.2.2 as `-qB5220-`, which works while
+every component stays under ten. Hydranos is at minor 26, so decimal would need
+five characters and stop being a peer id. `-HY4Q00-` for 4.26.0.
+
+### The tracker was told one thing and its swarm another
+
+`announce_clients` spoofs the client per tracker -- but only in the ANNOUNCE.
+The handshake kept the engine's own id, so a private tracker was told
+`-qB5220-` while every peer in its swarm saw `-HY....-`. A tracker that
+compares the two, and strict ones do, sees a client lying about what it is:
+worse than not spoofing at all.
+
+The torrent now carries the prefix its FIRST tracker calls for, and all three
+handshake paths use it -- outbound dial, inbound plaintext, inbound MSE. Set by
+the announce runner on every cycle, so an override added at runtime applies
+without a restart.
+
+Only the eight-byte prefix is replaced; the random tail stays the binding's.
+That is what keeps two engines of one node distinguishable, and the
+self-connection guard -- which compares peer ids -- working.
+
+A torrent with no override keeps the binding's id. That is every public
+torrent, and it is the right answer there: DHT and PEX hand over peers with
+nobody vouching for them and nobody cross-checking.
+
 ## v4.25.0 -- the detail panel stops dying on the first connected peer
 
 A torrent with connected peers froze its detail panel. The peer flags arrive as

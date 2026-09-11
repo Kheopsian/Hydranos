@@ -124,6 +124,33 @@ pub struct Request {
 }
 
 /// Build the announce for one torrent on one tracker.
+/// The eight-byte peer-id prefix this torrent must present in the BT
+/// handshake, or `None` when the binding's own will do.
+///
+/// The FIRST tracker decides. A torrent announcing to several private trackers
+/// cannot show a different client to each of them -- they share one swarm, and
+/// its peers compare notes. An operator who lists several will have overridden
+/// all of them anyway; taking the first is the only choice that is stable.
+///
+/// `None` for a torrent with no tracker override, which is every public one:
+/// DHT and PEX hand over peers with nobody vouching for them and nobody
+/// checking, so there is nothing to stay consistent with.
+///
+/// The spoof replaces only the eight-byte prefix, so the random tail -- which
+/// differs per binding -- survives. That is what keeps two engines of the same
+/// node distinguishable, and the self-connection guard working.
+pub fn handshake_prefix(policy: &Policy, trackers: &[Vec<String>]) -> Option<[u8; 8]> {
+    let first = trackers.iter().flatten().next()?;
+    let spoof = client_for(policy, first)?;
+    let bytes = spoof.peer_id_prefix.as_bytes();
+    if bytes.len() != 8 {
+        return None;
+    }
+    let mut out = [0u8; 8];
+    out.copy_from_slice(bytes);
+    Some(out)
+}
+
 pub fn prepare(
     policy: &Policy,
     tracker_url: &str,
@@ -186,6 +213,73 @@ fn flip_last_peer_id_byte(peer_id: &str) -> Option<String> {
     let last = bytes.len() - 1;
     bytes[last] ^= 0x01;
     String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod handshake_identity_tests {
+    use super::*;
+
+    fn policy_with(host: &str, prefix: &str) -> Policy {
+        let mut p = Policy::default();
+        p.clients.insert(
+            host.to_string(),
+            ClientSpoof { peer_id_prefix: prefix.into(), user_agent: "qBittorrent/5.2.2".into() },
+        );
+        p
+    }
+    fn tiers(urls: &[&str]) -> Vec<Vec<String>> {
+        vec![urls.iter().map(|u| u.to_string()).collect()]
+    }
+
+    /// The case this exists for: the tracker was told -qB5220- while its swarm
+    /// saw -HY....-, and a strict tracker compares the two.
+    #[test]
+    fn an_overridden_tracker_sets_the_handshake_too() {
+        let p = policy_with("tracker.example.org", "-qB5220-");
+        let got = handshake_prefix(&p, &tiers(&["https://tracker.example.org/announce"]));
+        assert_eq!(got, Some(*b"-qB5220-"));
+    }
+
+    /// Public torrents keep the binding's own id: nobody vouches for a DHT or
+    /// PEX peer and nobody cross-checks, so there is nothing to match.
+    #[test]
+    fn a_tracker_with_no_override_changes_nothing() {
+        let p = policy_with("tracker.example.org", "-qB5220-");
+        let got = handshake_prefix(&p, &tiers(&["https://other.example.net/announce"]));
+        assert_eq!(got, None);
+    }
+
+    /// The FIRST tracker decides. Several private trackers share one swarm, so
+    /// a torrent cannot show each of them a different client.
+    #[test]
+    fn the_first_tracker_decides() {
+        let mut p = policy_with("first.example.org", "-qB5220-");
+        p.clients.insert(
+            "second.example.org".into(),
+            ClientSpoof { peer_id_prefix: "-DE13F0-".into(), user_agent: "Deluge".into() },
+        );
+        let got = handshake_prefix(&p, &tiers(&[
+            "https://first.example.org/announce",
+            "https://second.example.org/announce",
+        ]));
+        assert_eq!(got, Some(*b"-qB5220-"));
+    }
+
+    /// A prefix that is not eight bytes would shift the random tail into the
+    /// client field of whoever reads it. Refused rather than truncated.
+    #[test]
+    fn a_malformed_prefix_is_refused() {
+        let p = policy_with("tracker.example.org", "-qB-");
+        assert_eq!(handshake_prefix(&p, &tiers(&["https://tracker.example.org/announce"])), None);
+    }
+
+    /// No tracker at all: a magnet before metadata, or a torrent stripped of
+    /// its trackers.
+    #[test]
+    fn no_tracker_means_no_override() {
+        let p = policy_with("tracker.example.org", "-qB5220-");
+        assert_eq!(handshake_prefix(&p, &[]), None);
+    }
 }
 
 #[cfg(test)]

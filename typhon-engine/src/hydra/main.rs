@@ -154,6 +154,10 @@ async fn main() -> anyhow::Result<()> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("/config"))
         .to_path_buf();
+    // Before any engine builds its peer id: the fingerprint's four characters
+    // ARE the version to every client that decodes them, and ours said 2.4.3.0
+    // on a 4.x daemon for the whole life of the project.
+    typhon_engine::config::set_version(api::HYDRA_VERSION);
     let engine_host = Arc::new(engines::EngineHost::start(&config, &config_dir).await);
 
     // Same file 3.x writes: the store is what makes the switch reversible.

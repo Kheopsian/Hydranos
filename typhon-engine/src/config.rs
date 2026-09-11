@@ -163,7 +163,87 @@ fn default_max_uploads_per_torrent() -> i32 { -1 }
 fn default_peer_timeout() -> u64 { 300 }
 fn default_file_pool_size() -> usize { 5000 }
 fn default_socks5_port() -> u16 { 1080 }
-fn default_peer_fingerprint() -> String { "-HY2430-".into() }
+/// The fallback fingerprint, used only when nothing supplies a real one.
+///
+/// It says 2.4.3.0 and has done since the first public commit, on a daemon
+/// that is now 4.x: the four digits of an Azureus-style peer id ARE the
+/// version, and every client that decodes them -- including ours -- read a
+/// number that was never true. `peer_fingerprint_for` derives the real one;
+/// this remains only so a config that predates it still parses.
+/// The running version, set once by the binary at startup.
+///
+/// `HYDRA_VERSION` lives in `hydra/api.rs` because CI pins it there (it checks
+/// the changelog against it), and this crate is below that module. Rather than
+/// keep a second copy that would drift, the binary hands it down.
+static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Called once, before any config is parsed.
+pub fn set_version(version: &str) {
+    let _ = VERSION.set(version.to_string());
+}
+
+fn default_peer_fingerprint() -> String {
+    peer_fingerprint_for(VERSION.get().map(String::as_str).unwrap_or("0.0.0"))
+}
+
+/// `-HY<version>-`, in the Azureus convention: two letters for the client and
+/// FOUR characters for major, minor, patch and build, one each.
+///
+/// One character per component means base 36, not decimal: qBittorrent writes
+/// 5.2.2 as `-qB5220-`, which works while every component stays below ten and
+/// silently breaks above it. Hydranos is at minor 25, so decimal would need
+/// five characters and stop being a peer id. 25 is `P` in base 36, giving
+/// `-HY4P00-` for 4.25.0 -- unusual to read, but the only encoding that keeps
+/// the field the right width AND the version true.
+pub fn peer_fingerprint_for(version: &str) -> String {
+    fn b36(n: u32) -> char {
+        char::from_digit(n.min(35), 36).unwrap_or('0').to_ascii_uppercase()
+    }
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+    let build = parts.next().unwrap_or(0);
+    format!("-HY{}{}{}{}-", b36(major), b36(minor), b36(patch), b36(build))
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::peer_fingerprint_for;
+
+    /// The whole point: the digits are the version, so they must BE the
+    /// version. A fingerprint frozen at 2430 on a 4.25 daemon told every peer
+    /// and every tracker a number that was never true.
+    #[test]
+    fn the_fingerprint_carries_the_real_version() {
+        assert_eq!(peer_fingerprint_for("4.25.0"), "-HY4P00-");
+        assert_eq!(peer_fingerprint_for("1.2.3"), "-HY1230-");
+    }
+
+    /// Always eight bytes, whatever the version: a peer id is 20 bytes with
+    /// the first eight spoken for, and a short prefix shifts the random tail
+    /// into the client field of whoever reads it.
+    #[test]
+    fn it_is_always_eight_bytes() {
+        for v in ["0.0.0", "4.25.0", "10.0.0", "99.99.99", "", "nonsense"] {
+            assert_eq!(peer_fingerprint_for(v).len(), 8, "version {v:?}");
+        }
+    }
+
+    /// Base 36 runs out at 35. Past that the component is pinned rather than
+    /// overflowing into the next character and corrupting the whole field.
+    #[test]
+    fn a_component_past_base36_is_pinned() {
+        assert_eq!(peer_fingerprint_for("40.0.0"), "-HYZ000-");
+    }
+
+    /// A version string that is not one must not produce a malformed id.
+    #[test]
+    fn nonsense_still_yields_a_valid_prefix() {
+        let fp = peer_fingerprint_for("not.a.version");
+        assert_eq!(fp, "-HY0000-");
+    }
+}
 fn default_user_agent() -> String { "Hydra/2.4.3-typhon".into() }
 
 impl EngineConfig {

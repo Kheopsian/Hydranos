@@ -258,6 +258,22 @@ pub struct TorrentState {
     /// the set_trackers command; the announce loop takes a snapshot each
     /// pass, so a change lands on the next announce without a restart.
     pub live_trackers: RwLock<Vec<Vec<String>>>,
+    /// The peer id to present in the BT HANDSHAKE for this torrent.
+    ///
+    /// `None` means "use the binding's own", which is the right answer for a
+    /// public torrent: DHT and PEX peers arrive without a tracker vouching for
+    /// them and nobody cross-checks anything there.
+    ///
+    /// It matters on a private tracker. The announce can be spoofed per tracker
+    /// (`announce_clients`), and until now the handshake was not: the tracker
+    /// was told `-qB5220-` while every peer in its swarm saw `-HY...-`. A
+    /// tracker that compares the two -- which strict ones do -- sees a client
+    /// lying about what it is, which is worse than not spoofing at all.
+    ///
+    /// Set from the FIRST tracker's override: a torrent announcing to several
+    /// private trackers cannot present a different identity to each, since they
+    /// share one swarm.
+    pub handshake_prefix: RwLock<Option<[u8; 8]>>,
     pub save_path: RwLock<PathBuf>,
     pub info_hash: InfoHash,
     pub torrent_file_path: String,
@@ -353,6 +369,27 @@ pub struct TorrentState {
     /// PEX (BEP 11) to compute added/dropped between ticks and by the dial
     /// dedup path ("don't redial a peer we already serve").
     pub connected_addrs: DashMap<std::net::SocketAddr, ()>,
+}
+
+
+impl TorrentState {
+    /// The peer id to hand this torrent's peers: the tracker-consistent one
+    /// when a private tracker override set it, the binding's own otherwise.
+    ///
+    /// Every handshake for this torrent goes through here, inbound and out, so
+    /// a peer and the tracker of a private swarm are told the same thing. They
+    /// were not before: the announce could be spoofed while the handshake said
+    /// `-HY...-`, and a tracker that compares the two sees a client lying about
+    /// what it is.
+    pub fn handshake_pid(&self, binding: &[u8; 20]) -> [u8; 20] {
+        let Some(prefix) = *self.handshake_prefix.read() else { return *binding };
+        // Only the eight-byte prefix is replaced. The random tail stays the
+        // binding's, which is what keeps two engines of one node telling each
+        // other apart -- and the self-connection guard working.
+        let mut out = *binding;
+        out[..8].copy_from_slice(&prefix);
+        out
+    }
 }
 
 impl TorrentState {
@@ -516,6 +553,7 @@ impl TorrentState {
         // Built lazily by `have_sender`; a seeder never asks for one.
         Self {
             live_trackers: RwLock::new(meta.trackers.clone()),
+            handshake_prefix: RwLock::new(None),
             meta,
             save_path: RwLock::new(save_path),
             info_hash: ih,
