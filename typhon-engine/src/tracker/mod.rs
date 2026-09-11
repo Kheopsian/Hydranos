@@ -429,25 +429,8 @@ pub fn start_announce_loop(
 
 
 
-/// Best-effort peer-client identification from the 20-byte peer_id (Azureus style).
-pub fn client_from_peer_id(pid: &[u8; 20]) -> String {
-    if pid.len() >= 8 && pid[0] == b'-' && pid[7] == b'-' {
-        let code = std::str::from_utf8(&pid[1..3]).unwrap_or("??");
-        let ver = std::str::from_utf8(&pid[3..7]).unwrap_or("????");
-        let name = match code {
-            "qB" => "qBittorrent",
-            "UT" => "uTorrent",
-            "TR" => "Transmission",
-            "DE" => "Deluge",
-            "LT" => "libtorrent",
-            "AZ" => "Azureus",
-            _ => code,
-        };
-        format!("{} {}", name, ver)
-    } else {
-        String::new()
-    }
-}
+// client_from_peer_id lived here too, byte for byte the same as the copy in
+// peer::choking. Both are gone: peer::peerclient is the one table now.
 
 use tokio::net::{TcpSocket, TcpStream};
 use crate::peer::transport::PeerTransport;

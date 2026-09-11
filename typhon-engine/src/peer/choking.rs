@@ -137,25 +137,11 @@ fn tick_torrent(t: &TorrentState, max_unchoked: usize) -> (usize, usize, bool) {
     (newly_unchoked, newly_choked, true)
 }
 
-/// Best-effort peer-client identification from the 20-byte peer_id.
-/// Recognizes the Azureus-style `-XX0000-` prefix used by mainline clients.
+/// Who the peer says it is. The table lives in `peerclient`, which knows the
+/// conventions BEFORE Azureus as well as the codes after it -- this used to be
+/// six entries copied into two files, and every other client read as raw bytes.
 pub fn client_from_peer_id(pid: &[u8; 20]) -> String {
-    if pid.len() >= 8 && pid[0] == b'-' && pid[7] == b'-' {
-        let code = std::str::from_utf8(&pid[1..3]).unwrap_or("??");
-        let ver = std::str::from_utf8(&pid[3..7]).unwrap_or("????");
-        let name = match code {
-            "qB" => "qBittorrent",
-            "UT" => "uTorrent",
-            "TR" => "Transmission",
-            "DE" => "Deluge",
-            "LT" => "libtorrent",
-            "AZ" => "Azureus",
-            _ => code,
-        };
-        format!("{} {}", name, ver)
-    } else {
-        String::new()
-    }
+    super::peerclient::identify(pid)
 }
 
 /// Count set bits in a bitfield, capped at `num_pieces` (BT pads the last byte).

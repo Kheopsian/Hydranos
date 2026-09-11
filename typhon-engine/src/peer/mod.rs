@@ -5,6 +5,7 @@ pub mod download;
 pub mod handshake;
 pub mod message;
 pub mod metadata;
+pub mod peerclient;
 pub mod pex;
 pub mod session;
 pub mod transport;
