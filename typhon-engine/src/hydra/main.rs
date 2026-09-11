@@ -265,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = api::AppState {
         imports: Default::default(),
+        facts_cache: Default::default(),
         config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
         engines: engine_host,
         store: shared_store.clone(),

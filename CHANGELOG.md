@@ -17,6 +17,41 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.23.0 -- stop rebuilding the library on every request
+
+Measured on the production library, a filtered hoard page took 0.82 s and
+`/api/v2/torrents/info?category=series` took 1.5 s. Walking the engine's
+300 853 torrents accounts for 0.04 s of that. The rest was the store: the facts
+of the WHOLE session rebuilt from SQLite on every single request, so `limit=1`
+cost the same as `limit=500` and narrowing a filter bought nothing.
+
+### The qBit shim asks for the category it wants
+
+*arr polls by category and nothing else. The shim was building a StoreFacts for
+each of 300k torrents -- three Strings and a Vec apiece -- to keep the 1972 in
+`series`. `Store::facts_in_category` asks the covering index for that category,
+and the shim walks those hashes instead of the catalogue.
+
+The shortcut is exact for a named category: a torrent with no row in the store
+has no category either, so it can only fall under the engine's own name. That
+one case still takes the full walk, which is also what keeps torrents the
+engine holds but the store has forgotten visible to `category=hoard`.
+
+### The page's facts are cached until the store is written to
+
+Keyed on `sqlite3_total_changes()`, SQLite's own tally of rows written on the
+connection. Any INSERT, UPDATE or DELETE moves it, so the cache cannot go stale
+through a write nobody remembered to annotate -- the failure mode that makes a
+hand-maintained version number untrustworthy across sixty write methods. It
+does not see writes made on another connection, so a 60 s TTL bounds that.
+
+Only the SLIM facts are cached: 40 bytes a torrent against ~200, so ~21 MB at
+300k and ~86 MB at a million, against a 2.5 GiB RSS. A cache over the rich
+facts existed on the listing path once and was removed for growing with the
+catalogue; this is deliberately not that. It also replaces an allocation of the
+same size that was being made and dropped several times a second, so under
+concurrent requests it lowers the peak rather than raising it.
+
 ## v4.22.0 -- tracker errors you can act on, and chips that count again
 
 ### Tracker errors, grouped by what they ask you to do
