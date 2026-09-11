@@ -73,6 +73,17 @@ pub struct TorrentManager {
     /// so a broken database degrades into the old behaviour instead of losing
     /// state outright.
     state_db: Option<Arc<statedb::StateDb>>,
+    /// Where the .torrent of a given info-hash REALLY comes from.
+    ///
+    /// The store keeps the metainfo as a blob keyed by info-hash; the file in
+    /// uploads/ is a second copy of the same bytes, and the one the resume
+    /// record points at by PATH. Two copies of one thing, and the authoritative
+    /// one was the file -- which is how a library ends up restoring a torrent
+    /// nobody asked for (see `record_matches_file`).
+    ///
+    /// A closure rather than a Store: this module has no business knowing what
+    /// a session or a SQLite handle is. It asks for bytes by hash.
+    blob_source: std::sync::RwLock<Option<Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>>>,
     /// Last state written per torrent, so a sweep can skip the rows that did
     /// not move. Without this the periodic save rewrites every torrent every
     /// five minutes regardless of activity, which is what made the old scheme
@@ -197,6 +208,7 @@ impl TorrentManager {
             data_dir,
             resume_dir,
             disk,
+            blob_source: std::sync::RwLock::new(None),
             upload_rate: rate::RateTracker::new(),
             download_rate: rate::RateTracker::new(),
             cached_unseeded_peers: std::sync::atomic::AtomicUsize::new(0),
@@ -520,6 +532,37 @@ impl TorrentManager {
         db.load_all()
     }
 
+    /// Point the manager at the store's metainfo blobs. Set once at startup,
+    /// before any resume runs.
+    pub fn set_blob_source(
+        &self,
+        source: Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>,
+    ) {
+        if let Ok(mut slot) = self.blob_source.write() {
+            *slot = Some(source);
+        }
+    }
+
+    /// The metainfo of one resume record, from the source that can be trusted.
+    ///
+    /// The STORE first, keyed by the record's own info-hash: a blob found that
+    /// way is the right torrent by construction -- the key IS the identity, so
+    /// there is nothing to disagree with. The file is the fallback, for a
+    /// record the store has never heard of (an install predating the store, or
+    /// a torrent added while it was unavailable), and it stays subject to
+    /// `record_matches_file`.
+    fn metainfo_for(&self, rd: &fastresume::ResumeData) -> Result<meta::TorrentMeta, String> {
+        if !rd.info_hash.is_empty() {
+            let source = self.blob_source.read().ok().and_then(|s| s.clone());
+            if let Some(source) = source {
+                if let Some(bytes) = source(&rd.info_hash) {
+                    return metainfo::parse_torrent_bytes(&bytes);
+                }
+            }
+        }
+        metainfo::parse_torrent_file(&rd.torrent_path)
+    }
+
     pub fn load_resume_data(&self) -> usize {
         // Timed in two parts on purpose. Reading the resume records is a few
         // dozen MB of small JSON; re-parsing every .torrent that each record
@@ -531,11 +574,12 @@ impl TorrentManager {
         let records = resumes.len();
         let t_records = t_start.elapsed();
         let mut loaded = 0;
+        let mut mismatched = 0usize;
         let mut parse_time = std::time::Duration::ZERO;
         let mut parse_bytes: u64 = 0;
         for rd in resumes {
             let t_parse = std::time::Instant::now();
-            let parsed = metainfo::parse_torrent_file(&rd.torrent_path);
+            let parsed = self.metainfo_for(&rd);
             parse_time += t_parse.elapsed();
             if let Ok(md) = std::fs::metadata(&rd.torrent_path) {
                 parse_bytes += md.len();
@@ -548,6 +592,40 @@ impl TorrentManager {
                 }
             };
             let ih = meta.info_hash;
+
+            // The record's key and the file it points at must be the SAME
+            // torrent. Nothing used to check, and the file won: a record keyed
+            // A whose path parsed to B restored B, under a hash no database had
+            // ever heard of.
+            //
+            // That is not hypothetical. Until the V4 the uploaded .torrent was
+            // stored under the FILE NAME the client sent, so a batch ingester
+            // posting every torrent as `t.torrent` overwrote the same file
+            // 2789 times; every record pointing there now parses to whichever
+            // torrent wrote last. Measured on the production library: 995
+            // shared paths across 5648 records.
+            //
+            // Restoring B here is worse than restoring nothing. B is absent
+            // from both databases, so it cannot be deleted (every write route
+            // resolves through the store first), cannot be shown (the detail
+            // panel 404s while the list shows the row), and comes back at the
+            // next start -- while it announces and seeds a payload that may
+            // have been erased. A torrent nobody can reach is worse than a
+            // torrent that is gone.
+            //
+            // An empty key is a record from before the field existed: nothing
+            // to disagree with, so it is trusted as before.
+            if !record_matches_file(&rd.info_hash, &ih) {
+                warn!(
+                    "[resume] skip {}: {} holds {} instead -- record and file disagree",
+                    &rd.info_hash[..8.min(rd.info_hash.len())],
+                    rd.torrent_path,
+                    &hex_encode(&ih)[..8],
+                );
+                mismatched += 1;
+                continue;
+            }
+
             if self.torrents.contains_key(&ih) {
                 continue;
             }
@@ -627,6 +705,17 @@ impl TorrentManager {
             loaded,
             t_start.elapsed().as_secs_f64(),
         );
+        // Said separately and only when it happens: a silent count inside the
+        // line above is a number nobody reads. Each of these is a record whose
+        // .torrent was overwritten by another torrent -- the file is the wrong
+        // one, and no restart will fix it without repairing the record.
+        if mismatched > 0 {
+            warn!(
+                "[resume] {} records point at a .torrent that is a DIFFERENT torrent and were skipped; \
+                 their entries need repairing from the store",
+                mismatched,
+            );
+        }
         loaded
     }
 
@@ -1226,6 +1315,51 @@ impl TorrentManager {
             num_pieces,
             if complete { "seeding" } else { "downloading" }
         );
+    }
+}
+
+/// Does a resume record agree with the .torrent it points at?
+///
+/// An empty key is a record written before the field existed: there is nothing
+/// to disagree with, so it is trusted. Anything else must match the hash the
+/// file actually parses to.
+fn record_matches_file(record_hash: &str, file_hash: &InfoHash) -> bool {
+    record_hash.is_empty() || record_hash.eq_ignore_ascii_case(&hex_encode(file_hash))
+}
+
+#[cfg(test)]
+mod resume_identity_tests {
+    use super::record_matches_file;
+
+    fn hash(byte: u8) -> [u8; 20] { [byte; 20] }
+
+    /// The case this exists to stop. A record keyed A pointing at a file that
+    /// parses to B used to restore B -- under a hash no database had ever
+    /// heard of, so it could not be deleted, could not be shown, and came back
+    /// at every start. Remove the check and this test fails.
+    #[test]
+    fn a_record_pointing_at_another_torrent_is_refused() {
+        let a = "aa".repeat(20);
+        assert!(!record_matches_file(&a, &hash(0xbb)));
+    }
+
+    #[test]
+    fn a_record_pointing_at_its_own_torrent_is_accepted() {
+        let a = "aa".repeat(20);
+        assert!(record_matches_file(&a, &hash(0xaa)));
+    }
+
+    /// Hex case must not decide whether a library loads.
+    #[test]
+    fn the_comparison_ignores_hex_case() {
+        assert!(record_matches_file(&"AA".repeat(20), &hash(0xaa)));
+    }
+
+    /// Records from before the field existed carry no key. Refusing those
+    /// would empty the library of everyone upgrading from an old build.
+    #[test]
+    fn a_record_with_no_key_is_trusted() {
+        assert!(record_matches_file("", &hash(0xaa)));
     }
 }
 

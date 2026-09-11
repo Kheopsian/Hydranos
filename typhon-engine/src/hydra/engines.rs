@@ -111,6 +111,39 @@ impl EngineHost {
                 disk.clone(),
             ));
 
+            // The metainfo comes from the STORE, not from uploads/.
+            //
+            // Both hold the same bytes -- the store as a blob keyed by
+            // info-hash, the directory as a file whose NAME used to be the one
+            // the client uploaded. Two copies of one thing, and the file was
+            // the one the resume record pointed at. Until the V4 a batch
+            // ingester posting every torrent as `t.torrent` overwrote that file
+            // over and over: 2789 records ended up pointing at the same path on
+            // the production library, so a restart restored whichever torrent
+            // had written last, under a hash neither database knew.
+            //
+            // Keyed lookup has no such failure mode: the key IS the identity.
+            // A record the store does not know still falls back to its file
+            // (an install predating the store), where record_matches_file
+            // refuses the mismatch rather than restoring the wrong torrent.
+            //
+            // Read-only, and its own handle: the shared store is opened later
+            // in main, after the engines are up, and reordering a daemon's
+            // startup to borrow it would be a bigger change than this is worth.
+            let blob_db = std::path::Path::new(&config.daemon.data_dir).join("hydra.db");
+            match crate::store::Store::open(&blob_db, true) {
+                Ok(store) => {
+                    let store = Arc::new(std::sync::Mutex::new(store));
+                    manager.set_blob_source(Arc::new(move |hash: &str| {
+                        store.lock().ok()?.torrent_blob(hash).ok().flatten()
+                    }));
+                }
+                Err(e) => tracing::warn!(
+                    engine = id,
+                    "no store to read metainfo from ({e}); falling back to the .torrent files"
+                ),
+            }
+
             let loaded = manager.load_resume_data();
             tracing::info!(engine = id, torrents = loaded, "engine state loaded");
 
