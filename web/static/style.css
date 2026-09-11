@@ -3226,11 +3226,28 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
    background, primary accent, race accent -- are what a person actually
    chooses between, and they stay honest when a palette is edited. */
 
+/* The card is one block, not three stacked ones. Each heading sits directly
+   on top of the grid it names, and only the gap BETWEEN the two pairs is
+   allowed to be visible. */
+.perso-body { padding: 12px 16px; }
+
+.perso-head {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+/* Space above a heading, never below it: a heading that floats between its
+   own control and the previous one belongs to neither. */
+.perso-head + .theme-grid,
+.perso-head + .perso-tab-grid { margin-top: 6px; }
+.theme-grid + .perso-head,
+.perso-tab-grid + .perso-head { margin-top: 14px; }
+
 .theme-grid {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-    margin-top: 4px;
 }
 
 .theme-card {
@@ -3273,7 +3290,6 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     display: flex;
     flex-wrap: wrap;
     gap: 6px 16px;
-    margin-top: 4px;
 }
 
 .perso-tab {

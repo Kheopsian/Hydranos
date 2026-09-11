@@ -17,6 +17,18 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.20.2 -- the Personalisation card is one block
+
+the maintainer, on the screenshot: "pas d'espace entre les sections". The card read as
+three loose pieces because both headings were `.settings-row` -- a row built for
+a label facing a control on the right, so it pads top and bottom and rules a
+line underneath. Here the control is the grid directly below, and that padding
+was opening a gap between a heading and the very thing it names.
+
+Headings are plain blocks now, with the space put ABOVE them and never below:
+a heading floating midway between its own control and the previous one belongs
+to neither.
+
 ## v4.20.1 -- 403, because that is what qBittorrent says
 
 With 4.19.0 deployed and the right credentials saved, Sonarr and Radarr still
