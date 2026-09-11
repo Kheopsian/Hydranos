@@ -260,6 +260,7 @@ impl Store {
         self.ensure_enrol_table()?;
         self.ensure_workflows_table()?;
         self.ensure_content_index()?;
+        self.ensure_dedup_pending_table()?;
         // After the tables exist, and before anything reads them.
         self.migrate_composite_key()?;
         Ok(())
@@ -1430,6 +1431,78 @@ impl Store {
                  ON content_index(content_key);",
         )?;
         Ok(())
+    }
+
+    /// Matches found but not acted on, in "ask" mode.
+    ///
+    /// Kept so the mode can mean something: without a record, "only record the
+    /// match" recognises the payload, throws the answer away, and lets the
+    /// torrent download anyway.
+    fn ensure_dedup_pending_table(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dedup_pending (
+                 info_hash TEXT PRIMARY KEY,
+                 session TEXT NOT NULL,
+                 source_info_hash TEXT NOT NULL,
+                 bytes INTEGER NOT NULL DEFAULT 0,
+                 found_at INTEGER NOT NULL DEFAULT 0);",
+        )?;
+        Ok(())
+    }
+
+    pub fn put_dedup_pending(
+        &self,
+        info_hash: &str,
+        session: &str,
+        source: &str,
+        bytes: u64,
+    ) -> anyhow::Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO dedup_pending
+                 (info_hash, session, source_info_hash, bytes, found_at)
+             VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![info_hash, session, source, bytes as i64, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn drop_dedup_pending(&self, info_hash: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM dedup_pending WHERE info_hash = ?1", [info_hash])?;
+        Ok(())
+    }
+
+    /// Pending matches whose torrents both still exist.
+    ///
+    /// Joined against `torrents` on both sides: a match whose source has since
+    /// been deleted is not an offer anyone can accept.
+    pub fn dedup_pending(&self) -> anyhow::Result<Vec<(String, String, String, i64)>> {
+        let mut q = self.conn.prepare(
+            "SELECT p.info_hash, p.session, p.source_info_hash, p.bytes
+               FROM dedup_pending p
+               JOIN torrents t ON t.info_hash = p.info_hash
+               JOIN torrents s ON s.info_hash = p.source_info_hash
+              ORDER BY p.bytes DESC",
+        )?;
+        let rows = q
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Where a torrent's data is meant to live, as the store recorded it.
+    pub fn save_path_of(&self, info_hash: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT save_path FROM torrents WHERE info_hash = ?1",
+                [info_hash],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
     }
 
     pub fn put_content_key(
