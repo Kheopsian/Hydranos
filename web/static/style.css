@@ -490,6 +490,27 @@ main {
     -webkit-backdrop-filter: blur(20px);
 }
 
+/* Stacked cards are one panel, not three.
+ *
+ * Two cards touching at 0px still show a seam: each draws its own 1px border,
+ * so the join is a 2px double rule, and each rounds its corners, so the page
+ * background shows through four notches. That seam is what reads as space
+ * between sections -- the gap measured zero the whole time, which is why
+ * hunting for a margin found nothing.
+ *
+ * Adjacent siblings only. A card that follows a `.cards` grid is not adjacent
+ * to the card inside it, so a run is exactly what it looks like. */
+.tab-content > .card + .card {
+    border-top: none;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+}
+
+.tab-content > .card:has(+ .card) {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
 .card h3 {
     padding: 12px 16px;
     font-size: 13px;
