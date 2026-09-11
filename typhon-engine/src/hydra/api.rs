@@ -1688,6 +1688,21 @@ fn add_torrent_bytes(
     std::fs::write(&tmp, bytes).map_err(|e| format!("write torrent: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("install torrent: {e}"))?;
 
+    // Data we already hold, under a name we have not seen before.
+    //
+    // Done BEFORE the engine is told, so that the links are in place when it
+    // first looks at the save path -- an engine that starts on an empty
+    // directory schedules a download, and the download is exactly what this
+    // saves. Every failure here is non-fatal: the torrent is added as it would
+    // have been, it just downloads.
+    let mut linked_from = String::new();
+    let dedup_mode = crate::dedup::Mode::parse(&cfg.dedup.mode);
+    if dedup_mode == crate::dedup::Mode::Auto {
+        if let Some(report) = try_link_existing(state, bytes, &hash, &save_path, &cfg) {
+            linked_from = report;
+        }
+    }
+
     let (info_hash, name) = engine
         .manager
         .add_torrent(&path.to_string_lossy(), &save_path, paused, seed_mode)
@@ -1713,10 +1728,150 @@ fn add_torrent_bytes(
         store
             .insert_torrent(&hash, &engine_id, bytes, &save_path, category, added_time, paused, tags)
             .map_err(|e| format!("store: {e}"))?;
+        // Indexed here rather than at boot: a torrent that is never indexed is
+        // a torrent the next add cannot recognise, and the backfill only sees
+        // what is already in the table.
+        if let Some(key) = crate::dedup::content_key(bytes) {
+            if let Err(e) = store.put_content_key(&hash, &engine_id, &key) {
+                tracing::warn!(hash = %hash, "content index: {e}");
+            }
+        }
     }
 
-    tracing::info!(engine = %engine_id, category = %category, hash = %hash, "torrent added");
+    if linked_from.is_empty() {
+        tracing::info!(engine = %engine_id, category = %category, hash = %hash, "torrent added");
+    } else {
+        tracing::info!(engine = %engine_id, category = %category, hash = %hash,
+            linked_from = %linked_from, "torrent added, seeded from data already held");
+    }
     Ok((hash, name))
+}
+
+
+/// Link an incoming torrent onto payload we already hold, if we hold it.
+///
+/// Returns the info_hash of the source it linked from. None means "nothing to
+/// do" for any reason at all -- no match, a match we cannot use, a filesystem
+/// that refused -- because every one of those outcomes has the same remedy:
+/// add the torrent and let it download.
+fn try_link_existing(
+    state: &AppState,
+    bytes: &[u8],
+    hash: &str,
+    save_path: &str,
+    cfg: &crate::config::Config,
+) -> Option<String> {
+    let key = crate::dedup::content_key(bytes)?;
+    let want = crate::dedup::layout(bytes)?;
+
+    if want.total_len() < cfg.dedup.min_mib.saturating_mul(1024 * 1024) {
+        return None;
+    }
+
+    let candidates = {
+        let store = state.store.lock().unwrap();
+        store.content_matches(&key, hash).ok()?
+    };
+
+    for (src_hash, _src_session, src_save_path) in candidates {
+        // The index narrows; the bytes decide. A content key collision must
+        // never be enough on its own to link one torrent's data to another.
+        let src_bytes = {
+            let store = state.store.lock().unwrap();
+            store.torrent_blob(&src_hash).ok().flatten()
+        };
+        let Some(src_bytes) = src_bytes else { continue };
+        if !crate::dedup::same_content(bytes, &src_bytes) {
+            tracing::warn!(hash = %hash, source = %src_hash, "content key matched but pieces differ");
+            continue;
+        }
+        let Some(have) = crate::dedup::layout(&src_bytes) else { continue };
+
+        match crate::dedup::plan(&have, &src_save_path, &want, save_path) {
+            Ok(p) if p.cross_device => {
+                tracing::info!(hash = %hash, source = %src_hash,
+                    "have this data but on another filesystem, cannot hardlink");
+            }
+            Ok(p) => match crate::dedup::apply(&p) {
+                Ok(done) => {
+                    tracing::info!(hash = %hash, source = %src_hash, files = done.created,
+                        bytes = done.bytes, "linked to data already held");
+                    return Some(src_hash);
+                }
+                Err(e) => tracing::warn!(hash = %hash, source = %src_hash, "link failed: {e}"),
+            },
+            Err(why) => {
+                tracing::debug!(hash = %hash, source = %src_hash, "cannot link: {why:?}");
+            }
+        }
+    }
+    None
+}
+
+/// What the content index knows: how much payload is held more than once.
+async fn get_dedup_stats(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let cfg = state.cfg();
+
+    let groups = {
+        let store = state.store.lock().unwrap();
+        match store.content_duplicate_groups() {
+            Ok(g) => g,
+            Err(e) => {
+                return Json(serde_json::json!({"error": e.to_string()})).into_response();
+            }
+        }
+    };
+
+    // A group whose members all sit at one save path already shares its bytes.
+    // Only differing locations are duplicated payload.
+    let mut same_location = 0usize;
+    let mut separate = 0usize;
+    let mut torrents = 0usize;
+    for g in &groups {
+        torrents += g.len();
+        let locations: std::collections::HashSet<&str> =
+            g.iter().map(|(_, _, sp)| sp.as_str()).collect();
+        if locations.len() == 1 {
+            same_location += 1;
+        } else {
+            separate += 1;
+        }
+    }
+
+    Json(serde_json::json!({
+        "mode": cfg.dedup.mode,
+        "min_mib": cfg.dedup.min_mib,
+        "groups": groups.len(),
+        "torrents": torrents,
+        "groups_same_location": same_location,
+        "groups_separate_location": separate,
+    }))
+    .into_response()
+}
+
+/// Index anything not yet indexed, and say how many rows that was.
+async fn post_dedup_reindex(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+
+    let done = {
+        let store = state.store.lock().unwrap();
+        store.backfill_content_index()
+    };
+    match done {
+        Ok(n) => Json(serde_json::json!({"indexed": n})).into_response(),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})).into_response(),
+    }
 }
 
 /// Where the current library came from, when it was imported from another client.
@@ -9745,6 +9900,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(get_health))
         .route("/api/announce/clients", get(get_clients).post(set_announce_client))
         .route("/api/announce/secondary-stats", get(get_secondary_stats).post(set_secondary_stats))
+        .route("/api/dedup/stats", get(get_dedup_stats))
+        .route("/api/dedup/reindex", axum::routing::post(post_dedup_reindex))
         .route("/api/torrents/add-defaults", get(get_add_defaults))
         .route("/api/update-check", get(get_update_check))
         .route("/api/vpn-speedtest/latest", get(get_vpn_speedtest_latest))

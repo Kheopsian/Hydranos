@@ -259,6 +259,7 @@ impl Store {
         self.ensure_nodes_table()?;
         self.ensure_enrol_table()?;
         self.ensure_workflows_table()?;
+        self.ensure_content_index()?;
         // After the tables exist, and before anything reads them.
         self.migrate_composite_key()?;
         Ok(())
@@ -1406,6 +1407,143 @@ impl Store {
                 |r| r.get(0),
             )
             .ok()
+    }
+
+    /// The content index: which torrents hold which payload.
+    ///
+    /// A table of its own rather than a column on `torrents`, because
+    /// `torrents` is 4.5 GB in production and an ALTER there rewrites the lot
+    /// for a field that only one feature reads. Additive and invisible to an
+    /// older build, like the nodes and workflows tables.
+    ///
+    /// The key is (info_hash, session): the same payload legitimately appears
+    /// in two engines, and collapsing those into one row would make the second
+    /// engine's copy invisible to the lookup.
+    fn ensure_content_index(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS content_index (
+                 info_hash TEXT NOT NULL,
+                 session TEXT NOT NULL,
+                 content_key TEXT NOT NULL,
+                 PRIMARY KEY (info_hash, session));
+             CREATE INDEX IF NOT EXISTS idx_content_index_key
+                 ON content_index(content_key);",
+        )?;
+        Ok(())
+    }
+
+    pub fn put_content_key(
+        &self,
+        info_hash: &str,
+        session: &str,
+        content_key: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO content_index (info_hash, session, content_key)
+             VALUES (?1,?2,?3)",
+            rusqlite::params![info_hash, session, content_key],
+        )?;
+        Ok(())
+    }
+
+    pub fn drop_content_key(&self, info_hash: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM content_index WHERE info_hash = ?1", [info_hash])?;
+        Ok(())
+    }
+
+    /// Torrents already held whose payload matches `content_key`.
+    ///
+    /// Joined against `torrents` so a stale index row -- one whose torrent has
+    /// since been deleted -- cannot be returned as a linkable source.
+    pub fn content_matches(
+        &self,
+        content_key: &str,
+        exclude_info_hash: &str,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let mut q = self.conn.prepare(
+            "SELECT t.info_hash, t.session, t.save_path
+               FROM content_index c
+               JOIN torrents t ON t.info_hash = c.info_hash AND t.session = c.session
+              WHERE c.content_key = ?1 AND c.info_hash <> ?2",
+        )?;
+        let rows = q
+            .query_map(rusqlite::params![content_key, exclude_info_hash], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Index every torrent that has no content key yet.
+    ///
+    /// Resumable by construction: it only looks at rows missing from
+    /// `content_index`, so an interrupted pass costs nothing and a completed
+    /// one is a no-op. Measured at 45 s for 301 221 torrents.
+    pub fn backfill_content_index(&self) -> anyhow::Result<usize> {
+        let mut q = self.conn.prepare(
+            "SELECT t.info_hash, t.session, t.torrent
+               FROM torrents t
+               LEFT JOIN content_index c
+                 ON c.info_hash = t.info_hash AND c.session = t.session
+              WHERE c.info_hash IS NULL",
+        )?;
+        let pending = q
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut done = 0;
+        for (ih, sess, blob) in pending {
+            if let Some(key) = crate::dedup::content_key(&blob) {
+                self.put_content_key(&ih, &sess, &key)?;
+                done += 1;
+            }
+        }
+        Ok(done)
+    }
+
+    /// Groups of torrents that hold the same payload, with their save paths.
+    ///
+    /// The caller decides what counts as waste: a group whose members share a
+    /// location already shares its bytes, and only differing locations cost
+    /// disk.
+    pub fn content_duplicate_groups(&self) -> anyhow::Result<Vec<Vec<(String, String, String)>>> {
+        let mut q = self.conn.prepare(
+            "SELECT c.content_key, t.info_hash, t.session, t.save_path
+               FROM content_index c
+               JOIN torrents t ON t.info_hash = c.info_hash AND t.session = c.session
+              WHERE c.content_key IN (
+                    SELECT content_key FROM content_index
+                     GROUP BY content_key HAVING COUNT(DISTINCT info_hash) > 1)
+              ORDER BY c.content_key",
+        )?;
+        let rows = q
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut out: Vec<Vec<(String, String, String)>> = Vec::new();
+        let mut cur = String::new();
+        for (key, ih, sess, sp) in rows {
+            if key != cur {
+                cur = key;
+                out.push(Vec::new());
+            }
+            out.last_mut().unwrap().push((ih, sess, sp));
+        }
+        Ok(out)
     }
 
     pub fn count_torrents(&self) -> anyhow::Result<i64> {

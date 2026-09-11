@@ -6591,6 +6591,9 @@ async function changePassword() {
 async function updateSettings() {
     const editor = document.getElementById("settings-editor");
     if (!editor) return;
+    // The duplicate-data card lives in this tab, so it refreshes with it
+    // rather than on a timer: the counts only move when torrents are added.
+    loadDedup();
     try {
         const cfg = await api("/api/settings");
         _settingsOrig = {};
@@ -6760,6 +6763,82 @@ function _settingTier(section, key) {
         return "engine";
     }
     return "full";
+}
+
+
+// --- Duplicate data -------------------------------------------------------
+// The numbers come from the content index, which is exact: two torrents share
+// a key only when their piece hashes are byte-identical, so a group here is
+// the same payload and never a guess.
+async function loadDedup() {
+    const box = document.getElementById("dedup-stats");
+    if (!box) return;
+    try {
+        const d = await api("/api/dedup/stats");
+        const sel = document.getElementById("dedup-mode");
+        const min = document.getElementById("dedup-minmib");
+        if (sel && d.mode) sel.value = d.mode;
+        if (min) min.value = d.min_mib;
+
+        if (!d.groups) {
+            box.innerHTML = '<span class="sr-desc">' + t("No duplicated payload found.") + "</span>";
+            return;
+        }
+        // Separate locations are the ones actually costing disk: a group whose
+        // members share a save path already shares its bytes.
+        box.innerHTML =
+            '<div class="dedup-grid">' +
+            '<div><span class="dd-n">' + d.groups + '</span><span class="dd-l">' + t("groups of identical payload") + "</span></div>" +
+            '<div><span class="dd-n">' + d.torrents + '</span><span class="dd-l">' + t("torrents in them") + "</span></div>" +
+            '<div><span class="dd-n">' + d.groups_separate_location + '</span><span class="dd-l">' + t("stored in more than one place") + "</span></div>" +
+            "</div>";
+    } catch (e) {
+        box.innerHTML = '<span class="sr-desc">' + t("Could not read the content index.") + "</span>";
+    }
+}
+
+async function saveDedupMode() {
+    const banner = document.getElementById("dedup-result");
+    const mode = document.getElementById("dedup-mode").value;
+    const minv = parseInt(document.getElementById("dedup-minmib").value, 10);
+    banner.style.display = "block";
+    banner.className = "result-msg info";
+    banner.textContent = t("Saving…");
+    try {
+        await api("/api/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ changes: [
+                { section: "dedup", key: "mode", value: mode },
+                { section: "dedup", key: "min_mib", value: isNaN(minv) ? 16 : minv },
+            ] }),
+        });
+        // [dedup] is read when a torrent is added, so it needs the daemon back.
+        // Offering a Save that leaves the setting inert would be half an action.
+        banner.textContent = t("Saved. Restarting…");
+        try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
+        banner.className = "result-msg ok";
+        banner.textContent = t("Saved and restarting.");
+    } catch (e) {
+        banner.className = "result-msg err";
+        banner.textContent = String(e);
+    }
+}
+
+async function reindexDedup() {
+    const banner = document.getElementById("dedup-result");
+    banner.style.display = "block";
+    banner.className = "result-msg info";
+    banner.textContent = t("Indexing…");
+    try {
+        const r = await api("/api/dedup/reindex", { method: "POST" });
+        banner.className = "result-msg ok";
+        banner.textContent = t("Indexed") + " " + r.indexed;
+        await loadDedup();
+    } catch (e) {
+        banner.className = "result-msg err";
+        banner.textContent = String(e);
+    }
 }
 
 async function saveSettings() {

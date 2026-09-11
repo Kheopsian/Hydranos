@@ -37,6 +37,50 @@ them:
 
 ## Unreleased -- the facts cache comes back out
 
+### Data we already hold is recognised, whatever it is called
+
+A torrent's `pieces` field hashes the payload stream, and that stream carries
+no names: not the files', not their folder's, not the torrent's. `info_hash`
+covers all three. So two torrents that differ only in naming have identical
+`pieces` -- which turns "do we already have this?" into an exact lookup rather
+than a guess.
+
+Hydranos now keeps that lookup. A `content_index` table maps each torrent to a
+key derived from its piece hashes, filled at boot for anything not yet indexed
+and maintained on every add. With `[dedup] mode = "auto"`, an incoming torrent
+whose payload we already hold is hardlinked onto the existing files under its
+own names and seeds immediately, instead of downloading bytes that are already
+on the disk.
+
+Measured on a 301 221-torrent catalogue before building this: 69 493 groups of
+identical payload covering 163 274 torrents, 9 336 of those groups stored in
+more than one place, for 25.76 TiB of duplicated data. 22.20 TiB of it sits
+within a single filesystem, where a hardlink reclaims it outright.
+
+Three things the implementation is careful about, each of which costs real data
+when skipped:
+
+- The index narrows, the bytes decide. A key match is confirmed by comparing
+  the `pieces` blobs before anything is linked, so no collision can attach one
+  torrent's name to another's data.
+- Identical `pieces` guarantees the same byte stream, not the same cut through
+  it. The file size list is compared before pairing files by index.
+- Directories are created, never linked -- the kernel refuses `link()` on a
+  directory -- and a partial failure removes everything it just created. A
+  half-linked torrent would seed corrupt data to the swarm.
+
+Cross-filesystem matches are reported and skipped: `link()` returns `EXDEV`
+there, and copying would defeat the purpose.
+
+The default is `mode = "ask"`, which records matches without touching the
+filesystem. Automatic imports are where duplicates actually come from, so
+`"auto"` is what an *arr or autobrr setup wants; it is opt-in because a feature
+that starts writing to the disk on upgrade, unasked, is a bad surprise.
+
+`scripts/dedup_sweep.py` applies the same reasoning to what is already stored.
+It is a dry run unless given `--apply`, and every removal is preceded by a link
+whose inode is verified against the source.
+
 Added in 4.23.0 on the reasoning that rebuilding the session facts cost 0.78s
 of every request. It does -- but the cache was measured never to serve: 0 hits
 in 15 requests against a daemon that had been up an hour, latency flat at

@@ -30,6 +30,7 @@ mod logbuf;
 mod qbitrow;
 mod row;
 mod speedtest;
+mod dedup;
 mod store;
 mod tomledit;
 mod trackeredit;
