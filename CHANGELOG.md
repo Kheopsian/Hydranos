@@ -72,10 +72,14 @@ when skipped:
 Cross-filesystem matches are reported and skipped: `link()` returns `EXDEV`
 there, and copying would defeat the purpose.
 
-The default is `mode = "ask"`, which records matches without touching the
-filesystem. Automatic imports are where duplicates actually come from, so
-`"auto"` is what an *arr or autobrr setup wants; it is opt-in because a feature
-that starts writing to the disk on upgrade, unasked, is a bad surprise.
+`[dedup] enabled` is one switch, off by default: linking destroys nothing, but
+it writes to the filesystem, and a feature that starts doing that on upgrade
+unasked is a bad surprise.
+
+There is deliberately no "just tell me about it" middle setting. The duplicates
+come from automatic imports -- an *arr, autobrr, a batch ingest -- and none of
+those has anyone in front of a screen, so a queue of offers nobody reads is
+dead weight that still has to be maintained.
 
 `scripts/dedup_sweep.py` applies the same reasoning to what is already stored.
 It is a dry run unless given `--apply`, and every removal is preceded by a link

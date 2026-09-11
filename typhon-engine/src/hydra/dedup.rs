@@ -31,36 +31,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// What to do when an incoming torrent turns out to be data we hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    /// Link it without asking. What the automatic importers need: an *arr or
-    /// autobrr add has no operator in front of it, and a question nobody
-    /// answers is a download.
-    Auto,
-    /// Record the match and let the UI offer it.
-    Ask,
-    Off,
-}
-
-impl Mode {
-    pub fn parse(s: &str) -> Mode {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "auto" => Mode::Auto,
-            "ask" | "prompt" => Mode::Ask,
-            _ => Mode::Off,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Mode::Auto => "auto",
-            Mode::Ask => "ask",
-            Mode::Off => "off",
-        }
-    }
-}
-
 /// A bencode string value read straight out of the raw torrent bytes.
 ///
 /// Parsing the whole dict to reach two fields would cost an allocation per
@@ -557,15 +527,6 @@ mod tests {
         assert!(!dst.join("P").join("a").exists(), "first link was left behind");
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn mode_parses_and_defaults_to_off() {
-        assert_eq!(Mode::parse("auto"), Mode::Auto);
-        assert_eq!(Mode::parse("ASK"), Mode::Ask);
-        assert_eq!(Mode::parse(""), Mode::Off);
-        assert_eq!(Mode::parse("nonsense"), Mode::Off);
-        assert_eq!(Mode::Auto.as_str(), "auto");
     }
 
     #[test]

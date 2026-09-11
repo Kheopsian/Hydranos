@@ -183,22 +183,22 @@ pub struct Auth {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Dedup {
-    /// "auto" links without asking, "ask" only records the match for the UI,
-    /// anything else is off.
+    /// Link an incoming torrent onto payload we already hold.
     ///
-    /// Defaults to "ask" rather than "auto": linking is safe, but it writes to
-    /// the filesystem, and a feature that starts doing that on upgrade without
+    /// Off by default. Linking destroys nothing, but it writes to the
+    /// filesystem, and a feature that starts doing that on upgrade without
     /// anyone asking is the kind of surprise that costs trust.
-    #[serde(default = "dedup_default_mode")]
-    pub mode: String,
+    ///
+    /// There is deliberately no third "just tell me about it" setting. The
+    /// duplicates come from automatic imports -- an *arr, autobrr, a batch
+    /// ingest -- and none of those has anyone in front of a screen, so a queue
+    /// of offers nobody reads is dead weight that still has to be maintained.
+    #[serde(default)]
+    pub enabled: bool,
     /// Skip matches whose payload is below this, in MiB. Linking a 3 KB .nfo
     /// pack saves nothing and still creates inodes.
     #[serde(default = "dedup_default_min_mib")]
     pub min_mib: u64,
-}
-
-fn dedup_default_mode() -> String {
-    "ask".to_string()
 }
 
 fn dedup_default_min_mib() -> u64 {
@@ -207,7 +207,7 @@ fn dedup_default_min_mib() -> u64 {
 
 impl Default for Dedup {
     fn default() -> Self {
-        Self { mode: dedup_default_mode(), min_mib: dedup_default_min_mib() }
+        Self { enabled: false, min_mib: dedup_default_min_mib() }
     }
 }
 

@@ -3361,18 +3361,6 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .dd-n { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .dd-l { font-size: 11px; opacity: 0.75; }
 
-/* Matches waiting for a decision. One row per offer, the button at the end:
-   the action sits where the eye finishes reading the line. */
-.dedup-pending-head { margin: 12px 0 6px; display: flex; flex-direction: column; gap: 2px; }
-.dedup-pending-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 5px 8px;
-    border-radius: 6px;
-    background: var(--bg-subtle, rgba(127, 127, 127, 0.08));
-    margin-bottom: 4px;
-}
-.dp-hash { font-family: monospace; font-size: 11px; }
-.dp-arrow { font-size: 11px; opacity: 0.6; }
-.dp-size { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+/* The one control this card has: checkbox and its label on one line, so the
+   words are part of the hit area rather than sitting next to it. */
+.sr-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
