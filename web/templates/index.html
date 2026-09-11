@@ -1005,7 +1005,7 @@
                     <div class="settings-row">
                         <div class="sr-label">
                             <span class="sr-key">On adding a torrent we already hold</span>
-                            <span class="sr-desc">Sets [dedup] enabled. Hardlinks the files we already hold under the new torrent's names, so it seeds at once without downloading them again. Off by default, because it writes to the disk.</span>
+                            <span class="sr-desc">Sets [dedup] enabled. Hardlinks the files we already hold under the new torrent's names, so it seeds at once without downloading them again. On by default: a link costs a directory entry, downloading the same data again costs the bandwidth and the disk.</span>
                         </div>
                         <div class="sr-field">
                             <label class="sr-check"><input type="checkbox" id="dedup-enabled"> <span>Link it instead of downloading</span></label>
