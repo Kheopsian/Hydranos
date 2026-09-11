@@ -35,6 +35,23 @@ them:
   worker cannot tell them apart. The existing guard only caught an engine that
   loaded NOTHING; this catches the one that loaded almost everything.
 
+## Unreleased -- the facts cache comes back out
+
+Added in 4.23.0 on the reasoning that rebuilding the session facts cost 0.78s
+of every request. It does -- but the cache was measured never to serve: 0 hits
+in 15 requests against a daemon that had been up an hour, latency flat at
+0.45s, while the store took one write every 20 seconds. Neither staleness nor
+write pressure explains that, and a cache whose behaviour nobody can explain is
+a liability rather than an optimisation. A cache on this same path had already
+been removed once for growing with the catalogue.
+
+Nothing measurable is lost: the 2x on the page came from the lighter row
+decoding, and the 9.5x on the qBit shim came from asking the index for the one
+category *arr wanted. Neither depended on this. 21 MB and a TTL go with it.
+
+What remains is worth doing properly: of the 0.45s, the query is 0.20s and the
+rest is decoding it -- 300k Strings and a HashMap grown from empty.
+
 ## v4.27.0 -- who the other end actually is
 
 The Client column knew six clients. Everything else -- BiglyBT, Tixati,

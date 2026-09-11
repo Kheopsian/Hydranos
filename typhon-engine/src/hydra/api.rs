@@ -190,8 +190,6 @@ pub struct AppState {
     pub engines: Arc<crate::engines::EngineHost>,
     /// The durable store, shared with 3.x and opened on the same file.
     pub store: Arc<std::sync::Mutex<crate::store::Store>>,
-    /// The per-session slim facts, kept between requests. cf `cached_slim_facts`.
-    pub facts_cache: Arc<std::sync::RwLock<std::collections::HashMap<String, CachedFacts>>>,
     /// Last known public addresses, (v4, v6). Empty until a lookup succeeds.
     pub public_ip: PublicIp,
     /// Last per-engine exit measurement, and when it was taken.
@@ -1929,63 +1927,6 @@ fn live_stats(state: &AppState, engine_id: &str) -> LiveStats {
 /// Filled on first use and refreshed by a worker. A hydration that reads
 /// SQLite directly costs 21 seconds of I/O for 300k rows, and the page shows
 /// nothing until the last batch -- the front paints once, at `done`.
-/// One session's slim facts and the write mark they were read at.
-pub struct CachedFacts {
-    mark: u64,
-    built: std::time::Instant,
-    facts: Arc<crate::store::SlimFacts>,
-}
-
-/// How long a cached set is trusted without the write mark moving.
-///
-/// The mark cannot miss a write made through our own connection, so this is
-/// only a floor under the damage from one made on ANOTHER -- sqlite3 on the
-/// host, a repair script. Sixty seconds of slightly stale chips is a price
-/// worth paying to never serve them wrong indefinitely.
-const FACTS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The session's slim facts, rebuilt only when the store has been written to.
-///
-/// Measured on the production library: rebuilding these cost 0.78 s of the
-/// 0.82 s a filtered page took, and it was paid again on every keystroke and
-/// every chip -- the 300k-row query, 300k Strings decoded, and a HashMap of
-/// 300k entries grown from empty. Walking the engine's 300k torrents, the part
-/// that looks expensive, costs 0.04 s.
-///
-/// Note the history here: a cache over the RICH facts once lived on the
-/// listing path and was removed, on the grounds that it grew with the
-/// catalogue. This one is the slim shape -- 40 bytes a torrent against ~200 --
-/// so it is ~21 MB at 300k and ~86 MB at a million, against a 2.5 GiB RSS. It
-/// also replaces an allocation of the same size that was being made and thrown
-/// away several times a second, so under concurrent requests it lowers the
-/// peak rather than raising it.
-fn cached_slim_facts(state: &AppState, session: &str) -> Arc<crate::store::SlimFacts> {
-    let mark = { state.store.lock().unwrap().write_mark() };
-    if let Ok(cache) = state.facts_cache.read() {
-        if let Some(entry) = cache.get(session) {
-            if entry.mark == mark && entry.built.elapsed() < FACTS_TTL {
-                return entry.facts.clone();
-            }
-        }
-    }
-    // Read the mark again WITH the facts, under one lock: a write landing
-    // between the two would otherwise be stamped as already included, and the
-    // cache would hold it back until the next unrelated write.
-    let (facts, mark) = {
-        let store = state.store.lock().unwrap();
-        let facts = store.slim_facts(session).unwrap_or_default();
-        let mark = store.write_mark();
-        (Arc::new(facts), mark)
-    };
-    if let Ok(mut cache) = state.facts_cache.write() {
-        cache.insert(
-            session.to_string(),
-            CachedFacts { mark, built: std::time::Instant::now(), facts: facts.clone() },
-        );
-    }
-    facts
-}
-
 fn engine_rows(state: &AppState, engine_id: &str) -> Vec<serde_json::Value> {
     let Some(engine) = state.engines.get(engine_id) else {
         return Vec::new();
@@ -2115,7 +2056,18 @@ async fn engine_page_value(
     // request at 300k, against a control run. This is the same information in
     // a few MB, and it is needed on every request because a row's STATE is
     // derived from the store's paused flag.
-    let facts = cached_slim_facts(state, engine_id);
+    // Read every time, on purpose. A cache sat here and was measured never to
+    // serve: 0 hits in 15 requests on an hour-old daemon, while the store took
+    // one write every 20s -- so neither staleness nor write pressure explains
+    // it, and a cache nobody can explain is a liability. A previous cache on
+    // this path had already been removed for growing with the catalogue.
+    //
+    // The 0.45s left is not the query (0.20s) but decoding it: 300k Strings and
+    // a HashMap grown from empty. That is where the next gain is.
+    let facts = {
+        let store = state.store.lock().unwrap();
+        store.slim_facts(engine_id).unwrap_or_default()
+    };
     let pinned: std::collections::HashSet<String> =
         if state_filter == "__pinned__" || want_facets {
             let store = state.store.lock().unwrap();
@@ -10324,7 +10276,6 @@ mod tests {
         );
         AppState {
             imports: Default::default(),
-            facts_cache: Default::default(),
             config: Arc::new(std::sync::RwLock::new(Arc::new(cfg))),
             config_path: std::path::PathBuf::from("/nonexistent.toml"),
             update_check: Arc::new(tokio::sync::Mutex::new(None)),
