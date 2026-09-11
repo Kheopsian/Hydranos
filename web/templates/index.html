@@ -1000,20 +1000,15 @@
             <div class="card">
                 <div class="card-header-row">
                     <h3>Duplicate data</h3>
-                    <button class="btn-small" onclick="reindexDedup()">Reindex</button>
                 </div>
                 <div class="card-body">
                     <div class="settings-row">
                         <div class="sr-label">
                             <span class="sr-key">On adding a torrent we already hold</span>
-                            <span class="sr-desc">Sets [dedup] mode. Link means hardlink the existing files under the new torrent's names, so it seeds without downloading anything. Automatic imports have nobody to ask, which is where the duplicates come from.</span>
+                            <span class="sr-desc">Sets [dedup] enabled. Hardlinks the files we already hold under the new torrent's names, so it seeds at once without downloading them again. Off by default, because it writes to the disk.</span>
                         </div>
                         <div class="sr-field">
-                            <select id="dedup-mode" class="sr-input">
-                                <option value="auto">Link automatically</option>
-                                <option value="ask">Only record the match</option>
-                                <option value="off">Do nothing</option>
-                            </select>
+                            <label class="sr-check"><input type="checkbox" id="dedup-enabled"> <span>Link it instead of downloading</span></label>
                             <button class="btn-small btn-accent" onclick="saveDedupMode()" style="margin-left:6px">Save and restart</button>
                         </div>
                     </div>
@@ -1026,7 +1021,6 @@
                     </div>
                     <div id="dedup-result" class="result-msg" style="display:none;margin-top:8px"></div>
                     <div id="dedup-stats" class="dedup-stats"></div>                    <div id="dedup-stats" class="dedup-stats"></div>
-                    <div id="dedup-pending"></div>
                 </div>
             </div>
             <div class="card">

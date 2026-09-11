@@ -1696,24 +1696,10 @@ fn add_torrent_bytes(
     // saves. Every failure here is non-fatal: the torrent is added as it would
     // have been, it just downloads.
     let mut linked_from = String::new();
-    match crate::dedup::Mode::parse(&cfg.dedup.mode) {
-        crate::dedup::Mode::Auto => {
-            if let Some(report) = try_link_existing(state, bytes, &hash, &save_path, &cfg, true) {
-                linked_from = report;
-            }
+    if cfg.dedup.enabled {
+        if let Some(report) = try_link_existing(state, bytes, &hash, &save_path, &cfg) {
+            linked_from = report;
         }
-        // Find the match, write it down, touch nothing. Without the record this
-        // mode would recognise the payload and throw the answer away.
-        crate::dedup::Mode::Ask => {
-            if let Some(source) = try_link_existing(state, bytes, &hash, &save_path, &cfg, false) {
-                let size = crate::dedup::layout(bytes).map(|l| l.total_len()).unwrap_or(0);
-                let store = state.store.lock().unwrap();
-                if let Err(e) = store.put_dedup_pending(&hash, &engine_id, &source, size) {
-                    tracing::warn!(hash = %hash, "dedup pending: {e}");
-                }
-            }
-        }
-        crate::dedup::Mode::Off => {}
     }
 
     let (info_hash, name) = engine
@@ -1773,7 +1759,6 @@ fn try_link_existing(
     hash: &str,
     save_path: &str,
     cfg: &crate::config::Config,
-    link: bool,
 ) -> Option<String> {
     let key = crate::dedup::content_key(bytes)?;
     let want = crate::dedup::layout(bytes)?;
@@ -1806,9 +1791,6 @@ fn try_link_existing(
                 tracing::info!(hash = %hash, source = %src_hash,
                     "have this data but on another filesystem, cannot hardlink");
             }
-            // A usable match. In "ask" mode that is the whole answer: the
-            // plan proves the links COULD be made, which is what gets recorded.
-            Ok(_) if !link => return Some(src_hash),
             Ok(p) => match crate::dedup::apply(&p) {
                 Ok(done) => {
                     tracing::info!(hash = %hash, source = %src_hash, files = done.created,
@@ -1829,7 +1811,7 @@ fn try_link_existing(
 #[derive(serde::Deserialize)]
 struct DedupConfigBody {
     #[serde(default)]
-    mode: String,
+    enabled: bool,
     #[serde(default)]
     min_mib: Option<u64>,
 }
@@ -1856,15 +1838,7 @@ async fn post_dedup_config(
                 Json(serde_json::json!({"error": "invalid body"}))).into_response();
     };
 
-    let mode = crate::dedup::Mode::parse(&req.mode);
-    // Mode::parse folds anything unknown to Off, which would silently turn the
-    // feature off on a typo. Refuse instead.
-    if !matches!(req.mode.trim().to_ascii_lowercase().as_str(), "auto" | "ask" | "off") {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "mode must be auto, ask or off"}))).into_response();
-    }
-
-    let mut kv = vec![("mode".to_string(), format!("{:?}", mode.as_str()))];
+    let mut kv = vec![("enabled".to_string(), req.enabled.to_string())];
     if let Some(m) = req.min_mib {
         kv.push(("min_mib".to_string(), m.to_string()));
     }
@@ -1896,85 +1870,13 @@ async fn post_dedup_config(
 
     Json(serde_json::json!({
         "status": "ok",
-        "mode": mode.as_str(),
+        "enabled": req.enabled,
         // Read when a torrent is added, so the running daemon needs restarting.
         "restart_required": true,
     }))
     .into_response()
 }
 
-
-/// Matches found in "ask" mode and not yet acted on.
-async fn get_dedup_pending(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-
-    let rows = {
-        let store = state.store.lock().unwrap();
-        store.dedup_pending()
-    };
-    match rows {
-        Ok(rows) => Json(serde_json::json!({
-            "pending": rows.iter().map(|(ih, sess, src, bytes)| serde_json::json!({
-                "info_hash": ih, "session": sess,
-                "source_info_hash": src, "bytes": bytes,
-            })).collect::<Vec<_>>(),
-        }))
-        .into_response(),
-        Err(e) => Json(serde_json::json!({"error": e.to_string()})).into_response(),
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct DedupApplyBody {
-    #[serde(default)]
-    info_hash: String,
-}
-
-/// Turn a recorded match into links, now that someone has said yes.
-async fn post_dedup_apply(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-
-    let Ok(req) = serde_json::from_str::<DedupApplyBody>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
-    };
-
-    let cfg = state.cfg();
-    let (blob, save_path) = {
-        let store = state.store.lock().unwrap();
-        let blob = store.torrent_blob(&req.info_hash).ok().flatten();
-        let sp = store.save_path_of(&req.info_hash).unwrap_or_default();
-        (blob, sp)
-    };
-    let Some(blob) = blob else {
-        return (StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "no such torrent"}))).into_response();
-    };
-
-    match try_link_existing(&state, &blob, &req.info_hash, &save_path, &cfg, true) {
-        Some(source) => {
-            let store = state.store.lock().unwrap();
-            let _ = store.drop_dedup_pending(&req.info_hash);
-            Json(serde_json::json!({"status": "ok", "linked_from": source})).into_response()
-        }
-        None => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "the match is no longer usable"})),
-        )
-            .into_response(),
-    }
-}
 
 /// What the content index knows: how much payload is held more than once.
 async fn get_dedup_stats(
@@ -2013,7 +1915,7 @@ async fn get_dedup_stats(
     }
 
     Json(serde_json::json!({
-        "mode": cfg.dedup.mode,
+        "enabled": cfg.dedup.enabled,
         "min_mib": cfg.dedup.min_mib,
         "groups": groups.len(),
         "torrents": torrents,
@@ -2021,25 +1923,6 @@ async fn get_dedup_stats(
         "groups_separate_location": separate,
     }))
     .into_response()
-}
-
-/// Index anything not yet indexed, and say how many rows that was.
-async fn post_dedup_reindex(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-
-    let done = {
-        let store = state.store.lock().unwrap();
-        store.backfill_content_index(usize::MAX)
-    };
-    match done {
-        Ok(n) => Json(serde_json::json!({"indexed": n})).into_response(),
-        Err(e) => Json(serde_json::json!({"error": e.to_string()})).into_response(),
-    }
 }
 
 /// Where the current library came from, when it was imported from another client.
@@ -10069,10 +9952,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/announce/clients", get(get_clients).post(set_announce_client))
         .route("/api/announce/secondary-stats", get(get_secondary_stats).post(set_secondary_stats))
         .route("/api/dedup/stats", get(get_dedup_stats))
-        .route("/api/dedup/reindex", axum::routing::post(post_dedup_reindex))
         .route("/api/dedup/config", axum::routing::post(post_dedup_config))
-        .route("/api/dedup/pending", get(get_dedup_pending))
-        .route("/api/dedup/apply", axum::routing::post(post_dedup_apply))
         .route("/api/torrents/add-defaults", get(get_add_defaults))
         .route("/api/update-check", get(get_update_check))
         .route("/api/vpn-speedtest/latest", get(get_vpn_speedtest_latest))
