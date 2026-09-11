@@ -362,7 +362,7 @@ function _languageCardHTML() {
     const opts = I18N.languages.map(l =>
         `<option value="${l.code}"${l.code === cur ? " selected" : ""}>${l.label}</option>`
     ).join("");
-    return `<div class="settings-section" style="margin-bottom:18px">
+    return `<div class="settings-section">
         <div class="settings-section-title">${t("Language")}</div>
         <div class="settings-row">
             <div class="sr-label"><span class="sr-key">${t("Interface language")}</span><span class="sr-desc">${t("Language of the WebUI. Stored in this browser, so each browser can differ. Changing it reloads the page.")}</span></div>
@@ -374,7 +374,7 @@ function _languageCardHTML() {
 function _unitsCardHTML() {
     const sz = _unitSize(), sp = _unitSpeed();
     const opt = (v, cur, label) => `<option value="${v}"${v === cur ? " selected" : ""}>${label}</option>`;
-    return `<div class="settings-section" style="margin-bottom:18px">
+    return `<div class="settings-section">
         <div class="settings-section-title">${t("Display units")}</div>
         <div class="settings-row">
             <div class="sr-label"><span class="sr-key">${t("Sizes")}</span><span class="sr-desc">${t("Binary (MiB, \u00d71024) or decimal (MB, \u00d71000).")}</span></div>
@@ -391,7 +391,7 @@ function _interfacesCardHTML(list) {
     const rows = (list && list.length)
         ? list.map((i) => `<div class="settings-row"><div class="sr-label"><span class="sr-key">${esc(i.name)}</span><span class="sr-desc">${i.up ? t("up") : t("down")}</span></div><div class="sr-field"><code class="sr-readonly">${esc(i.ip)}</code></div></div>`).join("")
         : `<div class="settings-row"><div class="sr-desc">${t("No non-loopback interfaces detected.")}</div></div>`;
-    return `<div class="settings-section" style="margin-bottom:18px">
+    return `<div class="settings-section">
         <div class="settings-section-title">${t("Network interfaces")}</div>
         <div class="sr-desc" style="padding:0 0 8px">${t("Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.")}</div>
         ${rows}

@@ -17,6 +17,22 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.20.4 -- no space between the sections
+
+Third attempt at the same sentence, and the first one aimed at the right thing.
+The blocks the maintainer meant are the ones the code literally calls sections:
+`.settings-section`, the groups with the blue monospace titles inside Advanced
+settings -- Language, Display units, Network interfaces, then one per TOML
+table.
+
+Measured: 18px between Language and Display units. `.settings-section` carries
+`margin-top: 12px`, and the first three also carried an inline
+`margin-bottom: 18px`; the two collapse to 18.
+
+Both are gone. Sections stack flush -- the title already separates itself from
+its rows by 4px and the last row above already pads 7px, so the seam reads
+without a band of empty space.
+
 ## v4.20.3 -- the title band, padded once
 
 Measured rather than eyeballed: on the Config page the title band of
