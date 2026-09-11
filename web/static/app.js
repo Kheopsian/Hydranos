@@ -1454,6 +1454,10 @@ let _hoardStateFilter = "";
 let _hoardCatInc = [], _hoardCatExc = [];
 let _hoardTrackerInc = [], _hoardTrackerExc = [];
 let _hoardTagInc = [], _hoardTagExc = [];
+// The KIND of tracker error. Same include/exclude shape as the other three,
+// but the family only exists while something is in error, so the row is hidden
+// rather than left as an empty label.
+let _hoardErrInc = [], _hoardErrExc = [];
 
 function _toggleFacet(inc, exc, value, negative) {
     const mine = negative ? exc : inc, other = negative ? inc : exc;
@@ -2341,6 +2345,63 @@ function setHoardTagFilter(el, value, negative) {
     fetchHoardPage(true);
 }
 
+function setHoardErrFilter(el, value, negative) {
+    _toggleFacet(_hoardErrInc, _hoardErrExc, value, !!negative);
+    _paintChips(".chip-err", "err", _hoardErrInc, _hoardErrExc);
+    fetchHoardPage(true);
+}
+
+// What each class MEANS, in the operator's terms. The server sends stable keys
+// ("dead"), never prose, so this is the only place the wording lives.
+const ERR_CLASS_LABEL = {
+    dead: "Dead on the tracker",
+    auth: "Bad passkey",
+    throttled: "Rate-limited",
+    unreachable: "Tracker unreachable",
+    other: "Other error",
+};
+const ERR_CLASS_HINT = {
+    dead: "The tracker does not know this torrent any more. It will never announce again -- these are the ones to delete.",
+    auth: "The tracker refused the credentials. Fixing the passkey clears every torrent on that tracker at once.",
+    throttled: "A quota or a rate limit. Transient: nothing to do but wait.",
+    unreachable: "DNS, routing or a timeout. The tracker is down, not the torrent.",
+    other: "Not recognised as any of the above.",
+};
+// Worst first, so the chip that calls for a gesture is the one under the cursor.
+const ERR_CLASS_ORDER = ["dead", "auth", "throttled", "unreachable", "other"];
+
+// The client's copy of `errclass::classify`, kept in step with it by hand --
+// the same arrangement the hoard filter and sort already live under, and for
+// the same reason: the row carries the MESSAGE, never the class. The row shape
+// is a frozen 3.x contract (see `the_key_set_matches_a_live_3x_row`), so a
+// derived field cannot be added to it just to save this function.
+//
+// Only the page in hand is ever classified here. The chip COUNTS come from the
+// server, over the whole library.
+const _ERR_CLASS_RULES = [
+    ["auth", ["passkey", "unauthorized", "authentication", "invalid user", " 401", " 403"]],
+    ["dead", ["not registered", "unregistered", "introuvable", "not found", "has been deleted", "inactif"]],
+    ["throttled", ["429", "too many requests", "peers on this torrent", "unsatisfied", "rate limit", "slow down"]],
+    ["unreachable", ["timed out", "timeout", "unreachable", "dns error", "connect error", "connection refused", "no route", "client error (connect)"]],
+];
+
+function _errClassOf(msg) {
+    if (!msg || !msg.trim()) return "";
+    // Both stacks are in one string, as `v4: ... | v6: ...`, and they disagree
+    // often enough to matter. The most actionable half decides.
+    let best = "other";
+    for (const part of msg.split(" | ")) {
+        const s = part.toLowerCase();
+        for (const [cls, needles] of _ERR_CLASS_RULES) {
+            if (needles.some(n => s.includes(n))) {
+                if (ERR_CLASS_ORDER.indexOf(cls) < ERR_CLASS_ORDER.indexOf(best)) best = cls;
+                break;
+            }
+        }
+    }
+    return best;
+}
+
 // --- Tags context-menu editor (hoard-only, multi-select) ---
 async function _showTagPicker(ev) {
     if (ev) ev.stopPropagation();
@@ -2512,6 +2573,8 @@ function _hoardPageQuery() {
     if (_hoardTagExc.length) q.set("tag_not", _hoardTagExc.join(","));
     if (_hoardTrackerInc.length) q.set("tracker", _hoardTrackerInc.join(","));
     if (_hoardTrackerExc.length) q.set("tracker_not", _hoardTrackerExc.join(","));
+    if (_hoardErrInc.length) q.set("error_class", _hoardErrInc.join(","));
+    if (_hoardErrExc.length) q.set("error_class_not", _hoardErrExc.join(","));
     if (_hoardStateFilter) q.set("state", _hoardStateFilter);
     return q.toString();
 }
@@ -2663,6 +2726,23 @@ function _renderHoardCounts() {
         trkContainer.innerHTML = trks.map(h =>
             `<button class="chip chip-tracker${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(h)} <span class="chip-count">${trkCounts[h]}</span></button>`
         ).join("");
+    }
+
+    // Tracker-error classes. Drawn only while something is in error: an empty
+    // label with nothing under it is what the three families above already look
+    // like on a healthy library, and it reads as broken.
+    const errCounts = F ? (F.error_class || {}) : {};
+    const errGroup = document.getElementById("facet-errors");
+    const errContainer = document.getElementById("hoard-err-chips");
+    const errKeys = ERR_CLASS_ORDER.filter(k => errCounts[k] > 0)
+        .concat(Object.keys(errCounts).filter(k => !ERR_CLASS_ORDER.includes(k) && errCounts[k] > 0));
+    if (errContainer && errGroup) {
+        errGroup.style.display = errKeys.length ? "" : "none";
+        errContainer.innerHTML = errKeys.map(k => {
+            const label = t(ERR_CLASS_LABEL[k] || k);
+            const hint = t(ERR_CLASS_HINT[k] || "");
+            return `<button class="chip chip-err chip-err-${esc(k)}${_hoardErrInc.includes(k) ? " active" : ""}${_hoardErrExc.includes(k) ? " excluded" : ""}" data-err="${esc(k)}" onclick="setHoardErrFilter(this,'${esc(k)}')" oncontextmenu="setHoardErrFilter(this,'${esc(k)}',true);return false" title="${esc(hint)}">${esc(label)} <span class="chip-count">${errCounts[k]}</span></button>`;
+        }).join("");
     }
 
     const tagCounts = F ? (F.tag || {}) : {};
@@ -3082,6 +3162,11 @@ function _hoardMatches(t, search, skip) {
         if (_hoardTagInc.length && !_hoardTagInc.some(has)) return false;
         if (_hoardTagExc.some(has)) return false;
     }
+    if (skip !== "err") {
+        const ev = _errClassOf(t.tracker_error_msg || "");
+        if (_hoardErrInc.length && !_hoardErrInc.includes(ev)) return false;
+        if (ev && _hoardErrExc.includes(ev)) return false;
+    }
     if (skip !== "state") {
         const s = _hoardStateFilter;
         if (s === "__active__") { if (!(t.state === "seeding" && t.upload_rate > 0)) return false; }
@@ -3137,6 +3222,8 @@ async function _selectAllFiltered() {
     if (_hoardTagExc.length) q.set("tag_not", _hoardTagExc.join(","));
     if (_hoardTrackerInc.length) q.set("tracker", _hoardTrackerInc.join(","));
     if (_hoardTrackerExc.length) q.set("tracker_not", _hoardTrackerExc.join(","));
+    if (_hoardErrInc.length) q.set("error_class", _hoardErrInc.join(","));
+    if (_hoardErrExc.length) q.set("error_class_not", _hoardErrExc.join(","));
     if (_hoardStateFilter) q.set("state", _hoardStateFilter);
 
     let copies = null;

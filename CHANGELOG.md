@@ -17,6 +17,43 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.22.0 -- tracker errors you can act on, and chips that count again
+
+### Tracker errors, grouped by what they ask you to do
+
+The hoard list gains a fourth facet family: the KIND of tracker error. On the
+production library, 1931 torrents in error carried only 13 distinct messages,
+and those 13 collapse to four classes -- dead on the tracker, bad passkey,
+rate-limited, tracker unreachable. Grouping by raw message would have split the
+one class worth acting on across five spellings in two languages, which is the
+split the operator is trying to undo.
+
+The chips filter like the other three families: left click includes, right
+click excludes, and the counts come from the server over the whole library. The
+row is hidden entirely while nothing is in error.
+
+A message carries both stacks (`v4: ... | v6: ...`) and the halves disagree
+often enough to matter. Each half is classified and the most actionable wins,
+so a torrent unregistered over v4 and merely unreachable over v6 reads as
+unregistered.
+
+New query parameters on `/api/<engine>/page`: `error_class=` and
+`error_class_not=`, comma-separated, same shape as `category` and `tracker`.
+The facet block gains `error_class`.
+
+### Facet counts survive a second node
+
+Enrolling one node blanked every number on the hoard page: the chip counts, the
+three facet families, and the "All" total. The fan-out answered `facets: null`
+on the reasoning that nodes need not share a category or tag vocabulary.
+
+They need not -- but the UI reads the same block for the state chip counts, and
+refusing to merge turned a question with a perfectly good answer into silence.
+Differing vocabularies are not a merge problem: the union of two keyed counts is
+the answer, and a category only one node knows appears with that node's count.
+`facets` is still null when NO node counted any, which is a different claim from
+zero and the one the UI needs to decide whether to draw chips at all.
+
 ## v4.21.0 -- stacked cards get their gap back
 
 Reverts 4.20.4, 4.20.5 and 4.20.6, and does what was actually asked.

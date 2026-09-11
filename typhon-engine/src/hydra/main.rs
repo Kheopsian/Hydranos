@@ -25,6 +25,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod allocdiag;
 mod api;
 mod engines;
+mod errclass;
 mod logbuf;
 mod qbitrow;
 mod row;

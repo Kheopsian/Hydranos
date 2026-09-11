@@ -2190,6 +2190,18 @@ footer {
 .chip-active-seed.active { background: rgba(63, 185, 80, 0.2); border-color: var(--accent-green); }
 .chip-tracker-err { border-color: rgba(248, 129, 73, 0.4); color: #f88149; }
 .chip-tracker-err.active { background: rgba(248, 129, 73, 0.2); border-color: #f88149; }
+
+/* Tracker-error classes. The colour says how urgent the class is, not which
+   tracker it came from: dead is the one that asks for a gesture, throttled and
+   unreachable are the ones to stop worrying about. */
+.chip-err-dead { border-color: rgba(229, 83, 83, 0.45); color: #e55353; }
+.chip-err-dead.active { background: rgba(229, 83, 83, 0.22); border-color: #e55353; }
+.chip-err-auth { border-color: rgba(248, 129, 73, 0.45); color: #f88149; }
+.chip-err-auth.active { background: rgba(248, 129, 73, 0.22); border-color: #f88149; }
+.chip-err-throttled { border-color: rgba(224, 178, 74, 0.4); color: #e0b24a; }
+.chip-err-throttled.active { background: rgba(224, 178, 74, 0.2); border-color: #e0b24a; }
+.chip-err-unreachable,
+.chip-err-other { border-color: var(--border); color: var(--text-secondary); }
 .chip-torrent-err { border-color: rgba(248, 81, 73, 0.4); color: var(--accent-red); }
 .chip-torrent-err.active { background: rgba(248, 81, 73, 0.2); border-color: var(--accent-red); }
 .torrent-err-badge {

@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.21.0";
+pub const HYDRA_VERSION: &str = "4.22.0";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -2085,6 +2085,11 @@ async fn engine_page_value(
     let tag_exc = split(&param("tag_not"));
     let trk_inc = split(&tracker_filter);
     let trk_exc = split(&param("tracker_not"));
+    // The KIND of tracker error, as a facet family like any other: a library is
+    // triaged by the gesture an error calls for, not by the string a tracker
+    // happened to write. cf `errclass`.
+    let err_inc = split(&param("error_class"));
+    let err_exc = split(&param("error_class_not"));
 
     // "__none__" is uncategorised / untagged: a state, not a name, so it is
     // resolved separately from the ids.
@@ -2119,6 +2124,7 @@ async fn engine_page_value(
     let mut f_cat: std::collections::BTreeMap<u16, i64> = Default::default();
     let mut f_tracker: std::collections::BTreeMap<u16, i64> = Default::default();
     let mut f_tag: [i64; 64] = [0; 64];
+    let mut f_errclass: std::collections::BTreeMap<&'static str, i64> = Default::default();
     let (mut n_all, mut n_active, mut n_trk_err, mut n_err, mut n_pinned) = (0i64, 0, 0, 0, 0);
     let (mut n_uncat, mut n_untagged) = (0i64, 0i64);
 
@@ -2152,11 +2158,14 @@ async fn engine_page_value(
             id
         };
 
-        let tracker_error = !t
+        // Classified under the SAME lock that decides whether there is an
+        // error at all, so the string is read once. classify() borrows it and
+        // returns a &'static str, so a 300k walk allocates nothing here.
+        let (tracker_error, err_class) = t
             .last_announce_error
             .lock()
-            .map(|s| s.is_empty())
-            .unwrap_or(true);
+            .map(|s| (!s.is_empty(), crate::errclass::classify(&s)))
+            .unwrap_or((false, ""));
         let torrent_error =
             core.status_u8 == typhon_engine::torrent::meta::TorrentStatus::Error as u8;
 
@@ -2176,6 +2185,10 @@ async fn engine_page_value(
         };
         let m_tracker = (trk_inc.is_empty() || trk_flag_inc[tracker_id as usize])
             && !trk_flag_exc[tracker_id as usize];
+        // A torrent with no tracker error is in no class, so it can never be
+        // included by one -- and an exclusion must not sweep it away either.
+        let m_errclass = (err_inc.is_empty() || err_inc.iter().any(|c| c == err_class))
+            && !err_exc.iter().any(|c| c == err_class);
         let hash_hex_needed = state_filter == "__pinned__" || (want_facets && !pinned.is_empty());
         let is_pinned = hash_hex_needed
             && pinned.contains(&typhon_engine::torrent::hex_encode(&t.info_hash));
@@ -2205,7 +2218,7 @@ async fn engine_page_value(
         };
 
         if want_facets {
-            if m_search && m_cat && m_tag && m_tracker {
+            if m_search && m_cat && m_tag && m_tracker && m_errclass {
                 n_all += 1;
                 *f_state.entry(row_state).or_insert(0) += 1;
                 if row_state == "seeding" && upload_rate > 0 { n_active += 1; }
@@ -2213,13 +2226,13 @@ async fn engine_page_value(
                 if torrent_error { n_err += 1; }
                 if is_pinned { n_pinned += 1; }
             }
-            if m_search && m_state && m_tag && m_tracker {
+            if m_search && m_state && m_tag && m_tracker && m_errclass {
                 if f.category_id == 0 { n_uncat += 1; } else { *f_cat.entry(f.category_id).or_insert(0) += 1; }
             }
-            if m_search && m_state && m_cat && m_tag && tracker_id != 0 {
+            if m_search && m_state && m_cat && m_tag && m_errclass && tracker_id != 0 {
                 *f_tracker.entry(tracker_id).or_insert(0) += 1;
             }
-            if m_search && m_state && m_cat && m_tracker {
+            if m_search && m_state && m_cat && m_tracker && m_errclass {
                 if f.tag_bits == 0 {
                     n_untagged += 1;
                 } else {
@@ -2230,7 +2243,13 @@ async fn engine_page_value(
             }
         }
 
-        if m_search && m_state && m_cat && m_tag && m_tracker {
+        if want_facets && !err_class.is_empty()
+            && m_search && m_state && m_cat && m_tag && m_tracker
+        {
+            *f_errclass.entry(err_class).or_insert(0) += 1;
+        }
+
+        if m_search && m_state && m_cat && m_tag && m_tracker && m_errclass {
             kept.push(idx as u32);
         }
     }
@@ -2369,6 +2388,7 @@ async fn engine_page_value(
                 .iter()
                 .map(|(id, n)| (tracker_names[*id as usize].clone(), *n))
                 .collect::<std::collections::BTreeMap<String, i64>>(),
+            "error_class": f_errclass,
             "tag": facts
                 .tags
                 .iter()
@@ -2436,9 +2456,11 @@ fn merge_pages(
     let mut total = 0i64;
     let mut filtered = 0i64;
     let mut all: Vec<serde_json::Value> = Vec::new();
+    let mut facets = FacetSum::default();
     for p in pages {
         total += p.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
         filtered += p.get("filtered").and_then(|v| v.as_i64()).unwrap_or(0);
+        facets.add(p.get("facets"));
         if let Some(rows) = p.get("rows").and_then(|v| v.as_array()) {
             all.extend(rows.iter().cloned());
         }
@@ -2472,11 +2494,66 @@ fn merge_pages(
         "offset": offset,
         "limit": limit,
         "rows": rows,
-        // Facets are the local node's. Summing chip counts across nodes would
-        // need every node to agree on the category and tag vocabulary, and they
-        // do not have to: that is a separate decision, not a merge detail.
-        "facets": serde_json::Value::Null,
+        "facets": facets.into_value(),
     })
+}
+
+/// The facet block of several nodes, added up.
+///
+/// This used to answer Null, on the reasoning that nodes need not share a
+/// category or tag vocabulary. They need not -- but the UI reads the SAME
+/// block for the state chip counts, so refusing to merge blanked every number
+/// on the page the moment one node was enrolled: "All", "Seeding", "Tracker
+/// Error" and the three facet families all went empty, on a fleet whose counts
+/// were perfectly well defined. Silence is not the honest answer when the
+/// question has one.
+///
+/// Differing vocabularies are not in fact a merge problem: the union of two
+/// keyed counts is the answer. A category only one node knows appears with
+/// that node's count, which is exactly what it holds.
+#[derive(Default)]
+struct FacetSum {
+    seen: bool,
+    scalars: std::collections::BTreeMap<String, i64>,
+    maps: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>,
+}
+
+impl FacetSum {
+    fn add(&mut self, facets: Option<&serde_json::Value>) {
+        let Some(obj) = facets.and_then(|f| f.as_object()) else { return };
+        self.seen = true;
+        for (key, value) in obj {
+            match value {
+                serde_json::Value::Object(inner) => {
+                    let bucket = self.maps.entry(key.clone()).or_default();
+                    for (name, n) in inner {
+                        *bucket.entry(name.clone()).or_insert(0) += n.as_i64().unwrap_or(0);
+                    }
+                }
+                _ => {
+                    *self.scalars.entry(key.clone()).or_insert(0) += value.as_i64().unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    /// Null when NO node answered with facets -- the caller did not ask for
+    /// them, or every node is too old to send them. Zero is a different claim
+    /// from "not counted", and the UI relies on the difference to decide
+    /// whether to draw chips at all.
+    fn into_value(self) -> serde_json::Value {
+        if !self.seen {
+            return serde_json::Value::Null;
+        }
+        let mut out = serde_json::Map::new();
+        for (k, v) in self.scalars {
+            out.insert(k, v.into());
+        }
+        for (k, v) in self.maps {
+            out.insert(k, serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
+        }
+        serde_json::Value::Object(out)
+    }
 }
 
 /// Replace `offset` and `limit` in a query string, keeping everything else.
