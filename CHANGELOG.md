@@ -17,6 +17,23 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.20.5 -- stacked cards are one panel
+
+The answer, at the fourth asking, was the seam between the cards themselves.
+It measured **0px** every time I looked, which is exactly why three rounds of
+hunting for a margin found nothing: there is no gap. Each card draws its own
+1px border, so where two touch the join is a **2px double rule**, and each
+rounds its corners at 12px, so the page background shows through **four
+notches** at the join. That is the space.
+
+A run of adjacent cards now reads as one panel: the second and later drop their
+top border and top radius, and any card followed by another drops its bottom
+radius. Adjacent siblings only, so a card sitting after a `.cards` grid is left
+alone.
+
+Applies wherever cards stack -- Overview, Race, Hoard, Workflows and Config all
+had it.
+
 ## v4.20.4 -- no space between the sections
 
 Third attempt at the same sentence, and the first one aimed at the right thing.
