@@ -197,6 +197,37 @@ async fn main() -> anyhow::Result<()> {
     let shared_store = Arc::new(std::sync::Mutex::new(store));
     workers::spawn_store_reconcile(engine_host.clone(), shared_store.clone());
 
+    // Index anything added by a build that did not know about the content
+    // index. In batches, off the startup path: the pass takes ~45 s on a
+    // 300k-torrent catalogue and the store mutex is what every API handler
+    // waits on, so doing it in one call would freeze the UI for the duration.
+    {
+        let store = shared_store.clone();
+        std::thread::spawn(move || {
+            let mut total = 0usize;
+            loop {
+                let done = match store.lock() {
+                    Ok(s) => s.backfill_content_index(2000),
+                    Err(_) => break,
+                };
+                match done {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        total += n;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => {
+                        tracing::warn!("content index backfill: {e}");
+                        break;
+                    }
+                }
+            }
+            if total > 0 {
+                tracing::info!(indexed = total, "content index backfilled");
+            }
+        });
+    }
+
     // Put the operator's pauses back into the engines, then start the manager
     // that must not undo them.
     //
