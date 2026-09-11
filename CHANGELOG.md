@@ -17,6 +17,46 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.24.0 -- the store owns the metainfo, and the resume stops lying
+
+### Torrents that could not be deleted and came back at every start
+
+A hoard library carried 540 torrents the engine served but neither database
+knew: absent from `hydra.db` and from `<engine>/state.db`, invisible to the
+detail panel (404 while the list showed the row), refused by DELETE (every
+write route resolves through the store first), and back after a restart --
+seeding and announcing a payload that in some cases had already been erased.
+
+The cause is that the metainfo is stored TWICE. The store keeps it as a blob
+keyed by info-hash; `uploads/` keeps the same bytes in a file. The resume
+record pointed at the FILE, by path -- and until the V4 that file was named
+after whatever the client had called its upload. A batch ingester posting every
+torrent as `t.torrent` overwrote one file 2789 times. Measured on the
+production library: 995 paths shared by 5648 records, and 4728 records whose
+key no longer matches the torrent their file parses to.
+
+At startup the record's key was never compared to the file: `load_resume_data`
+inserted under the hash the FILE parsed to. A record keyed A pointing at a file
+holding B restored B, under a hash nothing had a row for.
+
+Two changes, in that order:
+
+- **The store is now the source of the metainfo.** The blob is fetched by the
+  record's own info-hash, so the key IS the identity and there is nothing left
+  to disagree with. A record the store has never heard of -- an install
+  predating the store -- still falls back to its file.
+- **A record that disagrees with its file is refused**, counted, and reported
+  at the end of startup instead of restoring the wrong torrent. Restoring it
+  was worse than restoring nothing: the result could not be deleted, shown, or
+  stopped.
+
+The 883 torrents whose record diverged but whose blob the store holds are
+repaired by the first change rather than lost to the second.
+
+The uploads directory (725 481 files, 16 GB against 4.12 GiB of blobs for the
+same 300k torrents) is still written, so a rollback to 4.23 still starts. It is
+no longer what a restart trusts.
+
 ## v4.23.0 -- stop rebuilding the library on every request
 
 Measured on the production library, a filtered hoard page took 0.82 s and
