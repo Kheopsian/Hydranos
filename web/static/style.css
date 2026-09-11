@@ -2506,7 +2506,14 @@ footer {
     padding: 4px 16px 14px;
     border-top: 1px solid var(--border);
 }
-.settings-section { margin-top: 12px; }
+/* Sections stack flush.
+ *
+ * The first three (Language, Display units, Network interfaces) also carried
+ * an inline `margin-bottom:18px`, which collapsed with this 12px to an 18px
+ * band between one section and the next -- the space between sections.
+ * The title already separates itself from its rows with 4px, and the last row
+ * of the section above already pads 7px, so the seam reads on its own. */
+.settings-section { margin-top: 0; }
 .settings-section-title {
     font-family: 'SF Mono', 'Cascadia Code', monospace;
     font-size: 11px;
