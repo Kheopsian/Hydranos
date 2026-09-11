@@ -72,9 +72,11 @@ when skipped:
 Cross-filesystem matches are reported and skipped: `link()` returns `EXDEV`
 there, and copying would defeat the purpose.
 
-`[dedup] enabled` is one switch, off by default: linking destroys nothing, but
-it writes to the filesystem, and a feature that starts doing that on upgrade
-unasked is a bad surprise.
+`[dedup] enabled` is one switch, on by default. A hardlink destroys nothing --
+it adds a directory entry pointing at an inode already on the disk, touching no
+existing file -- and the behaviour it replaces is downloading data we are
+already storing. Turning it off to be careful spends bandwidth and disk to
+avoid writing a directory entry.
 
 There is deliberately no "just tell me about it" middle setting. The duplicates
 come from automatic imports -- an *arr, autobrr, a batch ingest -- and none of
