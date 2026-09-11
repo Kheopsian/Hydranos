@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.3.1">
+    <link rel="stylesheet" href="/static/style.css?v=1.3.2">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -967,20 +967,21 @@
                     <h3>Personalisation</h3>
                     <button class="btn-small" onclick="resetPersonalisation()">Reset to defaults</button>
                 </div>
-                <div class="card-body">
-                    <div class="settings-row">
-                        <div class="sr-label">
-                            <span class="sr-key">Theme</span>
-                            <span class="sr-desc">Applies immediately, to this browser only. Other people using this instance keep theirs.</span>
-                        </div>
+                <div class="card-body perso-body">
+                    <!-- Not .settings-row: that row is built for a label facing
+                         a control, so it pads and rules off on both sides. Here
+                         the control is the grid directly underneath, and the
+                         padding was opening a gap between a heading and the
+                         thing it names. -->
+                    <div class="perso-head">
+                        <span class="sr-key">Theme</span>
+                        <span class="sr-desc">Applies immediately, to this browser only. Other people using this instance keep theirs.</span>
                     </div>
                     <div id="perso-themes" class="theme-grid"></div>
 
-                    <div class="settings-row" style="margin-top:18px">
-                        <div class="sr-label">
-                            <span class="sr-key">Tabs</span>
-                            <span class="sr-desc">Untick a tab to take it out of the bar. It hides the link, not the feature: nothing stops working and no endpoint closes. Overview and Config always stay, because Config is the way back here.</span>
-                        </div>
+                    <div class="perso-head">
+                        <span class="sr-key">Tabs</span>
+                        <span class="sr-desc">Untick a tab to take it out of the bar. It hides the link, not the feature: nothing stops working and no endpoint closes. Overview and Config always stay, because Config is the way back here.</span>
                     </div>
                     <div id="perso-tabs" class="perso-tab-grid"></div>
                 </div>
