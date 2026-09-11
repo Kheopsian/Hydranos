@@ -35,6 +35,32 @@ them:
   worker cannot tell them apart. The existing guard only caught an engine that
   loaded NOTHING; this catches the one that loaded almost everything.
 
+## v4.27.0 -- who the other end actually is
+
+The Client column knew six clients. Everything else -- BiglyBT, Tixati,
+PicoTorrent, WebTorrent, KTorrent, and the pre-Azureus conventions entirely --
+showed its raw two-letter code, or nothing at all when the peer id followed no
+convention the table recognised. The one real peer this production node had
+connected at the time read as `lt 0D80`, a client the table did not know
+printing a version nobody decodes.
+
+`peer::peerclient` replaces it: ~90 Azureus codes, the Shadow style that
+predates them (`T03C---` is BitTornado 0.3.12), Mainline (`M4-20-8--`), and the
+handful that put their name up front (`exbc`, `XBT`, Opera).
+
+Version strings are rendered the way each family writes them, which is not one
+rule: qBittorrent counts in decimal (`5220` is 5.2.2), libtorrent in base 16
+(`0D80` is 0.13.8), Transmission uses a two-digit minor (`3000` is 3.00), and
+ours base 36 so a minor above nine fits one character. Unparseable characters
+fall back to the raw string rather than inventing a number.
+
+An unknown code still reports the code, and 20 random bytes report nothing --
+that is a real answer, not a failure: a client is free to send them, and many
+do.
+
+The table was previously duplicated byte for byte in `peer::choking` and
+`tracker`, one copy dead. There is one now.
+
 ## v4.26.0 -- the peer id tells the truth, and tells the same story twice
 
 ### It said 2.4.3.0

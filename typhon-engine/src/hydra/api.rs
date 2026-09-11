@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.26.0";
+pub const HYDRA_VERSION: &str = "4.27.0";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
