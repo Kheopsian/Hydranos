@@ -1808,6 +1808,84 @@ fn try_link_existing(
     None
 }
 
+
+#[derive(serde::Deserialize)]
+struct DedupConfigBody {
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    min_mib: Option<u64>,
+}
+
+/// Write `[dedup]`, creating the section when the file has none.
+///
+/// Not `/api/settings`: that route edits keys that already exist, and every
+/// config file written before this feature has no `[dedup]` table at all --
+/// so the generic route answers `key "mode" not found in section "dedup"` and
+/// the setting cannot be changed anywhere. `set_toml_table` adds the section,
+/// which is exactly the difference, and keeping it here means a typo in a
+/// section name still cannot conjure a table through the generic route.
+async fn post_dedup_config(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+
+    let Ok(req) = serde_json::from_str::<DedupConfigBody>(&body) else {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+    };
+
+    let mode = crate::dedup::Mode::parse(&req.mode);
+    // Mode::parse folds anything unknown to Off, which would silently turn the
+    // feature off on a typo. Refuse instead.
+    if !matches!(req.mode.trim().to_ascii_lowercase().as_str(), "auto" | "ask" | "off") {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "mode must be auto, ask or off"}))).into_response();
+    }
+
+    let mut kv = vec![("mode".to_string(), format!("{:?}", mode.as_str()))];
+    if let Some(m) = req.min_mib {
+        kv.push(("min_mib".to_string(), m.to_string()));
+    }
+
+    let Ok(doc) = std::fs::read_to_string(&state.config_path) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "cannot read the config"}))).into_response();
+    };
+    let doc = match crate::tomledit::set_toml_table(&doc, "dedup", &kv) {
+        Ok(d) => d,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": message}))).into_response()
+        }
+    };
+
+    // Never commit a config that no longer parses.
+    if toml::from_str::<toml::Value>(&doc).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "edited config no longer parses"}))).into_response();
+    }
+    if std::fs::write(&state.config_path, &doc).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
+    }
+    if let Ok(reloaded) = toml::from_str::<Config>(&doc) {
+        state.set_cfg(reloaded);
+    }
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "mode": mode.as_str(),
+        // Read when a torrent is added, so the running daemon needs restarting.
+        "restart_required": true,
+    }))
+    .into_response()
+}
+
 /// What the content index knows: how much payload is held more than once.
 async fn get_dedup_stats(
     State(state): State<AppState>,
@@ -9902,6 +9980,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/announce/secondary-stats", get(get_secondary_stats).post(set_secondary_stats))
         .route("/api/dedup/stats", get(get_dedup_stats))
         .route("/api/dedup/reindex", axum::routing::post(post_dedup_reindex))
+        .route("/api/dedup/config", axum::routing::post(post_dedup_config))
         .route("/api/torrents/add-defaults", get(get_add_defaults))
         .route("/api/update-check", get(get_update_check))
         .route("/api/vpn-speedtest/latest", get(get_vpn_speedtest_latest))

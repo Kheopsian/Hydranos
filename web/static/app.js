@@ -6805,13 +6805,13 @@ async function saveDedupMode() {
     banner.className = "result-msg info";
     banner.textContent = t("Saving…");
     try {
-        await api("/api/settings", {
+        // Its own endpoint, not /api/settings: no config file written before
+        // this feature has a [dedup] table, and the generic route only edits
+        // keys that already exist.
+        await api("/api/dedup/config", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ changes: [
-                { section: "dedup", key: "mode", value: mode },
-                { section: "dedup", key: "min_mib", value: isNaN(minv) ? 16 : minv },
-            ] }),
+            body: JSON.stringify({ mode: mode, min_mib: isNaN(minv) ? 16 : minv }),
         });
         // [dedup] is read when a torrent is added, so it needs the daemon back.
         // Offering a Save that leaves the setting inert would be half an action.
