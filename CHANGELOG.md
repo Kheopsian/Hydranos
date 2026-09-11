@@ -17,6 +17,17 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.20.6 -- no dead band at the join either
+
+4.20.5 removed the double rule and the notches; a ~29px empty strip was still
+sitting at every join. Measured: 16px of card-body bottom padding, the 1px rule,
+then 12px of the next card's title padding, with nothing drawn in any of it.
+
+A body pads 16px all round, which is right when the card ends there and wrong
+when another starts immediately below. Rows already breathe 7px of their own,
+so the bottom pad was the part doing nothing. Dropped, for cards that have a
+sibling after them.
+
 ## v4.20.5 -- stacked cards are one panel
 
 The answer, at the fourth asking, was the seam between the cards themselves.
