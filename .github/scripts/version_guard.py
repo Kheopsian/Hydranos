@@ -40,8 +40,16 @@ CHANGELOG_FILE = Path("CHANGELOG.md")
 
 # `pub const HYDRA_VERSION: &str = "4.15.0";`
 VERSION_RE = re.compile(r'HYDRA_VERSION\s*:\s*&str\s*=\s*"([^"]+)"')
-# `fn default_peer_fingerprint() -> String { "-HY2430-".into() }`
-FINGERPRINT_RE = re.compile(r'fn\s+default_peer_fingerprint\s*\([^)]*\)[^{]*\{\s*"([^"]*)"')
+# The fingerprint is no longer a literal: it is derived from HYDRA_VERSION by
+# `peer_fingerprint_for`, because the four characters of an Azureus-style peer
+# id ARE the version and ours said 2.4.3.0 on a 4.x daemon for years.
+#
+# So this no longer reads a value -- it checks that the derivation is still
+# there. The eight-byte invariant it used to enforce is now covered for EVERY
+# version by `config::fingerprint_tests::it_is_always_eight_bytes`, which is a
+# stronger check than reading one literal ever was.
+FINGERPRINT_RE = re.compile(r'(fn\s+peer_fingerprint_for\s*\()')
+FINGERPRINT_TEST_RE = re.compile(r'(fn\s+it_is_always_eight_bytes)\s*\(')
 # A changelog entry heading: `## v4.15.0 -- title` or `## Unreleased`.
 HEADING_RE = re.compile(r"^##\s+(\S+)", re.MULTILINE)
 
@@ -123,13 +131,13 @@ def check(version: str, fingerprint: str, changelog: str, tags: list) -> list:
                     f"Renumber above it, or use `## Unreleased`, which cannot go stale."
                 )
 
-    # -- Rule 3: the peer fingerprint is eight bytes ------------------------
-    if len(fingerprint) != 8:
+    # -- Rule 3: the fingerprint is still DERIVED, and still pinned ---------
+    if not fingerprint:
         problems.append(
-            f"the default peer fingerprint {fingerprint!r} is "
-            f"{len(fingerprint)} bytes, not 8.\n"
-            f"    A peer_id is 8 bytes of client prefix and 12 of randomness; "
-            f"anything else quietly spends entropy."
+            "peer_fingerprint_for is gone from typhon-engine/src/config.rs.\n"
+            "    The peer id's four characters are the version to every client "
+            "that decodes them; a literal there goes stale the day it is "
+            "written, which is how ours announced 2.4.3.0 from a 4.x daemon."
         )
 
     return problems
@@ -167,8 +175,8 @@ def self_test() -> int:
             0,
         ),
         (
-            "a nine-byte fingerprint fails",
-            ("4.15.0", "-HY24300-", ok_log, tags),
+            "a fingerprint that is no longer derived fails",
+            ("4.15.0", "", ok_log, tags),
             1,
         ),
         ("an empty changelog fails", ("4.15.0", "-HY2430-", "", tags), 1),
@@ -196,7 +204,11 @@ def main() -> int:
     try:
         version = find_one(VERSION_RE, VERSION_FILE, "HYDRA_VERSION")
         fingerprint = find_one(
-            FINGERPRINT_RE, FINGERPRINT_FILE, "default_peer_fingerprint"
+            FINGERPRINT_RE, FINGERPRINT_FILE, "peer_fingerprint_for"
+        )
+        # The invariant moved into a test; make sure the test is still there.
+        find_one(
+            FINGERPRINT_TEST_RE, FINGERPRINT_FILE, "it_is_always_eight_bytes"
         )
         if not CHANGELOG_FILE.exists():
             raise Failure("CHANGELOG.md is missing")
