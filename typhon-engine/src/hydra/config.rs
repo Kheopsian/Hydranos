@@ -197,23 +197,15 @@ pub struct Dedup {
     /// of offers nobody reads is dead weight that still has to be maintained.
     #[serde(default = "dedup_default_enabled")]
     pub enabled: bool,
-    /// Skip matches whose payload is below this, in MiB. Linking a 3 KB .nfo
-    /// pack saves nothing and still creates inodes.
-    #[serde(default = "dedup_default_min_mib")]
-    pub min_mib: u64,
 }
 
 fn dedup_default_enabled() -> bool {
     true
 }
 
-fn dedup_default_min_mib() -> u64 {
-    16
-}
-
 impl Default for Dedup {
     fn default() -> Self {
-        Self { enabled: dedup_default_enabled(), min_mib: dedup_default_min_mib() }
+        Self { enabled: dedup_default_enabled() }
     }
 }
 

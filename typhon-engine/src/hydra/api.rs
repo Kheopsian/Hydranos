@@ -1763,10 +1763,6 @@ fn try_link_existing(
     let key = crate::dedup::content_key(bytes)?;
     let want = crate::dedup::layout(bytes)?;
 
-    if want.total_len() < cfg.dedup.min_mib.saturating_mul(1024 * 1024) {
-        return None;
-    }
-
     let candidates = {
         let store = state.store.lock().unwrap();
         store.content_matches(&key, hash).ok()?
@@ -1812,8 +1808,6 @@ fn try_link_existing(
 struct DedupConfigBody {
     #[serde(default)]
     enabled: bool,
-    #[serde(default)]
-    min_mib: Option<u64>,
 }
 
 /// Write `[dedup]`, creating the section when the file has none.
@@ -1838,10 +1832,7 @@ async fn post_dedup_config(
                 Json(serde_json::json!({"error": "invalid body"}))).into_response();
     };
 
-    let mut kv = vec![("enabled".to_string(), req.enabled.to_string())];
-    if let Some(m) = req.min_mib {
-        kv.push(("min_mib".to_string(), m.to_string()));
-    }
+    let kv = vec![("enabled".to_string(), req.enabled.to_string())];
 
     let Ok(doc) = std::fs::read_to_string(&state.config_path) else {
         return (StatusCode::INTERNAL_SERVER_ERROR,
@@ -1916,7 +1907,6 @@ async fn get_dedup_stats(
 
     Json(serde_json::json!({
         "enabled": cfg.dedup.enabled,
-        "min_mib": cfg.dedup.min_mib,
         "groups": groups.len(),
         "torrents": torrents,
         "groups_same_location": same_location,

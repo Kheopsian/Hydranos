@@ -6776,9 +6776,7 @@ async function loadDedup() {
     try {
         const d = await api("/api/dedup/stats");
         const on = document.getElementById("dedup-enabled");
-        const min = document.getElementById("dedup-minmib");
         if (on) on.checked = !!d.enabled;
-        if (min) min.value = d.min_mib;
 
         if (!d.groups) {
             box.innerHTML = '<span class="sr-desc">' + t("No duplicated payload found.") + "</span>";
@@ -6801,7 +6799,6 @@ async function loadDedup() {
 async function saveDedupMode() {
     const banner = document.getElementById("dedup-result");
     const enabled = document.getElementById("dedup-enabled").checked;
-    const minv = parseInt(document.getElementById("dedup-minmib").value, 10);
     banner.style.display = "block";
     banner.className = "result-msg info";
     banner.textContent = t("Saving…");
@@ -6812,7 +6809,7 @@ async function saveDedupMode() {
         await api("/api/dedup/config", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ enabled: enabled, min_mib: isNaN(minv) ? 16 : minv }),
+            body: JSON.stringify({ enabled: enabled }),
         });
         // [dedup] is read when a torrent is added, so it needs the daemon back.
         // Offering a Save that leaves the setting inert would be half an action.
