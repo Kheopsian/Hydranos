@@ -17,6 +17,20 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.20.3 -- the title band, padded once
+
+Measured rather than eyeballed: on the Config page the title band of
+Personalisation and of Advanced settings is **65px tall**, Account's is **40px**.
+Same page, same markup shape, 25px apart.
+
+`.card h3` carries `padding: 12px 16px`, because in a plain card the heading is
+the band. A card with a header button wraps that heading in `.card-header-row`,
+which carries the same padding -- and the two stacked. `.card-header-row h3`
+reset the margin and not the padding, so it survived every look at this page.
+
+Those 25px are what read as space between a section and its content. The
+heading no longer pads inside a row that already does.
+
 ## v4.20.2 -- the Personalisation card is one block
 
 the maintainer, on the screenshot: "pas d'espace entre les sections". The card read as
