@@ -1866,7 +1866,7 @@ async fn post_dedup_reindex(
 
     let done = {
         let store = state.store.lock().unwrap();
-        store.backfill_content_index()
+        store.backfill_content_index(usize::MAX)
     };
     match done {
         Ok(n) => Json(serde_json::json!({"indexed": n})).into_response(),

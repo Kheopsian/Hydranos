@@ -1480,16 +1480,21 @@ impl Store {
     /// Resumable by construction: it only looks at rows missing from
     /// `content_index`, so an interrupted pass costs nothing and a completed
     /// one is a no-op. Measured at 45 s for 301 221 torrents.
-    pub fn backfill_content_index(&self) -> anyhow::Result<usize> {
+    ///
+    /// Bounded by `limit` because the caller holds the store mutex for the
+    /// whole call: a single 45 s pass would freeze every API handler behind
+    /// it. The boot pass loops in batches and lets go in between.
+    pub fn backfill_content_index(&self, limit: usize) -> anyhow::Result<usize> {
         let mut q = self.conn.prepare(
             "SELECT t.info_hash, t.session, t.torrent
                FROM torrents t
                LEFT JOIN content_index c
                  ON c.info_hash = t.info_hash AND c.session = t.session
-              WHERE c.info_hash IS NULL",
+              WHERE c.info_hash IS NULL
+              LIMIT ?1",
         )?;
         let pending = q
-            .query_map([], |r| {
+            .query_map([limit as i64], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
