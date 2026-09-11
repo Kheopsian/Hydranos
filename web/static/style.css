@@ -511,6 +511,17 @@ main {
     border-bottom-right-radius: 0;
 }
 
+/* And no dead band at the join.
+ *
+ * A card body pads 16px all round, which is right when the card ends there and
+ * wrong when another card starts immediately below: the last row, the 16px, the
+ * 1px rule and the next title's own 12px stacked into a ~29px empty strip. The
+ * rows already breathe 7px of their own, so the bottom pad is the only part
+ * that was doing nothing. */
+.tab-content > .card:has(+ .card) .card-body {
+    padding-bottom: 0;
+}
+
 .card h3 {
     padding: 12px 16px;
     font-size: 13px;
