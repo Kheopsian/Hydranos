@@ -17,6 +17,24 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+### The reconcile stops amplifying a failed load
+
+`spawn_store_reconcile` deletes store rows whose torrent the engine does not
+hold. That reads "could not be loaded" as "delete it" -- and the row is where
+the metainfo blob lives, so five minutes after a collision kept a torrent from
+loading, its last copy was gone and no fix could bring it back. Reproduced on
+the bench: torrent A, perfectly legitimate, was erased between two restarts.
+
+Two limits, both on a pure `rows_to_drop` so they can be tested by breaking
+them:
+
+- a record the loader REFUSED keeps its row -- that row is what the next start
+  repairs from;
+- a pass that would drop more than 1% of a session (floor 50) refuses and says
+  so. A partial load looks exactly like a mass deletion from here, and this
+  worker cannot tell them apart. The existing guard only caught an engine that
+  loaded NOTHING; this catches the one that loaded almost everything.
+
 ## v4.24.0 -- the store owns the metainfo, and the resume stops lying
 
 ### Torrents that could not be deleted and came back at every start

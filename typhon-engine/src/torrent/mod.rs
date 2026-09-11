@@ -84,6 +84,14 @@ pub struct TorrentManager {
     /// A closure rather than a Store: this module has no business knowing what
     /// a session or a SQLite handle is. It asks for bytes by hash.
     blob_source: std::sync::RwLock<Option<Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>>>,
+    /// Records refused at load because the file they point at holds another
+    /// torrent.
+    ///
+    /// Published because the store reconcile deletes rows whose torrent is not
+    /// in the engine, and for these the row is the LAST copy of the metainfo:
+    /// reading "not loaded" as "delete it" turns a torrent that could still be
+    /// repaired into one that cannot.
+    refused_records: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Last state written per torrent, so a sweep can skip the rows that did
     /// not move. Without this the periodic save rewrites every torrent every
     /// five minutes regardless of activity, which is what made the old scheme
@@ -209,6 +217,7 @@ impl TorrentManager {
             resume_dir,
             disk,
             blob_source: std::sync::RwLock::new(None),
+            refused_records: std::sync::Mutex::new(std::collections::HashSet::new()),
             upload_rate: rate::RateTracker::new(),
             download_rate: rate::RateTracker::new(),
             cached_unseeded_peers: std::sync::atomic::AtomicUsize::new(0),
@@ -563,6 +572,11 @@ impl TorrentManager {
         metainfo::parse_torrent_file(&rd.torrent_path)
     }
 
+    /// The records this engine refused at startup. Empty on a healthy library.
+    pub fn refused_records(&self) -> std::collections::HashSet<String> {
+        self.refused_records.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+
     pub fn load_resume_data(&self) -> usize {
         // Timed in two parts on purpose. Reading the resume records is a few
         // dozen MB of small JSON; re-parsing every .torrent that each record
@@ -623,6 +637,9 @@ impl TorrentManager {
                     &hex_encode(&ih)[..8],
                 );
                 mismatched += 1;
+                if let Ok(mut refused) = self.refused_records.lock() {
+                    refused.insert(rd.info_hash.to_lowercase());
+                }
                 continue;
             }
 
