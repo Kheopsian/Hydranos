@@ -2110,15 +2110,13 @@ async function refreshDetail() {
         const ptbody = document.getElementById("detail-peers-tbody");
         if (d.peers && d.peers.length > 0) {
             ptbody.innerHTML = d.peers.map(p => {
-                const flags = (p.flags || []).map(f =>
-                    `<span class="peer-flag ${f}">${f}</span>`
-                ).join("");
+                const flags = peerFlags(p);
                 return `<tr>
                     <td>${incoIP(p.ip)}:${p.port}</td>
                     <td>${p.client || "-"}</td>
                     <td>${(p.progress * 100).toFixed(0)}%</td>
-                    <td>${formatSpeed(p.down_speed)}</td>
-                    <td>${formatSpeed(p.up_speed)}</td>
+                    <td>${formatSpeed(peerRate(p, 'dl'))}</td>
+                    <td>${formatSpeed(peerRate(p, 'ul'))}</td>
                     <td>${formatBytes(p.total_download)}</td>
                     <td>${formatBytes(p.total_upload)}</td>
                     <td>${flags || "-"}</td>
@@ -2164,6 +2162,34 @@ async function refreshDetail() {
 // to stay in step. They would not have: this row now has three states and an
 // estimate, and a second copy is a second chance to keep reporting "Success"
 // about a tracker nobody has spoken to.
+// A peer's flags, as the engine sends them: a STRING, the way qBittorrent
+// writes it -- "UFS" is three flags, not one.
+//
+// It used to be read as an array, so `.map` threw on the first connected peer
+// and took the whole panel down with it: refreshHoardDetail dies at the peer
+// table, and the tracker table right below it is never drawn. The panel then
+// freezes on whatever it showed when it opened, which reads as "this torrent
+// has never announced" while the torrent is announcing happily.
+//
+// Array.from accepts both shapes, so an older daemon sending an array still
+// renders.
+function peerFlags(p) {
+    return Array.from(p.flags || "")
+        .map(f => `<span class="peer-flag ${esc(f)}">${esc(f)}</span>`)
+        .join("");
+}
+
+// Peer rates. The V4 engine publishes dl_rate / ul_rate; 3.x published
+// down_speed / up_speed. Both are read, so the columns are filled whichever
+// answers -- they were blank on the V4 and nobody saw it, because the flags
+// crash above killed the table first.
+function peerRate(p, dir) {
+    const v = dir === "dl"
+        ? (p.dl_rate !== undefined ? p.dl_rate : p.down_speed)
+        : (p.ul_rate !== undefined ? p.ul_rate : p.up_speed);
+    return v || 0;
+}
+
 function trackerRowHtml(tr) {
     let domain = tr.url;
     try { domain = new URL(tr.url).hostname; } catch (_) {}
@@ -4246,15 +4272,13 @@ async function refreshHoardDetail() {
         const ptbody = document.getElementById("h-detail-peers-tbody");
         if (d.peers && d.peers.length > 0) {
             ptbody.innerHTML = d.peers.map(p => {
-                const flags = (p.flags || []).map(f =>
-                    `<span class="peer-flag ${f}">${f}</span>`
-                ).join("");
+                const flags = peerFlags(p);
                 return `<tr>
                     <td>${incoIP(p.ip)}:${p.port}</td>
                     <td>${p.client || "-"}</td>
                     <td>${(p.progress * 100).toFixed(0)}%</td>
-                    <td>${formatSpeed(p.down_speed)}</td>
-                    <td>${formatSpeed(p.up_speed)}</td>
+                    <td>${formatSpeed(peerRate(p, 'dl'))}</td>
+                    <td>${formatSpeed(peerRate(p, 'ul'))}</td>
                     <td>${formatBytes(p.total_download)}</td>
                     <td>${formatBytes(p.total_upload)}</td>
                     <td>${flags || "-"}</td>

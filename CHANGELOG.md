@@ -35,6 +35,29 @@ them:
   worker cannot tell them apart. The existing guard only caught an engine that
   loaded NOTHING; this catches the one that loaded almost everything.
 
+## v4.25.0 -- the detail panel stops dying on the first connected peer
+
+A torrent with connected peers froze its detail panel. The peer flags arrive as
+a STRING, the way qBittorrent writes them -- "UFS" is three flags -- and both
+panels read them as an array. `.map` threw on the first peer, and since the
+tracker table is drawn just below in the same function, it was never drawn at
+all: the panel kept whatever it showed when it opened.
+
+Which reads as the tracker never having been announced to. It had: the API
+reported status ok, last announce 163s, next in 1637s, scrape 2s/2l, while the
+panel said otherwise. The bug was never in the announce.
+
+Both panels are affected, and race always has peers -- its detail panel has
+been frozen since the V4 for any torrent actually transferring.
+
+`Array.from` takes either shape, so an older daemon sending an array still
+renders.
+
+Underneath it, a second one the crash was hiding: the peer table read
+`down_speed` / `up_speed`, which the V4 engine does not publish -- it sends
+`dl_rate` / `ul_rate`. Both names are read now, so the columns fill whichever
+answers.
+
 ## v4.24.0 -- the store owns the metainfo, and the resume stops lying
 
 ### Torrents that could not be deleted and came back at every start
