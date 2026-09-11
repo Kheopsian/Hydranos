@@ -962,6 +962,83 @@ impl Store {
         Ok(out)
     }
 
+    /// SQLite's own tally of rows written on this connection.
+    ///
+    /// Any INSERT, UPDATE or DELETE moves it, so a cache keyed on this value
+    /// cannot go stale through a write somebody forgot to annotate -- which is
+    /// the failure mode that makes hand-maintained cache versions untrustworthy
+    /// on a store with sixty write methods. It counts writes to every table, so
+    /// a job row moving invalidates a torrent cache needlessly; that costs one
+    /// rebuild, where the other direction costs a wrong answer.
+    ///
+    /// It does NOT see writes made on another connection, which is why callers
+    /// pair it with a TTL.
+    pub fn write_mark(&self) -> u64 {
+        self.conn.total_changes()
+    }
+
+    /// The facts of ONE category, and the hashes that carry it.
+    ///
+    /// The whole-session query builds a StoreFacts for every torrent in the
+    /// library -- three Strings and a Vec each -- and the qBit shim then throws
+    /// away all but the category *arr asked about: 300k built, 1972 kept. This
+    /// asks the index for the category directly, so the work is proportional to
+    /// what the client wanted.
+    ///
+    /// The covering index already leads with `session`; `category` sits inside
+    /// it, so the scan is over that session's slice of the index and stops at
+    /// the rows that match.
+    pub fn facts_in_category(
+        &self,
+        session: &str,
+        category: &str,
+    ) -> anyhow::Result<std::collections::HashMap<String, crate::row::StoreFacts>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT info_hash, category, save_path, added_time, completed_time,
+                    seeding_time, tags, paused, content_folder
+             FROM torrents WHERE session = ?1 AND category = ?2",
+        )?;
+        let mut out = std::collections::HashMap::new();
+        let rows = stmt.query_map([session, category], Self::fact_row)?;
+        for row in rows {
+            let (hash, facts) = row?;
+            out.insert(hash, facts);
+        }
+        Ok(out)
+    }
+
+    /// One row of the facts query, shared by the whole-session and the
+    /// per-category form so the two can never drift into reading the same
+    /// columns differently.
+    fn fact_row(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<(String, crate::row::StoreFacts)> {
+        let info_hash: String = row.get(0)?;
+        let tags: String = row.get(6)?;
+        let content_folder: i64 = row.get(8)?;
+        Ok((
+            info_hash,
+            crate::row::StoreFacts {
+                category: row.get(1)?,
+                save_path: row.get(2)?,
+                // added_time / completed_time are REAL seconds in the
+                // schema; the API publishes whole seconds.
+                added_time: row.get::<_, f64>(3)? as i64,
+                completed_time: row.get::<_, f64>(4)? as i64,
+                seeding_time: row.get(5)?,
+                tags: split_tags(&tags),
+                user_paused: row.get::<_, i64>(7)? != 0,
+                // -1 is the column's "unset" default, and unset must stay
+                // absent from the JSON rather than become false.
+                content_folder: if content_folder < 0 {
+                    None
+                } else {
+                    Some(content_folder != 0)
+                },
+            },
+        ))
+    }
+
     pub fn facts_by_session(
         &self,
         session: &str,
@@ -972,32 +1049,7 @@ impl Store {
              FROM torrents WHERE session = ?1",
         )?;
         let mut out = std::collections::HashMap::new();
-        let rows = stmt.query_map([session], |row| {
-            let info_hash: String = row.get(0)?;
-            let tags: String = row.get(6)?;
-            let content_folder: i64 = row.get(8)?;
-            Ok((
-                info_hash,
-                crate::row::StoreFacts {
-                    category: row.get(1)?,
-                    save_path: row.get(2)?,
-                    // added_time / completed_time are REAL seconds in the
-                    // schema; the API publishes whole seconds.
-                    added_time: row.get::<_, f64>(3)? as i64,
-                    completed_time: row.get::<_, f64>(4)? as i64,
-                    seeding_time: row.get(5)?,
-                    tags: split_tags(&tags),
-                    user_paused: row.get::<_, i64>(7)? != 0,
-                    // -1 is the column's "unset" default, and unset must stay
-                    // absent from the JSON rather than become false.
-                    content_folder: if content_folder < 0 {
-                        None
-                    } else {
-                        Some(content_folder != 0)
-                    },
-                },
-            ))
-        })?;
+        let rows = stmt.query_map([session], Self::fact_row)?;
         for row in rows {
             let (hash, facts) = row?;
             out.insert(hash, facts);
@@ -1524,6 +1576,61 @@ mod enrol_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The write mark is what the facts cache trusts to know it is stale.
+    ///
+    /// Every write has to move it, whichever method made it -- that is the
+    /// whole point of taking SQLite's own tally instead of a counter this file
+    /// would have to remember to bump in sixty places. Pin the property here:
+    /// an insert, an update and a delete each move it, a read never does.
+    #[test]
+    fn every_write_moves_the_mark_and_no_read_does() {
+        let store = fresh();
+        let a = "a".repeat(40);
+
+        let start = store.write_mark();
+        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+        let after_insert = store.write_mark();
+        assert!(after_insert > start, "an insert must move the mark");
+
+        store.set_category(&a, "movies").unwrap();
+        let after_update = store.write_mark();
+        assert!(after_update > after_insert, "an update must move the mark");
+
+        // Reads are what the cache does between writes; if they moved the mark
+        // it would rebuild on every request and buy nothing.
+        let _ = store.slim_facts("hoard").unwrap();
+        let _ = store.facts_by_session("hoard").unwrap();
+        let _ = store.facts_in_category("hoard", "movies").unwrap();
+        assert_eq!(store.write_mark(), after_update, "a read must not move it");
+
+        store.delete_torrent(&a).unwrap();
+        assert!(store.write_mark() > after_update, "a delete must move the mark");
+    }
+
+    /// The per-category query is the whole-session one, narrowed -- the qBit
+    /// shim swaps between them by which the client asked for, so a difference
+    /// in the facts would be a difference in what *arr sees.
+    #[test]
+    fn one_category_reads_exactly_what_the_whole_session_would() {
+        let store = fresh();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        store.insert_torrent(&a, "hoard", b"x", "/data/one", "movies", 11.0, false, "").unwrap();
+        store.insert_torrent(&b, "hoard", b"x", "/data/two", "series", 22.0, true, "").unwrap();
+
+        let whole = store.facts_by_session("hoard").unwrap();
+        let narrowed = store.facts_in_category("hoard", "movies").unwrap();
+
+        assert_eq!(narrowed.len(), 1, "only the category asked for");
+        let from_narrow = narrowed.get(&a).expect("the movies torrent");
+        let from_whole = whole.get(&a).expect("the movies torrent");
+        assert_eq!(from_narrow.category, from_whole.category);
+        assert_eq!(from_narrow.save_path, from_whole.save_path);
+        assert_eq!(from_narrow.added_time, from_whole.added_time);
+        assert_eq!(from_narrow.user_paused, from_whole.user_paused);
+        assert_eq!(from_narrow.tags, from_whole.tags);
+    }
 
     /// What the download slot manager asks on every pass.
     ///
