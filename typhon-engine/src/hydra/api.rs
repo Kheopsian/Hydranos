@@ -2440,6 +2440,47 @@ fn row_sort_key(row: &serde_json::Value, sort: &str) -> (String, f64) {
     }
 }
 
+/// Re-apply the error-class filter to pages that came back from other nodes.
+///
+/// A node older than the filter does not know the parameter and answers with
+/// its whole catalogue -- measured against a 4.13 node, asking for
+/// `error_class=dead` brought back its passkey failures and its timeouts too.
+/// One pass over the rows already in hand makes the answer right whatever the
+/// fleet is running.
+///
+/// `window` is `offset + limit`, the most rows any single node was asked for.
+/// A node that answered with FEWER than that sent its whole filtered catalogue,
+/// so its `filtered` count can be corrected exactly. A node that filled the
+/// window is holding rows nobody has seen, and adjusting its count from the
+/// visible ones would be a number that lies stably -- so it is left alone.
+fn enforce_error_class(
+    pages: &mut [serde_json::Value],
+    inc: &[String],
+    exc: &[String],
+    window: usize,
+) {
+    if inc.is_empty() && exc.is_empty() {
+        return;
+    }
+    for page in pages.iter_mut() {
+        let Some(obj) = page.as_object_mut() else { continue };
+        let Some(rows) = obj.get_mut("rows").and_then(|r| r.as_array_mut()) else { continue };
+        let before = rows.len();
+        rows.retain(|r| {
+            let msg = r.get("tracker_error_msg").and_then(|v| v.as_str()).unwrap_or("");
+            let class = crate::errclass::classify(msg);
+            (inc.is_empty() || inc.iter().any(|c| c == class))
+                && !exc.iter().any(|c| c == class)
+        });
+        let dropped = (before - rows.len()) as i64;
+        if dropped > 0 && before < window {
+            if let Some(f) = obj.get_mut("filtered") {
+                *f = (f.as_i64().unwrap_or(0) - dropped).max(0).into();
+            }
+        }
+    }
+}
+
 /// Interleave pages that are each already sorted.
 ///
 /// Every node sorts and pages its OWN catalogue; nothing ships a whole library
@@ -2765,6 +2806,18 @@ async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -> serde_jso
     .await;
 
     pages.extend(remote.into_iter().filter(|v| !v.is_null()));
+    // A node older than this filter does not know the parameter and answers
+    // with its whole catalogue. Measured against a 4.13 node: asking for
+    // error_class=dead brought back its passkey failures and its timeouts too.
+    // Re-applying the filter here costs one pass over the rows already in hand
+    // and makes the answer right whatever the fleet is running.
+    let err_inc: Vec<String> = query_param(query, "error_class")
+        .map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+    let err_exc: Vec<String> = query_param(query, "error_class_not")
+        .map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+    enforce_error_class(&mut pages, &err_inc, &err_exc, offset + limit);
     merge_pages(pages, &sort, asc, offset, limit)
 }
 
@@ -9965,6 +10018,104 @@ mod fleet_tests {
         let b = page(&[("aa", 10.0)]);
         let out = merge_pages(vec![a, b], "added_time", true, 0, 10);
         assert_eq!(hashes(&out), vec!["aa", "bb"]);
+    }
+
+    fn page_with(rows: Vec<(&str, &str)>, filtered: i64) -> serde_json::Value {
+        serde_json::json!({
+            "total": filtered,
+            "filtered": filtered,
+            "rows": rows.iter().map(|(hash, msg)| serde_json::json!({
+                "info_hash": hash,
+                "tracker_error_msg": msg,
+                "added_time": 1,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// A node that does not know the filter sends everything. Without the
+    /// guard the page shows its passkey failures under "dead", which is the
+    /// bug this exists to stop: remove the retain() and this test fails.
+    #[test]
+    fn an_older_node_does_not_smuggle_in_other_classes() {
+        let mut pages = vec![page_with(
+            vec![
+                ("a", "v4: tracker: torrent introuvable"),
+                ("b", "v4: tracker: invalid passkey"),
+                ("c", "v4: <url>): operation timed out"),
+            ],
+            3,
+        )];
+        enforce_error_class(&mut pages, &["dead".to_string()], &[], 10);
+        let rows = pages[0]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["info_hash"], "a");
+        // The whole catalogue fitted in the window, so the count is exact.
+        assert_eq!(pages[0]["filtered"], 1);
+    }
+
+    /// A node that filled its window is holding rows nobody has seen, so its
+    /// count cannot be corrected from the visible ones.
+    #[test]
+    fn a_full_window_keeps_its_own_count() {
+        let mut pages = vec![page_with(
+            vec![
+                ("a", "v4: tracker: torrent introuvable"),
+                ("b", "v4: tracker: invalid passkey"),
+            ],
+            900,
+        )];
+        enforce_error_class(&mut pages, &["dead".to_string()], &[], 2);
+        assert_eq!(pages[0]["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(pages[0]["filtered"], 900);
+    }
+
+    /// No filter asked for, nothing touched -- including the torrents with no
+    /// error at all, which belong to no class and must not be swept away.
+    #[test]
+    fn no_filter_leaves_every_row_alone() {
+        let mut pages = vec![page_with(vec![("a", ""), ("b", "v4: tracker: invalid passkey")], 2)];
+        enforce_error_class(&mut pages, &[], &[], 10);
+        assert_eq!(pages[0]["rows"].as_array().unwrap().len(), 2);
+    }
+
+    /// Excluding a class keeps the torrents that are in NO class.
+    #[test]
+    fn excluding_a_class_keeps_the_healthy_ones() {
+        let mut pages = vec![page_with(vec![("a", ""), ("b", "v4: tracker: invalid passkey")], 2)];
+        enforce_error_class(&mut pages, &[], &["auth".to_string()], 10);
+        let rows = pages[0]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["info_hash"], "a");
+    }
+
+    /// Facets from several nodes add up instead of vanishing. Enrolling one
+    /// node used to blank every number on the page.
+    #[test]
+    fn facets_of_two_nodes_are_summed() {
+        let a = serde_json::json!({
+            "total": 1, "filtered": 1, "rows": [],
+            "facets": {"all": 10, "category": {"movies": 4}, "error_class": {"dead": 2}},
+        });
+        let b = serde_json::json!({
+            "total": 1, "filtered": 1, "rows": [],
+            "facets": {"all": 5, "category": {"movies": 1, "series": 3}, "error_class": {"auth": 1}},
+        });
+        let out = merge_pages(vec![a, b], "added_time", false, 0, 10);
+        assert_eq!(out["facets"]["all"], 15);
+        assert_eq!(out["facets"]["category"]["movies"], 5);
+        // A category only one node knows is still the answer for that node.
+        assert_eq!(out["facets"]["category"]["series"], 3);
+        assert_eq!(out["facets"]["error_class"]["dead"], 2);
+        assert_eq!(out["facets"]["error_class"]["auth"], 1);
+    }
+
+    /// Null when nobody counted: that is a different claim from zero, and the
+    /// UI reads the difference to decide whether to draw chips at all.
+    #[test]
+    fn facets_stay_null_when_no_node_counted() {
+        let a = serde_json::json!({"total": 1, "filtered": 1, "rows": [], "facets": null});
+        let out = merge_pages(vec![a], "added_time", false, 0, 10);
+        assert!(out["facets"].is_null());
     }
 
     #[test]
