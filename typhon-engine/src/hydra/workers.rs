@@ -405,6 +405,90 @@ pub fn spawn_stagger_start(manager: Arc<TorrentManager>) {
 /// Reconciled rather than deleted on the spot, because the engine is the
 /// authority on what exists and the store is not: comparing the two is the
 /// only way to tell an orphan from a torrent that is merely paused.
+/// The store rows one reconcile pass may delete, or `Err(n)` when there are so
+/// many that the pass refuses to act.
+///
+/// Two things are NOT orphans even though the engine does not hold them:
+///
+///   * a record the loader refused -- its .torrent on disk is a different
+///     torrent, so the store row is the last copy of its metainfo and the next
+///     start can repair from it;
+///   * everything, when there is a lot of it. A partial load looks exactly like
+///     a mass deletion from here and this worker cannot tell the two apart, so
+///     past a ceiling it refuses rather than acting on a reading it cannot
+///     verify. The caller's emptiness check only catches an engine that loaded
+///     NOTHING; this catches the one that loaded almost everything.
+fn rows_to_drop(
+    known: Vec<String>,
+    live: &std::collections::HashSet<String>,
+    refused: &std::collections::HashSet<String>,
+) -> Result<Vec<String>, usize> {
+    let total = known.len();
+    let doomed: Vec<String> = known
+        .into_iter()
+        .filter(|h| !live.contains(h) && !refused.contains(h))
+        .collect();
+    let ceiling = (total / 100).max(50);
+    if doomed.len() > ceiling {
+        return Err(doomed.len());
+    }
+    Ok(doomed)
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::rows_to_drop;
+    use std::collections::HashSet;
+
+    fn set(v: &[&str]) -> HashSet<String> { v.iter().map(|s| s.to_string()).collect() }
+    fn many(n: usize) -> Vec<String> { (0..n).map(|i| format!("h{i:06}")).collect() }
+
+    /// A row whose torrent is simply gone is still collected.
+    #[test]
+    fn a_real_orphan_is_dropped() {
+        let known = vec!["a".to_string(), "b".to_string()];
+        let out = rows_to_drop(known, &set(&["a"]), &HashSet::new()).unwrap();
+        assert_eq!(out, vec!["b".to_string()]);
+    }
+
+    /// The row of a refused record is the last copy of its metainfo. Deleting
+    /// it is what turned a recoverable collision into a torrent lost for good.
+    #[test]
+    fn a_refused_record_keeps_its_row() {
+        let known = vec!["a".to_string(), "b".to_string()];
+        let out = rows_to_drop(known, &set(&["a"]), &set(&["b"])).unwrap();
+        assert!(out.is_empty(), "the refused row must survive");
+    }
+
+    /// A library that failed to load must not be mistaken for one that was
+    /// emptied on purpose.
+    #[test]
+    fn a_mass_deletion_is_refused() {
+        match rows_to_drop(many(10_000), &set(&["h000000"]), &HashSet::new()) {
+            Err(n) => assert_eq!(n, 9_999),
+            Ok(_) => panic!("dropping 9999 of 10000 rows must be refused"),
+        }
+    }
+
+    /// The ceiling is a share, not a constant: 1% of a big session still goes
+    /// through, so ordinary churn is not blocked.
+    #[test]
+    fn ordinary_churn_still_goes_through() {
+        let known = many(10_000);
+        let live: HashSet<String> = known.iter().skip(60).cloned().collect();
+        let out = rows_to_drop(known, &live, &HashSet::new()).unwrap();
+        assert_eq!(out.len(), 60);
+    }
+
+    /// A small session has a floor, or removing two rows from a library of ten
+    /// would trip the percentage.
+    #[test]
+    fn a_small_session_has_a_floor() {
+        let out = rows_to_drop(many(10), &HashSet::new(), &HashSet::new()).unwrap();
+        assert_eq!(out.len(), 10);
+    }
+}
+
 pub fn spawn_store_reconcile(
     engines: Arc<crate::engines::EngineHost>,
     store: Arc<std::sync::Mutex<crate::store::Store>>,
@@ -438,14 +522,42 @@ pub fn spawn_store_reconcile(
                         continue;
                     }
                 };
+                // A record the loader REFUSED is not an orphan: its .torrent
+                // on disk holds a different torrent, so the store row is the
+                // last copy of its metainfo and the next start can repair from
+                // it. Deleting it here is what turned a recoverable collision
+                // into a torrent lost for good.
+                let refused = engine.manager.refused_records();
+                let total = known.len();
+                let doomed = match rows_to_drop(known, &live, &refused) {
+                    Ok(rows) => rows,
+                    Err(would_drop) => {
+                        tracing::warn!(
+                            engine = %engine.id,
+                            would_drop,
+                            of = total,
+                            "store reconcile: refusing to drop that many rows at once -- \
+                             load them or repair them first"
+                        );
+                        continue;
+                    }
+                };
+
                 let mut dropped = 0usize;
-                for hash in known {
-                    if !live.contains(&hash) && store.delete_torrent(&hash).unwrap_or(false) {
+                for hash in doomed {
+                    if store.delete_torrent(&hash).unwrap_or(false) {
                         dropped += 1;
                     }
                 }
                 if dropped > 0 {
                     tracing::info!(engine = %engine.id, dropped, "store reconcile: rows without a torrent removed");
+                }
+                if !refused.is_empty() {
+                    tracing::info!(
+                        engine = %engine.id,
+                        kept = refused.len(),
+                        "store reconcile: rows kept for records the loader refused"
+                    );
                 }
             }
         }
