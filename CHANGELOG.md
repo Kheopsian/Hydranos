@@ -17,6 +17,23 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.21.0 -- stacked cards get their gap back
+
+Reverts 4.20.4, 4.20.5 and 4.20.6, and does what was actually asked.
+
+"pas d'espace entre les sections" was a REPORT, not an instruction: there was no
+space between the cards, and there should have been. Read as an imperative, it
+produced three releases removing space that already measured zero, ending with
+the cards merged into one slab. They are cards again.
+
+Stacked cards now sit 16px apart -- the same gap the `.cards` grid already uses
+elsewhere, applied to cards that stack in normal flow. Adjacent siblings only,
+so a card following a `.cards` grid does not get a second helping.
+
+Kept from that run, because they were real and measured: the title band padded
+once (4.20.3, 65px against Account's 40px on the same page) and the
+Personalisation card's own internal layout (4.20.2).
+
 ## v4.20.6 -- no dead band at the join either
 
 4.20.5 removed the double rule and the notches; a ~29px empty strip was still

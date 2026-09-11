@@ -490,36 +490,18 @@ main {
     -webkit-backdrop-filter: blur(20px);
 }
 
-/* Stacked cards are one panel, not three.
+/* Stacked cards are separate cards, and they need to look it.
  *
- * Two cards touching at 0px still show a seam: each draws its own 1px border,
- * so the join is a 2px double rule, and each rounds its corners, so the page
- * background shows through four notches. That seam is what reads as space
- * between sections -- the gap measured zero the whole time, which is why
- * hunting for a margin found nothing.
+ * Two of them touching at 0px is not a design, it is an oversight: the tab
+ * sections put one card straight after another with nothing between, so a page
+ * of three cards read as one slab with two hairlines across it. The `.cards`
+ * grid elsewhere already uses a 16px gap; this is the same value, for cards
+ * that stack in normal flow instead.
  *
- * Adjacent siblings only. A card that follows a `.cards` grid is not adjacent
- * to the card inside it, so a run is exactly what it looks like. */
+ * Adjacent siblings only, so a card that follows a `.cards` grid keeps the
+ * grid's own spacing and does not get a second helping. */
 .tab-content > .card + .card {
-    border-top: none;
-    border-top-left-radius: 0;
-    border-top-right-radius: 0;
-}
-
-.tab-content > .card:has(+ .card) {
-    border-bottom-left-radius: 0;
-    border-bottom-right-radius: 0;
-}
-
-/* And no dead band at the join.
- *
- * A card body pads 16px all round, which is right when the card ends there and
- * wrong when another card starts immediately below: the last row, the 16px, the
- * 1px rule and the next title's own 12px stacked into a ~29px empty strip. The
- * rows already breathe 7px of their own, so the bottom pad is the only part
- * that was doing nothing. */
-.tab-content > .card:has(+ .card) .card-body {
-    padding-bottom: 0;
+    margin-top: 16px;
 }
 
 .card h3 {
@@ -2538,14 +2520,7 @@ footer {
     padding: 4px 16px 14px;
     border-top: 1px solid var(--border);
 }
-/* Sections stack flush.
- *
- * The first three (Language, Display units, Network interfaces) also carried
- * an inline `margin-bottom:18px`, which collapsed with this 12px to an 18px
- * band between one section and the next -- the space between sections.
- * The title already separates itself from its rows with 4px, and the last row
- * of the section above already pads 7px, so the seam reads on its own. */
-.settings-section { margin-top: 0; }
+.settings-section { margin-top: 12px; }
 .settings-section-title {
     font-family: 'SF Mono', 'Cascadia Code', monospace;
     font-size: 11px;
