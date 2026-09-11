@@ -6773,6 +6773,10 @@ function _settingTier(section, key) {
 async function loadDedup() {
     const box = document.getElementById("dedup-stats");
     if (!box) return;
+    // Pulled up front: pending offers and duplicate counts are separate
+    // questions, and hanging one off an early return in the other is how a
+    // panel goes quietly blank.
+    loadDedupPending();
     try {
         const d = await api("/api/dedup/stats");
         const sel = document.getElementById("dedup-mode");
@@ -6794,6 +6798,62 @@ async function loadDedup() {
             "</div>";
     } catch (e) {
         box.innerHTML = '<span class="sr-desc">' + t("Could not read the content index.") + "</span>";
+    }
+}
+
+
+// Matches found in "ask" mode: recognised, recorded, waiting for a yes.
+// Listed here rather than on the torrent row, because the decision is about
+// two torrents at once and the row only knows one of them.
+async function loadDedupPending() {
+    const box = document.getElementById("dedup-pending");
+    if (!box) return;
+    let d;
+    try {
+        d = await api("/api/dedup/pending");
+    } catch (e) {
+        box.innerHTML = "";
+        return;
+    }
+    const rows = d.pending || [];
+    if (!rows.length) {
+        box.innerHTML = "";
+        return;
+    }
+    let html = '<div class="dedup-pending-head"><span class="sr-key">'
+        + t("Matches waiting for a decision") + '</span><span class="sr-desc">'
+        + t("These torrents hold payload already on the disk. Linking makes them seed without downloading it again.")
+        + "</span></div>";
+    for (const r of rows) {
+        html += '<div class="dedup-pending-row">'
+            + '<span class="dp-hash">' + esc(r.info_hash.slice(0, 12)) + "</span>"
+            + '<span class="dp-arrow">' + t("from") + "</span>"
+            + '<span class="dp-hash">' + esc(r.source_info_hash.slice(0, 12)) + "</span>"
+            + '<span class="dp-size">' + formatBytes(r.bytes) + "</span>"
+            + '<button class="btn-small btn-accent" onclick="applyDedup(\'' + esc(r.info_hash) + '\')">'
+            + t("Link") + "</button></div>";
+    }
+    box.innerHTML = html;
+}
+
+async function applyDedup(infoHash) {
+    const banner = document.getElementById("dedup-result");
+    banner.style.display = "block";
+    banner.className = "result-msg info";
+    banner.textContent = t("Linking…");
+    try {
+        const r = await api("/api/dedup/apply", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ info_hash: infoHash }),
+        });
+        banner.className = "result-msg ok";
+        banner.textContent = t("Linked from") + " " + String(r.linked_from).slice(0, 12);
+        await loadDedupPending();
+        await loadDedup();
+    } catch (e) {
+        banner.className = "result-msg err";
+        banner.textContent = String(e);
     }
 }
 
