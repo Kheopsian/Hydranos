@@ -72,7 +72,12 @@ when skipped:
 Cross-filesystem matches are reported and skipped: `link()` returns `EXDEV`
 there, and copying would defeat the purpose.
 
-`[dedup] enabled` is one switch, on by default. A hardlink destroys nothing --
+`[dedup] enabled` is one switch, on by default, and there is no size threshold
+beside it. A hardlink creates no inode -- that is the whole point of one -- so
+a small file costs a directory entry, while skipping it costs a download. A
+threshold in MiB would also have guarded the wrong quantity: the work is one
+`stat` and one `link` per FILE, so a torrent of ten thousand 1 KB files is the
+expensive one and it is exactly what a 16 MiB floor would have let through. A hardlink destroys nothing --
 it adds a directory entry pointing at an inode already on the disk, touching no
 existing file -- and the behaviour it replaces is downloading data we are
 already storing. Turning it off to be careful spends bandwidth and disk to
