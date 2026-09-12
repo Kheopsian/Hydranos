@@ -37,6 +37,37 @@ them:
 
 ## Unreleased -- the facts cache comes back out
 
+### A tracker appears on the Trackers tab before the first announce
+
+The tab learned its hosts from three places, and all three were retrospective:
+the announce cache (successes), the error breakdown (failures), and the client
+overrides the operator had already declared. A torrent added stopped has done
+none of those things, so its tracker had no row -- and a row is what carries
+the passkey and the client identity. Setting them *before* the first announce
+is the entire point of adding a torrent stopped, and it was the one case the
+tab could not serve.
+
+A fourth source, and the only one that is a fact rather than a history: the
+hosts the catalogue actually names, counted per torrent by
+`TorrentManager::tracker_host_counts`. Iterated over the DashMap in place --
+`all()` would clone 300k `Arc`s to produce a few dozen hosts.
+
+Two consequences worth naming:
+
+- the `torrents` column now counts torrents. It used to carry the announce
+  count, which is what `announces` was already reporting beside it.
+- a row has three states, not two. `status` is `ok` / `error` / `never`, and
+  the UI paints `never` grey. Deriving it from `ok` alone meant a tracker
+  nothing had spoken to was reported as having failed.
+
+### The qBittorrent shim returns the real trackers
+
+`GET /api/v2/torrents/trackers` answered with the three pseudo rows -- DHT,
+PeX, LSD -- and nothing else, identically for every torrent in the catalogue.
+Any client asking a torrent who it announces to was told "nobody". The real
+tiers are appended now, with qBittorrent's own status vocabulary, including
+`1` (not contacted yet) for a torrent that has not announced.
+
 ### Add a torrent without starting it
 
 A checkbox on the add form. The torrent is listed with its trackers, announces

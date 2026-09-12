@@ -3488,6 +3488,10 @@ struct TrackerRow {
     host: String,
     torrents: i64,
     ok: bool,
+    /// "ok" | "error" | "never". `ok` alone could not tell a tracker that
+    /// failed from one nothing has spoken to yet, so every host the catalogue
+    /// knew but had not announced to was painted red.
+    status: &'static str,
     last_error: String,
     last_announce: String,
     announces: i64,
@@ -3540,8 +3544,20 @@ async fn get_trackers(
         }
     }
 
+    // What the catalogue actually names, announced to or not. Without this a
+    // torrent added stopped has no row on this tab, so its passkey and client
+    // identity cannot be set BEFORE the first announce -- which is the only
+    // moment setting them is worth anything. cf the empty state below.
+    let mut held: std::collections::HashMap<String, i64> = Default::default();
+    for engine in state.engines.engines() {
+        for (host, count) in engine.manager.tracker_host_counts() {
+            *held.entry(host).or_insert(0) += count;
+        }
+    }
+
     let mut hosts: std::collections::BTreeSet<String> = observed.keys().cloned().collect();
     hosts.extend(cfg.announce_clients.keys().cloned());
+    hosts.extend(held.keys().cloned());
     // And the trackers that have only ever FAILED.
     //
     // `per_tracker` is built from the announce cache, which is written on
@@ -3549,9 +3565,11 @@ async fn get_trackers(
     // outright had no row at all -- the ones most worth looking at were the
     // only ones missing. Measured on production: archive.org holds 107k
     // torrents and answers none of them, gemini refuses us on all 6k.
+    let mut errored: std::collections::BTreeSet<String> = Default::default();
     for engine in state.engines.engines() {
         for host in engine.announce_cache.error_breakdown().into_keys() {
-            hosts.insert(host);
+            hosts.insert(host.clone());
+            errored.insert(host);
         }
     }
 
@@ -3560,6 +3578,7 @@ async fn get_trackers(
         .map(|host| {
             let client = cfg.announce_clients.get(&host);
             let seen = observed.get(&host);
+            let holds = held.get(&host).copied().unwrap_or(0);
             let mut sources = Vec::new();
             if seen.is_some() {
                 sources.push("torrents".to_string());
@@ -3567,11 +3586,24 @@ async fn get_trackers(
             if client.is_some() {
                 sources.push("config".to_string());
             }
+            if holds > 0 {
+                sources.push("catalogue".to_string());
+            }
             TrackerRow {
-                torrents: seen.map(|(n, _)| *n).unwrap_or(0),
+                // The catalogue count, not the announce count: they are
+                // different questions, and `announces` below already answers
+                // the second one.
+                torrents: holds,
                 // An announce landed in the cache only because the tracker
                 // answered, so a host we have seen is a host that is working.
                 ok: seen.is_some(),
+                status: if seen.is_some() {
+                    "ok"
+                } else if errored.contains(&host) {
+                    "error"
+                } else {
+                    "never"
+                },
                 last_error: String::new(),
                 last_announce: seen
                     .map(|(_, age)| iso8601_ago(*age))
@@ -6950,12 +6982,55 @@ async fn qbit_torrent_trackers(
             "num_seeds": 0, "status": 2, "tier": "", "url": url,
         })
     };
-    Json(serde_json::json!([
+    let mut rows = vec![
         pseudo("** [DHT] **"),
         pseudo("** [PeX] **"),
         pseudo("** [LSD] **"),
-    ]))
-    .into_response()
+    ];
+
+    // And the real ones. This route used to return the three pseudo rows and
+    // nothing else, whatever the torrent: a client asking "who is this
+    // announcing to" got an answer that was the same for every torrent in the
+    // catalogue, and looked like a torrent with no trackers at all.
+    let hash = query_param(&query, "hash").unwrap_or_default().to_lowercase();
+    if let Some((_, torrent)) = find_torrent(&state, &hash) {
+        let last_error = torrent
+            .last_announce_error
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let announced = torrent
+            .last_announce_at
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0;
+        // qBit's vocabulary: 0 disabled, 1 not contacted yet, 2 working,
+        // 4 not working. "Not contacted yet" is the state of a torrent added
+        // stopped, and it is the one qBit clients render without an alarm.
+        let status = if !announced {
+            1
+        } else if last_error.is_empty() {
+            2
+        } else {
+            4
+        };
+        let seeders = torrent.scrape_seeders.load(std::sync::atomic::Ordering::Relaxed) as i64;
+        let leechers = torrent.scrape_leechers.load(std::sync::atomic::Ordering::Relaxed) as i64;
+        for (tier, urls) in torrent.live_trackers.read().iter().enumerate() {
+            for url in urls {
+                rows.push(serde_json::json!({
+                    "url": url,
+                    "tier": tier,
+                    "status": status,
+                    "msg": if status == 4 { last_error.clone() } else { String::new() },
+                    "num_peers": 0,
+                    "num_seeds": seeders,
+                    "num_leeches": leechers,
+                    "num_downloaded": 0,
+                }));
+            }
+        }
+    }
+    Json(serde_json::Value::Array(rows)).into_response()
 }
 
 
