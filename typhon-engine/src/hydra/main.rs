@@ -262,6 +262,13 @@ async fn main() -> anyhow::Result<()> {
             shared_store.clone(),
             engine.id.clone(),
         );
+        // Here and not in engines.rs for the same reason as the slot manager:
+        // the store does not exist yet when the engines are built.
+        workers::spawn_seed_time_sync(
+            engine.manager.clone(),
+            shared_store.clone(),
+            engine.id.clone(),
+        );
     }
 
     // The benchmark graphs read what this writes and nothing else does: with no
@@ -332,6 +339,26 @@ async fn main() -> anyhow::Result<()> {
                 let _ = api::session_and_day(&state);
             }
         });
+    }
+
+    // The race drain, here rather than in engines.rs: it reads the per-tracker
+    // seed obligation out of the live config, and the state that holds it is
+    // only built above.
+    for engine in state.engines.engines().iter() {
+        if engine.role != "race" {
+            continue;
+        }
+        let drain_cfg = state.cfg().race_drain.clone();
+        let race_path = if drain_cfg.race_path.is_empty() {
+            std::path::PathBuf::from("/race")
+        } else {
+            std::path::PathBuf::from(&drain_cfg.race_path)
+        };
+        workers::spawn_race_drain(
+            engine.manager.clone(),
+            state.config_handle(),
+            race_path,
+        );
     }
 
     // The workflow timer, before the router takes ownership of the state.
@@ -439,7 +466,7 @@ fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>) {
             let manager = e.manager.clone();
             std::thread::spawn(move || {
                 let t = std::time::Instant::now();
-                manager.save_all_resume();
+                manager.flush_all_resume();
                 tracing::info!(engine = %id, took_ms = t.elapsed().as_millis() as u64,
                                "resume data saved");
             })

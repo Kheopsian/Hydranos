@@ -49,6 +49,9 @@ pub struct Fingerprint {
     pub num_have: u32,
     pub paused: bool,
     pub seed_mode: bool,
+    /// Seed time in HOURS. See `fingerprint_of`: seconds here would mark every
+    /// seeding torrent dirty at every sweep.
+    pub seed_hours: i64,
 }
 
 pub struct StateDb {
@@ -67,7 +70,8 @@ CREATE TABLE IF NOT EXISTS torrent_state (
     added_time       INTEGER NOT NULL DEFAULT 0,
     completed_time   INTEGER NOT NULL DEFAULT 0,
     bitfield         TEXT NOT NULL DEFAULT '',
-    trackers         TEXT NOT NULL DEFAULT ''
+    trackers         TEXT NOT NULL DEFAULT '',
+    seed_secs        INTEGER NOT NULL DEFAULT 0
 );
 ";
 
@@ -89,6 +93,12 @@ impl StateDb {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(SCHEMA)?;
+        // The schema above only builds a NEW database. Every existing one --
+        // including a 300k-row production file -- keeps the old layout, so the
+        // column has to be added explicitly. A second run fails with "duplicate
+        // column name", which is the success case here and is why the error is
+        // dropped rather than propagated.
+        let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN seed_secs INTEGER NOT NULL DEFAULT 0", []);
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -155,7 +165,7 @@ impl StateDb {
         let mut stmt = match conn.prepare(
             "SELECT info_hash, torrent_path, save_path, seed_mode, paused,
                     total_uploaded, total_downloaded, added_time, completed_time,
-                    bitfield, trackers
+                    bitfield, trackers, seed_secs
              FROM torrent_state",
         ) {
             Ok(s) => s,
@@ -178,6 +188,7 @@ impl StateDb {
                 completed_time: row.get(8)?,
                 bitfield: row.get(9)?,
                 trackers: decode_trackers(&trackers_json),
+                seed_secs: row.get(11).unwrap_or(0),
             })
         });
         let rows = match rows {
@@ -226,8 +237,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
         "INSERT INTO torrent_state
             (info_hash, torrent_path, save_path, seed_mode, paused,
              total_uploaded, total_downloaded, added_time, completed_time,
-             bitfield, trackers)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             bitfield, trackers, seed_secs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(info_hash) DO UPDATE SET
             torrent_path=excluded.torrent_path,
             save_path=excluded.save_path,
@@ -238,7 +249,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             added_time=excluded.added_time,
             completed_time=excluded.completed_time,
             bitfield=excluded.bitfield,
-            trackers=excluded.trackers",
+            trackers=excluded.trackers,
+            seed_secs=excluded.seed_secs",
         params![
             rd.info_hash,
             rd.torrent_path,
@@ -251,6 +263,7 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             rd.completed_time,
             rd.bitfield,
             encode_trackers(&rd.trackers),
+            rd.seed_secs,
         ],
     )?;
     Ok(())

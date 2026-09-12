@@ -206,6 +206,61 @@ pub fn spawn_health_scan(
     });
 }
 
+/// Copy each torrent's seed counter from the engine into the store.
+///
+/// The engine owns the number -- it is the only thing that knows when a
+/// torrent is actually seeding -- but the UI row and the workflow facts are
+/// both built from `torrents.seeding_time` in the store. Without this the
+/// counter is correct and invisible.
+///
+/// Hourly, and only for the torrents whose value CHANGED since the last pass.
+/// A 48-hour obligation does not need second precision, and rewriting 300k
+/// rows every five minutes to move a number by 300 would cost more than the
+/// question is worth. The lag is at most an hour, and it lags BEHIND the true
+/// value, so an obligation is never reported satisfied before it is.
+pub fn spawn_seed_time_sync(
+    manager: Arc<TorrentManager>,
+    store: Arc<std::sync::Mutex<crate::store::Store>>,
+    engine_id: String,
+) {
+    tokio::spawn(async move {
+        let mut last: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        // After the engines have loaded, so the first pass sees restored
+        // counters rather than a catalogue of zeros.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        loop {
+            let now = typhon_engine::torrent::meta::now_secs();
+            let mut rows: Vec<(String, i64)> = Vec::new();
+            for t in manager.all() {
+                let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
+                let secs = t.seed_time_now(now);
+                if last.get(&hash).copied() != Some(secs) {
+                    rows.push((hash, secs));
+                }
+            }
+            if !rows.is_empty() {
+                let wrote = {
+                    let st = match store.lock() {
+                        Ok(s) => s,
+                        Err(e) => e.into_inner(),
+                    };
+                    st.update_seeding_times(&rows)
+                };
+                match wrote {
+                    Ok(n) => {
+                        for (hash, secs) in rows {
+                            last.insert(hash, secs);
+                        }
+                        tracing::debug!(engine = %engine_id, rows = n, "seed time synced");
+                    }
+                    Err(e) => tracing::warn!(engine = %engine_id, "seed time sync: {e}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
+}
+
 /// Free space on the race disk by removing what has earned its keep.
 ///
 /// Destructive by design and gated twice: it does nothing unless the operator
@@ -214,9 +269,16 @@ pub fn spawn_health_scan(
 /// stops it running again on the next tick.
 pub fn spawn_race_drain(
     manager: Arc<TorrentManager>,
-    config: crate::config::RaceDrain,
+    cfg_handle: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
     race_path: std::path::PathBuf,
 ) {
+    let live = || -> Arc<crate::config::Config> {
+        match cfg_handle.read() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    };
+    let config = live().race_drain.clone();
     if !config.enabled {
         tracing::info!("race drain: disabled");
         return;
@@ -237,15 +299,61 @@ pub fn spawn_race_drain(
         );
         loop {
             tokio::time::sleep(interval).await;
-            drain_once(&manager, &config, &race_path);
+            // Re-read every tick: an obligation typed into the UI has to apply
+            // to the NEXT pass, not to the next restart.
+            let cfg = match cfg_handle.read() {
+                Ok(g) => g.clone(),
+                Err(e) => e.into_inner().clone(),
+            };
+            drain_once(&manager, &cfg.race_drain, &race_path, &cfg);
         }
     });
+}
+
+/// Hours this torrent's tracker requires it to be seeded, and whether that
+/// obligation is met.
+///
+/// ⚠ A tracker with NOTHING declared is treated as protected, not as free.
+/// The drain deletes; an unknown rule and no rule are not the same thing, and
+/// the cost of confusing them is a hit-and-run on an account that took months
+/// to build. The operator opts a tracker INTO deletion by declaring 0.
+fn seed_obligation_met(
+    t: &Arc<typhon_engine::torrent::meta::TorrentState>,
+    cfg: &crate::config::Config,
+    now: i64,
+) -> (bool, String, i64) {
+    let host = t
+        .live_trackers
+        .read()
+        .iter()
+        .flatten()
+        .next()
+        .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u))
+        .unwrap_or_default();
+    // No tracker at all: nobody is owed anything.
+    if host.is_empty() {
+        return (true, host, 0);
+    }
+    let declared = cfg
+        .announce_min_seed_hours
+        .get(&host)
+        .map(|v| v.trim().to_string());
+    let Some(raw) = declared else {
+        return (false, host, -1);
+    };
+    let hours: i64 = raw.parse().unwrap_or(-1);
+    if hours < 0 {
+        return (false, host, -1);
+    }
+    let seeded = t.seed_time_now(now);
+    (seeded >= hours * 3600, host, hours)
 }
 
 fn drain_once(
     manager: &Arc<TorrentManager>,
     config: &crate::config::RaceDrain,
     race_path: &std::path::Path,
+    cfg: &crate::config::Config,
 ) {
     let Some((used, total)) = disk_usage(race_path) else {
         // Silence here is how a wrong path hides: the drain would run every
@@ -270,9 +378,25 @@ fn drain_once(
     let mut torrents = manager.all();
     torrents.sort_by_key(|t| t.added_time);
 
+    let now = typhon_engine::torrent::meta::now_secs();
+    let mut protected = 0usize;
+    let mut undeclared = 0usize;
     for torrent in torrents {
         if to_free <= 0.0 {
             break;
+        }
+        // The obligation comes FIRST, before size or age. Sorting by added_time
+        // and deleting the oldest is a proxy for "has earned its keep" that
+        // breaks exactly when a tracker has a minimum: under high churn the
+        // oldest race on the disk can still be six hours old.
+        let (met, host, hours) = seed_obligation_met(&torrent, cfg, now);
+        if !met {
+            if hours < 0 {
+                undeclared += 1;
+            } else {
+                protected += 1;
+            }
+            continue;
         }
         let size = torrent.meta.total_size as f64;
         // ⚠ keep_data, NOT delete_files. The Go signature at this position is
@@ -282,8 +406,20 @@ fn drain_once(
         // catalogue disappears without the disk ever emptying.
         if manager.remove_torrent(&torrent.info_hash, false).is_ok() {
             to_free -= size;
-            tracing::info!(name = %torrent.meta.name, "drained");
+            tracing::info!(name = %torrent.meta.name, tracker = %host, "drained");
         }
+    }
+
+    // A drain that cannot free what it needs has to SAY so. Otherwise the disk
+    // fills while the worker reports nothing, which is the failure this very
+    // drain already had once when it was watching the wrong path.
+    if to_free > 0.0 {
+        tracing::warn!(
+            still_needed_gb = (to_free / 1e9).round(),
+            protected,
+            undeclared,
+            "race drain could not free enough: torrents are under a seed obligation"
+        );
     }
 }
 

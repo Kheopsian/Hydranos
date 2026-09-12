@@ -1188,6 +1188,34 @@ impl Store {
             .collect()
     }
 
+    /// Push the engines' seed counters into the column the UI and the rules
+    /// engine both read.
+    ///
+    /// `torrents.seeding_time` was declared, indexed and read in six places,
+    /// and written by nothing: it answered 0 for every torrent since the
+    /// column existed. A rule saying "seeded for 48 hours" was therefore
+    /// always false, and the detail panel always said zero.
+    ///
+    /// One transaction for the batch: 300k single-statement commits would be
+    /// 300k fsyncs.
+    pub fn update_seeding_times(&self, rows: &[(String, i64)]) -> Result<usize, rusqlite::Error> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0usize;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE torrents SET seeding_time = ?2 WHERE info_hash = ?1",
+            )?;
+            for (hash, secs) in rows {
+                n += stmt.execute(rusqlite::params![hash, secs])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     pub fn set_tags(&self, info_hash: &str, tags: &[String]) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE torrents SET tags = ?2 WHERE info_hash = ?1",

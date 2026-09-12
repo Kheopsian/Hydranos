@@ -55,7 +55,9 @@ pub struct Engine {
     /// sent to the wrong scheduler announces the wrong catalogue. Empty until
     /// `connect` puts the engine on the network -- an offline engine has no
     /// announce loop to jump.
-    pub bump: std::sync::OnceLock<tokio::sync::mpsc::Sender<String>>,
+    pub bump: std::sync::OnceLock<
+        tokio::sync::mpsc::Sender<crate::announce::scheduler::BumpReq>,
+    >,
     /// This engine's live announce policy, swappable while it runs.
     ///
     /// Empty until `connect` starts the announcer, like `bump`: an engine that
@@ -253,11 +255,12 @@ impl EngineHost {
                         } else {
                             std::path::PathBuf::from(&config.race_drain.race_path)
                         };
-                        crate::workers::spawn_race_drain(
-                            engine.manager.clone(),
-                            config.race_drain.clone(),
-                            race_path,
-                        );
+                        // NOT spawned here any more: the drain has to read the
+                        // per-tracker seed obligation, which lives in the live
+                        // config, and the AppState that owns it does not exist
+                        // yet. main.rs starts it once the state is built --
+                        // same reason as the download slot manager below.
+                        let _ = race_path;
                     }
                     // The download slot manager is NOT started here. It has to
                     // read the paused column to know which stops are the

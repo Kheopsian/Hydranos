@@ -168,7 +168,18 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
     row.insert("progress".into(), num(progress));
     row.insert("ratio".into(), num(ratio));
     row.insert("save_path".into(), save_path.into());
-    row.insert("seeding_time".into(), facts.seeding_time.into());
+    // The engine's live counter wins over the store's copy. The store is
+    // written once an hour -- enough for a rule that asks about 48 hours, far
+    // too coarse for a panel a person is looking at, which would sit on a
+    // stale number for up to an hour and show 0 for the first one.
+    //
+    // The store value is the fallback, for a torrent the engines no longer
+    // hold: there the last synced figure is all there is.
+    let live_seed = i(engine, "seeding_time");
+    row.insert(
+        "seeding_time".into(),
+        if live_seed > 0 { live_seed.into() } else { facts.seeding_time.into() },
+    );
     row.insert("state".into(), state.into());
     row.insert("swarm_leechers".into(), i(engine, "list_peers").into());
     row.insert("swarm_seeds".into(), i(engine, "list_seeds").into());

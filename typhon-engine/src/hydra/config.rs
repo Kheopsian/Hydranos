@@ -267,6 +267,31 @@ pub struct Config {
     #[serde(default)]
     pub announce_muted: BTreeMap<String, String>,
 
+    /// tracker host -> hours this tracker requires a torrent to be seeded.
+    ///
+    /// The OBLIGATION, and it belongs to the tracker because it is the
+    /// tracker's rule -- not an operator preference and not a property of a
+    /// category. A category says what to DO with a torrent; this says what may
+    /// not be done to it yet.
+    ///
+    /// Empty means no obligation is declared, and the drain then treats the
+    /// torrent as protected rather than free: an unknown rule is not the same
+    /// as no rule, and guessing wrong costs a hit-and-run.
+    #[serde(default)]
+    pub announce_min_seed_hours: BTreeMap<String, String>,
+
+    /// tracker host -> hidden from the Trackers tab.
+    ///
+    /// Listing a tracker because the CATALOGUE names it turned 15 rows into 91
+    /// on this node: every public tracker baked into a stray .torrent gets one,
+    /// most of them holding a single torrent. Hiding is a VIEW decision and
+    /// nothing else -- a hidden tracker is still announced to, still counted,
+    /// and still surfaces on the tab when it needs action. Saying "I know, stop
+    /// telling me" is what announce_muted is for, and the two must not be
+    /// confused: one declutters, the other silences.
+    #[serde(default)]
+    pub announce_hidden: BTreeMap<String, String>,
+
     /// tracker host -> passkey substituted into the announce URL.
     #[serde(default)]
     pub announce_passkeys: BTreeMap<String, String>,

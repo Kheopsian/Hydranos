@@ -311,6 +311,12 @@ pub struct TorrentState {
     /// can persist the fact at once.
     pub completed_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<InfoHash>>,
     pub is_paused: AtomicBool,
+    /// Seconds spent seeding, folded in at every state change and at the
+    /// periodic sweep. See `fold_seed_time`.
+    pub seed_secs: AtomicI64,
+    /// Unix time this torrent last STARTED seeding, or 0 when it is not
+    /// seeding. The open interval; `seed_secs` holds the closed ones.
+    pub seed_since: AtomicI64,
     /// Anti-thrash: when true, this torrent serves no piece Requests
     /// (disk reads gated in peer::session), but stays connected and
     /// announced. Set by the per-disk seed-slot manager; cleared to resume.
@@ -381,6 +387,54 @@ pub struct TorrentState {
     pub connected_addrs: DashMap<std::net::SocketAddr, ()>,
 }
 
+
+/// Unix seconds. The seed counter needs a wall clock, not a monotonic one:
+/// it is persisted and compared across restarts.
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+impl TorrentState {
+    /// Close the open seeding interval and start a new one if still seeding.
+    ///
+    /// Called at every state change and at the five-minute sweep, so the
+    /// counter costs nothing in steady state -- a per-second loop over 300k
+    /// torrents to move a number that only changes on transitions is the kind
+    /// of cost that turns up in a CPU profile three weeks later.
+    ///
+    /// ⚠ Folding on the transitions that STOP seeding is the part that has to
+    /// be right. Relying on the sweep alone would credit a torrent paused two
+    /// minutes after a sweep with the whole five minutes -- an over-count, and
+    /// an over-counted obligation is one deleted too early.
+    pub fn fold_seed_time(&self, now: i64) {
+        use std::sync::atomic::Ordering;
+        let seeding = self.status.load(Ordering::Relaxed) == crate::torrent::TorrentStatus::Seeding as u8
+            && !self.is_paused.load(Ordering::Relaxed)
+            && !self.is_removed.load(Ordering::Relaxed);
+        let since = self.seed_since.load(Ordering::Relaxed);
+        if since > 0 {
+            let delta = (now - since).max(0);
+            if delta > 0 {
+                self.seed_secs.fetch_add(delta, Ordering::Relaxed);
+            }
+        }
+        // A clock that jumped backwards leaves `since` in the future; storing
+        // `now` anyway is what keeps the next fold from crediting the gap.
+        self.seed_since.store(if seeding { now } else { 0 }, Ordering::Relaxed);
+    }
+
+    /// The counter including the interval still open, without mutating it.
+    /// What the API should report: folding on a read would make a GET a write.
+    pub fn seed_time_now(&self, now: i64) -> i64 {
+        use std::sync::atomic::Ordering;
+        let base = self.seed_secs.load(Ordering::Relaxed);
+        let since = self.seed_since.load(Ordering::Relaxed);
+        if since > 0 { base + (now - since).max(0) } else { base }
+    }
+}
 
 impl TorrentState {
     /// The peer id to hand this torrent's peers: the tracker-consistent one
@@ -582,6 +636,8 @@ impl TorrentState {
             limiter: std::sync::OnceLock::new(),
             completed_tx: std::sync::OnceLock::new(),
             is_paused: AtomicBool::new(false),
+            seed_secs: AtomicI64::new(0),
+            seed_since: AtomicI64::new(0),
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),

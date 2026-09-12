@@ -91,10 +91,34 @@ pub async fn fields(
                 rules::Kind::Bool => ("bool", &["eq", "ne"]),
                 rules::Kind::Tags => ("tags", &["has_tag", "not_has_tag"]),
             };
+            // The editor shows these; the engine is sent `name`. "not_contains"
+            // and "ne" are how the matcher spells it, not how anyone reads it.
+            let ops_labelled: Vec<serde_json::Value> = ops
+                .iter()
+                .map(|o| serde_json::json!({"op": o, "label": op_label(o, *kind)}))
+                .collect();
             serde_json::json!({
                 "name": name,
+                "label": field_label(name),
                 "kind": kind_name,
                 "operators": ops,
+                "operators_labelled": ops_labelled,
+                // Where the editor should get the list of possible values, when
+                // there is one. Typing a category by hand is how a rule ends up
+                // pointing at a category that does not exist, matching nothing,
+                // and looking perfectly correct while it does it.
+                "choices_from": match *name {
+                    "category" => "categories",
+                    "tags" => "tags",
+                    "tracker_host" => "trackers",
+                    "engine" => "engines",
+                    _ => "",
+                },
+                "choices": match (*name, kind) {
+                    ("state", _) => serde_json::json!(rules::STATES),
+                    (_, rules::Kind::Bool) => serde_json::json!(["true", "false"]),
+                    _ => serde_json::Value::Null,
+                },
                 // What the editor should show under the value box. A duration
                 // typed as "2 days" is the commonest way to get a rule that
                 // silently never fires.
@@ -110,6 +134,76 @@ pub async fn fields(
         })
         .collect();
     Json(serde_json::json!({"fields": out})).into_response()
+}
+
+/// A field name as a person reads it.
+///
+/// The engine's name is the wire format and stays untouched: renaming
+/// `completed_age` would break every stored rule. This is the other end.
+fn field_label(name: &str) -> String {
+    match name {
+        "name" => "torrent name",
+        "info_hash" => "info hash",
+        "category" => "category",
+        "tags" => "tags",
+        "state" => "state",
+        "engine" => "engine",
+        "save_path" => "save path",
+        "tracker_host" => "tracker",
+        "tracker_error" => "has a tracker error",
+        "tracker_error_msg" => "tracker error message",
+        "torrent_error" => "has a torrent error",
+        "user_paused" => "stopped by hand",
+        "multi_file" => "has several files",
+        "progress" => "progress",
+        "ratio" => "ratio",
+        "total_size" => "size",
+        "total_uploaded" => "uploaded",
+        "total_downloaded" => "downloaded",
+        "upload_rate" => "upload rate",
+        "download_rate" => "download rate",
+        "num_peers" => "connected peers",
+        "num_seeds" => "connected seeds",
+        "swarm_seeds" => "seeds in swarm",
+        "swarm_leechers" => "leechers in swarm",
+        "added_age" => "time since added",
+        "completed_age" => "time since completed",
+        // A field added to FIELDS without a label still works; it
+        // just reads as the engine spells it.
+        other => return other.to_string(),
+    }
+    .to_string()
+}
+
+/// An operator as a person reads it, which depends on what it compares.
+///
+/// "greater than" is right for a ratio and wrong for an age: `added_age > 2d`
+/// means added MORE than two days ago, and reading it as "greater" is how a
+/// rule gets written backwards.
+fn op_label(op: &str, kind: rules::Kind) -> String {
+    match (op, kind) {
+        ("eq", rules::Kind::Bool) => "is",
+        ("ne", rules::Kind::Bool) => "is not",
+        ("eq", _) => "is",
+        ("ne", _) => "is not",
+        ("contains", _) => "contains",
+        ("not_contains", _) => "does not contain",
+        ("starts_with", _) => "starts with",
+        ("ends_with", _) => "ends with",
+        ("matches", _) => "matches regex",
+        ("has_tag", _) => "has tag",
+        ("not_has_tag", _) => "does not have tag",
+        ("gt", rules::Kind::Duration) => "is older than",
+        ("ge", rules::Kind::Duration) => "is at least",
+        ("lt", rules::Kind::Duration) => "is newer than",
+        ("le", rules::Kind::Duration) => "is at most",
+        ("gt", _) => "is more than",
+        ("ge", _) => "is at least",
+        ("lt", _) => "is less than",
+        ("le", _) => "is at most",
+        other => return other.0.to_string(),
+    }
+    .to_string()
 }
 
 /// Parse and validate a workflow from a request body.

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 /// Sized for ~200k torrents: throughput times latency, not a number of cores.
@@ -52,6 +52,33 @@ const MAX_NEW_PER_CYCLE: usize = 500;
 /// `MIN_INTERVAL` on purpose -- the scheduler already treats a minute as the
 /// shortest honest gap between two announces of one torrent.
 const BUMP_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// What the scheduler actually did with one hand-pressed reannounce.
+///
+/// Until 4.28.0 `bump_now` answered `bool` and the receive arm threw it away,
+/// so a refused bump was indistinguishable from an applied one -- and the HTTP
+/// route had already answered `{"status":"ok"}` the instant the message entered
+/// the channel. A bulk reannounce of 540 torrents could therefore be a complete
+/// no-op and report success for every one of them. The outcome travels back now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BumpOutcome {
+    /// Moved to the head of the queue.
+    Bumped,
+    /// Refused: this hash was bumped less than `BUMP_COOLDOWN` ago.
+    Cooldown { retry_in: Duration },
+    /// Refused: a worker is announcing this hash right now, which is the
+    /// announce the caller was asking for.
+    InFlight,
+}
+
+/// One hand-pressed reannounce, and where to report what became of it.
+///
+/// `reply` is an `Option` so an internal caller can still fire and forget
+/// without inventing a receiver it will never read.
+pub struct BumpReq {
+    pub info_hash: String,
+    pub reply: Option<oneshot::Sender<BumpOutcome>>,
+}
 
 /// What one torrent owes the scheduler.
 struct State {
@@ -159,7 +186,7 @@ impl Admission {
 pub async fn run<C, F, Fut>(
     catalogue: Arc<C>,
     announce: Arc<F>,
-    mut bump_rx: mpsc::Receiver<String>,
+    mut bump_rx: mpsc::Receiver<BumpReq>,
     admission: Arc<Admission>,
 )
 where
@@ -266,8 +293,13 @@ where
                     epoch: state.epoch,
                 }));
             }
-            Some(hash) = bump_rx.recv() => {
-                bump_now(&mut states, &mut heap, hash);
+            Some(req) = bump_rx.recv() => {
+                let outcome = bump_now(&mut states, &mut heap, req.info_hash);
+                if let Some(reply) = req.reply {
+                    // The caller may have given up waiting; that is its right
+                    // and not an error here.
+                    let _ = reply.send(outcome);
+                }
             }
             _ = reconcile.tick() => {
                 reconcile_now(&catalogue, &mut states, &mut heap, &admission);
@@ -337,7 +369,7 @@ fn bump_now(
     states: &mut HashMap<String, State>,
     heap: &mut BinaryHeap<Reverse<Deadline>>,
     hash: String,
-) -> bool {
+) -> BumpOutcome {
     let now = Instant::now();
     let state = states.entry(hash.clone()).or_insert_with(|| State {
         info_hash: hash.clone(),
@@ -347,20 +379,21 @@ fn bump_now(
         last_bump: None,
     });
     if let Some(last) = state.last_bump {
-        if now.duration_since(last) < BUMP_COOLDOWN {
-            return false;
+        let since = now.duration_since(last);
+        if since < BUMP_COOLDOWN {
+            return BumpOutcome::Cooldown { retry_in: BUMP_COOLDOWN - since };
         }
     }
     // Already with a worker: the announce the caller wants is in progress.
     if state.in_flight {
-        return false;
+        return BumpOutcome::InFlight;
     }
     // The epoch moves first: every deadline made before this one is now stale
     // and will be dropped when it surfaces.
     state.epoch += 1;
     state.last_bump = Some(now);
     heap.push(Reverse(Deadline { at: now, info_hash: hash, epoch: state.epoch }));
-    true
+    BumpOutcome::Bumped
 }
 
 #[cfg(test)]
@@ -484,7 +517,7 @@ mod tests {
         heap.push(Reverse(Deadline { at: now + DEFAULT_INTERVAL, info_hash: "a".into(), epoch: 0 }));
         heap.push(Reverse(Deadline { at: now + Duration::from_secs(60), info_hash: "b".into(), epoch: 0 }));
 
-        assert!(bump_now(&mut states, &mut heap, "a".into()));
+        assert_eq!(bump_now(&mut states, &mut heap, "a".into()), BumpOutcome::Bumped);
 
         let Reverse(head) = heap.peek().expect("a deadline");
         assert_eq!(head.info_hash, "a", "the bumped torrent must come out first");
@@ -500,7 +533,7 @@ mod tests {
         states.insert("a".to_string(), fresh("a"));
         heap.push(Reverse(Deadline { at: Instant::now(), info_hash: "a".into(), epoch: 0 }));
 
-        assert!(bump_now(&mut states, &mut heap, "a".into()));
+        assert_eq!(bump_now(&mut states, &mut heap, "a".into()), BumpOutcome::Bumped);
 
         let epoch = states["a"].epoch;
         assert_eq!(epoch, 1);
@@ -516,9 +549,43 @@ mod tests {
         let mut heap = BinaryHeap::new();
         states.insert("a".to_string(), fresh("a"));
 
-        assert!(bump_now(&mut states, &mut heap, "a".into()), "first press works");
-        assert!(!bump_now(&mut states, &mut heap, "a".into()), "second press is refused");
+        assert_eq!(
+            bump_now(&mut states, &mut heap, "a".into()),
+            BumpOutcome::Bumped,
+            "first press works"
+        );
+        assert!(
+            matches!(
+                bump_now(&mut states, &mut heap, "a".into()),
+                BumpOutcome::Cooldown { .. }
+            ),
+            "second press is refused"
+        );
         assert_eq!(heap.len(), 1, "and schedules nothing extra");
+    }
+
+    /// ⭐ The refusal must be NAMED, not merely counted. 540 torrents were left
+    /// on `invalid passkey` on 2026-09-12 because a bulk reannounce inside the
+    /// cooldown answered ok for every one of them and did nothing.
+    #[test]
+    fn a_refused_bump_says_why_and_when_to_come_back() {
+        let mut states = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        states.insert("a".to_string(), fresh("a"));
+
+        assert_eq!(bump_now(&mut states, &mut heap, "a".into()), BumpOutcome::Bumped);
+        match bump_now(&mut states, &mut heap, "a".into()) {
+            BumpOutcome::Cooldown { retry_in } => {
+                assert!(retry_in <= BUMP_COOLDOWN, "never longer than the cooldown");
+                assert!(!retry_in.is_zero(), "and a caller can be told when to retry");
+            }
+            other => panic!("expected a cooldown refusal, got {other:?}"),
+        }
+
+        // A torrent already with a worker is refused for its own reason: the
+        // announce being asked for is the one in progress.
+        states.insert("b".to_string(), State { in_flight: true, ..fresh("b") });
+        assert_eq!(bump_now(&mut states, &mut heap, "b".into()), BumpOutcome::InFlight);
     }
 
     /// A torrent still waiting its turn to join must be announceable by hand:
@@ -529,7 +596,7 @@ mod tests {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
 
-        assert!(bump_now(&mut states, &mut heap, "new".into()));
+        assert_eq!(bump_now(&mut states, &mut heap, "new".into()), BumpOutcome::Bumped);
 
         assert!(states.contains_key("new"), "admitted outside MAX_NEW_PER_CYCLE");
         assert!(states["new"].first_announce, "and it announces as a first announce");
