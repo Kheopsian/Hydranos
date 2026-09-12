@@ -37,6 +37,19 @@ them:
 
 ## Unreleased -- the facts cache comes back out
 
+### Add a torrent without starting it
+
+A checkbox on the add form. The torrent is listed with its trackers, announces
+to none of them and connects to nobody, until you start it -- which is what you
+want to hold a tracker in the list without ever telling it you are there.
+
+Most of it already existed: the upload route read `paused`, `add_torrent` set
+the flag, and the announce catalogue filtered paused torrents out. But the
+catalogue filter alone was not enough. A bump puts one torrent at the head of
+the announce queue directly, so a forced reannounce walked straight past it and
+a paused torrent announced. The guard now sits in the one place every announce
+funnels through, whoever asked for it.
+
 ### You can see which identity a torrent announced with
 
 An override takes effect at each torrent's next announce, so for a while the
