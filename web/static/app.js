@@ -4541,9 +4541,14 @@ async function renderTorrentPreview() {
 function _addOverrides() {
     const sub = document.getElementById("add-create-subfolder");
     const skip = document.getElementById("add-skip-recheck");
+    const paused = document.getElementById("add-start-paused");
     return {
         create_subfolder: (sub && sub.dataset.ready) ? sub.checked : undefined,
         skip_recheck: !!(skip && skip.checked),
+        // Listed, with its trackers, announcing to none of them. Unlike the
+        // other two this is not a daemon default to override: an unchecked box
+        // means "start it", which is what an add has always done.
+        start_paused: !!(paused && paused.checked),
     };
 }
 
@@ -4581,6 +4586,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                 const ov = _addOverrides();
                 if (ov.create_subfolder !== undefined) formData.append("create_subfolder", String(ov.create_subfolder));
                 if (ov.skip_recheck) formData.append("skip_recheck", "true");
+                if (ov.start_paused) formData.append("paused", "true");
                 const res = await fetch("/api/torrents/upload", {
                     method: "POST",
                     headers: { "X-Api-Key": API_KEY },
@@ -4604,6 +4610,8 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                         const ov = _addOverrides();
                         if (ov.create_subfolder !== undefined) formData.append("create_subfolder", String(ov.create_subfolder));
                         if (ov.skip_recheck) formData.append("skip_recheck", "true");
+                if (ov.start_paused) formData.append("paused", "true");
+                        if (ov.start_paused) formData.append("paused", "true");
                         const res = await fetch("/api/torrents/upload", {
                             method: "POST",
                             headers: { "X-Api-Key": API_KEY },
