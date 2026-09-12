@@ -242,10 +242,21 @@ impl EngineHost {
                     crate::workers::spawn_stagger_start(engine.manager.clone());
                     crate::workers::spawn_verify_throttle(engine.manager.clone());
                     if engine.role == "race" {
+                        // The path the operator CONFIGURED, not one derived
+                        // from config_dir: passing config_dir.join("race")
+                        // pointed the drain at /configs/race, which sits on the
+                        // appdata pool. It measured 77% there while /race was
+                        // at 100%, stayed under its watermark, and never ran --
+                        // a guard that guarded a disk nobody was filling.
+                        let race_path = if config.race_drain.race_path.is_empty() {
+                            std::path::PathBuf::from("/race")
+                        } else {
+                            std::path::PathBuf::from(&config.race_drain.race_path)
+                        };
                         crate::workers::spawn_race_drain(
                             engine.manager.clone(),
                             config.race_drain.clone(),
-                            config_dir.join("race"),
+                            race_path,
                         );
                     }
                     // The download slot manager is NOT started here. It has to
