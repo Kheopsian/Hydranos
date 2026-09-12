@@ -1095,6 +1095,9 @@ async fn set_announce_min_seed(
         host: String,
         #[serde(default)]
         hours: i64,
+        /// Remove the declaration entirely. NOT the same as zero.
+        #[serde(default)]
+        clear: bool,
     }
     let Ok(req) = serde_json::from_str::<Req>(&body) else {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"})))
@@ -1109,11 +1112,17 @@ async fn set_announce_min_seed(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "hours cannot be negative"})))
             .into_response();
     }
-    let value = if req.hours > 0 { req.hours.to_string() } else { String::new() };
+    // ⚠ "0" is STORED, not turned into a blank. Blank means "nothing declared"
+    // and the drain treats that as protected; 0 means "this tracker asks for
+    // nothing" and releases the torrent. Writing 0 as an empty value made the
+    // second state unreachable -- the only way to ever authorise a deletion
+    // silently did nothing. Clearing is its own flag.
+    let value = if req.clear { String::new() } else { req.hours.to_string() };
     let persisted = set_host_entry(&state, "announce_min_seed_hours", &host, &value);
     Json(serde_json::json!({
         "host": host,
-        "min_seed_hours": req.hours,
+        "min_seed_hours": if req.clear { serde_json::Value::Null } else { req.hours.into() },
+        "cleared": req.clear,
         "persisted": persisted,
     }))
     .into_response()
@@ -1648,7 +1657,7 @@ async fn get_startup_pause(
 /// otherwise equal: the bench caught this as "same JSON, same 1595 bytes,
 /// different bytes", which is exactly the class of difference a structural
 /// comparison alone would have waved through.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 struct Category {
     // Every field defaults. `name` in particular is NOT in the stored document
     // -- it is the map key -- so without a default serde rejects every entry
@@ -1661,6 +1670,18 @@ struct Category {
     mode: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     graduate_to: String,
+    /// What the race drain may do with a torrent filed here.
+    ///
+    /// "keep" (the default, and what every existing category gets), "delete",
+    /// or "graduate" -- which moves the payload to `graduate_to`'s storage.
+    ///
+    /// The DESTINY, chosen by the operator. What may not be done YET is the
+    /// tracker's `min_seed_hours`, and the two are deliberately apart: a
+    /// category that says "delete" still cannot delete a torrent whose tracker
+    /// is owed seeding time. Default "keep" so nothing an operator already
+    /// configured becomes deletable because this shipped.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    drain_action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agents: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1796,6 +1817,67 @@ fn add_recheck_wanted(seed_mode: bool, data_on_disk: bool) -> bool {
     !seed_mode && data_on_disk
 }
 
+/// Refuse a race that the disk cannot hold.
+///
+/// ⚠ Against PROJECTED free space, not free space. Ten races arriving in thirty
+/// seconds each fit in what is free at the moment they are looked at, and
+/// together they fill the disk: every decision correct, the outcome wrong. What
+/// the torrents already accepted still have to write is subtracted first.
+///
+/// Off unless `add_block_enabled`, and it only ever guards a race engine: the
+/// hoard is on a pool with tens of terabytes free and a different problem.
+fn race_admission(
+    state: &AppState,
+    engine: &crate::engines::Engine,
+    incoming: i64,
+) -> Result<(), String> {
+    if engine.role != "race" {
+        return Ok(());
+    }
+    let cfg = state.cfg();
+    let d = &cfg.race_drain;
+    if !d.add_block_enabled {
+        return Ok(());
+    }
+    let race_path = if d.race_path.is_empty() { "/race" } else { &d.race_path };
+    let Some(free) = crate::jobs::free_space(std::path::Path::new(race_path)) else {
+        // A path that cannot be read is not a reason to start refusing every
+        // race: that would take the node off the air over a typo.
+        tracing::warn!(path = %race_path, "race admission: cannot read free space, letting it through");
+        return Ok(());
+    };
+    let free = free as i64;
+
+    // What the catalogue has promised to write but has not written yet.
+    let mut committed: i64 = 0;
+    for t in engine.manager.all() {
+        let core = typhon_engine::rpc::dispatch::torrent_core(&t);
+        let remaining = t.meta.total_size as i64 - core.total_done as i64;
+        if remaining > 0 {
+            committed += remaining;
+        }
+    }
+    let reserve = d.reserve_free_gb.max(0) * 1_000_000_000;
+    let projected = free - committed - reserve;
+    if projected < incoming {
+        tracing::warn!(
+            incoming_gb = (incoming as f64 / 1e9 * 10.0).round() / 10.0,
+            free_gb = (free as f64 / 1e9).round(),
+            committed_gb = (committed as f64 / 1e9).round(),
+            reserve_gb = d.reserve_free_gb,
+            "race refused: not enough projected space"
+        );
+        return Err(format!(
+            "race disk full: {} GB free, {} GB already promised to downloads in flight, {} GB reserved; this torrent needs {} GB",
+            free / 1_000_000_000,
+            committed / 1_000_000_000,
+            d.reserve_free_gb,
+            incoming / 1_000_000_000
+        ));
+    }
+    Ok(())
+}
+
 fn add_torrent_bytes(
     state: &AppState,
     bytes: &[u8],
@@ -1827,6 +1909,12 @@ fn add_torrent_bytes(
     let Some(engine) = state.engines.get(&engine_id) else {
         return Err(format!("no engine {engine_id}"));
     };
+
+    // Refused BEFORE anything is written. The drain cannot win this race:
+    // measured on this machine, /race to the pool moves ~520 MB/s while a race
+    // can arrive at 1 GB/s, and four parallel moves buy 10%. The only lever
+    // that acts on the fast side is not accepting the work.
+    race_admission(state, engine, meta.total_size as i64)?;
 
     // Written before the engine is told, and by rename: the engine records this
     // path in its resume data, and a half-written file there is a torrent that
@@ -3677,7 +3765,8 @@ struct TrackerRow {
     /// Kept out of the tab by the operator. A view decision, not a mute:
     /// see Config::announce_hidden.
     hidden: bool,
-    /// Hours this tracker requires. 0 = nothing declared.
+    /// Hours this tracker requires. -1 = nothing declared, 0 = declared as
+    /// requiring nothing.
     min_seed_hours: i64,
     sources: Vec<String>,
 }
@@ -3793,11 +3882,14 @@ async fn get_trackers(
                 user_agent: client.map(|c| c.user_agent.clone()).unwrap_or_default(),
                 passkey_set: cfg.announce_passkeys.contains_key(&host),
                 hidden: cfg.announce_hidden.contains_key(&host),
+                // -1 = nothing declared, which is NOT 0. The drain protects
+                // the first and releases the second, so a row that cannot tell
+                // them apart cannot show which trackers are still unguarded.
                 min_seed_hours: cfg
                     .announce_min_seed_hours
                     .get(&host)
-                    .and_then(|v| v.parse::<i64>().ok())
-                    .unwrap_or(0),
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .unwrap_or(-1),
                 ip_mode: cfg
                     .announce_ip_modes
                     .get(&host)
@@ -5190,6 +5282,13 @@ struct StoredCategory {
     mode: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     graduate_to: String,
+    /// ⚠ A field added to `Category` and not here is SILENTLY DROPPED: this is
+    /// the struct the write path normalises through, and anything it does not
+    /// know about disappears on the next save. Measured: drain_action came back
+    /// from the API as absent after a PUT that carried it, with a 200 and no
+    /// error anywhere.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    drain_action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agents: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9065,6 +9164,144 @@ async fn post_torrent_copy(
 /// Duplicating locally is NOT offered, and the reason is not tidiness: two
 /// engines pointed at one set of files are two writers on the same bytes the
 /// first time either repairs a piece.
+/// Queue a graduation: move this torrent's DATA to another engine's storage.
+///
+/// Not the same thing as `POST /api/torrents/:hash/engine`, which reassigns the
+/// engine and deliberately leaves every byte where it is. This one moves the
+/// payload, which is the whole point when the race disk is what needs emptying.
+/// It returns a job id rather than doing the work: at ~520 MB/s a 50 GB torrent
+/// is a hundred seconds, and an HTTP request is not the place to spend them.
+async fn post_torrent_graduate(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let hash = info_hash.to_lowercase();
+    let Some((current, torrent)) = find_torrent(&state, &hash) else {
+        return not_found();
+    };
+    let to = v.get("engine").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let category = v.get("category").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let mut save_path = v.get("save_path").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if to.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "engine is required"})))
+            .into_response();
+    }
+    if to == current {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("already in {current}")}))).into_response();
+    }
+    if state.engines.get(&to).is_none() {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("no engine named {to}")}))).into_response();
+    }
+    // The category's own save path when the caller did not name one: that is
+    // where a graduation is supposed to land, and asking the operator to repeat
+    // it is how the two drift apart.
+    if save_path.is_empty() && !category.is_empty() {
+        let cfg = state.cfg();
+        let _ = &cfg;
+        if let Some(c) = category_entry(&state, &category) {
+            if !c.save_path.is_empty() {
+                save_path = c.save_path;
+            }
+        }
+    }
+    if save_path.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "save_path is required (or a category that has one)"})))
+            .into_response();
+    }
+    match crate::jobsrun::queue_graduation(
+        &state,
+        &hash,
+        &torrent.meta.name,
+        &current,
+        &to,
+        &category,
+        &save_path,
+        torrent.meta.total_size as i64,
+    ) {
+        Some(id) => Json(serde_json::json!({"status": "queued", "job": id})).into_response(),
+        None => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "a graduation is already queued or running for this torrent"})),
+        )
+            .into_response(),
+    }
+}
+
+/// What the drain may do with this torrent, per its category.
+///
+/// "keep" when the category says nothing, which is every category that existed
+/// before this shipped.
+pub(crate) fn category_drain_action(state: &AppState, hash: &str) -> String {
+    let cat = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.category_of(hash).unwrap_or_default()
+    };
+    if cat.is_empty() {
+        return "keep".into();
+    }
+    category_entry(state, &cat)
+        .map(|c| if c.drain_action.is_empty() { "keep".to_string() } else { c.drain_action })
+        .unwrap_or_else(|| "keep".into())
+}
+
+/// The graduation target of this torrent's category: (engine, category, path).
+pub(crate) fn category_graduation(state: &AppState, hash: &str) -> Option<(String, String, String)> {
+    let cat = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.category_of(hash).unwrap_or_default()
+    };
+    let entry = category_entry(state, &cat)?;
+    if entry.drain_action != "graduate" || entry.graduate_to.is_empty() {
+        return None;
+    }
+    let target = category_entry(state, &entry.graduate_to)?;
+    if target.save_path.is_empty() {
+        return None;
+    }
+    let (engine_id, _) = placement(state, &entry.graduate_to, "");
+    Some((engine_id, entry.graduate_to, target.save_path))
+}
+
+/// A category's configured save path, and the engine role it files under.
+///
+/// Read the way `get_categories` reads them -- the store document first, the
+/// on-disk `categories.json` as the fallback -- so the two cannot disagree
+/// about where a category puts its data.
+fn category_entry(state: &AppState, name: &str) -> Option<Category> {
+    let cfg = state.cfg();
+    let raw = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.meta_doc("categories")
+    }
+    .filter(|doc| !doc.is_empty())
+    .or_else(|| {
+        let path = std::path::Path::new(&cfg.daemon.data_dir).join("categories.json");
+        std::fs::read_to_string(path).ok()
+    })?;
+    let map: std::collections::BTreeMap<String, Category> = serde_json::from_str(&raw).ok()?;
+    let mut c = map.get(name).cloned()?;
+    c.name = name.to_string();
+    Some(c)
+}
+
 async fn post_torrent_engine(
     State(state): State<AppState>,
     Path(info_hash): Path<String>,
@@ -10582,6 +10819,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/torrents/:info_hash/torrent", get(get_torrent_file))
         .route("/api/torrents/:info_hash/peers", axum::routing::post(post_torrent_peers))
         .route("/api/torrents/:info_hash/engine", axum::routing::post(post_torrent_engine))
+        .route("/api/torrents/:info_hash/graduate", axum::routing::post(post_torrent_graduate))
         .route("/api/torrents/:info_hash/copy", axum::routing::post(post_torrent_copy))
         .route("/api/torrents/:info_hash/trackers", get(get_torrent_trackers).post(post_torrent_trackers))
         .route("/api/torrents/:info_hash/add-tracker", axum::routing::post(post_add_tracker))

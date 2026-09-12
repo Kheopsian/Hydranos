@@ -735,6 +735,99 @@ impl Store {
     }
 
     /// One job by id.
+    /// Queue a job. Returns its id.
+    ///
+    /// The `jobs` table has been in the schema, served by three routes and
+    /// drawn by a whole tab since the V4 port, and nothing ever inserted a
+    /// row. These are the writes it was missing.
+    pub fn create_job(
+        &self,
+        kind: &str,
+        info_hash: &str,
+        params: &str,
+        total_bytes: i64,
+    ) -> anyhow::Result<String> {
+        let now = now_secs();
+        let id = format!("job{}{}", now, &info_hash.chars().take(6).collect::<String>());
+        self.conn.execute(
+            "INSERT INTO jobs (id, type, state, info_hash, params, progress_bytes,
+                               total_bytes, error, created_at, updated_at)
+             VALUES (?1, ?2, 'queued', ?3, ?4, 0, ?5, '', ?6, ?6)
+             ON CONFLICT(id) DO NOTHING",
+            rusqlite::params![id, kind, info_hash, params, total_bytes, now],
+        )?;
+        Ok(id)
+    }
+
+    /// Is there already a job of this kind in flight for this torrent?
+    ///
+    /// Without this a drain that runs every minute queues the same graduation
+    /// sixty times while the first copy is still going.
+    pub fn job_pending_for(&self, kind: &str, info_hash: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs
+                 WHERE type = ?1 AND info_hash = ?2 AND state IN ('queued','running')",
+                rusqlite::params![kind, info_hash],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0
+    }
+
+    /// Take the oldest queued job of any kind and mark it running.
+    ///
+    /// One statement, so two runners cannot claim the same row.
+    pub fn claim_next_job(&self) -> Option<Job> {
+        let now = now_secs();
+        let id: String = self
+            .conn
+            .query_row(
+                "UPDATE jobs SET state = 'running', updated_at = ?1
+                 WHERE id = (SELECT id FROM jobs WHERE state = 'queued'
+                             ORDER BY created_at LIMIT 1)
+                 RETURNING id",
+                rusqlite::params![now],
+                |r| r.get(0),
+            )
+            .ok()?;
+        self.job(&id)
+    }
+
+    pub fn job_progress(&self, id: &str, done: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET progress_bytes = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, done, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    pub fn job_finish(&self, id: &str, error: &str) -> anyhow::Result<()> {
+        let state = if error.is_empty() { "done" } else { "failed" };
+        self.conn.execute(
+            "UPDATE jobs SET state = ?2, error = ?3, updated_at = ?4 WHERE id = ?1",
+            rusqlite::params![id, state, error, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Put jobs that were running when the process died back in the queue.
+    ///
+    /// A job left "running" belongs to a process that no longer exists, so it
+    /// will never finish and never fail: it would sit in the tab forever. The
+    /// work is re-done rather than resumed -- a half-copied file is not a
+    /// state this can trust, and `copy_then_delete` only unlinks the source
+    /// once the copy is complete, so the source is still there.
+    pub fn requeue_running_jobs(&self) -> usize {
+        self.conn
+            .execute(
+                "UPDATE jobs SET state = 'queued', progress_bytes = 0, updated_at = ?1
+                 WHERE state = 'running'",
+                rusqlite::params![now_secs()],
+            )
+            .unwrap_or(0)
+    }
+
     pub fn job(&self, id: &str) -> Option<Job> {
         self.conn
             .query_row(
@@ -1399,6 +1492,29 @@ impl Store {
             return Vec::new();
         };
         rows.filter_map(|r| r.ok()).collect()
+    }
+
+    /// Where this torrent's data now lives.
+    ///
+    /// A graduation moves the payload; without this the row keeps pointing at
+    /// the directory the bytes left, and the next restart looks for them there.
+    pub fn set_save_path(&self, info_hash: &str, save_path: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE torrents SET save_path = ?2 WHERE info_hash = ?1",
+            rusqlite::params![info_hash, save_path],
+        )?;
+        Ok(())
+    }
+
+    /// This torrent's category, or empty when it has none.
+    pub fn category_of(&self, info_hash: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT category FROM torrents WHERE info_hash = ?1",
+                rusqlite::params![info_hash],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
     }
 
     pub fn set_category(&self, info_hash: &str, category: &str) -> anyhow::Result<()> {

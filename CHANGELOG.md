@@ -19,6 +19,97 @@ Two ways to title a new entry:
 
 ## Unreleased -- a refused reannounce says so
 
+### Seeding time is measured instead of guessed
+
+`seeding_time` was the age of the completion: `now - completed_time`. A torrent
+finished fifty hours ago and stopped for forty of them reported fifty hours of
+seeding. Plausible, and wrong in the direction that costs a hit-and-run.
+
+There is now a real counter. Two fields on the torrent -- the accumulated total
+and the open interval -- folded at every state change and at the five-minute
+sweep, so it costs nothing in steady state: a per-second loop over 300k torrents
+to move a number that only changes on transitions is a CPU profile entry three
+weeks later.
+
+- persisted in `state.db` AND carried through a move between engines, which is
+  what lets "48 hours of seeding" mean the same thing on both sides of a
+  graduation;
+- the sweep fingerprint holds it in HOURS. In seconds, every seeding torrent
+  would be dirty at every sweep and the fingerprint would stop saving anything.
+  The cost is that a restart loses up to an hour -- an under-count, which delays
+  a deletion rather than bringing one forward;
+- the shutdown flush now writes everything rather than what the fingerprint
+  calls dirty. Measured on the bench before the fix: 440 seconds in memory, 202
+  on disk after a restart. A node restarted hourly would never have accumulated
+  anything.
+
+`torrents.seeding_time` in the store was declared, indexed, read in six places
+and written by nothing. An hourly worker fills it, and the row prefers the
+engine's live value so the panel is current instead of up to an hour stale.
+
+### A tracker's seed obligation, and a drain that respects it
+
+The emergency drain sorted by `added_time` and deleted the oldest until the disk
+came down. That is a proxy for "has earned its keep", and it breaks exactly when
+a tracker imposes a minimum: under churn the oldest race on the disk can be six
+hours old. The drain could hand out hit-and-runs, by design, silently.
+
+`min_seed_hours` is now declared per tracker, in the same override table as the
+passkeys, and read from the LIVE config at every tick -- the announce policy was
+frozen at boot for months and nothing ever contradicted itself on screen.
+
+⚠ A tracker with nothing declared is treated as PROTECTED, not free. An unknown
+rule and no rule are not the same thing. Zero is storable and means "this
+tracker asks for nothing"; blank means "nobody has said". Writing zero as a
+blank made the only way to authorise a deletion a silent no-op.
+
+The drain also asks the category for consent (below), and says what it held
+back when it cannot free enough -- silence there is how a filling disk looks
+like a broken drain.
+
+### Categories decide what happens to a race, trackers decide when
+
+A race category carries `drain_action`: keep, delete, or graduate. Default keep,
+so nothing already configured becomes deletable because this shipped. The
+obligation governs the timing, the category governs the destiny, and neither can
+override the other.
+
+`graduate` moves the payload to the `graduate_to` category's storage and keeps
+the torrent seeding there. Continuous background work, not an emergency valve:
+measured on this machine, /race to the pool moves ~520 MB/s while a race can
+land at 1 GB/s, and four parallel copies buy 10% because the pool saturates on
+writes. A drain that has to copy always loses the race.
+
+### The job engine
+
+The `jobs` table, its three routes and the Jobs tab shipped with the V4 port and
+nothing ever inserted a row. The writes exist now: queue, claim, progress,
+finish, and requeue-on-boot for jobs whose process died.
+
+One job at a time, for the throughput reason above. The store mutex is held for
+the bookkeeping and released for the copy -- a long operation holding it freezes
+every route that touches the store.
+
+⚠ The metainfo is rewritten from the store blob before it is used. The file
+named after a hash does not necessarily contain that torrent: measured on the
+bench, `uploads/cae7a364....torrent` held a different one, so a graduation
+re-added the wrong torrent, pointed it at the right one's data, and lost the
+original from every engine while reporting success. The hash the engine actually
+added is now compared to the hash asked for, and the job fails if they differ.
+
+### A race the disk cannot hold is refused
+
+`add_block_enabled` and `reserve_free_gb` were in the config, served by the API
+and bound in the UI, and read by no code at all. They mean something now.
+
+⚠ Against PROJECTED free space, not free space: what the torrents already
+accepted still have to write is subtracted first. Ten races arriving in thirty
+seconds each fit in what is free when they are looked at, and together they fill
+the disk -- every decision correct, the outcome wrong.
+
+Refusing one race costs one race. Accepting one too many costs every seed on the
+disk: a full /race produced 39 891 `No space left on device` in one evening.
+
 ### The Verify button verifies
 
 `POST /api/hoard/torrents/:info_hash/verify` resolved the hash and answered
