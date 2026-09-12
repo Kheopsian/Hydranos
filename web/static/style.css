@@ -3364,8 +3364,3 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 /* The one control this card has: checkbox and its label on one line, so the
    words are part of the hit area rather than sitting next to it. */
 .sr-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-
-/* The add form's option rows: control first, then what it does underneath, so
-   a long explanation does not push the checkbox off to the right. */
-.add-opt { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
-.add-opt label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
