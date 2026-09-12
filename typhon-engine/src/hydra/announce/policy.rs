@@ -139,6 +139,22 @@ pub struct Request {
 /// The spoof replaces only the eight-byte prefix, so the random tail -- which
 /// differs per binding -- survives. That is what keeps two engines of the same
 /// node distinguishable, and the self-connection guard working.
+/// The full peer id this policy would send for these trackers.
+///
+/// The override replaces the 8-byte prefix only; the random tail stays the
+/// engine's, which is what keeps one torrent distinguishable from another on
+/// the same tracker.
+pub fn announced_peer_id(policy: &Policy, trackers: &[Vec<String>]) -> [u8; 20] {
+    let mut out = [0u8; 20];
+    let base = policy.peer_id.as_bytes();
+    let n = base.len().min(20);
+    out[..n].copy_from_slice(&base[..n]);
+    if let Some(prefix) = handshake_prefix(policy, trackers) {
+        out[..8].copy_from_slice(&prefix);
+    }
+    out
+}
+
 pub fn handshake_prefix(policy: &Policy, trackers: &[Vec<String>]) -> Option<[u8; 8]> {
     let first = trackers.iter().flatten().next()?;
     let spoof = client_for(policy, first)?;

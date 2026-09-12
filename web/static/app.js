@@ -1557,6 +1557,10 @@ function renderRaceTable() {
 
 async function showDetail(infoHash, agent) {
     selectedTorrent = infoHash;
+    // Not on the 3 s refresh: this only moves when the torrent announces, and
+    // re-fetching every tick would be a request per panel per 3 seconds for a
+    // value that changes every half hour.
+    loadPeerIdState(infoHash, "detail-peerid-state");
     selectedTorrentAgent = agent || "local";
     const panel = document.getElementById("torrent-detail");
     panel.style.display = "block";
@@ -2291,6 +2295,7 @@ async function openTrackerEditor(infoHash) {
         ta.focus();
         const eng = document.getElementById("trk-edit-engine");
         if (eng) eng.textContent = _trkEditEngine ? t("Engine") + ": " + _trkEditEngine : "";
+        renderPeerIdState(res, "trk-peerid-state");
     } catch (e) {
         ta.value = "";
         ta.disabled = true;
@@ -2846,6 +2851,7 @@ async function updateHoardStats() {
 }
 
 async function showHoardDetail(infoHash, agent) {
+    loadPeerIdState(infoHash, "h-detail-peerid-state");
     selectedHoardTorrent = infoHash;
     selectedHoardTorrentAgent = agent || "local";
     switchHoardDetailTab("info");
@@ -7417,6 +7423,61 @@ function _trkResult(msg, ok) {
     const r = document.getElementById("trk-result");
     r.textContent = msg; r.className = "result-msg " + (ok ? "success" : "error"); r.style.display = "block";
 }
+// Which identity this torrent last told a tracker, and which one it will use
+// next. They differ for a while after an override is saved, because the switch
+// happens at the torrent's next announce -- showing both is how an operator
+// tells "not applied yet" from "not applied at all".
+// Pulled when a detail panel opens: the identity a torrent announced with is
+// per torrent, so it cannot come from the list payload shared by all of them.
+async function loadPeerIdState(infoHash, boxId) {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    box.innerHTML = "";
+    try {
+        const res = await api(`/api/torrents/${infoHash}/trackers`);
+        renderPeerIdState(res, boxId);
+    } catch (e) {
+        // A torrent the engine no longer holds: leave the row empty rather
+        // than claiming an identity we cannot read.
+    }
+}
+
+function renderPeerIdState(res, boxId) {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    const announced = res.announced_peer_id;
+    const next = res.next_peer_id;
+
+    if (!announced) {
+        box.innerHTML = '<span class="sr-desc">'
+            + t("Not announced yet since this engine started.")
+            + (next ? " " + t("Will announce as") + ' <code>' + esc(next) + "</code>" : "")
+            + "</span>";
+        return;
+    }
+
+    const when = res.announced_at ? " (" + relTime(res.announced_at) + ")" : "";
+    let html = '<div class="pid-row"><span class="pid-label">' + t("Announced as") + "</span>"
+        + '<code class="pid-val">' + esc(announced) + "</code>"
+        + '<span class="sr-desc">' + esc(when) + "</span></div>";
+
+    if (res.peer_id_pending && next) {
+        html += '<div class="pid-row pid-pending"><span class="pid-label">' + t("Next announce") + "</span>"
+            + '<code class="pid-val">' + esc(next) + "</code>"
+            + '<span class="sr-desc">' + t("changes at the next announce") + "</span></div>";
+    }
+    box.innerHTML = html;
+}
+
+/// "2 min ago" for a unix timestamp in seconds.
+function relTime(secs) {
+    const d = Math.max(0, Math.floor(Date.now() / 1000 - secs));
+    if (d < 60) return t("just now");
+    if (d < 3600) return t("{n} min ago", { n: Math.floor(d / 60) });
+    if (d < 86400) return t("{n} h ago", { n: Math.floor(d / 3600) });
+    return t("{n} d ago", { n: Math.floor(d / 86400) });
+}
+
 function _trkHost() { return document.getElementById("trk-host").value.trim(); }
 async function saveTracker() {
     const host = _trkHost();
@@ -7427,7 +7488,10 @@ async function saveTracker() {
         if (pk) await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: pk }) });
         await api("/api/announce/ip-modes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, mode: document.getElementById("trk-ipmode").value }) });
         _trackersSig = "";
-        hideTrackerForm(); await updateTrackers();
+        // An override reaches a torrent at ITS next announce, not now. Saying
+        // so here is the difference between "it did not work" and "not yet".
+        _trkResult(t("Saved. Each torrent switches at its next announce, so the change spreads over one announce interval. The detail panel of a torrent shows which identity it last announced with."), true);
+        await updateTrackers();
     } catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 async function clearTrackerSpoof() {

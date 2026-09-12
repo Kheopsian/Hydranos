@@ -369,6 +369,19 @@ async fn announce_one(
         }
     }
 
+    if announced_at_all {
+        // What a tracker was actually told, recorded only now that one has
+        // answered. Derived from the intention instead, every torrent would
+        // look compliant the instant a setting was saved -- which is the
+        // failure mode where nothing contradicts itself.
+        let sent = policy::announced_peer_id(policy, &torrent.meta.trackers);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        *torrent.announced_peer_id.write() = Some((sent, now));
+    }
+
     let next_in = match mode {
         Mode::Hoard => interval,
         // A complete race torrent is a seed like any other and falls back to
