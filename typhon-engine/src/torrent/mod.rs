@@ -328,6 +328,39 @@ impl TorrentManager {
         self.torrents.iter().map(|r| r.value().clone()).collect()
     }
 
+    /// How many torrents in this catalogue name each tracker host.
+    ///
+    /// The Trackers tab used to learn its hosts only from announce results, so
+    /// a tracker nobody had announced to yet -- a torrent added stopped, which
+    /// is exactly when the operator wants to fix the passkey BEFORE the first
+    /// announce -- had no row to edit. This is the list as a fact about the
+    /// catalogue rather than a history of what already happened.
+    ///
+    /// Iterated in place instead of through `all()`: the answer is a few dozen
+    /// hosts, and cloning 300k Arcs to count them is the kind of cost that only
+    /// shows up once the catalogue is large.
+    pub fn tracker_host_counts(&self) -> std::collections::HashMap<String, i64> {
+        let mut out: std::collections::HashMap<String, i64> = Default::default();
+        // Per torrent, not per URL: the same host across two tiers is one
+        // torrent, and counting it twice would make the column disagree with
+        // the torrent list for no visible reason.
+        let mut seen: Vec<String> = Vec::new();
+        for r in self.torrents.iter() {
+            seen.clear();
+            for url in r.value().live_trackers.read().iter().flatten() {
+                let host = crate::rpc::dispatch::tracker_host_of(url);
+                if host.is_empty() || seen.iter().any(|h| h == &host) {
+                    continue;
+                }
+                seen.push(host);
+            }
+            for host in seen.drain(..) {
+                *out.entry(host).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
     /// O(1) MSE SKEY resolution for an inbound handshake.
     pub fn lookup_skey(&self, req2_hash: &[u8; 20]) -> Option<InfoHash> {
         self.skey_index.get(req2_hash).map(|r| *r.value())

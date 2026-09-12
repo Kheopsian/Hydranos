@@ -7257,13 +7257,20 @@ async function updateTrackers() {
         }
         const tbody = document.getElementById("trackers-tbody");
         if (!rows || !rows.length) {
-            tbody.innerHTML = `<tr><td colspan="8" class="empty">${t("No tracker known yet. They appear here once a torrent announces, or as soon as you give one a setting.")}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="8" class="empty">${t("No tracker known yet. They appear here as soon as a torrent names one, announced to or not.")}</td></tr>`;
             return;
         }
         const _thtml = rows.map(r => {
-            let status = r.ok
+            // Three states, not two. "never" is a tracker the catalogue names
+            // and nothing has announced to yet -- the state of a torrent added
+            // stopped, and the moment its passkey is worth setting. Painting it
+            // red said a failure had happened when none had.
+            const st = r.status || (r.ok ? "ok" : "error");
+            let status = st === "ok"
                 ? '<span class="mode-tag mode-hoard">ok</span>'
-                : '<span class="mode-tag mode-race">error</span>';
+                : (st === "never"
+                    ? `<span class="mode-tag" title="${esc(t("no announce yet"))}">${esc(t("not announced"))}</span>`
+                    : '<span class="mode-tag mode-race">error</span>');
             // The self-check verdict, when one has been taken. "unknown" is a
             // real answer and is left grey: a tracker usually omits the asking
             // peer from its own reply, so an absence alone proves nothing. What
