@@ -238,23 +238,41 @@ pub fn spawn_seed_time_sync(
                     rows.push((hash, secs));
                 }
             }
-            if !rows.is_empty() {
+            // ⚠ IN CHUNKS, releasing the store between each one. The first
+            // version took the mutex once for the whole catalogue: on 295k
+            // torrents that is a single transaction held for minutes, and
+            // every route that touches the store hangs behind it. /health kept
+            // answering in under a millisecond while /api/status timed out --
+            // measured on production, and invisible on a 31-torrent bench.
+            const CHUNK: usize = 2000;
+            let mut wrote_total = 0usize;
+            let mut failed = false;
+            for chunk in rows.chunks(CHUNK) {
                 let wrote = {
                     let st = match store.lock() {
                         Ok(s) => s,
                         Err(e) => e.into_inner(),
                     };
-                    st.update_seeding_times(&rows)
+                    st.update_seeding_times(chunk)
                 };
                 match wrote {
                     Ok(n) => {
-                        for (hash, secs) in rows {
-                            last.insert(hash, secs);
+                        wrote_total += n;
+                        for (hash, secs) in chunk {
+                            last.insert(hash.clone(), *secs);
                         }
-                        tracing::debug!(engine = %engine_id, rows = n, "seed time synced");
                     }
-                    Err(e) => tracing::warn!(engine = %engine_id, "seed time sync: {e}"),
+                    Err(e) => {
+                        tracing::warn!(engine = %engine_id, "seed time sync: {e}");
+                        failed = true;
+                        break;
+                    }
                 }
+                // Hands the lock to whoever is waiting before taking it again.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if wrote_total > 0 && !failed {
+                tracing::info!(engine = %engine_id, rows = wrote_total, "seed time synced");
             }
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
