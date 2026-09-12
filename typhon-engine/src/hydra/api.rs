@@ -8555,6 +8555,34 @@ async fn delete_torrent(
         return not_found();
     }
 
+    match remove_one_torrent(&state, &hash, &sessions, &want, delete_files) {
+        Ok(dropped) => {
+            tracing::info!(hash = %hash, delete_files, copies = dropped, "torrent removed");
+            Json(serde_json::json!({"status": "ok"})).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// Remove a torrent from the engines that hold it, and from the store.
+///
+/// Shared by the native DELETE and the qBit shim: the shim used to read
+/// `deleteFiles` and honour none of it, so an *arr removing a torrent with its
+/// data left both the row and the payload in place -- which is how /race filled
+/// to 100% while every client believed it had cleaned up after itself.
+///
+/// Returns how many copies were dropped.
+fn remove_one_torrent(
+    state: &AppState,
+    hash: &str,
+    sessions: &[String],
+    want: &str,
+    delete_files: bool,
+) -> Result<usize, String> {
     // The engine first: dropping the store row alone leaves a torrent that
     // still seeds, still announces, and comes back at the next restart from the
     // engine's own state -- present to the network, invisible to the interface.
@@ -8564,36 +8592,31 @@ async fn delete_torrent(
     // nothing.
     let remaining = {
         let store = state.store.lock().unwrap();
-        store.sessions_of(&hash).len()
+        store.sessions_of(hash).len()
     };
     let mut dropped = 0usize;
-    for session in &sessions {
+    for session in sessions {
         let Some(engine) = state.engines.get(session) else { continue };
-        let Some(torrent) = find_copy(&state, session, &hash) else { continue };
+        let Some(torrent) = find_copy(state, session, hash) else { continue };
         let last = dropped + 1 >= remaining;
-        let keep = if delete_files && last { false } else { true };
+        let keep = !(delete_files && last);
         if let Err(e) = engine.manager.remove_torrent(&torrent.info_hash, keep) {
             tracing::warn!(hash = %hash, session, "engine refused removal: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
+            return Err(e);
         }
-        engine.announce_cache.forget(&hash);
+        engine.announce_cache.forget(hash);
         dropped += 1;
     }
 
     {
         let store = state.store.lock().unwrap();
         if want.is_empty() {
-            let _ = store.delete_torrent(&hash);
+            let _ = store.delete_torrent(hash);
         } else {
-            let _ = store.delete_copy(&hash, &want);
+            let _ = store.delete_copy(hash, want);
         }
     }
-    tracing::info!(hash = %hash, delete_files, copies = dropped, "torrent removed");
-    Json(serde_json::json!({"status": "ok"})).into_response()
+    Ok(dropped)
 }
 
 /// Seed the same torrent from a SECOND engine of this node.
@@ -8864,21 +8887,34 @@ async fn qbit_delete(
     let cfg = state.cfg();
     let _ = cfg;
 
-    // deleteFiles is read but NOT honoured yet: removing payload needs the
-    // engine's own delete path. Dropping the rows while ignoring the flag would
-    // be the dangerous half done silently, so the rows are dropped only when
-    // the caller did not ask for files.
+    // deleteFiles goes through the same path as the native DELETE. It used to
+    // be read and honoured by nobody: with the flag set this handler dropped
+    // neither the payload NOR the row and answered "Ok.", so every *arr that
+    // removed a torrent with its data left both behind. That is how /race
+    // reached 100% with no client aware of having failed at anything.
     let wants_files = form
         .get("deleteFiles")
         .map(|v| matches!(v.trim(), "true" | "1"))
         .unwrap_or(false);
-    if !wants_files {
-        let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
-        let store = state.store.lock().unwrap();
-        for prefix in hashes {
-            if let Some(hash) = store.resolve_hash(&prefix) {
-                let _ = store.delete_torrent(&hash);
+
+    let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
+    for prefix in hashes {
+        let resolved = {
+            let store = state.store.lock().unwrap();
+            store.resolve_hash(&prefix)
+        };
+        let Some(hash) = resolved else { continue };
+        // Unqualified, as qBit means it: every copy of this torrent.
+        let sessions = {
+            let store = state.store.lock().unwrap();
+            store.sessions_of(&hash)
+        };
+        match remove_one_torrent(&state, &hash, &sessions, "", wants_files) {
+            Ok(dropped) => {
+                tracing::info!(hash = %hash, delete_files = wants_files, copies = dropped,
+                    "torrent removed (qbit shim)");
             }
+            Err(e) => tracing::warn!(hash = %hash, "shim removal failed: {e}"),
         }
     }
     qbit_ok()

@@ -229,6 +229,7 @@ pub fn spawn_race_drain(
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(10)).await;
         tracing::info!(
+            path = %race_path.display(),
             check_interval_s = interval.as_secs(),
             high = config.high_watermark_pct,
             low = config.low_watermark_pct,
@@ -247,6 +248,10 @@ fn drain_once(
     race_path: &std::path::Path,
 ) {
     let Some((used, total)) = disk_usage(race_path) else {
+        // Silence here is how a wrong path hides: the drain would run every
+        // minute, measure nothing, and report nothing, while the disk it was
+        // meant to watch filled up.
+        tracing::warn!(path = %race_path.display(), "race drain: cannot read disk usage");
         return;
     };
     if total == 0 {
