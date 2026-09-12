@@ -3417,3 +3417,36 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     opacity: .6;
     border-style: dashed;
 }
+
+/* One condition or one action, read left to right. It used to borrow
+ * .cat-form-grid, a two-column form layout, which gave every child a full
+ * cell: the Remove button came out as a bar the width of a text field. */
+.wf-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+}
+.wf-row > select,
+.wf-row > input[type="text"] {
+    flex: 1 1 170px;
+    min-width: 130px;
+}
+.wf-row > .sr-desc {
+    flex: 1 1 150px;
+}
+/* Sized by its label, not by the grid. */
+.wf-row > .wf-row-del {
+    flex: 0 0 auto;
+    padding: 4px 12px;
+}
+/* The delete checkbox and its wording travel together. */
+.wf-a-arg-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 170px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}

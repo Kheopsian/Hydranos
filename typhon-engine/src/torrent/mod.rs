@@ -414,6 +414,7 @@ impl TorrentManager {
             completed_time: state.completed_time.load(Ordering::Relaxed),
             bitfield: String::new(),
             trackers: state.live_trackers.read().clone(),
+            seed_secs: 0,
         };
         self.persist(&ih, &rd);
 
@@ -506,6 +507,9 @@ impl TorrentManager {
     pub fn start_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         t.is_paused.store(false, Ordering::Relaxed);
+        // Opens the seeding interval if this start makes it a seed. Folding
+        // before the status is read would close an interval that has not
+        // begun, which is harmless; after, it opens the right one.
         // Resuming re-arms the DHT stream that stop_torrent cancelled.
         self.track_in_dht(t.clone());
         // A recheck in progress owns the status. Don't let a start (e.g. from the
@@ -515,6 +519,7 @@ impl TorrentManager {
         // of already-complete data pulls 100-200 MB" bug). run_recheck sets the
         // final Seeding/Downloading itself when it finishes.
         if t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
+            t.fold_seed_time(crate::torrent::meta::now_secs());
             return Ok(());
         }
         if t.seed_mode || t.picker.get().is_none() {
@@ -529,11 +534,17 @@ impl TorrentManager {
                 t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
             }
         }
+        // The status is settled: open the interval if this is now a seed.
+        t.fold_seed_time(crate::torrent::meta::now_secs());
         Ok(())
     }
 
     pub fn stop_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
+        // Closed BEFORE the pause flag goes up, so the interval that just
+        // ended is credited. After it, fold_seed_time would see a paused
+        // torrent and drop the open interval on the floor.
+        t.fold_seed_time(crate::torrent::meta::now_secs());
         t.is_paused.store(true, Ordering::Relaxed);
         t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         // A stopped torrent must not keep a get_peers recursion alive: the
@@ -707,6 +718,9 @@ impl TorrentManager {
             if !saved_trackers.is_empty() {
                 *state.live_trackers.write() = saved_trackers;
             }
+            // Restored BEFORE the status is derived below: the fold that the
+            // first sweep performs must find the carried-over total, not zero.
+            state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
             state.total_uploaded.store(rd.total_uploaded, Ordering::Relaxed);
             state.total_downloaded.store(rd.total_downloaded, Ordering::Relaxed);
             // Restore verified-pieces bitfield FIRST so we don't re-DL 6+ GB
@@ -835,13 +849,32 @@ impl TorrentManager {
     /// dirtying a filesystem block that the next snapshot then pins. Comparing
     /// a six-field fingerprint first reduces the sweep to the torrents that
     /// actually moved -- the hot set, not the total.
+    /// Write every torrent, whatever the fingerprint says.
+    ///
+    /// For the shutdown flush. The fingerprint holds seed time in HOURS, so a
+    /// torrent that gained four minutes of seeding is not "dirty" and its
+    /// counter is not written -- measured on the bench: 440 seconds in memory,
+    /// 202 on disk after a restart. A node restarted every hour would never
+    /// accumulate anything, and the loss is invisible because the value still
+    /// looks plausible.
+    ///
+    /// Clearing the fingerprints is what forces the write: the sweep below
+    /// then finds nothing to compare against and writes the lot. Costly, and
+    /// correct exactly once, at shutdown.
+    pub fn flush_all_resume(&self) {
+        self.last_saved.clear();
+        self.save_all_resume();
+    }
+
     pub fn save_all_resume(&self) {
         let db = match &self.state_db {
             Some(db) => db.clone(),
             None => {
                 // Legacy path, unchanged.
+                let now = crate::torrent::meta::now_secs();
                 for entry in self.torrents.iter() {
                     let t = entry.value();
+                    t.fold_seed_time(now);
                     let rd = Self::build_resume_data(t);
                     fastresume::save(&self.resume_dir, &t.info_hash, &rd);
                 }
@@ -854,8 +887,11 @@ impl TorrentManager {
         let mut hashes: Vec<InfoHash> = Vec::new();
         let mut fps: Vec<statedb::Fingerprint> = Vec::new();
         let total = self.torrents.len();
+        let now = crate::torrent::meta::now_secs();
         for entry in self.torrents.iter() {
             let t = entry.value();
+            // Before the fingerprint: the fingerprint reads the counter.
+            t.fold_seed_time(now);
             let fp = fingerprint_of(t);
             if self.last_saved.get(&t.info_hash).map(|p| *p.value() == fp).unwrap_or(false) {
                 continue;
@@ -937,6 +973,7 @@ impl TorrentManager {
             completed_time: t.completed_time.load(Ordering::Relaxed),
             bitfield,
             trackers: t.live_trackers.read().clone(),
+            seed_secs: t.seed_time_now(crate::torrent::meta::now_secs()),
         }
     }
 
@@ -1026,6 +1063,9 @@ impl TorrentManager {
         if !rd.trackers.is_empty() {
             *state.live_trackers.write() = rd.trackers.clone();
         }
+        // Carried across an engine move: this is what makes "48 hours of
+        // seeding" mean the same thing on both sides of a graduation.
+        state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
         state.total_uploaded.store(rd.total_uploaded, Ordering::Relaxed);
         state.total_downloaded.store(rd.total_downloaded, Ordering::Relaxed);
         // Bitfield before status, for the same reason the startup path does it
@@ -1085,6 +1125,13 @@ fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
         num_have: t.picker.get().map(|p| p.lock().unwrap().num_have()).unwrap_or(0),
         paused: t.is_paused.load(Ordering::Relaxed),
         seed_mode: t.seed_mode,
+        // ⚠ HOURS, not seconds. The counter moves every second a torrent
+        // seeds, so putting it in raw would mark all 300k dirty at every
+        // sweep and undo the whole point of the fingerprint. Quantised, a
+        // seeding torrent is rewritten once an hour. The cost is that a
+        // restart loses up to an hour of credit -- an UNDER-count, which
+        // delays a deletion rather than bringing it forward.
+        seed_hours: t.seed_time_now(crate::torrent::meta::now_secs()) / 3600,
     }
 }
 
@@ -1356,6 +1403,10 @@ impl TorrentManager {
             completed_time: t.completed_time.load(Ordering::Relaxed),
             bitfield,
             trackers: t.live_trackers.read().clone(),
+            // A recheck must not reset the clock: the torrent has already
+            // seeded whatever it seeded, and re-verifying its pieces says
+            // nothing about that.
+            seed_secs: t.seed_time_now(crate::torrent::meta::now_secs()),
         };
         self.persist(&ih, &rd);
         info!(

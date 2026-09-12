@@ -2052,6 +2052,19 @@ function formatDate(ts) {
     return d.toLocaleDateString() + " " + d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
 }
 
+/// "3 d ago" from a unix timestamp.
+///
+/// Computed here rather than read from `active_time`: that field is a
+/// deliberate 0 inherited from 3.x, whose IPC status did not carry it, and
+/// changing what it means on the wire would move it for every client reading
+/// it. The panel already receives added_time, which is the fact this line
+/// claims to show.
+function _addedAgo(ts) {
+    if (!ts) return "-";
+    const age = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    return formatDuration(age) + " " + t("ago");
+}
+
 function formatDuration(seconds) {
     if (!seconds || seconds <= 0) return "-";
     const h = Math.floor(seconds / 3600);
@@ -2103,7 +2116,7 @@ async function refreshDetail() {
         document.getElementById("detail-swarm-leechers").textContent = d.swarm_leechers || 0;
         document.getElementById("detail-pieces").textContent = d.num_pieces;
         document.getElementById("detail-piece-size").textContent = formatBytes(d.piece_length);
-        document.getElementById("detail-active-time").textContent = formatDuration(d.active_time);
+        document.getElementById("detail-active-time").textContent = _addedAgo(d.added_time);
         document.getElementById("detail-seeding-time").textContent = formatDuration(d.seeding_time);
 
         // Choking
@@ -2810,12 +2823,20 @@ function _renderHoardCounts() {
     }
 
     const trkCounts = F ? (F.tracker || {}) : {};
-    const trks = _facetKeys(trkCounts, _hoardTrackerInc, _hoardTrackerExc, []);
+    const trks = _facetKeys(trkCounts, _hoardTrackerInc, _hoardTrackerExc, ["__none__"]);
+    const nNoTracker = F ? (F.no_tracker || 0) : 0;
     const trkContainer = document.getElementById("hoard-tracker-chips");
     if (trkContainer) {
-        trkContainer.innerHTML = trks.map(h =>
+        let trkHtml = trks.map(h =>
             `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(h)} <span class="chip-count">${trkCounts[h] || 0}</span></button>`
         ).join("");
+        // First in the row, like Uncategorized and Untagged: a torrent with no
+        // tracker at all was in no facet and matched by no filter, so the only
+        // way to reach one was to already know its name.
+        if (nNoTracker > 0 || _hoardTrackerInc.includes("__none__") || _hoardTrackerExc.includes("__none__")) {
+            trkHtml = `<button class="chip chip-tracker chip-none${nNoTracker ? "" : " chip-orphan"}${_hoardTrackerInc.includes("__none__") ? " active" : ""}${_hoardTrackerExc.includes("__none__") ? " excluded" : ""}" data-tracker="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTrackerFilter(this,'__none__')" oncontextmenu="setHoardTrackerFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">No tracker <span class="chip-count">${nNoTracker}</span></button>` + trkHtml;
+        }
+        trkContainer.innerHTML = trkHtml;
     }
 
     // Tracker-error classes. Drawn only while something is in error: an empty
@@ -3245,7 +3266,10 @@ function _hoardMatches(t, search, skip) {
         if (_hoardCatExc.includes(cv)) return false;
     }
     if (skip !== "tracker") {
-        const tv = t.tracker_host || "";
+        // "__none__", like the category line above: the server sends the
+        // trackerless rows back, and comparing them against an empty string
+        // here would drop every one of them on the way to the table.
+        const tv = t.tracker_host || "__none__";
         if (_hoardTrackerInc.length && !_hoardTrackerInc.includes(tv)) return false;
         if (_hoardTrackerExc.includes(tv)) return false;
     }
@@ -4071,24 +4095,87 @@ document.addEventListener("click", e => {
     closeHoardDetail();
 });
 
+// Reannounce every selected torrent, and say what actually happened to each.
+//
+// The scheduler refuses a bump inside its sixty-second cooldown, and again
+// while an announce for that hash is already in flight. Until 4.28.0 the route
+// answered ok regardless and this loop read nothing back, so pressing
+// Reannounce over a big selection could be a total no-op that looked like a
+// success -- which is exactly how 540 `invalid passkey` rows survived a bulk
+// reannounce on 2026-09-12. Reading the outcome is the point.
 async function _reannounceSelected() {
     _hideCtxMenu();
     const entries = [..._selected.entries()];
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        try {
-            if (!_isLocalAgent(_selAgent(sel))) {
-                await _agentAction(_selAgent(sel), _selMode(sel), "reannounce", hash);
-                continue;
+    if (!entries.length) return;
+    const tally = { ok: 0, in_flight: 0, cooldown: 0, queued: 0, failed: 0, sent: 0 };
+    // One at a time is what made a 540-row press take minutes and feel dead. A
+    // small window keeps the UI answering without turning the tracker-facing
+    // announce rate into a burst -- the scheduler still paces the announces.
+    const CONCURRENCY = 8;
+    let next = 0;
+    async function worker() {
+        while (next < entries.length) {
+            const [, sel] = entries[next++];
+            const hash = _selHash(sel);
+            try {
+                if (!_isLocalAgent(_selAgent(sel))) {
+                    await _agentAction(_selAgent(sel), _selMode(sel), "reannounce", hash);
+                    tally.sent++;
+                    continue;
+                }
+                const r = await fetch(`/api/torrents/${hash}/reannounce`, {
+                    method: "POST",
+                    headers: { "X-Api-Key": API_KEY },
+                });
+                let body = null;
+                try { body = await r.json(); } catch (e) { body = null; }
+                const status = (body && body.status) || (r.ok ? "ok" : "failed");
+                if (status === "ok") tally.ok++;
+                else if (status === "in_flight") tally.in_flight++;
+                else if (status === "cooldown") tally.cooldown++;
+                else if (status === "queued") tally.queued++;
+                else tally.failed++;
+            } catch (err) {
+                tally.failed++;
+                console.error("Failed to reannounce", hash, err);
             }
-            await fetch(`/api/torrents/${hash}/reannounce`, {
-                method: "POST",
-                headers: { "X-Api-Key": API_KEY },
-            });
-        } catch (err) {
-            console.error("Failed to reannounce", hash, err);
         }
     }
+    await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, entries.length) }, worker)
+    );
+    _flashStatus(_reannounceSummary(tally));
+}
+
+// One line the operator can act on. "412 reannounced, 127 refused (cooldown)"
+// is a different instruction from "539 reannounced": the second half has to be
+// pressed again in a minute, and silence would hide that entirely.
+function _reannounceSummary(c) {
+    const parts = [];
+    if (c.ok) parts.push(t("{n} reannounced", { n: c.ok }));
+    if (c.sent) parts.push(t("{n} sent to agents", { n: c.sent }));
+    if (c.in_flight) parts.push(t("{n} already announcing", { n: c.in_flight }));
+    if (c.queued) parts.push(t("{n} queued", { n: c.queued }));
+    if (c.cooldown) parts.push(t("{n} refused (cooldown)", { n: c.cooldown }));
+    if (c.failed) parts.push(t("{n} failed", { n: c.failed }));
+    return parts.join(" \u00b7 ") || t("nothing to reannounce");
+}
+
+// Say something in the list's status line for a moment. The selection count
+// already lives there; both are transient and neither deserves a modal.
+function _flashStatus(msg) {
+    const el = document.getElementById("hoard-filter-count");
+    if (!el) return;
+    if (_flashStatus._prev === undefined) _flashStatus._prev = el.textContent;
+    const prev = _flashStatus._prev;
+    el.textContent = msg;
+    el.style.fontWeight = "bold";
+    clearTimeout(_flashStatus._t);
+    _flashStatus._t = setTimeout(() => {
+        el.style.fontWeight = "";
+        if (el.textContent === msg) el.textContent = prev;
+        _flashStatus._prev = undefined;
+    }, 6000);
 }
 
 // Recheck = hash-check the torrent data on disk (engine verify), resuming
@@ -4333,7 +4420,7 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-seeds-count").textContent = d.num_seeds;
         document.getElementById("h-detail-pieces").textContent = d.num_pieces;
         document.getElementById("h-detail-piece-size").textContent = formatBytes(d.piece_length);
-        document.getElementById("h-detail-active-time").textContent = formatDuration(d.active_time);
+        document.getElementById("h-detail-active-time").textContent = _addedAgo(d.added_time);
         document.getElementById("h-detail-seeding-time").textContent = formatDuration(d.seeding_time);
 
         const ptbody = document.getElementById("h-detail-peers-tbody");
@@ -7267,6 +7354,43 @@ async function muteTracker(host, muted) {
     } catch (e) { console.error("mute failed:", e); }
 }
 
+/// The hidden trackers, as a list of their own.
+///
+/// Mixed into the table above they were unfindable, which is the problem hiding
+/// was supposed to solve rather than one to hand back: picking the four you
+/// want among ninety is the same search either way. So: its own table, the two
+/// columns that identify a tracker, the two settings worth not losing, and one
+/// action.
+function _renderHiddenTrackers(hidden) {
+    const section = document.getElementById("trk-hidden-section");
+    const table = document.getElementById("trk-hidden-table");
+    const tbody = document.getElementById("trk-hidden-tbody");
+    const lbl = document.getElementById("trk-hidden-toggle");
+    if (!section || !table || !tbody || !lbl) return;
+
+    section.style.display = hidden.length ? "" : "none";
+    lbl.textContent = _showHiddenTrackers
+        ? t("Hidden trackers ({n}) -- hide this list", { n: hidden.length })
+        : t("Hidden trackers ({n})", { n: hidden.length });
+    table.style.display = _showHiddenTrackers ? "" : "none";
+    if (!_showHiddenTrackers) return;
+
+    tbody.innerHTML = hidden.map(r => {
+        // Carried over because they are the reason a row here is not
+        // interchangeable with the next: unhiding the wrong tracker is
+        // harmless, but so is knowing which one carries your passkey.
+        const passkey = r.passkey_set
+            ? '<span class="mode-tag mode-hoard">set</span>'
+            : '<span class="sr-desc">-</span>';
+        const spoof = r.spoofed
+            ? `<span class="mode-tag mode-hoard">${esc(r.peer_id_prefix || "spoof")}</span>`
+            : '<span class="sr-desc">-</span>';
+        return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td>`
+            + `<td>${passkey}</td><td>${spoof}</td>`
+            + `<td><button class="btn-small" onclick="hideTracker('${esc(r.host)}',false)">${esc(t("Unhide"))}</button></td></tr>`;
+    }).join("");
+}
+
 // Tab badges. Counted in distinct trackers, never in errors, and muted hosts
 // are excluded: an indicator that is always lit teaches you to ignore it.
 async function updateTabBadges() {
@@ -7288,6 +7412,68 @@ async function updateTabBadges() {
         dot.title = (b.trackers_red || 0) + " needing action, " + (b.trackers_amber || 0) + " throttled or unreachable";
     } catch (e) { /* the tab still works without its badge */ }
 }
+
+// Whether the hidden list is unfolded. A view choice about a view choice, so
+// it lives in the browser and not in the config.
+let _showHiddenTrackers = localStorage.getItem("hydra_show_hidden_trackers") === "1";
+
+function toggleHiddenTrackers() {
+    _showHiddenTrackers = !_showHiddenTrackers;
+    localStorage.setItem("hydra_show_hidden_trackers", _showHiddenTrackers ? "1" : "0");
+    _trackersSig = "";
+    updateTrackers();
+}
+
+async function hideTracker(host, hidden) {
+    try {
+        await api("/api/announce/hidden", { method: "POST", body: JSON.stringify({ host, hidden }) });
+        _trackersSig = "";
+        await updateTrackers();
+    } catch (e) { console.error("hide failed:", e); }
+}
+
+/// Hide every unconfigured tracker under a torrent count, in one request.
+///
+/// The count is the operator's, not a constant of mine: what counts as noise
+/// on a 300k library is not what counts as noise on a hundred torrents.
+async function hideSmallTrackers() {
+    const raw = document.getElementById("trk-hide-below")?.value;
+    const n = parseInt(raw, 10);
+    if (!isFinite(n) || n < 1) return;
+    const hosts = (_lastTrackerRows || [])
+        .filter(r => !r.hidden && r.torrents < n && !r.passkey_set && !r.spoofed && (r.ip_mode || "auto") === "auto")
+        .map(r => r.host);
+    if (!hosts.length) {
+        _trkBulkNote(t("Nothing to hide under {n}.", { n }));
+        return;
+    }
+    try {
+        const res = await api("/api/announce/hidden", { method: "POST", body: JSON.stringify({ hosts, hidden: true }) });
+        _trackersSig = "";
+        await updateTrackers();
+        _trkBulkNote(tp(res.changed || 0, "{n} tracker hidden.", "{n} trackers hidden."));
+    } catch (e) { console.error("bulk hide failed:", e); }
+}
+
+async function unhideAllTrackers() {
+    const hosts = (_lastTrackerRows || []).filter(r => r.hidden).map(r => r.host);
+    if (!hosts.length) return;
+    try {
+        await api("/api/announce/hidden", { method: "POST", body: JSON.stringify({ hosts, hidden: false }) });
+        _trackersSig = "";
+        await updateTrackers();
+        _trkBulkNote(tp(hosts.length, "{n} tracker shown again.", "{n} trackers shown again."));
+    } catch (e) { console.error("unhide failed:", e); }
+}
+
+function _trkBulkNote(msg) {
+    const el = document.getElementById("trk-hide-note");
+    if (el) el.textContent = msg;
+}
+
+// Every row the server returned, hidden ones included: the bulk actions and the
+// "Show hidden (n)" count both need the whole set, not the drawn subset.
+let _lastTrackerRows = [];
 
 async function updateTrackers() {
     try {
@@ -7321,7 +7507,19 @@ async function updateTrackers() {
             tbody.innerHTML = `<tr><td colspan="8" class="empty">${t("No tracker known yet. They appear here as soon as a torrent names one, announced to or not.")}</td></tr>`;
             return;
         }
-        const _thtml = rows.map(r => {
+        _lastTrackerRows = rows;
+        // Hidden means hidden: out of the table, out of the badge, whatever
+        // state the tracker is in. This goes further than Mute on purpose --
+        // Mute keeps the row and only drops it from the counts. The whole
+        // point is a list short enough to read, and a row that can come back
+        // on its own is not out of the list.
+        //
+        // The way back is the switch below, never an automatic one.
+        const hiddenRows = rows.filter(r => r.hidden);
+        const shown = rows.filter(r => !r.hidden);
+        _renderHiddenTrackers(hiddenRows);
+
+        const _thtml = shown.map(r => {
             // Three states, not two. "never" is a tracker the catalogue names
             // and nothing has announced to yet -- the state of a torrent added
             // stopped, and the moment its passkey is worth setting. Painting it
@@ -7350,6 +7548,11 @@ async function updateTrackers() {
             const passkey = r.passkey_set
                 ? '<span class="mode-tag mode-hoard">set</span>'
                 : '<span class="sr-desc">-</span>';
+            // "-" is not 0: an undeclared tracker is one the drain refuses to
+            // delete from, which is the opposite of "no constraint".
+            const minseed = r.min_seed_hours > 0
+                ? `<span class="mode-tag mode-hoard">${r.min_seed_hours}h</span>`
+                : '<span class="sr-desc" title="' + esc(t("not declared: the drain will not delete from this tracker")) + '">-</span>';
             const hh = agg[r.host];
             const counts = hh ? Object.entries(hh.errors).sort((a, b) => b[1] - a[1]) : [];
             // The breakdown replaces the last error when there is one: it says
@@ -7374,6 +7577,7 @@ async function updateTrackers() {
             };
             const dot = "";
             const mute = `<button class="btn-small" onclick="muteTracker('${esc(r.host)}',${muted ? "false" : "true"})">${muted ? "Unmute" : "Mute"}</button>`;
+            const hide = `<button class="btn-small" onclick="hideTracker('${esc(r.host)}',${r.hidden ? "false" : "true"})" title="${esc(t("Still announced to. Out of this table and out of the tab badge until you show hidden trackers again"))}">${r.hidden ? t("Unhide") : t("Hide")}</button>`;
             // The severity replaces the bare ok/error tag: two words saying the
             // same thing in one cell is noise. Tooltip on the whole row, so the
             // pointer aims at the wording rather than at a 9px circle.
@@ -7383,7 +7587,7 @@ async function updateTrackers() {
             const rowTip = SEV[sev]
                 ? esc(r.host + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
-            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}')">Edit</button></td></tr>`;
+            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}',${r.min_seed_hours || 0})">Edit</button></td></tr>`;
         }).join("");
         updateTabBadges();
         if (_thtml === _trackersSig) return;
@@ -7483,18 +7687,22 @@ function _renderTrackerStatsChart(rows) {
     _trkStatsChart.update();
 }
 
-function showTrackerForm(host = "", pid = "", ua = "", ipmode = "auto") {
+function showTrackerForm(host = "", pid = "", ua = "", ipmode = "auto", minseed = 0) {
     document.getElementById("trk-host").value = host;
     document.getElementById("trk-preset").value = "";
     document.getElementById("trk-pid").value = pid;
     document.getElementById("trk-ua").value = ua;
     document.getElementById("trk-passkey").value = "";
     document.getElementById("trk-ipmode").value = ipmode || "auto";
+    // Blank, not 0: they mean different things. Blank is "nothing declared",
+    // which PROTECTS the torrent from the drain; 0 is "this tracker asks for
+    // nothing", which releases it.
+    document.getElementById("trk-minseed").value = minseed > 0 ? minseed : "";
     document.getElementById("trk-result").style.display = "none";
     document.getElementById("trk-form").style.display = "block";
 }
 function hideTrackerForm() { document.getElementById("trk-form").style.display = "none"; }
-function editTracker(host, pid, ua, ipmode) { showTrackerForm(host, pid, ua, ipmode); }
+function editTracker(host, pid, ua, ipmode, minseed) { showTrackerForm(host, pid, ua, ipmode, minseed); }
 function _trkResult(msg, ok) {
     const r = document.getElementById("trk-result");
     r.textContent = msg; r.className = "result-msg " + (ok ? "success" : "error"); r.style.display = "block";
@@ -7563,6 +7771,10 @@ async function saveTracker() {
         const pk = document.getElementById("trk-passkey").value.trim();
         if (pk) await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: pk }) });
         await api("/api/announce/ip-modes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, mode: document.getElementById("trk-ipmode").value }) });
+        const rawMin = document.getElementById("trk-minseed").value.trim();
+        if (rawMin !== "") {
+            await api("/api/announce/min-seed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, hours: parseInt(rawMin, 10) || 0 }) });
+        }
         _trackersSig = "";
         // An override reaches a torrent at ITS next announce, not now. Saying
         // so here is the difference between "it did not work" and "not yet".
@@ -9106,7 +9318,9 @@ async function loadWorkflowFields() {
 }
 
 async function updateWorkflows() {
-    await loadWorkflowFields();
+    // Both before anything is drawn: a row built before the lists arrive would
+    // fall back to a free-text box and stay one.
+    await Promise.all([loadWorkflowFields(), _loadWfChoices()]);
     const body = document.getElementById("wf-list");
     try {
         const rows = await api("/api/workflows");
@@ -9168,7 +9382,9 @@ function newWorkflow() {
     document.getElementById("wf-join").value = "all";
     document.getElementById("wf-conds").innerHTML = "";
     document.getElementById("wf-actions").innerHTML = "";
-    document.getElementById("wf-result").textContent = "";
+    const _r = document.getElementById("wf-result");
+    _r.textContent = "";
+    _r.className = "result-msg";
     addCondRow();
     addActionRow();
     document.getElementById("wf-form").style.display = "";
@@ -9178,22 +9394,67 @@ function hideWorkflowForm() {
     document.getElementById("wf-form").style.display = "none";
 }
 
+// The value lists the editor offers, fetched once when the tab opens. Typing a
+// category by hand is how a rule ends up pointing at one that does not exist:
+// it matches nothing and looks perfectly correct doing it.
+let _wfChoices = null;
+
+async function _loadWfChoices() {
+    if (_wfChoices) return _wfChoices;
+    const grab = async (url, pick) => {
+        try { return pick(await api(url)) || []; } catch (e) { return []; }
+    };
+    const [categories, tags, engines, trackers] = await Promise.all([
+        grab("/api/categories", d => (d || []).map(c => c.name)),
+        grab("/api/tags", d => Array.isArray(d) ? d.map(t => t.name || t) : []),
+        grab("/api/engines", d => (d || []).map(e => e.id || e.name)),
+        grab("/api/trackers", d => (d || []).map(r => r.host)),
+    ]);
+    _wfChoices = { categories, tags, engines, trackers };
+    return _wfChoices;
+}
+
+/// The value control for a field: a list when the set of values is known, a
+/// box when it is not.
+function _wfValueControl(f, value) {
+    const list = _wfChoiceList(f);
+    if (!list) {
+        return `<input type="text" class="wf-c-val" placeholder="value" value="${esc(value || "")}" autocomplete="off">`;
+    }
+    // The current value is kept even if it is no longer in the list -- a
+    // category deleted under a saved rule must stay visible, not be silently
+    // rewritten to whatever happens to be first.
+    const opts = list.slice();
+    if (value && !opts.includes(value)) opts.unshift(value);
+    return `<select class="wf-c-val">`
+        + opts.map(o => `<option value="${esc(o)}" ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")
+        + `</select>`;
+}
+
+function _wfChoiceList(f) {
+    if (!f) return null;
+    if (Array.isArray(f.choices) && f.choices.length) return f.choices;
+    const src = f.choices_from;
+    if (!src || !_wfChoices) return null;
+    const list = _wfChoices[src];
+    return list && list.length ? list : null;
+}
+
 function addCondRow(cond) {
     const wrap = document.getElementById("wf-conds");
     const i = wrap.children.length;
     const opts = _wfFields.map(f =>
-        `<option value="${esc(f.name)}" ${cond && cond.field === f.name ? "selected" : ""}>${esc(f.name)}</option>`
+        `<option value="${esc(f.name)}" ${cond && cond.field === f.name ? "selected" : ""}>${esc(f.label || f.name)}</option>`
     ).join("");
+    const f0 = _wfFields.find(x => x.name === (cond ? cond.field : (_wfFields[0] || {}).name));
     const div = document.createElement("div");
-    div.className = "cat-form-grid";
-    div.style.marginBottom = "6px";
+    div.className = "wf-row";
     div.innerHTML = `
         <select class="wf-c-field" onchange="syncCondOps(${i})">${opts}</select>
         <select class="wf-c-op"></select>
-        <input type="text" class="wf-c-val" placeholder="value"
-               value="${esc(cond ? cond.value : "")}" autocomplete="off">
+        ${_wfValueControl(f0, cond ? cond.value : "")}
         <span class="sr-desc wf-c-hint"></span>
-        <button class="btn-cancel" onclick="this.parentElement.remove()">x</button>`;
+        <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this condition">Remove</button>`;
     wrap.appendChild(div);
     if (cond) div.querySelector(".wf-c-op").dataset.want = cond.op;
     syncCondOps(i);
@@ -9209,22 +9470,82 @@ function syncCondOps(i) {
     if (!f) return;
     const sel = row.querySelector(".wf-c-op");
     const want = sel.dataset.want || sel.value;
-    sel.innerHTML = f.operators.map(o =>
-        `<option value="${esc(o)}" ${o === want ? "selected" : ""}>${esc(o)}</option>`
+    const labelled = f.operators_labelled
+        || f.operators.map(o => ({ op: o, label: o }));
+    sel.innerHTML = labelled.map(o =>
+        `<option value="${esc(o.op)}" ${o.op === want ? "selected" : ""}>${esc(o.label)}</option>`
     ).join("");
     delete sel.dataset.want;
     row.querySelector(".wf-c-hint").textContent = f.hint || "";
+
+    // The value control belongs to the FIELD, so it is rebuilt when the field
+    // changes: a free-text box left over from "torrent name" under a "category"
+    // condition is exactly the typo trap the lists are here to close.
+    const old = row.querySelector(".wf-c-val");
+    const keep = old ? old.value : "";
+    const list = _wfChoiceList(f);
+    const wanted = list ? "SELECT" : "INPUT";
+    if (old && old.tagName !== wanted) {
+        old.outerHTML = _wfValueControl(f, list && !list.includes(keep) ? "" : keep);
+    } else if (old && list) {
+        old.innerHTML = list.map(o =>
+            `<option value="${esc(o)}" ${o === keep ? "selected" : ""}>${esc(o)}</option>`).join("");
+    }
 }
 
-const WF_ACTIONS = ["pause", "resume", "set_category", "add_tags", "remove_tags", "delete"];
+const WF_ACTIONS = [
+    { type: "pause", label: "stop the torrent" },
+    { type: "resume", label: "start the torrent" },
+    { type: "set_category", label: "move to category" },
+    { type: "add_tags", label: "add tags" },
+    { type: "remove_tags", label: "remove tags" },
+    { type: "delete", label: "delete the torrent" },
+];
+
+/// The argument control for an action. One box captioned
+/// "category / tags / with_files" asked the operator to know which of three
+/// things the action wanted, and to spell it.
+function _wfArgControl(type, value) {
+    if (type === "set_category") {
+        const list = (_wfChoices && _wfChoices.categories) || [];
+        const opts = list.slice();
+        if (value && !opts.includes(value)) opts.unshift(value);
+        return `<select class="wf-a-arg">`
+            + opts.map(o => `<option value="${esc(o)}" ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")
+            + `</select>`;
+    }
+    if (type === "add_tags" || type === "remove_tags") {
+        return `<input type="text" class="wf-a-arg" placeholder="tag, tag, tag" value="${esc(value || "")}" autocomplete="off">`;
+    }
+    if (type === "delete") {
+        // A checkbox, because this is a yes/no and the old box wanted the
+        // literal string "with_files" -- anything else silently meant no.
+        return `<label class="wf-a-arg-wrap"><input type="checkbox" class="wf-a-arg" ${value === "with_files" ? "checked" : ""}> ${esc(t("also delete the files on disk"))}</label>`;
+    }
+    // pause and resume take nothing. An empty box invites a value that would
+    // be ignored.
+    return `<span class="sr-desc wf-a-arg" data-none="1"></span>`;
+}
+
+function syncActionRow(btn) {
+    const row = btn.closest ? btn.closest(".wf-row") : null;
+    if (!row) return;
+    const type = row.querySelector(".wf-a-type").value;
+    const old = row.querySelector(".wf-a-arg");
+    const wrap = old && old.parentElement.classList.contains("wf-a-arg-wrap") ? old.parentElement : old;
+    if (wrap) wrap.outerHTML = _wfArgControl(type, "");
+    const note = row.querySelector(".wf-a-note");
+    // Only where it applies. Shown under "pause" it reads as a warning about
+    // pausing.
+    if (note) note.textContent = type === "delete" ? t("delete must be the only action in a workflow") : "";
+}
 
 function addActionRow(act) {
     const wrap = document.getElementById("wf-actions");
     const div = document.createElement("div");
-    div.className = "cat-form-grid";
-    div.style.marginBottom = "6px";
+    div.className = "wf-row";
     const opts = WF_ACTIONS.map(a =>
-        `<option value="${esc(a)}" ${act && act.type === a ? "selected" : ""}>${esc(a)}</option>`
+        `<option value="${esc(a.type)}" ${act && act.type === a.type ? "selected" : ""}>${esc(a.label)}</option>`
     ).join("");
     let arg = "";
     if (act) {
@@ -9232,12 +9553,12 @@ function addActionRow(act) {
         else if (act.tags) arg = act.tags.join(",");
         else if (act.with_files) arg = "with_files";
     }
+    const type = act ? act.type : WF_ACTIONS[0].type;
     div.innerHTML = `
-        <select class="wf-a-type">${opts}</select>
-        <input type="text" class="wf-a-arg" placeholder="category / tags / with_files"
-               value="${esc(arg)}" autocomplete="off">
-        <span class="sr-desc">delete must be the only action</span>
-        <button class="btn-cancel" onclick="this.parentElement.remove()">x</button>`;
+        <select class="wf-a-type" onchange="syncActionRow(this)">${opts}</select>
+        ${_wfArgControl(type, arg)}
+        <span class="sr-desc wf-a-note">${type === "delete" ? esc(t("delete must be the only action in a workflow")) : ""}</span>
+        <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this action">Remove</button>`;
     wrap.appendChild(div);
 }
 
@@ -9250,12 +9571,13 @@ function _wfCollect() {
     }));
     const then = [...document.getElementById("wf-actions").children].map(r => {
         const type = r.querySelector(".wf-a-type").value;
-        const arg = r.querySelector(".wf-a-arg").value.trim();
+        const el = r.querySelector(".wf-a-arg");
+        if (type === "delete") return { type, with_files: !!(el && el.checked) };
+        const arg = (el && el.value ? el.value : "").trim();
         if (type === "set_category") return { type, to: arg };
         if (type === "add_tags" || type === "remove_tags") {
             return { type, tags: arg.split(",").map(s => s.trim()).filter(Boolean) };
         }
-        if (type === "delete") return { type, with_files: arg === "with_files" };
         return { type };
     });
     const join = document.getElementById("wf-join").value;
@@ -9274,7 +9596,10 @@ function _wfCollect() {
 // would happen -- not a second implementation that could disagree.
 async function previewWorkflow() {
     const out = document.getElementById("wf-result");
-    out.textContent = "Checking...";
+    // .result-msg is display:none until it carries success or error. Writing
+    // only textContent left the answer in an element the stylesheet never
+    // shows: the preview ran, the server replied, and the screen said nothing.
+    _wfSay(out, t("Checking..."), "success");
     try {
         const d = await api("/api/workflows/preview", {
             method: "POST",
@@ -9285,15 +9610,27 @@ async function previewWorkflow() {
         let msg = `${d.matched} matched, ${d.would_apply} would change, ${d.skipped} already as asked`;
         if (d.capped) msg += " (capped)";
         if (d.freed_bytes > 0) msg += ` -- would free ${(d.freed_bytes / 1e9).toFixed(1)} GB`;
-        out.textContent = msg + (names ? ` :: ${names}` : "");
+        // Nothing matched is a RESULT, not a failure -- but it is almost always
+        // a rule that does not say what its author meant, so it does not get
+        // the same green as a rule that found work to do.
+        _wfSay(out, msg + (names ? ` :: ${names}` : ""), d.matched > 0 ? "success" : "error");
     } catch (e) {
-        out.textContent = e.message;
+        _wfSay(out, e.message, "error");
     }
+}
+
+/// Write into a .result-msg AND make it visible. The class is what the
+/// stylesheet keys on; setting the text alone is a silent no-op.
+function _wfSay(el, text, cls) {
+    if (!el) return;
+    el.textContent = text;
+    el.className = "result-msg " + (cls || "success");
 }
 
 async function saveWorkflow() {
     const out = document.getElementById("wf-result");
     try {
+
         await api("/api/workflows", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -9302,7 +9639,7 @@ async function saveWorkflow() {
         hideWorkflowForm();
         updateWorkflows();
     } catch (e) {
-        out.textContent = e.message;
+        _wfSay(out, e.message, "error");
     }
 }
 

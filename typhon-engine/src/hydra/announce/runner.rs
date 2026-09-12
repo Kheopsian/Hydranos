@@ -123,7 +123,7 @@ pub fn start(
     mode: Mode,
     cache: Arc<Cache>,
     admission: Arc<scheduler::Admission>,
-) -> tokio::sync::mpsc::Sender<String> {
+) -> tokio::sync::mpsc::Sender<scheduler::BumpReq> {
     let catalogue = Arc::new(EngineCatalogue { manager: manager.clone() });
     // One breaker for the engine, not one per torrent: an outage belongs to the
     // host, and every torrent listing it has to learn from the same evidence.
@@ -144,7 +144,7 @@ pub fn start(
 
     // Small on purpose: this carries hand-pressed buttons, not traffic. A full
     // queue means something is looping and must be refused, not buffered.
-    let (bump_tx, bump_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (bump_tx, bump_rx) = tokio::sync::mpsc::channel::<scheduler::BumpReq>(64);
     tokio::spawn(async move {
         scheduler::run(catalogue, announce, bump_rx, admission).await;
     });

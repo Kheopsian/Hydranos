@@ -230,6 +230,18 @@ impl AppState {
         self.config.read().unwrap().clone()
     }
 
+    /// The live configuration handle, for a worker that must not freeze its
+    /// copy at boot.
+    ///
+    /// The announce policy was captured by value once per engine and an
+    /// override edited in the UI never reached the runner -- nothing
+    /// contradicted itself, the tab showed the new value while the announcer
+    /// used the old. A drain holding a stale obligation would fail the same
+    /// way, except the symptom is a deleted torrent.
+    pub fn config_handle(&self) -> Arc<std::sync::RwLock<Arc<Config>>> {
+        self.config.clone()
+    }
+
     /// Replace the live configuration after the file has been edited.
     pub fn set_cfg(&self, config: Config) {
         *self.config.write().unwrap() = Arc::new(config);
@@ -1067,6 +1079,119 @@ async fn get_clients(
 /// Body: `{"host": "...", "muted": true}`. Persisted next to the ip modes, so
 /// it survives a restart: an operator who has decided that archive.org is not
 /// coming back should not have to decide it again every morning.
+/// Declare how long a tracker requires a torrent to be seeded.
+///
+/// Body: `{"host": "...", "hours": 48}`. Zero or a missing value clears it.
+async fn set_announce_min_seed(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    #[derive(serde::Deserialize)]
+    struct Req {
+        host: String,
+        #[serde(default)]
+        hours: i64,
+    }
+    let Ok(req) = serde_json::from_str::<Req>(&body) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"})))
+            .into_response();
+    };
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "host is required"})))
+            .into_response();
+    }
+    if req.hours < 0 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "hours cannot be negative"})))
+            .into_response();
+    }
+    let value = if req.hours > 0 { req.hours.to_string() } else { String::new() };
+    let persisted = set_host_entry(&state, "announce_min_seed_hours", &host, &value);
+    Json(serde_json::json!({
+        "host": host,
+        "min_seed_hours": req.hours,
+        "persisted": persisted,
+    }))
+    .into_response()
+}
+
+/// Hide one tracker, or a batch of them, from the Trackers tab.
+///
+/// Body: `{"host": "...", "hidden": true}` or `{"hosts": [...], "hidden": true}`.
+/// The batch form exists because the problem it answers is a batch one: listing
+/// trackers from the catalogue produced 91 rows here, and hiding 78 public
+/// trackers one request at a time is not an interface, it is a chore.
+///
+/// A host carrying a passkey, a client identity or an IP mode is NEVER hidden
+/// by the batch form. Those are settings the operator wrote on purpose, and
+/// making them invisible by a bulk action is how a passkey goes missing without
+/// anyone touching it.
+async fn set_announce_hidden(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    #[derive(serde::Deserialize)]
+    struct Req {
+        #[serde(default)]
+        host: String,
+        #[serde(default)]
+        hosts: Vec<String>,
+        #[serde(default)]
+        hidden: bool,
+    }
+    let Ok(req) = serde_json::from_str::<Req>(&body) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"})))
+            .into_response();
+    };
+    let mut wanted: Vec<String> = req.hosts.iter().map(|h| h.trim().to_string()).collect();
+    if !req.host.trim().is_empty() {
+        wanted.push(req.host.trim().to_string());
+    }
+    wanted.retain(|h| !h.is_empty());
+    wanted.sort();
+    wanted.dedup();
+    if wanted.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "host is required"})))
+            .into_response();
+    }
+
+    let cfg = state.cfg();
+    let value = if req.hidden { "1" } else { "" };
+    let mut changed = Vec::new();
+    let mut skipped = Vec::new();
+    for host in wanted {
+        // Only the batch form protects configured hosts: hiding a single row
+        // the operator clicked on is exactly what they asked for.
+        let configured = cfg.announce_passkeys.contains_key(&host)
+            || cfg.announce_clients.contains_key(&host)
+            || cfg.announce_ip_modes.contains_key(&host);
+        if req.hidden && configured && req.hosts.len() > 1 {
+            skipped.push(host);
+            continue;
+        }
+        if set_host_entry(&state, "announce_hidden", &host, value) {
+            changed.push(host);
+        }
+    }
+    Json(serde_json::json!({
+        "hidden": req.hidden,
+        "changed": changed.len(),
+        "hosts": changed,
+        // Named rather than counted: "3 skipped" invites the question this
+        // answers.
+        "skipped_configured": skipped,
+    }))
+    .into_response()
+}
+
 async fn set_announce_mute(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -1142,12 +1267,20 @@ async fn get_announce_health(
             // muted : seen and accepted, kept out of every count.
             // Torrents the tracker deleted are NOT a fault: nothing to fix.
             let muted = cfg.announce_muted.contains_key(&h);
+            // Hidden goes FURTHER than muted, on purpose. Muted keeps the row
+            // and only drops it from the counts; hidden takes the tracker out
+            // of the tab altogether, badge included. 91 rows on this node, most
+            // of them a public tracker holding one torrent: a list nobody can
+            // read is not safer than a short one.
+            let hidden = cfg.announce_hidden.contains_key(&h);
             let classes: Vec<&str> = errs
                 .get(&h)
                 .map(|v| v.iter().map(|(c, _)| c.as_str()).collect())
                 .unwrap_or_default();
             let verdict = vers.get(&h).map(|v| v.verdict()).unwrap_or("");
-            let severity = if muted {
+            let severity = if hidden {
+                "hidden"
+            } else if muted {
                 "muted"
             } else if classes.contains(&"invalid_passkey")
                 || matches!(verdict, "v4_missing" | "v6_missing" | "absent")
@@ -1163,6 +1296,7 @@ async fn get_announce_health(
             };
             o.insert("severity".into(), serde_json::json!(severity));
             o.insert("muted".into(), serde_json::json!(muted));
+            o.insert("hidden".into(), serde_json::json!(hidden));
             if let Some(v) = vers.get(&h) {
                 o.insert(
                     "verify".into(),
@@ -1645,6 +1779,23 @@ fn placement(state: &AppState, category: &str, engine_override: &str) -> (String
 /// routes were validation-only, so nothing could reach this node at all:
 /// the file is written where the engine's resume records point, the engine is
 /// told about it, and the store gets the row the interface lists from.
+/// Whether an add should hash-check the data already sitting at the save path.
+///
+/// Two inputs, and deliberately NOT a third. `paused` used to gate this, which
+/// silently disabled the check for the one workflow "add without starting"
+/// exists to serve: an operator adds a torrent paused BECAUSE they want to know
+/// what is on disk before it touches the network. The torrent then sat at 0% on
+/// top of complete data (2026-09-12, a 184 GB library). Rechecking a paused
+/// torrent is safe -- `run_recheck` leaves it Stopped, and the download path
+/// gates on `is_paused` -- so pause has no business in this decision.
+///
+/// `seed_mode` does belong here: it means the caller asserted the data is good
+/// (`skip_checking`, which is why cross-seed sets it), and that assertion is the
+/// whole point of the fast path.
+fn add_recheck_wanted(seed_mode: bool, data_on_disk: bool) -> bool {
+    !seed_mode && data_on_disk
+}
+
 fn add_torrent_bytes(
     state: &AppState,
     bytes: &[u8],
@@ -1714,7 +1865,16 @@ fn add_torrent_bytes(
     // Data already on disk (cross-seed, a re-add) is hash-checked rather than
     // overwritten -- unless the caller asked to skip, which is what
     // skip_checking means and why cross-seed sets it.
-    if !seed_mode && !paused && engine.manager.any_file_exists(&info_hash) {
+    //
+    // WARNING `!paused` used to gate this too, which silently disabled the
+    // check for exactly the case "add without starting" (2026-09-12) was built
+    // to serve: an operator adds a torrent paused BECAUSE they want to inspect
+    // it before it touches the network, and the inspection was the thing being
+    // skipped. The torrent sat at 0% on top of complete data. Rechecking a
+    // paused torrent is safe: `run_recheck` leaves it Stopped and the download
+    // path gates on `is_paused`, so this reports what is on disk without
+    // fetching anything.
+    if add_recheck_wanted(seed_mode, engine.manager.any_file_exists(&info_hash)) {
         let _ = engine.manager.recheck(&info_hash);
     }
 
@@ -2323,6 +2483,13 @@ async fn engine_page_value(
     // tracker", which no filter can name.
     let mut trk_flag_inc: Vec<bool> = vec![false];
     let mut trk_flag_exc: Vec<bool> = vec![false];
+    // Slot 0 is the torrent with NO tracker at all -- a magnet never given one,
+    // or a .torrent with no announce. It was counted in no facet and matched by
+    // no filter, so 23 torrents on this node could not be reached from the list
+    // by any route. "__none__" names that state, as it already does for a
+    // category and a tag.
+    trk_flag_inc[0] = trk_inc.iter().any(|x| x == "__none__");
+    trk_flag_exc[0] = trk_exc.iter().any(|x| x == "__none__");
 
     let mut f_state: std::collections::BTreeMap<&'static str, i64> = Default::default();
     let mut f_cat: std::collections::BTreeMap<u16, i64> = Default::default();
@@ -2331,6 +2498,7 @@ async fn engine_page_value(
     let mut f_errclass: std::collections::BTreeMap<&'static str, i64> = Default::default();
     let (mut n_all, mut n_active, mut n_trk_err, mut n_err, mut n_pinned) = (0i64, 0, 0, 0, 0);
     let (mut n_uncat, mut n_untagged) = (0i64, 0i64);
+    let mut n_no_tracker = 0i64;
 
     // Kept rows are INDICES into `torrents`. Nothing per-torrent is copied out:
     // the sort keys are read back through the index for the few that survive.
@@ -2433,8 +2601,12 @@ async fn engine_page_value(
             if m_search && m_state && m_tag && m_tracker && m_errclass {
                 if f.category_id == 0 { n_uncat += 1; } else { *f_cat.entry(f.category_id).or_insert(0) += 1; }
             }
-            if m_search && m_state && m_cat && m_tag && m_errclass && tracker_id != 0 {
-                *f_tracker.entry(tracker_id).or_insert(0) += 1;
+            if m_search && m_state && m_cat && m_tag && m_errclass {
+                if tracker_id == 0 {
+                    n_no_tracker += 1;
+                } else {
+                    *f_tracker.entry(tracker_id).or_insert(0) += 1;
+                }
             }
             if m_search && m_state && m_cat && m_tracker && m_errclass {
                 if f.tag_bits == 0 {
@@ -2583,6 +2755,7 @@ async fn engine_page_value(
             "pinned": n_pinned,
             "uncategorized": n_uncat,
             "untagged": n_untagged,
+            "no_tracker": n_no_tracker,
             "state": f_state,
             "category": f_cat
                 .iter()
@@ -3501,6 +3674,11 @@ struct TrackerRow {
     user_agent: String,
     passkey_set: bool,
     ip_mode: String,
+    /// Kept out of the tab by the operator. A view decision, not a mute:
+    /// see Config::announce_hidden.
+    hidden: bool,
+    /// Hours this tracker requires. 0 = nothing declared.
+    min_seed_hours: i64,
     sources: Vec<String>,
 }
 
@@ -3614,6 +3792,12 @@ async fn get_trackers(
                 peer_id_prefix: client.map(|c| c.peer_id_prefix.clone()).unwrap_or_default(),
                 user_agent: client.map(|c| c.user_agent.clone()).unwrap_or_default(),
                 passkey_set: cfg.announce_passkeys.contains_key(&host),
+                hidden: cfg.announce_hidden.contains_key(&host),
+                min_seed_hours: cfg
+                    .announce_min_seed_hours
+                    .get(&host)
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0),
                 ip_mode: cfg
                     .announce_ip_modes
                     .get(&host)
@@ -3804,13 +3988,16 @@ async fn get_tracker_stats_current(
     for engine in state.engines.engines() {
         for torrent in engine.manager.all().iter() {
             let row = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
-            // The host the torrent last announced to; "(none)" is a real key
-            // here, for torrents that have not reached a tracker yet.
+            // The host baked into the torrent, NOT a result of announcing:
+            // live_trackers is filled when the torrent is built. So a torrent
+            // that has never announced still counts under its own tracker, and
+            // this bucket holds only the ones carrying no announce URL at all.
+            // The name says that; "(none)" invited the other reading.
             let host = row
                 .get("tracker_host")
                 .and_then(|v| v.as_str())
                 .filter(|h| !h.is_empty())
-                .unwrap_or("(none)")
+                .unwrap_or("(no tracker)")
                 .to_string();
             let entry = totals.entry((engine.id.clone(), host)).or_insert((0, 0, 0));
             entry.0 += row.get("total_upload").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -7729,6 +7916,19 @@ simple_post!(drain_now, |_s: &AppState| {
 });
 
 /// Verify one torrent. Scoped to hoard, like the other per-torrent routes.
+///
+/// WARNING Until 2026-09-12 this route resolved the hash and answered `ok`
+/// without hash-checking anything: the Verify button in the UI had never
+/// checked a torrent, and said it had. Same shape as the reannounce stub
+/// below, and the same reason it went unnoticed -- nothing contradicts a
+/// success that was never going to be measured. `TorrentManager::recheck`
+/// already existed and already does the right thing; it was simply never
+/// called from here.
+///
+/// A paused torrent is rechecked and STAYS paused: `run_recheck` stores
+/// Stopped rather than Downloading when `is_paused` is set, so the operator
+/// learns what is missing without putting the torrent on the network. That is
+/// the whole point of verifying before starting.
 async fn hoard_verify_one(
     State(state): State<AppState>,
     Path(info_hash): Path<String>,
@@ -7737,11 +7937,31 @@ async fn hoard_verify_one(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    match resolve_in_hoard(&state, &engine_param(&query, "hoard"), &info_hash, "torrent not found") {
-        Ok(_) => Json(serde_json::json!({"status": "ok"})).into_response(),
-        Err(response) => response,
+    let Some((engine_id, torrent)) = find_selected(&state, &query, &info_hash) else {
+        return not_found();
+    };
+    let Some(engine) = state.engines.get(&engine_id) else {
+        return not_found();
+    };
+    // The engine owns the hash, so take the typed one off the torrent instead
+    // of re-parsing the prefix the caller typed.
+    match engine.manager.recheck(&torrent.info_hash) {
+        // Answer what happened, not that the request was well-formed: the
+        // check runs in the background, and "checking" is what the caller
+        // needs to know to start polling progress.
+        Ok(()) => Json(serde_json::json!({
+            "status": "ok",
+            "checking": true,
+            "paused": torrent.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+        }))
+        .into_response(),
+        // recheck refuses a torrent it cannot check. A refusal is a 409,
+        // never a silent ok.
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -7780,11 +8000,68 @@ async fn reannounce_one(
     };
     // try_send, never send: this runs on a request, and a scheduler too busy to
     // read is a reason to refuse the click, not to hold the connection open.
-    match bump.try_send(info_hash.to_lowercase()) {
-        Ok(()) => Json(serde_json::json!({"status": "ok", "engine": engine_id})).into_response(),
-        Err(_) => (
+    //
+    // ⭐ The reply channel is the whole point of this shape. Answering ok the
+    // moment the message entered the queue is what let a bulk reannounce of 540
+    // torrents report success and do nothing on 2026-09-12: the scheduler
+    // refuses a bump inside its sixty-second cooldown, and the refusal was
+    // dropped on the floor. What the caller is told now is what happened.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if bump
+        .try_send(crate::announce::scheduler::BumpReq {
+            info_hash: info_hash.to_lowercase(),
+            reply: Some(reply_tx),
+        })
+        .is_err()
+    {
+        return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "announce queue is busy, try again"})),
+        )
+            .into_response();
+    }
+    // Bounded wait: a scheduler in the middle of reconciling 300k torrents may
+    // take a moment, and "queued" is the honest answer if it does. The bump is
+    // not lost -- we simply cannot say yet what became of it, and saying "ok"
+    // is exactly the lie this change removes.
+    match tokio::time::timeout(std::time::Duration::from_secs(5), reply_rx).await {
+        Ok(Ok(crate::announce::scheduler::BumpOutcome::Bumped)) => Json(serde_json::json!({
+            "status": "ok",
+            "engine": engine_id,
+            "bumped": true,
+        }))
+        .into_response(),
+        // Not a failure: the announce being asked for is the one already in
+        // progress. The caller gets what it wanted, just not because of it.
+        Ok(Ok(crate::announce::scheduler::BumpOutcome::InFlight)) => Json(serde_json::json!({
+            "status": "in_flight",
+            "engine": engine_id,
+            "bumped": false,
+        }))
+        .into_response(),
+        Ok(Ok(crate::announce::scheduler::BumpOutcome::Cooldown { retry_in })) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "status": "cooldown",
+                "engine": engine_id,
+                "bumped": false,
+                "retry_after_secs": retry_in.as_secs() + 1,
+            })),
+        )
+            .into_response(),
+        // The scheduler dropped its end: there is no announce loop left to jump.
+        Ok(Err(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "engine is not announcing"})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "queued",
+                "engine": engine_id,
+                "bumped": false,
+            })),
         )
             .into_response(),
     }
@@ -10367,6 +10644,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/announce/health", get(get_announce_health))
         .route("/api/announce/policy", get(get_live_announce_policy))
         .route("/api/announce/mute", axum::routing::post(set_announce_mute))
+        .route("/api/announce/hidden", axum::routing::post(set_announce_hidden))
+        .route("/api/announce/min-seed", axum::routing::post(set_announce_min_seed))
         .route("/api/announce/passkeys", get(get_passkeys).post(set_announce_passkey))
         .route("/api/categories/:name", axum::routing::put(category_update).delete(category_delete))
         // Workflows carry their own routes, so this file does not grow another
@@ -10937,6 +11216,28 @@ mod tests {
     // The trap this guards: "3.9.0" is lexically greater than "3.180.0", so a
     // string comparison would offer 3.9.0 as an upgrade from 3.180.0.
     #[test]
+    /// Locks the 2026-09-12 regression: adding a torrent PAUSED must still
+    /// hash-check data already on disk. The `!paused` gate that used to live
+    /// here left a complete 184 GB torrent reporting 0%, with a Verify button
+    /// that was itself a stub -- the two holes covered each other.
+    #[test]
+    fn a_paused_add_still_checks_the_data_on_disk() {
+        // The case that regressed: paused is simply not an input.
+        assert!(add_recheck_wanted(false, true));
+    }
+
+    #[test]
+    fn an_add_with_no_data_on_disk_checks_nothing() {
+        assert!(!add_recheck_wanted(false, false));
+    }
+
+    #[test]
+    fn seed_mode_keeps_its_trust_fast_path() {
+        // skip_checking is an assertion by the caller; honour it.
+        assert!(!add_recheck_wanted(true, true));
+        assert!(!add_recheck_wanted(true, false));
+    }
+
     fn a_local_engine_is_named_local_something() {
         assert_eq!(local_agent("race"), "local-race");
         assert_eq!(local_agent("hoard"), "local-hoard");

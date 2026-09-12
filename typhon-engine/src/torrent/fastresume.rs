@@ -28,6 +28,16 @@ pub struct ResumeData {
     /// .torrent says".
     #[serde(default)]
     pub trackers: Vec<Vec<String>>,
+    /// Seconds this torrent has actually spent seeding, accumulated across
+    /// restarts AND across engine moves.
+    ///
+    /// Not the same thing as the age of the completion: a torrent finished 50
+    /// hours ago and stopped for 40 of them has seeded 10. The tracker counts
+    /// the second number, and it is the one a minimum-seed obligation is
+    /// measured against. Serde default keeps older records loadable -- they
+    /// restart the count from zero, which under-reports rather than over.
+    #[serde(default)]
+    pub seed_secs: i64,
 }
 
 /// Save resume data for a torrent.

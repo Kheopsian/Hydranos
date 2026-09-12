@@ -761,7 +761,12 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         .as_secs() as i64;
     let active_time = (now - t.added_time).max(0);
     let completed = t.completed_time.load(Ordering::Relaxed);
-    let seeding_time = if completed > 0 { (now - completed).max(0) } else { 0 };
+    // The ACCUMULATED seed time, not the age of the completion. Those two used
+    // to be the same expression here, which meant a torrent completed 50 hours
+    // ago and stopped for 40 of them reported 50 hours of seeding. A minimum
+    // seed obligation measured against that is satisfied early, and early is
+    // the direction that costs a hit-and-run.
+    let seeding_time = t.seed_time_now(now);
     let current_tracker = t.current_tracker.lock()
         .map(|s| s.clone())
         .unwrap_or_default();

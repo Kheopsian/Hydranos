@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.4.2">
+    <link rel="stylesheet" href="/static/style.css?v=1.4.5">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -318,7 +318,7 @@
                             <div class="metric"><span>Swarm Leechers</span><span id="detail-swarm-leechers"></span></div>
                             <div class="metric"><span>Pieces</span><span id="detail-pieces"></span></div>
                             <div class="metric"><span>Piece Size</span><span id="detail-piece-size"></span></div>
-                            <div class="metric"><span>Active Time</span><span id="detail-active-time"></span></div>
+                            <div class="metric"><span>Added</span><span id="detail-active-time"></span></div>
                             <div class="metric"><span>Seeding Time</span><span id="detail-seeding-time"></span></div>
                         </div>
                     </div>
@@ -553,7 +553,7 @@
                             <div class="metric"><span>Connected Seeds</span><span id="h-detail-seeds-count"></span></div>
                             <div class="metric"><span>Pieces</span><span id="h-detail-pieces"></span></div>
                             <div class="metric"><span>Piece Size</span><span id="h-detail-piece-size"></span></div>
-                            <div class="metric"><span>Active Time</span><span id="h-detail-active-time"></span></div>
+                            <div class="metric"><span>Added</span><span id="h-detail-active-time"></span></div>
                             <div class="metric"><span>Seeding Time</span><span id="h-detail-seeding-time"></span></div>
                         </div>
                     </div>
@@ -907,6 +907,10 @@
                             <input type="text" id="trk-passkey" placeholder="(unchanged)" autocomplete="off">
                         </div>
                         <div class="form-group">
+                            <label>Minimum seed <span class="sr-desc">hours this tracker requires; blank = undeclared, and the drain will not delete</span></label>
+                            <input type="number" id="trk-minseed" min="0" step="1" placeholder="48" autocomplete="off">
+                        </div>
+                        <div class="form-group">
                             <label>Announce <span class="sr-desc">auto = every family this host has</span></label>
                             <select id="trk-ipmode">
                                 <option value="auto">auto</option>
@@ -929,14 +933,41 @@
                 <button class="btn-small" onclick="spoofAllTrackers(true)">Clear every spoof</button>
                 <span id="trackers-bulk-result" class="sr-desc"></span>
             </div>
+            <!-- Listing trackers from the catalogue turned 15 rows into 91 on a
+                 300k library: every public tracker baked into a stray .torrent
+                 gets one. Hiding is a view choice, kept apart from Mute. -->
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+                <span class="sr-desc">Hide unconfigured trackers holding fewer than</span>
+                <input type="number" id="trk-hide-below" value="10" min="1" step="1"
+                       style="width:70px" aria-label="torrent count">
+                <span class="sr-desc">torrents</span>
+                <button class="btn-small" onclick="hideSmallTrackers()">Hide them</button>
+                <span id="trk-hide-note" class="sr-desc"></span>
+            </div>
             <table id="trackers-table">
                 <thead>
-                    <tr><th>Tracker</th><th>Torrents</th><th>Status</th><th>Client spoof</th><th>Passkey</th><th>Announce</th><th>Last error</th><th>Actions</th></tr>
+                    <tr><th>Tracker</th><th>Torrents</th><th>Status</th><th>Client spoof</th><th>Passkey</th><th>Min seed</th><th>Announce</th><th>Last error</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="trackers-tbody">
                     <tr><td colspan="7" class="empty">No announces yet</td></tr>
                 </tbody>
             </table>
+            <!-- A list of its own rather than rows mixed into the one above.
+                 Finding the four you want to bring back among ninety is the
+                 problem hiding was meant to solve, not one to hand back. -->
+            <div id="trk-hidden-section" style="display:none;margin-top:18px">
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+                    <button class="btn-small" id="trk-hidden-toggle" onclick="toggleHiddenTrackers()">Hidden trackers</button>
+                    <button class="btn-small" onclick="unhideAllTrackers()">Unhide all</button>
+                    <span class="sr-desc">Still announced to, and out of the table and the tab badge above.</span>
+                </div>
+                <table id="trk-hidden-table" style="display:none">
+                    <thead>
+                        <tr><th>Tracker</th><th>Torrents</th><th>Passkey</th><th>Client spoof</th><th>Actions</th></tr>
+                    </thead>
+                    <tbody id="trk-hidden-tbody"></tbody>
+                </table>
+            </div>
 
             <div class="card" style="margin-top:20px">
                 <h3>Per-tracker stats</h3>
@@ -1437,6 +1468,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.6"></script>
+    <script src="/static/app.js?v=1.6.16"></script>
 </body>
 </html>

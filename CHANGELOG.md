@@ -17,6 +17,60 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## Unreleased -- a refused reannounce says so
+
+### The Verify button verifies
+
+`POST /api/hoard/torrents/:info_hash/verify` resolved the hash and answered
+`{"status":"ok"}` without hash-checking anything. The button had been in the UI
+since the 4.0 port, wired to a handler that only proved the torrent existed, so
+every click reported a check that never ran.
+
+`TorrentManager::recheck` already did the work -- bounded concurrency, verify
+into a local set, install the bitfield in one critical section, persist the
+resume. It was never called from the route. It is now, and the reply carries
+`checking` and `paused` instead of a bare `ok`; a torrent that cannot be
+checked answers 409 rather than success.
+
+### Adding a torrent paused no longer skips the check of data already on disk
+
+The add path gated its automatic recheck on `!seed_mode && !paused`. The
+`!paused` half silently disabled the check for the one workflow "add without
+starting" exists to serve: an operator adds a torrent paused *because* they
+want to see what is on disk before it touches the network, and the inspection
+was what got skipped. The torrent sat at 0% on top of complete data, and the
+only way out was a Verify button that did nothing either.
+
+A paused torrent is now rechecked and stays paused: `run_recheck` stores
+Stopped rather than Downloading when `is_paused` is set, and the download path
+gates on the same flag. The check reports what is there; it fetches nothing.
+
+
+### Reannounce reports what the scheduler did, instead of that it was asked
+
+`POST /api/torrents/:info_hash/reannounce` answered `{"status":"ok"}` the
+instant the hash entered the scheduler's bump channel. The scheduler then
+refuses that bump in two cases -- inside the sixty-second `BUMP_COOLDOWN`, or
+while an announce for the hash is already in flight -- and `bump_now` returned a
+`bool` that the receive arm threw away. No log, no metric, no response field.
+
+The cost was measured on 2026-09-12: 540 torrents sat on `invalid passkey`, a
+passkey override was set, the whole selection was reannounced from the Trackers
+tab, and nothing happened. Every one of the 540 requests had answered `ok`. They
+were inside the cooldown left by an earlier press.
+
+The outcome now travels back. `BumpReq` carries an optional reply channel and
+`bump_now` returns a named `BumpOutcome`, so the route can answer `ok`,
+`in_flight`, `cooldown` with `retry_after_secs`, or `queued` when the scheduler
+is too busy to say within five seconds -- the bump is not lost in that case, we
+just cannot claim it landed. The bulk action in the UI tallies the outcomes and
+reports them in one line, and runs eight at a time instead of one, because a
+sequential press over a large selection took minutes and looked dead.
+
+Same family as the cosmetic pause and the "Success" shown for a torrent that had
+never announced: state rendered from the absence of a failure rather than the
+presence of a success.
+
 ### The reconcile stops amplifying a failed load
 
 `spawn_store_reconcile` deletes store rows whose torrent the engine does not

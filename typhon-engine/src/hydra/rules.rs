@@ -218,6 +218,20 @@ pub enum Kind {
     Percent,
 }
 
+/// The states a torrent row can report, for the editor's dropdown.
+///
+/// Listed rather than derived: they come out of `derive_state_static`, which
+/// is a match on strings the engine writes, so there is nothing to enumerate
+/// at runtime. Kept beside FIELDS so the two are read together.
+pub const STATES: &[&str] = &[
+    "seeding",
+    "downloading",
+    "stopped",
+    "queued",
+    "checking_files",
+    "error",
+];
+
 /// Every field a condition may name, with the kind that decides its operators.
 ///
 /// The single source of truth: `/api/workflows/fields` serves this, the
