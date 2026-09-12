@@ -4962,6 +4962,11 @@ async function showCategoryForm(name = null) {
             : "";
     }
     _populateGraduateSelect(allCats, cat ? cat.graduate_to : "", name);
+    // "keep" when the category says nothing: the default has to be the one
+    // that touches nothing, or opening a form and saving it would arm a
+    // deletion nobody asked for.
+    const da = document.getElementById("cat-drain-action");
+    if (da) da.value = (cat && cat.drain_action) || "keep";
     _catModeChanged();
     await _renderCatPlacement(cat);
 }
@@ -4975,6 +4980,8 @@ function _populateGraduateSelect(cats, current, selfName) {
 }
 function _catModeChanged() {
     const race = document.getElementById("cat-mode").value === "race";
+    const dw = document.getElementById("cat-drain-wrap");
+    if (dw) dw.style.display = race ? "" : "none";
     const w = document.getElementById("cat-graduate-wrap");
     if (w) w.style.display = race ? "" : "none";
 }
@@ -5201,7 +5208,8 @@ async function saveCategory() {
         const minFreeGiB = parseFloat(document.getElementById("cat-min-free").value) || 0;
         const min_free_bytes = Math.max(0, Math.round(minFreeGiB * 1024 * 1024 * 1024));
         const graduate_to = mode === "race" ? (document.getElementById("cat-graduate-to").value || "") : "";
-        const payload = { name, save_path, mode, placement, agents, strategy, graduate_to, min_free_bytes };
+        const drain_action = mode === "race" ? (document.getElementById("cat-drain-action").value || "keep") : "";
+        const payload = { name, save_path, mode, placement, agents, strategy, graduate_to, drain_action, min_free_bytes };
         if (_editingCategory) {
             await api(`/api/categories/${encodeURIComponent(_editingCategory)}`, {
                 method: "PUT",
@@ -7550,9 +7558,14 @@ async function updateTrackers() {
                 : '<span class="sr-desc">-</span>';
             // "-" is not 0: an undeclared tracker is one the drain refuses to
             // delete from, which is the opposite of "no constraint".
+            // Three states, and the middle one is the whole point: 0 means
+            // "this tracker asks for nothing" and releases a torrent, while
+            // nothing declared protects it.
             const minseed = r.min_seed_hours > 0
                 ? `<span class="mode-tag mode-hoard">${r.min_seed_hours}h</span>`
-                : '<span class="sr-desc" title="' + esc(t("not declared: the drain will not delete from this tracker")) + '">-</span>';
+                : (r.min_seed_hours === 0
+                    ? `<span class="mode-tag" title="${esc(t("declared as requiring no seeding: the drain may delete"))}">0h</span>`
+                    : '<span class="sr-desc" title="' + esc(t("not declared: the drain will not delete from this tracker")) + '">-</span>');
             const hh = agg[r.host];
             const counts = hh ? Object.entries(hh.errors).sort((a, b) => b[1] - a[1]) : [];
             // The breakdown replaces the last error when there is one: it says
@@ -7587,7 +7600,7 @@ async function updateTrackers() {
             const rowTip = SEV[sev]
                 ? esc(r.host + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
-            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}',${r.min_seed_hours || 0})">Edit</button></td></tr>`;
+            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
         }).join("");
         updateTabBadges();
         if (_thtml === _trackersSig) return;
@@ -7697,7 +7710,7 @@ function showTrackerForm(host = "", pid = "", ua = "", ipmode = "auto", minseed 
     // Blank, not 0: they mean different things. Blank is "nothing declared",
     // which PROTECTS the torrent from the drain; 0 is "this tracker asks for
     // nothing", which releases it.
-    document.getElementById("trk-minseed").value = minseed > 0 ? minseed : "";
+    document.getElementById("trk-minseed").value = minseed >= 0 ? minseed : "";
     document.getElementById("trk-result").style.display = "none";
     document.getElementById("trk-form").style.display = "block";
 }
@@ -7771,10 +7784,13 @@ async function saveTracker() {
         const pk = document.getElementById("trk-passkey").value.trim();
         if (pk) await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: pk }) });
         await api("/api/announce/ip-modes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, mode: document.getElementById("trk-ipmode").value }) });
+        // An emptied field CLEARS the declaration; it used to send nothing,
+        // so the old value stayed and the form lied about what was saved.
         const rawMin = document.getElementById("trk-minseed").value.trim();
-        if (rawMin !== "") {
-            await api("/api/announce/min-seed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, hours: parseInt(rawMin, 10) || 0 }) });
-        }
+        const minBody = rawMin === ""
+            ? { host, clear: true }
+            : { host, hours: parseInt(rawMin, 10) || 0 };
+        await api("/api/announce/min-seed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(minBody) });
         _trackersSig = "";
         // An override reaches a torrent at ITS next announce, not now. Saying
         // so here is the difference between "it did not work" and "not yet".

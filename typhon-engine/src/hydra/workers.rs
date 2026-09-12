@@ -261,6 +261,68 @@ pub fn spawn_seed_time_sync(
     });
 }
 
+/// Queue the graduations the categories ask for.
+///
+/// Continuous background work, NOT an emergency valve. Measured here: /race to
+/// the pool moves ~520 MB/s while a race can land at 1 GB/s, so a drain that
+/// has to copy always loses. The way a race disk stays empty is that this has
+/// already moved things long before the disk is tight.
+///
+/// The obligation still governs: a torrent whose tracker is owed seeding time
+/// is not moved either, because the move takes it off the network for the
+/// duration of the copy.
+pub fn spawn_graduation_policy(
+    state: crate::api::AppState,
+    manager: Arc<TorrentManager>,
+    cfg_handle: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
+    engine_id: String,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        loop {
+            let cfg = match cfg_handle.read() {
+                Ok(g) => g.clone(),
+                Err(e) => e.into_inner().clone(),
+            };
+            let now = typhon_engine::torrent::meta::now_secs();
+            let mut queued = 0usize;
+            for t in manager.all() {
+                let (met, _host, _hours) = seed_obligation_met(&t, &cfg, now);
+                if !met {
+                    continue;
+                }
+                let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
+                let Some((to_engine, to_category, save_path)) =
+                    crate::api::category_graduation(&state, &hash)
+                else {
+                    continue;
+                };
+                if to_engine == engine_id {
+                    continue;
+                }
+                if crate::jobsrun::queue_graduation(
+                    &state,
+                    &hash,
+                    &t.meta.name,
+                    &engine_id,
+                    &to_engine,
+                    &to_category,
+                    &save_path,
+                    t.meta.total_size as i64,
+                )
+                .is_some()
+                {
+                    queued += 1;
+                }
+            }
+            if queued > 0 {
+                tracing::info!(engine = %engine_id, queued, "graduations queued");
+            }
+            tokio::time::sleep(Duration::from_secs(300)).await;
+        }
+    });
+}
+
 /// Free space on the race disk by removing what has earned its keep.
 ///
 /// Destructive by design and gated twice: it does nothing unless the operator
@@ -268,6 +330,7 @@ pub fn spawn_seed_time_sync(
 /// removes only down to the low watermark -- the gap between the two is what
 /// stops it running again on the next tick.
 pub fn spawn_race_drain(
+    state: crate::api::AppState,
     manager: Arc<TorrentManager>,
     cfg_handle: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
     race_path: std::path::PathBuf,
@@ -305,7 +368,7 @@ pub fn spawn_race_drain(
                 Ok(g) => g.clone(),
                 Err(e) => e.into_inner().clone(),
             };
-            drain_once(&manager, &cfg.race_drain, &race_path, &cfg);
+            drain_once(&state, &manager, &cfg.race_drain, &race_path, &cfg);
         }
     });
 }
@@ -350,6 +413,7 @@ fn seed_obligation_met(
 }
 
 fn drain_once(
+    state: &crate::api::AppState,
     manager: &Arc<TorrentManager>,
     config: &crate::config::RaceDrain,
     race_path: &std::path::Path,
@@ -381,6 +445,7 @@ fn drain_once(
     let now = typhon_engine::torrent::meta::now_secs();
     let mut protected = 0usize;
     let mut undeclared = 0usize;
+    let mut not_for_deletion = 0usize;
     for torrent in torrents {
         if to_free <= 0.0 {
             break;
@@ -396,6 +461,16 @@ fn drain_once(
             } else {
                 protected += 1;
             }
+            continue;
+        }
+        // And the category has to CONSENT. The obligation says what may not be
+        // done yet; the category says what the operator wants done at all. A
+        // category that has not opted in keeps its torrents -- which is what
+        // every existing category does, so shipping this deletes nothing that
+        // was not already marked for deletion.
+        let hash = typhon_engine::torrent::hex_encode(&torrent.info_hash);
+        if crate::api::category_drain_action(state, &hash) != "delete" {
+            not_for_deletion += 1;
             continue;
         }
         let size = torrent.meta.total_size as f64;
@@ -418,7 +493,8 @@ fn drain_once(
             still_needed_gb = (to_free / 1e9).round(),
             protected,
             undeclared,
-            "race drain could not free enough: torrents are under a seed obligation"
+            not_for_deletion,
+            "race drain could not free enough"
         );
     }
 }

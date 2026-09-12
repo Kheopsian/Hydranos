@@ -45,6 +45,7 @@ mod announce;
 mod health;
 mod importer;
 mod jobs;
+mod jobsrun;
 mod wgtun;
 mod workers;
 mod portfwd;
@@ -355,11 +356,22 @@ async fn main() -> anyhow::Result<()> {
             std::path::PathBuf::from(&drain_cfg.race_path)
         };
         workers::spawn_race_drain(
+            state.clone(),
             engine.manager.clone(),
             state.config_handle(),
             race_path,
         );
+        workers::spawn_graduation_policy(
+            state.clone(),
+            engine.manager.clone(),
+            state.config_handle(),
+            engine.id.clone(),
+        );
     }
+
+    // The job runner. One task, one job at a time -- see the module header for
+    // why concurrency buys nothing here.
+    jobsrun::spawn(state.clone());
 
     // The workflow timer, before the router takes ownership of the state.
     // It waits two minutes of its own so it never fires against a catalogue

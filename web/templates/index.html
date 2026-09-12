@@ -623,6 +623,15 @@
                             <label>Save Path</label>
                             <input type="text" id="cat-save-path" placeholder="/mnt/race/movies" style="width:100%" autocomplete="off">
                         </div>
+                        <div class="form-group" id="cat-drain-wrap" style="grid-column:1/-1;display:none">
+                            <label>When the race disk fills</label>
+                            <select id="cat-drain-action">
+                                <option value="keep">Keep - never touched by the drain</option>
+                                <option value="graduate">Graduate - move the data to the hoard category below</option>
+                                <option value="delete">Delete - erase it</option>
+                            </select>
+                            <div class="sr-desc">A tracker&#39;s minimum seed time still applies: neither action happens to a torrent that still owes seeding.</div>
+                        </div>
                         <div class="form-group" id="cat-graduate-wrap" style="grid-column:1/-1;display:none">
                             <label>Graduate to (hoard category)</label>
                             <select id="cat-graduate-to"><option value="">- none (no graduation) -</option></select>
@@ -1468,6 +1477,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.16"></script>
+    <script src="/static/app.js?v=1.6.18"></script>
 </body>
 </html>
