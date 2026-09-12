@@ -6742,6 +6742,22 @@ async fn get_torrent_files(
 }
 
 /// Trackers of one torrent, grouped by tier, plus the engine holding it.
+/// A peer id as a human reads it: printable bytes kept, the rest escaped.
+///
+/// The tail is random binary, so a plain from_utf8 would either fail or render
+/// as replacement characters and make two different ids look identical.
+fn printable_peer_id(id: &[u8; 20]) -> String {
+    id.iter()
+        .map(|&b| {
+            if (0x20..0x7f).contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02x}")
+            }
+        })
+        .collect()
+}
+
 async fn get_torrent_trackers(
     State(state): State<AppState>,
     Path(info_hash): Path<String>,
@@ -6759,7 +6775,44 @@ async fn get_torrent_trackers(
     // The LIVE list, not the one baked into the .torrent: an operator who edited
     // the trackers expects to see what will actually be announced to.
     let tiers = torrent.live_trackers.read().clone();
-    Json(serde_json::json!({"engine": engine, "trackers": tiers})).into_response()
+
+    // The identity a tracker was last actually told, beside the one the current
+    // policy would send. An override applies at the NEXT announce, so these two
+    // disagree for a while -- and without showing both, the only way to know
+    // which torrents have caught up is to wait and hope.
+    let (announced, announced_at) = match *torrent.announced_peer_id.read() {
+        Some((id, at)) => (Some(printable_peer_id(&id)), Some(at)),
+        None => (None, None),
+    };
+    let next = state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.id == engine)
+        .and_then(|e| e.announce_policy.get())
+        .map(|handle| {
+            let p = handle
+                .read()
+                .map(|p| p.clone())
+                .unwrap_or_else(|e| e.into_inner().clone());
+            printable_peer_id(&crate::announce::policy::announced_peer_id(&p, &tiers))
+        });
+
+    Json(serde_json::json!({
+        "engine": engine,
+        "trackers": tiers,
+        // None until this torrent has announced at least once since startup.
+        "announced_peer_id": announced,
+        "announced_at": announced_at,
+        "next_peer_id": next,
+        "peer_id_pending": match (&announced, &next) {
+            (Some(a), Some(n)) => a != n,
+            // Never announced yet: nothing has been told to anyone, so there is
+            // nothing stale to warn about.
+            _ => false,
+        },
+    }))
+    .into_response()
 }
 
 /// Files of one torrent, qBittorrent shape.

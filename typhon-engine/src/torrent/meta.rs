@@ -274,6 +274,16 @@ pub struct TorrentState {
     /// private trackers cannot present a different identity to each, since they
     /// share one swarm.
     pub handshake_prefix: RwLock<Option<[u8; 8]>>,
+    /// The peer id a tracker was last actually told, and when.
+    ///
+    /// Written AFTER an announce succeeds, never from the policy: the policy
+    /// says what we intend to send next, and an operator who changed an
+    /// override needs to see which torrents have caught up. Deriving this from
+    /// the intention would make every torrent look compliant the instant the
+    /// setting was saved -- the failure mode where nothing contradicts itself.
+    ///
+    /// None until this torrent has announced at least once since startup.
+    pub announced_peer_id: RwLock<Option<([u8; 20], u64)>>,
     pub save_path: RwLock<PathBuf>,
     pub info_hash: InfoHash,
     pub torrent_file_path: String,
@@ -554,6 +564,7 @@ impl TorrentState {
         Self {
             live_trackers: RwLock::new(meta.trackers.clone()),
             handshake_prefix: RwLock::new(None),
+            announced_peer_id: RwLock::new(None),
             meta,
             save_path: RwLock::new(save_path),
             info_hash: ih,
