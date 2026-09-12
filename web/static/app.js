@@ -2701,6 +2701,58 @@ function renderHoardTable() {
     _updateRowHighlights();
 }
 
+// The chips a facet family should draw: what the server counted, plus
+// whatever is currently SELECTED.
+//
+// The chips used to be drawn from the server facets alone, and the facets only
+// count what matches. Delete the last torrent of the tracker you were filtering
+// on and its chip vanishes while the filter stays set: the list goes empty and
+// the only control that could turn it off is no longer on the page. The way out
+// was a browser refresh, which is the UI admitting it has no way back.
+//
+// Meta keys (__none__) are drawn by their own branch below and are kept out of
+// this list.
+function _facetKeys(counts, inc, exc, metas) {
+    const out = Object.keys(counts);
+    for (const k of inc.concat(exc)) {
+        if (!metas.includes(k) && !out.includes(k)) out.push(k);
+    }
+    return out.filter(k => !metas.includes(k)).sort();
+}
+
+/// How many filters are narrowing the list right now, search included.
+function _hoardActiveFilters() {
+    return _hoardCatInc.length + _hoardCatExc.length
+        + _hoardTagInc.length + _hoardTagExc.length
+        + _hoardTrackerInc.length + _hoardTrackerExc.length
+        + _hoardErrInc.length + _hoardErrExc.length
+        + (_hoardStateFilter ? 1 : 0)
+        + ((document.getElementById("hoard-search")?.value || "") ? 1 : 0);
+}
+
+/// Every filter family at once, search and state included.
+///
+/// Deliberately the whole set rather than "clear the chips": half a reset
+/// leaves the list still narrowed by the part it did not touch, which is the
+/// same dead end with fewer suspects.
+function resetHoardFilters() {
+    _hoardCatInc = []; _hoardCatExc = [];
+    _hoardTagInc = []; _hoardTagExc = [];
+    _hoardTrackerInc = []; _hoardTrackerExc = [];
+    _hoardErrInc = []; _hoardErrExc = [];
+    _hoardStateFilter = "";
+    const box = document.getElementById("hoard-search");
+    if (box) box.value = "";
+    document.querySelectorAll(".chip-state").forEach(c => {
+        c.classList.toggle("active", c.dataset.state === "");
+    });
+    _paintChips(".chip-cat", "cat", _hoardCatInc, _hoardCatExc);
+    _paintChips(".chip-tag", "tag", _hoardTagInc, _hoardTagExc);
+    _paintChips(".chip-tracker", "tracker", _hoardTrackerInc, _hoardTrackerExc);
+    _paintChips(".chip-err", "err", _hoardErrInc, _hoardErrExc);
+    fetchHoardPage(true);
+}
+
 // Recompute state/cat chip counts. Called only when the torrent list mutates
 // (30s backstop fetch, torrent_added/removed), not on each stats snapshot.
 function _renderHoardCounts() {
@@ -2734,28 +2786,35 @@ function _renderHoardCounts() {
     document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `Tracker Error <span class="chip-count">${nTrackerErr}</span>`;
     document.querySelector(".chip-state[data-state='__error__']").innerHTML = `Error <span class="chip-count">${nTorrentErr}</span>`;
 
+    const resetBtn = document.getElementById("hoard-reset-filters");
+    if (resetBtn) {
+        const n = _hoardActiveFilters();
+        resetBtn.style.display = n ? "" : "none";
+        resetBtn.textContent = tp(n, "Reset {n} filter", "Reset {n} filters");
+    }
+
     const catCounts = F ? (F.category || {}) : {};
-    const cats = Object.keys(catCounts).sort();
+    const cats = _facetKeys(catCounts, _hoardCatInc, _hoardCatExc, ["__none__"]);
     const nUncat = F ? (F.uncategorized || 0) : 0;
     const container = document.getElementById("hoard-cat-chips");
     if (container) {
         let html = cats.map(c =>
-            `<button class="chip chip-cat${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')" oncontextmenu="setHoardCatFilter(this,'${c}',true);return false" title="Click to include, right-click to exclude">${esc(incoCat(c))} <span class="chip-count">${catCounts[c]}</span></button>`
+            `<button class="chip chip-cat${(catCounts[c] || 0) ? "" : " chip-orphan"}${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')" oncontextmenu="setHoardCatFilter(this,'${c}',true);return false" title="Click to include, right-click to exclude">${esc(incoCat(c))} <span class="chip-count">${catCounts[c] || 0}</span></button>`
         ).join("");
         // Meta-filter: only meaningful when at least one real category exists and
         // some torrents lack one (e.g. after a category was deleted).
-        if (cats.length > 0 && nUncat > 0) {
+        if ((cats.length > 0 && nUncat > 0) || _hoardCatInc.includes("__none__") || _hoardCatExc.includes("__none__")) {
             html = `<button class="chip chip-cat chip-none${_hoardCatInc.includes("__none__") ? " active" : ""}${_hoardCatExc.includes("__none__") ? " excluded" : ""}" data-cat="__none__" style="font-style:italic;opacity:.85" onclick="setHoardCatFilter(this,'__none__')" oncontextmenu="setHoardCatFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Uncategorized <span class="chip-count">${nUncat}</span></button>` + html;
         }
         container.innerHTML = html;
     }
 
     const trkCounts = F ? (F.tracker || {}) : {};
-    const trks = Object.keys(trkCounts).sort();
+    const trks = _facetKeys(trkCounts, _hoardTrackerInc, _hoardTrackerExc, []);
     const trkContainer = document.getElementById("hoard-tracker-chips");
     if (trkContainer) {
         trkContainer.innerHTML = trks.map(h =>
-            `<button class="chip chip-tracker${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(h)} <span class="chip-count">${trkCounts[h]}</span></button>`
+            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(h)} <span class="chip-count">${trkCounts[h] || 0}</span></button>`
         ).join("");
     }
 
@@ -2765,27 +2824,29 @@ function _renderHoardCounts() {
     const errCounts = F ? (F.error_class || {}) : {};
     const errGroup = document.getElementById("facet-errors");
     const errContainer = document.getElementById("hoard-err-chips");
-    const errKeys = ERR_CLASS_ORDER.filter(k => errCounts[k] > 0)
-        .concat(Object.keys(errCounts).filter(k => !ERR_CLASS_ORDER.includes(k) && errCounts[k] > 0));
+    const errSel = _hoardErrInc.concat(_hoardErrExc);
+    const errKeys = ERR_CLASS_ORDER.filter(k => errCounts[k] > 0 || errSel.includes(k))
+        .concat(Object.keys(errCounts).filter(k => !ERR_CLASS_ORDER.includes(k) && errCounts[k] > 0))
+        .concat(errSel.filter(k => !ERR_CLASS_ORDER.includes(k) && !errCounts[k]));
     if (errContainer && errGroup) {
         errGroup.style.display = errKeys.length ? "" : "none";
         errContainer.innerHTML = errKeys.map(k => {
             const label = t(ERR_CLASS_LABEL[k] || k);
             const hint = t(ERR_CLASS_HINT[k] || "");
-            return `<button class="chip chip-err chip-err-${esc(k)}${_hoardErrInc.includes(k) ? " active" : ""}${_hoardErrExc.includes(k) ? " excluded" : ""}" data-err="${esc(k)}" onclick="setHoardErrFilter(this,'${esc(k)}')" oncontextmenu="setHoardErrFilter(this,'${esc(k)}',true);return false" title="${esc(hint)}">${esc(label)} <span class="chip-count">${errCounts[k]}</span></button>`;
+            return `<button class="chip chip-err chip-err-${esc(k)}${(errCounts[k] || 0) ? "" : " chip-orphan"}${_hoardErrInc.includes(k) ? " active" : ""}${_hoardErrExc.includes(k) ? " excluded" : ""}" data-err="${esc(k)}" onclick="setHoardErrFilter(this,'${esc(k)}')" oncontextmenu="setHoardErrFilter(this,'${esc(k)}',true);return false" title="${esc(hint)}">${esc(label)} <span class="chip-count">${errCounts[k] || 0}</span></button>`;
         }).join("");
     }
 
     const tagCounts = F ? (F.tag || {}) : {};
-    const tagNames = Object.keys(tagCounts).sort();
+    const tagNames = _facetKeys(tagCounts, _hoardTagInc, _hoardTagExc, ["__none__"]);
     const nUntagged = F ? (F.untagged || 0) : 0;
     const tagContainer = document.getElementById("hoard-tag-chips");
     if (tagContainer) {
         let html = tagNames.map(tg =>
-            `<button class="chip chip-tag${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')" oncontextmenu="setHoardTagFilter(this,'${tg}',true);return false" title="Click to include, right-click to exclude">${esc(tg)} <span class="chip-count">${tagCounts[tg]}</span></button>`
+            `<button class="chip chip-tag${(tagCounts[tg] || 0) ? "" : " chip-orphan"}${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')" oncontextmenu="setHoardTagFilter(this,'${tg}',true);return false" title="Click to include, right-click to exclude">${esc(tg)} <span class="chip-count">${tagCounts[tg] || 0}</span></button>`
         ).join("");
         // Untagged meta-filter: only when tags are actually in use.
-        if (tagNames.length > 0 && nUntagged > 0) {
+        if ((tagNames.length > 0 && nUntagged > 0) || _hoardTagInc.includes("__none__") || _hoardTagExc.includes("__none__")) {
             html = `<button class="chip chip-tag chip-none${_hoardTagInc.includes("__none__") ? " active" : ""}${_hoardTagExc.includes("__none__") ? " excluded" : ""}" data-tag="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTagFilter(this,'__none__')" oncontextmenu="setHoardTagFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Untagged <span class="chip-count">${nUntagged}</span></button>` + html;
         }
         tagContainer.innerHTML = html;

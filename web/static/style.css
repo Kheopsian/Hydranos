@@ -3393,3 +3393,27 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .pid-pending .pid-val {
     color: var(--text-dim, #8b949e);
 }
+
+/* Clears every filter family at once. Quiet by default: it is a way out, not
+ * an action worth drawing the eye away from the list. */
+.btn-reset-filters {
+    padding: 4px 10px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius, 8px);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.btn-reset-filters:hover {
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
+}
+/* A chip still selected after its last torrent went away. It has to stay
+ * clickable -- turning it off is the only thing left to do with it -- but it
+ * matches nothing, so it should not read as a live choice. */
+.chip.chip-orphan {
+    opacity: .6;
+    border-style: dashed;
+}

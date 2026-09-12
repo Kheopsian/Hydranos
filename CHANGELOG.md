@@ -37,6 +37,27 @@ them:
 
 ## Unreleased -- the facts cache comes back out
 
+### A way out of a filter whose torrents are gone
+
+The facet chips were drawn from the server facets alone, and the facets only
+count what matches. Filter the list on a tracker, delete the last torrent that
+names it, and the chip disappears while the filter stays set: an empty list,
+and the one control that could turn it off no longer on the page. The way out
+was a browser refresh, which is the interface admitting it has none.
+
+Two changes, because the button alone would not have been one:
+
+- a value that is SELECTED is drawn whether or not the facets still count it.
+  It renders at zero, dashed and dimmed (`chip-orphan`), and clicking it off
+  works. That keeps the rest of the selection, which a blanket reset does not.
+  The `Uncategorized` and `Untagged` meta chips had the same trap and get the
+  same treatment.
+- a `Reset filters` control beside the filter count, hidden until something is
+  actually filtering, reporting how many filters it will clear. It clears every
+  family at once -- categories, tags, trackers, error classes, state and the
+  search box. Half a reset leaves the list narrowed by whatever it skipped,
+  which is the same dead end with fewer suspects.
+
 ### A tracker appears on the Trackers tab before the first announce
 
 The tab learned its hosts from three places, and all three were retrospective:

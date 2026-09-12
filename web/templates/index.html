@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.4.1">
+    <link rel="stylesheet" href="/static/style.css?v=1.4.2">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -450,6 +450,10 @@
             <div class="hoard-filter-bar">
                 <input type="text" id="hoard-search" placeholder="Search…" oninput="scheduleHoardPage(250)">
                 <span id="hoard-filter-count"></span>
+                <!-- Hidden until something is actually filtering. Sits beside
+                     the count, which is the number it puts back. -->
+                <button id="hoard-reset-filters" class="btn-reset-filters"
+                        style="display:none" onclick="resetHoardFilters()">Reset filters</button>
                 <div class="hoard-chips-row hoard-chips-state">
                 <button class="chip chip-state active" data-state="" onclick="setHoardStateFilter(this, '')">All</button>
                 <button class="chip chip-state" data-state="seeding" onclick="setHoardStateFilter(this, 'seeding')">Seeding</button>
@@ -1433,6 +1437,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.5"></script>
+    <script src="/static/app.js?v=1.6.6"></script>
 </body>
 </html>
