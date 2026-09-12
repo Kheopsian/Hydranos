@@ -37,6 +37,21 @@ them:
 
 ## Unreleased -- the facts cache comes back out
 
+### You can see which identity a torrent announced with
+
+An override takes effect at each torrent's next announce, so for a while the
+config, the UI and the tracker disagree -- and there was no way to tell "not
+applied yet" from "not applied at all" except waiting and hoping.
+
+Saving an override now says that each torrent switches at its next announce,
+and a torrent's detail panel shows the peer id a tracker was last actually told
+beside the one the current policy would send, flagged when they differ.
+
+The announced id is recorded AFTER an announce succeeds and never derived from
+the policy: derived, every torrent would look compliant the instant a setting
+was saved. It stays empty until the torrent has announced at least once, and an
+empty value is not reported as stale, because nothing has been told to anyone.
+
 ### Tracker overrides reach the announcer that is running
 
 `policy_from_config` ran once per engine at startup and the result was moved
