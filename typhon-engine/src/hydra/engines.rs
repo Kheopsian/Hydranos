@@ -56,6 +56,11 @@ pub struct Engine {
     /// `connect` puts the engine on the network -- an offline engine has no
     /// announce loop to jump.
     pub bump: std::sync::OnceLock<tokio::sync::mpsc::Sender<String>>,
+    /// This engine's live announce policy, swappable while it runs.
+    ///
+    /// Empty until `connect` starts the announcer, like `bump`: an engine that
+    /// is not on the network has no policy to reload.
+    pub announce_policy: std::sync::OnceLock<crate::announce::PolicyHandle>,
     /// How far this engine's scheduler has got through the catalogue.
     ///
     /// Per engine for the same reason `bump` is: two engines admit at their own
@@ -160,6 +165,7 @@ impl EngineHost {
                 disk,
                 announce_cache: Default::default(),
                 bump: std::sync::OnceLock::new(),
+                announce_policy: std::sync::OnceLock::new(),
                 admission: Default::default(),
             });
         }
@@ -208,13 +214,18 @@ impl EngineHost {
                     // every tracker forgets the whole catalogue within one
                     // announce interval.
                     let peer_id = engine_cfg.peer_id();
+                    let policy: crate::announce::PolicyHandle =
+                        std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(
+                            crate::announce::policy_from_config(
+                                config,
+                                String::from_utf8_lossy(&peer_id).into_owned(),
+                                String::new(),
+                            ),
+                        )));
+                    let _ = engine.announce_policy.set(policy.clone());
                     let bump = crate::announce::runner::start(
                         engine.manager.clone(),
-                        crate::announce::policy_from_config(
-                            config,
-                            String::from_utf8_lossy(&peer_id).into_owned(),
-                            String::new(),
-                        ),
+                        policy,
                         session.listen_port,
                         // By role: "race" is a behaviour, not a name. An engine
                         // called vpn1 with role=race announces like a racer.

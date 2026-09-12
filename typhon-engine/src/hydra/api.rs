@@ -5529,12 +5529,15 @@ async fn set_announce_ip_mode(
     let stored = if req.mode == "auto" { "" } else { req.mode.as_str() };
     let persisted = set_host_entry(&state, "announce_ip_modes", req.host.trim(), stored);
 
+    // Hand the new tables to the runners before answering, so the
+    // reply cannot claim an override that is not live yet.
+    let engines_reloaded = refresh_announce_policies(&state);
     Json(serde_json::json!({
+        "engines_reloaded": engines_reloaded,
         "status": "ok",
         "ip_modes": state.cfg().announce_ip_modes,
         // One "agent" per local engine: this node presents itself as local-race
         // and local-hoard, and a config push reaches both.
-        "agents_pushed": state.engines.engines().len(),
         "agents_failed": 0,
         "persisted": persisted,
     }))
@@ -5561,10 +5564,13 @@ async fn set_announce_passkey(
                 Json(serde_json::json!({"error": "host is required"}))).into_response();
     }
     let persisted = set_host_entry(&state, "announce_passkeys", req.host.trim(), &req.passkey);
+    // Hand the new tables to the runners before answering, so the
+    // reply cannot claim an override that is not live yet.
+    let engines_reloaded = refresh_announce_policies(&state);
     Json(serde_json::json!({
+        "engines_reloaded": engines_reloaded,
         "status": "ok",
         "passkeys": state.cfg().announce_passkeys,
-        "agents_pushed": state.engines.engines().len(),
         "agents_failed": 0,
         "persisted": persisted,
     }))
@@ -5584,6 +5590,70 @@ struct ClientOverride {
 
 /// Declare the client identity Hydra presents to one tracker.
 ///
+/// Push the config now on disk into every running announcer.
+///
+/// Without this the tables are written, the UI redraws them, and the runner
+/// keeps announcing with the policy it was handed at startup -- the setting
+/// looks applied and is not, which is the failure mode nothing contradicts.
+///
+/// Returns how many engines were handed the new policy.
+fn refresh_announce_policies(state: &AppState) -> usize {
+    let cfg = state.cfg();
+    crate::announce::refresh_policies(&cfg, state.engines.engines())
+}
+
+/// What each running announcer is ACTUALLY using.
+///
+/// Deliberately not `state.cfg()`: every other announce route reports the
+/// config, so a policy that failed to reload would be invisible -- the file
+/// says one thing, the UI repeats it, and the tracker sees the old identity.
+/// This reads the live handles, which is the only way to tell "written" from
+/// "in force". cf the announce policy being frozen at startup until 4.28.
+async fn get_live_announce_policy(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+
+    let engines: Vec<serde_json::Value> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|engine| match engine.announce_policy.get() {
+            None => serde_json::json!({
+                "engine": engine.id,
+                "announcing": false,
+            }),
+            Some(handle) => {
+                let p = handle
+                    .read()
+                    .map(|p| p.clone())
+                    .unwrap_or_else(|e| e.into_inner().clone());
+                serde_json::json!({
+                    "engine": engine.id,
+                    "announcing": true,
+                    "peer_id": p.peer_id,
+                    "user_agent": p.user_agent,
+                    "public_ip": p.public_ip,
+                    "clients": p.clients.iter().map(|(host, c)| {
+                        (host.clone(), serde_json::json!({
+                            "peer_id_prefix": c.peer_id_prefix,
+                            "user_agent": c.user_agent,
+                        }))
+                    }).collect::<serde_json::Map<_, _>>(),
+                    "passkeys": p.passkeys.keys().collect::<Vec<_>>(),
+                    "secondary_stats": p.secondary_stats,
+                    "ip_modes": p.ip_modes,
+                })
+            }
+        })
+        .collect();
+
+    Json(serde_json::json!({ "engines": engines })).into_response()
+}
+
 /// Stored as a nested table -- `[announce_clients."host"]` -- because the host
 /// is a quoted key and the entry carries two fields. Clearing both fields
 /// removes the table rather than leaving an empty one behind.
@@ -5624,10 +5694,13 @@ async fn set_announce_client(
         })
     };
 
+    // Hand the new tables to the runners before answering, so the
+    // reply cannot claim an override that is not live yet.
+    let engines_reloaded = refresh_announce_policies(&state);
     Json(serde_json::json!({
+        "engines_reloaded": engines_reloaded,
         "status": "ok",
         "clients": state.cfg().announce_clients,
-        "agents_pushed": state.engines.engines().len(),
         "agents_failed": 0,
         "persisted": persisted,
     }))
@@ -5655,10 +5728,13 @@ async fn set_secondary_stats(
     }
     let persisted =
         set_host_entry(&state, "announce_secondary_stats", req.host.trim(), &req.mode);
+    // Hand the new tables to the runners before answering, so the
+    // reply cannot claim an override that is not live yet.
+    let engines_reloaded = refresh_announce_policies(&state);
     Json(serde_json::json!({
+        "engines_reloaded": engines_reloaded,
         "status": "ok",
         "secondary_stats": state.cfg().announce_secondary_stats,
-        "agents_pushed": state.engines.engines().len(),
         "agents_failed": 0,
         "persisted": persisted,
     }))
@@ -7707,7 +7783,11 @@ async fn set_clients_bulk(
         }
     }
 
+    // Hand the new tables to the runners before answering, so the
+    // reply cannot claim an override that is not live yet.
+    let engines_reloaded = refresh_announce_policies(&state);
     Json(serde_json::json!({
+        "engines_reloaded": engines_reloaded,
         "status": "ok",
         "applied": applied,
         // Echoed so the caller knows which hosts the batch actually covered:
@@ -7724,7 +7804,6 @@ async fn set_clients_bulk(
             )
         },
         "clients": state.cfg().announce_clients,
-        "agents_pushed": state.engines.engines().len(),
         "agents_failed": 0,
     }))
     .into_response()
@@ -10122,6 +10201,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/categories", axum::routing::post(category_create))
         .route("/api/announce/ip-modes", get(get_ip_modes).post(set_announce_ip_mode))
         .route("/api/announce/health", get(get_announce_health))
+        .route("/api/announce/policy", get(get_live_announce_policy))
         .route("/api/announce/mute", axum::routing::post(set_announce_mute))
         .route("/api/announce/passkeys", get(get_passkeys).post(set_announce_passkey))
         .route("/api/categories/:name", axum::routing::put(category_update).delete(category_delete))
