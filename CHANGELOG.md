@@ -37,6 +37,31 @@ them:
 
 ## Unreleased -- the facts cache comes back out
 
+### Tracker overrides reach the announcer that is running
+
+`policy_from_config` ran once per engine at startup and the result was moved
+into the announce runner, which never consulted it again. Writing an override
+edited the file and the UI redrew it from the config, so the setting looked
+applied while the tracker kept seeing the old identity. Nothing contradicted
+itself anywhere, which is why it survived.
+
+The runner now reads its policy per job instead of capturing it for its
+lifetime, and every route that edits `announce_clients`, `announce_passkeys`,
+`announce_secondary_stats` or `announce_ip_modes` rebuilds the live policy
+before replying, reporting how many engines it reached. `peer_id`,
+`user_agent` and `public_ip` are carried over from the policy being replaced --
+they come from the engine's own binding, and rebuilding them from these tables
+would give every engine the same identity.
+
+An override applies at the next announce for a given torrent, not instantly.
+
+`agents_pushed` is gone from four responses: it counted engines that existed
+and pushed nothing to any of them, which is precisely what made this look like
+it worked. In its place, `GET /api/announce/policy` reports what each announcer
+is actually using, read from the live handles rather than from the config --
+every other announce route reports the file, so a reload that failed would have
+been invisible all over again.
+
 ### Data we already hold is recognised, whatever it is called
 
 A torrent's `pieces` field hashes the payload stream, and that stream carries
