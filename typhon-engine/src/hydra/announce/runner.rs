@@ -192,6 +192,17 @@ async fn announce_one(
     } else {
         (torrent.meta.total_size as i64 - downloaded).max(0)
     };
+    // Filtering the catalogue is not enough: a bump puts one torrent at the head
+    // of the queue directly, so a forced reannounce reached a paused torrent and
+    // told a tracker we are a peer for something we will not serve. The guard
+    // belongs here, the one place every announce funnels through -- a paused
+    // torrent announces to nobody, whoever asked. Reported as `gone` because
+    // that is what it is to the scheduler: the catalogue already filters paused
+    // torrents, so resuming one puts it back on the next refill.
+    if torrent.is_paused.load(Ordering::Relaxed) {
+        return gone;
+    }
+
     // "started" is only right the first time a tracker hears about a torrent.
     // Sending it on every announce makes a tracker reset its view of us, and
     // some read it as a client that restarts in a loop.
