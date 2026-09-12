@@ -3364,3 +3364,32 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 /* The one control this card has: checkbox and its label on one line, so the
    words are part of the hit area rather than sitting next to it. */
 .sr-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+
+/* The announced-identity line under the trackers table.
+ *
+ * These four classes were written into app.js and never given a rule, so the
+ * label inherited the panel's heading size: "Announced as" came out twice the
+ * height of the peer id it introduces, which is the part worth reading. */
+.pid-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 4px 0 8px;
+    font-size: 12px;
+}
+.pid-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+.pid-val {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+}
+/* An identity that will change at the next announce: the current value is
+ * still the true one, so the row is dimmed rather than highlighted. */
+.pid-pending .pid-val {
+    color: var(--text-dim, #8b949e);
+}
