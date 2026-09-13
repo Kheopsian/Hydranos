@@ -355,11 +355,33 @@ pub fn spawn_transit_sweep(
 /// enabled it, and nothing until usage is over the high watermark. It then
 /// removes only down to the low watermark -- the gap between the two is what
 /// stops it running again on the next tick.
+/// What one pass of the drain did, so a caller can answer with it.
+///
+/// The button that runs the drain by hand needs to say whether anything
+/// happened; a worker that only logs leaves the UI to invent a sentence.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct DrainOutcome {
+    pub deleted: usize,
+    pub graduated: usize,
+    pub stuck: usize,
+    pub freed_bytes: u64,
+}
+
+/// Free space on the race volumes by removing what has earned its keep.
+///
+/// Destructive by design and gated twice: it does nothing unless the operator
+/// enabled it, and nothing until a volume is over ITS high watermark. It then
+/// removes only down to the low watermark -- the gap between the two is what
+/// stops it running again on the next tick.
+///
+/// ⚠ One pass per VOLUME, never one pass for the engine. Before this, a single
+/// `race_path` was measured and every torrent of the engine was a candidate,
+/// so a full SSD made the drain delete races living on a different, healthy
+/// SSD -- and the full one never emptied, so it did it again on the next tick.
 pub fn spawn_race_drain(
     state: crate::api::AppState,
     manager: Arc<TorrentManager>,
     cfg_handle: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
-    race_path: std::path::PathBuf,
     engine_id: String,
 ) {
     let live = || -> Arc<crate::config::Config> {
@@ -369,10 +391,6 @@ pub fn spawn_race_drain(
         }
     };
     let config = live().race_drain.clone();
-    if !config.enabled {
-        tracing::info!("race drain: disabled");
-        return;
-    }
     let interval = if config.check_interval_seconds > 0 {
         Duration::from_secs(config.check_interval_seconds as u64)
     } else {
@@ -381,21 +399,28 @@ pub fn spawn_race_drain(
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(10)).await;
         tracing::info!(
-            path = %race_path.display(),
+            engine = %engine_id,
             check_interval_s = interval.as_secs(),
-            high = config.high_watermark_pct,
-            low = config.low_watermark_pct,
-            "race drain started"
+            "race drain started, one pass per volume"
         );
         loop {
             tokio::time::sleep(interval).await;
             // Re-read every tick: an obligation typed into the UI has to apply
-            // to the NEXT pass, not to the next restart.
+            // to the NEXT pass, not to the next restart. Volumes are rediscovered
+            // for the same reason -- a disk added today is a disk watched today.
             let cfg = match cfg_handle.read() {
                 Ok(g) => g.clone(),
                 Err(e) => e.into_inner().clone(),
             };
-            drain_once(&state, &manager, &cfg.race_drain, &race_path, &cfg, &engine_id);
+            for volume in crate::volumes::discover(&state, &manager, &cfg.race_drain) {
+                if !volume.policy.enabled {
+                    continue;
+                }
+                if volume.used_pct() < volume.policy.high as f64 {
+                    continue;
+                }
+                drain_once(&state, &manager, &volume, &cfg, &engine_id);
+            }
         }
     });
 }
@@ -439,35 +464,39 @@ fn seed_obligation_met(
     (seeded >= hours * 3600, host, hours)
 }
 
-fn drain_once(
+/// One pass on ONE volume. Callers gate on the watermark; this frees.
+pub fn drain_once(
     state: &crate::api::AppState,
     manager: &Arc<TorrentManager>,
-    config: &crate::config::RaceDrain,
-    race_path: &std::path::Path,
+    volume: &crate::volumes::Volume,
     cfg: &crate::config::Config,
     engine_id: &str,
-) {
-    let Some((used, total)) = disk_usage(race_path) else {
-        // Silence here is how a wrong path hides: the drain would run every
-        // minute, measure nothing, and report nothing, while the disk it was
-        // meant to watch filled up.
-        tracing::warn!(path = %race_path.display(), "race drain: cannot read disk usage");
-        return;
-    };
-    if total == 0 {
-        return;
+) -> DrainOutcome {
+    let target = volume.total as f64 * volume.policy.low as f64 / 100.0;
+    let wanted = volume.used as f64 - target;
+    let mut to_free = wanted;
+    if to_free <= 0.0 {
+        return DrainOutcome::default();
     }
-    let pct = used as f64 * 100.0 / total as f64;
-    if pct < config.high_watermark_pct as f64 {
-        return;
-    }
-    let target = total as f64 * config.low_watermark_pct as f64 / 100.0;
-    let mut to_free = used as f64 - target;
-    tracing::warn!(pct = pct.round(), high = config.high_watermark_pct, "race disk over the high watermark, draining");
+    tracing::warn!(
+        volume = %volume.id,
+        pct = volume.used_pct().round(),
+        high = volume.policy.high,
+        "race volume over its high watermark, draining"
+    );
 
     // Oldest first: a race that has been sitting the longest has had the most
     // time to earn its ratio, so it is the cheapest to let go.
-    let mut torrents = manager.all();
+    // The whole point: a torrent on another disk is not a candidate, however
+    // full this one is.
+    let mut torrents: Vec<_> = manager
+        .all()
+        .into_iter()
+        .filter(|t| {
+            let path = t.save_path.read().clone();
+            crate::volumes::device_of_nearest(&path) == Some(volume.dev)
+        })
+        .collect();
     torrents.sort_by_key(|t| t.added_time);
 
     let now = typhon_engine::torrent::meta::now_secs();
@@ -569,12 +598,19 @@ fn drain_once(
     // drain already had once when it was watching the wrong path.
     if to_free > 0.0 {
         tracing::warn!(
+            volume = %volume.id,
             still_needed_gb = (to_free / 1e9).round(),
             deleted,
             graduated,
             stuck,
             "race drain could not free enough"
         );
+    }
+    DrainOutcome {
+        deleted,
+        graduated,
+        stuck,
+        freed_bytes: (wanted - to_free).max(0.0) as u64,
     }
 }
 

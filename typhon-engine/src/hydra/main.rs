@@ -47,6 +47,7 @@ mod importer;
 mod jobs;
 mod jobsrun;
 mod wgtun;
+mod volumes;
 mod workers;
 mod portfwd;
 mod raceevents;
@@ -349,17 +350,10 @@ async fn main() -> anyhow::Result<()> {
         if engine.role != "race" {
             continue;
         }
-        let drain_cfg = state.cfg().race_drain.clone();
-        let race_path = if drain_cfg.race_path.is_empty() {
-            std::path::PathBuf::from("/race")
-        } else {
-            std::path::PathBuf::from(&drain_cfg.race_path)
-        };
         workers::spawn_race_drain(
             state.clone(),
             engine.manager.clone(),
             state.config_handle(),
-            race_path,
             engine.id.clone(),
         );
     }

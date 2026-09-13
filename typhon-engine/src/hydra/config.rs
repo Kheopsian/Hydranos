@@ -135,8 +135,6 @@ pub struct RaceDrain {
     pub low_watermark_pct: i64,
     #[serde(default)]
     pub reserve_free_gb: i64,
-    #[serde(default)]
-    pub race_path: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

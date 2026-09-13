@@ -280,17 +280,11 @@ impl EngineHost {
                         // appdata pool. It measured 77% there while /race was
                         // at 100%, stayed under its watermark, and never ran --
                         // a guard that guarded a disk nobody was filling.
-                        let race_path = if config.race_drain.race_path.is_empty() {
-                            std::path::PathBuf::from("/race")
-                        } else {
-                            std::path::PathBuf::from(&config.race_drain.race_path)
-                        };
                         // NOT spawned here any more: the drain has to read the
                         // per-tracker seed obligation, which lives in the live
                         // config, and the AppState that owns it does not exist
                         // yet. main.rs starts it once the state is built --
                         // same reason as the download slot manager below.
-                        let _ = race_path;
                     }
                     // The download slot manager is NOT started here. It has to
                     // read the paused column to know which stops are the
