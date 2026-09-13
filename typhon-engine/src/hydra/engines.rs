@@ -151,6 +151,36 @@ impl EngineHost {
                 ),
             }
 
+            // Everything this engine knows must have its metainfo in the
+            // store before resume runs, because resume no longer looks
+            // anywhere else. On an install that already migrated this finds
+            // nothing and costs one query per torrent.
+            {
+                let uploads = std::path::Path::new(&config.daemon.data_dir).join("uploads");
+                match crate::store::Store::open(&blob_db, false) {
+                    Ok(rw) => {
+                        let rw = std::sync::Mutex::new(rw);
+                        let sink = |hash: &str, bytes: &[u8]| -> Result<(), String> {
+                            rw.lock()
+                                .map_err(|_| "store lock".to_string())?
+                                .insert_torrent(hash, id, bytes, "", "", 0.0, false, "")
+                                .map_err(|e| e.to_string())
+                        };
+                        let (imported, lost) = manager.import_missing_blobs(&uploads, &sink);
+                        if imported > 0 || lost > 0 {
+                            tracing::warn!(
+                                engine = id, imported, unrecoverable = lost,
+                                "metainfo migrated out of uploads/ and into the store"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::error!(
+                        engine = id,
+                        "cannot open the store to migrate metainfo ({e}); torrents whose blob is missing will not load"
+                    ),
+                }
+            }
+
             let loaded = manager.load_resume_data();
             tracing::info!(engine = id, torrents = loaded, "engine state loaded");
 

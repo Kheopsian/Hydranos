@@ -170,6 +170,34 @@ fn sha1_hash(data: &[u8]) -> InfoHash {
 /// and a SHA-1 over the whole piece, so one file read is lost in the noise.
 ///
 /// A pure seeder never calls this at all: serving a piece does not verify it.
+/// The piece hash table of a metainfo held in memory.
+///
+/// The bytes come from the store, which keys them by info-hash, so there is
+/// no path to name in the errors -- the caller knows which torrent it asked
+/// for. See `TorrentState::piece_hash`.
+pub fn piece_hashes_from_bytes(data: &[u8]) -> Result<Vec<[u8; 20]>, String> {
+    let info_raw = find_info_raw(data)?;
+    let dict = bencode_decode(&info_raw).map_err(|e| format!("info dict: {}", e))?;
+    let dict = dict.as_dict().ok_or("info is not a dict")?;
+    let raw = dict
+        .get("pieces")
+        .ok_or("missing pieces")?
+        .as_bytes()
+        .ok_or("pieces not bytes")?;
+    if raw.len() % 20 != 0 {
+        return Err("pieces length not multiple of 20".into());
+    }
+    Ok(raw
+        .chunks(20)
+        .map(|c| {
+            let mut h = [0u8; 20];
+            h.copy_from_slice(c);
+            h
+        })
+        .collect())
+}
+
+#[cfg(test)]
 pub fn piece_hashes_from_file(path: &str) -> Result<Vec<[u8; 20]>, String> {
     let info_raw = info_dict_from_file(path)?;
     let dict = bencode_decode(&info_raw)
@@ -193,6 +221,12 @@ pub fn piece_hashes_from_file(path: &str) -> Result<Vec<[u8; 20]>, String> {
         .collect())
 }
 
+/// The raw info dict of a metainfo held in memory, for BEP 9.
+pub fn info_dict_from_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    find_info_raw(data)
+}
+
+#[cfg(test)]
 pub fn info_dict_from_file(path: &str) -> Result<Vec<u8>, String> {
     let data = std::fs::read(path).map_err(|e| format!("read {}: {}", path, e))?;
     find_info_raw(&data)

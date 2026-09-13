@@ -7,7 +7,6 @@ use super::meta::InfoHash;
 #[derive(Serialize, Deserialize)]
 pub struct ResumeData {
     pub info_hash: String,
-    pub torrent_path: String,
     pub save_path: String,
     pub seed_mode: bool,
     pub paused: bool,
@@ -21,7 +20,7 @@ pub struct ResumeData {
     #[serde(default)]
     pub bitfield: String,
     /// The tracker list actually announced to, in tiers, which is NOT
-    /// necessarily what `torrent_path` parses to: the operator can edit it.
+    /// necessarily what the stored metainfo parses to: the operator can edit it.
     /// This record is what restores a torrent at startup, so without the
     /// list here every edit is undone by the next restart. Serde default
     /// keeps older resume files loadable -- empty means "whatever the

@@ -222,7 +222,7 @@ impl DiskManager {
             Some(h) => h,
             None => return Err(format!(
                 "no piece hashes for {}; refusing to accept piece {}",
-                torrent.torrent_file_path, piece
+                torrent.info_hash_hex(), piece
             )),
         };
         let ops = torrent.meta.map_block(piece, 0, data.len() as u32);

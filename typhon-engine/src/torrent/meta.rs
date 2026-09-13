@@ -286,7 +286,6 @@ pub struct TorrentState {
     pub announced_peer_id: RwLock<Option<([u8; 20], u64)>>,
     pub save_path: RwLock<PathBuf>,
     pub info_hash: InfoHash,
-    pub torrent_file_path: String,
     pub added_time: i64,
     pub completed_time: AtomicI64,
     pub seed_mode: bool,
@@ -310,6 +309,19 @@ pub struct TorrentState {
     /// Where this torrent reports that it finished downloading, so its engine
     /// can persist the fact at once.
     pub completed_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<InfoHash>>,
+    /// The metainfo bytes of this torrent, by info-hash, from the store.
+    ///
+    /// The store is the only authority: it keys the blob by info-hash, so what
+    /// comes back IS this torrent by construction. There is deliberately no
+    /// fallback to a file. uploads/ used to be a second copy of these bytes and
+    /// the one every runtime path actually read, which is how a torrent whose
+    /// file had gone missing kept asking peers for pieces it could never
+    /// verify. One copy, one authority, no way to disagree.
+    ///
+    /// Unset for a torrent built outside a manager (a magnet being resolved, a
+    /// unit test): such a torrent cannot verify, which the callers already
+    /// treat as "refuse the piece".
+    pub blob_source: std::sync::OnceLock<Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>>,
     pub is_paused: AtomicBool,
     /// Seconds spent seeding, folded in at every state change and at the
     /// periodic sweep. See `fold_seed_time`.
@@ -328,7 +340,7 @@ pub struct TorrentState {
     /// write_piece (create=true) re-creates the files we just deleted.
     pub is_removed: AtomicBool,
 
-    /// The torrent's 20-byte piece hashes: loaded from `torrent_file_path` the
+    /// The torrent's 20-byte piece hashes: loaded from the store the
     /// first time something needs to verify data, dropped again the moment the
     /// torrent goes back to seeding, and never loaded at all for a torrent that
     /// only ever seeds. See `piece_hash` and `release_piece_hashes`.
@@ -520,10 +532,11 @@ impl TorrentState {
 
     /// The expected SHA-1 of one piece, loading the hash table on first use.
     ///
-    /// Returns `None` when the table cannot be read -- a missing or truncated
-    /// `.torrent`. Callers MUST treat that as "cannot verify", never as
-    /// "verified": the two call sites compare against the returned hash, so a
-    /// `None` has to fail the piece rather than pass it.
+    /// Returns `None` when the table cannot be read -- no blob in the store for
+    /// this info-hash, or a blob that does not parse. Callers MUST treat that
+    /// as "cannot verify", never as "verified": the two call sites compare
+    /// against the returned hash, so a `None` has to fail the piece rather than
+    /// pass it.
     pub fn piece_hash(&self, piece: u32) -> Option<[u8; 20]> {
         let table = {
             let mut slot = match self.piece_hashes.lock() {
@@ -531,19 +544,31 @@ impl TorrentState {
                 Err(poisoned) => poisoned.into_inner(),
             };
             if slot.is_none() {
-                match crate::torrent::metainfo::piece_hashes_from_file(&self.torrent_file_path) {
+                let ih = self.info_hash_hex();
+                let bytes = match self.metainfo_bytes() {
+                    Some(b) => b,
+                    None => {
+                        tracing::error!(
+                            info_hash = %ih,
+                            "no metainfo in the store; refusing to verify"
+                        );
+                        return None;
+                    }
+                };
+                match crate::torrent::metainfo::piece_hashes_from_bytes(&bytes) {
                     Ok(h) => {
                         if h.len() as u32 != self.meta.num_pieces {
                             tracing::error!(
-                                "piece hashes for {} disagree with metadata: {} on disk, {} expected; refusing to verify",
-                                self.torrent_file_path, h.len(), self.meta.num_pieces
+                                info_hash = %ih,
+                                "piece hashes disagree with metadata: {} in the store, {} expected; refusing to verify",
+                                h.len(), self.meta.num_pieces
                             );
                             return None;
                         }
                         *slot = Some(Arc::new(h));
                     }
                     Err(e) => {
-                        tracing::error!("cannot load piece hashes: {}", e);
+                        tracing::error!(info_hash = %ih, "cannot parse the stored metainfo: {}", e);
                         return None;
                     }
                 }
@@ -552,6 +577,22 @@ impl TorrentState {
             slot.clone()?
         };
         table.get(piece as usize).copied()
+    }
+
+    /// This torrent's metainfo bytes, or None when the store has no blob for
+    /// it. The single point where a runtime path obtains a .torrent.
+    pub fn metainfo_bytes(&self) -> Option<Vec<u8>> {
+        let src = self.blob_source.get()?;
+        src(&self.info_hash_hex())
+    }
+
+    /// The info-hash as lowercase hex, which is how the store keys it.
+    pub fn info_hash_hex(&self) -> String {
+        let mut out = String::with_capacity(40);
+        for b in self.info_hash.iter() {
+            out.push_str(&format!("{:02x}", b));
+        }
+        out
     }
 
     /// Drop the piece hash table.
@@ -575,8 +616,8 @@ impl TorrentState {
     }
 
 
-    pub fn new(meta: TorrentMeta, save_path: PathBuf, torrent_file_path: String, seed_mode: bool) -> Self {
-        Self::new_with_times(meta, save_path, torrent_file_path, seed_mode, None, None, !seed_mode)
+    pub fn new(meta: TorrentMeta, save_path: PathBuf, seed_mode: bool) -> Self {
+        Self::new_with_times(meta, save_path, seed_mode, None, None, !seed_mode)
     }
 
     /// Create a TorrentState, optionally restoring added_time / completed_time
@@ -584,7 +625,6 @@ impl TorrentState {
     pub fn new_with_times(
         meta: TorrentMeta,
         save_path: PathBuf,
-        torrent_file_path: String,
         seed_mode: bool,
         added_time_override: Option<i64>,
         completed_time_override: Option<i64>,
@@ -622,7 +662,6 @@ impl TorrentState {
             meta,
             save_path: RwLock::new(save_path),
             info_hash: ih,
-            torrent_file_path,
             added_time: added,
             completed_time: AtomicI64::new(completed),
             seed_mode,
@@ -635,6 +674,7 @@ impl TorrentState {
             policy: std::sync::OnceLock::new(),
             limiter: std::sync::OnceLock::new(),
             completed_tx: std::sync::OnceLock::new(),
+            blob_source: std::sync::OnceLock::new(),
             is_paused: AtomicBool::new(false),
             seed_secs: AtomicI64::new(0),
             seed_since: AtomicI64::new(0),
@@ -754,13 +794,56 @@ mod tests {
 
     fn state_for(tag: &str, n: usize) -> (TorrentState, Vec<[u8; 20]>, String) {
         let (bytes, hashes) = torrent_bytes(n);
+        // No file is written any more: the metainfo reaches the torrent the
+        // way it does in production, from the store. The path is still handed
+        // back so the callers' cleanup stays harmless.
         let mut p = std::env::temp_dir();
         p.push(format!("typhon-state-{}-{}.torrent", std::process::id(), tag));
-        std::fs::write(&p, &bytes).unwrap();
         let path = p.to_string_lossy().into_owned();
         let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
-        let st = TorrentState::new(meta, std::path::PathBuf::from("/tmp"), path.clone(), true);
+        let st = TorrentState::new(meta, std::path::PathBuf::from("/tmp"), true);
+        let blob = bytes.clone();
+        let _ = st
+            .blob_source
+            .set(Arc::new(move |_: &str| Some(blob.clone())));
         (st, hashes, path)
+    }
+
+    /// A torrent wired to a store whose blob the test can swap or remove.
+    ///
+    /// This is how a metainfo goes missing now: not by deleting a file, but by
+    /// the store no longer answering for that hash.
+    fn state_with_store(n: usize) -> (TorrentState, Vec<[u8; 20]>, Arc<Mutex<Option<Vec<u8>>>>) {
+        let (bytes, hashes) = torrent_bytes(n);
+        let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+        let st = TorrentState::new(meta, std::path::PathBuf::from("/tmp"), true);
+        let slot = Arc::new(Mutex::new(Some(bytes)));
+        let handle = slot.clone();
+        let _ = st.blob_source.set(Arc::new(move |_: &str| {
+            handle.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }));
+        (st, hashes, slot)
+    }
+
+    /// A torrent whose metainfo the store does not have cannot verify, and says
+    /// so by returning None.
+    ///
+    /// This is the whole point of dropping the file fallback: `None` is what
+    /// makes `write_piece` refuse the piece. If this ever returned a hash from
+    /// somewhere else, a torrent could accept data nothing had checked.
+    #[test]
+    fn piece_hash_without_a_store_blob_refuses_to_verify() {
+        let (bytes, _) = torrent_bytes(4);
+        let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+        let st = TorrentState::new(meta, std::path::PathBuf::from("/tmp"), true);
+        // Wired, but the store holds nothing for this hash.
+        let _ = st.blob_source.set(Arc::new(|_: &str| None));
+        assert_eq!(st.piece_hash(0), None, "verified a piece with no metainfo");
+
+        // And with no source wired at all (a torrent built outside a manager).
+        let meta2 = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+        let bare = TorrentState::new(meta2, std::path::PathBuf::from("/tmp"), true);
+        assert_eq!(bare.piece_hash(0), None, "verified a piece with no blob source");
     }
 
     /// A seeder holds no hashes until something asks to verify, and then it
@@ -833,20 +916,20 @@ mod tests {
         st.release_piece_hashes(); // no-op, must not panic
         assert!(st.piece_hashes.lock().unwrap().is_none());
 
-        // Still correct afterwards: a later recheck reloads from the file.
+        // Still correct afterwards: a later recheck reloads from the store.
         assert_eq!(st.piece_hash(1), Some(hashes[1]), "reload after release failed");
         std::fs::remove_file(&path).ok();
     }
 
-    /// The release really frees the table rather than hiding it: with the file
+    /// The release really frees the table rather than hiding it: with the blob
     /// gone afterwards there is nothing left to serve, and the engine says so
     /// instead of quietly answering from a stale copy.
     #[test]
-    fn release_is_not_a_cache_that_survives_the_file() {
-        let (st, hashes, path) = state_for("released-gone", 3);
+    fn release_is_not_a_cache_that_survives_the_store() {
+        let (st, hashes, blob) = state_with_store(3);
         assert_eq!(st.piece_hash(0), Some(hashes[0]));
         st.release_piece_hashes();
-        std::fs::remove_file(&path).unwrap();
+        *blob.lock().unwrap() = None;
         assert_eq!(st.piece_hash(0), None, "answered from a table it claimed to release");
     }
 
@@ -864,25 +947,26 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// ⚠️ The one that matters: a torrent whose file is gone must report "I
-    /// cannot verify", never a hash. Both call sites turn None into a refusal,
-    /// so returning Some(anything) here would silently bless unchecked data.
+    /// ⚠️ The one that matters: a torrent the store no longer answers for must
+    /// report "I cannot verify", never a hash. Both call sites turn None into a
+    /// refusal, so returning Some(anything) here would silently bless unchecked
+    /// data -- and the opposite failure, refusing every piece forever, is what
+    /// cost 19 475 wasted piece requests in production on 2026-09-13.
     #[test]
-    fn piece_hash_is_none_when_the_torrent_file_is_gone() {
-        let (st, _, path) = state_for("gone", 3);
-        std::fs::remove_file(&path).unwrap();
+    fn piece_hash_is_none_when_the_store_loses_the_blob() {
+        let (st, _, blob) = state_with_store(3);
+        *blob.lock().unwrap() = None;
         assert_eq!(st.piece_hash(0), None, "verification passed without a hash table");
     }
 
-    /// A `.torrent` that no longer agrees with the metadata is refused whole,
+    /// A metainfo that no longer agrees with the metadata is refused whole,
     /// rather than verifying some pieces against the wrong offsets.
     #[test]
     fn piece_hash_refuses_a_table_of_the_wrong_length() {
-        let (st, _, path) = state_for("mismatch", 5);
+        let (st, _, blob) = state_with_store(5);
         let (other, _) = torrent_bytes(2);
-        std::fs::write(&path, &other).unwrap();
+        *blob.lock().unwrap() = Some(other);
         assert_eq!(st.piece_hash(0), None, "accepted a table of the wrong length");
-        std::fs::remove_file(&path).ok();
     }
 
     /// One shard still has to behave like the set it replaced.

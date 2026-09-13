@@ -366,6 +366,12 @@ impl TorrentManager {
         self.skey_index.get(req2_hash).map(|r| *r.value())
     }
 
+    /// Add a torrent from a `.torrent` on disk.
+    ///
+    /// Ingress only: a caller handing us a file it just received. Everything
+    /// already inside Hydranos has its bytes in the store and uses
+    /// `add_torrent_bytes` -- three call sites used to read a blob out of the
+    /// store, write it to a file, and have it parsed back off disk.
     pub fn add_torrent(
         &self,
         torrent_path: &str,
@@ -373,7 +379,24 @@ impl TorrentManager {
         stopped: bool,
         seed_mode: bool,
     ) -> Result<(InfoHash, String), String> {
-        let meta = metainfo::parse_torrent_file(torrent_path)?;
+        let bytes = std::fs::read(torrent_path)
+            .map_err(|e| format!("read {}: {}", torrent_path, e))?;
+        self.add_torrent_bytes(&bytes, save_path, stopped, seed_mode)
+    }
+
+    /// Add a torrent from metainfo already in hand.
+    ///
+    /// ⚠️ The caller must have written the blob to the store FIRST. The engine
+    /// reads its piece hashes from there, so a torrent added before its row
+    /// exists cannot verify anything -- and an add triggers a recheck.
+    pub fn add_torrent_bytes(
+        &self,
+        bytes: &[u8],
+        save_path: &str,
+        stopped: bool,
+        seed_mode: bool,
+    ) -> Result<(InfoHash, String), String> {
+        let meta = metainfo::parse_torrent_bytes(bytes)?;
         let ih = meta.info_hash;
         let name = meta.name.clone();
 
@@ -381,15 +404,8 @@ impl TorrentManager {
             return Err("torrent already added".into());
         }
 
-        let state = TorrentState::new(
-            meta,
-            save_path.into(),
-            torrent_path.to_string(),
-            seed_mode,
-        );
-        let _ = state.policy.set(self.policy.clone());
-        let _ = state.limiter.set(self.limiter.clone());
-        let _ = state.completed_tx.set(self.completed_tx.clone());
+        let state = TorrentState::new(meta, save_path.into(), seed_mode);
+        self.adopt(&state);
 
         if stopped {
             state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
@@ -404,7 +420,6 @@ impl TorrentManager {
         // Save resume data
         let rd = fastresume::ResumeData {
             info_hash: hex_encode(&ih),
-            torrent_path: torrent_path.to_string(),
             save_path: save_path.to_string(),
             seed_mode,
             paused: stopped,
@@ -596,24 +611,100 @@ impl TorrentManager {
         }
     }
 
-    /// The metainfo of one resume record, from the source that can be trusted.
+    /// The metainfo of one resume record. The store, and nothing else.
     ///
-    /// The STORE first, keyed by the record's own info-hash: a blob found that
-    /// way is the right torrent by construction -- the key IS the identity, so
-    /// there is nothing to disagree with. The file is the fallback, for a
-    /// record the store has never heard of (an install predating the store, or
-    /// a torrent added while it was unavailable), and it stays subject to
-    /// `record_matches_file`.
+    /// Keyed by the record's own info-hash, so what comes back IS the right
+    /// torrent by construction -- the key IS the identity, and there is nothing
+    /// to disagree with.
+    ///
+    /// There is deliberately no fallback to a file. uploads/ held a second copy
+    /// of these same bytes and every runtime path read THAT one, so a torrent
+    /// whose file had gone missing kept asking peers for pieces it could never
+    /// verify -- 19 475 refused pieces in half an hour, measured in production
+    /// on 2026-09-13. A second source that can disagree with the first is not a
+    /// safety net, it is the bug. An install upgrading from before the store
+    /// gets its blobs imported once at boot; see `import_missing_blobs`.
     fn metainfo_for(&self, rd: &fastresume::ResumeData) -> Result<meta::TorrentMeta, String> {
-        if !rd.info_hash.is_empty() {
-            let source = self.blob_source.read().ok().and_then(|s| s.clone());
-            if let Some(source) = source {
-                if let Some(bytes) = source(&rd.info_hash) {
-                    return metainfo::parse_torrent_bytes(&bytes);
+        if rd.info_hash.is_empty() {
+            return Err("resume record has no info-hash".into());
+        }
+        let source = self
+            .blob_source
+            .read()
+            .ok()
+            .and_then(|s| s.clone())
+            .ok_or("no store to read the metainfo from")?;
+        let bytes = source(&rd.info_hash).ok_or("no metainfo in the store")?;
+        metainfo::parse_torrent_bytes(&bytes)
+    }
+
+    /// Hand a freshly built torrent everything its engine owns, including where
+    /// its metainfo comes from.
+    ///
+    /// One place, so a new construction site cannot forget the blob source and
+    /// produce a torrent that silently cannot verify a single piece.
+    fn adopt(&self, state: &meta::TorrentState) {
+        let _ = state.policy.set(self.policy.clone());
+        let _ = state.limiter.set(self.limiter.clone());
+        let _ = state.completed_tx.set(self.completed_tx.clone());
+        if let Some(src) = self.blob_source.read().ok().and_then(|s| s.clone()) {
+            let _ = state.blob_source.set(src);
+        }
+    }
+
+    /// Import into the store every metainfo that exists only as a file.
+    ///
+    /// The one and only place a `.torrent` under uploads/ is still read, and it
+    /// runs once, before resume, on an install coming from a version where the
+    /// file was the authority. After it, the store holds every torrent this
+    /// engine knows about and nothing reads uploads/ ever again.
+    ///
+    /// Driven by the RESUME RECORDS, never by scanning the directory: uploads/
+    /// also holds hundreds of thousands of files belonging to no torrent (the
+    /// 2026-09-11 double-storage mess left 430 831 of them in production), and
+    /// importing those would resurrect junk nobody asked for.
+    ///
+    /// A file is imported only if it IS the torrent the record is keyed by --
+    /// same check as `record_matches_file`, for the same reason: before the V4
+    /// the file was named after whatever the uploading client called it, so one
+    /// path could hold a completely different torrent.
+    ///
+    /// Returns (imported, unrecoverable).
+    pub fn import_missing_blobs(
+        &self,
+        uploads_dir: &std::path::Path,
+        sink: &dyn Fn(&str, &[u8]) -> Result<(), String>,
+    ) -> (usize, usize) {
+        let (Some(db), Some(source)) = (
+            self.state_db.as_ref(),
+            self.blob_source.read().ok().and_then(|s| s.clone()),
+        ) else {
+            return (0, 0);
+        };
+        let (mut imported, mut lost) = (0usize, 0usize);
+        for rd in db.load_all() {
+            if rd.info_hash.is_empty() || source(&rd.info_hash).is_some() {
+                continue;
+            }
+            let path = uploads_dir.join(format!("{}.torrent", rd.info_hash));
+            let Ok(bytes) = std::fs::read(&path) else {
+                lost += 1;
+                continue;
+            };
+            match metainfo::parse_torrent_bytes(&bytes) {
+                Ok(m) if hex_encode(&m.info_hash) == rd.info_hash => {
+                    match sink(&rd.info_hash, &bytes) {
+                        Ok(()) => imported += 1,
+                        Err(e) => {
+                            warn!("[migrate] {}: {}", &rd.info_hash[..8], e);
+                            lost += 1;
+                        }
+                    }
                 }
+                _ => lost += 1,
             }
         }
-        metainfo::parse_torrent_file(&rd.torrent_path)
+        (imported, lost)
     }
 
     /// The records this engine refused at startup. Empty on a healthy library.
@@ -639,9 +730,14 @@ impl TorrentManager {
             let t_parse = std::time::Instant::now();
             let parsed = self.metainfo_for(&rd);
             parse_time += t_parse.elapsed();
-            if let Ok(md) = std::fs::metadata(&rd.torrent_path) {
-                parse_bytes += md.len();
-            }
+            parse_bytes += self
+                .blob_source
+                .read()
+                .ok()
+                .and_then(|s| s.clone())
+                .and_then(|src| src(&rd.info_hash))
+                .map(|b| b.len() as u64)
+                .unwrap_or(0);
             let meta = match parsed {
                 Ok(m) => m,
                 Err(e) => {
@@ -673,11 +769,14 @@ impl TorrentManager {
             //
             // An empty key is a record from before the field existed: nothing
             // to disagree with, so it is trusted as before.
+            // Now that the metainfo comes from the store keyed by this very
+            // hash, the two can only disagree if the store itself filed a blob
+            // under the wrong key. Kept as the integrity check it has become:
+            // cheap, and the one thing that would catch a corrupted row.
             if !record_matches_file(&rd.info_hash, &ih) {
                 warn!(
-                    "[resume] skip {}: {} holds {} instead -- record and file disagree",
+                    "[resume] skip {}: the stored metainfo is {} instead -- the store key and the blob disagree",
                     &rd.info_hash[..8.min(rd.info_hash.len())],
-                    rd.torrent_path,
                     &hex_encode(&ih)[..8],
                 );
                 mismatched += 1;
@@ -703,15 +802,12 @@ impl TorrentManager {
             let state = TorrentState::new_with_times(
                 meta,
                 rd.save_path.into(),
-                rd.torrent_path,
                 rd.seed_mode,
                 Some(rd.added_time),
                 Some(rd.completed_time),
                 !rd.seed_mode && !already_complete,
             );
-            let _ = state.policy.set(self.policy.clone());
-        let _ = state.limiter.set(self.limiter.clone());
-        let _ = state.completed_tx.set(self.completed_tx.clone());
+            self.adopt(&state);
             // The resume record wins over the .torrent: an edited list lives
             // here, and the file on disk may be the original one. Empty means
             // the torrent predates tracker editing, so the parsed list stands.
@@ -963,7 +1059,6 @@ impl TorrentManager {
         };
         fastresume::ResumeData {
             info_hash: hex_encode(&t.info_hash),
-            torrent_path: t.torrent_file_path.clone(),
             save_path: t.save_path.read().to_string_lossy().to_string(),
             seed_mode: t.seed_mode,
             paused: t.is_paused.load(Ordering::Relaxed),
@@ -1036,8 +1131,9 @@ impl TorrentManager {
     /// move) the payload files, and for removing the torrent from the source
     /// engine afterwards: this end only adopts.
     pub fn import_state(&self, rd: &fastresume::ResumeData) -> Result<(InfoHash, String), String> {
-        let meta = metainfo::parse_torrent_file(&rd.torrent_path)
-            .map_err(|e| format!("import: parse {}: {}", rd.torrent_path, e))?;
+        let meta = self
+            .metainfo_for(rd)
+            .map_err(|e| format!("import: {}: {}", rd.info_hash, e))?;
         let ih = meta.info_hash;
         let name = meta.name.clone();
         if self.torrents.contains_key(&ih) {
@@ -1049,15 +1145,12 @@ impl TorrentManager {
         let state = TorrentState::new_with_times(
             meta,
             rd.save_path.clone().into(),
-            rd.torrent_path.clone(),
             rd.seed_mode,
             Some(rd.added_time),
             Some(rd.completed_time),
             !rd.seed_mode && !already_complete,
         );
-        let _ = state.policy.set(self.policy.clone());
-        let _ = state.limiter.set(self.limiter.clone());
-        let _ = state.completed_tx.set(self.completed_tx.clone());
+        self.adopt(&state);
         // An edited tracker list lives in the record, not in the .torrent on
         // disk. Dropping it here would silently undo the edit on every move.
         if !rd.trackers.is_empty() {
@@ -1393,7 +1486,6 @@ impl TorrentManager {
         let bitfield = hex_encode_bytes(&picker.lock().unwrap().export_bitfield());
         let rd = fastresume::ResumeData {
             info_hash: hex_encode(&ih),
-            torrent_path: t.torrent_file_path.clone(),
             save_path: t.save_path.read().to_string_lossy().to_string(),
             seed_mode: t.seed_mode,
             paused: t.is_paused.load(Ordering::Relaxed),

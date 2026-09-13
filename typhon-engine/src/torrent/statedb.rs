@@ -163,7 +163,7 @@ impl StateDb {
             Err(e) => e.into_inner(),
         };
         let mut stmt = match conn.prepare(
-            "SELECT info_hash, torrent_path, save_path, seed_mode, paused,
+            "SELECT info_hash, save_path, seed_mode, paused,
                     total_uploaded, total_downloaded, added_time, completed_time,
                     bitfield, trackers, seed_secs
              FROM torrent_state",
@@ -175,20 +175,19 @@ impl StateDb {
             }
         };
         let rows = stmt.query_map([], |row| {
-            let trackers_json: String = row.get(10)?;
+            let trackers_json: String = row.get(9)?;
             Ok(ResumeData {
                 info_hash: row.get(0)?,
-                torrent_path: row.get(1)?,
-                save_path: row.get(2)?,
-                seed_mode: row.get::<_, i64>(3)? != 0,
-                paused: row.get::<_, i64>(4)? != 0,
-                total_uploaded: row.get::<_, i64>(5)? as u64,
-                total_downloaded: row.get::<_, i64>(6)? as u64,
-                added_time: row.get(7)?,
-                completed_time: row.get(8)?,
-                bitfield: row.get(9)?,
+                save_path: row.get(1)?,
+                seed_mode: row.get::<_, i64>(2)? != 0,
+                paused: row.get::<_, i64>(3)? != 0,
+                total_uploaded: row.get::<_, i64>(4)? as u64,
+                total_downloaded: row.get::<_, i64>(5)? as u64,
+                added_time: row.get(6)?,
+                completed_time: row.get(7)?,
+                bitfield: row.get(8)?,
                 trackers: decode_trackers(&trackers_json),
-                seed_secs: row.get(11).unwrap_or(0),
+                seed_secs: row.get(10).unwrap_or(0),
             })
         });
         let rows = match rows {
@@ -234,13 +233,16 @@ impl StateDb {
 
 fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
     conn.execute(
+        // torrent_path is NOT written any more. The column survives in the
+        // schema (NOT NULL DEFAULT '') so an older binary can still read this
+        // file, but nothing reads it back: the metainfo comes from the store,
+        // keyed by info-hash. Dropping the column is a migration of its own.
         "INSERT INTO torrent_state
-            (info_hash, torrent_path, save_path, seed_mode, paused,
+            (info_hash, save_path, seed_mode, paused,
              total_uploaded, total_downloaded, added_time, completed_time,
              bitfield, trackers, seed_secs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(info_hash) DO UPDATE SET
-            torrent_path=excluded.torrent_path,
             save_path=excluded.save_path,
             seed_mode=excluded.seed_mode,
             paused=excluded.paused,
@@ -253,7 +255,6 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             seed_secs=excluded.seed_secs",
         params![
             rd.info_hash,
-            rd.torrent_path,
             rd.save_path,
             rd.seed_mode as i64,
             rd.paused as i64,
@@ -290,7 +291,6 @@ mod tests {
     fn rec(ih: &str, up: u64) -> ResumeData {
         ResumeData {
             info_hash: ih.to_string(),
-            torrent_path: format!("/uploads/{}.torrent", ih),
             save_path: "/data/x".into(),
             seed_mode: true,
             paused: false,
@@ -300,6 +300,7 @@ mod tests {
             completed_time: 200,
             bitfield: "ff00".into(),
             trackers: vec![vec!["http://t/announce".into()]],
+            seed_secs: 0,
         }
     }
 
@@ -319,7 +320,6 @@ mod tests {
         assert_eq!(all.len(), 1);
         let r = &all[0];
         assert_eq!(r.info_hash, "aa");
-        assert_eq!(r.torrent_path, "/uploads/aa.torrent");
         assert_eq!(r.save_path, "/data/x");
         assert!(r.seed_mode);
         assert!(!r.paused);

@@ -19,6 +19,58 @@ Two ways to title a new entry:
 
 ## Unreleased -- a refused reannounce says so
 
+### The store is the only place a .torrent lives
+
+The metainfo existed twice: a blob in the store, keyed by info-hash, and a file
+in `uploads/`. 4.24.0 made the store authoritative -- but only for the resume
+path. Every other runtime path still read the file, and only the file.
+
+Measured in production on 2026-09-13: 262 torrents had a row in the store and no
+file. Seven of them were downloading. Each one pulled a piece off a peer, could
+not load its hash table, threw the piece away, and asked again -- **19 475
+refused pieces in thirty minutes, ~4.7 MB/s taken from other people's swarms and
+discarded**. No error surfaced anywhere a user would look, and the ratio was
+untouched, because nothing was ever written.
+
+`uploads/` was therefore still load-bearing, and deleting it -- which had been
+planned, and deferred by luck -- would have broken piece verification and BEP 9
+metadata serving for all 296 090 torrents at once.
+
+Now there is one copy and one authority:
+
+- `TorrentState::piece_hash` and `serve_metadata_block` read the store, keyed by
+  the torrent's own info-hash. The key IS the identity, so what comes back
+  cannot be a different torrent;
+- **no fallback to a file.** A second source that can disagree with the first is
+  not a safety net, it is the bug. `piece_hashes_from_file` and
+  `info_dict_from_file` are now `#[cfg(test)]`, so the compiler guarantees no
+  production path reads a `.torrent` off disk;
+- `TorrentState` no longer carries a `torrent_file_path`, and `ResumeData` no
+  longer carries a `torrent_path`. The `state.db` column survives with its
+  `DEFAULT ''` so an older binary can still read the file; nothing writes it;
+- `add_torrent_bytes` takes the metainfo directly. Three call sites -- the
+  node duplicate, the graduation job, and the archive importer -- used to read
+  a blob out of the store, write it to a file, and have it parsed back off disk;
+- ⚠️ at ingress the store row is written **before** the engine is told. An add
+  triggers a recheck, so in the other order the torrent would verify against a
+  row that did not exist yet and refuse every piece of itself;
+- moving a torrent between engines no longer refuses when the file is absent,
+  and `adopt()` hands every newly built torrent its blob source in one place, so
+  a new construction site cannot forget it and produce a torrent that silently
+  cannot verify anything.
+
+On startup, any torrent whose metainfo is not yet in the store is imported from
+`uploads/` once, then never read again. The import is driven by the resume
+records, never by scanning the directory: `uploads/` also holds 430 831 files
+belonging to no torrent, and importing those would resurrect junk. A file is
+accepted only if it IS the torrent its record is keyed by -- before the V4 the
+file was named after whatever the uploading client called it, so one path could
+hold a completely different torrent.
+
+Also fixed here: the `statedb` test builder was missing `seed_secs` and the
+`torrent_to_json` bench was missing `url_list`, so `cargo check --all-targets`
+did not pass before this change.
+
 ### Seeding time is measured instead of guessed
 
 `seeding_time` was the age of the completion: `now - completed_time`. A torrent
