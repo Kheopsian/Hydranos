@@ -360,8 +360,16 @@ async fn main() -> anyhow::Result<()> {
             engine.manager.clone(),
             state.config_handle(),
             race_path,
+            engine.id.clone(),
         );
-        workers::spawn_graduation_policy(
+    }
+
+    // The transit sweep runs on EVERY engine, not only the race ones: a
+    // graduation target lives in the hoard by definition, so scoping this the
+    // way the drain is scoped would mean nothing ever leaves the transit area.
+    // What keeps it safe is the category scope, not the engine scope.
+    for engine in state.engines.engines().iter() {
+        workers::spawn_transit_sweep(
             state.clone(),
             engine.manager.clone(),
             state.config_handle(),

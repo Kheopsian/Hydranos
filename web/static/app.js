@@ -4962,11 +4962,8 @@ async function showCategoryForm(name = null) {
             : "";
     }
     _populateGraduateSelect(allCats, cat ? cat.graduate_to : "", name);
-    // "keep" when the category says nothing: the default has to be the one
-    // that touches nothing, or opening a form and saving it would arm a
-    // deletion nobody asked for.
-    const da = document.getElementById("cat-drain-action");
-    if (da) da.value = (cat && cat.drain_action) || "keep";
+    const tr = document.getElementById("cat-transit");
+    if (tr) tr.checked = !!(cat && cat.transit);
     _catModeChanged();
     await _renderCatPlacement(cat);
 }
@@ -4980,10 +4977,12 @@ function _populateGraduateSelect(cats, current, selfName) {
 }
 function _catModeChanged() {
     const race = document.getElementById("cat-mode").value === "race";
-    const dw = document.getElementById("cat-drain-wrap");
-    if (dw) dw.style.display = race ? "" : "none";
     const w = document.getElementById("cat-graduate-wrap");
     if (w) w.style.display = race ? "" : "none";
+    // Transit is a property of a DESTINATION, so it only makes sense on the
+    // hoard side -- the opposite of the graduate-to picker just above.
+    const tw = document.getElementById("cat-transit-wrap");
+    if (tw) tw.style.display = race ? "none" : "";
 }
 
 // _renderCatPlacement fills #cat-placement with one checkbox + save-path input
@@ -5208,8 +5207,8 @@ async function saveCategory() {
         const minFreeGiB = parseFloat(document.getElementById("cat-min-free").value) || 0;
         const min_free_bytes = Math.max(0, Math.round(minFreeGiB * 1024 * 1024 * 1024));
         const graduate_to = mode === "race" ? (document.getElementById("cat-graduate-to").value || "") : "";
-        const drain_action = mode === "race" ? (document.getElementById("cat-drain-action").value || "keep") : "";
-        const payload = { name, save_path, mode, placement, agents, strategy, graduate_to, drain_action, min_free_bytes };
+        const transit = mode === "hoard" && document.getElementById("cat-transit").checked;
+        const payload = { name, save_path, mode, placement, agents, strategy, graduate_to, transit, min_free_bytes };
         if (_editingCategory) {
             await api(`/api/categories/${encodeURIComponent(_editingCategory)}`, {
                 method: "PUT",
@@ -5915,27 +5914,12 @@ async function loadRacePolicy() {
     _rpSet("rp-enabled", st.enabled, true);
     _rpSet("rp-high", st.high_watermark);
     _rpSet("rp-low", st.low_watermark);
-    _rpSet("rp-minage", st.min_age_minutes);
     _rpSet("rp-interval", st.check_interval);
-    _rpSet("rp-maxage", st.max_age_hours);
-    _rpSet("rp-minratio", st.min_ratio);
     if (!_rpDirty.has("rp-enabled")) {
         const _bd = document.getElementById("rp-body-drain");
         if (_bd) _bd.classList.toggle("off", !st.enabled);
     }
-    if (!_rpDirty.has("rp-ar-enabled")) {
-        const _are = document.getElementById("rp-ar-enabled");
-        if (_are) _are.checked = !!st.age_ratio_enabled;
-        const _bar = document.getElementById("rp-body-ar");
-        if (_bar) _bar.classList.toggle("off", !st.age_ratio_enabled);
-    }
     _rpUpdateDrainBtn();
-    const _mode = (st.age_ratio_mode === "or") ? "or" : "and";
-    const _ea = document.getElementById("rp-mode-and"), _eo = document.getElementById("rp-mode-or");
-    if (_ea && _eo && !_rpDirty.has("__mode__")) { _ea.classList.toggle("on", _mode === "and"); _eo.classList.toggle("on", _mode === "or"); }
-    const _act = (st.age_ratio_action === "hoard") ? "hoard" : "delete";
-    const _ad = document.getElementById("rp-act-delete"), _ah = document.getElementById("rp-act-hoard");
-    if (_ad && _ah && !_rpDirty.has("__action__")) { _ad.classList.toggle("on", _act === "delete"); _ah.classList.toggle("on", _act === "hoard"); }
     _rpLoadGraduations();
 }
 async function _rpLoadGraduations() {
@@ -5951,11 +5935,6 @@ async function _rpLoadGraduations() {
             + `<div class="rp2-grad-pct">${formatBytes(x.copied || 0)} / ${formatBytes(x.total || 0)}</div></div>`;
     }).join("");
 }
-function _rpSetMode(m) {
-    document.getElementById("rp-mode-and").classList.toggle("on", m === "and");
-    document.getElementById("rp-mode-or").classList.toggle("on", m === "or");
-    _rpSave("age_ratio_mode", m);
-}
 function _rpSaveEnabled(on) {
     _rpDirty.add("rp-enabled");
     const b = document.getElementById("rp-body-drain");
@@ -5963,52 +5942,16 @@ function _rpSaveEnabled(on) {
     _rpUpdateDrainBtn();
     _rpSave("enabled", on);
 }
-// Drain now only does something when a policy is on; grey it out otherwise.
-// A threshold of 0 means "no constraint on that axis", not "off", so 0/0 is a
-// working policy that matches everything past the min-age floor.
+// The drain is the only policy left, so the button follows its toggle alone.
+// What a torrent becomes -- deleted or graduated -- is decided by its tracker's
+// seed obligation, not by a setting here.
 function _rpUpdateDrainBtn() {
     const b = document.getElementById("rp-drain-now");
     if (!b) return;
     const en = document.getElementById("rp-enabled");
-    const ar = document.getElementById("rp-ar-enabled");
-    const any = (en && en.checked) || (ar && ar.checked);
-    b.disabled = !any;
-    b.title = any ? "" : t("Enable a policy first");
-    _rpUpdateUnbounded();
-}
-// An unconstrained policy (both thresholds 0) whose action is Delete erases
-// every race torrent past the floor. That is irreversible, so say it plainly
-// before it runs rather than after.
-function _rpUnboundedDelete() {
-    const ar = document.getElementById("rp-ar-enabled");
-    if (!ar || !ar.checked) return false;
-    const num = id => { const e = document.getElementById(id); return e ? parseFloat(e.value) || 0 : 0; };
-    if (num("rp-maxage") > 0 || num("rp-minratio") > 0) return false;
-    const del = document.getElementById("rp-act-delete");
-    return !!(del && del.classList.contains("on"));
-}
-function _rpUpdateUnbounded() {
-    const w = document.getElementById("rp-warn");
-    if (!w) return;
-    if (_rpUnboundedDelete()) {
-        w.textContent = t("Both thresholds are 0, so every race torrent past the keep floor matches, and the action is Delete. Their data will be erased.");
-        w.style.display = "";
-    } else {
-        w.style.display = "none";
-    }
-}
-function _rpSaveAR(on) {
-    _rpDirty.add("rp-ar-enabled");
-    const b = document.getElementById("rp-body-ar");
-    if (b) b.classList.toggle("off", !on);
-    _rpUpdateDrainBtn();
-    _rpSave("age_ratio_enabled", on);
-}
-function _rpSetAction(a) {
-    document.getElementById("rp-act-delete").classList.toggle("on", a === "delete");
-    document.getElementById("rp-act-hoard").classList.toggle("on", a === "hoard");
-    _rpSave("age_ratio_action", a);
-    _rpUpdateUnbounded();
+    const on = !!(en && en.checked);
+    b.disabled = !on;
+    b.title = on ? "" : t("Enable a policy first");
 }
 let _rpDirty = new Set();
 function _rpSet(id, val, isCheck) {
@@ -6020,17 +5963,13 @@ function _rpSet(id, val, isCheck) {
     if (isCheck) el.checked = !!val; else el.value = val;
 }
 async function _rpSave(key, value) {
-    const _idmap = { high_watermark_pct: "rp-high", low_watermark_pct: "rp-low", min_age_minutes: "rp-minage", check_interval_seconds: "rp-interval", enabled: "rp-enabled", max_age_hours: "rp-maxage", min_ratio: "rp-minratio", add_block_enabled: "rp-block", reserve_free_gb: "rp-reserve" };
+    const _idmap = { high_watermark_pct: "rp-high", low_watermark_pct: "rp-low", check_interval_seconds: "rp-interval", enabled: "rp-enabled", add_block_enabled: "rp-block", reserve_free_gb: "rp-reserve" };
     if (_idmap[key]) _rpDirty.add(_idmap[key]);
-    if (key === "age_ratio_mode") _rpDirty.add("__mode__");
-    if (key === "age_ratio_action") _rpDirty.add("__action__");
     try {
         await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }) });
         document.getElementById("rp-apply").style.display = "";
     } catch (e) { hydraNotify(t("Save failed: {msg}", { msg: e.message })); }
-    // Thresholds decide whether the age/ratio policy can fire at all, so the
-    // Drain now button has to be re-evaluated after any field edit too.
     _rpUpdateDrainBtn();
 }
 async function _rpRestart() {
@@ -6038,8 +5977,6 @@ async function _rpRestart() {
     try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
 }
 async function _rpDrainNow(btn) {
-    if (_rpUnboundedDelete() &&
-        !await hydraConfirm(t("Both thresholds are 0, so this deletes EVERY race torrent older than the keep floor, data included.") + "\n\n" + t("Run it?"))) return;
     btn.disabled = true; const t = btn.textContent; btn.textContent = window.t("Draining…");
     let msg;
     try {
@@ -6600,7 +6537,6 @@ const _SETTINGS_DESC = {
     high_watermark_pct: "Disk-usage % that triggers purging old race data.",
     low_watermark_pct: "Purge stops once disk usage drops to this %.",
     race_path: "Filesystem path monitored/purged for race data.",
-    min_age_minutes: "Minimum age before a race torrent can be purged (minutes).",
     // [notify]
     webhook_url: "Discord webhook URL for notifications.",
     // generique
@@ -6662,7 +6598,7 @@ const _SETTINGS_DEFAULT = {
     "arr_cleanup::min_score": 0.6,
     "race_drain::enabled": true, "race_drain::check_interval_seconds": 60,
     "race_drain::high_watermark_pct": 95, "race_drain::low_watermark_pct": 85,
-    "race_drain::race_path": "/race", "race_drain::min_age_minutes": 10,
+    "race_drain::race_path": "/race",
 };
 const _SETTINGS_ENUM = {
     strategy: ["rarity_captive"],

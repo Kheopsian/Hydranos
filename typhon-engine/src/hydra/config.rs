@@ -128,23 +128,11 @@ pub struct RaceDrain {
     #[serde(default)]
     pub add_block_enabled: bool,
     #[serde(default)]
-    pub age_ratio_action: String,
-    #[serde(default)]
-    pub age_ratio_enabled: bool,
-    #[serde(default)]
-    pub age_ratio_mode: String,
-    #[serde(default)]
     pub check_interval_seconds: i64,
     #[serde(default)]
     pub high_watermark_pct: i64,
     #[serde(default)]
     pub low_watermark_pct: i64,
-    #[serde(default)]
-    pub max_age_hours: i64,
-    #[serde(default)]
-    pub min_age_minutes: i64,
-    #[serde(default)]
-    pub min_ratio: f64,
     #[serde(default)]
     pub reserve_free_gb: i64,
     #[serde(default)]

@@ -1668,20 +1668,24 @@ struct Category {
     save_path: String,
     #[serde(default)]
     mode: String,
+    /// Where a torrent filed here goes when it has to leave the race disk but
+    /// still owes its tracker seeding time.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     graduate_to: String,
-    /// What the race drain may do with a torrent filed here.
+    /// TRANSIT: a torrent that lands here is deleted once its tracker's seed
+    /// obligation is paid.
     ///
-    /// "keep" (the default, and what every existing category gets), "delete",
-    /// or "graduate" -- which moves the payload to `graduate_to`'s storage.
+    /// A property of the DESTINATION, not a choice made by the source: some
+    /// categories are a waiting room where a torrent finishes owing its time,
+    /// others are a library it should never leave. Nothing else can tell the
+    /// two apart -- both are hoard categories something graduates into.
     ///
-    /// The DESTINY, chosen by the operator. What may not be done YET is the
-    /// tracker's `min_seed_hours`, and the two are deliberately apart: a
-    /// category that says "delete" still cannot delete a torrent whose tracker
-    /// is owed seeding time. Default "keep" so nothing an operator already
-    /// configured becomes deletable because this shipped.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    drain_action: String,
+    /// ⚠ Defaults to FALSE, and that direction is deliberate. A wrong `true`
+    /// erases a library; a wrong `false` lets a waiting room grow, which costs
+    /// disk on the pool and gets noticed. The race disk drains either way,
+    /// because draining it is the MOVE, not the later deletion.
+    #[serde(default, skip_serializing_if = "is_false")]
+    transit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agents: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3540,9 +3544,6 @@ async fn get_drain_status(
     let (total, used, pct) = disk_usage(path);
     Json(serde_json::json!({
         "add_block_enabled": d.add_block_enabled,
-        "age_ratio_action": d.age_ratio_action,
-        "age_ratio_enabled": d.age_ratio_enabled,
-        "age_ratio_mode": d.age_ratio_mode,
         "check_interval": d.check_interval_seconds,
         "disk_total": total,
         "disk_used": used,
@@ -3551,9 +3552,6 @@ async fn get_drain_status(
         "high_watermark": d.high_watermark_pct,
         "last_drain": 0,
         "low_watermark": d.low_watermark_pct,
-        "max_age_hours": d.max_age_hours,
-        "min_age_minutes": d.min_age_minutes,
-        "min_ratio": crate::row::num_json(d.min_ratio),
         "reserve_free_gb": d.reserve_free_gb,
         "running": false,
         "stats": {"bytes_freed": 0, "checks": 0, "drains_triggered": 0, "torrents_removed": 0},
@@ -5274,15 +5272,22 @@ fn indent_two<T: serde::Serialize>(value: &T) -> String {
 struct StoredCategory {
     save_path: String,
     mode: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    graduate_to: String,
+    /// Where this category's torrents go when they have to leave the race disk
+    /// but still owe their tracker seeding time. Empty means there is nowhere
+    /// to move them, so under pressure they can only be deleted once the
+    /// obligation is paid.
+    ///
     /// ⚠ A field added to `Category` and not here is SILENTLY DROPPED: this is
     /// the struct the write path normalises through, and anything it does not
     /// know about disappears on the next save. Measured: drain_action came back
     /// from the API as absent after a PUT that carried it, with a 200 and no
     /// error anywhere.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    drain_action: String,
+    graduate_to: String,
+    /// See `Category::transit`. Listed here because of the warning above: left
+    /// out, a transit area would quietly stop being one at the next save.
+    #[serde(default, skip_serializing_if = "is_false")]
+    transit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agents: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9021,7 +9026,7 @@ async fn delete_torrent(
 /// to 100% while every client believed it had cleaned up after itself.
 ///
 /// Returns how many copies were dropped.
-fn remove_one_torrent(
+pub(crate) fn remove_one_torrent(
     state: &AppState,
     hash: &str,
     sessions: &[String],
@@ -9224,20 +9229,75 @@ async fn post_torrent_graduate(
 ///
 /// "keep" when the category says nothing, which is every category that existed
 /// before this shipped.
-pub(crate) fn category_drain_action(state: &AppState, hash: &str) -> String {
-    let cat = {
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Every configured category.
+///
+/// Same source and same precedence as `category_entry`: the store document
+/// first, the file only when the store has nothing. Reading them from two
+/// different places is how the two would start to disagree.
+fn all_categories(state: &AppState) -> Vec<Category> {
+    let cfg = state.cfg();
+    let raw = {
         let store = match state.store.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        store.category_of(hash).unwrap_or_default()
-    };
-    if cat.is_empty() {
-        return "keep".into();
+        store.meta_doc("categories")
     }
-    category_entry(state, &cat)
-        .map(|c| if c.drain_action.is_empty() { "keep".to_string() } else { c.drain_action })
-        .unwrap_or_else(|| "keep".into())
+    .filter(|doc| !doc.is_empty())
+    .or_else(|| {
+        let path = std::path::Path::new(&cfg.daemon.data_dir).join("categories.json");
+        std::fs::read_to_string(path).ok()
+    });
+    let Some(raw) = raw else { return Vec::new() };
+    // ⚠ `name` is NOT in the stored document -- it is the map KEY, and the
+    // struct defaults it to "". Returning the values as-is hands back a list of
+    // nameless categories, and every caller that matches on the name silently
+    // matches nothing. `category_entry` fills it in for the same reason.
+    serde_json::from_str::<std::collections::BTreeMap<String, Category>>(&raw)
+        .map(|m| {
+            m.into_iter()
+                .map(|(k, mut c)| {
+                    c.name = k;
+                    c
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The categories some other category graduates INTO.
+///
+/// A transit area, not a library: a torrent lands there to finish the seeding
+/// time it still owes, and is deleted once it has. Scoped deliberately -- the
+/// same sweep applied to every hoard category would delete the whole library.
+pub(crate) fn graduation_target_categories(state: &AppState) -> std::collections::HashSet<String> {
+    let cats = all_categories(state);
+    // Named as a destination by somebody...
+    let destinations: std::collections::HashSet<String> = cats
+        .iter()
+        .filter(|c| !c.graduate_to.is_empty())
+        .map(|c| c.graduate_to.clone())
+        .collect();
+    // ...AND marked as a waiting room rather than a library. Both conditions,
+    // on purpose: `transit` ticked on a category nothing graduates into is
+    // then harmless, and the cost of being wrong here is someone's library.
+    cats.into_iter()
+        .filter(|c| c.transit && destinations.contains(&c.name))
+        .map(|c| c.name)
+        .collect()
+}
+
+/// The category a torrent is filed under, or empty.
+pub(crate) fn category_of_hash(state: &AppState, hash: &str) -> String {
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    store.category_of(hash).unwrap_or_default()
 }
 
 /// The graduation target of this torrent's category: (engine, category, path).
@@ -9250,7 +9310,7 @@ pub(crate) fn category_graduation(state: &AppState, hash: &str) -> Option<(Strin
         store.category_of(hash).unwrap_or_default()
     };
     let entry = category_entry(state, &cat)?;
-    if entry.drain_action != "graduate" || entry.graduate_to.is_empty() {
+    if entry.graduate_to.is_empty() {
         return None;
     }
     let target = category_entry(state, &entry.graduate_to)?;
