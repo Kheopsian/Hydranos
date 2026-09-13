@@ -5911,15 +5911,26 @@ const RP_TIP =
     + "4. A torrent that still owes time and whose category has no destination is <b>stuck</b>: neither deletable nor movable. It is logged by name.<br>"
     + "The minimum is declared <b>per tracker</b>, in the Trackers tab, not here.";
 
+// Appended per card: the tick is global and needs a restart, so it is stated
+// here rather than shown as a field among thresholds that apply immediately.
+function _rpTip() {
+    const s = _rpDefaults || {};
+    return RP_TIP + "<br><br>" + t("Checked every {n}s, and the default for a new volume is {hi}% / {lo}%. Both are in Config.",
+        { n: s.check_interval ?? "?", hi: s.default_high_watermark ?? "?", lo: s.default_low_watermark ?? "?" });
+}
+
 let _rpVols = [];
+let _rpDefaults = {};
+// Which volumes have their history open, by id. The panel polls and rebuilds
+// its cards, so without this an open history closes itself a second later --
+// under the hand of whoever opened it.
+let _rpHistOpen = new Set();
 async function loadRacePolicy() {
     let st;
     try { st = await api("/api/drain/status"); } catch (e) { return; }
     const box = document.getElementById("rp-volumes");
     if (!box) return;
-    _rpSet("rp-interval", st.check_interval);
-    const note = document.getElementById("rp-default-note");
-    if (note) note.textContent = t("default {hi}% / {lo}%", { hi: st.default_high_watermark, lo: st.default_low_watermark });
+    _rpDefaults = st;
     _rpVols = st.volumes || [];
     if (!_rpVols.length) {
         box.innerHTML = '<div class="rp2"><div class="rp2-row"><span class="rp2-disk">'
@@ -5931,6 +5942,7 @@ async function loadRacePolicy() {
     // markup while a threshold is half typed would eat the edit.
     if (box.contains(document.activeElement)) return;
     box.innerHTML = _rpVols.map((v, i) => _rpVolCard(v, i)).join("");
+    _rpVols.forEach((v, i) => { if (_rpHistOpen.has(v.id)) _rpRenderHist(i); });
     _rpLoadGraduations();
 }
 // A graduation copies for minutes. Showing it only in the log means the panel
@@ -5962,6 +5974,7 @@ function _rpVolCard(v, i) {
     return '<div class="card vol-card">'
         + "<h3><span>" + esc(v.id) + '</span><span class="cap">' + formatBytes(v.total || 0) + "</span>"
         + '<div class="rp2-spacer"></div>'
+        + '<button class="rp2-btn ghost" onclick="_rpToggleHist(' + i + ')">' + t("History") + "</button>"
         + '<button class="rp2-btn" onclick="_rpVolDrain(this,' + i + ')">' + t("Drain now") + "</button></h3>"
         + '<div class="card-body">'
         + '<div class="rp2-gauge"><div class="rp2-fill" style="width:' + pct.toFixed(1) + "%" + fill + '"></div>'
@@ -5976,7 +5989,7 @@ function _rpVolCard(v, i) {
         + '<div class="rp2-row"><div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox"'
         + (v.enabled ? " checked" : "") + ' onchange="_rpVolSave(' + i + ',\'enabled\',this.checked)">'
         + '<span class="rp2-sl"></span></label>' + t("Auto drain")
-        + '<span class="rp2-info">i<span class="rp2-tip">' + RP_TIP + "</span></span></div>"
+        + '<span class="rp2-info">i<span class="rp2-tip">' + _rpTip() + "</span></span></div>"
         + '<div class="rp2-body' + inh + '" style="flex-wrap:nowrap">'
         + '<div class="rp2-f">' + t("start") + ' <input type="number" min="1" max="100" value="' + (v.high_watermark || 0)
         + '" onchange="_rpVolSave(' + i + ',\'high_watermark\',parseInt(this.value))">%</div>'
@@ -5985,6 +5998,7 @@ function _rpVolCard(v, i) {
         + '<span class="abs">' + t("that is {at}, back to {back}", { at: at, back: back }) + "</span>"
         + "</div></div>"
         + '<div class="rp2-row rp2-drain-result" id="rp-res-' + i + '" style="display:none"></div>'
+        + '<div class="rp2-hist" id="rp-hist-' + i + '" style="display:none"></div>'
         + "</div></div>";
 }
 // Saved against the VOLUME, and it applies on the next tick: the daemon reads
@@ -6039,37 +6053,33 @@ function _rpDrainMsg(r) {
     if (r.stuck) s += " " + t("({n} stuck: still owes seeding time and has nowhere to go)", { n: r.stuck });
     return s.replace("&middot;", "·");
 }
-let _rpDirty = new Set();
-function _rpSet(id, val) {
-    const el = document.getElementById(id);
-    if (!el || _rpDirty.has(id) || el === document.activeElement) return;
-    el.value = val;
+function _rpToggleHist(i) {
+    const v = _rpVols[i];
+    if (!v) return;
+    if (_rpHistOpen.has(v.id)) _rpHistOpen.delete(v.id); else _rpHistOpen.add(v.id);
+    _rpRenderHist(i);
 }
-async function _rpSave(key, value) {
-    _rpDirty.add("rp-interval");
-    try {
-        await api("/api/settings", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }),
-        });
-        document.getElementById("rp-apply").style.display = "";
-    } catch (e) { hydraNotify(t("Save failed: {msg}", { msg: e.message })); }
-}
-async function _rpRestart() {
-    if (!await hydraConfirm(t("Restart Hydranos now to apply the check interval?"))) return;
-    try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
-}
-async function _rpToggleHist() {
-    const box = document.getElementById("rp-hist");
-    if (box.style.display !== "none") { box.style.display = "none"; return; }
+async function _rpRenderHist(i) {
+    const v = _rpVols[i];
+    const box = document.getElementById("rp-hist-" + i);
+    if (!box || !v) return;
+    if (!_rpHistOpen.has(v.id)) { box.style.display = "none"; return; }
     let h;
     try { h = await api("/api/drain/history"); } catch (e) { h = []; }
-    if (h && h.length) {
-        box.innerHTML = "<table><thead><tr><th>When</th><th>Volume</th><th>Before</th><th>After</th><th>Freed</th><th>Deleted</th><th>Graduated</th><th>Stuck</th></tr></thead><tbody>" +
-            h.map(d => `<tr><td>${new Date((d.timestamp || 0) * 1000).toLocaleString()}</td><td>${esc(d.volume || "")}</td><td>${d.before_pct ?? 0}%</td><td>${d.after_pct ?? 0}%</td><td>${formatBytes(d.freed || 0)}</td><td>${d.deleted || 0}</td><td>${d.graduated || 0}</td><td>${d.stuck || 0}</td></tr>`).join("") +
-            "</tbody></table>";
+    // Filtered here rather than server-side: the list is capped at 50 rows, and
+    // one request serves every card instead of one per open.
+    h = (h || []).filter(d => d.volume === v.id);
+    if (h.length) {
+        box.innerHTML = "<table><thead><tr><th>" + t("When") + "</th><th>" + t("Before") + "</th><th>"
+            + t("After") + "</th><th>" + t("Freed") + "</th><th>" + t("Deleted") + "</th><th>"
+            + t("Graduated") + "</th><th>" + t("Stuck") + "</th></tr></thead><tbody>"
+            + h.map(d => "<tr><td>" + new Date((d.timestamp || 0) * 1000).toLocaleString() + "</td><td>"
+                + (d.before_pct ?? 0) + "%</td><td>" + (d.after_pct ?? 0) + "%</td><td>"
+                + formatBytes(d.freed || 0) + "</td><td>" + (d.deleted || 0) + "</td><td>"
+                + (d.graduated || 0) + "</td><td>" + (d.stuck || 0) + "</td></tr>").join("")
+            + "</tbody></table>";
     } else {
-        box.innerHTML = '<div class="rp-muted" style="font-size:12px">No drains yet.</div>';
+        box.innerHTML = '<div class="rp2-disk" style="padding:8px 0">' + t("No drain on this volume yet.") + "</div>";
     }
     box.style.display = "";
 }
@@ -6579,7 +6589,6 @@ const _SETTINGS_DESC = {
     check_interval_seconds: "How often disk usage is checked (seconds).",
     high_watermark_pct: "Disk-usage % that triggers purging old race data.",
     low_watermark_pct: "Purge stops once disk usage drops to this %.",
-    race_path: "Filesystem path monitored/purged for race data.",
     // [notify]
     webhook_url: "Discord webhook URL for notifications.",
     // generique
@@ -6641,7 +6650,6 @@ const _SETTINGS_DEFAULT = {
     "arr_cleanup::min_score": 0.6,
     "race_drain::enabled": true, "race_drain::check_interval_seconds": 60,
     "race_drain::high_watermark_pct": 95, "race_drain::low_watermark_pct": 85,
-    "race_drain::race_path": "/race",
 };
 const _SETTINGS_ENUM = {
     strategy: ["rarity_captive"],

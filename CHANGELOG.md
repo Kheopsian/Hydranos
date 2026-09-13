@@ -51,6 +51,15 @@ again on the next tick.
   sum of the declared torrent sizes. A bench pass claimed 8 MiB and the disk
   gave back 4: one of the two rows was a ghost whose data was already gone.
 
+- the panel has no global row left. `check` is the worker tick: global, and it
+  needs a restart, so it sits in Config with the rest of `default.toml` and the
+  tooltip names its value. History moved into each card and shows that volume's
+  passes. `race_path` is gone from the Config screen and from the shipped
+  `default.toml` too -- a setting the daemon no longer reads must not stay
+  editable.
+- an open history survives the panel's refresh: the open volumes are kept by id,
+  not in the DOM the poll rebuilds.
+
 **`POST /api/drain/now` was a stub**: it answered `no_drain_needed` without
 looking at a disk, so the Drain now button had never drained anything and said
 so in a way that read like a result. It runs the pass now, scoped to
