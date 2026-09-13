@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.1">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.2">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -220,20 +220,15 @@
                  several disks is what let it report pressure on one and delete
                  on another. -->
             <div class="cards vol-cards" id="rp-volumes"></div>
-            <div class="rp2" id="race-policy">
-                <div class="rp2-row">
-                    <div class="rp2-lbl">Every volume</div>
-                    <div class="rp2-body">
-                        <div class="rp2-f dim">check <input type="number" id="rp-interval" min="5" onchange="_rpSave('check_interval_seconds', parseInt(this.value))">s</div>
-                        <span class="rp2-disk" id="rp-default-note"></span>
-                    </div>
-                    <div class="rp2-spacer"></div>
-                    <button class="rp2-btn ghost" id="rp-apply" style="display:none" onclick="_rpRestart()">Apply &amp; restart</button>
-                    <button class="rp2-btn ghost" onclick="_rpToggleHist()">History</button>
-                </div>
-                <div class="rp2-grad" id="rp-grad"></div>
-                <div class="rp2-hist" id="rp-hist" style="display:none"></div>
-            </div>
+            <!-- No global row under the cards. `check` is the worker's tick:
+                 global, restart-required, set once. Sitting it beside per-volume
+                 thresholds that apply on the next tick made two different kinds
+                 of setting look like one, and dragged an "Apply & restart"
+                 button into a panel where nothing else needs a restart. It
+                 lives in Config with the rest of default.toml; the tooltip
+                 names its value. History moved INTO each card, where it can be
+                 about that volume. -->
+            <div id="rp-grad"></div>
             <!-- Race is served whole to the browser and rendered whole, so this
                  filter is client-side: the rows are already here, and a round
                  trip would buy nothing at this tier's size. It shares

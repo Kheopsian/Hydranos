@@ -144,7 +144,6 @@ enabled = true
 check_interval_seconds = 60
 high_watermark_pct = 95
 low_watermark_pct = 85
-race_path = "/race"
 min_age_minutes = 10
 
 # Optional per-tracker announce passkey override (host substring -> passkey).
