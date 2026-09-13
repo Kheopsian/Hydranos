@@ -19,6 +19,51 @@ Two ways to title a new entry:
 
 ## Unreleased -- a refused reannounce says so
 
+### The drain applies a decision instead of taking one
+
+What happens to a race torrent under disk pressure is a property of the
+TORRENT, not a switch: its tracker is owed seeding time or it is not.
+
+- obligation met -> deleted, the ratio is earned;
+- obligation not met -> graduated to the category's `graduate_to`, where it
+  finishes paying, and is deleted there once it has.
+
+`drain_action` (keep/delete/graduate) is gone from the category, the API and the
+form. It was a deployment precaution -- *"shipping this deletes nothing that was
+not already marked for deletion"* -- that became a permanent rule, and combined
+with "an undeclared obligation protects" it made the drain a guaranteed no-op:
+measured in production, `undeclared=532` out of 532 while the disk sat at 99%.
+An undeclared tracker still never gets a torrent deleted, but it no longer
+blocks: the torrent leaves the SSD by moving.
+
+The two halves used to be separate workers that ignored each other, and the one
+driven by disk pressure could only delete. Worse, `spawn_graduation_policy`
+graduated torrents whose obligation was already **met** -- the opposite of the
+rule above. One decision, two outcomes, one worker.
+
+A graduation target is a waiting room, not a library, so a new `transit` flag on
+the DESTINATION category says which it is. Off by default, and that direction is
+deliberate: a wrong `true` erases a library, a wrong `false` only lets a waiting
+room grow. The sweep requires BOTH that something graduates into the category
+and that it is marked transit.
+
+⚠️ The drain and the sweep now delete through `remove_one_torrent`, the path the
+DELETE route and the qBit shim take, because it drops the STORE ROW too. Calling
+`manager.remove_torrent` directly does not: measured on the bench, 10 torrents
+gone from the engine and still in the store, which is the shape of a ghost the
+reconcile then refuses to clean because removing them all trips its 1% guard.
+
+Also gone, because nothing ever read them: the whole **age/ratio policy**
+(`age_ratio_enabled`, `age_ratio_action`, `age_ratio_mode`, `max_age_hours`,
+`min_ratio`) and the **minimum age** (`min_age_minutes`). They were declared in
+the config, faithfully served by the API, shown in the UI with a tooltip
+describing behaviour that existed nowhere, and read by no logic at all. Ticking
+"Handle old races" armed nothing. How long a torrent stays is the tracker's
+obligation to state, not a floor set here. An existing `default.toml` keeps its
+now-unknown keys without complaint -- nothing in the tree uses
+`deny_unknown_fields`.
+
+
 ### The store is the only place a .torrent lives
 
 The metainfo existed twice: a blob in the store, keyed by info-hash, and a file

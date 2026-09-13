@@ -279,17 +279,21 @@ pub fn spawn_seed_time_sync(
     });
 }
 
-/// Queue the graduations the categories ask for.
+/// Delete from a graduation TARGET what has finished paying its seeding time.
 ///
-/// Continuous background work, NOT an emergency valve. Measured here: /race to
-/// the pool moves ~520 MB/s while a race can land at 1 GB/s, so a drain that
-/// has to copy always loses. The way a race disk stays empty is that this has
-/// already moved things long before the disk is tight.
+/// A category that something graduates into is a transit area, not a library:
+/// a torrent lands there owing seeding time, serves it, and goes. Without this
+/// the transit area only ever grows, and the race disk is simply emptied into
+/// the pool.
 ///
-/// The obligation still governs: a torrent whose tracker is owed seeding time
-/// is not moved either, because the move takes it off the network for the
-/// duration of the copy.
-pub fn spawn_graduation_policy(
+/// ⚠⚠ SCOPED TO GRADUATION TARGETS, and that scope is the whole safety of it.
+/// The same rule applied to every category of the hoard would walk a 293 000
+/// torrent library deleting everything whose tracker declares an obligation it
+/// has already met. The library is not transit; nothing graduates into it.
+///
+/// No pressure condition: the obligation is a property of the torrent, so the
+/// moment it is paid the torrent has no reason to hold the space.
+pub fn spawn_transit_sweep(
     state: crate::api::AppState,
     manager: Arc<TorrentManager>,
     cfg_handle: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
@@ -302,39 +306,43 @@ pub fn spawn_graduation_policy(
                 Ok(g) => g.clone(),
                 Err(e) => e.into_inner().clone(),
             };
-            let now = typhon_engine::torrent::meta::now_secs();
-            let mut queued = 0usize;
-            for t in manager.all() {
-                let (met, _host, _hours) = seed_obligation_met(&t, &cfg, now);
-                if !met {
-                    continue;
+            let targets = crate::api::graduation_target_categories(&state);
+            if !targets.is_empty() {
+                let now = typhon_engine::torrent::meta::now_secs();
+                let mut removed = 0usize;
+                for t in manager.all() {
+                    let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
+                    if !targets.contains(&crate::api::category_of_hash(&state, &hash)) {
+                        continue;
+                    }
+                    let (met, host, hours) = seed_obligation_met(&t, &cfg, now);
+                    // hours < 0 is an UNDECLARED tracker, which `met` reports as
+                    // false. Nothing to do but wait: an undeclared obligation is
+                    // never paid, so the operator has to declare one.
+                    if !met || hours < 0 {
+                        continue;
+                    }
+                    // Same shared path as the drain, for the same reason: the
+                    // store row has to go with the torrent.
+                    match crate::api::remove_one_torrent(
+                        &state,
+                        &hash,
+                        &[engine_id.clone()],
+                        &engine_id,
+                        true,
+                    ) {
+                        Ok(_) => {
+                            removed += 1;
+                            tracing::info!(name = %t.meta.name, tracker = %host,
+                                "transit: seeding time served, removed");
+                        }
+                        Err(e) => tracing::warn!(name = %t.meta.name,
+                            "transit sweep could not remove it: {e}"),
+                    }
                 }
-                let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
-                let Some((to_engine, to_category, save_path)) =
-                    crate::api::category_graduation(&state, &hash)
-                else {
-                    continue;
-                };
-                if to_engine == engine_id {
-                    continue;
+                if removed > 0 {
+                    tracing::info!(engine = %engine_id, removed, "transit sweep");
                 }
-                if crate::jobsrun::queue_graduation(
-                    &state,
-                    &hash,
-                    &t.meta.name,
-                    &engine_id,
-                    &to_engine,
-                    &to_category,
-                    &save_path,
-                    t.meta.total_size as i64,
-                )
-                .is_some()
-                {
-                    queued += 1;
-                }
-            }
-            if queued > 0 {
-                tracing::info!(engine = %engine_id, queued, "graduations queued");
             }
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
@@ -352,6 +360,7 @@ pub fn spawn_race_drain(
     manager: Arc<TorrentManager>,
     cfg_handle: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
     race_path: std::path::PathBuf,
+    engine_id: String,
 ) {
     let live = || -> Arc<crate::config::Config> {
         match cfg_handle.read() {
@@ -386,7 +395,7 @@ pub fn spawn_race_drain(
                 Ok(g) => g.clone(),
                 Err(e) => e.into_inner().clone(),
             };
-            drain_once(&state, &manager, &cfg.race_drain, &race_path, &cfg);
+            drain_once(&state, &manager, &cfg.race_drain, &race_path, &cfg, &engine_id);
         }
     });
 }
@@ -436,6 +445,7 @@ fn drain_once(
     config: &crate::config::RaceDrain,
     race_path: &std::path::Path,
     cfg: &crate::config::Config,
+    engine_id: &str,
 ) {
     let Some((used, total)) = disk_usage(race_path) else {
         // Silence here is how a wrong path hides: the drain would run every
@@ -461,9 +471,9 @@ fn drain_once(
     torrents.sort_by_key(|t| t.added_time);
 
     let now = typhon_engine::torrent::meta::now_secs();
-    let mut protected = 0usize;
-    let mut undeclared = 0usize;
-    let mut not_for_deletion = 0usize;
+    let mut deleted = 0usize;
+    let mut graduated = 0usize;
+    let mut stuck = 0usize;
     for torrent in torrents {
         if to_free <= 0.0 {
             break;
@@ -472,34 +482,85 @@ fn drain_once(
         // and deleting the oldest is a proxy for "has earned its keep" that
         // breaks exactly when a tracker has a minimum: under high churn the
         // oldest race on the disk can still be six hours old.
-        let (met, host, hours) = seed_obligation_met(&torrent, cfg, now);
+        // ⭐ The fate of a torrent is a property of the TORRENT, not of the
+        // pressure and not of an operator switch. It owes seeding time or it
+        // does not; everything else follows. Deciding by pressure would give
+        // the same torrent a different fate depending on when the drain
+        // happened to look at it.
+        //
+        //   obligation met     -> delete, the ratio is earned
+        //   obligation not met -> graduate, it has to keep seeding elsewhere
+        //
+        // An UNDECLARED tracker counts as not met: an unknown rule and no rule
+        // are not the same thing, and the cost of confusing them is a
+        // hit-and-run. But unlike before it no longer blocks the drain -- the
+        // torrent leaves the SSD by moving instead of by being deleted.
+        let hash = typhon_engine::torrent::hex_encode(&torrent.info_hash);
+        let size = torrent.meta.total_size as f64;
+        let (met, host, _hours) = seed_obligation_met(&torrent, cfg, now);
         if !met {
-            if hours < 0 {
-                undeclared += 1;
-            } else {
-                protected += 1;
+            let Some((to_engine, to_category, save_path)) =
+                crate::api::category_graduation(state, &hash)
+            else {
+                // Nowhere to put it and no right to delete it. Said out loud,
+                // with the category, because a silent counter here is exactly
+                // how this drain spent a day doing nothing.
+                stuck += 1;
+                tracing::warn!(
+                    name = %torrent.meta.name,
+                    tracker = %host,
+                    category = %crate::api::category_of_hash(state, &hash),
+                    "still owes seeding time and its category has no graduate_to:                      it can be neither deleted nor moved"
+                );
+                continue;
+            };
+            if to_engine == engine_id {
+                stuck += 1;
+                continue;
+            }
+            // Charged to the budget at QUEUE time, not at completion: the copy
+            // takes minutes and the drain ticks every 60s. Not counting it
+            // would re-queue the same torrents on every tick and flood the job
+            // table; `queue_graduation` already refuses a duplicate, so the
+            // budget is the only thing that would be wrong.
+            if crate::jobsrun::queue_graduation(
+                state,
+                &hash,
+                &torrent.meta.name,
+                &engine_id,
+                &to_engine,
+                &to_category,
+                &save_path,
+                torrent.meta.total_size as i64,
+            )
+            .is_some()
+            {
+                to_free -= size;
+                graduated += 1;
+                tracing::info!(name = %torrent.meta.name, tracker = %host,
+                    to = %to_category, "graduating: still owes seeding time");
             }
             continue;
         }
-        // And the category has to CONSENT. The obligation says what may not be
-        // done yet; the category says what the operator wants done at all. A
-        // category that has not opted in keeps its torrents -- which is what
-        // every existing category does, so shipping this deletes nothing that
-        // was not already marked for deletion.
-        let hash = typhon_engine::torrent::hex_encode(&torrent.info_hash);
-        if crate::api::category_drain_action(state, &hash) != "delete" {
-            not_for_deletion += 1;
-            continue;
-        }
-        let size = torrent.meta.total_size as f64;
-        // ⚠ keep_data, NOT delete_files. The Go signature at this position is
-        // `deleteFiles` and passes true; this one is its opposite. Passing true
-        // here would drop the torrent from the engine and leave every byte on
-        // disk -- freeing nothing, so the next tick drains again, and the race
-        // catalogue disappears without the disk ever emptying.
-        if manager.remove_torrent(&torrent.info_hash, false).is_ok() {
-            to_free -= size;
-            tracing::info!(name = %torrent.meta.name, tracker = %host, "drained");
+        // Through `remove_one_torrent`, the same path the DELETE route and the
+        // qBit shim take, because it drops the STORE ROW as well.
+        //
+        // ⚠ Calling `manager.remove_torrent` directly does not. Measured on the
+        // bench: 10 torrents gone from the engine and still in the store, which
+        // is the shape of a ghost -- a row nothing can reach and the reconcile
+        // refuses to clean because removing them all trips its 1% guard.
+        //
+        // ⚠ `delete_files: true` here. The engine-level call takes the OPPOSITE
+        // flag (`keep_data`), and this is the position where the two are easy
+        // to confuse: passing false would free nothing and the next tick would
+        // drain again forever.
+        match crate::api::remove_one_torrent(state, &hash, &[engine_id.to_string()], engine_id, true) {
+            Ok(_) => {
+                to_free -= size;
+                deleted += 1;
+                tracing::info!(name = %torrent.meta.name, tracker = %host, "drained");
+            }
+            Err(e) => tracing::warn!(name = %torrent.meta.name, "drain could not remove it: {e}"),
         }
     }
 
@@ -509,9 +570,9 @@ fn drain_once(
     if to_free > 0.0 {
         tracing::warn!(
             still_needed_gb = (to_free / 1e9).round(),
-            protected,
-            undeclared,
-            not_for_deletion,
+            deleted,
+            graduated,
+            stuck,
             "race drain could not free enough"
         );
     }
