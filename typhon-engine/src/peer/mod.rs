@@ -523,6 +523,19 @@ pub static SEED_SEED_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::
 
 pub static INBOUND_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Sessions whose have-broadcast arm was disarmed after the sender went away.
+///
+/// The torrent reached Seeding, `release_have_tx` dropped the sender, and the
+/// session's `Receiver` started returning Closed on every poll. Each increment
+/// is one session that would otherwise have spun until its idle deadline.
+/// This is the measurement, not decoration: it is the only way to tell how
+/// much of the engine's CPU that bug was worth on a live swarm.
+pub static HAVE_RX_DISARMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Piece announcements lost because the 256-slot have-ring overflowed.
+/// Previously swallowed by `.ok()`, so an overflowing ring was invisible.
+pub static HAVE_RX_LAGGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 async fn handle_incoming(
     mut stream: PeerTransport,
     addr: SocketAddr,

@@ -7,8 +7,47 @@ use tracing::{info, error};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[tokio::main]
-async fn main() {
+/// Worker threads for the engine runtime.
+///
+/// `#[tokio::main]` defaults to one worker per visible core. On a 128-core host
+/// that built 128 workers for a load measured at 7-10 cores, and they spent
+/// their time stealing work from each other: profiled in prod 2026-09-13,
+/// `queue::Steal::steal_into` (8.09%) + `context::thread_rng_n` (2.96%) +
+/// `worker::Context::run` (2.09%) came to 13% of all CPU, before counting the
+/// kernel scheduler traffic they caused. None of it is BitTorrent work.
+///
+/// The right number follows the machine and the swarm, not the source, so it
+/// is a knob -- but it needs a sane default, because the old one was "however
+/// many cores the box happens to have" and that is what went wrong.
+fn worker_threads() -> usize {
+    if let Some(n) = std::env::var("HYDRA_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        return n;
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
+    // Cap rather than scale: past this point extra workers add stealing, not
+    // throughput. The engine is I/O bound -- blocking work goes to the
+    // blocking pool, which is sized separately and left at its default.
+    cores.min(32)
+}
+
+fn main() {
+    let workers = worker_threads();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+        .block_on(async_main(workers))
+}
+
+async fn async_main(workers: usize) {
+    info!("[engine] tokio runtime: {} worker threads", workers);
     // SIGUSR1 => dump a jemalloc heap profile to $prof_prefix (set via
     // MALLOC_CONF). The Go watchdog raises this on a ballooning engine right
     // before killing it, so the 85GB heap leak (2026-07-09) gets an
