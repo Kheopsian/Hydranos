@@ -1916,56 +1916,11 @@ fn add_torrent_bytes(
     // that acts on the fast side is not accepting the work.
     race_admission(state, engine, meta.total_size as i64)?;
 
-    // Written before the engine is told, and by rename: the engine records this
-    // path in its resume data, and a half-written file there is a torrent that
-    // vanishes at the next restart.
+    // The metainfo goes into the store BEFORE the engine is told, and that
+    // order is not cosmetic: the engine reads its piece hashes from the store,
+    // and adding a torrent triggers a recheck. Told first, it would verify
+    // against a row that does not exist yet and refuse every piece.
     let cfg = state.cfg();
-    let dir = std::path::Path::new(&cfg.daemon.data_dir).join("uploads");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("uploads dir: {e}"))?;
-    let path = dir.join(format!("{hash}.torrent"));
-    let tmp = dir.join(format!("{hash}.torrent.part"));
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write torrent: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("install torrent: {e}"))?;
-
-    // Data we already hold, under a name we have not seen before.
-    //
-    // Done BEFORE the engine is told, so that the links are in place when it
-    // first looks at the save path -- an engine that starts on an empty
-    // directory schedules a download, and the download is exactly what this
-    // saves. Every failure here is non-fatal: the torrent is added as it would
-    // have been, it just downloads.
-    let mut linked_from = String::new();
-    if cfg.dedup.enabled {
-        if let Some(report) = try_link_existing(state, bytes, &hash, &save_path, &cfg) {
-            linked_from = report;
-        }
-    }
-
-    let (info_hash, name) = engine
-        .manager
-        .add_torrent(&path.to_string_lossy(), &save_path, paused, seed_mode)
-        .map_err(|e| {
-            // The engine refused it, so nothing owns this file.
-            let _ = std::fs::remove_file(&path);
-            e
-        })?;
-
-    // Data already on disk (cross-seed, a re-add) is hash-checked rather than
-    // overwritten -- unless the caller asked to skip, which is what
-    // skip_checking means and why cross-seed sets it.
-    //
-    // WARNING `!paused` used to gate this too, which silently disabled the
-    // check for exactly the case "add without starting" (2026-09-12) was built
-    // to serve: an operator adds a torrent paused BECAUSE they want to inspect
-    // it before it touches the network, and the inspection was the thing being
-    // skipped. The torrent sat at 0% on top of complete data. Rechecking a
-    // paused torrent is safe: `run_recheck` leaves it Stopped and the download
-    // path gates on `is_paused`, so this reports what is on disk without
-    // fetching anything.
-    if add_recheck_wanted(seed_mode, engine.manager.any_file_exists(&info_hash)) {
-        let _ = engine.manager.recheck(&info_hash);
-    }
-
     let added_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -1983,6 +1938,45 @@ fn add_torrent_bytes(
                 tracing::warn!(hash = %hash, "content index: {e}");
             }
         }
+    }
+
+    // Data we already hold, under a name we have not seen before.
+    //
+    // Done BEFORE the engine is told, so that the links are in place when it
+    // first looks at the save path -- an engine that starts on an empty
+    // directory schedules a download, and the download is exactly what this
+    // saves. Every failure here is non-fatal: the torrent is added as it would
+    // have been, it just downloads.
+    let mut linked_from = String::new();
+    if cfg.dedup.enabled {
+        if let Some(report) = try_link_existing(state, bytes, &hash, &save_path, &cfg) {
+            linked_from = report;
+        }
+    }
+
+    let (info_hash, name) = engine
+        .manager
+        .add_torrent_bytes(bytes, &save_path, paused, seed_mode)
+        .map_err(|e| {
+            // The engine refused it, so nothing owns this row.
+            let _ = state.store.lock().unwrap().delete_torrent(&hash);
+            e
+        })?;
+
+    // Data already on disk (cross-seed, a re-add) is hash-checked rather than
+    // overwritten -- unless the caller asked to skip, which is what
+    // skip_checking means and why cross-seed sets it.
+    //
+    // WARNING `!paused` used to gate this too, which silently disabled the
+    // check for exactly the case "add without starting" (2026-09-12) was built
+    // to serve: an operator adds a torrent paused BECAUSE they want to inspect
+    // it before it touches the network, and the inspection was the thing being
+    // skipped. The torrent sat at 0% on top of complete data. Rechecking a
+    // paused torrent is safe: `run_recheck` leaves it Stopped and the download
+    // path gates on `is_paused`, so this reports what is on disk without
+    // fetching anything.
+    if add_recheck_wanted(seed_mode, engine.manager.any_file_exists(&info_hash)) {
+        let _ = engine.manager.recheck(&info_hash);
     }
 
     if linked_from.is_empty() {
@@ -9127,18 +9121,8 @@ async fn post_torrent_copy(
         store.torrent_blob(&hash).ok().flatten()
     };
     let Some(blob) = blob else { return not_found() };
-    let cfg = state.cfg();
-    let path = std::path::Path::new(&cfg.daemon.data_dir)
-        .join("uploads")
-        .join(format!("{hash}.torrent"));
-    if !path.exists() {
-        if std::fs::write(&path, &blob).is_err() {
-            return bad("the .torrent could not be written".into());
-        }
-    }
-
     let Some(dst) = state.engines.get(&target) else { return not_found() };
-    if let Err(e) = dst.manager.add_torrent(&path.to_string_lossy(), &save_path, false, true) {
+    if let Err(e) = dst.manager.add_torrent_bytes(&blob, &save_path, false, true) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("the engine refused it: {e}")})),
@@ -9356,17 +9340,17 @@ async fn post_torrent_engine(
             .and_then(|m| m.get(&hash).map(|f| (f.save_path.clone(), f.user_paused)))
             .unwrap_or_default()
     };
-    let cfg = state.cfg();
-    let path = std::path::Path::new(&cfg.daemon.data_dir)
-        .join("uploads")
-        .join(format!("{hash}.torrent"));
-    if !path.exists() {
+    let blob = {
+        let store = state.store.lock().unwrap();
+        store.torrent_blob(&hash).ok().flatten()
+    };
+    let Some(blob) = blob else {
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "the .torrent is not on disk; cannot re-add it elsewhere"})),
+            Json(serde_json::json!({"error": "no metainfo in the store; cannot re-add it elsewhere"})),
         )
             .into_response();
-    }
+    };
 
     // Source first, and KEEPING the data: the files are the whole point of not
     // transferring anything.
@@ -9386,7 +9370,7 @@ async fn post_torrent_engine(
     // large payload for a move that touched nothing would cost hours of disk.
     if let Err(e) = dst
         .manager
-        .add_torrent(&path.to_string_lossy(), &save_path, paused, true)
+        .add_torrent_bytes(&blob, &save_path, paused, true)
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -9741,19 +9725,14 @@ async fn post_qbit_import_start(
 
     tokio::spawn(async move {
         crate::importer::run_import(creds, progress, move |t, bytes| {
-            let (Some(manager), Some(dir)) = (manager.as_ref(), torrent_dir.as_ref()) else {
+            let Some(manager) = manager.as_ref() else {
                 return Err("no hoard engine to import into".into());
             };
-            // The engine adds from a path, not from bytes: the .torrent has to
-            // be on disk anyway, because that is what a restart reads back.
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-            let path = dir.join(format!("{}.torrent", t.hash));
-            std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
             // seed_mode: the data is already there, whole. Rechecking a
             // quarter of a million imported torrents would read the entire
             // library off disk before a single one could be served.
             manager
-                .add_torrent(&path.to_string_lossy(), &t.save_path, false, true)
+                .add_torrent_bytes(&bytes, &t.save_path, false, true)
                 .map(|_| ())
         })
         .await;

@@ -25,10 +25,10 @@ fn make_torrent(i: u32) -> Arc<TorrentState> {
         // Size of the raw info dict, as metainfo parsing fills it. The bench
         // never sends metadata pieces, but the field is not optional.
         info_dict_len: 0,
+        url_list: Vec::new(),
     };
     let save_path = PathBuf::from("/data");
-    let torrent_file_path = format!("/torrents/doc-{}.torrent", i);
-    Arc::new(TorrentState::new(meta, save_path, torrent_file_path, true))
+    Arc::new(TorrentState::new(meta, save_path, true))
 }
 
 fn bench_json_one(c: &mut Criterion) {

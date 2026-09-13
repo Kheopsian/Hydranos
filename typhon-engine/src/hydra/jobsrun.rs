@@ -174,47 +174,28 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         let _ = store.job_progress(&job.id, done);
     }
 
-    let cfg = state.cfg();
-    let torrent_file = std::path::Path::new(&cfg.daemon.data_dir)
-        .join("uploads")
-        .join(format!("{hash}.torrent"));
-
-    // ⚠ The file named after a hash does not necessarily CONTAIN that torrent.
-    // The store keeps the metainfo twice -- a blob and a file -- and the file
-    // has been seen holding someone else's torrent. Measured on the bench:
+    // The blob keyed by this hash IS this torrent, so there is nothing left to
+    // guard against here. The file under uploads/ named after a hash did not
+    // necessarily CONTAIN that torrent -- measured on the bench,
     // uploads/cae7a364....torrent held GHOST_D, so the graduation re-added the
     // wrong torrent, pointed it at the data of the right one, and lost the
-    // original from every engine. The blob is the authority; the file is
-    // rewritten from it here rather than trusted.
-    {
-        let blob = {
-            let store = match state.store.lock() {
-                Ok(s) => s,
-                Err(e) => e.into_inner(),
-            };
-            store.torrent_blob(&hash).ok().flatten()
+    // original from every engine. That whole failure mode goes away with the
+    // file: the metainfo is fetched by key and handed straight to the engine.
+    let metainfo = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
         };
-        match blob {
-            Some(bytes) => {
-                if let Some(dir) = torrent_file.parent() {
-                    std::fs::create_dir_all(dir).ok();
-                }
-                std::fs::write(&torrent_file, &bytes)
-                    .map_err(|e| format!("cannot write the metainfo back: {e}"))?;
-            }
-            None if !torrent_file.exists() => {
-                return Err("no metainfo in the store and none on disk; the data moved but nothing can re-add it".into());
-            }
-            None => {}
-        }
+        store.torrent_blob(&hash).ok().flatten()
     }
+    .ok_or("no metainfo in the store; the data moved but nothing can re-add it")?;
 
     let dst = state.engines.get(&to).ok_or("target engine is gone")?;
     // seed_mode: the payload was verified where it came from and the move
     // copied it byte for byte. A recheck here would read every byte again.
     let (added_ih, _name) = dst
         .manager
-        .add_torrent(&torrent_file.to_string_lossy(), &dest_root, false, true)
+        .add_torrent_bytes(&metainfo, &dest_root, false, true)
         .map_err(|e| format!("the target engine refused it, and the data has already moved: {e}"))?;
 
     // The hash it actually added, against the one asked for. Without this the

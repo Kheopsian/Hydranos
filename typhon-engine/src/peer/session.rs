@@ -61,19 +61,23 @@ use crate::torrent::meta::{PeerGuard, PeerStats, TorrentState, TorrentStatus};
 use crate::wire::codec::BtCodec;
 
 /// Build the BEP 9 reply for one requested block, or a reject if we cannot
-/// serve it. Reading the .torrent per request is fine: requests are rare, and
-/// the alternative is keeping every info dict resident forever.
+/// serve it. Re-reading the metainfo per request is fine: requests are rare,
+/// and the alternative is keeping every info dict resident forever.
 fn serve_metadata_block(torrent: &Arc<TorrentState>, piece: u32) -> Vec<u8> {
     let total = torrent.meta.info_dict_len as usize;
     if total == 0 {
         return extension::build_metadata_reject(piece);
     }
-    let dict = match crate::torrent::metainfo::info_dict_from_file(&torrent.torrent_file_path) {
+    let bytes = match torrent.metainfo_bytes() {
+        Some(b) => b,
+        None => return extension::build_metadata_reject(piece),
+    };
+    let dict = match crate::torrent::metainfo::info_dict_from_bytes(&bytes) {
         Ok(d) => d,
         Err(_) => return extension::build_metadata_reject(piece),
     };
-    // The file on disk must still be the torrent we advertised; if it changed
-    // underneath us, serving a mismatched slice would corrupt the peer's dict.
+    // What the store holds must still be the torrent we advertised; serving a
+    // mismatched slice would corrupt the peer's dict.
     if dict.len() != total {
         return extension::build_metadata_reject(piece);
     }
@@ -387,7 +391,7 @@ pub async fn run(
                                     }
                                 } else if ext_id == extension::OUR_UT_METADATA_ID {
                                     // BEP 9 request from a peer resolving a
-                                    // magnet. Re-read the .torrent rather than
+                                    // magnet. Re-read the metainfo rather than
                                     // hold the dict in memory; on any problem
                                     // reply reject, which is a valid answer and
                                     // lets the peer move on to someone else.
