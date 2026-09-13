@@ -4685,6 +4685,20 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "total_peers": race_live.active_peers,
             "total_upload_rate": race_live.upload_rate,
         },
+        // Process-wide peer counters. These live in atomics that only
+        // `rpc::dispatch::get_diagnostics` used to read, and that function is
+        // reachable only over the unix-socket RPC the 3.x Go control plane
+        // spoke -- so since the full-Rust V4 they have been written and never
+        // read by anything. Surfaced here because a counter nobody can read is
+        // not a measurement.
+        "engine_counters": {
+            "have_rx_disarmed": typhon_engine::peer::HAVE_RX_DISARMED.load(std::sync::atomic::Ordering::Relaxed),
+            "have_rx_lagged": typhon_engine::peer::HAVE_RX_LAGGED.load(std::sync::atomic::Ordering::Relaxed),
+            "seed_seed_dropped": typhon_engine::peer::SEED_SEED_DROPPED.load(std::sync::atomic::Ordering::Relaxed),
+            "hs_timed_out": typhon_engine::peer::HS_TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed),
+            "inbound_accepted": typhon_engine::peer::INBOUND_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
+            "worker_threads": typhon_engine::runtime::worker_threads(),
+        },
         "server_ts": now,
         "tunnels": [],
         // Seconds with a fraction, as 3.x publishes it.
