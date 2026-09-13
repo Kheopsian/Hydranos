@@ -113,8 +113,20 @@ async fn rescue(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Explicit runtime instead of #[tokio::main]: the macro's default is one
+    // worker per core, which on a 128-core host is ~4x more workers than this
+    // load needs and costs 13% of all CPU in work-stealing. See
+    // typhon_engine::runtime.
+    let workers = typhon_engine::runtime::worker_threads();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?
+        .block_on(async_main(workers))
+}
+
+async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Before anything allocates in anger: the signal handlers and the
     // five-minute stats line are the only instruments that can tell a real
     // leak from pages the allocator is holding.
@@ -136,6 +148,8 @@ async fn main() -> anyhow::Result<()> {
             .with(logbuf::LogLayer { buffer: logs.clone() })
             .init();
     }
+
+    tracing::info!("tokio runtime: {} worker threads", workers);
 
     let config_path = parse_args();
     let mut config = Config::load(&config_path)?;
