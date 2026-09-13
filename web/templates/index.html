@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.0">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.1">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -231,6 +231,7 @@
                     <button class="rp2-btn ghost" id="rp-apply" style="display:none" onclick="_rpRestart()">Apply &amp; restart</button>
                     <button class="rp2-btn ghost" onclick="_rpToggleHist()">History</button>
                 </div>
+                <div class="rp2-grad" id="rp-grad"></div>
                 <div class="rp2-hist" id="rp-hist" style="display:none"></div>
             </div>
             <!-- Race is served whole to the browser and rendered whole, so this

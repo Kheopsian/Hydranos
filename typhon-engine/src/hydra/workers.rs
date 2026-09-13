@@ -606,11 +606,46 @@ pub fn drain_once(
             "race drain could not free enough"
         );
     }
+    // Measured again, not assumed: deletions free space now, a graduation only
+    // queues a copy, so the two do not move this number the same way.
+    //
+    // ⭐ And the declared sizes are NOT what came back. Measured on the bench:
+    // a pass reported 8 MiB freed and the disk gave back 4, because one of the
+    // two torrents was a ghost -- a store row whose data was already gone, so
+    // deleting it released nothing. `meta.total_size` is what a torrent CLAIMS
+    // to occupy; only statvfs knows what the filesystem handed back. The budget
+    // below still runs on the declared sizes (something has to decide what to
+    // remove before removing it), but what is reported and archived is the
+    // delta that actually happened.
+    let (after_used, after) = crate::volumes::usage(std::path::Path::new(&volume.id))
+        .map(|(used, total, _)| {
+            (used, if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 })
+        })
+        .unwrap_or((volume.used, volume.used_pct()));
+    let freed = volume.used.saturating_sub(after_used);
+    if deleted > 0 || graduated > 0 || stuck > 0 {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        if let Err(e) = store.record_drain(
+            typhon_engine::torrent::meta::now_secs(),
+            &volume.id,
+            volume.used_pct(),
+            after,
+            deleted as i64,
+            graduated as i64,
+            stuck as i64,
+            freed as i64,
+        ) {
+            tracing::warn!("drain history not written: {e}");
+        }
+    }
     DrainOutcome {
         deleted,
         graduated,
         stuck,
-        freed_bytes: (wanted - to_free).max(0.0) as u64,
+        freed_bytes: freed,
     }
 }
 

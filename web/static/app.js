@@ -5931,6 +5931,24 @@ async function loadRacePolicy() {
     // markup while a threshold is half typed would eat the edit.
     if (box.contains(document.activeElement)) return;
     box.innerHTML = _rpVols.map((v, i) => _rpVolCard(v, i)).join("");
+    _rpLoadGraduations();
+}
+// A graduation copies for minutes. Showing it only in the log means the panel
+// looks idle while the disk is busy.
+async function _rpLoadGraduations() {
+    const box = document.getElementById("rp-grad");
+    if (!box) return;
+    let g;
+    try { g = await api("/api/drain/graduations"); } catch (e) { return; }
+    if (!g || !g.length) { box.innerHTML = ""; return; }
+    box.innerHTML = '<div class="rp2-grad-title">' + t("Graduating") + "</div>"
+        + g.map(x => {
+            const pct = Math.min(100, x.pct || 0);
+            return '<div class="rp2-grad-row"><div class="rp2-grad-name" title="' + esc(x.name || "") + '">'
+                + esc(x.name || x.info_hash) + "</div>"
+                + '<div class="rp2-grad-bar"><div class="rp2-grad-fill" style="width:' + pct.toFixed(1) + '%"></div></div>'
+                + '<div class="rp2-grad-pct">' + formatBytes(x.copied || 0) + " / " + formatBytes(x.total || 0) + "</div></div>";
+        }).join("");
 }
 function _rpVolCard(v, i) {
     const pct = Math.min(100, Math.max(0, v.used_pct || 0));
@@ -6047,8 +6065,8 @@ async function _rpToggleHist() {
     let h;
     try { h = await api("/api/drain/history"); } catch (e) { h = []; }
     if (h && h.length) {
-        box.innerHTML = "<table><thead><tr><th>When</th><th>Before</th><th>After</th><th>Freed</th><th>Removed</th></tr></thead><tbody>" +
-            h.map(d => `<tr><td>${new Date((d.timestamp || 0) * 1000).toLocaleString()}</td><td>${d.before_pct ?? 0}%</td><td>${d.after_pct ?? 0}%</td><td>${formatBytes(d.freed || 0)}</td><td>${d.removed_count || 0}</td></tr>`).join("") +
+        box.innerHTML = "<table><thead><tr><th>When</th><th>Volume</th><th>Before</th><th>After</th><th>Freed</th><th>Deleted</th><th>Graduated</th><th>Stuck</th></tr></thead><tbody>" +
+            h.map(d => `<tr><td>${new Date((d.timestamp || 0) * 1000).toLocaleString()}</td><td>${esc(d.volume || "")}</td><td>${d.before_pct ?? 0}%</td><td>${d.after_pct ?? 0}%</td><td>${formatBytes(d.freed || 0)}</td><td>${d.deleted || 0}</td><td>${d.graduated || 0}</td><td>${d.stuck || 0}</td></tr>`).join("") +
             "</tbody></table>";
     } else {
         box.innerHTML = '<div class="rp-muted" style="font-size:12px">No drains yet.</div>';

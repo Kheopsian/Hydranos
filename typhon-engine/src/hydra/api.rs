@@ -3702,8 +3702,72 @@ macro_rules! empty_list_route {
 // Subsystems whose listing is empty until they have run or been configured.
 // They are separate handlers rather than one shared one so that each can grow
 // its own body when its slice is ported, without touching the others.
-empty_list_route!(get_drain_history);
-empty_list_route!(get_drain_graduations);
+/// Past drain passes, newest first.
+///
+/// WARNING Until 2026-09-13 this was `empty_list_route!`: the History button
+/// opened on "No drains yet." however many had run. Nothing recorded them.
+async fn get_drain_history(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let rows = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.drain_history(50).unwrap_or_default()
+    };
+    Json(serde_json::Value::Array(rows)).into_response()
+}
+
+/// Graduations in flight, so a move that takes minutes is visible while it
+/// happens rather than only in the logs.
+///
+/// Read from the jobs table, which is where `queue_graduation` puts them: the
+/// drain charges its budget at QUEUE time, so a torrent can be counted as
+/// graduated here long before its bytes have finished moving.
+async fn get_drain_graduations(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let jobs = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.list_jobs(200).unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    for j in jobs {
+        if j.kind != "graduate" || (j.state != "running" && j.state != "queued") {
+            continue;
+        }
+        let name = serde_json::from_str::<serde_json::Value>(&j.params)
+            .ok()
+            .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        let pct = if j.total_bytes > 0 {
+            j.progress_bytes as f64 * 100.0 / j.total_bytes as f64
+        } else {
+            0.0
+        };
+        out.push(serde_json::json!({
+            "info_hash": j.info_hash,
+            "name": name,
+            "state": j.state,
+            "copied": j.progress_bytes,
+            "total": j.total_bytes,
+            "pct": crate::row::num_json(pct),
+        }));
+    }
+    Json(serde_json::Value::Array(out)).into_response()
+}
 empty_list_route!(get_categories_orphans);
 empty_list_route!(get_agents_removed);
 
