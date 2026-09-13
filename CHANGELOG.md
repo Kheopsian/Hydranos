@@ -42,6 +42,15 @@ again on the next tick.
 - one card per volume in the panel, each with its own gauge, its own
   `Auto drain` (renamed from `Emergency drain`) and its own `Drain now`
 
+- `GET /api/drain/history` and `GET /api/drain/graduations` were
+  `empty_list_route!`: the History button opened on "No drains yet." however
+  many passes had run, and the Graduating block was always empty. History is a
+  new `drain_history` table written at the end of every pass; graduations are
+  read from the jobs table where `queue_graduation` puts them.
+- what a pass reports as freed is the **measured** delta on the volume, not the
+  sum of the declared torrent sizes. A bench pass claimed 8 MiB and the disk
+  gave back 4: one of the two rows was a ghost whose data was already gone.
+
 **`POST /api/drain/now` was a stub**: it answered `no_drain_needed` without
 looking at a disk, so the Drain now button had never drained anything and said
 so in a way that read like a result. It runs the pass now, scoped to

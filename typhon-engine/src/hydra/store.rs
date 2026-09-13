@@ -131,6 +131,11 @@ CREATE TABLE IF NOT EXISTS torrents (
 CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, ul INTEGER NOT NULL DEFAULT 0, dl INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tag_registry (name TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS drain_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, volume TEXT NOT NULL,
+    before_pct REAL NOT NULL DEFAULT 0, after_pct REAL NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0, graduated INTEGER NOT NULL DEFAULT 0,
+    stuck INTEGER NOT NULL DEFAULT 0, freed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY, type TEXT NOT NULL, state TEXT NOT NULL,
     info_hash TEXT NOT NULL DEFAULT '', params TEXT NOT NULL DEFAULT '',
@@ -854,6 +859,56 @@ impl Store {
     }
 
     /// Background jobs, newest first, as the API reports them.
+    /// Write down one drain pass.
+    ///
+    /// A drain that leaves no trace cannot be argued with later: the operator
+    /// sees a torrent gone and has nothing to read. This is the row that says
+    /// which disk, when, and what it cost.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_drain(
+        &self,
+        at: i64,
+        volume: &str,
+        before_pct: f64,
+        after_pct: f64,
+        deleted: i64,
+        graduated: i64,
+        stuck: i64,
+        freed: i64,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO drain_history (at, volume, before_pct, after_pct, deleted, graduated, stuck, freed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![at, volume, before_pct, after_pct, deleted, graduated, stuck, freed],
+        )?;
+        Ok(())
+    }
+
+    pub fn drain_history(&self, limit: i64) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT at, volume, before_pct, after_pct, deleted, graduated, stuck, freed
+             FROM drain_history ORDER BY at DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |row| {
+                let deleted: i64 = row.get(4)?;
+                let graduated: i64 = row.get(5)?;
+                Ok(serde_json::json!({
+                    "timestamp": row.get::<_, i64>(0)?,
+                    "volume": row.get::<_, String>(1)?,
+                    "before_pct": crate::row::num_json(row.get::<_, f64>(2)?),
+                    "after_pct": crate::row::num_json(row.get::<_, f64>(3)?),
+                    "deleted": deleted,
+                    "graduated": graduated,
+                    "removed_count": deleted + graduated,
+                    "stuck": row.get::<_, i64>(6)?,
+                    "freed": row.get::<_, i64>(7)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn list_jobs(&self, limit: i64) -> anyhow::Result<Vec<Job>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, type, state, info_hash, params, progress_bytes, total_bytes,
