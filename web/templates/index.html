@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.4.5">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.0">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -215,25 +215,22 @@
                 <span>Grabbed: <strong id="race-session-grabbed">0</strong></span>
                 <span>Avg Share: <strong id="race-avg-share">-</strong></span>
             </div>
+            <!-- One card per VOLUME. The drain acts per filesystem, so the
+                 panel is shaped like the thing it commands: a global bar over
+                 several disks is what let it report pressure on one and delete
+                 on another. -->
+            <div class="cards vol-cards" id="rp-volumes"></div>
             <div class="rp2" id="race-policy">
                 <div class="rp2-row">
-                    <div class="rp2-gauge"><div class="rp2-fill" id="rp-fill"></div><div class="rp2-mark low" id="rp-mark-low"></div><div class="rp2-mark" id="rp-mark-high"></div></div>
-                    <div class="rp2-disk"><b id="rp-disk-pct">-</b> used · <span id="rp-disk-free">-</span> free</div>
+                    <div class="rp2-lbl">Every volume</div>
+                    <div class="rp2-body">
+                        <div class="rp2-f dim">check <input type="number" id="rp-interval" min="5" onchange="_rpSave('check_interval_seconds', parseInt(this.value))">s</div>
+                        <span class="rp2-disk" id="rp-default-note"></span>
+                    </div>
                     <div class="rp2-spacer"></div>
                     <button class="rp2-btn ghost" id="rp-apply" style="display:none" onclick="_rpRestart()">Apply &amp; restart</button>
-                    <button class="rp2-btn" id="rp-drain-now" onclick="_rpDrainNow(this)">Drain now</button>
                     <button class="rp2-btn ghost" onclick="_rpToggleHist()">History</button>
                 </div>
-                <div class="rp2-row rp2-drain-result" id="rp-drain-result" style="display:none"></div>
-                <div class="rp2-row">
-                    <div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox" id="rp-enabled" onchange="_rpSaveEnabled(this.checked)"><span class="rp2-sl"></span></label>Emergency drain<span class="rp2-info">i<span class="rp2-tip">Every <b>check</b>s Hydranos looks at the /race disk. Above the <b>start</b> mark it deletes the <b>oldest</b> torrents (never younger than the floor) until usage drops to <b>down&nbsp;to</b>. The data is erased - this is the safety valve, not graduation.</span></span></div>
-                    <div class="rp2-body" id="rp-body-drain">
-                        <div class="rp2-f">start <input type="number" id="rp-high" min="1" max="100" onchange="_rpSave('high_watermark_pct', parseInt(this.value))">%</div>
-                        <div class="rp2-f">down to <input type="number" id="rp-low" min="1" max="100" onchange="_rpSave('low_watermark_pct', parseInt(this.value))">%</div>
-                        <div class="rp2-f dim">check <input type="number" id="rp-interval" min="5" onchange="_rpSave('check_interval_seconds', parseInt(this.value))">s</div>
-                    </div>
-                </div>
-                <div class="rp2-grad" id="rp-grad"></div>
                 <div class="rp2-hist" id="rp-hist" style="display:none"></div>
             </div>
             <!-- Race is served whole to the browser and rendered whole, so this

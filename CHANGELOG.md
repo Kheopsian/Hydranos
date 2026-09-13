@@ -17,6 +17,36 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## Unreleased
+
+### Race drain, per volume
+
+Hydranos had no notion of a storage location. One `race_path` was read for
+every race engine and the drain then acted on every torrent the engine held,
+without ever asking where the bytes were: with two SSDs, pressure on one
+deleted races living on the other, the full one never emptied, and it did it
+again on the next tick.
+
+- a **volume** is deduced, never configured: the `st_dev` of the data already
+  on disk, named by its mount point. Two categories on one disk group
+  themselves; two disks separate themselves. A category is not a location.
+- the drain makes **one pass per volume** and only considers torrents whose
+  save path is on it
+- `race_path` is gone from the config, from `main.rs` and from `engines.rs`
+- **thresholds per volume**, kept in the store and re-read every tick, so a
+  value typed in the panel applies to the next pass instead of the next restart
+- `GET /api/drain/status` answers a **list of volumes**, merged by mount point
+  across engines; `POST /api/drain/policy` sets or clears one volume's policy
+- race admission measures the volume the torrent is **about to land on**,
+  taken from its own save path
+- one card per volume in the panel, each with its own gauge, its own
+  `Auto drain` (renamed from `Emergency drain`) and its own `Drain now`
+
+**`POST /api/drain/now` was a stub**: it answered `no_drain_needed` without
+looking at a disk, so the Drain now button had never drained anything and said
+so in a way that read like a result. It runs the pass now, scoped to
+`?volume=`, and answers what it did.
+
 ## Unreleased -- a refused reannounce says so
 
 ### The drain applies a decision instead of taking one

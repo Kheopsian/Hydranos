@@ -5899,122 +5899,147 @@ async function runCompare() {
 // ─── Metrics uptime ─────────────────────────────────────
 
 // ─── Race drain policy panel (Phase 1) ─────────────────
+// The drain's own words, so the panel and the daemon cannot drift apart.
+const RP_TIP =
+    "<b>What the drain does, in order.</b><br>"
+    + "1. Every <b>check</b> seconds it measures THIS volume.<br>"
+    + "2. Above <b>start</b> it walks its torrents <b>oldest first</b> until usage is back down to <b>down to</b>.<br>"
+    + "3. What happens to each one comes from <b>its tracker's seed obligation</b>, never from disk pressure:<br>"
+    + "&bull; obligation <b>met</b>: deleted, data erased.<br>"
+    + "&bull; obligation <b>not met yet</b>: <b>graduated</b> to its category's destination, it keeps seeding there.<br>"
+    + "&bull; tracker <b>not declared</b>: counts as not met, so it is never deleted by mistake, but it still leaves the SSD by moving.<br>"
+    + "4. A torrent that still owes time and whose category has no destination is <b>stuck</b>: neither deletable nor movable. It is logged by name.<br>"
+    + "The minimum is declared <b>per tracker</b>, in the Trackers tab, not here.";
+
+let _rpVols = [];
 async function loadRacePolicy() {
     let st;
     try { st = await api("/api/drain/status"); } catch (e) { return; }
-    const pctEl = document.getElementById("rp-disk-pct");
-    if (!pctEl) return;
-    const pct = st.disk_used_pct || 0;
-    const free = (st.disk_total || 0) - (st.disk_used || 0);
-    pctEl.textContent = pct.toFixed(0) + "%";
-    document.getElementById("rp-disk-free").textContent = formatBytes(free);
-    document.getElementById("rp-fill").style.width = Math.min(100, pct) + "%";
-    document.getElementById("rp-mark-low").style.left = (st.low_watermark || 0) + "%";
-    document.getElementById("rp-mark-high").style.left = (st.high_watermark || 0) + "%";
-    _rpSet("rp-enabled", st.enabled, true);
-    _rpSet("rp-high", st.high_watermark);
-    _rpSet("rp-low", st.low_watermark);
-    _rpSet("rp-interval", st.check_interval);
-    if (!_rpDirty.has("rp-enabled")) {
-        const _bd = document.getElementById("rp-body-drain");
-        if (_bd) _bd.classList.toggle("off", !st.enabled);
-    }
-    _rpUpdateDrainBtn();
-    _rpLoadGraduations();
-}
-async function _rpLoadGraduations() {
-    const box = document.getElementById("rp-grad");
+    const box = document.getElementById("rp-volumes");
     if (!box) return;
-    let g;
-    try { g = await api("/api/drain/graduations"); } catch (e) { return; }
-    if (!g || !g.length) { box.innerHTML = ""; return; }
-    box.innerHTML = '<div class="rp2-grad-title">Graduating to hoard</div>' + g.map(x => {
-        const pct = Math.min(100, x.pct || 0);
-        return `<div class="rp2-grad-row"><div class="rp2-grad-name" title="${esc(x.name || "")}">${esc(x.name || x.info_hash)}</div>`
-            + `<div class="rp2-grad-bar"><div class="rp2-grad-fill" style="width:${pct.toFixed(1)}%"></div></div>`
-            + `<div class="rp2-grad-pct">${formatBytes(x.copied || 0)} / ${formatBytes(x.total || 0)}</div></div>`;
-    }).join("");
+    _rpSet("rp-interval", st.check_interval);
+    const note = document.getElementById("rp-default-note");
+    if (note) note.textContent = t("default {hi}% / {lo}%", { hi: st.default_high_watermark, lo: st.default_low_watermark });
+    _rpVols = st.volumes || [];
+    if (!_rpVols.length) {
+        box.innerHTML = '<div class="rp2"><div class="rp2-row"><span class="rp2-disk">'
+            + esc(t("No race volume yet. One appears as soon as a race torrent has data on disk."))
+            + "</span></div></div>";
+        return;
+    }
+    // Never redraw under the user's fingers: this polls, and rebuilding the
+    // markup while a threshold is half typed would eat the edit.
+    if (box.contains(document.activeElement)) return;
+    box.innerHTML = _rpVols.map((v, i) => _rpVolCard(v, i)).join("");
 }
-function _rpSaveEnabled(on) {
-    _rpDirty.add("rp-enabled");
-    const b = document.getElementById("rp-body-drain");
-    if (b) b.classList.toggle("off", !on);
-    _rpUpdateDrainBtn();
-    _rpSave("enabled", on);
+function _rpVolCard(v, i) {
+    const pct = Math.min(100, Math.max(0, v.used_pct || 0));
+    const hot = pct >= (v.high_watermark || 100);
+    const fill = hot
+        ? ";background:linear-gradient(90deg,var(--accent-yellow),var(--accent-red))"
+        : "";
+    const inh = v.inherited ? " inh" : "";
+    const at = formatBytes((v.total || 0) * (v.high_watermark || 0) / 100);
+    const back = formatBytes((v.total || 0) * (v.low_watermark || 0) / 100);
+    return '<div class="card vol-card">'
+        + "<h3><span>" + esc(v.id) + '</span><span class="cap">' + formatBytes(v.total || 0) + "</span>"
+        + '<div class="rp2-spacer"></div>'
+        + '<button class="rp2-btn" onclick="_rpVolDrain(this,' + i + ')">' + t("Drain now") + "</button></h3>"
+        + '<div class="card-body">'
+        + '<div class="rp2-gauge"><div class="rp2-fill" style="width:' + pct.toFixed(1) + "%" + fill + '"></div>'
+        + '<div class="rp2-mark low" style="left:' + (v.low_watermark || 0) + '%"></div>'
+        + '<div class="rp2-mark" style="left:' + (v.high_watermark || 0) + '%"></div></div>'
+        + '<div class="rp2-row"><div class="rp2-disk"><b>' + pct.toFixed(0) + "%</b> "
+        + t("used") + " &middot; " + formatBytes(v.free || 0) + " " + t("free")
+        + ' <span style="color:var(--text-muted)">&middot; ' + (v.torrents || 0) + " " + t("torrents") + "</span></div>"
+        + '<div class="rp2-spacer"></div>'
+        + (hot ? '<span class="rp2-warn" style="color:var(--accent-yellow)">' + t("over its mark") + "</span>" : "")
+        + "</div>"
+        + '<div class="rp2-row"><div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox"'
+        + (v.enabled ? " checked" : "") + ' onchange="_rpVolSave(' + i + ',\'enabled\',this.checked)">'
+        + '<span class="rp2-sl"></span></label>' + t("Auto drain")
+        + '<span class="rp2-info">i<span class="rp2-tip">' + RP_TIP + "</span></span></div>"
+        + '<div class="rp2-body' + inh + '" style="flex-wrap:nowrap">'
+        + '<div class="rp2-f">' + t("start") + ' <input type="number" min="1" max="100" value="' + (v.high_watermark || 0)
+        + '" onchange="_rpVolSave(' + i + ',\'high_watermark\',parseInt(this.value))">%</div>'
+        + '<div class="rp2-f">' + t("down to") + ' <input type="number" min="1" max="100" value="' + (v.low_watermark || 0)
+        + '" onchange="_rpVolSave(' + i + ',\'low_watermark\',parseInt(this.value))">%</div>'
+        + '<span class="abs">' + t("that is {at}, back to {back}", { at: at, back: back }) + "</span>"
+        + "</div></div>"
+        + '<div class="rp2-row rp2-drain-result" id="rp-res-' + i + '" style="display:none"></div>'
+        + "</div></div>";
 }
-// The drain is the only policy left, so the button follows its toggle alone.
-// What a torrent becomes -- deleted or graduated -- is decided by its tracker's
-// seed obligation, not by a setting here.
-function _rpUpdateDrainBtn() {
-    const b = document.getElementById("rp-drain-now");
-    if (!b) return;
-    const en = document.getElementById("rp-enabled");
-    const on = !!(en && en.checked);
-    b.disabled = !on;
-    b.title = on ? "" : t("Enable a policy first");
-}
-let _rpDirty = new Set();
-function _rpSet(id, val, isCheck) {
-    const el = document.getElementById(id);
-    // Race settings are restart-required, so drain/status still reports the OLD
-    // value until a restart. Once the user edits a field, stop the poll from
-    // clobbering their pending choice (until page reload).
-    if (!el || el === document.activeElement || _rpDirty.has(id)) return;
-    if (isCheck) el.checked = !!val; else el.value = val;
-}
-async function _rpSave(key, value) {
-    const _idmap = { high_watermark_pct: "rp-high", low_watermark_pct: "rp-low", check_interval_seconds: "rp-interval", enabled: "rp-enabled", add_block_enabled: "rp-block", reserve_free_gb: "rp-reserve" };
-    if (_idmap[key]) _rpDirty.add(_idmap[key]);
+// Saved against the VOLUME, and it applies on the next tick: the daemon reads
+// the policy from the store every pass, so there is no restart to offer here.
+async function _rpVolSave(i, key, value) {
+    const v = _rpVols[i];
+    if (!v) return;
+    const body = { volume: v.id };
+    body[key] = value;
     try {
-        await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }) });
-        document.getElementById("rp-apply").style.display = "";
-    } catch (e) { hydraNotify(t("Save failed: {msg}", { msg: e.message })); }
-    _rpUpdateDrainBtn();
+        const r = await api("/api/drain/policy", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        _rpVols[i] = Object.assign({}, v, r, { inherited: false });
+        loadRacePolicy();
+    } catch (e) {
+        hydraNotify(t("Save failed: {msg}", { msg: e.message }));
+    }
 }
-async function _rpRestart() {
-    if (!await hydraConfirm(t("Restart Hydranos now to apply the race drain settings?"))) return;
-    try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
-}
-async function _rpDrainNow(btn) {
-    btn.disabled = true; const t = btn.textContent; btn.textContent = window.t("Draining…");
+async function _rpVolDrain(btn, i) {
+    const v = _rpVols[i];
+    if (!v) return;
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = t("Draining…");
     let msg;
     try {
-        const r = await api("/api/drain/now", { method: "POST" });
+        const r = await api("/api/drain/now?volume=" + encodeURIComponent(v.id), { method: "POST" });
         msg = _rpDrainMsg(r);
     } catch (e) {
-        msg = window.t("Failed: {msg}", { msg: e && e.message ? e.message : window.t("unknown error") });
+        msg = t("Failed: {msg}", { msg: e && e.message ? e.message : t("unknown error") });
     }
-    btn.disabled = false; btn.textContent = t;
-    _rpUpdateDrainBtn();
-    _rpDrainResult(msg);
+    btn.disabled = false;
+    btn.textContent = label;
+    const el = document.getElementById("rp-res-" + i);
+    if (el) { el.textContent = msg; el.style.display = ""; }
     loadRacePolicy();
 }
-// Turn a /api/drain/now response into one line. A drain that legitimately did
-// nothing must still say so, reporting nothing is what made the button look
-// dead even when it had run.
+// A drain that legitimately did nothing must still say so. Reporting nothing
+// is what made this button look dead back when it never ran at all.
 function _rpDrainMsg(r) {
     if (!r || typeof r !== "object") return t("Nothing to do.");
-    if (r.status === "no_match") {
-        if (r.no_category_link)
-            return t("{n} torrent(s) matched but their category has no hoard category linked, nothing moved.", { n: r.no_category_link });
-        if (r.failed) return t("{n} torrent(s) matched but failed, see the logs.", { n: r.failed });
-        return t("Nothing matched the thresholds.");
-    }
-    if (r.status === "no_drain_needed") return t("Nothing to do: disk is below the start mark.");
-    const n = r.removed_count || 0;
-    if (!n) return t("Nothing to do.");
-    let s = r.action === "hoard"
-        ? t("{n} torrent(s) graduated, {size}.", { n: n, size: formatBytes(r.freed || 0) })
-        : t("{n} torrent(s) removed, {size}.", { n: n, size: formatBytes(r.freed || 0) });
-    if (r.no_category_link) s += " " + t("{n} skipped (no linked category).", { n: r.no_category_link });
-    return s;
+    if (r.status === "no_volume") return t("That volume is gone.");
+    if (r.status === "no_drain_needed") return t("Nothing to do: below the start mark, or nothing that may leave.");
+    const parts = [];
+    if (r.deleted) parts.push(t("{n} deleted", { n: r.deleted }));
+    if (r.graduated) parts.push(t("{n} graduated", { n: r.graduated }));
+    if (!parts.length) return t("Nothing to do.");
+    let s = parts.join(", ") + " &middot; " + formatBytes(r.freed_bytes || 0);
+    if (r.stuck) s += " " + t("({n} stuck: still owes seeding time and has nowhere to go)", { n: r.stuck });
+    return s.replace("&middot;", "·");
 }
-function _rpDrainResult(msg) {
-    const el = document.getElementById("rp-drain-result");
-    if (!el) { console.log("[drain]", msg); return; }
-    el.textContent = msg;
-    el.style.display = "";
+let _rpDirty = new Set();
+function _rpSet(id, val) {
+    const el = document.getElementById(id);
+    if (!el || _rpDirty.has(id) || el === document.activeElement) return;
+    el.value = val;
+}
+async function _rpSave(key, value) {
+    _rpDirty.add("rp-interval");
+    try {
+        await api("/api/settings", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ changes: [{ section: "race_drain", key, value }] }),
+        });
+        document.getElementById("rp-apply").style.display = "";
+    } catch (e) { hydraNotify(t("Save failed: {msg}", { msg: e.message })); }
+}
+async function _rpRestart() {
+    if (!await hydraConfirm(t("Restart Hydranos now to apply the check interval?"))) return;
+    try { await api("/api/settings/restart", { method: "POST" }); } catch (e) {}
 }
 async function _rpToggleHist() {
     const box = document.getElementById("rp-hist");

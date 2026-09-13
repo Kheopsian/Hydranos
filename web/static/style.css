@@ -3450,3 +3450,33 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     font-size: 12px;
     color: var(--text-secondary);
 }
+
+
+/* ─── Race volumes (one card per filesystem) ──────────────────────────────
+   Built on .card and the .rp2 controls, so a volume reads like the rest of
+   the panel. Two traps, both hit while rendering it:
+   - .card has overflow:hidden for its header radius, which BEHEADED the info
+     tooltip after one line;
+   - .card has a backdrop-filter, which creates a stacking context, so the
+     tooltip's z-index is trapped inside it and the NEXT card paints over it.
+     The card is what has to be raised on hover, not the tooltip. */
+.vol-cards{grid-template-columns:repeat(auto-fit,minmax(460px,1fr))}
+.vol-card{overflow:visible;position:relative;z-index:5}
+.vol-card:hover{z-index:70}
+/* The volume name is a PATH: `.card h3` uppercases, and /Data is not
+   /data. Case is meaning here, not styling. */
+.vol-card h3 > span:first-child{text-transform:none;letter-spacing:0;color:var(--text-primary);font-size:13.5px;font-weight:600}
+.vol-card h3{display:flex;align-items:center;gap:12px;justify-content:flex-start;border-radius:12px 12px 0 0}
+.vol-card h3 .cap{color:var(--accent-purple);font-weight:600;letter-spacing:0;text-transform:none;font-size:13px}
+.vol-card h3 .rp2-btn{text-transform:none;letter-spacing:0}
+.vol-card .rp2-gauge{width:100%}
+.vol-card .rp2-row{padding:9px 0;flex-wrap:nowrap}
+.vol-card .rp2-row:first-child{border-top:none}
+.vol-card .rp2-lbl{width:auto}
+.vol-card .rp2-body{gap:10px}
+/* An inherited value is marked by a dashed border, never by transparency:
+   at opacity .55 this text measured 2.6:1 against the card, and a field you
+   cannot read does not say "inherited", it says "broken". */
+.vol-card .inh input[type=number]{border-style:dashed}
+.vol-card .abs{color:var(--text-secondary);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.vol-card .rp2-tip{width:380px;line-height:1.6;z-index:60}

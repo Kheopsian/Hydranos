@@ -343,6 +343,15 @@ fn query_param(query: &str, name: &str) -> Option<String> {
     None
 }
 
+/// 400 with a message, the shape every other refusal in this file uses.
+fn bad_request(msg: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error": msg})),
+    )
+        .into_response()
+}
+
 fn percent_decode(input: &str) -> String {
     let bytes = input.replace('+', " ").into_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -1834,6 +1843,7 @@ fn race_admission(
     state: &AppState,
     engine: &crate::engines::Engine,
     incoming: i64,
+    save_path: &str,
 ) -> Result<(), String> {
     if engine.role != "race" {
         return Ok(());
@@ -1843,18 +1853,30 @@ fn race_admission(
     if !d.add_block_enabled {
         return Ok(());
     }
-    let race_path = if d.race_path.is_empty() { "/race" } else { &d.race_path };
-    let Some(free) = crate::jobs::free_space(std::path::Path::new(race_path)) else {
-        // A path that cannot be read is not a reason to start refusing every
-        // race: that would take the node off the air over a typo.
-        tracing::warn!(path = %race_path, "race admission: cannot read free space, letting it through");
+    // The volume this torrent is about to land on, taken from its own save
+    // path. Asking a global path -- or the emptiest disk -- answers for a disk
+    // that may hold none of this download.
+    let target = std::path::Path::new(save_path);
+    let mount = crate::volumes::mount_point_of(target);
+    let (Some((_, _, free)), Some(dev)) = (
+        crate::volumes::usage(&mount),
+        crate::volumes::device_of_nearest(target),
+    ) else {
+        // Unreadable is not a reason to start refusing every race: that would
+        // take the node off the air over a typo.
+        tracing::warn!(path = %save_path, "race admission: cannot read that volume, letting it through");
         return Ok(());
     };
     let free = free as i64;
 
-    // What the catalogue has promised to write but has not written yet.
+    // What the catalogue has promised to write but has not written yet, counted
+    // on THIS volume only.
     let mut committed: i64 = 0;
     for t in engine.manager.all() {
+        let path = t.save_path.read().clone();
+        if crate::volumes::device_of_nearest(&path) != Some(dev) {
+            continue;
+        }
         let core = typhon_engine::rpc::dispatch::torrent_core(&t);
         let remaining = t.meta.total_size as i64 - core.total_done as i64;
         if remaining > 0 {
@@ -1918,7 +1940,7 @@ fn add_torrent_bytes(
     // measured on this machine, /race to the pool moves ~520 MB/s while a race
     // can arrive at 1 GB/s, and four parallel moves buy 10%. The only lever
     // that acts on the fast side is not accepting the work.
-    race_admission(state, engine, meta.total_size as i64)?;
+    race_admission(state, engine, meta.total_size as i64, &save_path)?;
 
     // The metainfo goes into the store BEFORE the engine is told, and that
     // order is not cosmetic: the engine reads its piece hashes from the store,
@@ -3531,6 +3553,10 @@ fn disk_usage(path: &str) -> (i64, i64, f64) {
     (total, used, pct)
 }
 
+/// Occupancy and policy of every volume that holds race data.
+///
+/// A list, not three scalars. The old shape described one global `race_path`,
+/// which is exactly the assumption that made the drain act on the wrong disk.
 async fn get_drain_status(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -3540,21 +3566,120 @@ async fn get_drain_status(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let d = &cfg.race_drain;
-    let path = if d.race_path.is_empty() { "/race" } else { &d.race_path };
-    let (total, used, pct) = disk_usage(path);
+    // Merged by mount point. Two race engines on one SSD are two passes for the
+    // drain -- each owns its own torrents -- but they are ONE disk to fill, and
+    // showing the same disk twice would ask the operator to add up two cards to
+    // know how full it is.
+    let mut merged: std::collections::BTreeMap<String, (crate::volumes::Volume, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for engine in state.engines.engines().iter() {
+        if engine.role != "race" {
+            continue;
+        }
+        for v in crate::volumes::discover(&state, &engine.manager, d) {
+            match merged.get_mut(&v.id) {
+                Some((acc, engines)) => {
+                    acc.torrents += v.torrents;
+                    engines.push(engine.id.clone());
+                }
+                None => {
+                    merged.insert(v.id.clone(), (v, vec![engine.id.clone()]));
+                }
+            }
+        }
+    }
+    let mut volumes = Vec::new();
+    {
+        for (_, (v, engines)) in merged {
+            volumes.push(serde_json::json!({
+                "id": v.id,
+                "engines": engines,
+                "total": v.total,
+                "used": v.used,
+                "free": v.free,
+                "used_pct": crate::row::num_json(v.used_pct()),
+                "torrents": v.torrents,
+                "enabled": v.policy.enabled,
+                "high_watermark": v.policy.high,
+                "low_watermark": v.policy.low,
+                "inherited": v.policy.inherited,
+            }));
+        }
+    }
     Json(serde_json::json!({
         "add_block_enabled": d.add_block_enabled,
         "check_interval": d.check_interval_seconds,
-        "disk_total": total,
-        "disk_used": used,
-        "disk_used_pct": crate::row::num_json(pct),
-        "enabled": d.enabled,
-        "high_watermark": d.high_watermark_pct,
-        "last_drain": 0,
-        "low_watermark": d.low_watermark_pct,
         "reserve_free_gb": d.reserve_free_gb,
-        "running": false,
-        "stats": {"bytes_freed": 0, "checks": 0, "drains_triggered": 0, "torrents_removed": 0},
+        "default_enabled": d.enabled,
+        "default_high_watermark": d.high_watermark_pct,
+        "default_low_watermark": d.low_watermark_pct,
+        "volumes": volumes,
+    }))
+    .into_response()
+}
+
+/// Set, or drop, one volume's own drain policy.
+///
+/// Stored beside the data rather than in `default.toml`: a threshold typed in
+/// the panel applies on the next tick. The race panel used to need an
+/// "Apply & restart" for this, which is half an action.
+#[derive(serde::Deserialize)]
+struct VolumePolicyBody {
+    volume: String,
+    #[serde(default)]
+    inherit: bool,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    high_watermark: Option<i64>,
+    #[serde(default)]
+    low_watermark: Option<i64>,
+}
+
+async fn set_volume_policy(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    Json(body): Json<VolumePolicyBody>,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    if body.volume.is_empty() {
+        return bad_request("volume is required");
+    }
+    let cfg = state.cfg();
+    if body.inherit {
+        if let Err(e) = crate::volumes::clear_policy(&state, &body.volume) {
+            return bad_request(&format!("could not clear: {e}"));
+        }
+        return Json(serde_json::json!({"status": "ok", "inherited": true})).into_response();
+    }
+    let mut p = crate::volumes::policy_for(&state, &body.volume, &cfg.race_drain);
+    if let Some(v) = body.enabled {
+        p.enabled = v;
+    }
+    if let Some(v) = body.high_watermark {
+        p.high = v;
+    }
+    if let Some(v) = body.low_watermark {
+        p.low = v;
+    }
+    // A low above a high would drain forever: it can never reach its target.
+    if p.low >= p.high {
+        return bad_request("down to must be below start");
+    }
+    if p.high < 1 || p.high > 100 || p.low < 1 {
+        return bad_request("watermarks are percentages");
+    }
+    if let Err(e) = crate::volumes::save_policy(&state, &body.volume, &p) {
+        return bad_request(&format!("could not save: {e}"));
+    }
+    Json(serde_json::json!({
+        "status": "ok",
+        "enabled": p.enabled,
+        "high_watermark": p.high,
+        "low_watermark": p.low,
+        "inherited": false,
     }))
     .into_response()
 }
@@ -8007,11 +8132,71 @@ simple_post!(hoard_restart_stuck, |_s: &AppState| {
 
 /// Run the race drain now instead of waiting for its interval.
 ///
-/// "no_drain_needed" rather than "ok": the drain deletes payload, and an
-/// operator pressing this button needs to know whether it did.
-simple_post!(drain_now, |_s: &AppState| {
-    serde_json::json!({"status": "no_drain_needed"})
-});
+/// WARNING Until 2026-09-13 this route answered `no_drain_needed` without
+/// looking at a disk: the button had never drained anything and said so in a
+/// way that read like a result. Same shape as the Verify and reannounce stubs.
+///
+/// Scoped to one volume through `?volume=`, because that is the whole point of
+/// the panel: pressing the button on the full SSD must not touch the other one.
+/// Without the parameter it passes over every volume that is over its mark.
+async fn drain_now(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let want = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("volume="))
+        .map(|v| percent_decode(v))
+        .unwrap_or_default();
+    let cfg = state.cfg();
+    // Off the async runtime: this deletes files and queues copies, and a race
+    // panel is not worth stalling every other request for.
+    let st = state.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        let mut total = crate::workers::DrainOutcome::default();
+        let mut touched: Vec<String> = Vec::new();
+        for engine in st.engines.engines().iter() {
+            if engine.role != "race" {
+                continue;
+            }
+            for volume in crate::volumes::discover(&st, &engine.manager, &cfg.race_drain) {
+                if !want.is_empty() && volume.id != want {
+                    continue;
+                }
+                if want.is_empty() && volume.used_pct() < volume.policy.high as f64 {
+                    continue;
+                }
+                let o = crate::workers::drain_once(&st, &engine.manager, &volume, &cfg, &engine.id);
+                total.deleted += o.deleted;
+                total.graduated += o.graduated;
+                total.stuck += o.stuck;
+                total.freed_bytes += o.freed_bytes;
+                touched.push(volume.id.clone());
+            }
+        }
+        (total, touched)
+    })
+    .await;
+    let Ok((total, touched)) = out else {
+        return bad_request("drain panicked");
+    };
+    if touched.is_empty() {
+        return Json(serde_json::json!({"status": "no_volume", "volumes": touched})).into_response();
+    }
+    let did = total.deleted + total.graduated;
+    Json(serde_json::json!({
+        "status": if did > 0 { "ok" } else { "no_drain_needed" },
+        "volumes": touched,
+        "deleted": total.deleted,
+        "graduated": total.graduated,
+        "stuck": total.stuck,
+        "freed_bytes": total.freed_bytes,
+    }))
+    .into_response()
+}
 
 /// Verify one torrent. Scoped to hoard, like the other per-torrent routes.
 ///
@@ -10774,6 +10959,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hoard/torrents/:info_hash/verify", axum::routing::post(hoard_verify_one))
         .route("/api/torrents/:info_hash/reannounce", axum::routing::post(reannounce_one))
         .route("/api/drain/now", axum::routing::post(drain_now))
+        .route("/api/drain/policy", axum::routing::post(set_volume_policy))
         .route("/api/health/anomalies", get(get_health_anomalies))
         .route("/api/network/check", axum::routing::post(post_network_check))
         .route("/api/restart", axum::routing::post(post_restart))
