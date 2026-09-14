@@ -4698,6 +4698,13 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "hs_timed_out": typhon_engine::peer::HS_TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed),
             "inbound_accepted": typhon_engine::peer::INBOUND_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
             "worker_threads": typhon_engine::runtime::worker_threads(),
+            // Size of the incomplete index the webseed scanner walks. Watched
+            // rather than assumed: if this ever drifts toward the catalogue
+            // size, the pruning in collect_incomplete has stopped working.
+            // Summed over every engine rather than the two well-known roles:
+            // a node can run vpn7/vpn8/... too, and a per-role list would go
+            // stale the day one is added.
+            "incomplete_indexed": state.engines.engines().iter().map(|e| e.manager.incomplete_len()).sum::<usize>(),
         },
         "server_ts": now,
         "tunnels": [],
