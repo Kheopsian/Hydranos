@@ -8,7 +8,7 @@ pub mod rate;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tracing::{info, warn};
 
 use meta::{InfoHash, TorrentState, TorrentStatus};
@@ -38,6 +38,21 @@ pub struct TorrentManager {
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
+    /// Torrents that may still have something left to download.
+    ///
+    /// Work that only applies to an unfinished torrent -- the webseed scanner
+    /// above all -- used to find its candidates by walking the whole
+    /// catalogue. On a seedbox that is 293k entries scanned twice a second to
+    /// select ~17, measured at ~19% of the process CPU on 2026-09-14.
+    ///
+    /// ⭐ Deliberately a SUPERSET of the true set, and that is what makes it
+    /// safe. Only the three insertion sites have to be right; a missed removal
+    /// costs one wasted predicate call on a list of tens, never a wrong
+    /// answer, because `collect_incomplete` re-checks every entry and prunes
+    /// the ones that no longer qualify. That is why no completion site needs
+    /// to know this index exists -- `peer::download` has no handle on the
+    /// manager anyway.
+    incomplete: DashSet<InfoHash>,
     /// This engine's DHT node, once it has bootstrapped. Per manager rather
     /// than per process: two engines in one process each get their own node,
     /// and an engine with `enable_dht = false` simply never sets it.
@@ -225,6 +240,7 @@ impl TorrentManager {
             cached_torrents_with_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_uploading: std::sync::atomic::AtomicUsize::new(0),
             skey_index: DashMap::new(),
+            incomplete: DashSet::new(),
             dht: std::sync::OnceLock::new(),
             webseed: Default::default(),
             magnet: Default::default(),
@@ -322,6 +338,57 @@ impl TorrentManager {
             }
         }
         out
+    }
+
+    /// Candidates among the torrents that still have something to download.
+    ///
+    /// The O(incomplete) counterpart to `collect_torrents`: it walks the
+    /// `incomplete` index instead of the catalogue, so a 293k-torrent seedbox
+    /// pays for the handful that are actually downloading.
+    ///
+    /// It also prunes as it goes -- an entry whose torrent has finished or
+    /// disappeared is dropped here. That is the whole reason the index can be
+    /// a superset: no completion site has to remember to clean up, and the
+    /// cost of one stale entry is one predicate call, paid once.
+    ///
+    /// ⚠️ Removals are collected and applied AFTER the iterator is done.
+    /// Mutating a DashSet while iterating it deadlocks on the shard lock.
+    pub fn collect_incomplete<F>(&self, max: usize, pred: F) -> Vec<InfoHash>
+    where
+        F: Fn(&Arc<TorrentState>) -> bool,
+    {
+        let mut out = Vec::new();
+        let mut stale: Vec<InfoHash> = Vec::new();
+        for entry in self.incomplete.iter() {
+            let ih = *entry.key();
+            let Some(t) = self.torrents.get(&ih) else {
+                stale.push(ih);
+                continue;
+            };
+            // `picker` is None once a torrent seeds, so "no picker" means
+            // finished, not "unknown".
+            let finished = t.seed_mode
+                || t.picker
+                    .get()
+                    .map_or(true, |p| p.lock().unwrap().is_complete());
+            if finished {
+                stale.push(ih);
+                continue;
+            }
+            if out.len() < max && pred(t.value()) {
+                out.push(ih);
+            }
+        }
+        for ih in stale {
+            self.incomplete.remove(&ih);
+        }
+        out
+    }
+
+    /// Number of torrents currently held in the incomplete index.
+    /// Exposed so the figure can be watched rather than assumed.
+    pub fn incomplete_len(&self) -> usize {
+        self.incomplete.len()
     }
 
     pub fn all(&self) -> Vec<Arc<TorrentState>> {
@@ -438,6 +505,11 @@ impl TorrentManager {
         let num_pieces = state_arc.meta.num_pieces();
         let private = state_arc.meta.private;
         self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
+        // A fresh non-seed_mode torrent has something to fetch until proven
+        // otherwise; `collect_incomplete` prunes it once it completes.
+        if !state_arc.seed_mode {
+            self.incomplete.insert(ih);
+        }
         self.torrents.insert(ih, state_arc.clone());
         // Track in DHT (no-op for private torrents, see dht::track_torrent).
         self.track_in_dht(state_arc);
@@ -489,6 +561,7 @@ impl TorrentManager {
                 } else { None }
             } else { None };
         self.skey_index.remove(&crate::crypto::mse::sha1_combine(b"req2", info_hash));
+        self.incomplete.remove(info_hash);
         let result = self.torrents.remove(info_hash)
             .map(|_| ())
             .ok_or_else(|| "torrent not found".into());
@@ -847,6 +920,11 @@ impl TorrentManager {
                 state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
             }
             self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
+            // The status was just decided above from the resume record, so
+            // trust it rather than re-deriving the answer.
+            if state.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8 {
+                self.incomplete.insert(ih);
+            }
             let state = Arc::new(state);
             // Seed the sweep's baseline from what was just read back, so the
             // first sweep after a start writes only what has moved since --
@@ -1184,6 +1262,9 @@ impl TorrentManager {
         let num_pieces = state.meta.num_pieces();
         let private = state.meta.private;
         self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
+        if !state.seed_mode {
+            self.incomplete.insert(ih);
+        }
         self.torrents.insert(ih, state.clone());
         self.track_in_dht(state);
         // Durable here before the source is told to let go, so a crash in the
