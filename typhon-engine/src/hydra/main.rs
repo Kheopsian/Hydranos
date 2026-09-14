@@ -305,6 +305,10 @@ async fn main() -> anyhow::Result<()> {
             session_offset: (up, down),
             day_baseline: (0, 0),
             day_date: String::new(),
+            // The same mark per engine, taken in the same breath: marking them
+            // lazily on first read would count everything an engine did before
+            // anyone happened to open the page as this session's work.
+            per_engine: engine_host.session_totals_by_engine().into_iter().collect(),
         }))
     };
 

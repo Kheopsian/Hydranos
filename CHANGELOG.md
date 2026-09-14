@@ -19,6 +19,33 @@ Two ways to title a new entry:
 
 ## Unreleased
 
+### Deleting a torrent stopped erasing its upload history
+
+Every total Hydranos publishes is a live sum over the torrents currently loaded
+plus a stored baseline. In 3.x, removing a torrent folded its lifetime bytes
+into that baseline first, in the same transaction that dropped its row. The V4
+port kept the row deletion and dropped the fold, so a delete subtracted
+everything the torrent had ever uploaded -- from the all-time figure as much as
+from the day's. Measured on prod on 2026-09-14: 14 removals, **7.03 TB of
+lifetime upload erased in seven hours**, which is why the headline read 2.75 TB
+against 8.97 TB of measured traffic.
+
+- `Store::delete_absorb` folds the bytes into the **global and per-tracker**
+  carry-overs and drops the row in **one transaction**, restoring the 3.x
+  guarantee. Two statements would mean a crash between them either
+  double-counts the torrent at the next boot or loses its bytes for good, and
+  lifetime upload is the one figure here that cannot be recomputed
+- every removal path goes through it: the native `DELETE`, the qBit shim, the
+  drain, and workflow `Delete` actions -- which now take the same route a human
+  click takes instead of calling the engine directly
+- the in-process odometer learns to **forget** a removed torrent, so "today" and
+  "this session" no longer drop by a torrent's entire history the moment it is
+  deleted
+- the per-engine blocks of `/api/status` report their **own** session totals.
+  `hoard` published two literal zeros and `race` published the all-engines sum
+- test fixtures build on the real `SCHEMA` instead of a hand-copied subset of
+  it, which is why nothing caught a missing `counters` table
+
 ### Race drain, per volume
 
 Hydranos had no notion of a storage location. One `race_path` was read for

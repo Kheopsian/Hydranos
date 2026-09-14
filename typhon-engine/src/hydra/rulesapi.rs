@@ -417,6 +417,12 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
     let hook = |engine: &str, hash: &str, paused: bool| {
         crate::api::apply_pause_to_engine(state, engine, hash, paused);
     };
+    // Same reasoning for delete, and it matters more: this is the path that
+    // folds a removed torrent's lifetime bytes into the durable counters.
+    let delete_hook = |engine: &str, hash: &str, with_files: bool| {
+        crate::api::remove_one_torrent(state, hash, &[engine.to_string()], engine, with_files)
+            .map(|_| ())
+    };
 
     for m in &matches {
         let action_name = m
@@ -433,7 +439,7 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
             .collect::<Vec<_>>()
             .join("+");
 
-        match rulesrun::apply(&state.engines, &state.store, w, m, &hook) {
+        match rulesrun::apply(&state.engines, &state.store, w, m, &hook, &delete_hook) {
             Ok(()) => {
                 report.applied += 1;
                 let store = state.store.lock().unwrap();

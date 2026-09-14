@@ -200,6 +200,7 @@ pub fn apply(
     w: &Workflow,
     m: &Match,
     pause_hook: &dyn Fn(&str, &str, bool),
+    delete_hook: &dyn Fn(&str, &str, bool) -> Result<(), String>,
 ) -> Result<(), String> {
     for action in &m.actions {
         match action {
@@ -248,18 +249,18 @@ pub fn apply(
                     .map_err(|e| e.to_string())?;
             }
             Action::Delete { with_files } => {
-                let Some(engine) = host.engines().iter().find(|e| e.id == m.engine) else {
+                if !host.engines().iter().any(|e| e.id == m.engine) {
                     return Err(format!("engine {} is not running here", m.engine));
-                };
-                let Some(ih) = crate::store::hex20(&m.info_hash) else {
+                }
+                if crate::store::hex20(&m.info_hash).is_none() {
                     return Err("bad info hash".into());
-                };
-                engine
-                    .manager
-                    .remove_torrent(&ih, !with_files)
-                    .map_err(|e| e.to_string())?;
-                let store = store.lock().map_err(|_| "store lock")?;
-                let _ = store.delete_torrent(&m.info_hash);
+                }
+                // Through the hook, which is the route a human click takes:
+                // calling `manager.remove_torrent` and dropping the row here
+                // skipped the lifetime-byte carry-over, so a workflow that
+                // deleted torrents quietly erased everything they had ever
+                // uploaded from the all-time totals.
+                delete_hook(&m.engine, &m.info_hash, *with_files)?;
             }
         }
     }

@@ -373,6 +373,41 @@ impl EngineHost {
         (up, down)
     }
 
+    /// The same figure for ONE engine.
+    ///
+    /// The headline used to publish the all-engines sum inside the per-engine
+    /// blocks, which made race and hoard report identical totals and hoard
+    /// report a hardcoded zero. A per-engine block has to be countable on its
+    /// own or it is decoration.
+    pub fn session_totals_of(&self, engine_id: &str) -> (i64, i64) {
+        use std::sync::atomic::Ordering;
+        let (mut up, mut down) = (0i64, 0i64);
+        if let Some(engine) = self.get(engine_id) {
+            for t in engine.manager.all().iter() {
+                up += t.total_uploaded.load(Ordering::Relaxed) as i64;
+                down += t.total_downloaded.load(Ordering::Relaxed) as i64;
+            }
+        }
+        (up, down)
+    }
+
+    /// Every engine's id with its session totals, for marking the odometer at
+    /// boot in one walk instead of one walk per engine.
+    pub fn session_totals_by_engine(&self) -> Vec<(String, (i64, i64))> {
+        use std::sync::atomic::Ordering;
+        self.engines
+            .iter()
+            .map(|engine| {
+                let (mut up, mut down) = (0i64, 0i64);
+                for t in engine.manager.all().iter() {
+                    up += t.total_uploaded.load(Ordering::Relaxed) as i64;
+                    down += t.total_downloaded.load(Ordering::Relaxed) as i64;
+                }
+                (engine.id.clone(), (up, down))
+            })
+            .collect()
+    }
+
     /// Total torrents across every engine, read from the engines themselves.
     ///
     /// The figure the Go front published came from a cache it refreshed on a
