@@ -110,6 +110,31 @@ pub struct Odometer {
     pub day_baseline: (i64, i64),
     /// The date that baseline belongs to, `YYYY-MM-DD` in Europe/Paris.
     pub day_date: String,
+    /// The same startup mark, per engine id, so a per-engine block can publish
+    /// its own session instead of the all-engines sum.
+    pub per_engine: std::collections::HashMap<String, (i64, i64)>,
+}
+
+impl Odometer {
+    /// Take a removed torrent's lifetime bytes off the marks.
+    ///
+    /// `session = totals - session_offset`, and `totals` is a sum over the
+    /// torrents currently LOADED -- so it is about to lose this torrent's
+    /// lifetime bytes. Lowering the mark by the same amount is what keeps "this
+    /// session" and "today" continuous across a delete. Without it, removing a
+    /// torrent that had uploaded 500 GB over its life subtracts 500 GB from
+    /// TODAY's figure, for work done weeks ago.
+    ///
+    /// `day_baseline` is deliberately untouched: `day = session - day_baseline`
+    /// and `session` does not move here, so the day does not either.
+    pub fn forget(&mut self, engine_id: &str, ul: i64, dl: i64) {
+        self.session_offset.0 -= ul;
+        self.session_offset.1 -= dl;
+        if let Some(mark) = self.per_engine.get_mut(engine_id) {
+            mark.0 -= ul;
+            mark.1 -= dl;
+        }
+    }
 }
 
 pub type Odo = Arc<std::sync::Mutex<Odometer>>;
@@ -166,6 +191,21 @@ pub fn session_and_day(state: &AppState) -> ((i64, i64), (i64, i64), (i64, i64))
     // summing 300k counters twice per frame is the kind of waste that only
     // shows up as a warm CPU.
     ((total_up, total_down), session, day)
+}
+
+/// One engine's "since this process started" totals.
+///
+/// Same shape as `session_and_day`, scoped to a single engine: its live sum
+/// minus the mark taken at boot, ratcheted down if the sum falls below the mark
+/// so a large removal cannot publish a negative session.
+pub fn engine_session(state: &AppState, engine_id: &str) -> (i64, i64) {
+    let totals = state.engines.session_totals_of(engine_id);
+    let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
+    let mark = odo.per_engine.entry(engine_id.to_string()).or_insert(totals);
+    if totals.0 < mark.0 || totals.1 < mark.1 {
+        *mark = totals;
+    }
+    ((totals.0 - mark.0).max(0), (totals.1 - mark.1).max(0))
 }
 
 #[derive(Clone)]
@@ -4646,6 +4686,11 @@ fn status_payload(state: &AppState) -> serde_json::Value {
 
     let hoard_live = live_stats(state, "hoard");
     let race_live = live_stats(state, "race");
+    // Per engine, not the all-engines sum. The hoard block used to carry two
+    // literal zeros and the race block the global total, so hoard looked idle
+    // while it was seeding and race looked like it had done hoard's work too.
+    let hoard_session = engine_session(state, "hoard");
+    let race_session = engine_session(state, "race");
 
     serde_json::json!({
         "baseline": {
@@ -4663,7 +4708,8 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "active_peers": hoard_live.active_peers,
             "active_upload_rate": hoard_live.upload_rate,
             "engine": "hoard", "listen_port": cfg.hoard.listen_port,
-            "running": true, "session_downloaded": 0, "session_uploaded": 0,
+            "running": true,
+            "session_downloaded": hoard_session.1, "session_uploaded": hoard_session.0,
             "stagger_complete": true,
             "swarm_leechers": swarm_leechers_total(state),
             "torrents_announced": announced_count(state, "hoard"),
@@ -4675,7 +4721,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "race": {
             "active_downloads": downloading,
             "active_seeds": seeds,
-            "session_downloaded": session_down,
+            "session_downloaded": race_session.1,
             "session_grabbed": 0,
             "session_ratio": crate::row::num_json(ratio),
             "session_uploaded": session_up,
@@ -9267,6 +9313,70 @@ async fn delete_torrent(
     }
 }
 
+/// Move a removed torrent's lifetime bytes into the durable carry-over, and
+/// drop its store row, in one transaction.
+///
+/// Every total the interface publishes is a sum over the torrents currently
+/// loaded plus a stored baseline. Removing a torrent takes its bytes out of the
+/// sum; this is what puts them into the baseline, so the published figure does
+/// not move. The V4 port dropped this call and kept only the row deletion,
+/// which is why deleting a torrent silently erased everything it had ever
+/// uploaded -- from the all-time figure as well as the day's.
+///
+/// Per tracker as well as globally: the Trackers tab reads the same counters,
+/// and a ratio that forgets what a removed torrent gave back is the number an
+/// operator is judged on.
+pub(crate) fn absorb_on_remove(
+    state: &AppState,
+    engine_id: &str,
+    torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+    hash: &str,
+    session: Option<&str>,
+) {
+    use std::sync::atomic::Ordering;
+    let ul = torrent.total_uploaded.load(Ordering::Relaxed) as i64;
+    let dl = torrent.total_downloaded.load(Ordering::Relaxed) as i64;
+
+    // The host baked into the torrent, read the way the Trackers tab reads it,
+    // and bucketed under the same name it uses for a torrent carrying no
+    // announce URL -- otherwise the absorbed bytes land on a row only this path
+    // knows about, and the tab keeps showing the figure without them.
+    let host = torrent
+        .live_trackers
+        .read()
+        .iter()
+        .flatten()
+        .next()
+        .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u))
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "(no tracker)".to_string());
+
+    let keys = vec![
+        "global".to_string(),
+        crate::store::Store::tracker_counter_key(engine_id, &host),
+    ];
+
+    {
+        let store = state.store.lock().unwrap();
+        if let Err(e) = store.delete_absorb(hash, session, &keys, ul, dl) {
+            // Loud on purpose: lifetime upload is the one figure here that
+            // cannot be recomputed from anything else, so a fold that did not
+            // land must never pass for a clean delete.
+            tracing::error!(
+                hash = %hash, engine = %engine_id, ul, dl,
+                "absorb-on-remove failed, lifetime bytes not carried over: {e}"
+            );
+            return;
+        }
+    }
+
+    // Only once the bytes are durable. The in-process mark and the stored
+    // counter have to move together, or the headline jumps by the difference
+    // until the next restart re-reads the store.
+    let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
+    odo.forget(engine_id, ul, dl);
+}
+
 /// Remove a torrent from the engines that hold it, and from the store.
 ///
 /// Shared by the native DELETE and the qBit shim: the shim used to read
@@ -9304,6 +9414,10 @@ pub(crate) fn remove_one_torrent(
             return Err(e);
         }
         engine.announce_cache.forget(hash);
+        // AFTER the engine let go, never before: absorbing a torrent the engine
+        // then refuses to drop counts its bytes twice, once in the carry-over
+        // and once in the live sum. This also drops the row for this copy.
+        absorb_on_remove(state, session, &torrent, hash, Some(session));
         dropped += 1;
     }
 
@@ -9709,12 +9823,16 @@ fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bo
     if let Some((_, torrent)) = find_torrent(state, &hash) {
         let ih = torrent.info_hash;
         for engine in state.engines.engines() {
-            if engine.manager.get(&ih).is_some() {
+            // This engine's OWN copy: the counters are per copy, and absorbing
+            // the first engine's figures for every engine would credit the
+            // carry-over with bytes the others never moved.
+            if let Some(copy) = engine.manager.get(&ih) {
                 if let Err(e) = engine.manager.remove_torrent(&ih, keep_data) {
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
                     return;
                 }
                 engine.announce_cache.forget(&hash);
+                absorb_on_remove(state, &engine.id, &copy, &hash, Some(&engine.id));
             }
         }
     }
@@ -11461,6 +11579,7 @@ mod tests {
     fn a_lifetime_total_is_not_todays_traffic() {
         // A library that has moved 321 TB before this process ever started.
         let mut odo = Odometer {
+            per_engine: Default::default(),
             session_offset: (321_000, 90_000),
             day_baseline: (0, 0),
             day_date: "2026-09-08".into(),
@@ -11479,6 +11598,7 @@ mod tests {
     #[test]
     fn midnight_resets_the_day_but_not_the_session() {
         let mut odo = Odometer {
+            per_engine: Default::default(),
             session_offset: (1000, 0),
             day_baseline: (0, 0),
             day_date: "2026-09-08".into(),
@@ -11498,6 +11618,7 @@ mod tests {
     #[test]
     fn removing_a_torrent_never_makes_the_counters_negative() {
         let mut odo = Odometer {
+            per_engine: Default::default(),
             session_offset: (1000, 0),
             day_baseline: (0, 0),
             day_date: "2026-09-08".into(),
@@ -11508,6 +11629,55 @@ mod tests {
         let (session, day) = split(&mut odo, (300, 0), "2026-09-08");
         assert_eq!(session, (0, 0), "follow the totals down, never go negative");
         assert_eq!(day, (0, 0));
+    }
+
+    /// The bug, stated as a test.
+    ///
+    /// The totals are a sum over the torrents currently LOADED, so a delete
+    /// takes that torrent's LIFETIME bytes out of the sum. Without `forget`,
+    /// removing a torrent that had uploaded 1.2k over months subtracts 1.2k
+    /// from TODAY -- and the ratchet above then floors the day at zero, which
+    /// is the "never negative" safety net firing on a number that should never
+    /// have moved. On prod this erased 7 TB in a single day.
+    #[test]
+    fn a_delete_does_not_rewrite_todays_figure() {
+        let mut odo = Odometer {
+            per_engine: [("hoard".to_string(), (1000, 0))].into_iter().collect(),
+            session_offset: (1000, 0),
+            day_baseline: (0, 0),
+            day_date: "2026-09-08".into(),
+        };
+        // 500 moved today, on a library summing 1500.
+        let (session, day) = split(&mut odo, (1500, 0), "2026-09-08");
+        assert_eq!((session.0, day.0), (500, 500));
+
+        // A torrent holding 1200 lifetime bytes is removed. The live sum falls
+        // to 300; the mark follows it down by the same 1200.
+        odo.forget("hoard", 1200, 0);
+        let (session, day) = split(&mut odo, (300, 0), "2026-09-08");
+        assert_eq!(session.0, 500, "the session is untouched by a delete");
+        assert_eq!(day.0, 500, "and so is the day");
+        assert_eq!(odo.per_engine["hoard"], (-200, 0), "the engine mark moved too");
+
+        // What the process keeps doing afterwards still counts.
+        let (session, day) = split(&mut odo, (400, 0), "2026-09-08");
+        assert_eq!((session.0, day.0), (600, 600));
+    }
+
+    /// An engine the odometer has no mark for must not be credited with the
+    /// removal -- a typo'd engine id silently moving the wrong mark is exactly
+    /// the kind of quiet drift this whole change exists to end.
+    #[test]
+    fn forgetting_names_an_engine_or_moves_only_the_global_mark() {
+        let mut odo = Odometer {
+            per_engine: [("hoard".to_string(), (10, 0))].into_iter().collect(),
+            session_offset: (10, 0),
+            day_baseline: (0, 0),
+            day_date: "2026-09-08".into(),
+        };
+        odo.forget("nope", 5, 0);
+        assert_eq!(odo.session_offset, (5, 0), "the global mark always moves");
+        assert_eq!(odo.per_engine["hoard"], (10, 0), "an unknown engine moves nothing else");
     }
 
     fn state(key: &str, password_hash: &str) -> AppState {

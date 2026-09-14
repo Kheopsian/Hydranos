@@ -1229,6 +1229,63 @@ impl Store {
         Ok(())
     }
 
+    /// The counters key for one (engine, tracker) pair.
+    ///
+    /// The separators are NUL bytes, matching what `tracker_counters` reads
+    /// back. Building this key with spaces would create a second row beside the
+    /// real one, invisible to the reader that only knows the NUL form.
+    pub fn tracker_counter_key(engine: &str, host: &str) -> String {
+        format!("tracker\0{engine}\0{host}")
+    }
+
+    /// Fold a removed torrent's lifetime bytes into the carry-over counters and
+    /// drop its row, in ONE transaction.
+    ///
+    /// This is the whole reason the counters exist. Every total the interface
+    /// publishes is a sum over the torrents currently LOADED, so removing one
+    /// takes its lifetime bytes out of that sum; the carry-over is what puts
+    /// them back. Without this call a delete silently rewrites history --
+    /// measured on prod 2026-09-14, the drain alone erased 7.03 TB of lifetime
+    /// upload in a day, from the all-time figure as well as the day's.
+    ///
+    /// The fold and the delete must commit together. As two statements, a crash
+    /// between them either double-counts the torrent at the next boot or drops
+    /// its bytes for good -- and lifetime upload is the one number here that
+    /// cannot be recomputed from anything else.
+    ///
+    /// `session` names which copy to drop; `None` means every copy, which is
+    /// what an unqualified "remove this torrent" has always meant.
+    pub fn delete_absorb(
+        &self,
+        info_hash: &str,
+        session: Option<&str>,
+        keys: &[String],
+        ul: i64,
+        dl: i64,
+    ) -> anyhow::Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        // A torrent that never moved a byte still has to lose its row, so only
+        // the folding is conditional.
+        if ul > 0 || dl > 0 {
+            for key in keys {
+                tx.execute(
+                    "INSERT INTO counters (key, ul, dl) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET ul = ul + excluded.ul, dl = dl + excluded.dl",
+                    rusqlite::params![key, ul, dl],
+                )?;
+            }
+        }
+        let n = match session {
+            Some(s) => tx.execute(
+                "DELETE FROM torrents WHERE info_hash = ?1 AND session = ?2",
+                rusqlite::params![info_hash, s],
+            )?,
+            None => tx.execute("DELETE FROM torrents WHERE info_hash = ?1", [info_hash])?,
+        };
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
     /// Every distinct tag used by one session's torrents, sorted.
     pub fn tags_of_session(&self, session: &str) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
@@ -1961,6 +2018,68 @@ mod tests {
         assert!(store.write_mark() > after_update, "a delete must move the mark");
     }
 
+    /// The bug this whole mechanism exists to prevent.
+    ///
+    /// The published totals are a live sum over the loaded torrents plus these
+    /// counters. Drop a row without folding its bytes in and the figure goes
+    /// DOWN -- which is how deleting torrents erased 7 TB of lifetime upload in
+    /// a day on prod, from the all-time total as well as the day's.
+    #[test]
+    fn a_removed_torrent_leaves_its_bytes_in_the_counters() {
+        let store = fresh();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+        let keys = vec![
+            "global".to_string(),
+            Store::tracker_counter_key("hoard", "tk.example.net"),
+        ];
+
+        assert!(store.delete_absorb(&a, None, &keys, 1000, 100).unwrap());
+        assert!(!store.has_torrent_blob(&a), "the row must be gone");
+        for key in &keys {
+            assert_eq!(store.counter(key), (1000, 100), "counter {key}");
+        }
+
+        // A second removal ACCUMULATES rather than overwrites. `set_counter`
+        // would have passed the first assertion and silently lost this one --
+        // that is the difference between a carry-over and a gauge.
+        store.insert_torrent(&b, "hoard", b"y", "", "", 0.0, false, "").unwrap();
+        assert!(store.delete_absorb(&b, None, &keys, 5, 5).unwrap());
+        for key in &keys {
+            assert_eq!(store.counter(key), (1005, 105), "counter {key} after the second");
+        }
+    }
+
+    /// A torrent that never moved a byte still has to lose its row.
+    #[test]
+    fn a_removal_with_no_bytes_still_drops_the_row() {
+        let store = fresh();
+        let a = "a".repeat(40);
+        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+        assert!(store.delete_absorb(&a, None, &["global".to_string()], 0, 0).unwrap());
+        assert!(!store.has_torrent_blob(&a));
+        assert_eq!(store.counter("global"), (0, 0), "nothing to fold, nothing folded");
+    }
+
+    /// Naming a session drops THAT copy only: two engines seeding one payload
+    /// are two rows, and removing one must not take the other's row with it.
+    #[test]
+    fn absorbing_one_copy_leaves_the_other() {
+        // On the MIGRATED key: one row per (hash, session) is what makes two
+        // copies possible in the first place, and `fresh()` is still on the
+        // pre-migration schema a new install starts from.
+        let store = Store::open_in_memory().unwrap();
+        store.migrate_composite_key().unwrap();
+        let a = "a".repeat(40);
+        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+        store.insert_torrent(&a, "race", b"x", "", "", 0.0, false, "").unwrap();
+
+        assert!(store.delete_absorb(&a, Some("hoard"), &["global".to_string()], 7, 3).unwrap());
+        assert_eq!(store.sessions_of(&a), vec!["race".to_string()]);
+        assert_eq!(store.counter("global"), (7, 3));
+    }
+
     /// The per-category query is the whole-session one, narrowed -- the qBit
     /// shim swaps between them by which the client asked for, so a difference
     /// in the facts would be a difference in what *arr sees.
@@ -2014,20 +2133,16 @@ mod tests {
         assert_eq!(store.paused_hashes("hoard").unwrap(), vec![b]);
     }
 
+    /// A store on the REAL schema, not a hand-copied subset of it.
+    ///
+    /// This used to declare `torrents` inline and nothing else, so every test
+    /// ran against a database missing `counters`, `meta`, `tag_registry` and
+    /// the rest. Anything reading those swallowed "no such table" through an
+    /// `unwrap_or` and passed -- a second schema definition that drifts from
+    /// the first tests the drift, not the code.
     fn fresh() -> Store {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE torrents (
-                info_hash TEXT PRIMARY KEY, session TEXT NOT NULL, torrent BLOB NOT NULL,
-                save_path TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '',
-                added_time REAL NOT NULL DEFAULT 0, completed_time REAL NOT NULL DEFAULT 0,
-                total_uploaded INTEGER NOT NULL DEFAULT 0,
-                total_downloaded INTEGER NOT NULL DEFAULT 0,
-                paused INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '',
-                content_folder INTEGER NOT NULL DEFAULT -1, pinned INTEGER NOT NULL DEFAULT 0,
-                seeding_time INTEGER NOT NULL DEFAULT 0);",
-        )
-        .unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
         Store { conn }
     }
 
