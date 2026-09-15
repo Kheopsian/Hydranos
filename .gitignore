@@ -35,3 +35,7 @@ tools/paritydiff/__pycache__/
 # Cargo cache kept beside the worktree so a container build can reuse it.
 # 330 MB of downloaded crates: a build artefact, not source.
 /.cargo-home/
+
+# Left behind by `cargo test`: the store opens a database beside the
+# crate root when a test builds a manager without one of its own.
+typhon-engine/hydra.db

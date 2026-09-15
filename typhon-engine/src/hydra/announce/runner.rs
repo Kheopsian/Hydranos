@@ -60,6 +60,13 @@ const VERIFY_EVERY: u64 = 64;
 /// How many peers a self-check asks for. Small enough that a tracker returning
 /// fewer than this proves the list was not truncated.
 const VERIFY_NUMWANT: u32 = 50;
+/// What a seeding torrent asks for once we know we are not reachable.
+///
+/// Not the 200 a leecher asks for: an unreachable node has to dial everything
+/// itself, and two hundred per torrent across a catalogue is the connection
+/// storm that made seeding passive in the first place. Fifty finds the leechers
+/// that are themselves reachable, which is most of them.
+const UNREACHABLE_SEED_NUMWANT: u32 = 50;
 static VERIFY_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How an engine announces.
@@ -100,7 +107,14 @@ impl Catalogue for EngineCatalogue {
             // A paused torrent is not announced. Telling a tracker we are a
             // peer for something we will not serve earns a connection attempt
             // from every leecher and answers none of them.
-            .filter(|t| !t.is_paused.load(std::sync::atomic::Ordering::Relaxed))
+            // ... except one that still owes its trackers a departure. It
+            // leaves the catalogue again as soon as that announce has gone
+            // out, because the runner clears the flag when it sends it.
+            .filter(|t| {
+                !t.is_paused.load(std::sync::atomic::Ordering::Relaxed)
+                    || t.pending_announce_event.load(std::sync::atomic::Ordering::Relaxed)
+                        == typhon_engine::torrent::meta::ANNOUNCE_EVENT_STOPPED
+            })
             .map(|t| hex(&t.info_hash))
             .collect()
     }
@@ -156,6 +170,49 @@ pub fn start(
 /// Stops at the first tier that answers: that is what a tier is for. Walking
 /// all of them would announce the same torrent several times over and count
 /// the upload twice on trackers that share a swarm.
+/// What a seeding torrent asks a tracker for.
+///
+/// A complete torrent normally asks for no peers: it is reachable, so leechers
+/// open the connection and there is nothing for us to dial. That assumption is
+/// the whole of it, and when it is false the torrent uploads *nothing* -- not
+/// less, nothing -- because it never learns a single address. Every other
+/// client dials out instead.
+///
+/// The self-check already measures the assumption, per tracker, by asking for a
+/// short peer list and looking for our own address in it. Until now nothing
+/// read the answer.
+///
+/// - no answer yet: ask, so the question gets settled on the first announce to
+///   a tracker rather than whenever the sampling tick comes round -- which on a
+///   small catalogue is an announce interval away, and that is exactly the user
+///   this is for.
+/// - a conclusive answer that did not find us: we are invisible, so dial.
+/// - anything else: the ordinary sampled behaviour.
+fn seed_numwant(verify: Option<&Verify>, sampled: bool) -> Option<u32> {
+    match verify {
+        None => Some(VERIFY_NUMWANT),
+        Some(v) if v.conclusive && !v.v4 && !v.v6 => Some(UNREACHABLE_SEED_NUMWANT),
+        _ if sampled => Some(VERIFY_NUMWANT),
+        _ => None,
+    }
+}
+
+/// Which BEP 3 event this announce carries.
+///
+/// An owed event outranks `started`: a torrent that finishes or is stopped
+/// inside its very first announce cycle has more to tell the tracker than that
+/// it arrived. Everything else is a periodic announce, which BEP 3 wants
+/// carrying no event key at all -- not an empty one.
+fn event_for(owed: u8, first: bool) -> &'static str {
+    use typhon_engine::torrent::meta::{ANNOUNCE_EVENT_COMPLETED, ANNOUNCE_EVENT_STOPPED};
+    match owed {
+        ANNOUNCE_EVENT_COMPLETED => "completed",
+        ANNOUNCE_EVENT_STOPPED => "stopped",
+        _ if first => "started",
+        _ => "",
+    }
+}
+
 async fn announce_one(
     manager: &Arc<TorrentManager>,
     policy: &Policy,
@@ -199,32 +256,33 @@ async fn announce_one(
     // torrent announces to nobody, whoever asked. Reported as `gone` because
     // that is what it is to the scheduler: the catalogue already filters paused
     // torrents, so resuming one puts it back on the next refill.
-    if torrent.is_paused.load(Ordering::Relaxed) {
+    // Read before the pause check, because a torrent that owes a departure is
+    // paused by definition and would otherwise be dropped here without ever
+    // telling its trackers.
+    use typhon_engine::torrent::meta::{ANNOUNCE_EVENT_NONE, ANNOUNCE_EVENT_STOPPED};
+    let owed = torrent.pending_announce_event.load(Ordering::Relaxed);
+
+    if torrent.is_paused.load(Ordering::Relaxed) && owed != ANNOUNCE_EVENT_STOPPED {
         return gone;
     }
 
+    // Taken only now that it is certain to be sent: clearing it above would
+    // lose the event for a torrent that turned out to be paused.
+    let owed = torrent
+        .pending_announce_event
+        .swap(ANNOUNCE_EVENT_NONE, Ordering::Relaxed);
+
     // "started" is only right the first time a tracker hears about a torrent.
     // Sending it on every announce makes a tracker reset its view of us, and
-    // some read it as a client that restarts in a loop.
-    let event = if job.first { "started" } else { "" };
+    // some read it as a client that restarts in a loop. An owed event outranks
+    // it: a torrent that completes on its very first announce cycle has more
+    // to say than that it arrived.
+    let event = event_for(owed, job.first);
 
     // Sampled self-check. Only on a torrent that is already seeding: a leecher
     // asks for peers anyway, so its answer says nothing about numwant.
     let verify_this = left == 0
         && VERIFY_TICK.fetch_add(1, Ordering::Relaxed) % VERIFY_EVERY == 0;
-    let numwant_this = if verify_this { Some(VERIFY_NUMWANT) } else { None };
-
-    // Keep the handshake identity in step with what we are about to announce.
-    // Done here, before the announce, because this is the one place that sees
-    // both the torrent and the policy -- and it re-runs on every cycle, so an
-    // override added or removed at runtime takes effect without a restart.
-    {
-        let want = policy::handshake_prefix(policy, &torrent.meta.trackers);
-        let mut slot = torrent.handshake_prefix.write();
-        if *slot != want {
-            *slot = want;
-        }
-    }
 
     let mut interval = Duration::from_secs(30 * 60);
     let mut announced_at_all = false;
@@ -235,6 +293,13 @@ async fn announce_one(
             if !breaker.allows(&host, std::time::Instant::now()) {
                 continue;
             }
+            // Per tracker, not per torrent: we can be visible to one and not to
+            // another -- an IPv6-only tracker on a v4-only host, say.
+            let numwant_this = if left == 0 {
+                seed_numwant(cache.verify_for(&host).as_ref(), verify_this)
+            } else {
+                None
+            };
             let Some(req) = policy::prepare(
                 policy,
                 tracker_url,
@@ -252,11 +317,16 @@ async fn announce_one(
                 Ok(resp) => {
                     breaker.record(&host, true, std::time::Instant::now());
                     cache.count_ok();
-                    if let Some(secondary) = req.secondary_url {
-                        typhon_engine::tracker::http::spawn_secondary_announce(secondary);
-                    }
                     if resp.interval > 0 {
                         interval = Duration::from_secs(resp.interval as u64);
+                    }
+                    // `min interval` is a floor, not a suggestion. It exists so
+                    // a tracker can refuse to be asked again too soon whatever
+                    // the client thinks -- so it wins over `interval` when the
+                    // two disagree, rather than being averaged with it.
+                    let floor = Duration::from_secs(resp.min_interval as u64);
+                    if resp.min_interval > 0 && interval < floor {
+                        interval = floor;
                     }
                     // The swarm counts only exist here. Nothing else in the
                     // process can tell how many seeders a parked torrent has.
@@ -472,5 +542,283 @@ mod tests {
         assert_eq!(parse_hex(&hex(&raw)), Some(raw));
         assert_eq!(parse_hex("short"), None);
         assert_eq!(parse_hex(&"zz".repeat(20)), None);
+    }
+}
+
+#[cfg(test)]
+mod event_rules {
+    use super::event_for;
+    use typhon_engine::torrent::meta::{
+        ANNOUNCE_EVENT_COMPLETED, ANNOUNCE_EVENT_NONE, ANNOUNCE_EVENT_STOPPED,
+    };
+
+    /// BEP 3: the first announce for a torrent says `started`, and only it.
+    #[test]
+    fn the_first_announce_is_the_only_started_one() {
+        assert_eq!(event_for(ANNOUNCE_EVENT_NONE, true), "started");
+        assert_eq!(event_for(ANNOUNCE_EVENT_NONE, false), "");
+    }
+
+    /// BEP 3: a finished download is reported. Private trackers count snatches
+    /// from this event and from nothing else.
+    #[test]
+    fn a_finished_download_reports_completed() {
+        assert_eq!(event_for(ANNOUNCE_EVENT_COMPLETED, false), "completed");
+    }
+
+    /// BEP 3: a stopped torrent tells its trackers to drop it, rather than
+    /// leaving them to time the entry out.
+    #[test]
+    fn a_stopped_torrent_reports_stopped() {
+        assert_eq!(event_for(ANNOUNCE_EVENT_STOPPED, false), "stopped");
+    }
+
+    /// An owed event wins over `started`: a torrent can complete within its
+    /// first announce interval, and "it arrived" is the less useful of the two.
+    #[test]
+    fn an_owed_event_outranks_the_first_announce() {
+        assert_eq!(event_for(ANNOUNCE_EVENT_COMPLETED, true), "completed");
+        assert_eq!(event_for(ANNOUNCE_EVENT_STOPPED, true), "stopped");
+    }
+}
+
+#[cfg(test)]
+mod numwant_rules {
+    use super::{seed_numwant, UNREACHABLE_SEED_NUMWANT, VERIFY_NUMWANT};
+    use crate::announce::cache::Verify;
+
+    fn verify(v4: bool, v6: bool, conclusive: bool) -> Verify {
+        Verify {
+            at: std::time::Instant::now(),
+            v4,
+            v6,
+            conclusive,
+            swarm: 10,
+        }
+    }
+
+    /// A tracker we have never checked gets asked straight away. Waiting for
+    /// the sampling tick would leave a small catalogue passive for a whole
+    /// announce interval, and a small catalogue is exactly the case where
+    /// somebody is comparing us with qBittorrent and finding us slower.
+    #[test]
+    fn an_unchecked_tracker_is_asked_immediately() {
+        assert_eq!(seed_numwant(None, false), Some(VERIFY_NUMWANT));
+    }
+
+    /// The point of the change: invisible to the tracker means we dial, the
+    /// way every other client does, instead of uploading nothing.
+    #[test]
+    fn an_invisible_seed_asks_for_peers_to_dial() {
+        let v = verify(false, false, true);
+        assert_eq!(seed_numwant(Some(&v), false), Some(UNREACHABLE_SEED_NUMWANT));
+    }
+
+    /// And the converse, which is what keeps a reachable node cheap: it asks
+    /// for nothing, because leechers open the connection to it.
+    #[test]
+    fn a_reachable_seed_still_asks_for_nothing() {
+        assert_eq!(seed_numwant(Some(&verify(true, true, true)), false), None);
+        assert_eq!(seed_numwant(Some(&verify(true, false, true)), false), None);
+        assert_eq!(seed_numwant(Some(&verify(false, true, true)), false), None);
+    }
+
+    /// An absence from a truncated list is not an absence. The tracker returned
+    /// as many peers as we asked for, so it had more to give and ours may be
+    /// among them -- treating that as unreachable would make every torrent in a
+    /// large swarm start dialling for nothing.
+    #[test]
+    fn an_inconclusive_answer_is_not_a_verdict() {
+        assert_eq!(seed_numwant(Some(&verify(false, false, false)), false), None);
+    }
+
+    /// The ordinary self-check still fires on a tracker that sees us.
+    #[test]
+    fn the_sampled_self_check_survives() {
+        assert_eq!(
+            seed_numwant(Some(&verify(true, true, true)), true),
+            Some(VERIFY_NUMWANT)
+        );
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    /// ⭐⭐ Only the IPv4 leg is classified when both families failed. On an
+    /// A-only tracker the v6 leg ALWAYS fails with "Network unreachable", and
+    /// classifying the concatenation lets that noise win over the real cause:
+    /// measured on the bench, a tracker answering 429 on v4 was filed under
+    /// `connect`.
+    #[test]
+    fn the_v6_leg_never_masks_the_real_v4_cause() {
+        let both = "v4: HTTP 429 Too Many Requests | v6: Network unreachable";
+        assert_eq!(classify(both), "rate_limited", "the v4 cause wins");
+
+        let timeout = "v4: operation timed out | v6: Network unreachable";
+        assert_eq!(classify(timeout), "timeout");
+    }
+
+    #[test]
+    fn each_class_is_recognised_from_what_a_tracker_actually_says() {
+        assert_eq!(classify("HTTP 429"), "rate_limited");
+        assert_eq!(classify("too many requests"), "rate_limited");
+        assert_eq!(classify("operation timed out"), "timeout");
+        assert_eq!(classify("connection timeout"), "timeout");
+        assert_eq!(classify("invalid passkey"), "invalid_passkey");
+        assert_eq!(classify("unregistered torrent"), "unknown_torrent");
+        assert_eq!(classify("torrent not registered"), "unknown_torrent");
+        assert_eq!(classify("dns error"), "dns");
+        assert_eq!(classify("connection refused"), "connect");
+        assert_eq!(classify("Network unreachable"), "connect");
+        assert_eq!(classify("HTTP 503"), "http_error");
+    }
+
+    /// A tracker answering in French still says "introuvable" -- the class has
+    /// to see it, or a whole tracker's errors land in `other`.
+    #[test]
+    fn a_french_tracker_saying_introuvable_is_an_unknown_torrent() {
+        assert_eq!(classify("torrent introuvable"), "unknown_torrent");
+    }
+
+    #[test]
+    fn classification_ignores_case() {
+        assert_eq!(classify("OPERATION TIMED OUT"), "timeout");
+        assert_eq!(classify("Invalid Passkey"), "invalid_passkey");
+    }
+
+    /// Anything unrecognised is `other`, never empty: the panel groups on this
+    /// string and an empty one would make a bucket nobody can name.
+    #[test]
+    fn an_unrecognised_error_is_other_rather_than_empty() {
+        assert_eq!(classify("something nobody has seen"), "other");
+        assert_eq!(classify(""), "other");
+    }
+
+    /// ⭐⭐ A URL carries the PASSKEY. It must never reach a log line or the
+    /// UI: that is how a private tracker account leaks out of a screenshot.
+    #[test]
+    fn a_url_is_redacted_out_of_an_error_message() {
+        let msg = "error sending request for url (https://tracker.example/announce?passkey=SECRET)";
+        let out = redact(msg);
+        assert!(!out.contains("SECRET"), "the passkey is gone: {out}");
+        assert!(!out.contains("tracker.example"), "and so is the host: {out}");
+        assert!(out.contains("<url>"), "replaced by a marker: {out}");
+    }
+
+    #[test]
+    fn redaction_handles_a_bare_url_and_several_of_them() {
+        let one = redact("failed https://a.example/x?passkey=A after 3 tries");
+        assert!(!one.contains("passkey=A"), "got {one}");
+        assert!(one.contains("after 3 tries"), "the rest of the message survives: {one}");
+
+        let two = redact("https://a.example/x?k=1 and https://b.example/y?k=2");
+        assert!(!two.contains("k=1") && !two.contains("k=2"), "got {two}");
+    }
+
+    #[test]
+    fn a_message_with_no_url_is_left_alone() {
+        assert_eq!(redact("operation timed out"), "operation timed out");
+        assert_eq!(redact(""), "");
+    }
+
+    /// ⭐ An owed event OUTRANKS `started`: a torrent that finishes or is
+    /// stopped inside its first announce cycle has more to tell the tracker
+    /// than that it arrived.
+    #[test]
+    fn an_owed_event_outranks_started() {
+        use typhon_engine::torrent::meta::{ANNOUNCE_EVENT_COMPLETED, ANNOUNCE_EVENT_STOPPED};
+        assert_eq!(event_for(ANNOUNCE_EVENT_COMPLETED, true), "completed");
+        assert_eq!(event_for(ANNOUNCE_EVENT_STOPPED, true), "stopped");
+    }
+
+    /// ⭐ A periodic announce carries NO event key at all -- not an empty one.
+    /// BEP 3 is explicit, and some trackers refuse `event=`.
+    #[test]
+    fn a_periodic_announce_carries_no_event() {
+        assert_eq!(event_for(0, false), "", "no event, which the caller omits");
+        assert_eq!(event_for(0, true), "started", "the first one announces itself");
+    }
+
+    #[test]
+    fn hex_round_trips_through_parse() {
+        let h = [0xABu8; 20];
+        let s = hex(&h);
+        assert_eq!(s.len(), 40);
+        assert_eq!(parse_hex(&s), Some(h));
+    }
+
+    /// A hash of the wrong shape is refused rather than silently truncated to
+    /// something that addresses another torrent.
+    #[test]
+    fn a_hash_of_the_wrong_shape_does_not_parse() {
+        assert!(parse_hex("").is_none());
+        assert!(parse_hex(&"0".repeat(39)).is_none());
+        assert!(parse_hex(&"0".repeat(41)).is_none());
+        assert!(parse_hex(&"z".repeat(40)).is_none(), "not hex");
+    }
+
+    #[test]
+    fn hex_parsing_accepts_either_case() {
+        let upper = "AABBCCDDEEFF00112233445566778899AABBCCDD";
+        assert_eq!(parse_hex(upper), parse_hex(&upper.to_lowercase()));
+        assert!(parse_hex(upper).is_some());
+    }
+
+    /// ⭐ A self-check costs one `numwant` a tracker would have answered
+    /// anyway. Never checked at all, and we would never learn that a tracker
+    /// stopped handing back our own address.
+    #[test]
+    fn a_torrent_never_verified_asks_for_a_self_check() {
+        assert_eq!(seed_numwant(None, false), Some(VERIFY_NUMWANT));
+    }
+
+    #[test]
+    fn a_sampled_announce_asks_for_a_self_check() {
+        assert_eq!(seed_numwant(None, true), Some(VERIFY_NUMWANT));
+    }
+
+    /// ⭐ A torrent the tracker conclusively does NOT hand our address back
+    /// for -- neither family -- asks for a bigger peer list: it is unreachable
+    /// and needs somebody to dial it instead.
+    #[test]
+    fn an_unreachable_seed_asks_for_more_peers() {
+        let unreachable = Verify {
+            at: std::time::Instant::now(),
+            v4: false,
+            v6: false,
+            conclusive: true,
+            swarm: 10,
+        };
+        assert_eq!(seed_numwant(Some(&unreachable), false), Some(UNREACHABLE_SEED_NUMWANT));
+    }
+
+    /// An INCONCLUSIVE check is not evidence of anything: the tracker
+    /// truncated the list, so an absence is not an absence.
+    #[test]
+    fn an_inconclusive_check_does_not_trigger_the_unreachable_path() {
+        let inconclusive = Verify {
+            at: std::time::Instant::now(),
+            v4: false,
+            v6: false,
+            conclusive: false,
+            swarm: 10,
+        };
+        assert_eq!(seed_numwant(Some(&inconclusive), false), None);
+    }
+
+    /// The ordinary case asks for nothing: a seeder does not want peers, and
+    /// asking for them on every announce is load nobody needs.
+    #[test]
+    fn an_ordinary_seeding_announce_asks_for_no_peers() {
+        let verified = Verify {
+            at: std::time::Instant::now(),
+            v4: true,
+            v6: true,
+            conclusive: true,
+            swarm: 10,
+        };
+        assert_eq!(seed_numwant(Some(&verified), false), None);
     }
 }

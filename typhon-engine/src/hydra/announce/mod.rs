@@ -17,7 +17,7 @@ pub mod scheduler;
 pub mod url;
 
 use crate::config::Config;
-use policy::{ClientSpoof, Policy};
+use policy::Policy;
 use std::sync::{Arc, RwLock};
 
 /// The live announce policy for one engine.
@@ -61,20 +61,6 @@ pub fn refresh_policies(config: &Config, engines: &[crate::engines::Engine]) -> 
 pub fn policy_from_config(config: &Config, peer_id: String, public_ip: String) -> Policy {
     Policy {
         passkeys: config.announce_passkeys.clone(),
-        clients: config
-            .announce_clients
-            .iter()
-            .map(|(host, c)| {
-                (
-                    host.clone(),
-                    ClientSpoof {
-                        peer_id_prefix: c.peer_id_prefix.clone(),
-                        user_agent: c.user_agent.clone(),
-                    },
-                )
-            })
-            .collect(),
-        secondary_stats: config.announce_secondary_stats.clone(),
         ip_modes: config.announce_ip_modes.clone(),
         peer_id,
         // The User-Agent carries the version, as 3.x did: a tracker operator
@@ -102,15 +88,9 @@ mod tests {
 
         // A reader that captured the Arc once -- the runner's old behaviour.
         let captured = handle.read().unwrap().clone();
-        assert!(captured.clients.is_empty());
+        assert!(captured.passkeys.is_empty());
 
-        config.announce_clients.insert(
-            "tracker.example".into(),
-            crate::config::AnnounceClient {
-                peer_id_prefix: "-qB5220-".into(),
-                user_agent: "qBittorrent/5.2.2".into(),
-            },
-        );
+        config.announce_passkeys.insert("tracker.example".into(), "KEY".into());
         {
             let mut slot = handle.write().unwrap();
             let old = slot.clone();
@@ -120,13 +100,13 @@ mod tests {
         }
 
         // Whoever captured early still sees nothing: that IS the old bug.
-        assert!(captured.clients.is_empty(), "a captured Arc must not change under us");
+        assert!(captured.passkeys.is_empty(), "a captured Arc must not change under us");
 
         // Whoever re-reads sees the override. That is the fix.
         let fresh = handle.read().unwrap().clone();
         assert_eq!(
-            fresh.clients.get("tracker.example").map(|c| c.peer_id_prefix.as_str()),
-            Some("-qB5220-")
+            fresh.passkeys.get("tracker.example").map(String::as_str),
+            Some("KEY")
         );
     }
 
@@ -161,19 +141,8 @@ mod tests {
     fn the_policy_is_read_from_the_same_config_keys_as_3x() {
         let mut config = Config::default();
         config.announce_passkeys.insert("tr4ker.net".into(), "KEY".into());
-        config.announce_clients.insert(
-            "t.myanonamouse.net".into(),
-            crate::config::AnnounceClient {
-                peer_id_prefix: "-qB5220-".into(),
-                user_agent: "qBittorrent/5.2.2".into(),
-            },
-        );
         let p = policy_from_config(&config, "-TY0001-abcdefghijkl".into(), String::new());
         assert_eq!(p.passkeys.get("tr4ker.net").map(String::as_str), Some("KEY"));
-        assert_eq!(
-            p.clients.get("t.myanonamouse.net").map(|c| c.peer_id_prefix.as_str()),
-            Some("-qB5220-")
-        );
         assert!(p.user_agent.starts_with("Hydra/"));
     }
 }

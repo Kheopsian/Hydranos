@@ -6526,7 +6526,7 @@ const SETTINGS_DOMAINS = [
     { id: "daemon",   label: "General",              icon: "\u2699\uFE0F", tops: ["daemon"] },
     { id: "race",     label: "Session Race", icon: "\u{1F3C1}",     tops: ["race", "race_drain"] },
     { id: "hoard",    label: "Session Hoard",          icon: "\u{1F4E6}",     tops: ["hoard"] },
-    { id: "trackers", label: "Trackers & Network",             icon: "\u{1F310}",     tops: ["announce_passkeys", "announce_clients", "announce_ip_modes"] },
+    { id: "trackers", label: "Trackers & Network",             icon: "\u{1F310}",     tops: ["announce_passkeys", "announce_ip_modes"] },
     { id: "observ",   label: "Observability",                 icon: "\u{1F4CA}",     tops: ["metrics", "peer_intel"] },
     { id: "maint",    label: "Maintenance",                   icon: "\u{1F9F9}",     tops: ["vpn_speedtest"] },
 ];
@@ -7298,47 +7298,6 @@ async function restoreAgent(name) {
 
 
 // ─── Trackers ───────────────────────────────────────────
-const TRACKER_PRESETS = {
-    qb522: { pid: "-qB5220-", ua: "qBittorrent/5.2.2" },
-    qb461: { pid: "-qB4610-", ua: "qBittorrent/4.6.1" },
-    tr405: { pid: "-TR4050-", ua: "Transmission/4.0.5" },
-    de211: { pid: "-DE211s-", ua: "Deluge 2.1.1" },
-};
-function applyTrackerPreset() {
-    const p = TRACKER_PRESETS[document.getElementById("trk-preset").value];
-    if (!p) return;
-    document.getElementById("trk-pid").value = p.pid;
-    document.getElementById("trk-ua").value = p.ua;
-}
-// Whitelist-enforcing trackers reject the real client outright, so someone who
-// wants to look like qBittorrent generally wants it on all of them. Applied one
-// by one through the Edit form, that is where a tracker gets forgotten.
-async function spoofAllTrackers(clear) {
-    const out = document.getElementById("trackers-bulk-result");
-    const spoof = { peer_id_prefix: "-qB5220-", user_agent: "qBittorrent/5.2.2" };
-    const body = clear ? { peer_id_prefix: "", user_agent: "" } : spoof;
-    const question = clear
-        ? t("Remove the client spoof from every tracker?")
-        : t("Make every tracker see this client as qBittorrent 5.2.2?");
-    if (!await hydraConfirm(question)) return;
-    if (out) out.textContent = t("Applying…");
-    try {
-        const r = await api("/api/announce/clients/bulk", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-        });
-        if (out) {
-            out.textContent = t("Applied to {n} tracker(s).", { n: r.applied });
-            if (r.not_persisted && r.not_persisted.length) {
-                out.textContent += " " + t("{n} could not be written to the config file and will be lost on restart.", { n: r.not_persisted.length });
-            }
-        }
-        _trackersSig = "";
-        updateTrackers();
-    } catch (e) {
-        if (out) out.textContent = t("Error: {msg}", { msg: e.message });
-    }
-}
 
 // Acknowledge a tracker, or take the acknowledgement back.
 async function muteTracker(host, muted) {
@@ -7377,11 +7336,8 @@ function _renderHiddenTrackers(hidden) {
         const passkey = r.passkey_set
             ? '<span class="mode-tag mode-hoard">set</span>'
             : '<span class="sr-desc">-</span>';
-        const spoof = r.spoofed
-            ? `<span class="mode-tag mode-hoard">${esc(r.peer_id_prefix || "spoof")}</span>`
-            : '<span class="sr-desc">-</span>';
         return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td>`
-            + `<td>${passkey}</td><td>${spoof}</td>`
+            + `cellule spoof (masques)`
             + `<td><button class="btn-small" onclick="hideTracker('${esc(r.host)}',false)">${esc(t("Unhide"))}</button></td></tr>`;
     }).join("");
 }
@@ -7436,7 +7392,7 @@ async function hideSmallTrackers() {
     const n = parseInt(raw, 10);
     if (!isFinite(n) || n < 1) return;
     const hosts = (_lastTrackerRows || [])
-        .filter(r => !r.hidden && r.torrents < n && !r.passkey_set && !r.spoofed && (r.ip_mode || "auto") === "auto")
+        .filter(r => !r.hidden && r.torrents < n && !r.passkey_set && (r.ip_mode || "auto") === "auto")
         .map(r => r.host);
     if (!hosts.length) {
         _trkBulkNote(t("Nothing to hide under {n}.", { n }));
@@ -7537,9 +7493,6 @@ async function updateTrackers() {
                     + esc("announce self-check, " + vv.age_secs + "s ago, swarm " + vv.swarm)
                     + '">' + esc(vv.verdict) + '</span>';
             }
-            const spoof = r.spoofed
-                ? `<span class="mode-tag mode-hoard">${esc(r.peer_id_prefix || "spoof")}</span>`
-                : '<span class="sr-desc">-</span>';
             const passkey = r.passkey_set
                 ? '<span class="mode-tag mode-hoard">set</span>'
                 : '<span class="sr-desc">-</span>';
@@ -7587,7 +7540,7 @@ async function updateTrackers() {
             const rowTip = SEV[sev]
                 ? esc(r.host + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
-            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${spoof}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(r.peer_id_prefix || "")}','${esc(r.user_agent || "")}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
+            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td>cellule spoof (principal)<td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
         }).join("");
         updateTabBadges();
         if (_thtml === _trackersSig) return;
@@ -7687,11 +7640,8 @@ function _renderTrackerStatsChart(rows) {
     _trkStatsChart.update();
 }
 
-function showTrackerForm(host = "", pid = "", ua = "", ipmode = "auto", minseed = 0) {
+function showTrackerForm(host = "", ipmode = "auto", minseed = 0) {
     document.getElementById("trk-host").value = host;
-    document.getElementById("trk-preset").value = "";
-    document.getElementById("trk-pid").value = pid;
-    document.getElementById("trk-ua").value = ua;
     document.getElementById("trk-passkey").value = "";
     document.getElementById("trk-ipmode").value = ipmode || "auto";
     // Blank, not 0: they mean different things. Blank is "nothing declared",
@@ -7702,7 +7652,7 @@ function showTrackerForm(host = "", pid = "", ua = "", ipmode = "auto", minseed 
     document.getElementById("trk-form").style.display = "block";
 }
 function hideTrackerForm() { document.getElementById("trk-form").style.display = "none"; }
-function editTracker(host, pid, ua, ipmode, minseed) { showTrackerForm(host, pid, ua, ipmode, minseed); }
+function editTracker(host, ipmode, minseed) { showTrackerForm(host, ipmode, minseed); }
 function _trkResult(msg, ok) {
     const r = document.getElementById("trk-result");
     r.textContent = msg; r.className = "result-msg " + (ok ? "success" : "error"); r.style.display = "block";
@@ -7767,7 +7717,6 @@ async function saveTracker() {
     const host = _trkHost();
     if (!host) { _trkResult(t("Host required"), false); return; }
     try {
-        await api("/api/announce/clients", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, peer_id_prefix: document.getElementById("trk-pid").value.trim(), user_agent: document.getElementById("trk-ua").value.trim() }) });
         const pk = document.getElementById("trk-passkey").value.trim();
         if (pk) await api("/api/announce/passkeys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, passkey: pk }) });
         await api("/api/announce/ip-modes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, mode: document.getElementById("trk-ipmode").value }) });
@@ -7784,12 +7733,6 @@ async function saveTracker() {
         _trkResult(t("Saved. Each torrent switches at its next announce, so the change spreads over one announce interval. The detail panel of a torrent shows which identity it last announced with."), true);
         await updateTrackers();
     } catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
-}
-async function clearTrackerSpoof() {
-    const host = _trkHost();
-    if (!host) { _trkResult(t("Host required"), false); return; }
-    try { await api("/api/announce/clients", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, peer_id_prefix: "" }) }); hideTrackerForm(); await updateTrackers(); }
-    catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 async function clearTrackerPasskey() {
     const host = _trkHost();

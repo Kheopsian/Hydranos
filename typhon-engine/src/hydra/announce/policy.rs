@@ -17,21 +17,11 @@ use super::url::{self, Announce};
 /// Some trackers keep a client whitelist. Claiming a whitelisted client is how
 /// 3.x got announces accepted, and the two halves must agree -- a qBittorrent
 /// peer id with a Hydra User-Agent is a mismatch a tracker can spot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientSpoof {
-    pub peer_id_prefix: String,
-    pub user_agent: String,
-}
-
 /// Everything the announcer knows about how to talk to trackers.
 #[derive(Debug, Default, Clone)]
 pub struct Policy {
     /// host -> passkey, replacing the one in the tracker URL.
     pub passkeys: BTreeMap<String, String>,
-    /// host -> client to impersonate.
-    pub clients: BTreeMap<String, ClientSpoof>,
-    /// host -> "off" to skip the secondary announce for that tracker.
-    pub secondary_stats: BTreeMap<String, String>,
     /// Our own peer id, used when no tracker asks for another.
     pub peer_id: String,
     pub user_agent: String,
@@ -65,29 +55,6 @@ pub fn ip_mode_for(policy: &Policy, tracker_url: &str) -> typhon_engine::tracker
     }
 }
 
-/// The client to impersonate for this tracker, if any.
-pub fn client_for<'a>(policy: &'a Policy, tracker_url: &str) -> Option<&'a ClientSpoof> {
-    let host = override_host(tracker_url);
-    let key = longest_override_key(&host, policy.clients.keys().map(|s| s.as_str()))?;
-    policy.clients.get(key)
-}
-
-/// Whether the secondary announce is wanted for this tracker.
-///
-/// It is skipped for a spoofed tracker whatever the mode says: the second
-/// announce is a double-credit trick, and posting a second impersonated peer to
-/// a tracker that whitelists clients is how one account gets noticed.
-pub fn secondary_wanted(policy: &Policy, tracker_url: &str, spoofed: bool) -> bool {
-    if spoofed {
-        return false;
-    }
-    let host = override_host(tracker_url);
-    match longest_override_key(&host, policy.secondary_stats.keys().map(|s| s.as_str())) {
-        Some(k) => policy.secondary_stats.get(k).map(|m| m != "off").unwrap_or(true),
-        None => true,
-    }
-}
-
 /// Rewrite the passkey segment of a tracker URL.
 ///
 /// The passkey is the last path segment on every tracker that puts it in the
@@ -117,10 +84,6 @@ pub struct Request {
     pub user_agent: String,
     /// Which families to announce from for this tracker.
     pub ip_mode: typhon_engine::tracker::http::IpMode,
-    /// The URL of the secondary announce, when one is wanted. Its peer id has
-    /// its last byte flipped so a tracker that dedups by peer id keeps both
-    /// entries instead of overwriting the first.
-    pub secondary_url: Option<String>,
 }
 
 /// Build the announce for one torrent on one tracker.
@@ -139,33 +102,20 @@ pub struct Request {
 /// The spoof replaces only the eight-byte prefix, so the random tail -- which
 /// differs per binding -- survives. That is what keeps two engines of the same
 /// node distinguishable, and the self-connection guard working.
-/// The full peer id this policy would send for these trackers.
+/// The peer id this policy sends. One identity, the same to every tracker and
+/// to every peer.
 ///
-/// The override replaces the 8-byte prefix only; the random tail stays the
-/// engine's, which is what keeps one torrent distinguishable from another on
-/// the same tracker.
-pub fn announced_peer_id(policy: &Policy, trackers: &[Vec<String>]) -> [u8; 20] {
+/// It used to depend on which tracker was being addressed. It does not any
+/// more, and the argument is kept only so the call sites read the same: what a
+/// tracker is told cannot vary by tracker.
+pub fn announced_peer_id(policy: &Policy, _trackers: &[Vec<String>]) -> [u8; 20] {
     let mut out = [0u8; 20];
     let base = policy.peer_id.as_bytes();
     let n = base.len().min(20);
     out[..n].copy_from_slice(&base[..n]);
-    if let Some(prefix) = handshake_prefix(policy, trackers) {
-        out[..8].copy_from_slice(&prefix);
-    }
     out
 }
 
-pub fn handshake_prefix(policy: &Policy, trackers: &[Vec<String>]) -> Option<[u8; 8]> {
-    let first = trackers.iter().flatten().next()?;
-    let spoof = client_for(policy, first)?;
-    let bytes = spoof.peer_id_prefix.as_bytes();
-    if bytes.len() != 8 {
-        return None;
-    }
-    let mut out = [0u8; 8];
-    out.copy_from_slice(bytes);
-    Some(out)
-}
 
 pub fn prepare(
     policy: &Policy,
@@ -183,15 +133,8 @@ pub fn prepare(
         None => tracker_url.to_string(),
     };
 
-    let spoof = client_for(policy, tracker_url);
-    let peer_id = match spoof {
-        Some(s) => url::spoofed_peer_id(&policy.peer_id, &s.peer_id_prefix),
-        None => policy.peer_id.clone(),
-    };
-    let user_agent = match spoof {
-        Some(s) if !s.user_agent.is_empty() => s.user_agent.clone(),
-        _ => policy.user_agent.clone(),
-    };
+    let peer_id = policy.peer_id.clone();
+    let user_agent = policy.user_agent.clone();
 
     let a = Announce {
         tracker_url: &url_with_key,
@@ -207,94 +150,34 @@ pub fn prepare(
     };
     let primary = url::build(&a)?;
 
-    let secondary_url = if secondary_wanted(policy, tracker_url, spoof.is_some()) {
-        flip_last_peer_id_byte(&peer_id).and_then(|alt| {
-            let b = Announce { peer_id: &alt, ..a };
-            url::build(&b)
-        })
-    } else {
-        None
-    };
-
     let ip_mode = ip_mode_for(policy, tracker_url);
-    Some(Request { url: primary, user_agent, secondary_url, ip_mode })
-}
-
-/// The same peer id with its last byte flipped.
-fn flip_last_peer_id_byte(peer_id: &str) -> Option<String> {
-    let mut bytes = peer_id.as_bytes().to_vec();
-    if bytes.len() < 20 {
-        return None;
-    }
-    let last = bytes.len() - 1;
-    bytes[last] ^= 0x01;
-    String::from_utf8(bytes).ok()
+    Some(Request { url: primary, user_agent, ip_mode })
 }
 
 #[cfg(test)]
-mod handshake_identity_tests {
+mod identity_tests {
     use super::*;
 
-    fn policy_with(host: &str, prefix: &str) -> Policy {
-        let mut p = Policy::default();
-        p.clients.insert(
-            host.to_string(),
-            ClientSpoof { peer_id_prefix: prefix.into(), user_agent: "qBittorrent/5.2.2".into() },
-        );
-        p
-    }
     fn tiers(urls: &[&str]) -> Vec<Vec<String>> {
         vec![urls.iter().map(|u| u.to_string()).collect()]
     }
 
-    /// The case this exists for: the tracker was told -qB5220- while its swarm
-    /// saw -HY....-, and a strict tracker compares the two.
+    /// One identity, whatever the tracker. A per-tracker override used to
+    /// replace the first eight bytes here; a client that presents itself
+    /// differently depending on who is asking cannot then ask to be trusted on
+    /// anything else it reports.
     #[test]
-    fn an_overridden_tracker_sets_the_handshake_too() {
-        let p = policy_with("tracker.example.org", "-qB5220-");
-        let got = handshake_prefix(&p, &tiers(&["https://tracker.example.org/announce"]));
-        assert_eq!(got, Some(*b"-qB5220-"));
-    }
+    fn the_peer_id_does_not_depend_on_the_tracker() {
+        let mut p = Policy::default();
+        p.peer_id = "-HY4R00-abcdefghijkl".into();
 
-    /// Public torrents keep the binding's own id: nobody vouches for a DHT or
-    /// PEX peer and nobody cross-checks, so there is nothing to match.
-    #[test]
-    fn a_tracker_with_no_override_changes_nothing() {
-        let p = policy_with("tracker.example.org", "-qB5220-");
-        let got = handshake_prefix(&p, &tiers(&["https://other.example.net/announce"]));
-        assert_eq!(got, None);
-    }
+        let a = announced_peer_id(&p, &tiers(&["https://tracker.example.org/announce"]));
+        let b = announced_peer_id(&p, &tiers(&["https://other.example.net/announce"]));
+        let c = announced_peer_id(&p, &[]);
 
-    /// The FIRST tracker decides. Several private trackers share one swarm, so
-    /// a torrent cannot show each of them a different client.
-    #[test]
-    fn the_first_tracker_decides() {
-        let mut p = policy_with("first.example.org", "-qB5220-");
-        p.clients.insert(
-            "second.example.org".into(),
-            ClientSpoof { peer_id_prefix: "-DE13F0-".into(), user_agent: "Deluge".into() },
-        );
-        let got = handshake_prefix(&p, &tiers(&[
-            "https://first.example.org/announce",
-            "https://second.example.org/announce",
-        ]));
-        assert_eq!(got, Some(*b"-qB5220-"));
-    }
-
-    /// A prefix that is not eight bytes would shift the random tail into the
-    /// client field of whoever reads it. Refused rather than truncated.
-    #[test]
-    fn a_malformed_prefix_is_refused() {
-        let p = policy_with("tracker.example.org", "-qB-");
-        assert_eq!(handshake_prefix(&p, &tiers(&["https://tracker.example.org/announce"])), None);
-    }
-
-    /// No tracker at all: a magnet before metadata, or a torrent stripped of
-    /// its trackers.
-    #[test]
-    fn no_tracker_means_no_override() {
-        let p = policy_with("tracker.example.org", "-qB5220-");
-        assert_eq!(handshake_prefix(&p, &[]), None);
+        assert_eq!(&a, b"-HY4R00-abcdefghijkl");
+        assert_eq!(a, b, "two trackers, one identity");
+        assert_eq!(a, c, "and the same with no tracker at all");
     }
 }
 
@@ -309,10 +192,6 @@ mod tests {
             ..Default::default()
         };
         p.passkeys.insert("tr4ker.net".into(), "NEWKEY".into());
-        p.clients.insert(
-            "mam.example".into(),
-            ClientSpoof { peer_id_prefix: "-qB5220-".into(), user_agent: "qBittorrent/5.2.2".into() },
-        );
         p
     }
 
@@ -346,36 +225,21 @@ mod tests {
     }
 
     #[test]
-    fn a_spoofed_tracker_gets_the_claimed_client_and_no_second_announce() {
+    fn every_tracker_gets_the_same_identity() {
         let p = policy();
         let r = prepare(&p, "https://mam.example/announce/K", &"ab".repeat(20), 16171, 0, 0, 0, "", None)
             .unwrap();
-        assert!(r.url.contains("peer_id=-qB5220-abcdefghijkl"), "{}", r.url);
-        assert_eq!(r.user_agent, "qBittorrent/5.2.2");
-        assert!(
-            r.secondary_url.is_none(),
-            "a second impersonated peer is how one account gets noticed"
-        );
+        assert!(r.url.contains("peer_id=-TY0001-abcdefghijkl"), "{}", r.url);
+        assert_eq!(r.user_agent, "Hydra/4.0.0", "no tracker gets told anything else");
     }
 
     #[test]
-    fn an_ordinary_tracker_keeps_our_identity_and_gets_a_second_announce() {
+    fn an_ordinary_tracker_keeps_our_identity() {
         let p = policy();
         let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 1, 2, 3, "started", None)
             .unwrap();
         assert!(r.url.starts_with("https://tr4ker.net/announce/NEWKEY?"), "{}", r.url);
         assert!(r.url.contains("peer_id=-TY0001-abcdefghijkl"));
         assert_eq!(r.user_agent, "Hydra/4.0.0");
-        let sec = r.secondary_url.unwrap();
-        assert!(sec.contains("peer_id=-TY0001-abcdefghijkm"), "last byte flipped: {sec}");
-    }
-
-    #[test]
-    fn a_tracker_marked_off_gets_no_second_announce() {
-        let mut p = policy();
-        p.secondary_stats.insert("tr4ker.net".into(), "off".into());
-        let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 0, 0, 5, "", None)
-            .unwrap();
-        assert!(r.secondary_url.is_none());
     }
 }

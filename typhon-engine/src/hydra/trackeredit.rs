@@ -15,12 +15,26 @@ pub fn normalise_url(raw: &str) -> Result<String, String> {
     }
     let Some((scheme, rest)) = url.split_once("://") else {
         return Err(format!(
-            "{url:?}: a tracker URL has to start with http://, https:// or udp://"
+            "{url:?}: a tracker URL has to start with http:// or https://"
         ));
     };
-    if !matches!(scheme, "http" | "https" | "udp") {
+    // BEP 15 is not implemented, so a `udp://` tracker can never be reached.
+    // Accepting one produced a tracker that failed on every announce until the
+    // circuit breaker gave up on it, and an error message that did not say why.
+    // Refusing it here is the difference between being told now and finding out
+    // from a red row an hour later.
+    //
+    // Only typed URLs are refused. A `udp://` tracker already inside a
+    // `.torrent` is left alone and simply never reached, which is what an
+    // unimplemented transport should look like.
+    if scheme == "udp" {
         return Err(format!(
-            "{url:?}: a tracker URL has to start with http://, https:// or udp://"
+            "{url:?}: UDP trackers are not supported, only http:// and https://"
+        ));
+    }
+    if !matches!(scheme, "http" | "https") {
+        return Err(format!(
+            "{url:?}: a tracker URL has to start with http:// or https://"
         ));
     }
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -182,9 +196,9 @@ mod tests {
     #[test]
     fn adding_puts_the_new_tracker_in_its_own_tier() {
         let current = tiers(&[&["https://a/announce"]]);
-        let (out, changed) = apply(&current, "add", &urls(&["udp://b:6969"]), "", "").unwrap();
+        let (out, changed) = apply(&current, "add", &urls(&["https://b/announce"]), "", "").unwrap();
         assert!(changed);
-        assert_eq!(out, tiers(&[&["https://a/announce"], &["udp://b:6969"]]));
+        assert_eq!(out, tiers(&[&["https://a/announce"], &["https://b/announce"]]));
     }
 
     // An emptied tier must disappear, not linger: it is a level of the fallback
@@ -223,12 +237,24 @@ mod tests {
 
     #[test]
     fn only_tracker_schemes_are_accepted() {
+        assert!(normalise_url("http://t/announce").is_ok());
         assert!(normalise_url("https://t/announce").is_ok());
-        assert!(normalise_url("udp://t:6969").is_ok());
         assert!(normalise_url("ftp://t/announce").is_err());
         assert!(normalise_url("not a url").is_err());
         assert!(normalise_url("https://").is_err(), "no host");
         assert!(normalise_url("   ").is_err());
+    }
+
+    /// BEP 15 is not implemented, so a `udp://` tracker cannot be reached.
+    /// Accepting one produced a tracker that failed every announce until the
+    /// breaker gave up, with an error that never said why -- the operator was
+    /// left to find out from a red row an hour later.
+    #[test]
+    fn a_udp_tracker_is_refused_with_the_reason() {
+        let err = normalise_url("udp://tracker.example:6969/announce")
+            .expect_err("UDP is not a transport this client has");
+        assert!(err.contains("not supported"), "{err}");
+        assert!(err.contains("http"), "and it says what IS supported: {err}");
     }
 
     #[test]

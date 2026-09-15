@@ -939,3 +939,460 @@ fn set_self_ips(params: &Value) -> Value {
     crate::tracker::set_self_ips(ips);
     json!({"ok": true, "count": count})
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A manager on a throwaway directory. `TorrentManager::new` opens a state
+    /// database beside the resume folder, so each test gets its own tree rather
+    /// than sharing one and racing on it.
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "hydra-dispatch-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let data = root.join("data");
+        let resume = root.join("cfg").join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    /// Every field carries a serde default, so an empty object is a valid
+    /// engine configuration -- and a truer fixture than a hand-listed struct,
+    /// which would drift the moment a field is added.
+    fn cfg() -> EngineConfig {
+        serde_json::from_str("{}").expect("every field has a default")
+    }
+
+    fn call(mgr: &Arc<TorrentManager>, method: &str, params: Value) -> Value {
+        dispatch(method, &params, mgr, &Arc::new(DiskManager::new(16)), &cfg())
+    }
+
+    /// A minimal single-file torrent on disk, so `add_torrent` has something
+    /// real to parse. Built by hand: the bytes under test are visible here.
+    fn write_torrent(dir: &std::path::Path, name: &str, length: u64) -> String {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi{length}e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[0xAB; 20]);
+        info.push(b'e');
+
+        // Computed, not counted by hand: a bencode length is the one thing in
+        // this format that cannot be eyeballed, and getting it wrong yields a
+        // file the parser refuses for a reason that has nothing to do with the
+        // test.
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(
+            format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes(),
+        );
+        out.extend_from_slice(&info);
+        out.push(b'e');
+
+        let path = dir.join(format!("{name}.torrent"));
+        std::fs::write(&path, &out).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn err_of(v: &Value) -> String {
+        v.get("error").and_then(|e| e.as_str()).unwrap_or("").to_string()
+    }
+
+    // -----------------------------------------------------------------------
+    // Routing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ping_answers() {
+        let (mgr, _d) = manager("ping");
+        assert_eq!(call(&mgr, "ping", json!({})), json!({"pong": true}));
+    }
+
+    /// A method we do not have is an error, not a panic and not silence. This
+    /// is the front door of the engine: a caller that sends a name we retired
+    /// has to be told, or it waits on a reply that reads as success.
+    #[test]
+    fn an_unknown_method_is_refused_by_name() {
+        let (mgr, _d) = manager("unknown");
+        let v = call(&mgr, "no_such_method", json!({}));
+        assert!(!err_of(&v).is_empty(), "an unknown method says so: {v}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameters
+    // -----------------------------------------------------------------------
+
+    /// Every handler takes its arguments from untyped JSON. A missing one must
+    /// name itself: "error" alone sends whoever called it reading source.
+    #[test]
+    fn a_missing_argument_names_itself() {
+        let (mgr, _d) = manager("missing");
+        let v = call(&mgr, "add_torrent", json!({"save_path": "/tmp"}));
+        assert!(err_of(&v).contains("torrent_path"), "{v}");
+
+        let v = call(&mgr, "add_torrent", json!({"torrent_path": "/tmp/x.torrent"}));
+        assert!(err_of(&v).contains("save_path"), "{v}");
+    }
+
+    /// An info hash arrives as forty hex characters from a stranger's JSON.
+    /// Anything else is refused rather than padded or truncated into a hash
+    /// that means another torrent.
+    #[test]
+    fn a_malformed_info_hash_is_refused() {
+        let (mgr, _d) = manager("badhash");
+        for bad in [json!("zz"), json!(""), json!("not-hex-at-all"), json!(42)] {
+            let v = call(&mgr, "stop_torrent", json!({"info_hash": bad}));
+            assert!(!err_of(&v).is_empty(), "{bad} should be refused: {v}");
+        }
+    }
+
+    /// Operating on a torrent that is not here is an error for every verb.
+    /// Answering `ok` would make a caller believe a stop it never got.
+    #[test]
+    fn every_verb_refuses_a_torrent_that_is_not_here() {
+        let (mgr, _d) = manager("absent");
+        let absent = json!({"info_hash": "ab".repeat(20)});
+        for method in [
+            "stop_torrent",
+            "start_torrent",
+            "remove_torrent",
+            "verify_torrent",
+            "set_serving_suspended",
+        ] {
+            let v = call(&mgr, method, absent.clone());
+            assert!(
+                !err_of(&v).is_empty(),
+                "{method} answered {v} for a torrent that does not exist"
+            );
+            assert!(v.get("ok").is_none(), "{method} claimed success: {v}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A torrent's life, through the front door only
+    // -----------------------------------------------------------------------
+
+    /// Add, see it listed, stop it, read it back, remove it. Everything the
+    /// control plane does to a torrent goes through these calls, and none of
+    /// them had ever been run by a test.
+    #[test]
+    fn a_torrent_can_be_added_listed_stopped_and_removed() {
+        let (mgr, dir) = manager("lifecycle");
+        let torrent = write_torrent(&dir, "sample", 32768);
+        let save = dir.join("data").to_string_lossy().into_owned();
+
+        let added = call(
+            &mgr,
+            "add_torrent",
+            json!({"torrent_path": torrent, "save_path": save, "stopped": true}),
+        );
+        let ih = added
+            .get("info_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("add failed: {added}"))
+            .to_string();
+        assert_eq!(added.get("name").and_then(|v| v.as_str()), Some("sample"));
+
+        let listed = call(&mgr, "list_torrents", json!({}));
+        let body = listed.to_string();
+        assert!(body.contains(&ih), "the torrent is in the list: {listed}");
+
+        assert_eq!(call(&mgr, "stop_torrent", json!({"info_hash": ih})), json!({"ok": true}));
+
+        let status = call(&mgr, "get_status", json!({"info_hash": ih}));
+        assert!(
+            err_of(&status).is_empty(),
+            "a torrent that exists has a status: {status}"
+        );
+
+        assert!(
+            call(&mgr, "remove_torrent", json!({"info_hash": ih, "keep_data": true}))
+                .get("ok")
+                .is_some()
+        );
+        // And it is gone: the same call twice must not both succeed.
+        let v = call(&mgr, "stop_torrent", json!({"info_hash": ih}));
+        assert!(!err_of(&v).is_empty(), "removed, so no longer stoppable: {v}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file that is not a torrent is refused with a reason, not accepted as
+    /// an empty one.
+    #[test]
+    fn a_file_that_is_not_a_torrent_is_refused() {
+        let (mgr, dir) = manager("notatorrent");
+        let path = dir.join("junk.torrent");
+        std::fs::write(&path, b"this is not bencode").unwrap();
+        let v = call(
+            &mgr,
+            "add_torrent",
+            json!({"torrent_path": path.to_string_lossy(), "save_path": dir.to_string_lossy()}),
+        );
+        assert!(!err_of(&v).is_empty(), "{v}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_torrent_path_that_does_not_exist_is_refused() {
+        let (mgr, _d) = manager("nofile");
+        let v = call(
+            &mgr,
+            "add_torrent",
+            json!({"torrent_path": "/nonexistent/nope.torrent", "save_path": "/tmp"}),
+        );
+        assert!(!err_of(&v).is_empty(), "{v}");
+    }
+
+    /// The same torrent twice is one torrent. Accepting it again would give the
+    /// tracker two peers for one client and double-count what we serve.
+    #[test]
+    fn adding_the_same_torrent_twice_is_refused() {
+        let (mgr, dir) = manager("dup");
+        let torrent = write_torrent(&dir, "twice", 16384);
+        let save = dir.join("data").to_string_lossy().into_owned();
+        let params = json!({"torrent_path": torrent, "save_path": save, "stopped": true});
+
+        assert!(call(&mgr, "add_torrent", params.clone()).get("info_hash").is_some());
+        let again = call(&mgr, "add_torrent", params);
+        assert!(!err_of(&again).is_empty(), "the second add says no: {again}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Read-only calls
+    // -----------------------------------------------------------------------
+
+    /// An empty engine answers all of these rather than failing: a control
+    /// plane polls them before anything has been added.
+    #[test]
+    fn the_read_only_calls_answer_on_an_empty_engine() {
+        let (mgr, _d) = manager("empty");
+        for method in ["list_torrents", "get_session_stats"] {
+            let v = call(&mgr, method, json!({}));
+            assert!(err_of(&v).is_empty(), "{method} failed on an empty engine: {v}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod verb_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "hydra-verbs-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let data = root.join("data");
+        let resume = root.join("cfg").join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    fn cfg() -> EngineConfig {
+        serde_json::from_str("{}").expect("every field has a default")
+    }
+
+    fn call(mgr: &Arc<TorrentManager>, method: &str, params: Value) -> Value {
+        dispatch(method, &params, mgr, &Arc::new(DiskManager::new(16)), &cfg())
+    }
+
+    /// `dispatch` answers the payload ITSELF, not a `{"result": ...}` envelope
+    /// -- the id and the framing are added by the connection loop. So a reply
+    /// is any JSON object; what must never happen is no answer at all.
+    fn is_a_reply(v: &Value) -> bool {
+        v.is_object()
+    }
+
+    /// Every engine-wide verb answers on an engine holding nothing.
+    ///
+    /// "Nothing to report" is a real answer and the commonest state of a fresh
+    /// install; a verb that panics or hangs there takes the control plane with
+    /// it, because the dispatch loop is shared by every call on the socket.
+    macro_rules! global_verbs {
+        ($($test_name:ident => $method:expr, $params:expr);+ $(;)?) => {
+            $(
+                #[test]
+                fn $test_name() {
+                    let (mgr, root) = manager(stringify!($test_name));
+                    let out = call(&mgr, $method, $params);
+                    assert!(is_a_reply(&out), "{} answered {out}", $method);
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            )+
+        };
+    }
+
+    global_verbs!(
+        v_get_session_stats => "get_session_stats", json!({});
+        v_get_diagnostics => "get_diagnostics", json!({});
+        v_get_opt_flags => "get_opt_flags", json!({});
+        v_session_pinning => "session_pinning", json!({});
+        v_session_runtimes => "session_runtimes", json!({});
+        v_export_state => "export_state", json!({});
+        v_set_upload_limit => "set_upload_limit", json!({"limit": 1024});
+        v_set_download_limit => "set_download_limit", json!({"limit": 2048});
+        v_set_dial_limits => "set_dial_limits", json!({"max_dials_per_sec": 5.0});
+        v_set_dials_paused => "set_dials_paused", json!({"paused": true});
+        v_set_serving_suspended => "set_serving_suspended", json!({"suspended": false});
+        v_set_self_ips => "set_self_ips", json!({"ips": ["93.184.216.34"]});
+        v_set_opt_flag => "set_opt_flag", json!({"flag": "no_such_flag", "value": true});
+        v_block_mse => "block_mse", json!({"blocked": true});
+    );
+
+    /// ⭐ Every per-torrent verb must REFUSE a hash it does not hold, rather
+    /// than answer success for work it did not do. A 200 that means "received"
+    /// and not "done" is the shape of seven bugs in this repo.
+    macro_rules! unknown_hash_verbs {
+        ($($test_name:ident => $method:expr);+ $(;)?) => {
+            $(
+                #[test]
+                fn $test_name() {
+                    let (mgr, root) = manager(stringify!($test_name));
+                    let absent = "0".repeat(40);
+                    let out = call(&mgr, $method, json!({"info_hash": absent}));
+                    assert!(
+                        out.get("error").is_some(),
+                        "{} answered success for a torrent that is not here: {out}",
+                        $method
+                    );
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            )+
+        };
+    }
+
+    unknown_hash_verbs!(
+        u_get_files => "get_files";
+        u_get_peers => "get_peers";
+        u_get_trackers => "get_trackers";
+        u_get_availability => "get_availability";
+        u_start_torrent => "start_torrent";
+        u_recheck_torrent => "recheck_torrent";
+        u_verify_torrent => "verify_torrent";
+        u_set_save_path => "set_save_path";
+        u_add_peers => "add_peers";
+        u_set_trackers => "set_trackers";
+    );
+
+    /// ⭐ `get_metadata` on a hash we do not hold is NOT a refusal: "unknown"
+    /// is the honest state of a magnet whose dict has not arrived yet, and the
+    /// UI polls this to find out. Answering an error would make a pending
+    /// resolution indistinguishable from a broken one.
+    #[test]
+    fn metadata_for_an_unresolved_hash_is_a_state_not_an_error() {
+        let (mgr, root) = manager("meta-unknown");
+        let out = call(&mgr, "get_metadata", json!({"info_hash": "0".repeat(40)}));
+        assert!(out.get("error").is_none(), "{out}");
+        assert_eq!(out["state"], json!("unknown"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `fetch_metadata` starts a background resolution, so it needs a runtime
+    /// to spawn onto -- and it must still refuse a hash it does not hold.
+    #[tokio::test]
+    async fn fetching_metadata_for_a_torrent_that_is_not_here_is_refused() {
+        let (mgr, root) = manager("meta-fetch");
+        let out = call(&mgr, "fetch_metadata", json!({"info_hash": "0".repeat(40)}));
+        assert!(out.is_object(), "{out}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A malformed info hash is refused for being malformed, whatever the
+    /// verb: 39 characters, non-hex, or empty are not "not found", they are
+    /// not a hash at all.
+    #[test]
+    fn a_hash_that_is_not_a_hash_is_refused_by_every_verb() {
+        let (mgr, root) = manager("badhash");
+        for bad in ["", "xyz", "0".repeat(39).as_str(), "z".repeat(40).as_str()] {
+            for method in ["get_files", "start_torrent", "remove_torrent", "get_peers"] {
+                let out = call(&mgr, method, serde_json::json!({"info_hash": bad}));
+                assert!(
+                    out.get("error").is_some(),
+                    "{method} accepted {bad:?}: {out}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A verb whose required argument is missing names it, rather than
+    /// defaulting to something and acting on the wrong torrent.
+    #[test]
+    fn a_missing_info_hash_is_reported_not_defaulted() {
+        let (mgr, root) = manager("noarg");
+        for method in ["get_files", "start_torrent", "set_save_path", "get_peers"] {
+            let out = call(&mgr, method, serde_json::json!({}));
+            assert!(out.get("error").is_some(), "{method} accepted no arguments: {out}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Limits round-trip through the session: setting one and reading the
+    /// stats back must not error, and zero means unlimited rather than
+    /// "stopped".
+    #[test]
+    fn a_limit_of_zero_is_accepted_as_unlimited() {
+        let (mgr, root) = manager("zerolimit");
+        for method in ["set_upload_limit", "set_download_limit"] {
+            let out = call(&mgr, method, serde_json::json!({"limit": 0}));
+            assert!(is_a_reply(&out), "{method} answered {out}");
+            assert!(out.get("error").is_none(), "zero is a valid limit: {out}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Exporting the state of an empty engine gives something importable.
+    /// A round trip that cannot be fed back in is not a backup.
+    #[test]
+    fn an_exported_empty_state_can_be_imported_back() {
+        let (mgr, root) = manager("roundtrip");
+        let exported = call(&mgr, "export_state", serde_json::json!({}));
+        assert!(is_a_reply(&exported), "{exported}");
+        if let Some(result) = exported.get("result") {
+            let back = call(&mgr, "import_state", result.clone());
+            assert!(is_a_reply(&back), "import answered {back}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The listen port is engine state; setting it must answer rather than
+    /// silently do nothing.
+    #[test]
+    fn setting_the_listen_port_is_answered() {
+        let (mgr, root) = manager("listenport");
+        let out = call(&mgr, "set_listen_port", serde_json::json!({"port": 16371}));
+        assert!(is_a_reply(&out), "{out}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `tracker_host_of` is what keys every per-tracker counter and the
+    /// breaker; getting it wrong splits one tracker into several.
+    #[test]
+    fn the_tracker_host_is_the_host_and_nothing_else() {
+        assert_eq!(tracker_host_of("https://tracker.example/announce"), "tracker.example");
+        assert_eq!(tracker_host_of("http://tracker.example:8080/x"), "tracker.example");
+        assert_eq!(tracker_host_of("udp://tracker.example:1337"), "tracker.example");
+        assert_eq!(tracker_host_of("tracker.example/announce"), "tracker.example");
+        assert_eq!(tracker_host_of(""), "");
+    }
+}

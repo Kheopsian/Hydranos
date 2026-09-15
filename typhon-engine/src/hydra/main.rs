@@ -34,6 +34,7 @@ mod dedup;
 mod store;
 mod tomledit;
 mod trackeredit;
+mod spoofmigration;
 mod walrepair;
 mod web;
 mod benchdb;
@@ -50,6 +51,8 @@ mod wgtun;
 mod volumes;
 mod workers;
 mod portfwd;
+mod igd;
+mod portmap;
 mod raceevents;
 mod reconnect;
 mod config;
@@ -178,6 +181,20 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!(torrents = engine_host.total_torrents(), "engines up");
 
+    // Get the listen port forwarded. `portfwd` has been able to do this since
+    // it was written and was never once called -- `mod portfwd;` and no call
+    // site -- while the interface told Proton users their port was obtained by
+    // NAT-PMP and renewed continuously. One port per engine, deduplicated:
+    // race and hoard listen on different ones.
+    if config.auto_port_forward {
+        let mut asked = std::collections::BTreeSet::new();
+        for engine in engine_host.engines() {
+            if engine.listen_port != 0 && asked.insert(engine.listen_port) {
+                portmap::spawn(engine.listen_port);
+            }
+        }
+    }
+
     // Telemetry, alongside the store in data_dir. Its absence is survivable:
     // every route that reads it answers empty, exactly as 3.x does when the
     // file cannot be created.
@@ -271,6 +288,52 @@ async fn main() -> anyhow::Result<()> {
             shared_store.clone(),
             engine.id.clone(),
         );
+    }
+
+    // The release that removed client spoofing. Torrents that were announcing
+    // under a borrowed identity are paused once, so the operator learns about
+    // it from a stopped torrent rather than from a tracker's ban message.
+    //
+    // Only those torrents: a blanket pause would cost seeding time to everyone
+    // who never configured an override, and on a private tracker that is its
+    // own way of getting an account in trouble.
+    {
+        let config_text = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let spoofed_hosts = spoofmigration::legacy_spoofed_hosts(&config_text);
+        if !spoofed_hosts.is_empty() {
+            let mut paused_total = 0usize;
+            for engine in engine_host.engines() {
+                for torrent in engine.manager.all() {
+                    if !spoofmigration::is_affected(&torrent.meta.trackers, &spoofed_hosts) {
+                        continue;
+                    }
+                    if engine.manager.stop_torrent(&torrent.info_hash).is_err() {
+                        continue;
+                    }
+                    paused_total += 1;
+                    let hex = typhon_engine::torrent::hex_encode(&torrent.info_hash);
+                    if let Ok(store) = shared_store.lock() {
+                        let _ = store.set_paused(&hex, &engine.id, true);
+                    }
+                }
+            }
+            tracing::warn!(
+                hosts = ?spoofed_hosts,
+                paused = paused_total,
+                "client spoofing has been removed from Hydranos. These torrents were \
+                 announcing as another client to the trackers listed and are now PAUSED. \
+                 They will announce under their real peer id when you resume them -- check \
+                 each tracker allows this client before you do."
+            );
+            // Dropping the tables is the marker: next boot finds no hosts and
+            // does nothing. Written only after the pauses are in the store, so
+            // an interruption re-runs rather than skips.
+            let cleaned = spoofmigration::without_legacy_tables(&config_text);
+            if let Err(e) = std::fs::write(&config_path, cleaned) {
+                tracing::error!(error = %e, "could not strip [announce_clients] from the config; \
+                                             the migration will run again next boot");
+            }
+        }
     }
 
     // The benchmark graphs read what this writes and nothing else does: with no

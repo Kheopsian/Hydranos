@@ -137,6 +137,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin
             typhon-engine/target
           key: cargo-${{ runner.os }}-${{ hashFiles('typhon-engine/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
@@ -153,6 +154,46 @@ jobs:
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
         run: cargo test
+      # Coverage, as a ratchet rather than a target.
+      #
+      # Chasing a percentage produces tests written for the metric. What this
+      # guards is narrower and worth more: a change cannot arrive with less
+      # covered than what is already there. The V4 port shipped whole
+      # subsystems -- NAT-PMP among them -- with no call site and no test, and
+      # nothing anywhere said so.
+      #
+      # Installed rather than pulled from a third-party action: this is a
+      # public repository, and `--locked` from crates.io is one less thing
+      # taking someone's word for it. The cache makes it a one-off.
+      - name: Install cargo-llvm-cov
+        run: |
+          command -v cargo-llvm-cov >/dev/null 2>&1 \
+            || cargo install cargo-llvm-cov --locked
+          rustup component add llvm-tools-preview
+      - name: Coverage does not go down
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          floor=$(grep -v '^#' .coverage-floor | tr -d '[:space:]')
+          # Read from the JSON rather than the table: the human-readable one
+          # puts region, function and line coverage in three columns of the
+          # same shape, and picking the wrong one reads a number that is right
+          # about something else.
+          cargo llvm-cov --workspace --summary-only --json --output-path cov.json
+          pct=$(python3 -c "import json;print(json.load(open('cov.json'))['data'][0]['totals']['lines']['percent'])")
+          echo "line coverage: $pct%  (floor $floor%)"
+          python3 - "$pct" "$floor" <<'PY'
+          import sys
+          pct, floor = float(sys.argv[1]), float(sys.argv[2])
+          if pct + 1e-9 < floor:
+              print(f"::error::line coverage {pct:.2f}% is below the floor of {floor:.2f}%")
+              print("::error::add tests for what this change touches, or say in the commit why the floor moves")
+              sys.exit(1)
+          if pct >= floor + 2:
+              print(f"::notice::coverage is {pct:.2f}%, comfortably above {floor:.2f}% -- raise .coverage-floor")
+          PY
+
       # No cargo fmt check: rustfmt disagrees with 35 of the crate's files as
       # they stand, so gating on it would mean reformatting the whole engine in
       # the same commit that adds CI -- a diff that buries every git blame in

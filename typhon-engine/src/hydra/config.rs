@@ -151,14 +151,6 @@ pub struct VpnSpeedtest {
 /// serialises to: it has no json tags, so encoding/json used the exported Go
 /// field names as-is. Renaming them here to something more idiomatic would be
 /// an invisible break for every client that already parses this endpoint.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub struct AnnounceClient {
-    #[serde(rename = "PeerIDPrefix", alias = "peer_id_prefix", default)]
-    pub peer_id_prefix: String,
-    #[serde(rename = "UserAgent", alias = "user_agent", default)]
-    pub user_agent: String,
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Auth {
     #[serde(default)]
@@ -193,6 +185,10 @@ impl Default for Dedup {
     fn default() -> Self {
         Self { enabled: dedup_default_enabled() }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -231,15 +227,15 @@ pub struct Config {
     #[serde(default)]
     pub dedup: Dedup,
 
-    /// tracker host -> client identity. BTreeMap, not HashMap: the Go side
-    /// serialises a map and encoding/json sorts map keys, so the ordering is
-    /// part of the observable output.
-    #[serde(default)]
-    pub announce_clients: BTreeMap<String, AnnounceClient>,
-
-    /// tracker host -> "zero" | ...
-    #[serde(default)]
-    pub announce_secondary_stats: BTreeMap<String, String>,
+    /// Ask the network to forward the listen port, by NAT-PMP or UPnP.
+    ///
+    /// On by default, as every other client has it: a user who is not
+    /// reachable uploads to nobody, and most of them have no idea that is what
+    /// is happening. It only ever ADDS a mapping -- the listen port itself is
+    /// never changed, because the tracker has already been told which port we
+    /// are on. Turn it off if the forward is configured by hand.
+    #[serde(default = "default_true")]
+    pub auto_port_forward: bool,
 
     /// tracker host -> "v4" | "v6" | ...
     #[serde(default)]
@@ -451,18 +447,6 @@ mod tests {
     // The capitalised field names are the contract, so a test pins them: this
     // is the kind of detail that breaks the *arr stack silently rather than
     // loudly, and a rename would otherwise pass every other check.
-    #[test]
-    fn announce_client_serialises_with_go_field_names() {
-        let c = AnnounceClient {
-            peer_id_prefix: "-qB5220-".into(),
-            user_agent: "qBittorrent/5.2.2".into(),
-        };
-        let json = serde_json::to_string(&c).unwrap();
-        assert_eq!(
-            json,
-            r#"{"PeerIDPrefix":"-qB5220-","UserAgent":"qBittorrent/5.2.2"}"#
-        );
-    }
 
     #[test]
     fn reads_the_announce_sections_of_a_production_config() {
@@ -472,23 +456,11 @@ api_host = "0.0.0.0"
 api_port = 8199
 api_key = "secret"
 
-[announce_clients."t.myanonamouse.net"]
-peer_id_prefix = "-qB5220-"
-user_agent = "qBittorrent/5.2.2"
-
-[announce_secondary_stats]
-"seedpool.org" = "zero"
-
 [announce_ip_modes]
 "gemini-tracker.org" = "v4"
 "#;
         let cfg: Config = toml::from_str(toml_text).unwrap();
         assert_eq!(cfg.daemon.api_port, 8199);
-        assert_eq!(
-            cfg.announce_clients["t.myanonamouse.net"].peer_id_prefix,
-            "-qB5220-"
-        );
-        assert_eq!(cfg.announce_secondary_stats["seedpool.org"], "zero");
         assert_eq!(cfg.announce_ip_modes["gemini-tracker.org"], "v4");
     }
 }

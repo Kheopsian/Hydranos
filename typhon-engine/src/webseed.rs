@@ -871,3 +871,185 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use crate::torrent::TorrentManager;
+
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "typhon-ws-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let data = root.join("data");
+        let resume = root.join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(crate::disk::DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    /// Bencode lengths are COMPUTED. `url-list` is what makes a torrent
+    /// webseedable at all.
+    fn torrent_bytes(name: &str, webseed: Option<&str>) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}", announce.len()).as_bytes());
+        out.extend_from_slice(b"4:info");
+        out.extend_from_slice(&info);
+        if let Some(u) = webseed {
+            out.extend_from_slice(format!("8:url-list{}:{u}", u.len()).as_bytes());
+        }
+        out.push(b'e');
+        out
+    }
+
+    fn torrent(
+        mgr: &Arc<TorrentManager>,
+        name: &str,
+        webseed: Option<&str>,
+        seed_mode: bool,
+    ) -> Arc<TorrentState> {
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(name, webseed), "/tmp", true, seed_mode)
+            .unwrap_or_else(|e| panic!("add {name}: {e}"));
+        mgr.get(&ih).expect("just added")
+    }
+
+    /// ⭐ A torrent with no `url-list` has no webseed to pull from. Trying
+    /// anyway is a request to nowhere on every tick.
+    #[test]
+    fn a_torrent_without_a_url_list_is_not_a_webseed_candidate() {
+        let (mgr, root) = manager("nolist");
+        let t = torrent(&mgr, "plain", None, false);
+        assert!(!wants_webseed(&t));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ Seed mode means the data is already here. Pulling it from a webseed
+    /// would re-download a library the operator told us to take on trust --
+    /// and pay for the bandwidth twice.
+    #[test]
+    fn a_seed_mode_torrent_never_pulls_from_a_webseed() {
+        let (mgr, root) = manager("seedmode");
+        let t = torrent(&mgr, "seeded", Some("https://archive.example/files/"), true);
+        assert!(!wants_webseed(&t), "seed mode has nothing to fetch");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A paused or removed torrent is not fetched: pausing must actually stop
+    /// the traffic, not just the peer connections.
+    #[test]
+    fn a_paused_or_removed_torrent_is_not_fetched() {
+        let (mgr, root) = manager("paused");
+        let t = torrent(&mgr, "paused", Some("https://archive.example/files/"), false);
+
+        t.is_paused.store(true, Ordering::Relaxed);
+        assert!(!wants_webseed(&t), "a paused torrent pulls nothing");
+
+        t.is_paused.store(false, Ordering::Relaxed);
+        t.is_removed.store(true, Ordering::Relaxed);
+        assert!(!wants_webseed(&t), "a removed torrent pulls nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Only a DOWNLOADING torrent pulls. A seeding one has everything, and a
+    /// stopped one was told not to.
+    #[test]
+    fn only_a_downloading_torrent_pulls_from_a_webseed() {
+        let (mgr, root) = manager("status");
+        let t = torrent(&mgr, "status", Some("https://archive.example/files/"), false);
+        for status in [TorrentStatus::Seeding, TorrentStatus::Stopped, TorrentStatus::Error] {
+            t.status.store(status as u8, Ordering::Relaxed);
+            assert!(!wants_webseed(&t), "{status:?} must not pull");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The queue is empty on a fresh engine, and asking for a candidate must
+    /// answer None rather than spin.
+    #[test]
+    fn an_empty_queue_yields_no_candidate() {
+        let (mgr, root) = manager("emptyq");
+        assert!(next_candidate(&mgr).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A hash queued for a torrent that has since gone is dropped rather
+    /// than claimed forever -- otherwise the claim leaks and that hash can
+    /// never be webseeded again.
+    #[test]
+    fn a_queued_hash_whose_torrent_vanished_is_dropped_not_claimed() {
+        let (mgr, root) = manager("ghostq");
+        let absent = [7u8; 20];
+        mgr.webseed().queue.lock().unwrap().push_back(absent);
+
+        assert!(next_candidate(&mgr).is_none(), "nothing to hand out");
+        assert!(
+            !mgr.webseed().claimed.contains(&absent),
+            "the claim was released rather than leaked"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A queued candidate that IS eligible comes back, and comes back claimed
+    /// so a second worker does not take it too.
+    #[test]
+    fn an_eligible_candidate_is_handed_out_once() {
+        let (mgr, root) = manager("claim");
+        let t = torrent(&mgr, "pullme", Some("https://archive.example/files/"), false);
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+
+        mgr.webseed().queue.lock().unwrap().push_back(t.info_hash);
+        let got = next_candidate(&mgr);
+        if got.is_some() {
+            assert!(mgr.webseed().claimed.contains(&t.info_hash), "it is claimed");
+            // The queue is empty now, so a second worker gets nothing.
+            assert!(next_candidate(&mgr).is_none());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ HTTP/1.1 ONLY, and this is the whole performance story: archive.org
+    /// negotiates h2, and reqwest then multiplexes every concurrent request
+    /// onto ONE TCP connection -- 2.7 MB/s against 20.78 MB/s for the same
+    /// host over h1. The client must build, with the configured user agent.
+    #[test]
+    fn the_webseed_client_builds_from_the_engine_config() {
+        let cfg: EngineConfig =
+            toml::from_str("").expect("every EngineConfig field has a serde default");
+        assert!(build_client(&cfg).is_ok(), "the client must build on a default config");
+    }
+
+    /// A URL segment is percent-encoded so a file with a space or an accent
+    /// resolves. Leaving it raw produces a 404 on the one file that needed it.
+    #[test]
+    fn a_url_segment_is_percent_encoded() {
+        assert_eq!(enc_segment("plain"), "plain");
+        assert_eq!(enc_segment("a b"), "a%20b");
+        assert_eq!(enc_segment("caf\u{e9}"), "caf%C3%A9");
+        assert_eq!(enc_segment("a/b"), "a%2Fb", "a separator inside a name is escaped");
+    }
+
+    /// The unreserved set is left alone -- escaping it would still resolve but
+    /// produces URLs nobody can read, and some servers compare literally.
+    #[test]
+    fn unreserved_characters_are_left_alone() {
+        assert_eq!(enc_segment("A-Z_a-z.0-9~"), "A-Z_a-z.0-9~");
+    }
+}

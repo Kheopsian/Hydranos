@@ -806,3 +806,149 @@ mod tests {
         assert!(!json.contains("injected_peers"), "{json}");
     }
 }
+
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+
+    fn db() -> BenchDb {
+        BenchDb::open_in_memory().expect("an in-memory bench database")
+    }
+
+    /// A sample carries whatever columns the recorder had; the ones it did not
+    /// measure come back as zero rather than making the row unreadable.
+    fn sample(ts: f64, race_upload_rate: f64) -> serde_json::Value {
+        serde_json::json!({
+            "ts": ts,
+            "race_upload_rate": race_upload_rate,
+            "race_peers": 10.0,
+            "hoard_upload_rate": 1.0,
+        })
+    }
+
+    #[test]
+    fn a_sample_comes_back_out_of_the_window_it_falls_in() {
+        let d = db();
+        d.record_sample(&sample(100.0, 500.0)).unwrap();
+        let got = d.samples_in_range(0.0, 1000.0).unwrap();
+        assert_eq!(got.len(), 1);
+        // `num_json` emits a whole number as an integer, so compare the VALUE
+        // rather than the JSON shape: 100 and 100.0 are the same sample.
+        assert_eq!(got[0]["ts"].as_f64(), Some(100.0));
+        assert_eq!(got[0]["race_upload_rate"].as_f64(), Some(500.0));
+    }
+
+    /// The window is INCLUSIVE at both ends. An exclusive bound drops the
+    /// sample sitting exactly on the edge, which is the one a graph is
+    /// scrolled to.
+    #[test]
+    fn the_window_includes_both_of_its_bounds() {
+        let d = db();
+        d.record_sample(&sample(100.0, 1.0)).unwrap();
+        d.record_sample(&sample(200.0, 2.0)).unwrap();
+        assert_eq!(d.samples_in_range(100.0, 200.0).unwrap().len(), 2);
+        assert_eq!(d.samples_in_range(101.0, 199.0).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn samples_come_back_oldest_first_so_a_graph_reads_left_to_right() {
+        let d = db();
+        for ts in [300.0, 100.0, 200.0] {
+            d.record_sample(&sample(ts, 1.0)).unwrap();
+        }
+        let got = d.samples_in_range(0.0, 1000.0).unwrap();
+        let order: Vec<f64> = got.iter().filter_map(|s| s["ts"].as_f64()).collect();
+        assert_eq!(order, vec![100.0, 200.0, 300.0]);
+    }
+
+    /// A column the sample never carried is zero, not absent: the graph reads
+    /// every key on every point.
+    #[test]
+    fn a_column_the_sample_never_carried_reads_as_zero() {
+        let d = db();
+        d.record_sample(&sample(100.0, 1.0)).unwrap();
+        let got = d.samples_in_range(0.0, 1000.0).unwrap();
+        assert_eq!(got[0]["global_uploaded"].as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn an_empty_window_is_an_empty_list_not_an_error() {
+        let d = db();
+        assert!(d.samples_in_range(0.0, 10.0).unwrap().is_empty());
+    }
+
+    /// The timeline is observability: losing it must never cost the seedbox,
+    /// so a window that is backwards answers empty rather than failing.
+    #[test]
+    fn a_backwards_window_answers_empty_rather_than_failing() {
+        let d = db();
+        d.record_sample(&sample(100.0, 1.0)).unwrap();
+        assert!(d.samples_in_range(500.0, 10.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_tracker_sample_round_trips() {
+        let d = db();
+        d.record_tracker_sample(100.0, "race", "tracker.example", 5.0, 3.0, 40.0, 900, 100)
+            .unwrap();
+        let got = d.tracker_samples_in_range("tracker.example", 0.0, 1000.0).unwrap();
+        assert_eq!(got.len(), 1, "got {got:?}");
+    }
+
+    /// ⭐ Two engines announcing to the SAME tracker are two series. Collapsing
+    /// them would credit one engine's peers to the other.
+    #[test]
+    fn two_engines_on_one_tracker_stay_two_series() {
+        let d = db();
+        d.record_tracker_sample(100.0, "race", "tracker.example", 5.0, 3.0, 40.0, 900, 100)
+            .unwrap();
+        d.record_tracker_sample(100.0, "hoard", "tracker.example", 7.0, 4.0, 50.0, 800, 200)
+            .unwrap();
+        let got = d.tracker_samples_in_range("tracker.example", 0.0, 1000.0).unwrap();
+        assert_eq!(got.len(), 2, "got {got:?}");
+    }
+
+    #[test]
+    fn the_latest_tracker_samples_are_empty_on_a_fresh_database() {
+        let d = db();
+        assert!(d.tracker_samples_latest().unwrap().is_empty());
+    }
+
+    /// The Records card must render on a library that has done nothing yet.
+    #[test]
+    fn the_records_payload_answers_on_an_empty_database() {
+        let d = db();
+        let payload = d.records_payload().expect("an empty database still has a payload");
+        assert!(payload.is_object(), "got {payload}");
+    }
+
+    /// A read-only handle is how a refresh opens the file beside the writer.
+    /// Opening one on a path that does not exist is an error, not a panic and
+    /// not a silently created database.
+    #[test]
+    fn a_read_only_handle_on_a_missing_file_is_an_error() {
+        let missing = std::env::temp_dir().join("typhon-no-such-bench-4a1f.db");
+        let _ = std::fs::remove_file(&missing);
+        assert!(BenchDb::open_read_only(&missing).is_err());
+        assert!(!missing.exists(), "a read-only open must not create the file");
+    }
+
+    /// Opening for writing creates the file and its schema.
+    #[test]
+    fn opening_for_writing_creates_the_database() {
+        let path = std::env::temp_dir().join(format!(
+            "typhon-bench-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let d = BenchDb::open(&path).expect("open creates");
+            d.record_sample(&sample(1.0, 1.0)).unwrap();
+        }
+        assert!(path.exists());
+        let ro = BenchDb::open_read_only(&path).expect("now it can be read");
+        assert_eq!(ro.samples_in_range(0.0, 10.0).unwrap().len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+}

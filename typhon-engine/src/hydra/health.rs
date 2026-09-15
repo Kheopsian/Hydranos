@@ -263,3 +263,277 @@ mod tests {
         assert_eq!(r.wasted_bytes, 500);
     }
 }
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use std::sync::Arc;
+    use typhon_engine::torrent::TorrentManager;
+
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "hydra-health-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let data = root.join("data");
+        let resume = root.join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(typhon_engine::disk::DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    /// Bencode lengths are COMPUTED, never counted by hand.
+    fn torrent_bytes(name: &str, length: u64) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi{length}e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn torrent(mgr: &Arc<TorrentManager>, name: &str, size: u64) -> Arc<TorrentState> {
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(name, size), "/tmp", true, true)
+            .expect("the fixture torrent parses");
+        mgr.get(&ih).expect("just added")
+    }
+
+    fn no_seeds(_: &str) -> i64 {
+        0
+    }
+    fn no_outage(_: &str) -> bool {
+        false
+    }
+
+    fn kinds(r: &Report) -> Vec<String> {
+        r.anomalies.iter().map(|a| a.kind.clone()).collect()
+    }
+
+    /// A healthy engine reports nothing. An invariant that fires on a clean
+    /// library is worse than no invariant: it trains the operator to ignore it.
+    #[test]
+    fn a_healthy_torrent_raises_nothing() {
+        let (mgr, root) = manager("clean");
+        let t = torrent(&mgr, "clean", 16384);
+        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        *t.save_path.write() = std::path::PathBuf::from("/tmp");
+
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, no_outage, &mut r);
+        assert!(r.anomalies.is_empty(), "got {:?}", kinds(&r));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ Two gates, not one. The floor alone counts a huge torrent that
+    /// re-fetched a rounding error; the ratio alone counts a two-piece ebook
+    /// that re-requested one piece.
+    #[test]
+    fn re_download_needs_both_the_ratio_and_the_floor() {
+        let (mgr, root) = manager("redl");
+
+        // Past the ratio but far under the floor: a small torrent that fetched
+        // itself three times is still noise.
+        let small = torrent(&mgr, "small", 16384);
+        small.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        *small.save_path.write() = std::path::PathBuf::from("/tmp");
+        small.total_downloaded.store(16384 * 3, Ordering::Relaxed);
+        let mut r = Report::default();
+        scan_engine("race", &[small], no_seeds, no_outage, &mut r);
+        assert!(!kinds(&r).contains(&REDL.to_string()), "the floor must hold: {:?}", kinds(&r));
+
+        // Past the floor AND the ratio: a real offender.
+        let big = torrent(&mgr, "big", 16384);
+        big.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        *big.save_path.write() = std::path::PathBuf::from("/tmp");
+        big.total_downloaded.store(3 << 30, Ordering::Relaxed);
+        let mut r2 = Report::default();
+        scan_engine("race", &[big], no_seeds, no_outage, &mut r2);
+        assert!(kinds(&r2).contains(&REDL.to_string()), "got {:?}", kinds(&r2));
+        assert!(r2.wasted_bytes > 0, "a re-download reports what it wasted");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The Error status is set by the serve path on ENOENT and never cleared,
+    /// precisely so this can be seen.
+    #[test]
+    fn a_torrent_that_can_serve_nothing_is_reported() {
+        let (mgr, root) = manager("enoent");
+        let t = torrent(&mgr, "gone", 16384);
+        t.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, no_outage, &mut r);
+        assert!(kinds(&r).contains(&FILES_MISSING.to_string()), "got {:?}", kinds(&r));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ THE recurrent ghost: an active torrent whose save path is gone. Every
+    /// received piece fails its hash and is re-requested forever, and thrown
+    /// pieces are never counted -- so `redl` cannot see it. Only a stat can.
+    #[test]
+    fn an_active_torrent_whose_save_path_vanished_is_a_ghost() {
+        let (mgr, root) = manager("ghost");
+        let t = torrent(&mgr, "ghost", 16384);
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        *t.save_path.write() = std::path::PathBuf::from("/tmp/typhon-vanished-7c3a/sub");
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, no_outage, &mut r);
+        assert!(kinds(&r).contains(&GHOST.to_string()), "got {:?}", kinds(&r));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A STOPPED torrent whose path is gone is not a ghost: nothing is being
+    /// re-requested, and reporting it would bury the real ones.
+    #[test]
+    fn a_stopped_torrent_with_no_path_is_not_a_ghost() {
+        let (mgr, root) = manager("stopped");
+        let t = torrent(&mgr, "stopped", 16384);
+        t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        *t.save_path.write() = std::path::PathBuf::from("/tmp/typhon-vanished-7c3a/sub");
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, no_outage, &mut r);
+        assert!(!kinds(&r).contains(&GHOST.to_string()), "got {:?}", kinds(&r));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ The shape of the `left=0` announce bug: the tracker withheld the peer
+    /// list because we had mislabelled ourselves a seed, so the download never
+    /// started. Seeds in the swarm, none connected.
+    #[test]
+    fn a_leecher_with_seeds_in_the_swarm_and_no_peer_is_starved() {
+        let (mgr, root) = manager("starved");
+        let t = torrent(&mgr, "starved", 16384);
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        *t.save_path.write() = std::path::PathBuf::from("/tmp");
+        t.peers_connected.store(0, Ordering::Relaxed);
+        t.is_paused.store(false, Ordering::Relaxed);
+
+        let mut r = Report::default();
+        scan_engine("race", &[t.clone()], |_| 12, no_outage, &mut r);
+        assert!(kinds(&r).contains(&STARVED.to_string()), "got {:?}", kinds(&r));
+
+        // Connected to someone: not starved, whatever the swarm holds.
+        t.peers_connected.store(3, Ordering::Relaxed);
+        let mut r2 = Report::default();
+        scan_engine("race", &[t.clone()], |_| 12, no_outage, &mut r2);
+        assert!(!kinds(&r2).contains(&STARVED.to_string()));
+
+        // Paused on purpose: having no peer is the point, not a fault.
+        t.peers_connected.store(0, Ordering::Relaxed);
+        t.is_paused.store(true, Ordering::Relaxed);
+        let mut r3 = Report::default();
+        scan_engine("race", &[t], |_| 12, no_outage, &mut r3);
+        assert!(!kinds(&r3).contains(&STARVED.to_string()), "a paused torrent is not starved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A swarm with no seeds explains having no peer, so it is not a fault.
+    #[test]
+    fn a_leecher_in_a_seedless_swarm_is_not_starved() {
+        let (mgr, root) = manager("seedless");
+        let t = torrent(&mgr, "seedless", 16384);
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        *t.save_path.write() = std::path::PathBuf::from("/tmp");
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, no_outage, &mut r);
+        assert!(!kinds(&r).contains(&STARVED.to_string()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A host in outage is reported ONCE per torrent, not once per tracker
+    /// tier that names it.
+    #[test]
+    fn a_tracker_outage_is_reported_once_per_torrent() {
+        let (mgr, root) = manager("outage");
+        let t = torrent(&mgr, "outage", 16384);
+        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        *t.save_path.write() = std::path::PathBuf::from("/tmp");
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, |_| true, &mut r);
+        let n = kinds(&r).iter().filter(|k| *k == TRACKER_OUTAGE).count();
+        assert_eq!(n, 1, "got {:?}", kinds(&r));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A tracker credits upload as the MAXIMUM per user and torrent, not the
+    /// sum: seeding one hash from two engines splits demand across two peers of
+    /// ours and earns nothing extra.
+    #[test]
+    fn the_same_hash_seeded_by_two_engines_is_reported_once() {
+        let (mgr_a, root_a) = manager("dual-a");
+        let (mgr_b, root_b) = manager("dual-b");
+        let a = torrent(&mgr_a, "shared", 16384);
+        let b = torrent(&mgr_b, "shared", 16384);
+        assert_eq!(a.info_hash, b.info_hash, "the fixture builds the same torrent twice");
+        a.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        b.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+
+        let mut r = Report::default();
+        scan_dual_seed(
+            &[("race".to_string(), vec![a]), ("hoard".to_string(), vec![b])],
+            &mut r,
+        );
+        let n = kinds(&r).iter().filter(|k| *k == DUAL_SEED).count();
+        assert_eq!(n, 1, "one finding for one hash, got {:?}", kinds(&r));
+        let _ = std::fs::remove_dir_all(root_a);
+        let _ = std::fs::remove_dir_all(root_b);
+    }
+
+    /// Held by two engines but seeded by only one: nothing is being split.
+    #[test]
+    fn a_hash_seeded_by_one_engine_only_is_not_a_dual_seed() {
+        let (mgr_a, root_a) = manager("single-a");
+        let (mgr_b, root_b) = manager("single-b");
+        let a = torrent(&mgr_a, "shared", 16384);
+        let b = torrent(&mgr_b, "shared", 16384);
+        a.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        b.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+
+        let mut r = Report::default();
+        scan_dual_seed(
+            &[("race".to_string(), vec![a]), ("hoard".to_string(), vec![b])],
+            &mut r,
+        );
+        assert!(!kinds(&r).contains(&DUAL_SEED.to_string()), "got {:?}", kinds(&r));
+        let _ = std::fs::remove_dir_all(root_a);
+        let _ = std::fs::remove_dir_all(root_b);
+    }
+
+    /// The counters must agree with the list they summarise, or the card and
+    /// the table disagree on screen.
+    #[test]
+    fn the_counts_agree_with_the_anomalies_they_summarise() {
+        let (mgr, root) = manager("counts");
+        let t = torrent(&mgr, "broken", 16384);
+        t.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, no_outage, &mut r);
+        let total: i64 = r.counts.values().sum();
+        assert_eq!(total, r.anomalies.len() as i64);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An empty engine is a clean report, not a panic.
+    #[test]
+    fn scanning_nothing_reports_nothing() {
+        let mut r = Report::default();
+        scan_engine("race", &[], no_seeds, no_outage, &mut r);
+        scan_dual_seed(&[], &mut r);
+        assert!(r.anomalies.is_empty());
+        assert_eq!(r.wasted_bytes, 0);
+    }
+}

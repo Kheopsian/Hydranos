@@ -19,6 +19,313 @@ Two ways to title a new entry:
 
 ## Unreleased
 
+### Removed: client spoofing — and it is not coming back
+
+**Hydranos no longer presents itself as any client but itself, and there is no
+longer any way to make it.** The mechanism is gone, not disabled: the
+`[announce_clients]` table, the API routes that edited it, the interface that
+exposed it, and the per-torrent handshake identity that carried it. No setting
+replaces it, and none will.
+
+A per-tracker override used to replace our peer id prefix and User-Agent with
+another client's -- qBittorrent 5.2.2 in practice -- on the announce, and since
+4.26.0 on the peer handshake too.
+
+The reason is simple enough to state in one sentence: a client asking an
+operator to trust what it reports cannot at the same time misreport the one
+thing that operator can check directly. Everything else this client says about
+itself -- its counters, its events, whether it honours a private flag -- rests on
+its word. A spoofed peer id is that word being demonstrably false. It is removed
+rather than defaulted off, because a setting left in place is a setting that
+gets turned back on.
+
+**On first start after this upgrade, torrents that were announcing under a
+borrowed identity are PAUSED.** Only those: the migration reads the
+`[announce_clients]` tables still in your `config.toml`, pauses the torrents
+whose first tracker was overridden, and removes the tables. Everything else
+keeps running -- a blanket pause would cost seeding time to people who never
+configured an override, and on a private tracker that is its own way of getting
+an account in trouble.
+
+If you are paused, the decision is yours and it is not automatic: **check that
+each tracker concerned allows this client before you resume.** Resuming
+announces under the real peer id.
+
+- gone: the mechanism, `[announce_clients]`, `/api/announce/clients` and
+  `/api/announce/clients/bulk`, the per-tracker form fields, the "spoof every
+  tracker" buttons and the Client spoof column
+- `TorrentState::handshake_prefix` and `handshake_pid()` go with them. Every
+  handshake now uses the binding's own peer id, which is what the tracker is
+  told as well
+- a `config.toml` still carrying `[announce_clients]` keeps loading; after the
+  migration the tables are gone
+
+### BitTorrent conformance, checked against a tracker
+
+A tracker operator refused the client on the grounds that allowing it means
+trusting its announces, and asked a fair question: is there a test setup in the
+repository that drives it against a test tracker and checks the requests against
+the specifications? There was not. There is now, and writing it found four real
+defects — all of them invisible from the client, all of them visible only from
+the other end.
+
+The suite starts a real HTTP tracker on loopback and asserts on the query that
+arrives, rather than on the string our own builder produced. A test that checks
+our code against our code proves only that it is self-consistent.
+
+- `key` is sent. Not required by BEP 3, but every major client sends it, and it
+  is how a tracker recognises a peer whose address changed. Ours is derived from
+  the random suffix of the peer id, which is the one part of our identity a
+  per-tracker client override does not replace — so it survives both a spoof and
+  a policy reload
+- `min interval` is read and honoured as a floor. `interval` already was; the
+  separate floor a tracker can impose was parsed by nothing
+- `event=completed` is sent when a download finishes. Private trackers count
+  snatches from this event and from nothing else, so ours counted none
+- `event=stopped` is sent when the user stops a torrent, restoring what 3.x did
+  from a single call site. Lost in the V4 port rather than removed on purpose:
+  without it a stop is silent and every tracker keeps us in the swarm until the
+  entry goes stale. One announce per user action — never a bulk flush at
+  shutdown, which is the thing no client at this scale can do
+- `docs/BITTORRENT-CONFORMANCE.md` states what goes on the wire field by field,
+  maps every rule to the test that asserts it, and lists the remaining
+  deviations first rather than last
+- the **peer** half of the protocol is covered too -- handshake, message set,
+  framing, and BEP 27 -- and **the peer half needed no change**: all 27 of its
+  rules passed on the first run. The handshake byte layout moved into two pure
+  functions so it can be asserted on without a socket
+- BEP 27 was correct but written out twice, in the DHT registration and in the
+  peer session. One predicate, `TorrentMeta::allows_peer_discovery()`, now
+  answers for both: a private torrent uses no DHT, no PEX and no local
+  discovery, and a test holds the rule rather than two comments
+- a frame is bounded on its header. The length prefix is four bytes a stranger
+  controls, and refusing it late means letting them ask for the allocation
+
+### Seeding without a port forward no longer means seeding nothing
+
+A complete torrent asked the tracker for no peers at all. The reasoning held as
+long as we were reachable -- leechers open the connection, so there is nothing
+to dial -- and it is why a 300k catalogue does not open a socket per swarm. When
+it does not hold, the torrent learns no address at all and uploads **nothing**.
+Not less: nothing. Users behind a VPN with no port forward, behind CGNAT, or
+with UPnP off were comparing us with qBittorrent and finding an enormous gap,
+and this is most of it.
+
+The self-check was already measuring the assumption -- once every sixty-four
+seeding announces it asks for a short peer list and looks for our own address in
+it, per tracker. Nothing read the answer.
+
+- a tracker that has never been checked is asked on the first announce, rather
+  than whenever the sampling tick comes round. On a small catalogue that tick is
+  an announce interval away, which is exactly the person this is for
+- a conclusive self-check that did not find us means we are invisible, so the
+  torrent asks for peers and dials them, the way every other client does
+- fifty, not the two hundred a leecher asks for: an unreachable node dials
+  everything itself, and two hundred per torrent is the connection storm that
+  made seeding passive in the first place
+- a reachable node is unchanged and still asks for nothing
+- an absence from a truncated peer list is not an absence: only a conclusive
+  answer counts, or a large swarm would set every torrent dialling for nothing
+
+The decision is per tracker, not per torrent: an IPv6-only tracker on a v4-only
+host sees us differently from the others.
+
+### The control plane, the listener and a real session are under test
+
+Three files stood at zero coverage. They are the front door of the engine, the
+thing that decides whom to believe, and the loop every connection lives in.
+
+- **`rpc/dispatch.rs`** (0% to 42%): every method goes through one entry point,
+  so the tests drive that rather than the handlers. They cover a torrent's whole
+  life -- added, listed, stopped, read back, removed -- plus the answers that
+  matter more than the happy path: an unknown method, a missing argument that
+  names itself, a malformed info hash, and every verb refusing a torrent that is
+  not there. A control plane told `ok` for a stop that never happened is the
+  failure this codebase keeps finding
+- **`peer/mod.rs`** (0% to 18%): the tests are on `is_trusted_proxy_source`,
+  which decides whether to believe a PROXY v2 header -- and that header carries
+  the address the sender *claims*. Trust the wrong source and a stranger picks
+  its own identity. Public addresses are refused in both notations, `::ffff:`
+  included, and the RFC1918 172 range is pinned at both ends, where an
+  off-by-one hands the right to 172.32.0.0/11
+- **`peer/session.rs`** (0% to 21%): a real session, run over a loopback TCP
+  pair with a hand-written peer on the other end. It asserts the opening of a
+  BitTorrent conversation -- `have all` with the fast extension, a full bitfield
+  without it, then the unchoke -- because a seed that says what it has and never
+  lets anyone take it is the failure that looks like working. Also that a live
+  session is counted on the torrent and that hanging up releases it, which is
+  the leak that measured 459 MB of growth in half an hour
+
+`peer/extension.rs` went from 38% to 86% in the same pass.
+
+Line coverage is 37.3%, and `.coverage-floor` moves from 30 to 37.
+
+### Peer exchange no longer takes an address that cannot be a peer
+
+`parse_pex` checked the port and nothing else. A peer could name
+`127.0.0.1:631` in a PEX message and the address went straight into the dial
+queue -- a connection opened to a service on our own machine, for a stranger's
+reasons. The module deleted in this same release, `peer/pex.rs`, did have that
+guard; the live one never had it. That is what two copies of a protocol
+actually cost: the one kept is not necessarily the better one.
+
+Loopback, unspecified, multicast, broadcast, link-local and documentation
+addresses are refused, in both the IPv4 and IPv6 forms, and a v4-mapped v6
+entry is unwrapped before the check so it cannot smuggle one through.
+
+Deliberately *less* strict than the hole-punch guard, which also refuses
+private addresses: PEX names a peer for **us** to dial, while a rendezvous makes
+a **third party** dial what the asker named. Two machines of one LAN in a swarm
+is ordinary, so a private address is still a peer here.
+
+### One name and one version, everywhere
+
+The client called itself `Hydra/2.4.3-typhon` in the announce `User-Agent` and
+in the config default, and `typhon 0.2` in the BEP 10 `v` string every peer is
+shown -- three hand-written strings, all stale, none agreeing, while the peer id
+announced 4.27. A tracker that cross-checks the two is checking the one thing it
+can verify without taking our word for it, and it did not add up.
+
+All three now derive from the version the peer id does.
+
+### UDP trackers are refused when typed, instead of failing quietly
+
+BEP 15 is not implemented, so a `udp://` tracker can never be reached. The
+tracker editor accepted one anyway: the announce path built a request for it and
+handed it to an HTTP client that cannot speak it, and the tracker failed every
+announce until the circuit breaker gave up -- with an error that never said why.
+
+Only typed URLs are refused. A `udp://` tracker already inside a `.torrent` is
+left alone and simply never reached, which is what an unimplemented transport
+should look like.
+
+### Removed: a second, dead copy of peer exchange
+
+`peer/pex.rs` held its own `OUR_UT_PEX_ID`, its own BEP 10 handshake builder
+and its own PEX encoder and parser. So does `peer/extension.rs`, and
+`extension.rs` is the one every call site uses. The other 214 lines had no
+caller anywhere in the tree.
+
+Two copies of one protocol drift, and these had: the live module advertises
+itself as `typhon 0.2`, the dead one as `Typhon 0.1`. The dead one also wrote
+`added.f = 0x02` -- the seeder flag -- for every peer it announced, with the
+comment "We're always seeding", which is not true of a torrent being fetched.
+
+Found while adding tests for it. Writing them would have raised the coverage
+figure by guarding code nobody runs, which is the failure mode a coverage
+number has.
+
+### A disk that cannot take the data no longer downloads forever
+
+`commit_piece` gave a failed SHA1 and a failed write the same answer: hand the
+piece back to the picker. For a bad hash that is exactly right -- the peer lied,
+ask somebody else. For a write it is a loop with no way out: a full volume, a
+read-only mount or a disappeared share cannot be fixed by fetching the piece
+again, and each attempt pulls a whole piece off the swarm. The torrent
+downloaded at full speed, forever, made no progress, and showed none.
+
+- three consecutive write failures put the torrent in `Error` with the reason
+  in the interface. Three and not one, because a seedbox that drains under
+  pressure can refuse one write and accept the next; three and not thirty,
+  because every retry is paid in somebody else's upload
+- any successful write clears the count, so scattered failures never add up
+- the contract is the one the serve path already used for a file that has gone:
+  set once, never cleared on its own, brought back by a recheck
+- `get_requests` gates on the status, so the torrent actually stops asking
+  rather than merely being labelled
+
+### Endgame stopped making a peer ask itself for the same block
+
+Found by writing the first tests `peer/download.rs` has ever had.
+
+`pick_piece` stops excluding pieces that are already in flight once sixteen or
+fewer remain. That is endgame, and it is deliberate: the last pieces of a
+download are asked of several peers at once so one slow peer cannot hold the
+whole torrent hostage. Asking the same peer twice is not part of it, and
+nothing said so -- `get_requests` loops until its pipeline is full, so on any
+torrent inside its last sixteen pieces it refilled all thirty-two slots with
+copies of the block it had just requested.
+
+The second half is worse than wasted requests. `start_piece` *inserts* into the
+pending table, so starting a piece that was already in flight overwrote its
+entry -- `blocks_received` back to false, and every block already received for
+that piece thrown away. At the end of every download, which is exactly where
+endgame applies.
+
+- a peer does not pick a piece it has already started; the field that says so,
+  `started_pieces`, was already kept for releasing abandoned pieces on
+  disconnect
+- endgame across different peers is untouched, which is the behaviour worth
+  having
+
+`peer/download.rs` and `peer/choking.rs` were both at zero coverage. They now
+hold the regressions they were written from: a paused torrent that kept
+downloading at full speed while the interface said stopped, a repeated `have`
+counted twice until progress passed 100%, a piece's blocks dropped past the
+pipeline so large-piece torrents never completed, and the choking engine's
+ranking -- rarity before speed, the cap, and the tick window being closed.
+
+### Getting the port forwarded, and hole punching
+
+`portfwd` could ask a gateway to forward the listen port by NAT-PMP since the
+day it was written, and **was never called once** -- `mod portfwd;` in `main.rs`
+and no call site anywhere in the tree. Meanwhile the interface told Proton users
+the port was "obtained by NAT-PMP and renewed continuously". No installation
+ever got a mapping automatically.
+
+- NAT-PMP is wired in, at last, and renewed at half the granted lease
+- **UPnP IGD** is new (`igd`): SSDP discovery, the description document, and the
+  SOAP `AddPortMapping`. NAT-PMP is what a VPN gateway answers and almost no
+  home router does; IGD is the other half, and without it a user behind their
+  own box got nothing
+- `portmap` tries NAT-PMP first -- one datagram to a known address, and the
+  equipment that speaks it is also the case where there is no router to discover
+  -- then UPnP, and says which one worked
+- the new `auto_port_forward` setting is on by default, as it is in every other
+  client. It only ever ADDS a mapping: the listen port is never changed
+  underneath the engines, because the tracker has already been told which port
+  we are on
+- a router's refusal is reported in words. UPnP error 718 means the port is
+  already mapped to another machine, which is something an operator can act on;
+  "HTTP 500" is not
+
+**BEP 55 hole punching** (`ut_holepunch`) is implemented in both directions. A
+`connect` makes us dial immediately, because the other end is opening its hole
+at that moment and it closes in seconds. And we serve as the rendezvous for two
+peers we hold, which means telling **both** of them: the asker dials into a
+closed NAT unless the other punches at the same instant.
+
+The register is the per-torrent peer table that already existed. Reaching the
+other peer's session needed a queue and a wake on it -- an idle seeding session
+registers no timer at all, so without one the introduction would go out long
+after the hole had closed. A peer we cannot introduce is answered with the
+defined `NotConnected` or `NoSupport`, never with silence. At most sixteen
+introductions queue for one peer, and a repeat is not queued twice.
+
+Addresses that can be named in a rendezvous are restricted to public unicast:
+the message asks a stranger to dial an address we choose, and without that
+restriction a swarm becomes an amplifier aimed at whatever sits on the
+rendezvous peer's own network.
+
+### Removed: the secondary announce
+
+It sent a **second announce under a second peer id** — the first with one bit
+flipped — so that a tracker deduplicating by peer id would store both entries
+instead of overwriting one. It existed to register an IPv4 and an IPv6 path from
+behind a proxy that could not carry both, and it was off unless
+`TYPHON_ANNOUNCE_V6_PROXY` was set.
+
+Registering one client twice under two identities is not acceptable tracker
+behaviour, whatever it was for. BEP 7 already describes the honest version of
+the same idea, and the announce path implements it: one peer id, announced from
+both address families, which is what libtorrent does.
+
+- the `[announce_secondary_stats]` configuration table is gone, along with the
+  `/api/announce/secondary-stats` endpoint that edited it. A `config.toml` that
+  still carries the table keeps loading; the table is ignored
+- `TYPHON_ANNOUNCE_V6_PROXY` no longer does anything. `TYPHON_ANNOUNCE_PROXY`,
+  which routes the ordinary announce, is unaffected
+
 ### Deleting a torrent stopped erasing its upload history
 
 Every total Hydranos publishes is a live sum over the torrents currently loaded

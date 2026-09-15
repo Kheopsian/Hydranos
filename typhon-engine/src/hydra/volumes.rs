@@ -232,3 +232,129 @@ pub fn discover(
     });
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drain(enabled: bool, high: i64, low: i64) -> crate::config::RaceDrain {
+        let mut d = crate::config::RaceDrain::default();
+        d.enabled = enabled;
+        d.high_watermark_pct = high;
+        d.low_watermark_pct = low;
+        d
+    }
+
+    fn vol(total: u64, used: u64) -> Volume {
+        Volume {
+            id: "/mnt".into(),
+            dev: 1,
+            total,
+            used,
+            free: total.saturating_sub(used),
+            torrents: 0,
+            policy: Policy { enabled: true, high: 90, low: 80, inherited: true },
+        }
+    }
+
+    /// A volume of size zero is not a full volume. Dividing by its total would
+    /// hand the drain a NaN, and `sort_by` on NaN silently keeps the input
+    /// order -- the fullest disk would stop leading the list.
+    #[test]
+    fn a_volume_with_no_size_is_zero_percent_not_nan() {
+        let v = vol(0, 0);
+        assert_eq!(v.used_pct(), 0.0);
+        assert!(!v.used_pct().is_nan());
+    }
+
+    #[test]
+    fn used_pct_is_used_over_total() {
+        assert_eq!(vol(100, 50).used_pct(), 50.0);
+        assert_eq!(vol(1000, 1).used_pct(), 0.1);
+        assert_eq!(vol(100, 100).used_pct(), 100.0);
+    }
+
+    /// `inherited` is the whole point of `global`: it is what lets the panel
+    /// say "this disk has no rule of its own" without a second request.
+    #[test]
+    fn the_global_policy_is_marked_inherited() {
+        let p = Policy::global(&drain(true, 91, 77));
+        assert!(p.inherited, "a policy built from the global default is inherited");
+        assert!(p.enabled);
+        assert_eq!(p.high, 91);
+        assert_eq!(p.low, 77);
+
+        let off = Policy::global(&drain(false, 10, 5));
+        assert!(!off.enabled);
+        assert!(off.inherited);
+    }
+
+    #[test]
+    fn device_of_answers_for_a_path_that_exists_and_not_for_one_that_does_not() {
+        assert!(device_of(Path::new("/tmp")).is_some());
+        assert!(device_of(Path::new("/tmp/typhon-no-such-path-6f1a2b")).is_none());
+    }
+
+    /// A save path may point at a directory nobody has created yet. That is
+    /// not a reason to lose the torrent from its volume.
+    #[test]
+    fn a_save_path_not_yet_created_still_resolves_to_its_volume() {
+        let deep = Path::new("/tmp/typhon-absent-a/typhon-absent-b/typhon-absent-c");
+        let got = device_of_nearest(deep).expect("walks up to /tmp, which exists");
+        assert_eq!(got, device_of(Path::new("/tmp")).unwrap());
+    }
+
+    /// Walking up from an existing path must land on a real ancestor that is
+    /// still on the same filesystem -- that is the definition of the mount
+    /// point the UI shows.
+    #[test]
+    fn the_mount_point_is_an_ancestor_on_the_same_device() {
+        let p = Path::new("/tmp");
+        let mount = mount_point_of(p);
+        assert!(p.starts_with(&mount) || mount.starts_with(p), "{mount:?} must be on the /tmp branch");
+        assert_eq!(
+            device_of(&mount).unwrap(),
+            device_of_nearest(p).unwrap(),
+            "the mount point sits on the same filesystem as the path"
+        );
+    }
+
+    /// Unstattable path: the function must still name something rather than
+    /// panic, because a save path can be anywhere.
+    #[test]
+    fn an_unreachable_path_is_its_own_mount_point() {
+        // Nothing under a path that cannot exist is stattable, and `/` always
+        // is, so the walk terminates either way.
+        let mount = mount_point_of(Path::new("/tmp/typhon-absent-x/y"));
+        assert!(mount.is_absolute());
+    }
+
+    /// Used is what the filesystem counts as taken, NOT total minus available:
+    /// reserved blocks belong to neither, and counting them as used drains a
+    /// disk that is not full.
+    #[test]
+    fn usage_does_not_count_reserved_blocks_as_used() {
+        let (used, total, free) = usage(Path::new("/tmp")).expect("/tmp is a filesystem");
+        assert!(total > 0, "a mounted filesystem has a size");
+        assert!(used <= total);
+        assert!(free <= total);
+        assert!(
+            used + free <= total,
+            "used {used} + free {free} must leave room for reserved blocks in {total}"
+        );
+    }
+
+    #[test]
+    fn usage_of_a_path_that_does_not_exist_is_none() {
+        assert!(usage(Path::new("/tmp/typhon-no-such-path-6f1a2b")).is_none());
+    }
+
+    /// An interior NUL cannot be handed to statvfs; that is a None, not a panic.
+    #[test]
+    fn usage_rejects_a_path_with_an_interior_nul() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let bad = PathBuf::from(OsStr::from_bytes(b"/tmp/a\0b"));
+        assert!(usage(&bad).is_none());
+    }
+}

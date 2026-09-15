@@ -142,6 +142,22 @@ pub struct PeerStats {
     /// over whatever interval the caller polls at.
     pub dl_rate: RateTracker,
     pub ul_rate: RateTracker,
+    /// This peer advertised `ut_holepunch` (BEP 55) in its extension
+    /// handshake. Introducing two peers where one cannot read the message
+    /// leaves the other waiting on a connection nobody was asked to make.
+    pub supports_holepunch: AtomicBool,
+    /// Peers this session should be told to dial, put here by ANOTHER peer's
+    /// task when it asked us for an introduction.
+    ///
+    /// A queue and not a direct send, because the socket belongs to this
+    /// session's task and nothing else may write to it.
+    pub punch_outbox: std::sync::Mutex<Vec<std::net::SocketAddr>>,
+    /// Wakes this session when its outbox is filled.
+    ///
+    /// Needed rather than merely polite: an idle seeding session registers no
+    /// timer at all, so without a wake it would drain the queue at its next
+    /// scrap of traffic -- long after the hole at the other end has closed.
+    pub punch_wake: tokio::sync::Notify,
 }
 
 impl PeerStats {
@@ -169,7 +185,29 @@ impl PeerStats {
             uploaded_last_tick: AtomicU64::new(0),
             dl_rate: RateTracker::new(),
             ul_rate: RateTracker::new(),
+            supports_holepunch: AtomicBool::new(false),
+            punch_outbox: std::sync::Mutex::new(Vec::new()),
+            punch_wake: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Ask this session to tell its peer to dial `who`, now.
+    ///
+    /// Called from another peer's task. Bounded on purpose: a peer that asks
+    /// to be introduced to everyone is asking us to open connections on its
+    /// behalf, and a queue that grows without limit is the amplifier.
+    pub fn queue_punch(&self, who: std::net::SocketAddr) -> bool {
+        const MAX_PENDING: usize = 16;
+        if let Ok(mut q) = self.punch_outbox.lock() {
+            if q.len() >= MAX_PENDING || q.contains(&who) {
+                return false;
+            }
+            q.push(who);
+        } else {
+            return false;
+        }
+        self.punch_wake.notify_one();
+        true
     }
 }
 
@@ -248,6 +286,14 @@ impl Drop for PeerGuard {
 /// 2, not 1: dashmap asserts `shard_amount > 1` at construction.
 const PER_TORRENT_SHARDS: usize = 2;
 
+/// No announce event is owed.
+pub const ANNOUNCE_EVENT_NONE: u8 = 0;
+/// BEP 3 `event=completed`: this torrent finished downloading.
+pub const ANNOUNCE_EVENT_COMPLETED: u8 = 1;
+/// BEP 3 `event=stopped`: the user stopped this torrent and the trackers
+/// should drop us from the swarm rather than wait for the entry to go stale.
+pub const ANNOUNCE_EVENT_STOPPED: u8 = 2;
+
 pub struct TorrentState {
     /// Parsed straight from the .torrent. `meta.trackers` is the SEED for
     /// `live_trackers` and nothing else reads it: the operator can edit the
@@ -258,22 +304,6 @@ pub struct TorrentState {
     /// the set_trackers command; the announce loop takes a snapshot each
     /// pass, so a change lands on the next announce without a restart.
     pub live_trackers: RwLock<Vec<Vec<String>>>,
-    /// The peer id to present in the BT HANDSHAKE for this torrent.
-    ///
-    /// `None` means "use the binding's own", which is the right answer for a
-    /// public torrent: DHT and PEX peers arrive without a tracker vouching for
-    /// them and nobody cross-checks anything there.
-    ///
-    /// It matters on a private tracker. The announce can be spoofed per tracker
-    /// (`announce_clients`), and until now the handshake was not: the tracker
-    /// was told `-qB5220-` while every peer in its swarm saw `-HY...-`. A
-    /// tracker that compares the two -- which strict ones do -- sees a client
-    /// lying about what it is, which is worse than not spoofing at all.
-    ///
-    /// Set from the FIRST tracker's override: a torrent announcing to several
-    /// private trackers cannot present a different identity to each, since they
-    /// share one swarm.
-    pub handshake_prefix: RwLock<Option<[u8; 8]>>,
     /// The peer id a tracker was last actually told, and when.
     ///
     /// Written AFTER an announce succeeds, never from the policy: the policy
@@ -323,6 +353,13 @@ pub struct TorrentState {
     /// treat as "refuse the piece".
     pub blob_source: std::sync::OnceLock<Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>>,
     pub is_paused: AtomicBool,
+    /// An announce event owed to this torrent's trackers, not yet delivered.
+    ///
+    /// `ANNOUNCE_EVENT_NONE`, `_COMPLETED` or `_STOPPED`. Set where the
+    /// transition happens -- in this crate -- and taken by the announce runner,
+    /// which lives in the `hydra` binary and cannot be called from here. The
+    /// runner clears it as it sends, so the event goes out once and once only.
+    pub pending_announce_event: AtomicU8,
     /// Seconds spent seeding, folded in at every state change and at the
     /// periodic sweep. See `fold_seed_time`.
     pub seed_secs: AtomicI64,
@@ -385,6 +422,16 @@ pub struct TorrentState {
     /// Why this torrent is in `TorrentStatus::Error`, shown when the user
     /// opens it. Empty for every other status.
     pub error_msg: Mutex<String>,
+    /// Consecutive failures to WRITE a verified piece to disk.
+    ///
+    /// Counted rather than acted on at the first one, because a full disk on a
+    /// seedbox is often transient -- the drain frees space and the next piece
+    /// lands. What is not transient is a read-only mount or a volume that went
+    /// away, and those look identical for one piece.
+    ///
+    /// Reset by any successful write, so scattered failures never accumulate
+    /// into a stop.
+    pub disk_write_failures: AtomicU32,
 
     // Peer registry: insert at connect, remove at disconnect (via PeerGuard).
     // Each peer task holds its own Arc<PeerStats>, so hot-path updates do
@@ -445,26 +492,6 @@ impl TorrentState {
         let base = self.seed_secs.load(Ordering::Relaxed);
         let since = self.seed_since.load(Ordering::Relaxed);
         if since > 0 { base + (now - since).max(0) } else { base }
-    }
-}
-
-impl TorrentState {
-    /// The peer id to hand this torrent's peers: the tracker-consistent one
-    /// when a private tracker override set it, the binding's own otherwise.
-    ///
-    /// Every handshake for this torrent goes through here, inbound and out, so
-    /// a peer and the tracker of a private swarm are told the same thing. They
-    /// were not before: the announce could be spoofed while the handshake said
-    /// `-HY...-`, and a tracker that compares the two sees a client lying about
-    /// what it is.
-    pub fn handshake_pid(&self, binding: &[u8; 20]) -> [u8; 20] {
-        let Some(prefix) = *self.handshake_prefix.read() else { return *binding };
-        // Only the eight-byte prefix is replaced. The random tail stays the
-        // binding's, which is what keeps two engines of one node telling each
-        // other apart -- and the self-connection guard working.
-        let mut out = *binding;
-        out[..8].copy_from_slice(&prefix);
-        out
     }
 }
 
@@ -657,7 +684,6 @@ impl TorrentState {
         // Built lazily by `have_sender`; a seeder never asks for one.
         Self {
             live_trackers: RwLock::new(meta.trackers.clone()),
-            handshake_prefix: RwLock::new(None),
             announced_peer_id: RwLock::new(None),
             meta,
             save_path: RwLock::new(save_path),
@@ -676,6 +702,7 @@ impl TorrentState {
             completed_tx: std::sync::OnceLock::new(),
             blob_source: std::sync::OnceLock::new(),
             is_paused: AtomicBool::new(false),
+            pending_announce_event: AtomicU8::new(ANNOUNCE_EVENT_NONE),
             seed_secs: AtomicI64::new(0),
             seed_since: AtomicI64::new(0),
             serving_suspended: AtomicBool::new(false),
@@ -690,6 +717,7 @@ impl TorrentState {
             current_tracker: Mutex::new(String::new()),
             last_announce_ok: AtomicBool::new(false),
             last_announce_error: Mutex::new(String::new()),
+            disk_write_failures: AtomicU32::new(0),
             last_announce_at: AtomicI64::new(0),
             next_announce_at: AtomicI64::new(0),
             error_msg: Mutex::new(String::new()),
@@ -714,6 +742,43 @@ impl TorrentState {
         tracing::warn!("torrent {:?} parked in error: {}", self.meta.name, msg);
     }
 
+    /// The disk refused what we fetched: stop fetching, keep serving.
+    ///
+    /// Deliberately not `mark_error`, which also suspends the serve path. That
+    /// is right when the data has gone -- there is nothing left to offer -- and
+    /// wrong here: a volume that is full or read-only still READS, and a node
+    /// that stopped seeding everything it holds because one download could not
+    /// write would have traded a stalled torrent for a stalled library.
+    pub fn mark_write_error(&self, msg: &str) {
+        if self.status.load(Ordering::Relaxed) == TorrentStatus::Error as u8 {
+            return;
+        }
+        if let Ok(mut g) = self.error_msg.lock() {
+            *g = msg.to_string();
+        }
+        self.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        tracing::error!(torrent = %self.meta.name, "stopped fetching: {}", msg);
+    }
+
+    /// Forget a fault the operator has dealt with.
+    ///
+    /// Called when a recheck starts, which is the one moment somebody has
+    /// declared the underlying problem fixed. Nothing cleared `error_msg`
+    /// before, so a torrent that erred, was repaired and came back kept its
+    /// panic message on display for the rest of the process's life -- and the
+    /// operator had no way to tell a torrent that is broken from one that was.
+    ///
+    /// The failure count goes with it: leaving it at the threshold would put
+    /// the torrent back in error on its first unlucky write instead of its
+    /// third.
+    pub fn clear_error(&self) {
+        if let Ok(mut g) = self.error_msg.lock() {
+            g.clear();
+        }
+        self.disk_write_failures.store(0, Ordering::Relaxed);
+        self.serving_suspended.store(false, Ordering::Relaxed);
+    }
+
     pub fn have_bitfield(&self) -> Bytes {
         let n = self.meta.num_pieces() as usize;
         let byte_len = (n + 7) / 8;
@@ -731,6 +796,19 @@ impl TorrentState {
         } else {
             Bytes::from(vec![0u8; byte_len])
         }
+    }
+}
+
+/// BEP 27: whether this torrent may look for peers anywhere but its trackers.
+///
+/// A private torrent must not be announced to the DHT, offered over PEX, or
+/// broadcast on the local network. The rule is one line, and it was written
+/// twice in two distant files -- the DHT registration and the peer session --
+/// which is one copy too many for something a private tracker will ban an
+/// account over. Both call this.
+impl TorrentMeta {
+    pub fn allows_peer_discovery(&self) -> bool {
+        !self.private
     }
 }
 
@@ -984,5 +1062,135 @@ mod tests {
         assert!(addrs.remove(&a).is_some());
         assert!(!addrs.contains_key(&a));
         assert_eq!(addrs.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod punch_queue_tests {
+    use super::PeerStats;
+    use std::net::SocketAddr;
+
+    fn stats() -> PeerStats {
+        PeerStats::new(
+            "93.184.216.34:6881".parse().unwrap(),
+            [0u8; 20],
+            "test".into(),
+            false,
+            false,
+        )
+    }
+
+    fn addr(n: u8) -> SocketAddr {
+        format!("93.184.216.{n}:6881").parse().unwrap()
+    }
+
+    #[test]
+    fn a_queued_introduction_is_kept() {
+        let s = stats();
+        assert!(s.queue_punch(addr(1)));
+        assert_eq!(s.punch_outbox.lock().unwrap().as_slice(), &[addr(1)]);
+    }
+
+    /// Asking twice for the same peer does not make it dial twice. A peer that
+    /// repeats its request would otherwise have us send as many messages as it
+    /// asked for.
+    #[test]
+    fn the_same_peer_is_not_queued_twice() {
+        let s = stats();
+        assert!(s.queue_punch(addr(1)));
+        assert!(!s.queue_punch(addr(1)), "already waiting");
+        assert_eq!(s.punch_outbox.lock().unwrap().len(), 1);
+    }
+
+    /// ⭐ A rendezvous asks us to make somebody else open connections. An
+    /// unbounded queue is exactly the amplifier that turns a swarm into an
+    /// attack, so the queue has a ceiling and says no past it.
+    #[test]
+    fn the_queue_has_a_ceiling() {
+        let s = stats();
+        for i in 0..16 {
+            assert!(s.queue_punch(addr(i)), "the first sixteen are accepted");
+        }
+        assert!(!s.queue_punch(addr(200)), "the seventeenth is refused");
+        assert_eq!(s.punch_outbox.lock().unwrap().len(), 16);
+    }
+}
+
+#[cfg(test)]
+mod error_recovery_tests {
+    use super::*;
+    use crate::torrent::meta::TorrentMeta;
+    use std::path::PathBuf;
+
+    fn torrent() -> Arc<TorrentState> {
+        let t = Arc::new(TorrentState::new(
+            TorrentMeta {
+                info_hash: [11u8; 20],
+                name: "t".into(),
+                num_pieces: 8,
+                piece_length: 16384,
+                total_size: 8 * 16384,
+                files: Vec::new(),
+                trackers: Vec::new(),
+                url_list: Vec::new(),
+                private: false,
+                multi_file: false,
+                info_dict_len: 0,
+            },
+            PathBuf::from("/tmp"),
+            false,
+        ));
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t
+    }
+
+    /// ⭐ A full or read-only volume still READS. Suspending the serve path
+    /// here would stop seeding everything the node already holds because one
+    /// download could not write -- a stalled library traded for a stalled
+    /// torrent. That is the whole difference from `mark_error`.
+    #[test]
+    fn a_write_error_stops_fetching_but_keeps_serving() {
+        let t = torrent();
+        t.mark_write_error("cannot write to disk: No space left on device");
+
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+        assert!(
+            !t.serving_suspended.load(Ordering::Relaxed),
+            "what is already on disk is still worth uploading"
+        );
+        assert!(t.error_msg.lock().unwrap().contains("No space left"));
+    }
+
+    /// The first fault wins, as `mark_error` does: later ones would overwrite
+    /// the message that actually explains what happened first.
+    #[test]
+    fn the_first_fault_is_the_one_reported() {
+        let t = torrent();
+        t.mark_write_error("first");
+        t.mark_write_error("second");
+        assert_eq!(*t.error_msg.lock().unwrap(), "first");
+    }
+
+    /// ⭐ Nothing cleared `error_msg` before this. A torrent that erred, was
+    /// repaired and came back kept its panic on display for the life of the
+    /// process, and the operator could not tell a torrent that is broken from
+    /// one that was.
+    #[test]
+    fn clearing_forgets_the_message_and_the_count() {
+        let t = torrent();
+        t.disk_write_failures.store(3, Ordering::Relaxed);
+        t.mark_write_error("cannot write to disk: whatever");
+        t.serving_suspended.store(true, Ordering::Relaxed);
+
+        t.clear_error();
+
+        assert!(t.error_msg.lock().unwrap().is_empty(), "no stale panic");
+        assert_eq!(
+            t.disk_write_failures.load(Ordering::Relaxed),
+            0,
+            "left at the threshold, the next unlucky write would error again \
+             on the first piece instead of the third"
+        );
+        assert!(!t.serving_suspended.load(Ordering::Relaxed));
     }
 }

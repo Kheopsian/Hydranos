@@ -49,26 +49,29 @@ pub async fn incoming(
     Ok(result)
 }
 
-async fn send_handshake(
-    stream: &mut PeerTransport,
-    info_hash: &[u8; 20],
-    peer_id: &[u8; 20],
-) -> Result<(), String> {
-    let mut buf = Vec::with_capacity(68);
-    buf.push(19u8); // pstrlen
-    buf.extend_from_slice(PROTOCOL);
-    let mut reserved = [0u8; 8];
-    reserved[7] |= RESERVED_FAST;     // BEP 6
-    reserved[5] |= RESERVED_EXTENDED; // BEP 10
-    buf.extend_from_slice(&reserved);
-    buf.extend_from_slice(info_hash);
-    buf.extend_from_slice(peer_id);
-    stream.write_all(&buf).await.map_err(|e| e.to_string())
+/// The 68 bytes of a BEP 3 handshake.
+///
+/// `<pstrlen=19><"BitTorrent protocol"><8 reserved><info_hash><peer_id>`.
+/// The length is fixed and the far side reads exactly that many bytes, so a
+/// short peer id here makes a 65-byte handshake and the peer waits forever for
+/// three bytes that never come. Hence `[u8; 20]` rather than a slice: the type
+/// is what keeps the promise.
+pub fn build_handshake(info_hash: &[u8; 20], peer_id: &[u8; 20]) -> [u8; 68] {
+    let mut buf = [0u8; 68];
+    buf[0] = 19; // pstrlen
+    buf[1..20].copy_from_slice(PROTOCOL);
+    // Reserved bits we claim. Everything else stays zero: advertising an
+    // extension we do not implement makes a peer wait for messages we will
+    // never send.
+    buf[27] |= RESERVED_FAST; // BEP 6, reserved[7]
+    buf[25] |= RESERVED_EXTENDED; // BEP 10, reserved[5]
+    buf[28..48].copy_from_slice(info_hash);
+    buf[48..68].copy_from_slice(peer_id);
+    buf
 }
 
-async fn read_handshake(stream: &mut PeerTransport) -> Result<HandshakeResult, String> {
-    let mut buf = [0u8; 68];
-    stream.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
+/// Read the 68 bytes back, or say why they are not a handshake.
+pub fn parse_handshake(buf: &[u8; 68]) -> Result<HandshakeResult, String> {
     if buf[0] != 19 || &buf[1..20] != PROTOCOL {
         return Err("invalid protocol string".into());
     }
@@ -80,4 +83,19 @@ async fn read_handshake(stream: &mut PeerTransport) -> Result<HandshakeResult, S
     info_hash.copy_from_slice(&buf[28..48]);
     peer_id.copy_from_slice(&buf[48..68]);
     Ok(HandshakeResult { peer_id, info_hash, fast_extension, extended_protocol })
+}
+
+async fn send_handshake(
+    stream: &mut PeerTransport,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+) -> Result<(), String> {
+    let buf = build_handshake(info_hash, peer_id);
+    stream.write_all(&buf).await.map_err(|e| e.to_string())
+}
+
+async fn read_handshake(stream: &mut PeerTransport) -> Result<HandshakeResult, String> {
+    let mut buf = [0u8; 68];
+    stream.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
+    parse_handshake(&buf)
 }

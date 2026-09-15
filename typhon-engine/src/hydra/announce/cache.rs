@@ -134,6 +134,15 @@ impl Cache {
         self.verify.write().unwrap().insert(host.to_string(), v);
     }
 
+    /// The last self-check for one tracker.
+    ///
+    /// Separate from `verifications()` because this is read on the announce
+    /// path: cloning the whole table per announce is a cost that scales with
+    /// the number of trackers times the number of torrents.
+    pub fn verify_for(&self, host: &str) -> Option<Verify> {
+        self.verify.read().unwrap().get(host).cloned()
+    }
+
     pub fn verifications(&self) -> HashMap<String, Verify> {
         self.verify.read().unwrap().clone()
     }

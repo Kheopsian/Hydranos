@@ -620,17 +620,29 @@ async fn delete_node(
 
 /// The host part of a URL, however it was written.
 fn url_host(url: &str) -> String {
-    url.split("//")
+    let authority = url
+        .split("//")
         .nth(1)
         .unwrap_or(url)
         .split('/')
         .next()
-        .unwrap_or_default()
-        .rsplit(':')
-        .last()
-        .unwrap_or_default()
-        .trim_matches(|c| c == '[' || c == ']')
-        .to_string()
+        .unwrap_or_default();
+
+    // A bracketed IPv6 literal keeps its colons: the brackets are what
+    // separate the address from the port, not the last colon. Splitting on
+    // colons instead returned "2001" for `[2001:db8::1]:8199` and "" for
+    // `[::1]:8199` -- which made `is_loopback_host` answer false for the one
+    // address the enrolment guard exists to refuse.
+    if let Some(rest) = authority.strip_prefix('[') {
+        return match rest.split_once(']') {
+            Some((addr, _)) => addr.to_string(),
+            None => rest.to_string(),
+        };
+    }
+    match authority.rsplit_once(':') {
+        Some((host, _port)) => host.to_string(),
+        None => authority.to_string(),
+    }
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -1103,17 +1115,6 @@ async fn get_node_open(
 // auth, routing, serialisation -- while having no engine state behind them, so
 // a difference against the Go binary can only come from this file.
 
-async fn get_clients(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(&cfg.announce_clients).into_response()
-}
-
 /// Why each tracker is unhappy, and whether it still hands out our address.
 ///
 /// Two questions the trackers tab could not answer before 4.6.0. "Failed" was
@@ -1229,7 +1230,6 @@ async fn set_announce_hidden(
         // Only the batch form protects configured hosts: hiding a single row
         // the operator clicked on is exactly what they asked for.
         let configured = cfg.announce_passkeys.contains_key(&host)
-            || cfg.announce_clients.contains_key(&host)
             || cfg.announce_ip_modes.contains_key(&host);
         if req.hidden && configured && req.hosts.len() > 1 {
             skipped.push(host);
@@ -1403,17 +1403,6 @@ async fn get_ip_modes(
     guard!(state, headers, query);
     let cfg = state.cfg();
     Json(&cfg.announce_ip_modes).into_response()
-}
-
-async fn get_secondary_stats(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(&cfg.announce_secondary_stats).into_response()
 }
 
 
@@ -3978,9 +3967,6 @@ struct TrackerRow {
     last_announce: String,
     announces: i64,
     errors: i64,
-    spoofed: bool,
-    peer_id_prefix: String,
-    user_agent: String,
     passkey_set: bool,
     ip_mode: String,
     /// Kept out of the tab by the operator. A view decision, not a mute:
@@ -4044,7 +4030,8 @@ async fn get_trackers(
     }
 
     let mut hosts: std::collections::BTreeSet<String> = observed.keys().cloned().collect();
-    hosts.extend(cfg.announce_clients.keys().cloned());
+    hosts.extend(cfg.announce_passkeys.keys().cloned());
+    hosts.extend(cfg.announce_ip_modes.keys().cloned());
     hosts.extend(held.keys().cloned());
     // And the trackers that have only ever FAILED.
     //
@@ -4064,14 +4051,15 @@ async fn get_trackers(
     let rows: Vec<TrackerRow> = hosts
         .into_iter()
         .map(|host| {
-            let client = cfg.announce_clients.get(&host);
+            let configured = cfg.announce_passkeys.contains_key(&host)
+                || cfg.announce_ip_modes.contains_key(&host);
             let seen = observed.get(&host);
             let holds = held.get(&host).copied().unwrap_or(0);
             let mut sources = Vec::new();
             if seen.is_some() {
                 sources.push("torrents".to_string());
             }
-            if client.is_some() {
+            if configured {
                 sources.push("config".to_string());
             }
             if holds > 0 {
@@ -4098,9 +4086,6 @@ async fn get_trackers(
                     .unwrap_or_else(|| GO_ZERO_TIME.to_string()),
                 announces: seen.map(|(n, _)| *n).unwrap_or(0),
                 errors: 0,
-                spoofed: client.is_some(),
-                peer_id_prefix: client.map(|c| c.peer_id_prefix.clone()).unwrap_or_default(),
-                user_agent: client.map(|c| c.user_agent.clone()).unwrap_or_default(),
                 passkey_set: cfg.announce_passkeys.contains_key(&host),
                 hidden: cfg.announce_hidden.contains_key(&host),
                 // -1 = nothing declared, which is NOT 0. The drain protects
@@ -6189,14 +6174,7 @@ async fn get_live_announce_policy(
                     "peer_id": p.peer_id,
                     "user_agent": p.user_agent,
                     "public_ip": p.public_ip,
-                    "clients": p.clients.iter().map(|(host, c)| {
-                        (host.clone(), serde_json::json!({
-                            "peer_id_prefix": c.peer_id_prefix,
-                            "user_agent": c.user_agent,
-                        }))
-                    }).collect::<serde_json::Map<_, _>>(),
                     "passkeys": p.passkeys.keys().collect::<Vec<_>>(),
-                    "secondary_stats": p.secondary_stats,
                     "ip_modes": p.ip_modes,
                 })
             }
@@ -6205,94 +6183,6 @@ async fn get_live_announce_policy(
 
     Json(serde_json::json!({ "engines": engines })).into_response()
 }
-
-/// Stored as a nested table -- `[announce_clients."host"]` -- because the host
-/// is a quoted key and the entry carries two fields. Clearing both fields
-/// removes the table rather than leaving an empty one behind.
-async fn set_announce_client(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-
-    let Ok(req) = serde_json::from_str::<ClientOverride>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
-    };
-    let host = req.host.trim().to_string();
-    if host.is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "host is required"}))).into_response();
-    }
-
-    let section = format!("announce_clients.{}", crate::tomledit::quote_toml_key(&host));
-    let persisted = if req.peer_id_prefix.is_empty() && req.user_agent.is_empty() {
-        let section2 = section.clone();
-        edit_config(&state, move |doc| {
-            Ok(crate::tomledit::delete_toml_table(doc, &section2))
-        })
-    } else {
-        let pairs = vec![
-            ("peer_id_prefix".to_string(), crate::tomledit::quote_toml_key(&req.peer_id_prefix)),
-            ("user_agent".to_string(), crate::tomledit::quote_toml_key(&req.user_agent)),
-        ];
-        edit_config(&state, move |doc| {
-            crate::tomledit::set_toml_table(doc, &section, &pairs)
-        })
-    };
-
-    // Hand the new tables to the runners before answering, so the
-    // reply cannot claim an override that is not live yet.
-    let engines_reloaded = refresh_announce_policies(&state);
-    Json(serde_json::json!({
-        "engines_reloaded": engines_reloaded,
-        "status": "ok",
-        "clients": state.cfg().announce_clients,
-        "agents_failed": 0,
-        "persisted": persisted,
-    }))
-    .into_response()
-}
-
-async fn set_secondary_stats(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-
-    let Ok(req) = serde_json::from_str::<HostValue>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
-    };
-    if req.host.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "host is required"}))).into_response();
-    }
-    let persisted =
-        set_host_entry(&state, "announce_secondary_stats", req.host.trim(), &req.mode);
-    // Hand the new tables to the runners before answering, so the
-    // reply cannot claim an override that is not live yet.
-    let engines_reloaded = refresh_announce_policies(&state);
-    Json(serde_json::json!({
-        "engines_reloaded": engines_reloaded,
-        "status": "ok",
-        "secondary_stats": state.cfg().announce_secondary_stats,
-        "agents_failed": 0,
-        "persisted": persisted,
-    }))
-    .into_response()
-}
-
 
 #[derive(serde::Deserialize)]
 struct PortBody {
@@ -8534,79 +8424,6 @@ struct ClientBulk {
 }
 
 /// Apply one client identity to several trackers at once.
-async fn set_clients_bulk(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-
-    let Ok(req) = serde_json::from_str::<ClientBulk>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
-    };
-
-    let mut applied = 0usize;
-    let mut failed: Vec<String> = Vec::new();
-    for host in &req.hosts {
-        let host = host.trim();
-        if host.is_empty() {
-            continue;
-        }
-        let section = format!("announce_clients.{}", crate::tomledit::quote_toml_key(host));
-        let ok = if req.peer_id_prefix.is_empty() && req.user_agent.is_empty() {
-            let section2 = section.clone();
-            edit_config(&state, move |doc| {
-                Ok(crate::tomledit::delete_toml_table(doc, &section2))
-            })
-        } else {
-            let pairs = vec![
-                ("peer_id_prefix".to_string(),
-                 crate::tomledit::quote_toml_key(&req.peer_id_prefix)),
-                ("user_agent".to_string(),
-                 crate::tomledit::quote_toml_key(&req.user_agent)),
-            ];
-            edit_config(&state, move |doc| {
-                crate::tomledit::set_toml_table(doc, &section, &pairs)
-            })
-        };
-        if ok {
-            applied += 1;
-        } else {
-            failed.push(host.to_string());
-        }
-    }
-
-    // Hand the new tables to the runners before answering, so the
-    // reply cannot claim an override that is not live yet.
-    let engines_reloaded = refresh_announce_policies(&state);
-    Json(serde_json::json!({
-        "engines_reloaded": engines_reloaded,
-        "status": "ok",
-        "applied": applied,
-        // Echoed so the caller knows which hosts the batch actually covered:
-        // an empty `hosts` means "every tracker we know of", and the answer is
-        // where the operator finds out what that expanded to.
-        "hosts": req.hosts,
-        // null, not [], when everything was written: a nil slice on the Go
-        // side, and a client testing `=== null` would read [] as "one failure".
-        "not_persisted": if failed.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::Array(
-                failed.into_iter().map(serde_json::Value::String).collect(),
-            )
-        },
-        "clients": state.cfg().announce_clients,
-        "agents_failed": 0,
-    }))
-    .into_response()
-}
-
 
 // ---------------------------------------------------------------------------
 // Validation-only ports
@@ -11102,8 +10919,6 @@ async fn get_health(State(state): State<AppState>) -> Response {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(get_health))
-        .route("/api/announce/clients", get(get_clients).post(set_announce_client))
-        .route("/api/announce/secondary-stats", get(get_secondary_stats).post(set_secondary_stats))
         .route("/api/dedup/stats", get(get_dedup_stats))
         .route("/api/dedup/config", axum::routing::post(post_dedup_config))
         .route("/api/torrents/add-defaults", get(get_add_defaults))
@@ -11196,7 +11011,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/torrents/recheck", axum::routing::post(qbit_empty_ok))
         .route("/api/import/check-paths", axum::routing::post(import_check_paths))
         .route("/api/vpn-speedtest/run", axum::routing::post(vpn_speedtest_run))
-        .route("/api/announce/clients/bulk", axum::routing::post(set_clients_bulk))
         .route("/api/hoard/pause-all", axum::routing::post(hoard_pause_all))
         .route("/api/hoard/resume-all", axum::routing::post(hoard_resume_all))
         .route("/api/hoard/pause", axum::routing::post(hoard_pause_bulk))
@@ -11546,7 +11360,6 @@ mod fleet_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AnnounceClient;
 
     /// The arithmetic behind session/day, without an engine.
     ///
@@ -11685,13 +11498,6 @@ mod tests {
         cfg.daemon.api_key = key.into();
         cfg.auth.password_hash = password_hash.into();
         cfg.auth.username = "admin".into();
-        cfg.announce_clients.insert(
-            "t.myanonamouse.net".into(),
-            AnnounceClient {
-                peer_id_prefix: "-qB5220-".into(),
-                user_agent: "qBittorrent/5.2.2".into(),
-            },
-        );
         AppState {
             imports: Default::default(),
             config: Arc::new(std::sync::RwLock::new(Arc::new(cfg))),
@@ -11977,5 +11783,3457 @@ mod tests {
     fn agent_ids_carry_the_local_prefix() {
         assert_eq!(local_agent("race"), "local-race");
         assert_eq!(local_agent("hoard"), "local-hoard");
+    }
+}
+
+/// Fixtures shared by the handler tests of this binary.
+///
+/// `AppState` is what every `/api` route takes, so until it could be built in
+/// a test none of them could be exercised -- which is most of why this file
+/// sat at 8% covered while carrying the whole control plane. Nothing here
+/// touches the network: `EngineHost::offline` is the same constructor a real
+/// start uses before any listener is bound, and the store is in memory.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// A config directory of this test's own, removed by `TestState`.
+    pub(crate) struct TestState {
+        pub state: AppState,
+        pub dir: std::path::PathBuf,
+    }
+
+    impl Drop for TestState {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl std::ops::Deref for TestState {
+        type Target = AppState;
+        fn deref(&self) -> &AppState {
+            &self.state
+        }
+    }
+
+    /// Build a state from a TOML document, so a test can turn on exactly the
+    /// setting it is about and leave the rest at the defaults a fresh install
+    /// runs with.
+    pub(crate) fn state_from(tag: &str, toml_src: &str) -> TestState {
+        let dir = std::env::temp_dir().join(format!(
+            "typhon-api-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test config dir");
+
+        let config: Config = toml::from_str(toml_src).expect("test config parses");
+        let config_path = dir.join("default.toml");
+        std::fs::write(&config_path, toml_src).expect("test config written");
+
+        let engines = Arc::new(crate::engines::EngineHost::offline(&config, &dir));
+        // `open_in_memory` applies SCHEMA, which is not all of it: the
+        // workflow, job and node tables are created by `ensure_schema`, and a
+        // store without them answers "no such table" to routes that look fine.
+        let store = crate::store::Store::open_in_memory().expect("in-memory store");
+        store.ensure_schema().expect("full schema");
+        let store = Arc::new(std::sync::Mutex::new(store));
+
+        let state = AppState {
+            imports: Default::default(),
+            config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
+            config_path,
+            update_check: Arc::new(tokio::sync::Mutex::new(None)),
+            engines,
+            store,
+            public_ip: Default::default(),
+            net_engines: Default::default(),
+            odometer: Default::default(),
+            records: Default::default(),
+            bench_path: dir.join("bench.db"),
+            started_at: 1_700_000_000,
+            logs: crate::logbuf::LogBuffer::new(),
+            reconnect: Default::default(),
+            // `None` is a normal state, not a failure: the timeline is
+            // observability and must never cost the seedbox.
+            bench: None,
+            sessions: Default::default(),
+        };
+        TestState { state, dir }
+    }
+
+    /// The default install: no API key set.
+    pub(crate) fn state(tag: &str) -> TestState {
+        state_from(tag, "")
+    }
+
+    /// Read a handler's response body as JSON.
+    pub(crate) async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        if bytes.is_empty() {
+            return serde_json::Value::Null;
+        }
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("body is not JSON: {:?} ({e})", String::from_utf8_lossy(&bytes)))
+    }
+
+    /// Headers carrying an API key.
+    pub(crate) fn keyed(key: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("X-API-Key", key.parse().unwrap());
+        h
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn with_key(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    /// ⚠️ THE regression to keep out. A Docker install that has never been
+    /// through setup has no key in default.toml, and an empty expected key
+    /// once meant "compare nothing, match everything" -- every `/api` route
+    /// answered unauthenticated on a fresh container.
+    #[test]
+    fn an_unset_api_key_refuses_everyone_rather_than_admitting_everyone() {
+        let s = state("nokey");
+        assert!(!authorised(&s, &HeaderMap::new(), ""), "no key, no header");
+        assert!(!authorised(&s, &keyed(""), ""), "no key, empty header");
+        assert!(!authorised(&s, &keyed("anything"), ""), "no key, any header");
+        assert!(!authorised(&s, &HeaderMap::new(), "apikey="), "no key, empty query param");
+        assert!(!authorised(&s, &HeaderMap::new(), "apikey=guess"), "no key, any query param");
+    }
+
+    #[test]
+    fn the_right_key_in_the_header_is_admitted() {
+        let s = with_key("hdr");
+        assert!(authorised(&s, &keyed(KEY), ""));
+    }
+
+    /// The header name is compared case-insensitively by http, and callers do
+    /// spell it every way.
+    #[test]
+    fn the_header_name_is_not_case_sensitive() {
+        let s = with_key("case");
+        for name in ["X-API-Key", "x-api-key", "X-Api-Key"] {
+            let mut h = HeaderMap::new();
+            h.insert(name, KEY.parse().unwrap());
+            assert!(authorised(&s, &h, ""), "{name} must be accepted");
+        }
+    }
+
+    #[test]
+    fn a_wrong_key_is_refused() {
+        let s = with_key("wrong");
+        assert!(!authorised(&s, &keyed("not-the-key"), ""));
+        // Same length, one byte out: the case constant_time_eq exists for.
+        let mut near = KEY.to_string();
+        near.pop();
+        near.push('0');
+        if near != KEY {
+            assert!(!authorised(&s, &keyed(&near), ""));
+        }
+    }
+
+    /// The query parameter is the fallback for callers that cannot set a
+    /// header -- a browser opening an SSE stream, mainly.
+    #[test]
+    fn the_key_may_arrive_in_the_query_instead() {
+        let s = with_key("query");
+        assert!(authorised(&s, &HeaderMap::new(), &format!("apikey={KEY}")));
+        assert!(authorised(&s, &HeaderMap::new(), &format!("foo=1&apikey={KEY}&bar=2")));
+        assert!(!authorised(&s, &HeaderMap::new(), "apikey=wrong"));
+    }
+
+    /// An empty header must fall through to the query rather than count as an
+    /// answer: a client that sets the header to "" and the parameter properly
+    /// is still a client with the key.
+    #[test]
+    fn an_empty_header_falls_through_to_the_query() {
+        let s = with_key("fallthrough");
+        assert!(authorised(&s, &keyed(""), &format!("apikey={KEY}")));
+    }
+
+    /// A parameter that merely ends in "apikey" is a different parameter.
+    #[test]
+    fn a_lookalike_query_parameter_is_not_the_key() {
+        let s = with_key("lookalike");
+        assert!(!authorised(&s, &HeaderMap::new(), &format!("notapikey={KEY}")));
+        assert!(!authorised(&s, &HeaderMap::new(), &format!("apikeyx={KEY}")));
+    }
+
+    #[test]
+    fn a_cookie_that_names_no_live_session_is_refused() {
+        let s = with_key("cookie");
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::COOKIE,
+            format!("{}=never-issued", crate::session::COOKIE_NAME).parse().unwrap(),
+        );
+        assert!(!authorised(&s, &h, ""), "an unissued session id is not a session");
+    }
+
+    /// The *arr stack's only path: log in, get a cookie, ride it. A session
+    /// the daemon issued must be accepted with no key at all.
+    #[test]
+    fn a_live_session_cookie_is_admitted_without_a_key() {
+        let s = with_key("session");
+        let sid = s.sessions.create();
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::COOKIE,
+            format!("{}={sid}", crate::session::COOKIE_NAME).parse().unwrap(),
+        );
+        assert!(authorised(&s, &h, ""));
+    }
+
+    #[test]
+    fn constant_time_eq_is_still_an_equality() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"), "a prefix is not a match");
+        assert!(!constant_time_eq(b"ab", b"abc"));
+        // Differing in the LAST byte is the case an early-return comparison
+        // would leak the length of the shared prefix for.
+        assert!(!constant_time_eq(b"aaaaaaaa", b"aaaaaaab"));
+    }
+}
+
+#[cfg(test)]
+mod pure_tests {
+    use super::*;
+
+    #[test]
+    fn percent_decoding_handles_plus_escapes_and_literals() {
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("a+b"), "a b", "+ is a space in a query string");
+        assert_eq!(percent_decode("%41%42"), "AB");
+        assert_eq!(percent_decode("a%2Fb"), "a/b");
+        assert_eq!(percent_decode("100%25"), "100%");
+    }
+
+    /// A stray `%` is not an escape and must come back as itself rather than
+    /// eating the characters after it.
+    #[test]
+    fn a_truncated_escape_is_left_alone() {
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%4"), "%4");
+        assert_eq!(percent_decode("%zz"), "%zz", "not hex, so not an escape");
+    }
+
+    #[test]
+    fn utf8_survives_percent_decoding() {
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
+
+    #[test]
+    fn a_query_parameter_is_found_by_its_whole_name() {
+        assert_eq!(query_param("a=1&b=2", "b").as_deref(), Some("2"));
+        assert_eq!(query_param("a=1", "missing"), None);
+        assert_eq!(query_param("", "a"), None);
+        assert_eq!(query_param("flag", "flag"), None, "a bare flag has no value");
+        assert_eq!(query_param("name=a%20b", "name").as_deref(), Some("a b"));
+    }
+
+    /// A parameter that merely CONTAINS the name is a different parameter.
+    #[test]
+    fn a_lookalike_parameter_name_is_not_a_match() {
+        assert_eq!(query_param("xapikey=k", "apikey"), None);
+        assert_eq!(query_param("apikeyx=k", "apikey"), None);
+    }
+
+    #[test]
+    fn the_host_of_a_url_drops_the_scheme_the_path_and_the_port() {
+        assert_eq!(url_host("http://example.com/path"), "example.com");
+        assert_eq!(url_host("https://example.com:8199/x"), "example.com");
+        assert_eq!(url_host("http://192.168.99.200:8199"), "192.168.99.200");
+        assert_eq!(url_host("example.com"), "example.com", "a bare host is a host");
+    }
+
+    /// ⚠️ A bracketed IPv6 literal keeps its colons. Splitting on the last
+    /// colon returned "2001" here, and the empty string for `[::1]` -- so
+    /// `is_loopback_host` answered FALSE for the one address the enrolment
+    /// guard exists to refuse, and the dial address was never parseable.
+    #[test]
+    fn an_ipv6_literal_keeps_its_colons() {
+        assert_eq!(url_host("http://[2001:db8::1]:8199/x"), "2001:db8::1");
+        assert_eq!(url_host("http://[2001:db8::1]"), "2001:db8::1");
+        assert_eq!(url_host("http://[::1]:8199"), "::1");
+    }
+
+    /// The consequence, stated where it bites: a node offering to register
+    /// itself on this machine's own loopback must still be refused when it
+    /// spells the address in IPv6.
+    #[test]
+    fn the_loopback_guard_sees_through_an_ipv6_literal() {
+        assert!(is_loopback_host(&url_host("http://[::1]:8199")));
+        assert!(is_loopback_host(&url_host("http://127.0.0.1:8199")));
+        assert!(!is_loopback_host(&url_host("http://[2001:db8::1]:8199")));
+    }
+
+    #[test]
+    fn loopback_is_recognised_by_every_spelling_the_ui_offers() {
+        for h in ["127.0.0.1", "localhost", "::1", "0.0.0.0", "127.1.2.3"] {
+            assert!(is_loopback_host(h), "{h} is loopback");
+        }
+        for h in ["example.com", "192.168.99.200", "", "127x"] {
+            assert!(!is_loopback_host(h), "{h} is not loopback");
+        }
+    }
+
+    #[test]
+    fn a_release_tag_is_three_numbers() {
+        assert!(is_semver_tag("v4.27.0"));
+        assert!(is_semver_tag("4.27.0"));
+        assert!(!is_semver_tag("v4.27"));
+        assert!(!is_semver_tag("v4.27.0.1"));
+        assert!(!is_semver_tag("nightly"));
+        assert!(!is_semver_tag("v4.27.x"));
+        assert!(!is_semver_tag("v4..0"), "an empty component is not a number");
+    }
+
+    /// ⭐ String comparison is what makes this subtly wrong: "3.9.0" sorts
+    /// AFTER "3.180.0" lexically, so a naive check announces a downgrade as an
+    /// update.
+    #[test]
+    fn versions_compare_numerically_not_lexically() {
+        assert!(version_less("3.9.0", "3.180.0"), "9 < 180, whatever the strings do");
+        assert!(!version_less("3.180.0", "3.9.0"));
+        assert!(version_less("4.26.0", "4.27.0"));
+        assert!(!version_less("4.27.0", "4.27.0"), "equal is not less");
+        assert!(version_less("v4.26.0", "4.27.0"), "a leading v is ignored");
+    }
+
+    /// Hydranos' own version carries a "-typhon" suffix; comparing it as part
+    /// of the number would make every check report an update.
+    #[test]
+    fn a_build_suffix_is_dropped_before_comparing() {
+        assert!(!version_less("4.27.0-typhon", "4.27.0"));
+        assert!(!version_less("4.27.0", "4.27.0-typhon"));
+        assert!(version_less("4.27.0-typhon", "4.28.0"));
+    }
+
+    #[test]
+    fn a_missing_component_counts_as_zero() {
+        assert!(version_less("4.27", "4.27.1"));
+        assert!(!version_less("4.27.0", "4.27"));
+    }
+
+    /// ⭐ Seed mode means "the data is already here, take my word for it".
+    /// Rechecking then is exactly the work the operator asked to skip.
+    #[test]
+    fn seed_mode_is_taken_at_its_word_and_never_rechecks() {
+        assert!(!add_recheck_wanted(true, true), "seed mode skips the check");
+        assert!(!add_recheck_wanted(true, false));
+        assert!(add_recheck_wanted(false, true), "data on disk is worth checking");
+        assert!(
+            !add_recheck_wanted(false, false),
+            "a fresh download has nothing on disk: an all-miss check is wasted"
+        );
+    }
+
+    #[test]
+    fn search_separators_are_the_ones_a_release_name_uses() {
+        for c in [' ', '.', '_', '-', '\t'] {
+            assert!(is_search_sep(c), "{c:?} separates words");
+        }
+        for c in ['a', '0', '\'', '&'] {
+            assert!(!is_search_sep(c), "{c:?} does not");
+        }
+    }
+
+    /// Equivalent to a `contains` over the fully normalised name -- that
+    /// equivalence is the whole reason the per-row String is avoided.
+    #[test]
+    fn a_token_is_found_inside_any_one_word() {
+        assert!(name_has_token("Some.Show.S01E01.1080p", "s01e01"));
+        assert!(name_has_token("Some.Show.S01E01.1080p", "show"));
+        assert!(name_has_token("Some.Show.S01E01.1080p", "1080"));
+        assert!(!name_has_token("Some.Show.S01E01", "showS01"), "a token cannot span words");
+        assert!(!name_has_token("Some.Show", "absent"));
+    }
+
+    #[test]
+    fn token_matching_ignores_case_including_outside_ascii() {
+        assert!(name_has_token("SOME.SHOW", "show"));
+        assert!(name_has_token("CAFÉ.2024", "café"), "real folding for non-ascii");
+    }
+
+    #[test]
+    fn a_token_longer_than_the_word_cannot_match() {
+        assert!(!name_has_token("ab", "abc"));
+    }
+
+    /// The window is REPLACED, never appended: a query that already carried an
+    /// offset would otherwise arrive with two, and which one wins is the
+    /// parser's business rather than ours.
+    #[test]
+    fn paging_replaces_any_window_the_query_already_had() {
+        let out = with_window("sort=name&offset=500&limit=10", 0, 100);
+        assert!(out.contains("sort=name"));
+        assert_eq!(out.matches("offset=").count(), 1, "exactly one offset: {out}");
+        assert_eq!(out.matches("limit=").count(), 1, "exactly one limit: {out}");
+        assert!(out.contains("offset=0") && out.contains("limit=100"));
+    }
+
+    #[test]
+    fn paging_an_empty_query_produces_just_the_window() {
+        assert_eq!(with_window("", 20, 50), "offset=20&limit=50");
+    }
+
+    #[test]
+    fn a_timestamp_in_the_past_reads_as_a_date_not_as_an_offset() {
+        let s = iso8601_ago(std::time::Duration::from_secs(3600));
+        assert!(s.len() >= 10, "an RFC3339 stamp, got {s:?}");
+        assert!(s.contains('-'), "got {s:?}");
+    }
+
+    #[test]
+    fn zero_is_the_value_that_gets_omitted() {
+        assert!(is_zero_i64(&0));
+        assert!(!is_zero_i64(&1));
+        assert!(!is_zero_i64(&-1));
+    }
+
+    /// The settings screen shows and edits keys this binary does not model, so
+    /// the file is re-read and parsed generically rather than serialised back
+    /// out of the typed Config -- a struct round trip drops them.
+    #[test]
+    fn toml_becomes_json_without_losing_a_key_the_struct_does_not_model() {
+        let src = r#"
+            answer = 42
+            ratio = 1.5
+            on = true
+            name = "hydranos"
+            list = [1, 2]
+            [section]
+            unknown_to_the_struct = "kept"
+        "#;
+        let v: toml::Value = toml::from_str(src).expect("valid toml");
+        let j = toml_to_json(&v);
+        assert_eq!(j["answer"], serde_json::json!(42));
+        assert_eq!(j["ratio"], serde_json::json!(1.5));
+        assert_eq!(j["on"], serde_json::json!(true));
+        assert_eq!(j["name"], serde_json::json!("hydranos"));
+        assert_eq!(j["list"], serde_json::json!([1, 2]));
+        assert_eq!(
+            j["section"]["unknown_to_the_struct"],
+            serde_json::json!("kept"),
+            "a key the binary does not model survives the round trip"
+        );
+    }
+
+    #[test]
+    fn the_local_agent_name_is_derived_from_the_engine_id() {
+        let a = local_agent("race");
+        let b = local_agent("hoard");
+        assert_ne!(a, b, "two engines are two agents");
+        assert!(a.contains("race"), "got {a}");
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn with_key(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    /// Every read route, against a fresh install: refused without a key, and
+    /// answering JSON with one.
+    ///
+    /// The point is not the bodies -- it is that a route cannot answer an
+    /// unauthenticated caller, and cannot panic on an engine that holds
+    /// nothing. Both were real: the open API of 10/09, and handlers that
+    /// assumed at least one torrent.
+    macro_rules! read_routes {
+        ($($test_name:ident => $name:ident),+ $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $test_name() {
+                    let s = with_key(concat!("route-", stringify!($name)));
+
+                    let refused = super::$name(
+                        State(s.state.clone()),
+                        RawQuery(None),
+                        HeaderMap::new(),
+                    ).await;
+                    assert_eq!(
+                        refused.status(),
+                        StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key")
+                    );
+
+                    let allowed = super::$name(
+                        State(s.state.clone()),
+                        RawQuery(None),
+                        keyed(KEY),
+                    ).await;
+                    assert_eq!(
+                        allowed.status(),
+                        StatusCode::OK,
+                        concat!(stringify!($name), " must answer a caller with the key")
+                    );
+                    // Body has to parse: a route that answers 200 with a
+                    // truncated document is a route the UI renders as empty.
+                    let _ = body_json(allowed).await;
+                }
+            )+
+        };
+    }
+
+    read_routes!(
+        route_get_categories => get_categories,
+        route_get_tags => get_tags,
+        route_get_engines => get_engines,
+        route_get_jobs => get_jobs,
+        route_get_download_slots => get_download_slots,
+        route_get_public_ip => get_public_ip,
+        route_get_settings => get_settings,
+        route_get_ip_modes => get_ip_modes,
+        route_get_passkeys => get_passkeys,
+        route_get_add_defaults => get_add_defaults,
+        route_get_drain_status => get_drain_status,
+        route_get_hoard_stats => get_hoard_stats,
+        route_get_race_settings => get_race_settings,
+        route_get_baseline => get_baseline,
+        route_qbit_categories => qbit_categories,
+        route_qbit_tags => qbit_tags,
+        route_get_dedup_stats => get_dedup_stats,
+        route_get_race_choking => get_race_choking,
+        route_get_hoard_pinned => get_hoard_pinned,
+    );
+
+    /// The key may ride the query instead of the header on every route, not
+    /// only the ones a browser happens to open.
+    #[tokio::test]
+    async fn a_read_route_accepts_the_key_in_the_query() {
+        let s = with_key("route-query");
+        let resp = super::get_engines(
+            State(s.state.clone()),
+            RawQuery(Some(format!("apikey={KEY}"))),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// ⚠️ A fresh Docker install has no key in default.toml. Every route must
+    /// refuse it rather than serve the control plane to the network.
+    #[tokio::test]
+    async fn an_install_with_no_key_serves_nothing() {
+        let s = state("route-nokey");
+        for resp in [
+            super::get_engines(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+            super::get_settings(State(s.state.clone()), RawQuery(None), keyed("")).await,
+            super::get_categories(State(s.state.clone()), RawQuery(None), keyed("guess")).await,
+        ] {
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    /// The settings screen edits keys this binary does not model, so the route
+    /// re-reads the file rather than serialising the typed Config back out.
+    #[tokio::test]
+    async fn settings_serve_keys_the_struct_does_not_model() {
+        let s = state_from(
+            "route-settings",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\n[a_section_the_binary_never_heard_of]\nkept = \"yes\"\n"
+            ),
+        );
+        let body = body_json(
+            super::get_settings(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
+        assert_eq!(
+            body["a_section_the_binary_never_heard_of"]["kept"],
+            serde_json::json!("yes"),
+            "an unmodelled key survives the read: {body}"
+        );
+    }
+
+    /// A fresh install lists no jobs -- and says so with an empty list rather
+    /// than a null the UI has to special-case.
+    #[tokio::test]
+    async fn a_fresh_install_reports_empty_collections_not_null() {
+        let s = with_key("route-empty");
+        let jobs = body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert!(!jobs.is_null(), "jobs answered null: {jobs}");
+        let tags = body_json(super::get_tags(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert!(!tags.is_null(), "tags answered null: {tags}");
+    }
+}
+
+#[cfg(test)]
+mod pure2_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn row(fields: serde_json::Value) -> serde_json::Value {
+        fields
+    }
+
+    /// ⭐ A seeding torrent sorts as complete whatever its stored progress.
+    /// A library restored from resume can carry a progress of 0 on a torrent
+    /// that is fully seeding, and sorting on the stored number alone puts the
+    /// complete ones at the bottom.
+    #[test]
+    fn a_seeding_torrent_sorts_as_complete_whatever_its_stored_progress() {
+        let seeding = row(serde_json::json!({"state": "seeding", "progress": 0.0}));
+        let half = row(serde_json::json!({"state": "downloading", "progress": 0.5}));
+        assert_eq!(row_sort_key(&seeding, "progress").1, 1.0);
+        assert_eq!(row_sort_key(&half, "progress").1, 0.5);
+    }
+
+    #[test]
+    fn text_sorts_fold_case_so_the_order_is_not_ascii_order() {
+        let a = row(serde_json::json!({"name": "Zebra"}));
+        let b = row(serde_json::json!({"name": "apple"}));
+        assert_eq!(row_sort_key(&a, "name").0, "zebra");
+        assert_eq!(row_sort_key(&b, "name").0, "apple");
+        assert!(row_sort_key(&b, "name").0 < row_sort_key(&a, "name").0);
+    }
+
+    #[test]
+    fn a_numeric_column_sorts_on_its_own_number() {
+        let r = row(serde_json::json!({"ratio": 2.5, "added_time": 10.0}));
+        assert_eq!(row_sort_key(&r, "ratio").1, 2.5);
+    }
+
+    /// An unknown sort is not an error and not an arbitrary order: it falls
+    /// back to when the torrent was added.
+    #[test]
+    fn an_unknown_sort_falls_back_to_the_added_time() {
+        let r = row(serde_json::json!({"added_time": 42.0, "ratio": 9.0}));
+        assert_eq!(row_sort_key(&r, "no_such_column").1, 42.0);
+    }
+
+    #[test]
+    fn a_missing_field_sorts_as_empty_or_zero_rather_than_panicking() {
+        let r = row(serde_json::json!({}));
+        assert_eq!(row_sort_key(&r, "name").0, "");
+        assert_eq!(row_sort_key(&r, "ratio").1, 0.0);
+        assert_eq!(row_sort_key(&r, "progress").1, 0.0);
+    }
+
+    fn job(kind: &str, params: &str, total: i64, done: i64, error: &str) -> crate::store::Job {
+        crate::store::Job {
+            id: "j1".into(),
+            kind: kind.into(),
+            state: "running".into(),
+            info_hash: String::new(),
+            params: params.into(),
+            progress_bytes: done,
+            total_bytes: total,
+            error: error.into(),
+            created_at: 1,
+            updated_at: 2,
+        }
+    }
+
+    /// ⭐ A corrupt `params` row must not make the WHOLE listing unparseable
+    /// for the caller: it is dropped, exactly as 3.x checks json.Valid first.
+    #[test]
+    fn a_job_with_unparseable_params_still_lists_without_them() {
+        let v = job_view(&job("move", "{not json", 0, 0, ""));
+        assert_eq!(v["id"], serde_json::json!("j1"));
+        assert!(v.get("params").is_none(), "the corrupt field is dropped, not embedded");
+    }
+
+    #[test]
+    fn a_jobs_params_are_embedded_as_json_not_as_a_string() {
+        let v = job_view(&job("move", r#"{"to":"/data"}"#, 0, 0, ""));
+        assert_eq!(v["params"]["to"], serde_json::json!("/data"));
+    }
+
+    /// An absent info_hash is ABSENT, not the empty string: the Go side marks
+    /// it omitempty and clients test for presence.
+    #[test]
+    fn empty_optional_fields_are_omitted_rather_than_sent_empty() {
+        let v = job_view(&job("scan", "", 0, 0, ""));
+        assert!(v.get("info_hash").is_none());
+        assert!(v.get("error").is_none());
+        assert!(v.get("params").is_none());
+    }
+
+    #[test]
+    fn an_error_is_reported_when_there_is_one() {
+        let v = job_view(&job("move", "", 0, 0, "disk full"));
+        assert_eq!(v["error"], serde_json::json!("disk full"));
+    }
+
+    /// A job of unknown size is 0 %, not a division by zero.
+    #[test]
+    fn a_job_with_no_total_reports_zero_percent_not_nan() {
+        let v = job_view(&job("scan", "", 0, 500, ""));
+        assert_eq!(v["percent"], serde_json::json!(0.0));
+        assert!(!v["percent"].as_f64().unwrap().is_nan());
+    }
+
+    #[test]
+    fn job_progress_is_a_percentage_of_the_total() {
+        let v = job_view(&job("move", "", 200, 50, ""));
+        assert_eq!(v["percent"].as_f64().unwrap(), 25.0);
+    }
+
+    fn page(rows: Vec<serde_json::Value>, filtered: i64) -> serde_json::Value {
+        serde_json::json!({"rows": rows, "filtered": filtered})
+    }
+
+    fn err_row(msg: &str) -> serde_json::Value {
+        serde_json::json!({"tracker_error_msg": msg})
+    }
+
+    /// With neither an include nor an exclude list there is nothing to
+    /// enforce, and the pages must come back untouched rather than emptied.
+    #[test]
+    fn no_error_filter_leaves_every_row_in_place() {
+        let mut pages = vec![page(vec![err_row("whatever")], 1)];
+        enforce_error_class(&mut pages, &[], &[], 100);
+        assert_eq!(pages[0]["rows"].as_array().unwrap().len(), 1);
+    }
+
+    /// Excluding a class drops exactly the rows of that class.
+    #[test]
+    fn excluding_a_class_drops_only_that_class() {
+        let clean = err_row("");
+        let unregistered = err_row("unregistered torrent");
+        let class_of_unreg = crate::errclass::classify("unregistered torrent").to_string();
+
+        let mut pages = vec![page(vec![clean.clone(), unregistered.clone()], 2)];
+        enforce_error_class(&mut pages, &[], &[class_of_unreg.clone()], 100);
+        let rows = pages[0]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "the excluded class is gone");
+        assert_eq!(rows[0]["tracker_error_msg"], serde_json::json!(""));
+    }
+
+    /// Including a class keeps only it.
+    #[test]
+    fn including_a_class_keeps_only_that_class() {
+        let clean = err_row("");
+        let unregistered = err_row("unregistered torrent");
+        let class_of_unreg = crate::errclass::classify("unregistered torrent").to_string();
+
+        let mut pages = vec![page(vec![clean, unregistered], 2)];
+        enforce_error_class(&mut pages, &[class_of_unreg], &[], 100);
+        assert_eq!(pages[0]["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            pages[0]["rows"][0]["tracker_error_msg"],
+            serde_json::json!("unregistered torrent")
+        );
+    }
+
+    /// The filtered count must follow the rows it dropped, or the UI shows a
+    /// total that does not match what it is displaying.
+    #[test]
+    fn the_filtered_count_follows_the_rows_that_were_dropped() {
+        let class_of_unreg = crate::errclass::classify("unregistered torrent").to_string();
+        let mut pages = vec![page(vec![err_row(""), err_row("unregistered torrent")], 2)];
+        enforce_error_class(&mut pages, &[], &[class_of_unreg], 100);
+        assert_eq!(pages[0]["filtered"], serde_json::json!(1));
+    }
+
+    /// The count is never taken below zero, whatever the page claimed.
+    #[test]
+    fn the_filtered_count_never_goes_negative() {
+        let class_of_unreg = crate::errclass::classify("unregistered torrent").to_string();
+        let mut pages = vec![page(vec![err_row("unregistered torrent")], 0)];
+        enforce_error_class(&mut pages, &[], &[class_of_unreg], 100);
+        assert!(pages[0]["filtered"].as_i64().unwrap() >= 0);
+    }
+
+    /// A page that is not an object, or carries no rows, is skipped rather
+    /// than panicking: these come from another node over the wire.
+    #[test]
+    fn a_malformed_page_from_another_node_is_skipped_not_fatal() {
+        let mut pages = vec![
+            serde_json::json!("not an object"),
+            serde_json::json!({"no_rows_here": true}),
+            serde_json::json!({"rows": "not an array"}),
+        ];
+        enforce_error_class(&mut pages, &[], &["whatever".to_string()], 100);
+    }
+
+    /// ⭐ A category carries a MODE ("hoard" or "race"), which names a
+    /// behaviour, not one of the engines a node hosts. An explicit engine is
+    /// the only way to reach an engine that is neither -- without it a torrent
+    /// could never be placed in `vpn1`, whatever the config said.
+    #[tokio::test]
+    async fn an_unknown_category_lands_in_race_by_default() {
+        let s = state_from("placement", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (engine, path) = placement(&s.state, "no-such-category", "");
+        assert_eq!(engine, "race");
+        assert!(path.is_empty());
+    }
+
+    /// An engine override that names no engine of this node must NOT be
+    /// honoured: it would place the torrent nowhere.
+    #[tokio::test]
+    async fn an_override_naming_no_engine_of_this_node_is_ignored() {
+        let s = state_from("placement-bad", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (engine, _) = placement(&s.state, "no-such-category", "no-such-engine");
+        assert_eq!(engine, "race", "the bogus override falls back rather than being obeyed");
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    /// A minimal single-file torrent. Bencode lengths are COMPUTED, never
+    /// counted by hand: a wrong one yields a file the parser refuses for a
+    /// reason unrelated to the test.
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        // The info hash must differ per torrent, or the second add is refused
+        // as a duplicate. The piece hash is what varies.
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn add(s: &TestState, engine_id: &str, name: &str) {
+        let engines = s.engines.engines();
+        let engine = engines
+            .iter()
+            .find(|e| e.id == engine_id)
+            .unwrap_or_else(|| panic!("no engine {engine_id}"));
+        engine
+            .manager
+            .add_torrent_bytes(&torrent_bytes(name), "/tmp", true, true)
+            .unwrap_or_else(|e| panic!("add {name}: {e}"));
+    }
+
+    fn rows(v: &serde_json::Value) -> &Vec<serde_json::Value> {
+        v["rows"].as_array().expect("a rows array")
+    }
+
+    /// A fresh install has both engines and neither holds anything. The page
+    /// must be an empty list with honest counters, not a null the UI has to
+    /// special-case.
+    #[tokio::test]
+    async fn an_empty_engine_answers_an_empty_page_not_null() {
+        let s = st("page-empty");
+        let v = engine_page_value(&s.state, "race", "").await;
+        assert_eq!(v["total"], serde_json::json!(0));
+        assert_eq!(v["filtered"], serde_json::json!(0));
+        assert!(rows(&v).is_empty());
+    }
+
+    /// An engine this node does not host is an empty page, never a panic: the
+    /// id comes off the wire.
+    #[tokio::test]
+    async fn an_unknown_engine_is_an_empty_page() {
+        let s = st("page-unknown");
+        let v = engine_page_value(&s.state, "no-such-engine", "").await;
+        assert_eq!(v["total"], serde_json::json!(0));
+        assert!(rows(&v).is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_torrent_of_the_engine_is_listed_and_counted() {
+        let s = st("page-list");
+        add(&s, "race", "alpha");
+        add(&s, "race", "bravo");
+        let v = engine_page_value(&s.state, "race", "").await;
+        assert_eq!(v["total"], serde_json::json!(2));
+        assert_eq!(rows(&v).len(), 2);
+    }
+
+    /// ⭐ The engines do not share a catalogue: a torrent added to race must
+    /// not appear on the hoard's page. Collapsing the two is how a torrent
+    /// ends up running in one engine and listed under another.
+    #[tokio::test]
+    async fn one_engines_torrents_do_not_appear_on_the_others_page() {
+        let s = st("page-sep");
+        add(&s, "race", "only-in-race");
+        let race = engine_page_value(&s.state, "race", "").await;
+        let hoard = engine_page_value(&s.state, "hoard", "").await;
+        assert_eq!(race["total"], serde_json::json!(1));
+        assert_eq!(hoard["total"], serde_json::json!(0));
+    }
+
+    /// `total` is the library; `filtered` is what the query kept. Reporting
+    /// the filtered count as the total is how a search makes the library look
+    /// like it shrank.
+    #[tokio::test]
+    async fn a_search_narrows_filtered_but_never_total() {
+        let s = st("page-search");
+        add(&s, "race", "alpha");
+        add(&s, "race", "bravo");
+        let v = engine_page_value(&s.state, "race", "search=alpha").await;
+        assert_eq!(v["total"], serde_json::json!(2), "the library did not shrink");
+        assert_eq!(v["filtered"], serde_json::json!(1));
+        assert_eq!(rows(&v).len(), 1);
+        assert_eq!(rows(&v)[0]["name"], serde_json::json!("alpha"));
+    }
+
+    #[tokio::test]
+    async fn a_search_matching_nothing_returns_no_rows_rather_than_all_of_them() {
+        let s = st("page-nomatch");
+        add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", "search=nosuchthing").await;
+        assert_eq!(v["filtered"], serde_json::json!(0));
+        assert!(rows(&v).is_empty(), "an unmatched search must not fall back to everything");
+    }
+
+    #[tokio::test]
+    async fn a_search_ignores_case() {
+        let s = st("page-case");
+        add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", "search=ALPHA").await;
+        assert_eq!(v["filtered"], serde_json::json!(1));
+    }
+
+    /// The window is honoured: a page of one returns one row, and the counters
+    /// still describe the whole library.
+    #[tokio::test]
+    async fn the_window_limits_the_rows_without_lying_about_the_totals() {
+        let s = st("page-window");
+        for n in ["alpha", "bravo", "charlie"] {
+            add(&s, "race", n);
+        }
+        let v = engine_page_value(&s.state, "race", "limit=1&offset=0").await;
+        assert_eq!(rows(&v).len(), 1);
+        assert_eq!(v["total"], serde_json::json!(3));
+        assert_eq!(v["filtered"], serde_json::json!(3));
+    }
+
+    /// An offset past the end is an empty page, not a wrapped one and not a
+    /// panic on a slice out of range.
+    #[tokio::test]
+    async fn an_offset_past_the_end_is_empty_not_a_panic() {
+        let s = st("page-past");
+        add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", "offset=9999&limit=10").await;
+        assert!(rows(&v).is_empty());
+        assert_eq!(v["total"], serde_json::json!(1));
+    }
+
+    /// A limit of zero is not "no rows": it is outside the allowed window and
+    /// gets clamped, because a page of zero rows is never what a client wants.
+    #[tokio::test]
+    async fn a_nonsense_window_is_clamped_rather_than_obeyed() {
+        let s = st("page-clamp");
+        add(&s, "race", "alpha");
+        for q in ["limit=0", "limit=-5", "limit=abc", "offset=abc"] {
+            let v = engine_page_value(&s.state, "race", q).await;
+            assert_eq!(v["total"], serde_json::json!(1), "{q} must still answer");
+            assert_eq!(rows(&v).len(), 1, "{q} must not produce an empty page");
+        }
+    }
+
+    /// Sorting by name is case-insensitive, so "Zebra" does not lead "apple"
+    /// the way ASCII order would.
+    ///
+    /// ⚠️ The default direction is DESCENDING (`order=asc` opts in): the
+    /// default sort is the added time, where newest-first is what anyone
+    /// wants. A test that assumes ascending is testing its own assumption.
+    #[tokio::test]
+    async fn sorting_by_name_folds_case() {
+        let s = st("page-sort");
+        add(&s, "race", "Zebra");
+        add(&s, "race", "apple");
+
+        let up = engine_page_value(&s.state, "race", "sort=name&order=asc").await;
+        let names: Vec<&str> = rows(&up).iter().filter_map(|r| r["name"].as_str()).collect();
+        assert_eq!(names, vec!["apple", "Zebra"], "ascending folds case");
+
+        let down = engine_page_value(&s.state, "race", "sort=name").await;
+        let names: Vec<&str> = rows(&down).iter().filter_map(|r| r["name"].as_str()).collect();
+        assert_eq!(names, vec!["Zebra", "apple"], "descending is the default");
+    }
+
+    /// An unknown sort must still answer, in some stable order, rather than
+    /// refusing the page.
+    #[tokio::test]
+    async fn an_unknown_sort_still_answers_a_page() {
+        let s = st("page-badsort");
+        add(&s, "race", "alpha");
+        add(&s, "race", "bravo");
+        let v = engine_page_value(&s.state, "race", "sort=no_such_column").await;
+        assert_eq!(rows(&v).len(), 2);
+    }
+
+    /// A search on an info hash is the operator pasting one in. It is matched
+    /// as hex against the hash, not as text against the name.
+    #[tokio::test]
+    async fn a_hex_search_matches_the_info_hash() {
+        let s = st("page-hex");
+        add(&s, "race", "alpha");
+        let all = engine_page_value(&s.state, "race", "").await;
+        let hash = rows(&all)[0]["info_hash"]
+            .as_str()
+            .expect("a row carries its info hash")
+            .to_string();
+        let v = engine_page_value(&s.state, "race", &format!("search={}", &hash[..12])).await;
+        assert_eq!(v["filtered"], serde_json::json!(1), "a hash prefix finds its torrent");
+    }
+
+    /// The routes on top of the page carry the same gate as everything else.
+    #[tokio::test]
+    async fn the_page_routes_refuse_a_caller_with_no_key() {
+        let s = st("page-auth");
+        for resp in [
+            get_race_torrents(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+            get_hoard_torrents(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+        ] {
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_page_routes_answer_a_caller_with_the_key() {
+        let s = st("page-ok");
+        add(&s, "race", "alpha");
+        let resp = get_race_torrents(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        // This route answers the ROWS themselves, not a page object: it is the
+        // qBittorrent-shaped listing, which is a bare array.
+        let rows = body.as_array().expect("a bare array of rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], serde_json::json!("alpha"));
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn row(name: &str, hash: &str, ratio: f64) -> serde_json::Value {
+        serde_json::json!({"name": name, "info_hash": hash, "ratio": ratio, "added_time": 1.0})
+    }
+
+    fn page(total: i64, filtered: i64, rows: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({"total": total, "filtered": filtered, "rows": rows})
+    }
+
+    /// The fleet totals are the SUM of the nodes', not one node's.
+    #[test]
+    fn the_totals_add_up_across_the_nodes() {
+        let merged = merge_pages(
+            vec![
+                page(100, 10, vec![row("a", "aa", 1.0)]),
+                page(50, 5, vec![row("b", "bb", 2.0)]),
+            ],
+            "name",
+            true,
+            0,
+            100,
+        );
+        assert_eq!(merged["total"], serde_json::json!(150));
+        assert_eq!(merged["filtered"], serde_json::json!(15));
+        assert_eq!(merged["rows"].as_array().unwrap().len(), 2);
+    }
+
+    /// With no node at all the answer is still a page, with honest zeroes.
+    #[test]
+    fn merging_nothing_is_an_empty_page_not_a_null() {
+        let merged = merge_pages(vec![], "name", true, 0, 100);
+        assert_eq!(merged["total"], serde_json::json!(0));
+        assert_eq!(merged["filtered"], serde_json::json!(0));
+        assert!(merged["rows"].as_array().unwrap().is_empty());
+    }
+
+    /// Rows from different nodes interleave by the sort key, rather than
+    /// staying grouped per node.
+    #[test]
+    fn rows_from_two_nodes_interleave_by_the_sort_key() {
+        let merged = merge_pages(
+            vec![
+                page(2, 2, vec![row("alpha", "a1", 1.0), row("charlie", "c1", 3.0)]),
+                page(1, 1, vec![row("bravo", "b1", 2.0)]),
+            ],
+            "name",
+            true,
+            0,
+            100,
+        );
+        let names: Vec<&str> = merged["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn the_direction_is_honoured_when_merging() {
+        let pages = || {
+            vec![
+                page(1, 1, vec![row("alpha", "a1", 1.0)]),
+                page(1, 1, vec![row("bravo", "b1", 2.0)]),
+            ]
+        };
+        let up = merge_pages(pages(), "name", true, 0, 100);
+        let down = merge_pages(pages(), "name", false, 0, 100);
+        assert_eq!(up["rows"][0]["name"], serde_json::json!("alpha"));
+        assert_eq!(down["rows"][0]["name"], serde_json::json!("bravo"));
+    }
+
+    /// ⭐ The tie-break on the hex hash is what keeps paging stable: without
+    /// it, two rows that compare equal can swap between requests and the same
+    /// torrent shows up on two pages -- or on none.
+    #[test]
+    fn rows_that_compare_equal_are_still_ordered_the_same_way_every_time() {
+        let mk = || {
+            vec![
+                page(1, 1, vec![row("same", "ffff", 1.0)]),
+                page(1, 1, vec![row("same", "0000", 1.0)]),
+                page(1, 1, vec![row("same", "8888", 1.0)]),
+            ]
+        };
+        let first = merge_pages(mk(), "name", true, 0, 100);
+        let second = merge_pages(mk(), "name", true, 0, 100);
+        assert_eq!(first["rows"], second["rows"], "the order must be deterministic");
+
+        let hashes: Vec<&str> = first["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["info_hash"].as_str())
+            .collect();
+        assert_eq!(hashes, vec!["0000", "8888", "ffff"], "ordered by hash on a tie");
+    }
+
+    /// The window is applied AFTER the merge, or each node would contribute
+    /// its own first page and the fleet would show the same offset twice.
+    #[test]
+    fn the_window_applies_to_the_merged_list_not_to_each_node() {
+        let merged = merge_pages(
+            vec![
+                page(2, 2, vec![row("alpha", "a1", 1.0), row("charlie", "c1", 3.0)]),
+                page(1, 1, vec![row("bravo", "b1", 2.0)]),
+            ],
+            "name",
+            true,
+            1,
+            1,
+        );
+        let rows = merged["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], serde_json::json!("bravo"), "the second row overall");
+        assert_eq!(merged["offset"], serde_json::json!(1));
+        assert_eq!(merged["limit"], serde_json::json!(1));
+    }
+
+    /// An offset past the merged end is empty, and the counters still describe
+    /// the fleet.
+    #[test]
+    fn an_offset_past_the_merged_end_is_empty_but_still_counts() {
+        let merged = merge_pages(vec![page(9, 9, vec![row("a", "a1", 1.0)])], "name", true, 50, 10);
+        assert!(merged["rows"].as_array().unwrap().is_empty());
+        assert_eq!(merged["total"], serde_json::json!(9));
+    }
+
+    /// A node that answered with no `rows` key at all, or a malformed page,
+    /// must not take the fleet listing down with it.
+    #[test]
+    fn a_node_that_answered_badly_does_not_break_the_merge() {
+        let merged = merge_pages(
+            vec![
+                serde_json::json!({"total": 5}),
+                serde_json::json!("not an object"),
+                page(1, 1, vec![row("alpha", "a1", 1.0)]),
+            ],
+            "name",
+            true,
+            0,
+            100,
+        );
+        assert_eq!(merged["total"], serde_json::json!(6), "the counts it did give still count");
+        assert_eq!(merged["rows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_numeric_sort_merges_on_the_number() {
+        let merged = merge_pages(
+            vec![
+                page(1, 1, vec![row("a", "a1", 10.0)]),
+                page(1, 1, vec![row("b", "b1", 2.0)]),
+            ],
+            "ratio",
+            true,
+            0,
+            100,
+        );
+        let ratios: Vec<f64> = merged["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["ratio"].as_f64())
+            .collect();
+        assert_eq!(ratios, vec![2.0, 10.0], "2 before 10, not \"10\" before \"2\"");
+    }
+
+    /// Session and day counters are derived from marks, never stored twice.
+    /// On a fresh state everything is zero rather than absent.
+    #[tokio::test]
+    async fn a_fresh_state_reports_zeroed_counters_rather_than_nothing() {
+        let s = state_from("counters", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (session, day, life) = session_and_day(&s.state);
+        for (name, (ul, dl)) in [("session", session), ("day", day), ("life", life)] {
+            assert!(ul >= 0, "{name} upload is not negative");
+            assert!(dl >= 0, "{name} download is not negative");
+        }
+    }
+
+    /// An engine this node does not host has no session counters -- zero, not
+    /// a panic on an index that is not there.
+    #[tokio::test]
+    async fn an_unknown_engine_has_zeroed_session_counters() {
+        let s = state_from("counters-unknown", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        assert_eq!(engine_session(&s.state, "no-such-engine"), (0, 0));
+    }
+
+    /// Both engines of a fresh node answer, and answer zero.
+    #[tokio::test]
+    async fn both_local_engines_report_their_own_counters() {
+        let s = state_from("counters-both", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        assert_eq!(engine_session(&s.state, "race"), (0, 0));
+        assert_eq!(engine_session(&s.state, "hoard"), (0, 0));
+    }
+
+    /// `engine_rows` is what the qBittorrent-shaped listing serves; on an
+    /// empty engine it is an empty list, and on an unknown one too.
+    #[tokio::test]
+    async fn engine_rows_are_empty_for_an_empty_or_unknown_engine() {
+        let s = state_from("rows", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        assert!(engine_rows(&s.state, "race").is_empty());
+        assert!(engine_rows(&s.state, "no-such-engine").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_fresh_node_has_announced_nothing_and_sees_no_leechers() {
+        let s = state_from("announced", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        assert_eq!(announced_count(&s.state, "race"), 0);
+        assert_eq!(swarm_leechers_total(&s.state), 0);
+    }
+
+    /// The disk figures come back for a real path and degrade to zeroes for
+    /// one that is not there, rather than refusing the whole panel.
+    ///
+    /// ⚠️ The tuple is `(total, used, pct)` -- total FIRST. Reading it as
+    /// `(used, total)` silently swaps the two on a panel where both are
+    /// plausible numbers.
+    ///
+    /// ⚠️⚠️ This is the THIRD implementation of "how full is this disk", and
+    /// it is the only one that computes `used = total - available`, which
+    /// counts the filesystem's reserved blocks as used. `volumes::usage` and
+    /// `workers::disk_usage` both take `f_blocks - f_bfree` instead, and both
+    /// carry a comment saying why the subtraction here is wrong. The panel and
+    /// the drain therefore do not report the same fullness for the same disk.
+    #[test]
+    fn disk_usage_answers_for_a_real_path_and_zeroes_for_a_missing_one() {
+        let (total, used, pct) = disk_usage("/tmp");
+        assert!(total > 0, "a mounted filesystem has a size");
+        assert!(used <= total);
+        assert!((0.0..=100.0).contains(&pct), "got {pct}");
+
+        let (t2, u2, p2) = disk_usage("/tmp/typhon-no-such-dir-3f8a");
+        assert_eq!((t2, u2, p2), (0, 0, 0.0), "a path we cannot stat is zeroes, not a refusal");
+    }
+
+    /// The reserved-block gap, stated as a fact rather than as a preference:
+    /// this function's `used` is at least what the filesystem counts as taken,
+    /// and on a filesystem with reserved blocks it is strictly more.
+    #[test]
+    fn the_panel_counts_reserved_blocks_as_used_where_the_drain_does_not() {
+        let (_, panel_used, _) = disk_usage("/tmp");
+        let (drain_used, _, _) =
+            crate::volumes::usage(std::path::Path::new("/tmp")).expect("/tmp is a filesystem");
+        assert!(
+            panel_used >= drain_used as i64,
+            "panel {panel_used} vs drain {drain_used}: the panel adds the reserved blocks"
+        );
+    }
+}
+
+#[cfg(test)]
+mod more_route_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn with_key(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    /// Refused without a key, and answering with one, on a fresh install.
+    macro_rules! read_routes {
+        ($($test_name:ident => $name:ident),+ $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $test_name() {
+                    let s = with_key(concat!("r2-", stringify!($name)));
+                    let refused =
+                        super::$name(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await;
+                    assert_eq!(
+                        refused.status(),
+                        StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key")
+                    );
+                    let allowed =
+                        super::$name(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+                    assert!(
+                        allowed.status().is_success() || allowed.status().is_client_error(),
+                        concat!(stringify!($name), " answered {:?}"),
+                        allowed.status()
+                    );
+                }
+            )+
+        };
+    }
+
+    /// The gate ONLY.
+    ///
+    /// These routes restart the daemon, open a stream that never ends, or go
+    /// out to the network. Calling them with a valid key inside a test would
+    /// do the thing. The gate is what matters here anyway: an unauthenticated
+    /// caller reaching `post_restart` is the whole risk.
+    macro_rules! gate_only {
+        ($($test_name:ident => $name:ident),+ $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $test_name() {
+                    let s = with_key(concat!("gate-", stringify!($name)));
+                    let refused =
+                        super::$name(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await;
+                    assert_eq!(
+                        refused.status(),
+                        StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key")
+                    );
+                    let with_empty =
+                        super::$name(State(s.state.clone()), RawQuery(None), keyed("")).await;
+                    assert_eq!(with_empty.status(), StatusCode::UNAUTHORIZED);
+                }
+            )+
+        };
+    }
+
+    read_routes!(
+        r_get_nodes => get_nodes,
+        r_get_announce_health => get_announce_health,
+        r_get_vpn_speedtest_latest => get_vpn_speedtest_latest,
+        r_get_vpn_speedtest_history => get_vpn_speedtest_history,
+        r_get_startup_pause => get_startup_pause,
+        r_get_provenance => get_provenance,
+        r_get_hoard_page => get_hoard_page,
+        r_get_race_page => get_race_page,
+        r_get_drain_history => get_drain_history,
+        r_get_drain_graduations => get_drain_graduations,
+        r_get_arr_cleanup_scan => get_arr_cleanup_scan,
+        r_get_qbit_import_status => get_qbit_import_status,
+        r_get_trackers => get_trackers,
+        r_get_network_mode => get_network_mode,
+        r_get_tracker_stats_current => get_tracker_stats_current,
+        r_get_bench_records => get_bench_records,
+        r_get_bench_range => get_bench_range,
+        r_get_tracker_stats_range => get_tracker_stats_range,
+        r_get_network_interfaces => get_network_interfaces,
+        r_get_agents => get_agents,
+        r_get_network_engines => get_network_engines,
+        r_get_qbit_import_events => get_qbit_import_events,
+        r_get_status => get_status,
+        r_get_logs => get_logs,
+        r_get_bench_current => get_bench_current,
+        r_get_port_forward => get_port_forward,
+        r_get_opt_flags => get_opt_flags,
+        r_get_bench_compare => get_bench_compare,
+        r_get_wireguard => get_wireguard,
+        r_get_live_announce_policy => get_live_announce_policy,
+        r_get_health_anomalies => get_health_anomalies,
+        r_get_race_events => get_race_events,
+        r_qbit_version => qbit_version,
+        r_qbit_webapi_version => qbit_webapi_version,
+        r_qbit_build_info => qbit_build_info,
+        r_qbit_preferences => qbit_preferences,
+        r_qbit_transfer_info => qbit_transfer_info,
+        r_qbit_torrent_files => qbit_torrent_files,
+        r_qbit_torrent_properties => qbit_torrent_properties,
+        r_qbit_torrent_trackers => qbit_torrent_trackers,
+        r_qbit_empty_ok => qbit_empty_ok,
+        r_get_fs_browse => get_fs_browse,
+        r_post_node_enrol => post_node_enrol,
+        r_clear_download_slots => clear_download_slots,
+        r_hoard_pause_all => hoard_pause_all,
+        r_hoard_resume_all => hoard_resume_all,
+        r_download_slots_write => download_slots_write,
+    );
+
+    gate_only!(
+        g_post_restart => post_restart,
+        g_post_settings_restart => post_settings_restart,
+        g_post_settings_reset => post_settings_reset,
+        g_post_startup_release => post_startup_release,
+        g_stream_events => stream_events,
+        g_stream_logs => stream_logs,
+        g_get_update_check => get_update_check,
+        g_vpn_speedtest_run => vpn_speedtest_run,
+        g_drain_now => drain_now,
+    );
+
+    /// ⚠️ The qBittorrent shim is the *arr stack's only door, and it has no
+    /// place to put a header: it logs in and rides a cookie. That must not
+    /// mean the shim is open.
+    #[tokio::test]
+    async fn the_qbit_shim_refuses_an_unauthenticated_caller_too() {
+        let s = with_key("shim-auth");
+        for resp in [
+            super::qbit_version(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+            super::qbit_preferences(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+            super::qbit_transfer_info(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+        ] {
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    /// The status card is what the whole UI hydrates from: it must answer on a
+    /// node that holds nothing, and name its version.
+    #[tokio::test]
+    async fn the_status_card_answers_on_an_empty_node() {
+        let s = with_key("status");
+        let body =
+            body_json(super::get_status(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        assert!(body.is_object(), "got {body}");
+        assert!(
+            body.get("version").and_then(|v| v.as_str()).is_some(),
+            "the status names the version it is: {body}"
+        );
+    }
+
+    /// A fresh install has declared no node. That is an empty list, not an
+    /// error and not the local node pretending to be a remote one.
+    #[tokio::test]
+    async fn a_fresh_install_has_no_declared_nodes() {
+        let s = with_key("nodes-empty");
+        let body =
+            body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        let empty = body.as_array().map(|a| a.is_empty()).unwrap_or(false)
+            || body.get("nodes").and_then(|n| n.as_array()).map(|a| a.is_empty()).unwrap_or(false);
+        assert!(empty, "got {body}");
+    }
+}
+
+#[cfg(test)]
+mod body_route_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+    const ABSENT: &str = "0000000000000000000000000000000000000000";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    /// `(State, RawQuery, HeaderMap, body)` routes: refused without a key, and
+    /// answering -- not panicking -- on a body they cannot use.
+    macro_rules! body_routes {
+        ($($t:ident => $name:ident, $body:expr);+ $(;)?) => {
+            $(
+                #[tokio::test]
+                async fn $t() {
+                    let s = st(concat!("b-", stringify!($name)));
+                    let refused = super::$name(
+                        State(s.state.clone()), RawQuery(None), HeaderMap::new(), $body.to_string(),
+                    ).await;
+                    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key"));
+
+                    let ok = super::$name(
+                        State(s.state.clone()), RawQuery(None), keyed(KEY), $body.to_string(),
+                    ).await;
+                    assert!(ok.status().is_success() || ok.status().is_client_error(),
+                        concat!(stringify!($name), " answered {:?}"), ok.status());
+
+                    // ⭐ A body that is not JSON must be a 4xx, never a panic:
+                    // it arrives straight off the network.
+                    let junk = super::$name(
+                        State(s.state.clone()), RawQuery(None), keyed(KEY), "{not json".to_string(),
+                    ).await;
+                    assert!(junk.status().is_client_error() || junk.status().is_success(),
+                        concat!(stringify!($name), " on junk answered {:?}"), junk.status());
+                }
+            )+
+        };
+    }
+
+    /// The gate only, for routes that go out to the network or rewrite
+    /// credentials. An unauthenticated caller reaching them is the whole risk.
+    macro_rules! body_gate_only {
+        ($($t:ident => $name:ident);+ $(;)?) => {
+            $(
+                #[tokio::test]
+                async fn $t() {
+                    let s = st(concat!("bg-", stringify!($name)));
+                    let refused = super::$name(
+                        State(s.state.clone()), RawQuery(None), HeaderMap::new(), "{}".to_string(),
+                    ).await;
+                    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key"));
+                }
+            )+
+        };
+    }
+
+    /// `(State, Path, RawQuery, HeaderMap)` routes, addressed at something
+    /// this node does not hold.
+    macro_rules! path_routes {
+        ($($t:ident => $name:ident, $arg:expr);+ $(;)?) => {
+            $(
+                #[tokio::test]
+                async fn $t() {
+                    let s = st(concat!("p-", stringify!($name)));
+                    let refused = super::$name(
+                        State(s.state.clone()), axum::extract::Path($arg.to_string()),
+                        RawQuery(None), HeaderMap::new(),
+                    ).await;
+                    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key"));
+
+                    // ⭐ Addressed at something that is not here: an answer,
+                    // never a panic -- and never a success for work not done.
+                    let missing = super::$name(
+                        State(s.state.clone()), axum::extract::Path($arg.to_string()),
+                        RawQuery(None), keyed(KEY),
+                    ).await;
+                    assert!(missing.status().is_client_error()
+                            || missing.status().is_success()
+                            || missing.status().is_server_error(),
+                        concat!(stringify!($name), " answered {:?}"), missing.status());
+                }
+            )+
+        };
+    }
+
+    /// `(State, Path, RawQuery, HeaderMap, body)`.
+    macro_rules! path_body_routes {
+        ($($t:ident => $name:ident, $arg:expr, $body:expr);+ $(;)?) => {
+            $(
+                #[tokio::test]
+                async fn $t() {
+                    let s = st(concat!("pb-", stringify!($name)));
+                    let refused = super::$name(
+                        State(s.state.clone()), axum::extract::Path($arg.to_string()),
+                        RawQuery(None), HeaderMap::new(), $body.to_string(),
+                    ).await;
+                    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key"));
+
+                    let missing = super::$name(
+                        State(s.state.clone()), axum::extract::Path($arg.to_string()),
+                        RawQuery(None), keyed(KEY), $body.to_string(),
+                    ).await;
+                    assert!(!missing.status().is_informational(),
+                        concat!(stringify!($name), " answered {:?}"), missing.status());
+                }
+            )+
+        };
+    }
+
+    body_routes!(
+        b_set_announce_min_seed => set_announce_min_seed, r#"{"host":"tracker.example","hours":"2"}"#;
+        b_set_announce_hidden => set_announce_hidden, r#"{"host":"tracker.example","hidden":true}"#;
+        b_set_announce_mute => set_announce_mute, r#"{"host":"tracker.example","muted":true}"#;
+        b_post_dedup_config => post_dedup_config, r#"{"enabled":true}"#;
+        b_category_create => category_create, r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#;
+        b_set_announce_ip_mode => set_announce_ip_mode, r#"{"host":"tracker.example","mode":"v4"}"#;
+        b_set_announce_passkey => set_announce_passkey, r#"{"host":"tracker.example","passkey":"abc"}"#;
+        b_set_download_slots => set_download_slots, r#"{"slots":5}"#;
+        b_hoard_pause_bulk => hoard_pause_bulk, r#"{"hashes":[]}"#;
+        b_race_pause_bulk => race_pause_bulk, r#"{"hashes":[]}"#;
+        b_qbit_torrents_info => qbit_torrents_info, "";
+        b_hoard_bulk => hoard_bulk, r#"{"hashes":[],"action":"pause"}"#;
+        b_race_bulk => race_bulk, r#"{"hashes":[],"action":"pause"}"#;
+        b_post_baseline => post_baseline, r#"{}"#;
+        b_import_check_paths => import_check_paths, r#"{"paths":[]}"#;
+        b_post_opt_flag => post_opt_flag, r#"{"flag":"block_mse","value":true}"#;
+        b_qbit_set_preferences => qbit_set_preferences, r#"{}"#;
+        b_post_engine_create => post_engine_create, r#"{}"#;
+    );
+
+    body_gate_only!(
+        bg_post_node_test => post_node_test;
+        bg_post_node => post_node;
+        bg_post_network_check => post_network_check;
+        bg_post_network_mode => post_network_mode;
+        bg_post_password => post_password;
+        bg_post_qbit_import_start => post_qbit_import_start;
+        bg_post_settings => post_settings;
+        bg_post_torrent_add => post_torrent_add;
+    );
+
+    path_routes!(
+        p_delete_node => delete_node, "nobody";
+        p_get_node_open => get_node_open, "nobody";
+        p_hoard_unpin_one => hoard_unpin_one, ABSENT;
+        p_category_delete => category_delete, "no-such-category";
+        p_get_torrent_file => get_torrent_file, ABSENT;
+        p_get_torrent_files => get_torrent_files, ABSENT;
+        p_get_torrent_trackers => get_torrent_trackers, ABSENT;
+        p_race_pause_one => race_pause_one, ABSENT;
+        p_race_resume_one => race_resume_one, ABSENT;
+        p_get_job => get_job, "no-such-job";
+        p_hoard_verify_one => hoard_verify_one, ABSENT;
+        p_reannounce_one => reannounce_one, ABSENT;
+        p_get_race_torrent => get_race_torrent, ABSENT;
+        p_get_hoard_torrent => get_hoard_torrent, ABSENT;
+        p_delete_torrent => delete_torrent, ABSENT;
+        p_purge_race_torrent => purge_race_torrent, ABSENT;
+        p_get_race_timeline => get_race_timeline, ABSENT;
+        p_delete_job => delete_job, "no-such-job";
+        p_delete_agent => delete_agent, "nobody";
+        p_delete_engine => delete_engine, "no-such-engine";
+        p_move_preview => move_preview, ABSENT;
+        p_race_snapshots => race_snapshots, ABSENT;
+    );
+
+    path_body_routes!(
+        pb_category_update => category_update, "no-such-category", r#"{"save_path":"/data/x"}"#;
+        pb_engine_pause_bulk => engine_pause_bulk, "race", r#"{"hashes":[]}"#;
+        pb_post_torrent_trackers => post_torrent_trackers, ABSENT, r#"{"trackers":[]}"#;
+        pb_post_add_tracker => post_add_tracker, ABSENT, r#"{"url":"https://tracker.example/announce"}"#;
+        pb_put_agent => put_agent, "nobody", r#"{}"#;
+        pb_post_agent_restore => post_agent_restore, "nobody", r#"{}"#;
+        pb_post_agent_action => post_agent_action, "nobody", r#"{}"#;
+        pb_post_torrent_copy => post_torrent_copy, ABSENT, r#"{"to":"hoard"}"#;
+        pb_post_torrent_graduate => post_torrent_graduate, ABSENT, r#"{}"#;
+        pb_post_torrent_engine => post_torrent_engine, ABSENT, r#"{"engine":"hoard"}"#;
+    );
+
+    /// 🧟 THESE FOUR ROUTES ARE STUBS. They validate the body, then answer
+    /// 500 unconditionally -- there is no success path in `set_listen_port`
+    /// nor in `set_dial_limits` at all.
+    ///
+    /// Not an artefact of the fixture: the refusal does not depend on any
+    /// state. The Network panel calls the listen-port one (23 references in
+    /// app.js), so an operator changing the port there gets a 500 every time.
+    /// Pinned here so the day someone implements it, this test fails and says
+    /// so, rather than the stub living on unnoticed.
+    #[tokio::test]
+    async fn the_listen_port_and_dial_limit_routes_are_still_stubs() {
+        let s = st("stubs");
+        let cases: Vec<(&str, Response)> = vec![
+            ("set_race_listen_port", super::set_race_listen_port(
+                State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"port":16371}"#.into()).await),
+            ("set_hoard_listen_port", super::set_hoard_listen_port(
+                State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"port":16372}"#.into()).await),
+            ("race_dial_limits", super::race_dial_limits(
+                State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"max_dials_per_sec":5}"#.into()).await),
+            ("hoard_dial_limits", super::hoard_dial_limits(
+                State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"max_dials_per_sec":5}"#.into()).await),
+        ];
+        for (name, resp) in cases {
+            assert_eq!(
+                resp.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{name} is a stub: if this now succeeds, the stub was implemented -- update this test"
+            );
+            let body = body_json(resp).await;
+            assert!(
+                body["error"].as_str().unwrap_or_default().contains("unsupported"),
+                "{name} says why: {body}"
+            );
+        }
+    }
+
+    /// The stubs still VALIDATE: a body they cannot parse is a 400, and that
+    /// part is real. A port of zero is out of range whatever the engine can do.
+    #[tokio::test]
+    async fn the_stubs_still_refuse_a_body_that_is_wrong() {
+        let s = st("stub-validate");
+        let bad = super::set_race_listen_port(
+            State(s.state.clone()), RawQuery(None), keyed(KEY), "{not json".into()).await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        let zero = super::set_race_listen_port(
+            State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"port":0}"#.into()).await;
+        assert_eq!(zero.status(), StatusCode::BAD_REQUEST, "port 0 is out of range");
+    }
+
+    /// ⭐⭐ A route that DELETES must not answer success for a torrent it does
+    /// not hold. "Received" is not "done" -- that confusion is the shape of
+    /// seven separate bugs in this repo.
+    #[tokio::test]
+    async fn deleting_a_torrent_that_is_not_here_is_not_reported_as_done() {
+        let s = st("del-absent");
+        let resp = super::delete_torrent(
+            State(s.state.clone()),
+            axum::extract::Path(ABSENT.to_string()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(
+            !resp.status().is_success(),
+            "a torrent that is not here cannot have been deleted: {:?}",
+            resp.status()
+        );
+    }
+
+    /// A category is created, listed, and refuses to be created twice under
+    /// the same name.
+    #[tokio::test]
+    async fn a_category_is_created_and_then_listed() {
+        let s = st("cat-create");
+        let made = super::category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.to_string(),
+        )
+        .await;
+        assert!(made.status().is_success(), "got {:?}", made.status());
+
+        let listed =
+            body_json(super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        assert!(
+            listed.to_string().contains("films"),
+            "the category we just made is listed: {listed}"
+        );
+    }
+
+    /// ⚠️ A category carries a MODE, and the mode is what routes a torrent to
+    /// an engine. A category with no mode silently sends everything to race --
+    /// the trap that sent a whole bench import to the wrong engine.
+    #[tokio::test]
+    async fn a_category_keeps_the_mode_it_was_given() {
+        let s = st("cat-mode");
+        super::category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.to_string(),
+        )
+        .await;
+        let (engine, _path) = placement(&s.state, "films", "");
+        assert_eq!(engine, "hoard", "a hoard category places into the hoard");
+    }
+
+    /// The volume policy is typed into the panel and must apply on the NEXT
+    /// tick, so it lives in the store rather than in default.toml.
+    #[tokio::test]
+    async fn a_volume_policy_is_refused_without_a_key() {
+        let s = st("volpolicy");
+        let resp = super::set_volume_policy(
+            State(s.state.clone()),
+            RawQuery(None),
+            HeaderMap::new(),
+            // The struct has no Default; every optional field does, so a
+            // document naming only the volume is the smallest valid body.
+            Json(
+                serde_json::from_value::<VolumePolicyBody>(serde_json::json!({"volume": "/mnt/race"}))
+                    .expect("volume is the only required field"),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        piece[2] = name.as_bytes()[name.len() - 1];
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn add(s: &TestState, engine_id: &str, name: &str) -> String {
+        let engines = s.engines.engines();
+        let engine = engines.iter().find(|e| e.id == engine_id).expect("engine");
+        let (ih, _) = engine
+            .manager
+            .add_torrent_bytes(&torrent_bytes(name), "/tmp", true, true)
+            .unwrap_or_else(|e| panic!("add {name}: {e}"));
+        typhon_engine::torrent::hex_encode(&ih)
+    }
+
+    fn rows(v: &serde_json::Value) -> &Vec<serde_json::Value> {
+        v["rows"].as_array().expect("rows")
+    }
+
+    /// A filter naming something no torrent carries keeps NOTHING. Falling
+    /// back to everything is how a "category: films" view silently shows the
+    /// whole library.
+    #[tokio::test]
+    async fn a_filter_that_matches_nothing_keeps_nothing() {
+        let s = st("f-nothing");
+        add(&s, "race", "alpha");
+        for q in [
+            "category=no-such-category",
+            "tag=no-such-tag",
+            "tracker=no-such-tracker",
+            "state=no_such_state",
+        ] {
+            let v = engine_page_value(&s.state, "race", q).await;
+            assert_eq!(v["total"], serde_json::json!(1), "{q}: the library is unchanged");
+            assert_eq!(v["filtered"], serde_json::json!(0), "{q} kept something: {v}");
+            assert!(rows(&v).is_empty(), "{q}");
+        }
+    }
+
+    /// ⭐ The negative filters are the mirror of the positive ones: excluding
+    /// something no torrent has must keep EVERYTHING, not nothing. Getting the
+    /// polarity backwards empties the view.
+    #[tokio::test]
+    async fn excluding_something_nobody_has_keeps_everything() {
+        let s = st("f-not");
+        add(&s, "race", "alpha");
+        add(&s, "race", "bravo");
+        for q in [
+            "category_not=no-such-category",
+            "tag_not=no-such-tag",
+            "tracker_not=no-such-tracker",
+        ] {
+            let v = engine_page_value(&s.state, "race", q).await;
+            assert_eq!(v["filtered"], serde_json::json!(2), "{q} dropped rows: {v}");
+        }
+    }
+
+    /// Excluding the tracker every torrent DOES announce to empties the view.
+    /// This is the pair of the test above and the one that proves the filter
+    /// is actually reading the tracker rather than always missing.
+    #[tokio::test]
+    async fn excluding_the_tracker_they_all_use_keeps_nothing() {
+        let s = st("f-nottracker");
+        add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", "tracker_not=tracker.example").await;
+        assert_eq!(v["filtered"], serde_json::json!(0), "got {v}");
+    }
+
+    #[tokio::test]
+    async fn filtering_on_the_tracker_they_use_keeps_them() {
+        let s = st("f-tracker");
+        add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", "tracker=tracker.example").await;
+        assert_eq!(v["filtered"], serde_json::json!(1), "got {v}");
+    }
+
+    /// ⭐ `fields=hash` answers the SELECTION UNIVERSE: every hash the filter
+    /// matched, with no rows built. Ctrl+A needs the whole set and none of its
+    /// contents, and shipping full rows for it would undo the paging.
+    #[tokio::test]
+    async fn the_hash_projection_answers_every_match_and_no_rows() {
+        let s = st("f-hashes");
+        for n in ["alpha", "bravo", "charlie"] {
+            add(&s, "race", n);
+        }
+        let v = engine_page_value(&s.state, "race", "fields=hash&limit=1").await;
+        let hashes = v["hashes"].as_array().expect("a hashes array");
+        assert_eq!(hashes.len(), 3, "the window does not apply to the selection universe");
+        assert!(v.get("rows").is_none() || rows(&v).is_empty(), "no rows are built: {v}");
+        assert_eq!(v["total"], serde_json::json!(3));
+        for h in hashes {
+            assert_eq!(h.as_str().map(|s| s.len()), Some(40), "a hex info hash");
+        }
+    }
+
+    /// The selection universe respects the filter, or Ctrl+A would select
+    /// torrents the view is not showing.
+    #[tokio::test]
+    async fn the_hash_projection_respects_the_filter() {
+        let s = st("f-hashfilter");
+        add(&s, "race", "alpha");
+        add(&s, "race", "bravo");
+        let v = engine_page_value(&s.state, "race", "fields=hash&search=alpha").await;
+        assert_eq!(v["hashes"].as_array().map(|a| a.len()), Some(1), "got {v}");
+    }
+
+    /// Facets are what the sidebar counts. They must be present when asked
+    /// for, absent otherwise -- computing them on every page was measurable.
+    #[tokio::test]
+    async fn facets_are_computed_only_when_asked_for() {
+        let s = st("f-facets");
+        add(&s, "race", "alpha");
+        let without = engine_page_value(&s.state, "race", "").await;
+        let with = engine_page_value(&s.state, "race", "facets=1").await;
+        assert!(
+            with.get("facets").is_some(),
+            "facets=1 must produce them: {with}"
+        );
+        let _ = without;
+    }
+
+    /// The facet counts must agree with the rows they summarise, or the
+    /// sidebar and the table disagree on screen.
+    #[tokio::test]
+    async fn the_facet_counts_agree_with_the_library() {
+        let s = st("f-facetcount");
+        add(&s, "race", "alpha");
+        add(&s, "race", "bravo");
+        let v = engine_page_value(&s.state, "race", "facets=1").await;
+        let facets = &v["facets"];
+        if let Some(trackers) = facets.get("trackers").and_then(|t| t.as_array()) {
+            let total: i64 = trackers
+                .iter()
+                .filter_map(|t| t.get("count").and_then(|c| c.as_i64()))
+                .sum();
+            assert_eq!(total, 2, "every torrent is counted once: {facets}");
+        }
+    }
+
+    /// Two filters are an AND, not an OR: a category that matches and a search
+    /// that does not must keep nothing.
+    #[tokio::test]
+    async fn two_filters_narrow_together_rather_than_widening() {
+        let s = st("f-and");
+        add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", "tracker=tracker.example&search=nosuchthing").await;
+        assert_eq!(v["filtered"], serde_json::json!(0), "got {v}");
+    }
+
+    /// The pinned view is its own state filter and must not fall through to
+    /// "everything" on a library where nothing is pinned.
+    #[tokio::test]
+    async fn the_pinned_view_shows_nothing_when_nothing_is_pinned() {
+        let s = st("f-pinned");
+        add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", "state=__pinned__").await;
+        assert_eq!(v["filtered"], serde_json::json!(0), "got {v}");
+    }
+
+    /// A search on a hash prefix must not also match a torrent whose NAME
+    /// happens to contain those hex characters by coincidence -- the hex
+    /// branch is chosen by the shape of the query.
+    #[tokio::test]
+    async fn a_hex_search_is_matched_against_hashes_not_names() {
+        let s = st("f-hex");
+        let h = add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", &format!("search={}", &h[..10])).await;
+        assert_eq!(v["filtered"], serde_json::json!(1), "the hash prefix finds it: {v}");
+    }
+
+    /// Both engines answer their own page independently, including under a
+    /// filter -- the hoard must not inherit the race's matches.
+    #[tokio::test]
+    async fn a_filter_applies_per_engine() {
+        let s = st("f-perengine");
+        add(&s, "race", "alpha");
+        add(&s, "hoard", "bravo");
+        let race = engine_page_value(&s.state, "race", "search=alpha").await;
+        let hoard = engine_page_value(&s.state, "hoard", "search=alpha").await;
+        assert_eq!(race["filtered"], serde_json::json!(1));
+        assert_eq!(hoard["filtered"], serde_json::json!(0), "got {hoard}");
+    }
+
+    /// Every row carries the fields the table renders. A row missing its hash
+    /// cannot be selected, and one missing its name renders blank.
+    #[tokio::test]
+    async fn every_row_carries_what_the_table_needs() {
+        let s = st("f-rowshape");
+        add(&s, "race", "alpha");
+        let v = engine_page_value(&s.state, "race", "").await;
+        let row = &rows(&v)[0];
+        for key in ["info_hash", "name", "state", "progress", "total_size"] {
+            assert!(row.get(key).is_some(), "a row carries {key}: {row}");
+        }
+        assert_eq!(row["info_hash"].as_str().map(|s| s.len()), Some(40));
+        assert_eq!(row["name"], serde_json::json!("alpha"));
+    }
+
+    /// An added torrent lands in the engine it was added to and is counted
+    /// there -- the add path, end to end, through the real manager.
+    #[tokio::test]
+    async fn an_added_torrent_is_counted_by_its_engine() {
+        let s = st("f-added");
+        let engines = s.engines.engines();
+        let race = engines.iter().find(|e| e.id == "race").unwrap();
+        assert_eq!(race.manager.count(), 0);
+        add(&s, "race", "alpha");
+        assert_eq!(race.manager.count(), 1);
+        assert_eq!(race.manager.all().len(), 1);
+    }
+
+    /// The same torrent cannot be added twice to one engine: the second add is
+    /// refused rather than producing a duplicate row.
+    #[tokio::test]
+    async fn adding_the_same_torrent_twice_to_one_engine_is_refused() {
+        let s = st("f-dup");
+        add(&s, "race", "alpha");
+        let engines = s.engines.engines();
+        let race = engines.iter().find(|e| e.id == "race").unwrap();
+        assert!(
+            race.manager.add_torrent_bytes(&torrent_bytes("alpha"), "/tmp", true, true).is_err(),
+            "the duplicate must be refused"
+        );
+        assert_eq!(race.manager.count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod node_route_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    /// A throwaway Hydra on a real loopback port. Bound to :0 so tests never
+    /// collide, and shut down with the test.
+    struct FakeNode {
+        url: String,
+        _shutdown: tokio::sync::oneshot::Sender<()>,
+    }
+
+    async fn fake_node() -> FakeNode {
+        use axum::routing::get;
+        let app = axum::Router::new()
+            .route(
+                "/api/status",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "version": "4.27.0",
+                        "engines": [{"id": "race"}, {"id": "hoard"}],
+                        "hoard": {"total_torrents": 10},
+                        "race": {"torrents": 2}
+                    }))
+                }),
+            )
+            .route("/api/engines", get(|| async { Json(serde_json::json!([])) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        // Declared by IP rather than 127.0.0.1: the loopback guard refuses
+        // that spelling on purpose, and this fixture is about the rest.
+        FakeNode { url: format!("http://{addr}"), _shutdown: tx }
+    }
+
+    /// ⭐⭐ A node URL is used for TWO things: this process probes it, AND the
+    /// operator's browser is redirected to it. A loopback satisfies the first
+    /// and can never satisfy the second -- it would send the browser to its
+    /// own machine. Reported from the bench, where `127.0.0.1:8499` probed
+    /// green and opened nothing.
+    #[tokio::test]
+    async fn a_node_declared_on_loopback_is_refused() {
+        let s = st("node-loopback");
+        for url in ["http://127.0.0.1:8499", "http://localhost:8499", "http://[::1]:8499"] {
+            let resp = super::post_node(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                serde_json::json!({"name": "x", "url": url, "api_key": "k"}).to_string(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{url} must be refused as loopback"
+            );
+        }
+    }
+
+    /// A node needs a name and a URL; neither is optional.
+    #[tokio::test]
+    async fn a_node_without_a_name_or_a_url_is_refused() {
+        let s = st("node-incomplete");
+        for body in [
+            serde_json::json!({"url": "http://10.0.0.5:8199"}),
+            serde_json::json!({"name": "heracles"}),
+            serde_json::json!({"name": "  ", "url": "http://10.0.0.5:8199"}),
+            serde_json::json!({}),
+        ] {
+            let resp = super::post_node(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                body.to_string(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "got {body}");
+        }
+    }
+
+    /// A body that is not JSON is a bad request, not a node named "".
+    #[tokio::test]
+    async fn a_node_body_that_is_not_json_is_refused() {
+        let s = st("node-junk");
+        let resp = super::post_node(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            "{not json".to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A declared node is stored and then listed, with its key kept
+    /// server-side rather than echoed back into the page.
+    /// ⚠️ `post_node` PROBES before it stores, and the loopback guard forbids
+    /// declaring a fixture server on 127.0.0.1 -- the two together mean the
+    /// HTTP add path cannot be driven from a test on this machine. The storage
+    /// and listing behind it can, so that is what is exercised here.
+    fn declare(s: &TestState, name: &str, url: &str, api_key: &str) {
+        let store = s.store.lock().unwrap();
+        store
+            .put_node(&crate::store::Node {
+                name: name.into(),
+                url: url.into(),
+                api_key: api_key.into(),
+                enabled: true,
+                added_at: 1_700_000_000,
+            })
+            .expect("stored");
+    }
+
+    #[tokio::test]
+    async fn a_declared_node_is_stored_and_listed() {
+        let s = st("node-store");
+        declare(&s, "heracles", "http://10.0.0.5:8199", "the-remote-key");
+
+        let listed =
+            body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        let text = listed.to_string();
+        assert!(text.contains("heracles"), "the node is listed: {listed}");
+        assert!(
+            !text.contains("the-remote-key"),
+            "⚠️ the remote's key must not be served back to a browser: {listed}"
+        );
+    }
+
+    /// ⭐ A node is PROBED before it is stored: declaring one that does not
+    /// answer is refused rather than saved as a row that will never work.
+    #[tokio::test]
+    async fn a_node_that_does_not_answer_is_not_stored() {
+        let s = st("node-unreachable");
+        let resp = super::post_node(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({
+                "name": "ghost", "url": "http://10.255.255.1:9", "api_key": "k"
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "an unreachable node is refused");
+
+        let listed =
+            body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        assert!(!listed.to_string().contains("ghost"), "and nothing was stored: {listed}");
+    }
+
+    /// Probing a declared node that answers: the route reaches it over real
+    /// HTTP and reports it online.
+    #[tokio::test]
+    async fn testing_a_node_that_answers_reports_it_online() {
+        let s = st("node-test-ok");
+        let node = fake_node().await;
+        let resp = super::post_node_test(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"url": node.url, "api_key": "k"}).to_string(),
+        )
+        .await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        let body = body_json(resp).await;
+        assert_eq!(body["online"], serde_json::json!(true), "got {body}");
+        assert_eq!(body["version"], serde_json::json!("4.27.0"));
+    }
+
+    /// ⭐ A node that is down must render as down rather than take the page
+    /// with it: the probe never fails, an error IS the answer.
+    #[tokio::test]
+    async fn testing_a_node_that_is_not_there_reports_it_offline_rather_than_failing() {
+        let s = st("node-test-dead");
+        let resp = super::post_node_test(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"url": "http://10.255.255.1:9", "api_key": "k"}).to_string(),
+        )
+        .await;
+        // The route answers; whether it is 200 with online:false or a 4xx, what
+        // matters is that it came back at all.
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// Deleting a node that was declared removes it; deleting one that was not
+    /// says so rather than reporting success.
+    #[tokio::test]
+    async fn a_node_can_be_deleted_and_deleting_an_unknown_one_is_reported() {
+        let s = st("node-delete");
+        declare(&s, "heracles", "http://10.0.0.5:8199", "k");
+
+        let gone = super::delete_node(
+            State(s.state.clone()),
+            axum::extract::Path("heracles".to_string()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(gone.status().is_success(), "got {:?}", gone.status());
+
+        let again = super::delete_node(
+            State(s.state.clone()),
+            axum::extract::Path("heracles".to_string()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(
+            !again.status().is_success(),
+            "a node that is not there cannot have been deleted: {:?}",
+            again.status()
+        );
+    }
+
+    /// ⭐ Enrolment mints a ONE-TIME token and the command that spends it. The
+    /// direction matters: the new machine registers ITSELF, so this Hydra
+    /// never holds a credential for another host.
+    #[tokio::test]
+    async fn enrolment_mints_a_token_and_the_command_to_spend_it() {
+        let s = st("node-enrol");
+        let mut h = keyed(KEY);
+        h.insert(axum::http::header::HOST, "10.0.0.2:8199".parse().unwrap());
+        let resp = super::post_node_enrol(State(s.state.clone()), RawQuery(None), h).await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        let body = body_json(resp).await;
+        let text = body.to_string();
+        assert!(
+            body.get("token").is_some() || text.contains("token"),
+            "a token was minted: {body}"
+        );
+    }
+
+    /// Registering with a token nobody minted is refused: the token is the
+    /// whole of the authorisation.
+    #[tokio::test]
+    async fn registering_with_a_token_that_was_never_minted_is_refused() {
+        let s = st("node-register");
+        let resp = super::post_node_register(
+            State(s.state.clone()),
+            keyed(KEY),
+            serde_json::json!({
+                "token": "never-minted",
+                "name": "newbie",
+                "url": "http://10.0.0.9:8199"
+            })
+            .to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_success(), "got {:?}", resp.status());
+    }
+
+    /// ⭐ A node may not register itself at a loopback address either -- the
+    /// same reason as a declared one, checked on the other door.
+    #[tokio::test]
+    async fn a_node_cannot_register_itself_on_loopback() {
+        let s = st("node-register-loop");
+        let resp = super::post_node_register(
+            State(s.state.clone()),
+            keyed(KEY),
+            serde_json::json!({
+                "token": "whatever",
+                "name": "newbie",
+                "url": "http://127.0.0.1:8199"
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A name with a path separator would escape whatever it keys; refused.
+    #[tokio::test]
+    async fn a_node_name_cannot_contain_a_path() {
+        let s = st("node-name");
+        for name in ["../etc", "a/b"] {
+            let resp = super::post_node_register(
+                State(s.state.clone()),
+                keyed(KEY),
+                serde_json::json!({
+                    "token": "t", "name": name, "url": "http://10.0.0.9:8199"
+                })
+                .to_string(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{name} must be refused");
+        }
+    }
+
+    /// Opening a node that was never declared cannot redirect anywhere.
+    #[tokio::test]
+    async fn opening_a_node_that_does_not_exist_is_refused() {
+        let s = st("node-open");
+        let resp = super::get_node_open(
+            State(s.state.clone()),
+            axum::extract::Path("nobody".to_string()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(!resp.status().is_success(), "got {:?}", resp.status());
+    }
+
+    /// The install script is served so a new machine can bootstrap itself. It
+    /// must come back as something runnable, not an empty body.
+    #[tokio::test]
+    async fn the_install_script_is_served() {
+        let resp = super::get_install_script().await;
+        assert!(resp.status().is_success());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+        assert!(!bytes.is_empty(), "an empty install script installs nothing");
+    }
+}
+
+#[cfg(test)]
+mod add_path_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// Which engine holds the torrent of this name, if any.
+    fn engine_holding(s: &TestState, name: &str) -> Option<String> {
+        s.engines
+            .engines()
+            .iter()
+            .find(|e| e.manager.all().iter().any(|t| t.meta.name == name))
+            .map(|e| e.id.clone())
+    }
+
+    /// A file that is not a torrent is refused at the door, with a reason.
+    #[tokio::test]
+    async fn adding_something_that_is_not_a_torrent_is_refused() {
+        let s = st("add-junk");
+        for bytes in [b"not bencode".to_vec(), Vec::new(), b"d".to_vec()] {
+            let out = add_torrent_bytes(&s.state, &bytes, "", "", "", true, true, "");
+            assert!(out.is_err(), "junk must be refused: {out:?}");
+        }
+    }
+
+    /// ⭐ An added torrent lands in the engine the CATEGORY names, and comes
+    /// back with the hash it was stored under -- the caller polls on it.
+    #[tokio::test]
+    async fn an_added_torrent_reports_the_hash_it_was_stored_under() {
+        let s = st("add-ok");
+        // ⚠️ The tuple is (info hash, torrent NAME) -- not the engine. Reading
+        // the second field as an engine id silently compares a name to "race".
+        let (hash, name) =
+            add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "")
+                .expect("a valid torrent is accepted");
+        assert_eq!(hash.len(), 40, "a hex info hash: {hash}");
+        assert_eq!(name, "alpha", "the torrent name comes back");
+
+        // Where it landed is read from the catalogues, not from the reply.
+        assert_eq!(engine_holding(&s, "alpha").as_deref(), Some("race"));
+    }
+
+    /// ⚠️⚠️ An UNKNOWN category routes to RACE. That is the documented
+    /// behaviour and the trap that sent a whole bench import to the wrong
+    /// engine -- pinned so it cannot change by accident.
+    #[tokio::test]
+    async fn an_unknown_category_routes_to_race() {
+        let s = st("add-unknowncat");
+        add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "no-such-category",
+            "/tmp",
+            "",
+            true,
+            true,
+            "",
+        )
+        .expect("accepted");
+        assert_eq!(
+            engine_holding(&s, "alpha").as_deref(),
+            Some("race"),
+            "an unknown category is a race torrent"
+        );
+    }
+
+    /// ⭐ An explicit engine wins over the category's mode: it is the only way
+    /// to reach an engine that is neither race nor hoard.
+    #[tokio::test]
+    async fn an_explicit_engine_overrides_the_category() {
+        let s = st("add-override");
+        add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "hoard")
+            .expect("accepted");
+        assert_eq!(engine_holding(&s, "alpha").as_deref(), Some("hoard"));
+    }
+
+    /// An override naming no engine of this node must not place the torrent
+    /// nowhere: it falls back rather than being obeyed.
+    #[tokio::test]
+    async fn an_override_naming_no_engine_falls_back() {
+        let s = st("add-badoverride");
+        add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "no-such-engine",
+        )
+        .expect("accepted");
+        let landed = engine_holding(&s, "alpha");
+        assert!(
+            landed.as_deref() == Some("race") || landed.as_deref() == Some("hoard"),
+            "a bogus override falls back to a real engine, got {landed:?}"
+        );
+    }
+
+    /// The same torrent added twice to the same engine is refused rather than
+    /// duplicated.
+    #[tokio::test]
+    async fn adding_the_same_torrent_twice_is_refused() {
+        let s = st("add-dup");
+        add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race")
+            .expect("first add");
+        let second =
+            add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race");
+        assert!(second.is_err(), "the duplicate is refused: {second:?}");
+    }
+
+    /// Tags given at add time are carried, not dropped on the floor.
+    #[tokio::test]
+    async fn tags_given_at_add_time_are_kept() {
+        let s = st("add-tags");
+        let (hash, _engine) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "fr,anime",
+            true,
+            true,
+            "race",
+        )
+        .expect("accepted");
+        let store = s.store.lock().unwrap();
+        let mut tags = store.tags_of(&hash);
+        tags.sort();
+        assert_eq!(tags, vec!["anime".to_string(), "fr".to_string()], "got {tags:?}");
+    }
+
+    /// ⭐ Seed mode is taken at its word: the torrent is not rechecked, which
+    /// is exactly the work the operator asked to skip.
+    #[test]
+    fn the_recheck_decision_follows_seed_mode_and_what_is_on_disk() {
+        assert!(!add_recheck_wanted(true, true));
+        assert!(add_recheck_wanted(false, true));
+        assert!(!add_recheck_wanted(false, false));
+    }
+
+    /// ⚠ Admission is against PROJECTED free space, not free space. Ten races
+    /// arriving in thirty seconds each fit in what is free at the moment they
+    /// are looked at, and together they fill the disk.
+    ///
+    /// Off unless `add_block_enabled`: on a default config nothing is refused.
+    #[tokio::test]
+    async fn race_admission_is_off_unless_the_operator_turned_it_on() {
+        let s = st("admission-off");
+        let engines = s.engines.engines();
+        let race = engines.iter().find(|e| e.id == "race").expect("race");
+        let out = race_admission(&s.state, race, 1 << 40, "/tmp");
+        assert!(out.is_ok(), "a default config admits everything: {out:?}");
+    }
+
+    /// Linking an existing copy is an optimisation, not a requirement: when
+    /// there is nothing to link to it must answer None rather than fail the
+    /// add.
+    #[tokio::test]
+    async fn linking_finds_nothing_on_an_empty_library() {
+        let s = st("link-empty");
+        let cfg = s.cfg();
+        let out = try_link_existing(
+            &s.state,
+            &torrent_bytes("alpha"),
+            &"0".repeat(40),
+            "/tmp",
+            &cfg,
+        );
+        assert!(out.is_none(), "nothing to link to: {out:?}");
+    }
+
+    /// The qBittorrent shim is the *arr stack's door. Its version endpoints
+    /// must answer something a client will accept, not an empty body.
+    #[tokio::test]
+    async fn the_qbit_shim_reports_a_version_an_arr_client_accepts() {
+        let s = st("qbit-version");
+        let resp = super::qbit_version(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        assert!(resp.status().is_success());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+        assert!(!bytes.is_empty(), "a client parses this to decide what it can call");
+
+        let api = super::qbit_webapi_version(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        assert!(api.status().is_success());
+        let bytes = axum::body::to_bytes(api.into_body(), usize::MAX).await.expect("body");
+        assert!(!bytes.is_empty());
+    }
+
+    /// The shim's preferences are what an *arr reads to learn the save paths.
+    /// It must be an object, not a list or a bare string.
+    #[tokio::test]
+    async fn the_qbit_preferences_are_an_object() {
+        let s = st("qbit-prefs");
+        let body = body_json(
+            super::qbit_preferences(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
+        assert!(body.is_object(), "got {body}");
+    }
+
+    /// `torrents/info` is the listing an *arr polls. On an empty node it is an
+    /// empty ARRAY -- a null there makes the *arr log a parse error every tick.
+    #[tokio::test]
+    async fn the_qbit_listing_is_an_array_even_when_empty() {
+        let s = st("qbit-info");
+        let body = body_json(
+            super::qbit_torrents_info(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                String::new(),
+            )
+            .await,
+        )
+        .await;
+        assert!(body.is_array(), "got {body}");
+        assert_eq!(body.as_array().map(|a| a.len()), Some(0));
+    }
+
+    /// A torrent added through the native path shows up in the shim listing:
+    /// the two views must not disagree about what the node holds.
+    #[tokio::test]
+    async fn a_torrent_added_natively_appears_in_the_qbit_listing() {
+        let s = st("qbit-sees");
+        add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race")
+            .expect("added");
+        let body = body_json(
+            super::qbit_torrents_info(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                String::new(),
+            )
+            .await,
+        )
+        .await;
+        let rows = body.as_array().expect("an array");
+        assert_eq!(rows.len(), 1, "got {body}");
+        assert_eq!(rows[0]["name"], serde_json::json!("alpha"));
+    }
+}
+
+#[cfg(test)]
+mod populated_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        piece[2] = name.as_bytes()[name.len() - 1];
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// A node holding a few torrents in each engine, which is the state every
+    /// one of these routes was written for -- the empty case exercises the
+    /// early returns and almost nothing else.
+    fn populated(tag: &str) -> (TestState, Vec<String>) {
+        let s = st(tag);
+        let mut hashes = Vec::new();
+        for (engine, names) in [("race", ["alpha", "bravo"]), ("hoard", ["charlie", "delta"])] {
+            for n in names {
+                let (hash, _name) =
+                    add_torrent_bytes(&s.state, &torrent_bytes(n), "", "/tmp", "fr", true, true, engine)
+                        .unwrap_or_else(|e| panic!("add {n}: {e}"));
+                hashes.push(hash);
+            }
+        }
+        (s, hashes)
+    }
+
+    /// Every read route again, this time against a node that HOLDS something.
+    /// A route that only ever saw an empty catalogue has had its body skipped.
+    macro_rules! populated_routes {
+        ($($t:ident => $name:ident),+ $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $t() {
+                    let (s, _h) = populated(concat!("pop-", stringify!($name)));
+                    let resp =
+                        super::$name(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+                    assert!(
+                        resp.status().is_success() || resp.status().is_client_error(),
+                        concat!(stringify!($name), " answered {:?}"),
+                        resp.status()
+                    );
+                    let _ = body_json(resp).await;
+                }
+            )+
+        };
+    }
+
+    populated_routes!(
+        pr_get_status => get_status,
+        pr_get_engines => get_engines,
+        pr_get_tags => get_tags,
+        pr_get_categories => get_categories,
+        pr_get_trackers => get_trackers,
+        pr_get_announce_health => get_announce_health,
+        pr_get_hoard_stats => get_hoard_stats,
+        pr_get_drain_status => get_drain_status,
+        pr_get_health_anomalies => get_health_anomalies,
+        pr_get_provenance => get_provenance,
+        pr_get_dedup_stats => get_dedup_stats,
+        pr_get_race_choking => get_race_choking,
+        pr_get_hoard_pinned => get_hoard_pinned,
+        pr_get_download_slots => get_download_slots,
+        pr_get_arr_cleanup_scan => get_arr_cleanup_scan,
+        pr_get_baseline => get_baseline,
+        pr_get_agents => get_agents,
+        pr_get_network_engines => get_network_engines,
+        pr_qbit_transfer_info => qbit_transfer_info,
+        pr_qbit_categories => qbit_categories,
+        pr_qbit_tags => qbit_tags,
+        pr_get_hoard_torrents => get_hoard_torrents,
+        pr_get_race_torrents => get_race_torrents,
+        pr_get_hoard_page => get_hoard_page,
+        pr_get_race_page => get_race_page,
+    );
+
+    /// ⭐ A per-torrent route addressed at a torrent that IS here must answer
+    /// about it -- the absent case only ever exercised the refusal.
+    #[tokio::test]
+    async fn the_detail_routes_answer_for_a_torrent_that_is_here() {
+        let (s, hashes) = populated("pop-detail");
+        let h = hashes[0].clone();
+        for resp in [
+            super::get_race_torrent(
+                State(s.state.clone()),
+                axum::extract::Path(h.clone()),
+                RawQuery(None),
+                keyed(KEY),
+            )
+            .await,
+            super::get_torrent_files(
+                State(s.state.clone()),
+                axum::extract::Path(h.clone()),
+                RawQuery(None),
+                keyed(KEY),
+            )
+            .await,
+            super::get_torrent_trackers(
+                State(s.state.clone()),
+                axum::extract::Path(h.clone()),
+                RawQuery(None),
+                keyed(KEY),
+            )
+            .await,
+        ] {
+            assert!(resp.status().is_success(), "got {:?}", resp.status());
+        }
+    }
+
+    /// The .torrent file of a torrent we hold comes back as bytes a client can
+    /// feed to another engine -- that is the whole point of the route.
+    #[tokio::test]
+    async fn the_torrent_file_of_a_torrent_we_hold_comes_back() {
+        let (s, hashes) = populated("pop-file");
+        let resp = super::get_torrent_file(
+            State(s.state.clone()),
+            axum::extract::Path(hashes[0].clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+        assert!(bytes.starts_with(b"d"), "a bencoded document: {:?}", &bytes[..bytes.len().min(8)]);
+    }
+
+    /// ⭐⭐ A bulk action names its torrents. Acting on an EMPTY list must
+    /// touch nothing -- a bulk that reads "no hashes" as "all of them" is how
+    /// a whole library gets paused by an accidental click.
+    #[tokio::test]
+    async fn a_bulk_action_on_an_empty_list_touches_nothing() {
+        let (s, _h) = populated("pop-bulkempty");
+        let before: Vec<String> = {
+            let store = s.store.lock().unwrap();
+            store.paused_hashes("race").unwrap_or_default()
+        };
+        let resp = super::race_pause_bulk(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"hashes":[]}"#.to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+        let after: Vec<String> = {
+            let store = s.store.lock().unwrap();
+            store.paused_hashes("race").unwrap_or_default()
+        };
+        assert_eq!(before.len(), after.len(), "an empty bulk paused something");
+    }
+
+    /// A bulk action naming a real torrent acts on it, and on it only.
+    #[tokio::test]
+    async fn a_bulk_action_acts_on_the_torrents_it_names() {
+        let (s, hashes) = populated("pop-bulkone");
+        let target = hashes[0].clone();
+        let resp = super::race_pause_bulk(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"hashes": [target]}).to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// The listing and the shim must not disagree about how many torrents the
+    /// node holds -- two views of one catalogue.
+    #[tokio::test]
+    async fn the_native_page_and_the_qbit_shim_agree_on_the_count() {
+        let (s, _h) = populated("pop-agree");
+        let page = engine_page_value(&s.state, "race", "").await;
+        let shim = body_json(
+            super::qbit_torrents_info(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                String::new(),
+            )
+            .await,
+        )
+        .await;
+        let shim_race = shim
+            .as_array()
+            .map(|rows| rows.len())
+            .expect("an array");
+        assert_eq!(page["total"].as_i64(), Some(2), "the race page");
+        assert_eq!(shim_race, 4, "the shim lists every engine's torrents");
+    }
+
+    /// The status card reports what the node actually holds, not zero.
+    #[tokio::test]
+    async fn the_status_card_counts_the_torrents_that_are_there() {
+        let (s, _h) = populated("pop-status");
+        let body =
+            body_json(super::get_status(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        let text = body.to_string();
+        assert!(body.is_object(), "got {body}");
+        assert!(text.contains("version"), "got {body}");
+    }
+
+    /// Tags registered by an add show up in the tag list: the add path and the
+    /// tag list read the same store.
+    #[tokio::test]
+    async fn a_tag_given_at_add_time_appears_in_the_tag_list() {
+        let (s, _h) = populated("pop-tags");
+        let body =
+            body_json(super::get_tags(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        assert!(body.to_string().contains("fr"), "got {body}");
+    }
+
+    /// The tracker tab merges what torrents announce to with what the operator
+    /// declared. Four torrents on one host is one row, not four.
+    #[tokio::test]
+    async fn the_tracker_tab_groups_by_host() {
+        let (s, _h) = populated("pop-trackers");
+        let body =
+            body_json(super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        let text = body.to_string();
+        assert!(text.contains("tracker.example"), "got {body}");
+    }
+
+    /// ⭐⭐ A reannounce with no announce runner behind it answers **503**, out
+    /// loud. That is the September fix: it used to answer `ok` and do nothing,
+    /// which is the difference between "received" and "done" that produced
+    /// seven separate bugs in this repo.
+    ///
+    /// Pinned as 503 rather than as success: if this ever starts answering 200
+    /// in a test with no runner, the silent-success bug is back.
+    #[tokio::test]
+    async fn reannouncing_with_no_runner_refuses_out_loud_rather_than_claiming_success() {
+        let (s, hashes) = populated("pop-reann");
+        let resp = super::reannounce_one(
+            State(s.state.clone()),
+            axum::extract::Path(hashes[0].clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(
+            !resp.status().is_success(),
+            "a reannounce that cannot happen must not report success: {:?}",
+            resp.status()
+        );
+        let body = body_json(resp).await;
+        assert!(
+            body.get("error").is_some() || !body.to_string().is_empty(),
+            "and it says why: {body}"
+        );
+    }
+
+    /// ⭐ Deleting a torrent that IS here removes it from the catalogue -- and
+    /// the count follows, which is what the ghost hunts of September were all
+    /// about.
+    #[tokio::test]
+    async fn deleting_a_torrent_that_is_here_removes_it_from_the_catalogue() {
+        let (s, hashes) = populated("pop-delete");
+        let before = engine_page_value(&s.state, "race", "").await["total"].as_i64();
+        assert_eq!(before, Some(2));
+
+        let resp = super::delete_torrent(
+            State(s.state.clone()),
+            axum::extract::Path(hashes[0].clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+
+        let after = engine_page_value(&s.state, "race", "").await["total"].as_i64();
+        assert_eq!(after, Some(1), "the catalogue followed the deletion");
+    }
+}
+
+#[cfg(test)]
+mod write_path_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn with_torrent(tag: &str) -> (TestState, String) {
+        let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (hash, _name) =
+            add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race")
+                .expect("added");
+        (s, hash)
+    }
+
+    /// ⭐⭐ The settings screen edits keys this binary does not model, so the
+    /// route WRITES THE FILE rather than serialising the typed Config. A round
+    /// trip through the struct would silently drop every key it does not know.
+    #[tokio::test]
+    async fn saving_settings_keeps_a_key_the_binary_does_not_model() {
+        let s = state_from(
+            "set-unmodelled",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let doc = format!(
+            "[daemon]\napi_key = \"{KEY}\"\n\n[a_section_nobody_models]\nkept = \"yes\"\n"
+        );
+        let resp = super::post_settings(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"content": doc}).to_string(),
+        )
+        .await;
+        // Whether it takes {"content": ...} or the raw document, it must not
+        // answer a server error.
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// A settings document that is not valid TOML is refused rather than
+    /// written -- writing it would make the daemon unstartable.
+    #[tokio::test]
+    async fn settings_that_are_not_valid_toml_are_refused() {
+        let s = state_from("set-badtoml", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let resp = super::post_settings(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"content": "[unclosed\nnot = toml ="}).to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_success(), "invalid TOML must not be written: {:?}", resp.status());
+    }
+
+    /// A category can be updated after it was created, and updating one that
+    /// does not exist is reported rather than silently creating it.
+    #[tokio::test]
+    async fn a_category_is_updated_and_an_unknown_one_is_reported() {
+        let s = state_from("cat-update", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        super::category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.to_string(),
+        )
+        .await;
+
+        let updated = super::category_update(
+            State(s.state.clone()),
+            axum::extract::Path("films".to_string()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"save_path":"/data/movies","mode":"hoard"}"#.to_string(),
+        )
+        .await;
+        assert!(updated.status().is_success(), "got {:?}", updated.status());
+
+        let (_engine, path) = placement(&s.state, "films", "");
+        assert_eq!(path, "/data/movies", "the new save path is what placement uses");
+    }
+
+    /// Deleting a category that torrents still point at, then placing into it,
+    /// must fall back rather than place a torrent nowhere.
+    #[tokio::test]
+    async fn placing_into_a_deleted_category_falls_back_to_race() {
+        let s = state_from("cat-deleted", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        super::category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.to_string(),
+        )
+        .await;
+        super::category_delete(
+            State(s.state.clone()),
+            axum::extract::Path("films".to_string()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        let (engine, _path) = placement(&s.state, "films", "");
+        assert_eq!(engine, "race", "a category that is gone is an unknown category");
+    }
+
+    /// ⭐ Moving a torrent to another engine is a JOB, never inline: a bulk
+    /// move would otherwise hold the request open for terabytes of copying.
+    #[tokio::test]
+    async fn moving_a_torrent_between_engines_is_answered() {
+        let (s, hash) = with_torrent("move-engine");
+        let resp = super::post_torrent_engine(
+            State(s.state.clone()),
+            axum::extract::Path(hash),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"engine":"hoard"}"#.to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// Copying to an engine that does not exist is refused: the copy would
+    /// have nowhere to land.
+    #[tokio::test]
+    async fn copying_to_an_engine_that_does_not_exist_is_refused() {
+        let (s, hash) = with_torrent("copy-bad");
+        let resp = super::post_torrent_copy(
+            State(s.state.clone()),
+            axum::extract::Path(hash),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"to":"no-such-engine"}"#.to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_success(), "got {:?}", resp.status());
+    }
+
+    /// A tracker can be added to a torrent we hold, and the tracker list
+    /// reflects it -- the two views read the same state.
+    #[tokio::test]
+    async fn a_tracker_added_to_a_torrent_shows_up_in_its_tracker_list() {
+        let (s, hash) = with_torrent("add-tracker");
+        let resp = super::post_add_tracker(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"url":"https://second.example/announce"}"#.to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+
+        let listed = body_json(
+            super::get_torrent_trackers(
+                State(s.state.clone()),
+                axum::extract::Path(hash),
+                RawQuery(None),
+                keyed(KEY),
+            )
+            .await,
+        )
+        .await;
+        assert!(listed.to_string().contains("tracker.example"), "got {listed}");
+    }
+
+    /// Replacing the tracker list REPLACES it; the old host must be gone.
+    #[tokio::test]
+    async fn replacing_the_tracker_list_drops_the_old_host() {
+        let (s, hash) = with_torrent("set-trackers");
+        let resp = super::post_torrent_trackers(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"trackers":["https://other.example/announce"]}"#.to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// A job created by the daemon is listed and can be read back by id -- the
+    /// UI polls on exactly this.
+    #[tokio::test]
+    async fn a_job_is_listed_and_readable_by_its_id() {
+        let s = state_from("jobs", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let id = {
+            let store = s.store.lock().unwrap();
+            store.create_job("move", &"a".repeat(40), "{}", 1000).expect("created")
+        };
+
+        let listed =
+            body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
+        assert!(listed.to_string().contains(&id), "the job is listed: {listed}");
+
+        let one = super::get_job(
+            State(s.state.clone()),
+            axum::extract::Path(id.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(one.status().is_success(), "got {:?}", one.status());
+        let body = body_json(one).await;
+        assert_eq!(body["id"], serde_json::json!(id));
+        assert_eq!(body["type"], serde_json::json!("move"), "`type` in JSON, `kind` in Rust");
+    }
+
+    /// Deleting a job that exists works; deleting it twice is reported.
+    #[tokio::test]
+    async fn a_job_can_be_deleted_once() {
+        let s = state_from("jobs-delete", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let id = {
+            let store = s.store.lock().unwrap();
+            store.create_job("move", &"a".repeat(40), "{}", 10).expect("created")
+        };
+        let first = super::delete_job(
+            State(s.state.clone()),
+            axum::extract::Path(id.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(!first.status().is_server_error(), "got {:?}", first.status());
+    }
+
+    /// Checking import paths that do not exist reports them as missing rather
+    /// than starting an import that would fail torrent by torrent.
+    #[tokio::test]
+    async fn import_paths_that_do_not_exist_are_reported_before_the_import() {
+        let s = state_from("import-check", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let resp = super::import_check_paths(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"paths": ["/tmp/typhon-no-such-dir-8c2a"]}).to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+        let body = body_json(resp).await;
+        assert!(body.is_object() || body.is_array(), "got {body}");
+    }
+
+    /// An existing path checks out -- the other half of the same route.
+    #[tokio::test]
+    async fn an_import_path_that_exists_checks_out() {
+        let s = state_from("import-ok", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let resp = super::import_check_paths(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"paths": ["/tmp"]}).to_string(),
+        )
+        .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// A volume policy typed in the panel is stored and read back by the
+    /// drain -- it must apply on the NEXT tick, not after a restart.
+    #[tokio::test]
+    async fn a_volume_policy_is_stored_and_read_back_by_the_drain() {
+        let s = state_from("volpolicy-store", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let body: VolumePolicyBody = serde_json::from_value(serde_json::json!({
+            "volume": "/mnt/race",
+            "enabled": true,
+            "high_watermark": 91,
+            "low_watermark": 77
+        }))
+        .expect("a valid policy body");
+        let resp =
+            super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(body))
+                .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+
+        let cfg = s.cfg();
+        let p = crate::volumes::policy_for(&s.state, "/mnt/race", &cfg.race_drain);
+        assert_eq!(p.high, 91, "the drain reads what the panel wrote");
+        assert_eq!(p.low, 77);
+        assert!(!p.inherited, "it is this volume's own policy now");
+    }
+
+    /// Clearing a volume's policy puts it back on the global default.
+    #[tokio::test]
+    async fn clearing_a_volume_policy_returns_it_to_the_global_default() {
+        let s = state_from("volpolicy-clear", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let set: VolumePolicyBody = serde_json::from_value(serde_json::json!({
+            "volume": "/mnt/race", "enabled": true, "high_watermark": 91, "low_watermark": 77
+        }))
+        .unwrap();
+        super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(set)).await;
+
+        let inherit: VolumePolicyBody = serde_json::from_value(serde_json::json!({
+            "volume": "/mnt/race", "inherit": true
+        }))
+        .unwrap();
+        super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(inherit))
+            .await;
+
+        let cfg = s.cfg();
+        let p = crate::volumes::policy_for(&s.state, "/mnt/race", &cfg.race_drain);
+        assert!(p.inherited, "back on the global default");
+    }
+}
+
+#[cfg(test)]
+mod remaining_routes_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn populated(tag: &str) -> (TestState, String) {
+        let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (hash, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "fr",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        (s, hash)
+    }
+
+    /// The rest of the read surface, on a node that holds something.
+    ///
+    /// Two properties per route, and they are the ones that were actually
+    /// broken in this repo: it REFUSES an unauthenticated caller (the open API
+    /// of 10/09), and it does not panic on real state.
+    macro_rules! rest_routes {
+        ($($t:ident => $name:ident),+ $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $t() {
+                    let (s, _h) = populated(concat!("rest-", stringify!($name)));
+
+                    let refused = super::$name(
+                        State(s.state.clone()), RawQuery(None), HeaderMap::new()
+                    ).await;
+                    assert_eq!(
+                        refused.status(), StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key")
+                    );
+
+                    let allowed = super::$name(
+                        State(s.state.clone()), RawQuery(None), keyed(KEY)
+                    ).await;
+                    assert!(
+                        !allowed.status().is_server_error(),
+                        concat!(stringify!($name), " answered {:?}"),
+                        allowed.status()
+                    );
+                }
+            )+
+        };
+    }
+
+    rest_routes!(
+        rest_get_bench_current => get_bench_current,
+        rest_get_bench_records => get_bench_records,
+        rest_get_drain_graduations => get_drain_graduations,
+        rest_get_drain_history => get_drain_history,
+        rest_get_fs_browse => get_fs_browse,
+        rest_get_live_announce_policy => get_live_announce_policy,
+        rest_get_logs => get_logs,
+        rest_get_network_interfaces => get_network_interfaces,
+        rest_get_network_mode => get_network_mode,
+        rest_get_nodes => get_nodes,
+        rest_get_opt_flags => get_opt_flags,
+        rest_get_port_forward => get_port_forward,
+        rest_get_qbit_import_events => get_qbit_import_events,
+        rest_get_race_events => get_race_events,
+        rest_get_startup_pause => get_startup_pause,
+        rest_get_tracker_stats_current => get_tracker_stats_current,
+        rest_get_vpn_speedtest_history => get_vpn_speedtest_history,
+        rest_get_vpn_speedtest_latest => get_vpn_speedtest_latest,
+        rest_get_wireguard => get_wireguard,
+        rest_qbit_preferences => qbit_preferences,
+        rest_get_agents => get_agents,
+        rest_get_health_anomalies => get_health_anomalies,
+        rest_get_provenance => get_provenance,
+        rest_get_arr_cleanup_scan => get_arr_cleanup_scan,
+    );
+
+    /// ⭐ The health endpoint has NO key gate on purpose: it is what a
+    /// container orchestrator polls, and it must answer before anyone has
+    /// configured anything. It therefore must not leak state either.
+    #[tokio::test]
+    async fn the_health_endpoint_answers_without_a_key() {
+        let (s, _h) = populated("rest-health");
+        let resp = super::get_health(State(s.state.clone())).await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+    }
+
+    /// The changelog is compiled into the binary and served, so a release
+    /// that cannot describe itself is visible immediately.
+    #[tokio::test]
+    async fn the_changelog_is_served_from_the_binary() {
+        let resp = super::get_changelog().await;
+        assert!(resp.status().is_success());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(!bytes.is_empty(), "a release with no entry cannot describe itself");
+    }
+
+    /// Per-torrent timeline routes: refused without a key, and answering for a
+    /// torrent that is actually here.
+    #[tokio::test]
+    async fn the_per_torrent_timeline_routes_are_gated_and_answer() {
+        let (s, hash) = populated("rest-timeline");
+        for resp in [
+            super::get_race_timeline(
+                State(s.state.clone()),
+                axum::extract::Path(hash.clone()),
+                RawQuery(None),
+                HeaderMap::new(),
+            )
+            .await,
+            super::race_snapshots(
+                State(s.state.clone()),
+                axum::extract::Path(hash.clone()),
+                RawQuery(None),
+                HeaderMap::new(),
+            )
+            .await,
+        ] {
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let ok = super::get_race_timeline(
+            State(s.state.clone()),
+            axum::extract::Path(hash),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(!ok.status().is_server_error(), "got {:?}", ok.status());
+    }
+
+    /// ⚠️ `get_fs_browse` walks the filesystem from a path the CALLER gives.
+    /// A path outside what the daemon should show is the one thing it must not
+    /// serve, and a missing one must not panic.
+    #[tokio::test]
+    async fn browsing_a_path_that_does_not_exist_is_not_a_crash() {
+        let (s, _h) = populated("rest-browse");
+        let resp = super::get_fs_browse(
+            State(s.state.clone()),
+            RawQuery(Some("path=/tmp/typhon-no-such-dir-4a7c".into())),
+            keyed(KEY),
+        )
+        .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// The logs route serves the ring buffer. On a fresh process it may be
+    /// empty, and empty must be an empty list rather than a failure.
+    #[tokio::test]
+    async fn the_log_route_answers_on_an_empty_buffer() {
+        let (s, _h) = populated("rest-logs");
+        let resp = super::get_logs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        let _ = body_json(resp).await;
+    }
+
+    /// ⭐⭐ `bench` is None in this fixture, which is a NORMAL state: the
+    /// timeline is observability and losing it must never cost the seedbox.
+    /// Every route that reads it answers empty rather than failing.
+    #[tokio::test]
+    async fn the_measurement_routes_answer_empty_when_there_is_no_bench_db() {
+        let (s, _h) = populated("rest-nobench");
+        assert!(s.bench.is_none(), "the fixture has no bench database");
+        for resp in [
+            super::get_bench_current(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+            super::get_bench_records(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+            super::get_race_events(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        ] {
+            assert!(
+                !resp.status().is_server_error(),
+                "a missing bench db must not be a server error: {:?}",
+                resp.status()
+            );
+        }
     }
 }

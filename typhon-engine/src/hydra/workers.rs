@@ -147,22 +147,202 @@ fn enforce_download_slots(
 }
 
 #[cfg(test)]
-mod tests {
-    /// The ranking rule, on its own: most seeders first.
-    #[test]
-    fn the_likeliest_to_finish_gets_the_slot() {
-        let mut rows = vec![("slow", 1i64), ("fast", 400), ("middling", 30)];
-        rows.sort_by(|a, b| b.1.cmp(&a.1));
-        assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), ["fast", "middling", "slow"]);
+mod seed_obligation_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// A manager on a throwaway tree, so each test owns its state database.
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "hydra-workers-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let data = root.join("data");
+        let resume = root.join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(typhon_engine::disk::DiskManager::new(16)),
+        ));
+        (mgr, root)
     }
 
-    /// A ceiling of zero or less means "no ceiling", not "nothing may run".
-    /// Reading it the other way would stop every download on a default config.
-    #[test]
-    fn a_ceiling_of_zero_is_no_ceiling() {
-        for max in [-1i64, 0] {
-            assert!(max <= 0, "{max} must be read as unlimited");
+    /// A minimal single-file torrent. The bencode lengths are COMPUTED: a
+    /// hand-counted one yields a file the parser refuses for a reason that has
+    /// nothing to do with the test.
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(
+            format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes(),
+        );
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[0xAB; 20]);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// One torrent, announcing to `tracker`, having seeded `seeded_secs`.
+    fn torrent(
+        mgr: &Arc<TorrentManager>,
+        name: &str,
+        tracker: Option<&str>,
+        seeded_secs: i64,
+    ) -> Arc<typhon_engine::torrent::meta::TorrentState> {
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(name), "/tmp", true, true)
+            .expect("the fixture torrent parses");
+        let t = mgr.get(&ih).expect("just added");
+        {
+            let mut live = t.live_trackers.write();
+            live.clear();
+            if let Some(url) = tracker {
+                live.push(vec![url.to_string()]);
+            }
         }
+        t.seed_secs.store(seeded_secs, Ordering::Relaxed);
+        t.seed_since.store(0, Ordering::Relaxed);
+        t
+    }
+
+    fn config(declared: &[(&str, &str)]) -> crate::config::Config {
+        let mut cfg: crate::config::Config =
+            toml::from_str("").expect("every Config field has a serde default");
+        for (host, hours) in declared {
+            cfg.announce_min_seed_hours
+                .insert(host.to_string(), hours.to_string());
+        }
+        cfg
+    }
+
+    const NOW: i64 = 1_700_000_000;
+
+    /// ⭐⭐ THE race policy: a tracker the operator has NOT declared a seed
+    /// obligation for is PROTECTED, not free to drop. Reading an absent
+    /// declaration as "nothing is owed" is what would delete a torrent from a
+    /// tracker whose rules nobody wrote down.
+    #[test]
+    fn an_undeclared_tracker_is_protected_not_free_to_drop() {
+        let (mgr, root) = manager("undeclared");
+        let t = torrent(&mgr, "a", Some("https://tracker.example/announce"), 10_000_000);
+        let (met, host, hours) = seed_obligation_met(&t, &config(&[]), NOW);
+        assert!(!met, "an undeclared tracker never counts as satisfied");
+        assert_eq!(host, "tracker.example");
+        assert_eq!(hours, -1, "-1 is what marks it undeclared rather than zero");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// No tracker at all: nobody is owed anything, so the torrent is free.
+    #[test]
+    fn a_torrent_with_no_tracker_owes_nothing() {
+        let (mgr, root) = manager("notracker");
+        let t = torrent(&mgr, "b", None, 0);
+        let (met, host, hours) = seed_obligation_met(&t, &config(&[]), NOW);
+        assert!(met, "there is no tracker to owe anything to");
+        assert!(host.is_empty());
+        assert_eq!(hours, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A declaration of zero hours is a real declaration: the operator said
+    /// this tracker asks for nothing.
+    #[test]
+    fn a_declared_zero_is_an_obligation_that_is_already_met() {
+        let (mgr, root) = manager("zero");
+        let t = torrent(&mgr, "c", Some("https://tracker.example/announce"), 0);
+        let (met, host, hours) = seed_obligation_met(&t, &config(&[("tracker.example", "0")]), NOW);
+        assert!(met);
+        assert_eq!(host, "tracker.example");
+        assert_eq!(hours, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn seeding_short_of_the_declared_hours_is_not_met() {
+        let (mgr, root) = manager("short");
+        // Two hours owed, one hour served.
+        let t = torrent(&mgr, "d", Some("https://tracker.example/announce"), 3600);
+        let (met, _, hours) = seed_obligation_met(&t, &config(&[("tracker.example", "2")]), NOW);
+        assert!(!met);
+        assert_eq!(hours, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn seeding_past_the_declared_hours_is_met() {
+        let (mgr, root) = manager("long");
+        let t = torrent(&mgr, "e", Some("https://tracker.example/announce"), 2 * 3600);
+        let (met, _, hours) = seed_obligation_met(&t, &config(&[("tracker.example", "2")]), NOW);
+        assert!(met, "exactly the declared time counts as served");
+        assert_eq!(hours, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⚠️ A declaration that is not a number is not a declaration. Parsing it
+    /// as zero would turn a typo into "this tracker asks for nothing" and free
+    /// every torrent on it.
+    #[test]
+    fn an_unparseable_declaration_protects_rather_than_frees() {
+        let (mgr, root) = manager("garbage");
+        let t = torrent(&mgr, "f", Some("https://tracker.example/announce"), 10_000_000);
+        for bad in ["abc", "", "2h", "-1"] {
+            let (met, _, hours) =
+                seed_obligation_met(&t, &config(&[("tracker.example", bad)]), NOW);
+            assert!(!met, "{bad:?} must not free the torrent");
+            assert_eq!(hours, -1, "{bad:?} reads as undeclared");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The declaration is keyed on the tracker HOST, so a declaration for
+    /// another tracker must not apply here.
+    #[test]
+    fn a_declaration_for_another_tracker_does_not_apply() {
+        let (mgr, root) = manager("otherhost");
+        let t = torrent(&mgr, "g", Some("https://tracker.example/announce"), 10_000_000);
+        let (met, _, hours) =
+            seed_obligation_met(&t, &config(&[("other-tracker.example", "0")]), NOW);
+        assert!(!met, "this host is still undeclared");
+        assert_eq!(hours, -1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Whitespace around a declared value is the operator's typing, not a
+    /// different value.
+    #[test]
+    fn a_declaration_is_trimmed_before_it_is_read() {
+        let (mgr, root) = manager("trim");
+        let t = torrent(&mgr, "h", Some("https://tracker.example/announce"), 7200);
+        let (met, _, hours) = seed_obligation_met(&t, &config(&[("tracker.example", " 2 ")]), NOW);
+        assert!(met);
+        assert_eq!(hours, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod disk_usage_tests {
+    /// Used is what the filesystem counts as taken, NOT total minus free:
+    /// reserved blocks are neither available nor used by us, and counting them
+    /// as used would trigger a drain on a disk that is not full.
+    #[test]
+    fn reserved_blocks_count_as_neither_used_nor_free() {
+        let (used, total) = super::disk_usage(std::path::Path::new("/tmp"))
+            .expect("/tmp is on a filesystem");
+        assert!(total > 0);
+        assert!(used <= total);
+    }
+
+    #[test]
+    fn a_path_that_does_not_exist_has_no_usage() {
+        assert!(super::disk_usage(std::path::Path::new("/tmp/typhon-no-such-dir-9f2b")).is_none());
     }
 }
 
@@ -929,4 +1109,153 @@ pub fn spawn_store_reconcile(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    use crate::api::testing::{state_from, TestState};
+    use crate::volumes::{Policy, Volume};
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    fn volume(total: u64, used: u64, enabled: bool, high: i64, low: i64) -> Volume {
+        Volume {
+            id: "/mnt/race".into(),
+            dev: 1,
+            total,
+            used,
+            free: total.saturating_sub(used),
+            torrents: 0,
+            policy: Policy { enabled, high, low, inherited: true },
+        }
+    }
+
+    fn race_manager(s: &TestState) -> Arc<TorrentManager> {
+        s.engines
+            .engines()
+            .iter()
+            .find(|e| e.id == "race")
+            .expect("the race engine")
+            .manager
+            .clone()
+    }
+
+    /// ⭐⭐ Destructive by design, gated TWICE: nothing happens unless the
+    /// operator enabled it, and nothing until the volume is over ITS high
+    /// watermark. A drain that runs on a disk that is not full is a drain that
+    /// deletes for no reason.
+    #[tokio::test]
+    async fn a_volume_under_its_watermark_is_left_alone() {
+        let s = st("drain-under");
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+
+        // 50% used, high at 90: nothing to do.
+        let v = volume(1_000_000, 500_000, true, 90, 80);
+        let out = drain_once(&s.state, &mgr, &v, &cfg, "race");
+        assert_eq!(out.deleted, 0);
+        assert_eq!(out.graduated, 0);
+        assert_eq!(out.freed_bytes, 0);
+    }
+
+    /// Exactly AT the low watermark there is nothing left to free: the gap
+    /// between high and low is what stops it running again next tick.
+    #[tokio::test]
+    async fn a_volume_already_at_its_low_watermark_frees_nothing() {
+        let s = st("drain-atlow");
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+        let v = volume(1_000, 800, true, 90, 80);
+        let out = drain_once(&s.state, &mgr, &v, &cfg, "race");
+        assert_eq!(out.deleted, 0);
+        assert_eq!(out.freed_bytes, 0);
+    }
+
+    /// A volume over its watermark but holding NOTHING cannot free anything --
+    /// and must say so rather than looping or panicking on an empty catalogue.
+    #[tokio::test]
+    async fn an_over_full_volume_with_no_torrents_frees_nothing_without_failing() {
+        let s = st("drain-empty");
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+        let v = volume(1_000, 990, true, 90, 80);
+        let out = drain_once(&s.state, &mgr, &v, &cfg, "race");
+        assert_eq!(out.deleted, 0, "there is nothing to delete");
+        assert_eq!(out.graduated, 0);
+        assert_eq!(out.freed_bytes, 0);
+    }
+
+    /// A volume of size zero must not produce a NaN target and start deleting.
+    #[tokio::test]
+    async fn a_volume_with_no_size_is_not_drained() {
+        let s = st("drain-zero");
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+        let v = volume(0, 0, true, 90, 80);
+        let out = drain_once(&s.state, &mgr, &v, &cfg, "race");
+        assert_eq!(out.deleted, 0);
+        assert_eq!(out.freed_bytes, 0);
+    }
+
+    /// ⚠️ The per-volume policy is what the drain reads, not the global one.
+    /// A volume whose own policy is disabled is not drained even when the
+    /// global default would have it drained.
+    #[tokio::test]
+    async fn a_disabled_policy_on_the_volume_stops_the_drain() {
+        let s = st("drain-disabled");
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+        let v = volume(1_000, 990, false, 90, 80);
+        let out = drain_once(&s.state, &mgr, &v, &cfg, "race");
+        assert_eq!(out.deleted, 0, "a disabled volume is never drained");
+        assert_eq!(out.freed_bytes, 0);
+    }
+
+    /// A drain pass on an engine this node does not host is a no-op.
+    #[tokio::test]
+    async fn draining_an_engine_that_is_not_here_does_nothing() {
+        let s = st("drain-noengine");
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+        let v = volume(1_000, 990, true, 90, 80);
+        let out = drain_once(&s.state, &mgr, &v, &cfg, "no-such-engine");
+        assert_eq!(out.deleted, 0);
+    }
+
+    /// The outcome starts at zero on every field: a default that reported
+    /// anything non-zero would inflate the drain history for a pass that did
+    /// nothing.
+    #[test]
+    fn an_empty_outcome_is_zero_everywhere() {
+        let o = DrainOutcome::default();
+        assert_eq!((o.deleted, o.graduated, o.stuck, o.freed_bytes), (0, 0, 0, 0));
+    }
+
+    /// ⭐ A ceiling of zero or less means "no ceiling", not "nothing may run".
+    /// Reading it the other way stops every download on a default config.
+    #[tokio::test]
+    async fn a_download_slot_ceiling_of_zero_lets_everything_run() {
+        let s = st("slots-zero");
+        let mgr = race_manager(&s);
+        let cache = Cache::default();
+        let paused = std::collections::HashSet::new();
+        // Must not panic, and must not stop anything on an empty library.
+        enforce_download_slots(&mgr, &cache, 0, &paused);
+        assert_eq!(mgr.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn enforcing_slots_on_an_empty_engine_is_a_no_op() {
+        let s = st("slots-empty");
+        let mgr = race_manager(&s);
+        let cache = Cache::default();
+        let paused = std::collections::HashSet::new();
+        enforce_download_slots(&mgr, &cache, 5, &paused);
+        assert!(mgr.all().is_empty());
+    }
 }

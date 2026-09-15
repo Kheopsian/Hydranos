@@ -2181,3 +2181,552 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod absorb_and_copies_tests {
+    use super::*;
+
+    fn store() -> Store {
+        let s = Store::open_in_memory().expect("in-memory store");
+        s.ensure_schema().expect("schema");
+        s
+    }
+
+    const H: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const H2: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn add(s: &Store, hash: &str, session: &str) {
+        s.insert_torrent(hash, session, b"d4:infod4:name4:teseee", "/data", "cat", 1.0, false, "")
+            .expect("insert");
+    }
+
+    /// ⭐⭐ THE regression of 14/09: removing a torrent used to take its bytes
+    /// out of the lifetime total, because the total was summed over the
+    /// torrents still loaded. The fold into the carry-over and the deletion of
+    /// the row must happen in ONE transaction, or the bytes are simply lost.
+    #[test]
+    fn deleting_a_torrent_folds_its_bytes_into_the_carry_over() {
+        let s = store();
+        add(&s, H, "race");
+        let keys = vec!["global".to_string(), "race:tracker.example".to_string()];
+
+        assert_eq!(s.counter("global"), (0, 0));
+        assert!(s.delete_absorb(H, Some("race"), &keys, 5_000, 1_200).unwrap());
+
+        assert_eq!(s.counter("global"), (5_000, 1_200), "the bytes outlived the torrent");
+        assert_eq!(s.counter("race:tracker.example"), (5_000, 1_200));
+        assert!(s.sessions_of(H).is_empty(), "and the row is gone");
+    }
+
+    /// Absorbing twice adds; it never overwrites. A second deletion that reset
+    /// the counter would throw away every earlier torrent's contribution.
+    #[test]
+    fn absorbing_accumulates_rather_than_replaces() {
+        let s = store();
+        let keys = vec!["global".to_string()];
+        add(&s, H, "race");
+        s.delete_absorb(H, Some("race"), &keys, 100, 10).unwrap();
+        add(&s, H2, "race");
+        s.delete_absorb(H2, Some("race"), &keys, 400, 40).unwrap();
+        assert_eq!(s.counter("global"), (500, 50));
+    }
+
+    /// A torrent that never moved a byte still has to lose its row: only the
+    /// folding is conditional, not the deletion.
+    #[test]
+    fn a_torrent_that_moved_nothing_is_still_deleted() {
+        let s = store();
+        add(&s, H, "race");
+        assert!(s.delete_absorb(H, Some("race"), &["global".to_string()], 0, 0).unwrap());
+        assert!(s.sessions_of(H).is_empty());
+        assert_eq!(s.counter("global"), (0, 0), "no row was written for zero bytes");
+    }
+
+    /// Deleting a copy from ONE engine must leave the other engine's copy
+    /// alone -- and must not fold the bytes twice.
+    #[test]
+    fn deleting_one_copy_leaves_the_other_engines_copy() {
+        let s = store();
+        add(&s, H, "race");
+        add(&s, H, "hoard");
+        assert_eq!(s.sessions_of(H), vec!["hoard".to_string(), "race".to_string()]);
+
+        s.delete_absorb(H, Some("race"), &["global".to_string()], 7, 3).unwrap();
+        assert_eq!(s.sessions_of(H), vec!["hoard".to_string()], "hoard still holds it");
+        assert_eq!(s.counter("global"), (7, 3));
+    }
+
+    /// No session means every copy: the torrent is leaving the node.
+    #[test]
+    fn absorbing_without_a_session_removes_every_copy() {
+        let s = store();
+        add(&s, H, "race");
+        add(&s, H, "hoard");
+        assert!(s.delete_absorb(H, None, &["global".to_string()], 1, 1).unwrap());
+        assert!(s.sessions_of(H).is_empty());
+    }
+
+    /// Deleting something that is not there is `false`, not an error and not a
+    /// counter write: a retried delete must not double-count the bytes.
+    #[test]
+    fn absorbing_a_torrent_that_is_not_here_reports_false() {
+        let s = store();
+        assert!(!s.delete_absorb(H, Some("race"), &["global".to_string()], 9, 9).unwrap());
+    }
+
+    /// ⭐ `insert_torrent` is INSERT OR IGNORE, so it would leave the session
+    /// pointing at the old engine. That is how a moved torrent ends up running
+    /// in one engine and listed under another.
+    #[test]
+    fn re_homing_a_torrent_moves_the_copy_it_was_given() {
+        let s = store();
+        add(&s, H, "race");
+        s.set_session(H, "race", "hoard").unwrap();
+        assert_eq!(s.sessions_of(H), vec!["hoard".to_string()]);
+    }
+
+    #[test]
+    fn re_homing_from_an_engine_that_does_not_hold_it_changes_nothing() {
+        let s = store();
+        add(&s, H, "race");
+        s.set_session(H, "hoard", "other").unwrap();
+        assert_eq!(s.sessions_of(H), vec!["race".to_string()], "the race copy is untouched");
+    }
+
+    #[test]
+    fn dropping_one_copy_reports_whether_there_was_one() {
+        let s = store();
+        add(&s, H, "race");
+        assert!(s.delete_copy(H, "race").unwrap());
+        assert!(!s.delete_copy(H, "race").unwrap(), "the second call has nothing to drop");
+    }
+
+    #[test]
+    fn a_counter_that_was_never_written_reads_as_zero_not_as_missing() {
+        let s = store();
+        assert_eq!(s.counter("never-written"), (0, 0));
+    }
+
+    #[test]
+    fn setting_a_counter_replaces_it() {
+        let s = store();
+        s.set_counter("k", 10, 20).unwrap();
+        s.set_counter("k", 3, 4).unwrap();
+        assert_eq!(s.counter("k"), (3, 4), "set replaces, unlike absorb which adds");
+    }
+
+    /// The key carries the engine as well as the host: two engines seeding to
+    /// the same tracker keep separate obligations, and collapsing them would
+    /// credit one engine's upload to the other.
+    #[test]
+    fn a_tracker_counter_key_separates_engines_on_the_same_host() {
+        let a = Store::tracker_counter_key("race", "tracker.example");
+        let b = Store::tracker_counter_key("hoard", "tracker.example");
+        assert_ne!(a, b);
+        assert!(a.contains("race") && a.contains("tracker.example"));
+    }
+
+    #[test]
+    fn a_torrents_blob_comes_back_as_it_went_in() {
+        let s = store();
+        add(&s, H, "race");
+        assert!(s.has_torrent_blob(H));
+        assert_eq!(s.torrent_blob(H).unwrap().as_deref(), Some(&b"d4:infod4:name4:teseee"[..]));
+        assert!(!s.has_torrent_blob(H2));
+        assert!(s.torrent_blob(H2).unwrap().is_none());
+    }
+
+    #[test]
+    fn tags_round_trip_and_an_empty_list_clears_them() {
+        let s = store();
+        add(&s, H, "race");
+        s.set_tags(H, &["fr".into(), "anime".into()]).unwrap();
+        let mut got = s.tags_of(H);
+        got.sort();
+        assert_eq!(got, vec!["anime".to_string(), "fr".to_string()]);
+        s.set_tags(H, &[]).unwrap();
+        assert!(s.tags_of(H).is_empty());
+    }
+
+    #[test]
+    fn a_pause_is_remembered_per_engine() {
+        let s = store();
+        add(&s, H, "race");
+        add(&s, H, "hoard");
+        s.set_paused(H, "race", true).unwrap();
+        assert_eq!(s.paused_hashes("race").unwrap(), vec![H.to_string()]);
+        assert!(s.paused_hashes("hoard").unwrap().is_empty(), "the hoard copy still runs");
+    }
+
+    #[test]
+    fn pausing_everywhere_reaches_every_copy() {
+        let s = store();
+        add(&s, H, "race");
+        add(&s, H, "hoard");
+        s.set_paused_everywhere(H, true).unwrap();
+        assert_eq!(s.paused_hashes("race").unwrap().len(), 1);
+        assert_eq!(s.paused_hashes("hoard").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_save_path_can_be_rewritten_after_a_move() {
+        let s = store();
+        add(&s, H, "race");
+        s.set_save_path(H, "/data/moved").unwrap();
+        assert_eq!(s.all_hashes("race").unwrap(), vec![H.to_string()],
+            "the torrent is still listed under its engine after the move");
+        assert_eq!(s.category_of(H).as_deref(), Some("cat"), "and keeps its category");
+    }
+
+    #[test]
+    fn the_write_mark_moves_when_something_is_written() {
+        let s = store();
+        let before = s.write_mark();
+        add(&s, H, "race");
+        assert_ne!(s.write_mark(), before, "the facts cache must see this as stale");
+    }
+}
+
+#[cfg(test)]
+mod jobs_nodes_drain_tests {
+    use super::*;
+
+    fn store() -> Store {
+        let s = Store::open_in_memory().expect("in-memory store");
+        s.ensure_schema().expect("schema");
+        s
+    }
+
+    const H: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const H2: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// ⭐ Without this gate a drain that runs every minute queues the same
+    /// graduation sixty times while the first copy is still going.
+    #[test]
+    fn a_job_already_in_flight_is_not_queued_again() {
+        let s = store();
+        assert!(!s.job_pending_for("graduate", H), "nothing is pending yet");
+        s.create_job("graduate", H, "{}", 100).unwrap();
+        assert!(s.job_pending_for("graduate", H), "the queued job is pending");
+    }
+
+    /// The gate is per KIND and per TORRENT: a move must not be blocked by a
+    /// graduation, and another torrent's job is not this torrent's.
+    #[test]
+    fn the_pending_gate_is_per_kind_and_per_torrent() {
+        let s = store();
+        s.create_job("graduate", H, "{}", 100).unwrap();
+        assert!(!s.job_pending_for("move", H), "a different kind is not pending");
+        assert!(!s.job_pending_for("graduate", H2), "another torrent is not this one");
+    }
+
+    /// A finished job stops being pending, or the torrent could never be
+    /// graduated a second time.
+    #[test]
+    fn a_finished_job_stops_blocking_the_next_one() {
+        let s = store();
+        let id = s.create_job("graduate", H, "{}", 100).unwrap();
+        let claimed = s.claim_next_job().expect("the queued job is claimable");
+        assert_eq!(claimed.id, id);
+        s.job_finish(&id, "").unwrap();
+        assert!(!s.job_pending_for("graduate", H), "a finished job is not in flight");
+    }
+
+    /// A job is claimed ONCE. Two workers claiming the same job would do the
+    /// same copy twice.
+    #[test]
+    fn a_job_is_claimed_only_once() {
+        let s = store();
+        s.create_job("move", H, "{}", 10).unwrap();
+        assert!(s.claim_next_job().is_some());
+        assert!(s.claim_next_job().is_none(), "the queue is empty now");
+    }
+
+    #[test]
+    fn claiming_from_an_empty_queue_is_none_not_an_error() {
+        let s = store();
+        assert!(s.claim_next_job().is_none());
+    }
+
+    #[test]
+    fn progress_and_completion_are_readable_back() {
+        let s = store();
+        let id = s.create_job("move", H, "{}", 1000).unwrap();
+        s.claim_next_job().unwrap();
+        s.job_progress(&id, 400).unwrap();
+        let j = s.job(&id).expect("the job is there");
+        assert_eq!(j.progress_bytes, 400);
+        assert_eq!(j.total_bytes, 1000);
+
+        s.job_finish(&id, "disk full").unwrap();
+        let done = s.job(&id).expect("still there after finishing");
+        assert_eq!(done.error, "disk full", "a failure keeps its reason");
+    }
+
+    #[test]
+    fn a_job_that_does_not_exist_is_none() {
+        let s = store();
+        assert!(s.job("no-such-job").is_none());
+    }
+
+    /// ⭐ A job left `running` by a crash must go back to the queue at boot,
+    /// or the work it was doing is never picked up again and never reported.
+    #[test]
+    fn a_job_left_running_by_a_crash_is_requeued_at_boot() {
+        let s = store();
+        s.create_job("move", H, "{}", 10).unwrap();
+        s.claim_next_job().expect("claimed, now running");
+        assert!(s.claim_next_job().is_none(), "nothing left queued");
+
+        assert_eq!(s.requeue_running_jobs(), 1);
+        assert!(s.claim_next_job().is_some(), "it is claimable again after the requeue");
+    }
+
+    #[test]
+    fn requeueing_with_nothing_running_changes_nothing() {
+        let s = store();
+        assert_eq!(s.requeue_running_jobs(), 0);
+    }
+
+    #[test]
+    fn the_job_listing_is_bounded_by_its_limit() {
+        let s = store();
+        for i in 0..5 {
+            s.create_job("move", &format!("{i}{}", &H[1..]), "{}", 1).unwrap();
+        }
+        assert_eq!(s.list_jobs(3).unwrap().len(), 3);
+        assert!(s.list_jobs(100).unwrap().len() >= 5);
+    }
+
+    fn node(name: &str, url: &str) -> Node {
+        Node {
+            name: name.into(),
+            url: url.into(),
+            api_key: "remote-key".into(),
+            enabled: true,
+            added_at: 1_700_000_000,
+        }
+    }
+
+    /// ⭐ The remote's key stays in the store and is injected server-side by
+    /// the relay: it must survive a round trip, because losing it silently
+    /// turns every fleet call into a 401.
+    #[test]
+    fn a_node_round_trips_with_its_key() {
+        let s = store();
+        s.put_node(&node("heracles", "http://10.0.0.5:8199")).unwrap();
+        let back = s.node("heracles").unwrap().expect("the node is stored");
+        assert_eq!(back.url, "http://10.0.0.5:8199");
+        assert_eq!(back.api_key, "remote-key");
+        assert!(back.enabled);
+    }
+
+    #[test]
+    fn putting_a_node_twice_updates_it_rather_than_duplicating_it() {
+        let s = store();
+        s.put_node(&node("heracles", "http://10.0.0.5:8199")).unwrap();
+        s.put_node(&node("heracles", "http://10.0.0.9:8199")).unwrap();
+        let all = s.nodes().unwrap();
+        assert_eq!(all.len(), 1, "one name is one node");
+        assert_eq!(all[0].url, "http://10.0.0.9:8199", "the newer address wins");
+    }
+
+    #[test]
+    fn deleting_a_node_reports_whether_there_was_one() {
+        let s = store();
+        s.put_node(&node("heracles", "http://10.0.0.5:8199")).unwrap();
+        assert!(s.delete_node("heracles").unwrap());
+        assert!(!s.delete_node("heracles").unwrap(), "the second call has nothing to delete");
+        assert!(s.nodes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unknown_node_is_none_not_an_error() {
+        let s = store();
+        assert!(s.node("nobody").unwrap().is_none());
+    }
+
+    /// ⭐ An enrolment token is ONE-TIME. A token that could be spent twice
+    /// would let a second machine register under the operator's single
+    /// intention.
+    #[test]
+    fn an_enrolment_token_is_spent_exactly_once() {
+        let s = store();
+        let (token, _expiry) = s.create_enrol_token(3600).unwrap();
+        assert!(s.consume_enrol_token(&token).unwrap(), "the first use works");
+        assert!(!s.consume_enrol_token(&token).unwrap(), "the second use does not");
+    }
+
+    #[test]
+    fn a_token_that_was_never_minted_cannot_be_spent() {
+        let s = store();
+        assert!(!s.consume_enrol_token("never-minted").unwrap());
+    }
+
+    /// ⭐ An expired token is refused. A ttl that is not enforced is not a ttl.
+    #[test]
+    fn an_expired_token_is_refused() {
+        let s = store();
+        let (token, _) = s.create_enrol_token(-1).unwrap();
+        assert!(!s.consume_enrol_token(&token).unwrap(), "already past its expiry");
+    }
+
+    #[test]
+    fn a_drain_pass_is_recorded_and_comes_back_newest_first() {
+        let s = store();
+        s.record_drain(100, "/mnt/race", 95.0, 80.0, 3, 1, 0, 1 << 30).unwrap();
+        s.record_drain(200, "/mnt/race", 92.0, 79.0, 2, 0, 1, 1 << 29).unwrap();
+        let hist = s.drain_history(10).unwrap();
+        assert_eq!(hist.len(), 2);
+        // The SQL column is `at`; the key served to the UI is `timestamp`.
+        assert_eq!(hist[0]["timestamp"].as_i64(), Some(200), "newest first");
+        assert_eq!(hist[0]["volume"], serde_json::json!("/mnt/race"));
+    }
+
+    /// ⭐ `removed_count` is deleted PLUS graduated: a graduated torrent left
+    /// the volume just as surely as a deleted one, and counting only the
+    /// deletions understates what the pass actually freed.
+    #[test]
+    fn a_drain_pass_counts_graduations_as_removals_too() {
+        let s = store();
+        s.record_drain(100, "/mnt/race", 95.0, 80.0, 3, 2, 1, 1 << 30).unwrap();
+        let hist = s.drain_history(1).unwrap();
+        assert_eq!(hist[0]["deleted"].as_i64(), Some(3));
+        assert_eq!(hist[0]["graduated"].as_i64(), Some(2));
+        assert_eq!(hist[0]["removed_count"].as_i64(), Some(5), "3 deleted + 2 graduated");
+        assert_eq!(hist[0]["stuck"].as_i64(), Some(1));
+    }
+
+    #[test]
+    fn the_drain_history_is_bounded_by_its_limit() {
+        let s = store();
+        for at in 0..5 {
+            s.record_drain(at, "/mnt/race", 90.0, 80.0, 1, 0, 0, 1).unwrap();
+        }
+        assert_eq!(s.drain_history(2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_empty_drain_history_is_a_list_not_a_null() {
+        let s = store();
+        assert!(s.drain_history(10).unwrap().is_empty());
+    }
+
+    /// Tags are registered so the UI can offer them before any torrent wears
+    /// one; unregistering removes them again.
+    #[test]
+    fn tags_can_be_registered_and_unregistered() {
+        let s = store();
+        s.register_tags(&["fr".into(), "anime".into()]).unwrap();
+        let mut got = s.registered_tags().unwrap();
+        got.sort();
+        assert_eq!(got, vec!["anime".to_string(), "fr".to_string()]);
+
+        s.unregister_tags(&["fr".into()]).unwrap();
+        assert_eq!(s.registered_tags().unwrap(), vec!["anime".to_string()]);
+    }
+
+    #[test]
+    fn registering_the_same_tag_twice_does_not_duplicate_it() {
+        let s = store();
+        s.register_tags(&["fr".into()]).unwrap();
+        s.register_tags(&["fr".into()]).unwrap();
+        assert_eq!(s.registered_tags().unwrap().len(), 1);
+    }
+
+    /// Workflow activity is the audit trail: what a rule did, to what, and
+    /// whether it worked.
+    #[test]
+    fn workflow_activity_is_recorded_and_read_back_newest_first() {
+        let s = store();
+        for at in [100i64, 200] {
+            s.log_workflow_activity(&ActivityEntry {
+                at,
+                workflow_id: "wf1".into(),
+                workflow_name: "ratio reached".into(),
+                info_hash: H.into(),
+                torrent_name: "something".into(),
+                action: "pause".into(),
+                outcome: "applied".into(),
+                detail: String::new(),
+            })
+            .unwrap();
+        }
+        let rows = s.workflow_activity(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].at, 200, "newest first");
+        assert_eq!(rows[0].outcome, "applied");
+    }
+
+    /// The trail is pruned by age, and pruning must not take the recent
+    /// entries with it.
+    #[test]
+    fn pruning_the_trail_keeps_what_is_newer_than_the_cutoff() {
+        let s = store();
+        for at in [100i64, 500] {
+            s.log_workflow_activity(&ActivityEntry {
+                at,
+                workflow_id: "wf1".into(),
+                workflow_name: "w".into(),
+                info_hash: H.into(),
+                torrent_name: "t".into(),
+                action: "pause".into(),
+                outcome: "applied".into(),
+                detail: String::new(),
+            })
+            .unwrap();
+        }
+        assert_eq!(s.prune_workflow_activity(300).unwrap(), 1, "only the old one goes");
+        let rows = s.workflow_activity(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].at, 500);
+    }
+
+    /// A workflow round-trips, and deleting it reports whether there was one.
+    #[test]
+    fn a_workflow_round_trips_and_can_be_deleted() {
+        let s = store();
+        let w = StoredWorkflow {
+            id: "wf1".into(),
+            name: "ratio reached".into(),
+            body: r#"{"when":null,"then":[]}"#.into(),
+            enabled: true,
+            position: 0,
+            interval_secs: 900,
+            last_run: 0,
+        };
+        s.put_workflow(&w).unwrap();
+        let back = s.workflow("wf1").unwrap().expect("stored");
+        assert_eq!(back.name, "ratio reached");
+        assert_eq!(s.workflows().unwrap().len(), 1);
+
+        s.mark_workflow_run("wf1", 12345).unwrap();
+        assert_eq!(s.workflow("wf1").unwrap().unwrap().last_run, 12345);
+
+        assert!(s.delete_workflow("wf1").unwrap());
+        assert!(!s.delete_workflow("wf1").unwrap());
+    }
+
+    /// Seeding times are written in bulk, and the count says how many rows the
+    /// write actually touched -- a silent zero is how a sync looks when it is
+    /// addressing rows that are not there.
+    #[test]
+    fn a_bulk_seeding_time_write_reports_what_it_touched() {
+        let s = store();
+        s.insert_torrent(H, "race", b"d4:infod4:name1:aee", "/data", "", 1.0, false, "")
+            .unwrap();
+        let touched = s.update_seeding_times(&[(H.to_string(), 3600)]).unwrap();
+        assert_eq!(touched, 1);
+
+        let none = s.update_seeding_times(&[(H2.to_string(), 100)]).unwrap();
+        assert_eq!(none, 0, "a hash the store does not hold touches nothing");
+    }
+
+    #[test]
+    fn a_meta_document_round_trips_and_is_absent_until_written() {
+        let s = store();
+        assert!(s.meta_doc("nothing-here").is_none());
+        s.put_meta("k", "{\"a\":1}").unwrap();
+        assert_eq!(s.meta_doc("k").as_deref(), Some("{\"a\":1}"));
+    }
+}

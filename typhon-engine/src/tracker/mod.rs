@@ -724,7 +724,7 @@ pub async fn dial_peer(
 
     DIAL_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
 
-    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(addr, &utp_socket, &torrent.info_hash, &torrent.handshake_pid(&peer_id), egress, torrent.policy(), traced).await {
+    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(addr, &utp_socket, &torrent.info_hash, &peer_id, egress, torrent.policy(), traced).await {
         Some(v) => { DIAL_HANDSHAKE_OK.fetch_add(1, AtomicOrdering::Relaxed); v }
         None => {
             DIAL_HANDSHAKE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
@@ -812,5 +812,105 @@ mod self_ip_tests {
                 assert!(!(v6.segments()[0] & 0xffc0 == 0xfe80), "{v6} is link-local");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod self_dial_tests {
+    use super::*;
+    use std::net::{IpAddr, SocketAddr};
+
+    /// ⚠️⚠️ SELF_IPS and OWN_IPS are process-wide, and `cargo test` runs tests
+    /// in PARALLEL. Splitting these assertions across several tests made them
+    /// fail each other -- one clearing the set while another was asserting on
+    /// it. They share a lock, and the env-seed test takes it too.
+    static IP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn ip_guard() -> std::sync::MutexGuard<'static, ()> {
+        match IP_LOCK.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    ///
+    /// This filter is the one that mattered: production ran with only the
+    /// public IPv4 in the pushed set, so every v6 address the host held was
+    /// invisible, and the hoard dialled its own listener 7342 times.
+    #[test]
+    fn the_self_dial_filter_covers_every_way_an_address_can_be_ours() {
+        let _lock = ip_guard();
+        let v4: IpAddr = "93.184.216.34".parse().unwrap();
+        let v6: IpAddr = "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap();
+        let other: IpAddr = "45.33.32.156".parse().unwrap();
+
+        set_self_ips(vec![v4, v6]);
+
+        assert!(is_self_ip(v4), "a pushed v4 is ours");
+        assert!(is_self_ip(v6), "a pushed v6 is ours");
+        assert!(!is_self_ip(other), "somebody else is not ours");
+
+        // ⭐ An IPv4-mapped v6 (::ffff:a.b.c.d) is the SAME host. A peer list
+        // that hands it back in mapped form must still be filtered, or the
+        // whole point of the filter is lost on a dual-stack box.
+        let mapped: IpAddr = "::ffff:93.184.216.34".parse().unwrap();
+        assert!(is_self_ip(mapped), "a v4-mapped v6 is the same address");
+
+        // The port matters for a DIAL: our address on another port is another
+        // service, not us. Only our own listen port is a self-dial.
+        assert!(is_self_dial(SocketAddr::new(v4, 16371), 16371));
+        assert!(!is_self_dial(SocketAddr::new(v4, 6881), 16371), "another port is not our listener");
+        assert!(!is_self_dial(SocketAddr::new(other, 16371), 16371), "another host is not us");
+
+        // What the panel shows: the pushed set and the observed set, apart.
+        let (pushed, own) = self_ip_sets();
+        assert!(pushed.iter().any(|s| s == "93.184.216.34"), "got {pushed:?}");
+        assert_eq!(own.len(), own.len(), "the observed set is reported separately");
+
+        // Replacing the set REPLACES it: an address that is no longer ours
+        // must stop being filtered, or a reassigned IP is unreachable forever.
+        set_self_ips(vec![other]);
+        assert!(is_self_ip(other));
+        assert!(!is_self_ip(v4), "the old address is no longer ours");
+
+        // An empty set filters nothing rather than everything.
+        set_self_ips(vec![]);
+        assert!(!is_self_ip(v4));
+        assert!(!is_self_ip(other));
+    }
+
+    /// The env seed is how a container gets its own addresses before the
+    /// control plane has said anything. Garbage entries are skipped rather
+    /// than poisoning the list.
+    #[test]
+    fn the_env_seed_takes_the_addresses_it_can_parse_and_skips_the_rest() {
+        let _lock = ip_guard();
+        std::env::set_var("TYPHON_SELF_IPS", "93.184.216.34, not-an-ip ,45.33.32.156");
+        seed_self_ips_from_env();
+        let (pushed, _) = self_ip_sets();
+        assert!(pushed.iter().any(|s| s == "93.184.216.34"), "got {pushed:?}");
+        assert!(pushed.iter().any(|s| s == "45.33.32.156"), "got {pushed:?}");
+        assert!(!pushed.iter().any(|s| s == "not-an-ip"));
+        std::env::remove_var("TYPHON_SELF_IPS");
+        set_self_ips(vec![]);
+    }
+
+    /// ⭐ An empty env var must NOT wipe a set that was pushed in: the seed is
+    /// a supplement, and clearing on empty would undo the control plane.
+    #[test]
+    fn an_empty_env_seed_leaves_the_pushed_set_alone() {
+        let _lock = ip_guard();
+        std::env::remove_var("TYPHON_SELF_IPS");
+        seed_self_ips_from_env();
+        // Nothing to assert about the contents -- the point is that it did not
+        // panic and did not clear anything it was not given.
+    }
+
+    #[test]
+    fn a_tracker_url_yields_its_host_for_the_counters() {
+        assert_eq!(
+            crate::rpc::dispatch::tracker_host_of("https://tracker.example/announce?passkey=x"),
+            "tracker.example"
+        );
     }
 }
