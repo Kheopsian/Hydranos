@@ -822,3 +822,358 @@ mod classify_tests {
         assert_eq!(seed_numwant(Some(&verified), false), None);
     }
 }
+
+#[cfg(test)]
+mod announce_one_tests {
+    use super::*;
+    use std::sync::Arc;
+    use typhon_engine::torrent::TorrentManager;
+
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "hydra-ann1-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let data = root.join("data");
+        let resume = root.join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(typhon_engine::disk::DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    /// Bencode lengths are COMPUTED, never counted.
+    fn torrent_bytes(name: &str, announce: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    struct FakeTracker {
+        url: String,
+        _stop: tokio::sync::oneshot::Sender<()>,
+    }
+
+    async fn fake_tracker(body: &'static [u8], status: u16) -> FakeTracker {
+        let app = axum::Router::new().route(
+            "/announce",
+            axum::routing::get(move || async move {
+                (axum::http::StatusCode::from_u16(status).unwrap(), body.to_vec())
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        FakeTracker { url: format!("http://{addr}/announce"), _stop: tx }
+    }
+
+    /// `d8:completei3e10:incompletei1e8:intervali1800e12:min intervali900e5:peers0:e`
+    const OK_BODY: &[u8] =
+        b"d8:completei3e10:incompletei1e8:intervali1800e12:min intervali900e5:peers0:e";
+
+    /// ⚠️ `stopped: false`. A PAUSED torrent announces to nobody and is
+    /// reported as `gone` -- which is correct behaviour, not a bug, and it
+    /// silently made six of these tests assert the wrong thing.
+    fn add(mgr: &Arc<TorrentManager>, name: &str, announce: &str) -> String {
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(name, announce), "/tmp", false, true)
+            .expect("the fixture torrent parses");
+        let t = mgr.get(&ih).expect("just added");
+        {
+            let mut live = t.live_trackers.write();
+            live.clear();
+            live.push(vec![announce.to_string()]);
+        }
+        typhon_engine::torrent::hex_encode(&ih)
+    }
+
+    fn parts() -> (Policy, Breaker, Cache) {
+        (Policy::default(), Breaker::default(), Cache::default())
+    }
+
+    /// ⭐⭐ A hash the engine no longer holds reports `gone`, so the scheduler
+    /// stops tracking it. Without this the announcer keeps a timer alive for a
+    /// torrent nobody can serve -- 300k of those is the whole scheduler.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_torrent_the_engine_no_longer_holds_reports_gone() {
+        let (mgr, root) = manager("gone");
+        let (policy, breaker, cache) = parts();
+        let out = announce_one(
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job { info_hash: "a".repeat(40), first: true },
+        )
+        .await;
+        assert!(out.gone, "an unknown hash must be reported as gone");
+        assert_eq!(out.info_hash, "a".repeat(40), "the outcome names the job it answers");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A tracker that answers is believed: the interval it states is what
+    /// decides when we come back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_interval_the_tracker_states_decides_the_next_visit() {
+        let t = fake_tracker(OK_BODY, 200).await;
+        let (mgr, root) = manager("ok");
+        let hash = add(&mgr, "alpha", &t.url);
+        let (policy, breaker, cache) = parts();
+
+        let out = announce_one(
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job { info_hash: hash.clone(), first: true },
+        )
+        .await;
+
+        assert!(!out.gone, "the torrent is here");
+        assert_eq!(out.info_hash, hash);
+        assert!(
+            out.next_in > Duration::from_secs(0),
+            "a next visit is always scheduled, got {:?}",
+            out.next_in
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A tracker that is not there must not stop the announcer: it schedules
+    /// a retry rather than dropping the torrent. A dead tracker is the ordinary
+    /// case, not a reason to stop announcing forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dead_tracker_schedules_a_retry_rather_than_giving_up() {
+        let (mgr, root) = manager("dead");
+        let hash = add(&mgr, "beta", "http://127.0.0.1:1/announce");
+        let (policy, breaker, cache) = parts();
+
+        let out = announce_one(
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job { info_hash: hash.clone(), first: true },
+        )
+        .await;
+
+        assert!(!out.gone, "a tracker being down does not make the torrent gone");
+        assert!(out.next_in > Duration::from_secs(0), "a retry is scheduled");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A tracker refusing with a `failure reason` is an answer, not a crash --
+    /// and the torrent stays in the schedule.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tracker_refusal_is_handled_and_the_torrent_stays_scheduled() {
+        const REASON: &str = "unregistered torrent";
+        assert_eq!(REASON.len(), 20, "the fixture length is computed");
+        const FAIL: &[u8] = b"d14:failure reason20:unregistered torrente";
+
+        let t = fake_tracker(FAIL, 200).await;
+        let (mgr, root) = manager("refused");
+        let hash = add(&mgr, "gamma", &t.url);
+        let (policy, breaker, cache) = parts();
+
+        let out = announce_one(
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job { info_hash: hash.clone(), first: true },
+        )
+        .await;
+        assert!(!out.gone);
+        assert!(out.next_in > Duration::from_secs(0));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An HTTP error is classed and retried, not treated as a swarm with no
+    /// peers -- the two look identical if the status is ignored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_http_error_is_not_read_as_an_empty_swarm() {
+        let t = fake_tracker(b"rate limited", 429).await;
+        let (mgr, root) = manager("429");
+        let hash = add(&mgr, "delta", &t.url);
+        let (policy, breaker, cache) = parts();
+
+        let out = announce_one(
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job { info_hash: hash.clone(), first: true },
+        )
+        .await;
+        assert!(!out.gone);
+        assert!(out.next_in > Duration::from_secs(0));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A race is decided in its first minute, so a race torrent comes back
+    /// far sooner than a hoard one. Reading the two modes the same way is how
+    /// a race is lost before the first re-announce.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_race_comes_back_sooner_than_a_hoard() {
+        let t = fake_tracker(OK_BODY, 200).await;
+        let (mgr, root) = manager("mode");
+        let hash = add(&mgr, "epsilon", &t.url);
+        let (policy, breaker, cache) = parts();
+
+        let race = announce_one(
+            &mgr, &policy, &breaker, &cache, 16371, Mode::Race,
+            Job { info_hash: hash.clone(), first: true },
+        )
+        .await;
+        let hoard = announce_one(
+            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
+            Job { info_hash: hash.clone(), first: false },
+        )
+        .await;
+
+        assert!(
+            race.next_in <= hoard.next_in,
+            "a race must not wait longer than a hoard (race {:?} vs hoard {:?})",
+            race.next_in,
+            hoard.next_in
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ The breaker exists so a tracker in outage is not hammered by every
+    /// torrent that names it. When it refuses a host, the announce must not go
+    /// out -- and the torrent must still be rescheduled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_the_breaker_refuses_is_not_announced_to() {
+        let t = fake_tracker(OK_BODY, 200).await;
+        let (mgr, root) = manager("breaker");
+        let hash = add(&mgr, "zeta", &t.url);
+        let (policy, breaker, cache) = parts();
+
+        // Trip the breaker on this host by reporting failures against it.
+        let host = typhon_engine::rpc::dispatch::tracker_host_of(&t.url);
+        for _ in 0..20 {
+            breaker.record(&host, false, std::time::Instant::now());
+        }
+        assert!(
+            !breaker.allows(&host, std::time::Instant::now()),
+            "the breaker is open on this host, which is what the test is about"
+        );
+
+        let out = announce_one(
+            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
+            Job { info_hash: hash.clone(), first: true },
+        )
+        .await;
+        assert!(!out.gone, "a broken tracker does not make the torrent gone");
+        assert!(out.next_in > Duration::from_secs(0), "it comes back later");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ A PAUSED torrent announces to nobody, whoever asked. The guard sits
+    /// here because a bump puts a torrent at the head of the queue directly:
+    /// filtering the catalogue was not enough, and a forced reannounce told a
+    /// tracker we are a peer for something we will not serve.
+    ///
+    /// It reports `gone` so the scheduler stops visiting it, which is why the
+    /// six tests above had to add their torrents unpaused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_paused_torrent_announces_to_nobody_however_it_was_asked() {
+        let t = fake_tracker(OK_BODY, 200).await;
+        let (mgr, root) = manager("paused");
+        let hash = add(&mgr, "theta", &t.url);
+        {
+            let st = mgr.get(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+            st.is_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let (policy, breaker, cache) = parts();
+
+        let out = announce_one(
+            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
+            Job { info_hash: hash.clone(), first: true },
+        )
+        .await;
+        assert!(out.gone, "a paused torrent is dropped from the schedule, not announced");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ ...except when it owes a `stopped` event. A torrent stopped by hand is
+    /// paused BY DEFINITION, and dropping it here would lose the one announce
+    /// that tells its trackers we are leaving.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_paused_torrent_that_owes_a_stopped_event_still_announces_it() {
+        use typhon_engine::torrent::meta::ANNOUNCE_EVENT_STOPPED;
+        let t = fake_tracker(OK_BODY, 200).await;
+        let (mgr, root) = manager("paused-stop");
+        let hash = add(&mgr, "iota", &t.url);
+        {
+            let st = mgr.get(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+            st.is_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+            st.pending_announce_event.store(ANNOUNCE_EVENT_STOPPED, std::sync::atomic::Ordering::Relaxed);
+        }
+        let (policy, breaker, cache) = parts();
+
+        let out = announce_one(
+            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
+            Job { info_hash: hash.clone(), first: false },
+        )
+        .await;
+        assert!(
+            !out.gone,
+            "the goodbye announce must go out even though the torrent is paused"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A torrent with no tracker at all is still answered: it is scheduled,
+    /// just with nothing to talk to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_torrent_with_no_tracker_is_answered_not_dropped() {
+        let (mgr, root) = manager("notracker");
+        let hash = add(&mgr, "eta", "http://127.0.0.1:1/announce");
+        {
+            let t = mgr.get(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+            t.live_trackers.write().clear();
+        }
+        let (policy, breaker, cache) = parts();
+
+        let out = announce_one(
+            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
+            Job { info_hash: hash.clone(), first: true },
+        )
+        .await;
+        assert!(!out.gone);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

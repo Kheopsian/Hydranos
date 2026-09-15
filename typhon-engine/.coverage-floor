@@ -9,4 +9,4 @@
 # Raise it when a run comes in comfortably above: `cargo llvm-cov` prints the
 # figure, and moving this line is the whole of it. Never lower it without
 # saying why in the commit message.
-71.0
+72.0
