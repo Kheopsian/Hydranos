@@ -1259,3 +1259,202 @@ mod drain_tests {
         assert!(mgr.all().is_empty());
     }
 }
+
+#[cfg(test)]
+mod drain_policy_gate_tests {
+    use super::*;
+    use crate::volumes::{Policy, Volume};
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// A volume reported as `used_pct` full, with the policy the test is about.
+    fn volume(used_pct: u64, enabled: bool, high: i64, low: i64) -> Volume {
+        let total = 100_000_000_000u64;
+        Volume {
+            id: "/mnt/race".into(),
+            dev: 1,
+            total,
+            used: total / 100 * used_pct,
+            free: total - total / 100 * used_pct,
+            torrents: 1,
+            policy: Policy { enabled, high, low, inherited: true },
+        }
+    }
+
+    /// State with `n` seeding torrents on the race engine, each announcing to
+    /// `tracker.example` and having seeded `seeded_secs`.
+    fn state_with_torrents(
+        tag: &str,
+        toml_src: &str,
+        n: usize,
+        seeded_secs: i64,
+    ) -> crate::api::testing::TestState {
+        let s = crate::api::testing::state_from(tag, toml_src);
+        let engines = s.engines.engines();
+        let engine = engines.iter().find(|e| e.id == "race").expect("a race engine");
+        for i in 0..n {
+            let name = format!("t{i}");
+            let (ih, _) = engine
+                .manager
+                .add_torrent_bytes(&torrent_bytes(&name), "/tmp", true, true)
+                .unwrap_or_else(|e| panic!("add {name}: {e}"));
+            let t = engine.manager.get(&ih).expect("just added");
+            {
+                let mut live = t.live_trackers.write();
+                live.clear();
+                live.push(vec!["https://tracker.example/announce".to_string()]);
+            }
+            t.seed_secs.store(seeded_secs, std::sync::atomic::Ordering::Relaxed);
+            t.seed_since.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        s
+    }
+
+    fn race_manager(s: &crate::api::testing::TestState) -> Arc<TorrentManager> {
+        s.engines
+            .engines()
+            .iter()
+            .find(|e| e.id == "race")
+            .expect("a race engine")
+            .manager
+            .clone()
+    }
+
+    /// ⭐⭐ Gate one: the drain DELETES DATA, so it does nothing at all unless
+    /// the operator turned it on. A default install must never lose a torrent
+    /// to a background task nobody asked for.
+    #[test]
+    fn a_disabled_drain_deletes_nothing_however_full_the_disk_is() {
+        let toml = format!(
+            "[daemon]\napi_key = \"{KEY}\"\n\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n"
+        );
+        let s = state_with_torrents("drain-off", &toml, 3, 100_000);
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+
+        let out = drain_once(&s.state, &mgr, &volume(99, false, 90, 80), &cfg, "race");
+        assert_eq!(out.deleted, 0, "a disabled drain must not delete");
+        assert_eq!(out.freed_bytes, 0);
+        assert_eq!(mgr.all().len(), 3, "the library is intact");
+    }
+
+    /// ⭐ Gate two: nothing happens until the volume is over ITS OWN high
+    /// watermark. The gap between high and low is what stops it running again
+    /// on the next tick.
+    #[test]
+    fn a_volume_below_its_high_watermark_is_left_alone() {
+        let toml = format!(
+            "[daemon]\napi_key = \"{KEY}\"\n\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n"
+        );
+        let s = state_with_torrents("drain-under", &toml, 3, 100_000);
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+
+        let out = drain_once(&s.state, &mgr, &volume(50, true, 90, 80), &cfg, "race");
+        assert_eq!(out.deleted, 0, "half full is not over the watermark");
+        assert_eq!(mgr.all().len(), 3);
+    }
+
+    /// ⚠️⚠️ THE race policy, at the place it decides: a tracker for which the
+    /// operator declared NO seed obligation is PROTECTED. The disk being full
+    /// is not a reason to drop a torrent whose rules nobody wrote down.
+    #[test]
+    fn an_undeclared_tracker_is_never_drained_even_on_a_full_disk() {
+        // No [announce_min_seed_hours] at all: nothing is declared.
+        let toml = format!("[daemon]\napi_key = \"{KEY}\"\n");
+        let s = state_with_torrents("drain-undeclared", &toml, 3, 10_000_000);
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+
+        let out = drain_once(&s.state, &mgr, &volume(99, true, 90, 80), &cfg, "race");
+        assert_eq!(
+            out.deleted, 0,
+            "an undeclared tracker is protected, whatever the disk says"
+        );
+        assert_eq!(mgr.all().len(), 3, "every torrent survived");
+    }
+
+    /// A torrent that has NOT yet served its declared time is not free to go
+    /// either -- that is the obligation the whole policy exists to honour.
+    #[test]
+    fn a_torrent_short_of_its_declared_seed_time_is_not_drained() {
+        let toml = format!(
+            "[daemon]\napi_key = \"{KEY}\"\n\n[announce_min_seed_hours]\n\"tracker.example\" = \"72\"\n"
+        );
+        // One hour served against seventy-two owed.
+        let s = state_with_torrents("drain-short", &toml, 3, 3600);
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+
+        let out = drain_once(&s.state, &mgr, &volume(99, true, 90, 80), &cfg, "race");
+        assert_eq!(out.deleted, 0, "the obligation is not met yet");
+        assert_eq!(mgr.all().len(), 3);
+    }
+
+    /// An empty engine is a no-op, not a panic: the drain runs on a timer and
+    /// will meet this state on every fresh install.
+    #[test]
+    fn draining_an_engine_that_holds_nothing_is_a_no_op() {
+        let toml = format!("[daemon]\napi_key = \"{KEY}\"\n");
+        let s = crate::api::testing::state_from("drain-empty", &toml);
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+
+        let out = drain_once(&s.state, &mgr, &volume(99, true, 90, 80), &cfg, "race");
+        assert_eq!(out.deleted, 0);
+        assert_eq!(out.graduated, 0);
+        assert_eq!(out.freed_bytes, 0);
+    }
+
+    /// A volume of size zero must not be read as 100% full and trigger a
+    /// deletion sweep -- the same NaN trap the `used_pct` guard exists for.
+    #[test]
+    fn a_volume_with_no_size_does_not_trigger_a_sweep() {
+        let toml = format!(
+            "[daemon]\napi_key = \"{KEY}\"\n\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n"
+        );
+        let s = state_with_torrents("drain-zero", &toml, 2, 100_000);
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+
+        let mut v = volume(0, true, 90, 80);
+        v.total = 0;
+        v.used = 0;
+        v.free = 0;
+        let out = drain_once(&s.state, &mgr, &v, &cfg, "race");
+        assert_eq!(out.deleted, 0, "a zero-size volume is 0%, not 100%");
+        assert_eq!(mgr.all().len(), 2);
+    }
+
+    /// The outcome is a report, and its fields must agree with each other: no
+    /// freed bytes without a deletion.
+    #[test]
+    fn the_outcome_never_reports_freed_bytes_without_a_deletion() {
+        let toml = format!("[daemon]\napi_key = \"{KEY}\"\n");
+        let s = state_with_torrents("drain-report", &toml, 2, 10_000_000);
+        let mgr = race_manager(&s);
+        let cfg = s.cfg();
+
+        let out = drain_once(&s.state, &mgr, &volume(99, true, 90, 80), &cfg, "race");
+        if out.deleted == 0 {
+            assert_eq!(out.freed_bytes, 0, "nothing deleted, nothing freed");
+        }
+    }
+}
