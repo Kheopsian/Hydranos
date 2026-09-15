@@ -17,6 +17,33 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.27.1 -- a keep-alive is not activity
+
+### Fixed: a peer that only breathes is no longer immortal
+
+`PEER_IDLE_TIMEOUT` is 300 s and had never once fired. Every frame from a peer
+pushed the deadline out -- including `KeepAlive`, which BEP 3 has clients send
+every ~2 min precisely to hold an idle connection open. A peer that did nothing
+else reset the timeout for ever, and only the peer itself ever closed such a
+connection.
+
+Measured on the production hoard at 32 h of uptime: 16 000 standing peer
+connections, climbing ~350/h with no plateau, reset to ~1 000 by every restart.
+`lastrcv` p50 33 s (the connection is alive) next to `bytes_sent` p50 305 bytes
+(a handshake, and nothing since); 86 % had sent 1 KB or less in their whole
+life. Not a socket leak -- sockets that breathe and carry nothing.
+
+Only a useful frame now pushes the deadline. No new ceiling and no tunable:
+`max_connections` would not have helped even if set, since it bounds what we
+dial, and 14 472 of those 17 046 connections were inbound.
+
+### Fixed: a peer that seeds up while connected is dropped too
+
+Seed-to-seed connections were already cut on `Bitfield` and `HaveAll` (25 253 128
+drops in 32 h), but `Message::Have` set `is_seed` and kept the socket, so a peer
+that finished piece by piece while connected to us escaped the rule. Same exit,
+same counter.
+
 ## Unreleased
 
 ### Race drain, per volume
