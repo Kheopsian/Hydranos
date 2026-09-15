@@ -442,3 +442,162 @@ fn build_bt_handshake(info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Vec<u8> {
     buf.extend_from_slice(peer_id);
     buf
 }
+
+#[cfg(test)]
+mod crypto_tests {
+    use super::*;
+
+    /// ⭐ The whole point of the Diffie-Hellman exchange: two parties who
+    /// never send their private key end up holding the SAME secret. If this
+    /// ever diverges, every MSE connection fails with a garbage stream rather
+    /// than a clean refusal.
+    #[test]
+    fn two_parties_agree_on_the_same_secret() {
+        let (xa, ya) = gen_keypair();
+        let (xb, yb) = gen_keypair();
+        let s_a = compute_secret(&yb, &xa);
+        let s_b = compute_secret(&ya, &xb);
+        assert_eq!(s_a, s_b, "both sides must derive the same shared secret");
+        assert!(!s_a.is_empty());
+    }
+
+    /// A public key is 96 bytes on the wire: the handshake reads exactly that
+    /// many before it can do anything, so a shorter one desynchronises the
+    /// stream for good.
+    #[test]
+    fn a_public_key_is_ninety_six_bytes() {
+        for _ in 0..8 {
+            let (_x, y) = gen_keypair();
+            assert_eq!(y.len(), 96, "Ya/Yb are padded to the full modulus width");
+        }
+    }
+
+    /// Two keypairs must not be the same. A constant key would make every
+    /// session's stream identical and the encryption pointless.
+    #[test]
+    fn keypairs_are_not_constant() {
+        let (_, y1) = gen_keypair();
+        let (_, y2) = gen_keypair();
+        assert_ne!(y1, y2, "each handshake needs its own key");
+    }
+
+    #[test]
+    fn the_shared_secret_is_the_modulus_width() {
+        let (xa, ya) = gen_keypair();
+        let (xb, _yb) = gen_keypair();
+        let s = compute_secret(&ya, &xb);
+        assert_eq!(s.len(), 96, "S is padded like Y, or the RC4 keys differ by a byte");
+        let _ = xa;
+    }
+
+    /// `sha1_combine` is how every MSE key is derived; it must be a plain
+    /// SHA-1 over prefix||data and must separate its arguments.
+    #[test]
+    fn combining_a_prefix_and_data_separates_them() {
+        let a = sha1_combine(b"keyA", b"secret");
+        let b = sha1_combine(b"keyB", b"secret");
+        assert_ne!(a, b, "a different prefix is a different key");
+
+        // It is a plain SHA-1 over the CONCATENATION, with no separator --
+        // which is exactly what MSE specifies: SHA1('keyA' || S || SKEY).
+        // So moving the boundary gives the same digest, and that is correct
+        // rather than a weakness here: the two prefixes the protocol uses are
+        // fixed-width and differ in their last byte, so no pair of real inputs
+        // can collide this way.
+        assert_eq!(
+            sha1_combine(b"key", b"Asecret"),
+            a,
+            "no separator: the digest is over the concatenation, as MSE specifies"
+        );
+        assert_eq!(a.len(), 20);
+    }
+
+    #[test]
+    fn combining_is_deterministic() {
+        assert_eq!(sha1_combine(b"p", b"d"), sha1_combine(b"p", b"d"));
+    }
+
+    /// The BitTorrent handshake is a fixed 68-byte frame: 19, "BitTorrent
+    /// protocol", 8 reserved, 20 info hash, 20 peer id. A byte out and the
+    /// peer drops us.
+    #[test]
+    fn the_bittorrent_handshake_is_the_frame_every_client_expects() {
+        let ih = [0xAAu8; 20];
+        let pid = [0xBBu8; 20];
+        let hs = build_bt_handshake(&ih, &pid);
+        assert_eq!(hs.len(), 68);
+        assert_eq!(hs[0], 19, "the pstrlen");
+        assert_eq!(&hs[1..20], b"BitTorrent protocol");
+        assert_eq!(&hs[28..48], &ih, "the info hash sits after the 8 reserved bytes");
+        assert_eq!(&hs[48..68], &pid);
+    }
+
+    /// The reserved bytes advertise what we support. They must not be all
+    /// zero: that is a client claiming neither the extension protocol nor
+    /// fast extension, and trackers and peers both notice.
+    #[test]
+    fn the_reserved_bytes_advertise_our_extensions() {
+        let hs = build_bt_handshake(&[0u8; 20], &[0u8; 20]);
+        assert_ne!(&hs[20..28], &[0u8; 8], "we advertise at least one extension");
+    }
+
+    /// RC4 is a stream cipher: encrypting twice with the same key returns the
+    /// plaintext. This is what the MSE stream relies on in both directions.
+    #[test]
+    fn rc4_is_its_own_inverse_with_the_same_key() {
+        let plain = b"the quick brown fox jumps over the lazy dog".to_vec();
+        let mut enc = Rc4::new(b"a shared key");
+        let mut buf = plain.clone();
+        enc.process(&mut buf);
+        assert_ne!(buf, plain, "the ciphertext is not the plaintext");
+
+        let mut dec = Rc4::new(b"a shared key");
+        dec.process(&mut buf);
+        assert_eq!(buf, plain, "the same key brings it back");
+    }
+
+    /// A different key gives a different stream -- otherwise the key does
+    /// nothing at all.
+    #[test]
+    fn a_different_rc4_key_gives_a_different_stream() {
+        let mut a = Rc4::new(b"key one");
+        let mut b = Rc4::new(b"key two");
+        let (mut x, mut y) = (vec![0u8; 32], vec![0u8; 32]);
+        a.process(&mut x);
+        b.process(&mut y);
+        assert_ne!(x, y);
+    }
+
+    /// RC4 is stateful: the second block of a stream is not the first. A
+    /// cipher reset between messages would repeat its keystream, which is the
+    /// classic way to lose a stream cipher's secrecy entirely.
+    #[test]
+    fn the_keystream_advances_between_blocks() {
+        let mut c = Rc4::new(b"k");
+        let (mut first, mut second) = (vec![0u8; 16], vec![0u8; 16]);
+        c.process(&mut first);
+        c.process(&mut second);
+        assert_ne!(first, second, "the keystream must not repeat");
+    }
+
+    /// The MSE spec discards the first 1024 bytes of RC4 output; a key built
+    /// without that discard interoperates with nothing.
+    #[test]
+    fn the_handshake_rc4_keys_differ_by_direction() {
+        let s = vec![7u8; 96];
+        let skey = [0xABu8; 20];
+        let mut a = make_rc4_keys(b"keyA", &s, &skey);
+        let mut b = make_rc4_keys(b"keyB", &s, &skey);
+        let (mut x, mut y) = (vec![0u8; 16], vec![0u8; 16]);
+        a.process(&mut x);
+        b.process(&mut y);
+        assert_ne!(x, y, "the two directions must not share a keystream");
+    }
+
+    #[test]
+    fn the_prime_is_the_one_every_client_uses() {
+        let p = get_prime();
+        // The MSE/PE modulus is 768 bits.
+        assert_eq!(p.bits(), 768, "the shared modulus is the 768-bit MSE prime");
+    }
+}

@@ -134,7 +134,7 @@ pub async fn run(
     }
 
     // BEP 10 extension handshake (skip on private trackers — BEP 27).
-    let mut peer_ext = if lt_ext && !torrent.meta.private && listen_port != 0 {
+    let mut peer_ext = if lt_ext && torrent.meta.allows_peer_discovery() && listen_port != 0 {
         // Advertise the info dict size so peers know they can fetch it from us.
         let meta_size = if torrent.meta.info_dict_len > 0 {
             Some(torrent.meta.info_dict_len as usize)
@@ -230,6 +230,35 @@ pub async fn run(
         }
 
         tokio::select! {
+            // Another peer's task asked us to introduce this one. Woken rather
+            // than polled: an idle seeding session registers no timer, and a
+            // hole left unmentioned for a minute has closed long before.
+            _ = stats.punch_wake.notified() => {
+                let waiting: Vec<std::net::SocketAddr> = match stats.punch_outbox.lock() {
+                    Ok(mut q) => std::mem::take(&mut *q),
+                    Err(_) => Vec::new(),
+                };
+                if let Some(id) = peer_ext.as_ref().and_then(|e| e.ut_holepunch_id) {
+                    let mut broken = false;
+                    for who in waiting {
+                        let payload = Bytes::from(
+                            crate::peer::holepunch::Punch::Connect(who).encode(),
+                        );
+                        if framed
+                            .send(Message::Extended { ext_id: id, payload })
+                            .await
+                            .is_err()
+                        {
+                            broken = true;
+                            break;
+                        }
+                    }
+                    if broken {
+                        tracing::debug!("[peer-debug] {} BREAK send-holepunch failed", addr);
+                        break;
+                    }
+                }
+            }
             msg = framed.next() => {
                 // Traffic from the peer is what "not idle" means, so this is
                 // the only arm that pushes the deadline out.
@@ -386,8 +415,24 @@ pub async fn run(
                             }
                             Message::Extended { ext_id, payload } => {
                                 if ext_id == 0 {
-                                    if let Some(ext) = peer_ext.as_mut() {
-                                        ext.ut_pex_id = extension::parse_extension_handshake(&payload);
+                                    if let Some(parsed) = extension::parse_extension_handshake_full(
+                                        &payload,
+                                        torrent.policy(),
+                                    ) {
+                                        // Published on the stats rather than kept
+                                        // in this task alone: another peer's task
+                                        // has to know whether this one can be
+                                        // introduced to anybody.
+                                        stats.supports_holepunch.store(
+                                            parsed.ut_holepunch_id.is_some(),
+                                            Ordering::Relaxed,
+                                        );
+                                        if let Some(ext) = peer_ext.as_mut() {
+                                            ext.ut_pex_id = parsed.ut_pex_id;
+                                            ext.ut_metadata_id = parsed.ut_metadata_id;
+                                            ext.ut_holepunch_id = parsed.ut_holepunch_id;
+                                            ext.metadata_size = parsed.metadata_size;
+                                        }
                                     }
                                 } else if ext_id == extension::OUR_UT_METADATA_ID {
                                     // BEP 9 request from a peer resolving a
@@ -406,6 +451,70 @@ pub async fn run(
                                                 .await
                                                 .ok();
                                         }
+                                    }
+                                } else if ext_id == crate::peer::holepunch::OUR_UT_HOLEPUNCH_ID
+                                    && torrent.policy().pex()
+                                {
+                                    use crate::peer::holepunch::{Error as PunchError, Punch};
+                                    match Punch::decode(&payload) {
+                                        // Somebody we are connected to says a
+                                        // peer is expecting us right now. The
+                                        // whole value of the message is in
+                                        // dialling immediately: the other side
+                                        // is opening its hole at this instant
+                                        // and it closes in seconds.
+                                        Some(Punch::Connect(addr)) => {
+                                            if crate::peer::holepunch::is_punchable(&addr) {
+                                                crate::tracker::enqueue_dial(addr, torrent.clone());
+                                            }
+                                        }
+                                        // Somebody asks to be introduced. The
+                                        // register is `torrent.peer_stats`, which
+                                        // already holds every peer this torrent
+                                        // has and is emptied by the RAII guard
+                                        // when a session ends.
+                                        Some(Punch::Rendezvous(target)) => {
+                                            let (connected, supports) =
+                                                match torrent.peer_stats.get(&target) {
+                                                    Some(e) => (
+                                                        true,
+                                                        e.supports_holepunch
+                                                            .load(Ordering::Relaxed),
+                                                    ),
+                                                    None => (false, false),
+                                                };
+                                            let reply = crate::peer::holepunch::answer_rendezvous(
+                                                addr, target, connected, supports,
+                                            );
+                                            // BOTH sides, or neither: the asker
+                                            // dials into a closed NAT unless the
+                                            // other end punches at the same moment.
+                                            // Queued here and sent by that peer's
+                                            // own task, which owns its socket.
+                                            if matches!(reply, Punch::Connect(_)) {
+                                                if let Some(e) = torrent.peer_stats.get(&target) {
+                                                    e.queue_punch(addr);
+                                                }
+                                            }
+                                            // Their id, not ours: an extended
+                                            // message is addressed with the number
+                                            // the RECEIVER advertised.
+                                            if let Some(id) =
+                                                peer_ext.as_ref().and_then(|e| e.ut_holepunch_id)
+                                            {
+                                                framed
+                                                    .send(Message::Extended {
+                                                        ext_id: id,
+                                                        payload: Bytes::from(reply.encode()),
+                                                    })
+                                                    .await
+                                                    .ok();
+                                            }
+                                        }
+                                        Some(Punch::Error(addr, why)) => {
+                                            tracing::debug!(%addr, reason = why.reason(), "hole punch refused");
+                                        }
+                                        None => {}
                                     }
                                 } else if ext_id == OUR_UT_PEX_ID && torrent.policy().pex() {
                                     let new_peers = extension::parse_pex(&payload, torrent.policy());

@@ -562,6 +562,13 @@ impl TorrentManager {
         t.fold_seed_time(crate::torrent::meta::now_secs());
         t.is_paused.store(true, Ordering::Relaxed);
         t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        // BEP 3: tell the trackers we are leaving. Without it a stop is silent
+        // and every tracker keeps us in the swarm until the entry goes stale,
+        // handing our address to leechers we will not answer.
+        t.pending_announce_event.store(
+            crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
+            Ordering::Relaxed,
+        );
         // A stopped torrent must not keep a get_peers recursion alive: the
         // stream loop only checks is_removed, which a stop does not set.
         self.untrack_in_dht(info_hash);
@@ -1385,6 +1392,10 @@ impl TorrentManager {
                 crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces()),
             ))
         });
+        // A recheck is somebody saying the underlying problem is dealt with.
+        // Without this the torrent came back working and went on displaying the
+        // fault it no longer had.
+        t.clear_error();
         if !t.is_paused.load(Ordering::Relaxed) {
             t.status
                 .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
@@ -1610,5 +1621,680 @@ mod full_bitfield_tests {
         assert_eq!(full_bitfield(10), vec![0xFF, 0b1100_0000]);
         assert_eq!(full_bitfield(8), vec![0xFF]);
         assert!(full_bitfield(0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::torrent::meta::{TorrentStatus, ANNOUNCE_EVENT_STOPPED};
+    use std::sync::atomic::Ordering;
+
+    /// A manager on a throwaway tree. `new` opens a state database beside the
+    /// resume folder, so each test gets its own rather than racing on one.
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "hydra-mgr-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        let resume = root.join("cfg").join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(crate::disk::DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    /// A single-file torrent. Lengths are computed, never counted by hand: a
+    /// bencode length is the one thing here that cannot be eyeballed, and a
+    /// wrong one yields a file rejected for a reason unrelated to the test.
+    fn torrent_bytes(name: &str, announce: &str, length: u64) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(
+            format!("d6:lengthi{length}e4:name{}:{name}", name.len()).as_bytes(),
+        );
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[0xC3; 20]);
+        info.push(b'e');
+
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn add(mgr: &Arc<TorrentManager>, root: &std::path::Path, name: &str) -> InfoHash {
+        let save = root.join("data").to_string_lossy().into_owned();
+        let bytes = torrent_bytes(name, "https://tracker.example/announce", 16384);
+        mgr.add_torrent_bytes(&bytes, &save, true, false)
+            .unwrap_or_else(|e| panic!("add failed: {e}"))
+            .0
+    }
+
+    // -----------------------------------------------------------------------
+    // Adding and finding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_added_torrent_is_found_by_every_route() {
+        let (mgr, root) = manager("added");
+        assert_eq!(mgr.count(), 0);
+
+        let ih = add(&mgr, &root, "one");
+
+        assert_eq!(mgr.count(), 1);
+        assert!(mgr.has(&ih));
+        assert!(mgr.get(&ih).is_some());
+        assert_eq!(mgr.all().len(), 1);
+        assert!(mgr.find_torrent(|t| t.info_hash == ih).is_some());
+        assert_eq!(mgr.collect_torrents(10, |_| true), vec![ih]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same torrent twice is one torrent. Two entries would announce as
+    /// two peers for one client and double-count everything it serves.
+    #[test]
+    fn the_same_torrent_twice_is_refused() {
+        let (mgr, root) = manager("dup");
+        let save = root.join("data").to_string_lossy().into_owned();
+        let bytes = torrent_bytes("dup", "https://tracker.example/announce", 16384);
+
+        assert!(mgr.add_torrent_bytes(&bytes, &save, true, false).is_ok());
+        assert!(
+            mgr.add_torrent_bytes(&bytes, &save, true, false).is_err(),
+            "the second add says no"
+        );
+        assert_eq!(mgr.count(), 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_torrent_are_refused() {
+        let (mgr, root) = manager("junk");
+        let save = root.join("data").to_string_lossy().into_owned();
+        assert!(mgr.add_torrent_bytes(b"not bencode", &save, true, false).is_err());
+        assert_eq!(mgr.count(), 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `collect_torrents` takes a ceiling because its callers walk a catalogue
+    /// of hundreds of thousands. A cap that did not hold would return all of
+    /// them to something sized for a handful.
+    #[test]
+    fn collecting_respects_its_ceiling_and_its_filter() {
+        let (mgr, root) = manager("collect");
+        for n in ["a", "b", "c"] {
+            add(&mgr, &root, n);
+        }
+        assert_eq!(mgr.count(), 3);
+        assert_eq!(mgr.collect_torrents(2, |_| true).len(), 2, "the ceiling holds");
+        assert!(mgr.collect_torrents(10, |_| false).is_empty(), "the filter holds");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Starting, stopping, suspending
+    // -----------------------------------------------------------------------
+
+    /// ⭐ Stopping a torrent owes its trackers a departure. Without it the stop
+    /// is silent and every tracker keeps us in the swarm until the entry goes
+    /// stale, handing our address to leechers we will not answer.
+    #[test]
+    fn stopping_pauses_the_torrent_and_owes_the_trackers_a_departure() {
+        let (mgr, root) = manager("stop");
+        let ih = add(&mgr, &root, "stopme");
+        mgr.start_torrent(&ih).expect("started");
+
+        let t = mgr.get(&ih).unwrap();
+        t.pending_announce_event.store(0, Ordering::Relaxed);
+        assert!(!t.is_paused.load(Ordering::Relaxed));
+
+        mgr.stop_torrent(&ih).expect("stopped");
+
+        assert!(t.is_paused.load(Ordering::Relaxed));
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Stopped as u8);
+        assert_eq!(
+            t.pending_announce_event.load(Ordering::Relaxed),
+            ANNOUNCE_EVENT_STOPPED,
+            "a stop the trackers are never told about is a stop that did not happen for them"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn starting_lifts_the_pause() {
+        let (mgr, root) = manager("start");
+        let ih = add(&mgr, &root, "startme");
+        let t = mgr.get(&ih).unwrap();
+        assert!(t.is_paused.load(Ordering::Relaxed), "added stopped");
+
+        mgr.start_torrent(&ih).expect("started");
+        assert!(!t.is_paused.load(Ordering::Relaxed));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn serving_can_be_suspended_and_resumed() {
+        let (mgr, root) = manager("suspend");
+        let ih = add(&mgr, &root, "susp");
+        let t = mgr.get(&ih).unwrap();
+
+        mgr.set_serving_suspended(&ih, true).expect("suspended");
+        assert!(t.serving_suspended.load(Ordering::Relaxed));
+        mgr.set_serving_suspended(&ih, false).expect("resumed");
+        assert!(!t.serving_suspended.load(Ordering::Relaxed));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every verb refuses a torrent that is not here. Answering `Ok` would let
+    /// a caller believe a stop, a start or a move that never happened.
+    #[test]
+    fn every_verb_refuses_a_torrent_that_is_not_here() {
+        let (mgr, root) = manager("absent");
+        let absent: InfoHash = [0x11; 20];
+
+        assert!(mgr.start_torrent(&absent).is_err());
+        assert!(mgr.stop_torrent(&absent).is_err());
+        assert!(mgr.remove_torrent(&absent, true).is_err());
+        assert!(mgr.set_serving_suspended(&absent, true).is_err());
+        assert!(mgr.set_trackers(&absent, vec![]).is_err());
+        assert!(mgr.set_save_path(&absent, "/tmp").is_err());
+        assert!(mgr.recheck(&absent).is_err());
+        assert!(mgr.export_state(&absent).is_none());
+        assert!(!mgr.any_file_exists(&absent));
+        assert!(!mgr.has(&absent));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Editing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trackers_and_save_path_can_be_changed() {
+        let (mgr, root) = manager("edit");
+        let ih = add(&mgr, &root, "edit");
+        let t = mgr.get(&ih).unwrap();
+
+        let tiers = vec![
+            vec!["https://first.example/announce".to_string()],
+            vec!["https://second.example/announce".to_string()],
+        ];
+        mgr.set_trackers(&ih, tiers.clone()).expect("set");
+        assert_eq!(*t.live_trackers.read(), tiers);
+
+        mgr.set_save_path(&ih, "/somewhere/else").expect("set");
+        assert_eq!(t.save_path.read().to_string_lossy(), "/somewhere/else");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same host in two tiers is one tracker holding one torrent. Counting
+    /// it twice makes the tracker column disagree with the torrent list for no
+    /// visible reason.
+    #[test]
+    fn a_host_in_two_tiers_counts_once_for_one_torrent() {
+        let (mgr, root) = manager("hosts");
+        let ih = add(&mgr, &root, "hosts");
+        mgr.set_trackers(
+            &ih,
+            vec![
+                vec!["https://same.example/announce".to_string()],
+                vec!["https://same.example/announce2".to_string()],
+            ],
+        )
+        .expect("set");
+
+        let counts = mgr.tracker_host_counts();
+        assert_eq!(counts.get("same.example").copied(), Some(1), "{counts:?}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Moving between engines
+    // -----------------------------------------------------------------------
+
+    /// Export and import are the two halves of a move between engines. The
+    /// receiving side must end up with the same torrent, by hash and by name.
+    #[test]
+    fn a_torrent_exported_from_one_engine_imports_into_another() {
+        let (from, root_a) = manager("export");
+        let (into, root_b) = manager("import");
+        let save = root_a.join("data").to_string_lossy().into_owned();
+        let bytes = torrent_bytes("moving", "https://tracker.example/announce", 16384);
+        let (ih, _) = from
+            .add_torrent_bytes(&bytes, &save, true, false)
+            .expect("added");
+
+        // The receiving engine reads the metainfo from its store: resume data
+        // carries the info hash, not the dict. In production that store is the
+        // SQLite blob table; here it is the bytes we added.
+        let blob = bytes.clone();
+        into.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+
+        let state = from.export_state(&ih).expect("exported");
+        let (imported_ih, name) = into.import_state(&state).expect("imported");
+
+        assert_eq!(imported_ih, ih, "the same torrent, by hash");
+        assert_eq!(name, "moving");
+        assert!(into.has(&ih));
+
+        std::fs::remove_dir_all(&root_a).ok();
+        std::fs::remove_dir_all(&root_b).ok();
+    }
+
+    /// Without a store there is no metainfo, and an import that guessed one
+    /// would adopt a torrent it cannot verify. The refusal says which of the
+    /// two is missing, because "import failed" sends an operator reading
+    /// source.
+    #[test]
+    fn importing_without_a_store_refuses_and_says_why() {
+        let (from, root_a) = manager("export-nostore");
+        let (into, root_b) = manager("import-nostore");
+        let ih = add(&from, &root_a, "orphan");
+        let state = from.export_state(&ih).expect("exported");
+
+        let err = into.import_state(&state).expect_err("no store, no metainfo");
+        assert!(err.contains("store"), "{err}");
+        assert!(!into.has(&ih));
+
+        std::fs::remove_dir_all(&root_a).ok();
+        std::fs::remove_dir_all(&root_b).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Removing
+    // -----------------------------------------------------------------------
+
+    /// Removing flags the state before dropping it, so peer tasks holding an
+    /// `Arc` see it and leave instead of going on serving -- and instead of
+    /// `write_piece` recreating the files that were just deleted.
+    #[test]
+    fn removing_flags_the_state_before_forgetting_it() {
+        let (mgr, root) = manager("remove");
+        let ih = add(&mgr, &root, "goner");
+        let held = mgr.get(&ih).expect("a peer task would hold this");
+
+        mgr.remove_torrent(&ih, true).expect("removed");
+
+        assert!(!mgr.has(&ih), "gone from the catalogue");
+        assert_eq!(mgr.count(), 0);
+        assert!(
+            held.is_removed.load(Ordering::Relaxed),
+            "the Arc a peer task still holds knows it is over"
+        );
+        assert!(mgr.remove_torrent(&ih, true).is_err(), "and twice is an error");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `keep_data` is the difference between forgetting a torrent and deleting
+    /// somebody's files. It has to be the one the caller asked for.
+    #[test]
+    fn keeping_the_data_leaves_the_file_where_it_is() {
+        let (mgr, root) = manager("keepdata");
+        let data = root.join("data");
+        let ih = add(&mgr, &root, "kept");
+        let file = data.join("kept");
+        std::fs::write(&file, vec![0u8; 16384]).unwrap();
+        assert!(mgr.any_file_exists(&ih), "the data is on disk");
+
+        mgr.remove_torrent(&ih, true).expect("removed");
+        assert!(file.exists(), "keep_data means keep the data");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_torrent_with_no_data_on_disk_says_so() {
+        let (mgr, root) = manager("nodata");
+        let ih = add(&mgr, &root, "empty");
+        assert!(
+            !mgr.any_file_exists(&ih),
+            "nothing was written, so a recheck would be all-miss and is skipped"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod manager_tests {
+    use super::*;
+
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "typhon-mgr-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let data = root.join("data");
+        let resume = root.join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    /// Bencode lengths are COMPUTED. The piece hash varies with the name so
+    /// two fixtures are two different torrents.
+    fn torrent_bytes(name: &str, trackers: &[&str]) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+
+        let mut out = Vec::new();
+        out.push(b'd');
+        if let Some(first) = trackers.first() {
+            out.extend_from_slice(format!("8:announce{}:{first}", first.len()).as_bytes());
+        }
+        if trackers.len() > 1 {
+            out.extend_from_slice(b"13:announce-listl");
+            for t in trackers {
+                out.extend_from_slice(format!("l{}:{t}e", t.len()).as_bytes());
+            }
+            out.push(b'e');
+        }
+        out.extend_from_slice(b"4:info");
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn add(mgr: &Arc<TorrentManager>, name: &str) -> InfoHash {
+        mgr.add_torrent_bytes(&torrent_bytes(name, &["https://tracker.example/announce"]), "/tmp", true, true)
+            .unwrap_or_else(|e| panic!("add {name}: {e}"))
+            .0
+    }
+
+    #[test]
+    fn hex_round_trips_an_info_hash() {
+        let ih: InfoHash = [0x0f; 20];
+        let hex = hex_encode(&ih);
+        assert_eq!(hex.len(), 40);
+        assert_eq!(hex_decode(&hex).unwrap(), ih);
+    }
+
+    /// ⭐ A hash that is not 40 hex characters is not a hash. Accepting a
+    /// short one would address a torrent nobody asked for.
+    #[test]
+    fn a_hash_of_the_wrong_shape_is_refused() {
+        assert!(hex_decode("").is_err());
+        assert!(hex_decode(&"0".repeat(39)).is_err());
+        assert!(hex_decode(&"0".repeat(41)).is_err());
+        assert!(hex_decode(&"z".repeat(40)).is_err(), "not hex");
+    }
+
+    #[test]
+    fn hex_decoding_is_case_insensitive() {
+        let upper = "AABBCCDDEEFF00112233445566778899AABBCCDD";
+        let lower = upper.to_lowercase();
+        assert_eq!(hex_decode(upper).unwrap(), hex_decode(&lower).unwrap());
+    }
+
+    /// An empty manager holds nothing and says so consistently across every
+    /// way of asking.
+    #[test]
+    fn an_empty_manager_is_consistently_empty() {
+        let (mgr, root) = manager("empty");
+        assert_eq!(mgr.count(), 0);
+        assert!(mgr.all().is_empty());
+        assert!(!mgr.has(&[0u8; 20]));
+        assert!(mgr.get(&[0u8; 20]).is_none());
+        assert!(mgr.tracker_host_counts().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_added_torrent_is_visible_through_every_accessor() {
+        let (mgr, root) = manager("added");
+        let ih = add(&mgr, "alpha");
+        assert_eq!(mgr.count(), 1);
+        assert!(mgr.has(&ih));
+        assert!(mgr.get(&ih).is_some());
+        assert_eq!(mgr.all().len(), 1);
+        assert_eq!(mgr.all()[0].info_hash, ih);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ The per-tracker counts key every obligation and every breaker. One
+    /// torrent on one tracker is ONE count, not one per tier.
+    #[test]
+    fn the_tracker_counts_add_up_to_the_library() {
+        let (mgr, root) = manager("counts");
+        add(&mgr, "alpha");
+        add(&mgr, "bravo");
+        let counts = mgr.tracker_host_counts();
+        let total: i64 = counts.values().sum();
+        assert_eq!(total, 2, "got {counts:?}");
+        assert_eq!(counts.get("tracker.example").copied(), Some(2));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removing_a_torrent_takes_it_out_of_the_catalogue() {
+        let (mgr, root) = manager("remove");
+        let ih = add(&mgr, "alpha");
+        mgr.remove_torrent(&ih, true).expect("removed");
+        assert_eq!(mgr.count(), 0);
+        assert!(!mgr.has(&ih));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Removing something that is not here is an error, never a silent
+    /// success that would report work nobody did.
+    #[test]
+    fn removing_a_torrent_that_is_not_here_is_an_error() {
+        let (mgr, root) = manager("remove-absent");
+        assert!(mgr.remove_torrent(&[9u8; 20], true).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn starting_and_stopping_a_torrent_that_is_not_here_is_an_error() {
+        let (mgr, root) = manager("startstop-absent");
+        assert!(mgr.start_torrent(&[9u8; 20]).is_err());
+        assert!(mgr.stop_torrent(&[9u8; 20]).is_err());
+        assert!(mgr.set_serving_suspended(&[9u8; 20], true).is_err());
+        assert!(mgr.set_save_path(&[9u8; 20], "/tmp").is_err());
+        assert!(mgr.set_trackers(&[9u8; 20], vec![]).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_torrent_can_be_stopped_and_started_again() {
+        let (mgr, root) = manager("startstop");
+        let ih = add(&mgr, "alpha");
+        mgr.stop_torrent(&ih).expect("stopped");
+        mgr.start_torrent(&ih).expect("started");
+        assert!(mgr.has(&ih), "it is still in the catalogue either way");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ Replacing the tracker list REPLACES it. Appending instead is how a
+    /// torrent ends up announcing to a tracker the operator removed.
+    #[test]
+    fn setting_the_trackers_replaces_the_list() {
+        let (mgr, root) = manager("trackers");
+        let ih = add(&mgr, "alpha");
+        mgr.set_trackers(
+            &ih,
+            vec![vec!["https://other.example/announce".to_string()]],
+        )
+        .expect("set");
+        let counts = mgr.tracker_host_counts();
+        assert_eq!(counts.get("other.example").copied(), Some(1), "got {counts:?}");
+        assert!(counts.get("tracker.example").is_none(), "the old host is gone: {counts:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_save_path_can_be_rewritten() {
+        let (mgr, root) = manager("savepath");
+        let ih = add(&mgr, "alpha");
+        mgr.set_save_path(&ih, "/tmp/moved").expect("set");
+        let t = mgr.get(&ih).unwrap();
+        assert_eq!(t.save_path.read().to_string_lossy(), "/tmp/moved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `find_torrent` stops at the first match; `collect_torrents` is bounded.
+    /// An unbounded collect over 300k torrents on a request path is what the
+    /// cap exists to prevent.
+    #[test]
+    fn finding_and_collecting_respect_their_predicate_and_their_cap() {
+        let (mgr, root) = manager("find");
+        for n in ["alpha", "bravo", "charlie"] {
+            add(&mgr, n);
+        }
+        assert!(mgr.find_torrent(|t| t.meta.name == "bravo").is_some());
+        assert!(mgr.find_torrent(|t| t.meta.name == "nobody").is_none());
+
+        assert_eq!(mgr.collect_torrents(2, |_| true).len(), 2, "the cap holds");
+        assert_eq!(mgr.collect_torrents(100, |_| true).len(), 3);
+        assert!(mgr.collect_torrents(100, |_| false).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A file that is not a torrent is refused at the door rather than stored
+    /// as an empty one.
+    #[test]
+    fn something_that_is_not_a_torrent_is_refused() {
+        let (mgr, root) = manager("notatorrent");
+        assert!(mgr.add_torrent_bytes(b"this is not bencode", "/tmp", true, true).is_err());
+        assert!(mgr.add_torrent_bytes(b"", "/tmp", true, true).is_err());
+        assert_eq!(mgr.count(), 0, "nothing was stored");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The same torrent added twice is refused, not duplicated.
+    #[test]
+    fn the_same_torrent_cannot_be_added_twice() {
+        let (mgr, root) = manager("dup");
+        add(&mgr, "alpha");
+        assert!(mgr
+            .add_torrent_bytes(&torrent_bytes("alpha", &["https://tracker.example/announce"]), "/tmp", true, true)
+            .is_err());
+        assert_eq!(mgr.count(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A multi-tier announce list is read whole: a torrent announcing to two
+    /// hosts counts on both, or one tracker's obligation goes unseen.
+    #[test]
+    fn every_tier_of_the_announce_list_is_read() {
+        let (mgr, root) = manager("tiers");
+        mgr.add_torrent_bytes(
+            &torrent_bytes("multi", &["https://a.example/announce", "https://b.example/announce"]),
+            "/tmp",
+            true,
+            true,
+        )
+        .expect("added");
+        let counts = mgr.tracker_host_counts();
+        assert!(counts.contains_key("a.example"), "got {counts:?}");
+        assert!(counts.contains_key("b.example"), "got {counts:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Rates and the unseeded count are recomputed on demand; on an empty
+    /// library both must be a no-op rather than a panic.
+    #[test]
+    fn the_periodic_recomputations_are_safe_on_an_empty_library() {
+        let (mgr, root) = manager("periodic");
+        mgr.update_rates();
+        mgr.update_unseeded_count();
+        mgr.save_all_resume();
+        mgr.flush_all_resume();
+        assert_eq!(mgr.load_resume_data(), 0, "nothing was written, nothing loads");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ Resume data round-trips: a torrent saved and reloaded comes back.
+    /// This is what a restart depends on, and what 4 759 torrents silently
+    /// failed on at load in September.
+    #[test]
+    fn a_saved_torrent_comes_back_after_a_reload() {
+        let (mgr, root) = manager("resume");
+        let ih = add(&mgr, "alpha");
+        mgr.save_all_resume();
+        mgr.flush_all_resume();
+
+        // A second manager over the same directories is what a restart is.
+        let data = root.join("data");
+        let resume = root.join("resume");
+        let again = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        // ⭐ The metainfo comes from the STORE, not from the resume record, so
+        // a manager with no blob source has nothing to rebuild the torrent
+        // FROM -- see the companion test below.
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        again.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+
+        let loaded = again.load_resume_data();
+        assert_eq!(loaded, 1, "the torrent came back");
+        assert!(again.has(&ih), "and under the same hash");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⚠️⚠️ A resume record whose metainfo cannot be found is SKIPPED, and the
+    /// skip is silent: `load_resume_data` answers a smaller number and nothing
+    /// else says so. This is the shape of the 4 759 torrents that went missing
+    /// at load in September -- the count is the only signal there is, so an
+    /// operator who does not compare it against the store never finds out.
+    #[test]
+    fn a_resume_record_with_no_metainfo_is_skipped_silently() {
+        let (mgr, root) = manager("resume-noblob");
+        add(&mgr, "alpha");
+        mgr.save_all_resume();
+        mgr.flush_all_resume();
+
+        let data = root.join("data");
+        let resume = root.join("resume");
+        let again = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        // No blob source: nothing can rebuild the torrent.
+        assert_eq!(
+            again.load_resume_data(),
+            0,
+            "the record is skipped rather than restored"
+        );
+        assert_eq!(again.count(), 0, "and nothing is in the catalogue");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_manager_reports_no_refused_records_on_a_clean_library() {
+        let (mgr, root) = manager("refused");
+        assert!(mgr.refused_records().is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

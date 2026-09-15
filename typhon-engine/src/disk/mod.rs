@@ -548,3 +548,204 @@ pub async fn read_piece_for_check(torrent: &TorrentState, piece: u32) -> Option<
     .ok()
     .flatten()
 }
+
+#[cfg(test)]
+mod disk_tests {
+    use super::*;
+    use crate::torrent::TorrentManager;
+    use std::sync::Arc;
+
+    fn sha1_of(data: &[u8]) -> [u8; 20] {
+        use sha1::{Digest, Sha1};
+        let mut h = Sha1::new();
+        h.update(data);
+        h.finalize().into()
+    }
+
+    /// A single-file torrent whose piece hash is the REAL hash of `content`.
+    /// A fixture with a made-up hash can only ever exercise the refusal path.
+    fn torrent_bytes(name: &str, content: &[u8]) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(
+            format!("d6:lengthi{}e4:name{}:{name}", content.len(), name.len()).as_bytes(),
+        );
+        // One piece, sized to the content, so the whole file is piece 0.
+        info.extend_from_slice(format!("12:piece lengthi{}e6:pieces20:", content.len()).as_bytes());
+        info.extend_from_slice(&sha1_of(content));
+        info.push(b'e');
+        let mut out = Vec::new();
+        out.extend_from_slice(b"d4:info");
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    struct Fixture {
+        _mgr: Arc<TorrentManager>,
+        torrent: Arc<crate::torrent::meta::TorrentState>,
+        disk: Arc<DiskManager>,
+        root: std::path::PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn fixture(tag: &str, content: &[u8]) -> Fixture {
+        let root = std::env::temp_dir().join(format!(
+            "typhon-disk-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let data = root.join("data");
+        let resume = root.join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+
+        let disk = Arc::new(DiskManager::new(16));
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+
+        // ⭐ The piece hash table is NOT kept in RAM -- 20 bytes per piece over
+        // a 300k library is the whole point of releasing it -- so `piece_hash`
+        // reloads the metainfo through `blob_source` on demand. A manager with
+        // none refuses to verify, which is the right call and makes every
+        // write look like a hash mismatch. Set before the add: the state
+        // copies the source when it is built.
+        let blob = torrent_bytes("payload.bin", content);
+        mgr.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes("payload.bin", content),
+                data.to_string_lossy().as_ref(),
+                true,
+                false,
+            )
+            .expect("the fixture torrent parses");
+        let torrent = mgr.get(&ih).expect("just added");
+        Fixture { _mgr: mgr, torrent, disk, root }
+    }
+
+    /// ⭐ A piece is checked against its hash BEFORE it lands. Accepting one
+    /// that does not match is how a library ends up serving bytes it cannot
+    /// prove, and every later read of it fails somewhere else.
+    #[tokio::test]
+    async fn a_piece_that_does_not_match_its_hash_is_refused() {
+        let content = vec![7u8; 4096];
+        let f = fixture("badhash", &content);
+        let ok = f
+            .disk
+            .write_piece(&f.torrent, 0, vec![9u8; 4096])
+            .await
+            .expect("a mismatch is a verdict, not a failure");
+        assert!(!ok, "the piece must be refused");
+    }
+
+    #[tokio::test]
+    async fn a_piece_that_matches_its_hash_is_accepted_and_readable() {
+        let content = vec![7u8; 4096];
+        let f = fixture("goodhash", &content);
+        let ok = f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap();
+        assert!(ok, "the piece hashes correctly and must be kept");
+
+        let back = f.disk.read_block(&f.torrent, 0, 0, content.len() as u32).await.unwrap();
+        assert_eq!(&back[..], &content[..], "what was written is what comes back");
+    }
+
+    /// A block is a window into a piece, not the whole of it.
+    #[tokio::test]
+    async fn a_block_reads_the_window_it_asked_for() {
+        let mut content = vec![0u8; 4096];
+        for (i, b) in content.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        let f = fixture("window", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+
+        let back = f.disk.read_block(&f.torrent, 0, 1000, 256).await.unwrap();
+        assert_eq!(&back[..], &content[1000..1256]);
+    }
+
+    /// Reading the same block twice must answer the same bytes: the second
+    /// read comes out of the cache, and a cache that answers differently from
+    /// the disk is worse than no cache.
+    #[tokio::test]
+    async fn a_cached_read_answers_what_the_disk_holds() {
+        let content = vec![3u8; 4096];
+        let f = fixture("cache", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+
+        let first = f.disk.read_block(&f.torrent, 0, 0, 512).await.unwrap();
+        let second = f.disk.read_block(&f.torrent, 0, 0, 512).await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(&first[..], &content[..512]);
+    }
+
+    /// ⭐ Writing a piece must INVALIDATE the blocks cached over it, or a
+    /// re-checked torrent keeps serving the bytes it has just replaced.
+    #[tokio::test]
+    async fn rewriting_a_piece_invalidates_what_was_cached_over_it() {
+        let content = vec![1u8; 4096];
+        let f = fixture("invalidate", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        let before = f.disk.read_block(&f.torrent, 0, 0, 16).await.unwrap();
+        assert_eq!(&before[..], &[1u8; 16][..]);
+
+        // The same bytes again: the write must still drop the cached block
+        // rather than leave a stale one behind.
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        let after = f.disk.read_block(&f.torrent, 0, 0, 16).await.unwrap();
+        assert_eq!(&after[..], &before[..]);
+    }
+
+    /// A read past the end of the torrent is an error, never a short buffer a
+    /// peer would take for real data.
+    #[tokio::test]
+    async fn a_read_past_the_end_is_an_error_not_a_short_read() {
+        let content = vec![5u8; 1024];
+        let f = fixture("past", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f.disk.read_block(&f.torrent, 0, 1000, 4096).await.is_err());
+        assert!(f.disk.read_block(&f.torrent, 99, 0, 16).await.is_err());
+    }
+
+    /// Reading a torrent whose data was never written is an error, not zeroes.
+    /// Zeroes would be served to a peer as if they were the file.
+    #[tokio::test]
+    async fn reading_data_that_was_never_written_is_an_error() {
+        let content = vec![5u8; 1024];
+        let f = fixture("absent", &content);
+        assert!(f.disk.read_block(&f.torrent, 0, 0, 16).await.is_err());
+    }
+
+    /// The zero-copy path hands back a descriptor and an offset for a request
+    /// that sits inside ONE file; a request spanning two files has no single
+    /// descriptor and must decline rather than serve the wrong one.
+    #[tokio::test]
+    async fn the_zero_copy_path_answers_for_a_request_inside_one_file() {
+        let content = vec![2u8; 4096];
+        let f = fixture("sendfile", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        let got = f.disk.block_file(&f.torrent, 0, 0, 512);
+        assert!(got.is_some(), "a single-file torrent has one descriptor");
+        let (_, offset) = got.unwrap();
+        assert_eq!(offset, 0);
+    }
+
+    #[tokio::test]
+    async fn the_zero_copy_path_declines_a_request_it_cannot_satisfy_whole() {
+        let content = vec![2u8; 1024];
+        let f = fixture("sendfile-decline", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(
+            f.disk.block_file(&f.torrent, 0, 0, 99_999).is_none(),
+            "a length the file cannot satisfy is declined, not truncated"
+        );
+    }
+}

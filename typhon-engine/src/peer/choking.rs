@@ -164,3 +164,178 @@ pub fn count_bitfield_pieces(bf: &[u8], num_pieces: u32) -> u32 {
     }
     count
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::torrent::meta::{PeerStats, TorrentMeta};
+    use std::path::PathBuf;
+
+    fn meta(num_pieces: u32) -> TorrentMeta {
+        TorrentMeta {
+            info_hash: [7u8; 20],
+            name: "t".into(),
+            num_pieces,
+            piece_length: 16384,
+            total_size: num_pieces as u64 * 16384,
+            files: Vec::new(),
+            trackers: Vec::new(),
+            url_list: Vec::new(),
+            private: false,
+            multi_file: false,
+            info_dict_len: 0,
+        }
+    }
+
+    fn seeding(num_pieces: u32) -> TorrentState {
+        let t = TorrentState::new(meta(num_pieces), PathBuf::from("/tmp"), true);
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t
+    }
+
+    /// Register a peer on the torrent, the way a real session's RAII guard does.
+    fn peer(t: &TorrentState, n: u8, have: u32, interested: bool, bytes: u64) -> Arc<PeerStats> {
+        let addr: std::net::SocketAddr = format!("93.184.216.{n}:6881").parse().unwrap();
+        let s = Arc::new(PeerStats::new(addr, [n; 20], "test".into(), false, false));
+        s.num_pieces_have.store(have, Ordering::Relaxed);
+        s.interested.store(interested, Ordering::Relaxed);
+        s.uploaded_last_tick.store(bytes, Ordering::Relaxed);
+        t.peer_stats.insert(addr, s.clone());
+        s
+    }
+
+    /// Choking is about who gets our upload, and a torrent we are still
+    /// fetching has little to give. Ranking its peers would be work that
+    /// decides nothing.
+    #[test]
+    fn a_torrent_that_is_not_seeding_is_left_alone() {
+        let t = TorrentState::new(meta(100), PathBuf::from("/tmp"), false);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        peer(&t, 1, 0, true, 0);
+        assert_eq!(tick_torrent(&t, 4), (0, 0, false));
+    }
+
+    #[test]
+    fn no_interested_peer_is_nothing_to_decide() {
+        let t = seeding(100);
+        peer(&t, 1, 50, false, 0);
+        assert_eq!(tick_torrent(&t, 4), (0, 0, false), "nobody asked for anything");
+    }
+
+    /// The point of the ranking: bytes go to whoever needs them most. A peer
+    /// holding nothing outranks one that is nearly done, whatever their speed,
+    /// because rarity carries 0.7 of the score and speed only 0.3.
+    #[test]
+    fn the_peer_that_needs_us_most_is_unchoked_first() {
+        let t = seeding(100);
+        let empty = peer(&t, 1, 0, true, 0);
+        let nearly_done = peer(&t, 2, 99, true, 1_000_000);
+
+        let (unchoked, choked, had) = tick_torrent(&t, 1);
+        assert!(had);
+        assert_eq!((unchoked, choked), (1, 0), "one let through, one already choked");
+        assert!(!empty.choked.load(Ordering::Relaxed), "the one with nothing");
+        assert!(
+            nearly_done.choked.load(Ordering::Relaxed),
+            "a peer that is almost a seed does not outrank one that has nothing, \
+             even uploading a megabyte a tick"
+        );
+    }
+
+    /// Between two peers that need us equally, the one actually taking bytes
+    /// wins. That is the whole of the speed term.
+    #[test]
+    fn speed_breaks_a_tie_between_equal_needs() {
+        let t = seeding(100);
+        let idle = peer(&t, 1, 50, true, 0);
+        let busy = peer(&t, 2, 50, true, 999_999);
+
+        tick_torrent(&t, 1);
+        assert!(!busy.choked.load(Ordering::Relaxed), "the one using the connection");
+        assert!(idle.choked.load(Ordering::Relaxed));
+    }
+
+    /// The cap is the point: unchoking everyone would spread the upstream so
+    /// thin that nobody gets a usable rate.
+    #[test]
+    fn only_the_top_slots_are_let_through() {
+        let t = seeding(100);
+        let peers: Vec<_> = (1..=5).map(|i| peer(&t, i, i as u32 * 10, true, 0)).collect();
+
+        let (unchoked, _, _) = tick_torrent(&t, 2);
+        assert_eq!(unchoked, 2);
+        let open = peers.iter().filter(|p| !p.choked.load(Ordering::Relaxed)).count();
+        assert_eq!(open, 2, "two slots, two peers");
+    }
+
+    /// The speed term is a rate over one tick, so the window has to be closed.
+    /// Leaving it would make a peer that was fast once look fast forever.
+    #[test]
+    fn the_tick_window_is_reset_for_the_next_one() {
+        let t = seeding(100);
+        let p = peer(&t, 1, 10, true, 500_000);
+        tick_torrent(&t, 4);
+        assert_eq!(p.uploaded_last_tick.load(Ordering::Relaxed), 0);
+    }
+
+    /// A decision that does not change anything must not bump the generation:
+    /// the peer task emits a Choke or Unchoke on the wire every time it moves.
+    #[test]
+    fn an_unchanged_decision_sends_nothing() {
+        let t = seeding(100);
+        let p = peer(&t, 1, 0, true, 0);
+        let (first, _, _) = tick_torrent(&t, 4);
+        assert_eq!(first, 1, "unchoked once");
+        let gen_after_first = p.choking_gen.load(Ordering::Relaxed);
+
+        let (again, choked_again, _) = tick_torrent(&t, 4);
+        assert_eq!((again, choked_again), (0, 0), "nothing changed");
+        assert_eq!(
+            p.choking_gen.load(Ordering::Relaxed),
+            gen_after_first,
+            "the generation only moves when the wire has to"
+        );
+    }
+
+    /// A torrent with no pieces at all must not divide by it.
+    #[test]
+    fn a_torrent_of_no_pieces_does_not_divide_by_zero() {
+        let t = seeding(0);
+        let p = peer(&t, 1, 0, true, 0);
+        let (unchoked, _, had) = tick_torrent(&t, 4);
+        assert!(had);
+        assert_eq!(unchoked, 1);
+        assert!(!p.choked.load(Ordering::Relaxed));
+    }
+
+    // -----------------------------------------------------------------------
+    // count_bitfield_pieces
+    // -----------------------------------------------------------------------
+
+    /// BEP 3: the high bit of the first byte is piece 0.
+    #[test]
+    fn a_bitfield_is_read_high_bit_first() {
+        assert_eq!(count_bitfield_pieces(&[0b1000_0000], 8), 1);
+        assert_eq!(count_bitfield_pieces(&[0b0000_0001], 8), 1);
+        assert_eq!(count_bitfield_pieces(&[0b1111_1111], 8), 8);
+    }
+
+    /// BEP 3 pads the last byte with zeroes, but a peer may set them. Counting
+    /// them would make a peer look like it holds pieces the torrent does not
+    /// have -- and `is_seed` is derived from this count.
+    #[test]
+    fn the_padding_of_the_last_byte_is_not_counted() {
+        // Ten pieces: eight in the first byte, two in the second, six padding
+        // bits that this peer has wrongly set.
+        assert_eq!(count_bitfield_pieces(&[0xFF, 0xFF], 10), 10);
+        assert_eq!(count_bitfield_pieces(&[0x00, 0xFF], 10), 2);
+    }
+
+    #[test]
+    fn an_empty_or_short_bitfield_counts_what_is_there() {
+        assert_eq!(count_bitfield_pieces(&[], 100), 0);
+        assert_eq!(count_bitfield_pieces(&[0xFF], 100), 8, "one byte, eight pieces");
+    }
+}

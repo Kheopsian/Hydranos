@@ -182,6 +182,22 @@ pub fn set_version(version: &str) {
     let _ = VERSION.set(version.to_string());
 }
 
+/// How this client names itself: the HTTP `User-Agent` of an announce and the
+/// BEP 10 `v` string a peer is told.
+///
+/// Derived from the same version the peer id is, and that is the point. All
+/// three were written out by hand, all three were stale, and none of them
+/// agreed: `Hydra/2.4.3-typhon` while the peer id said 4.27. A tracker that
+/// cross-checks the two -- and the strict ones do -- sees a client that cannot
+/// keep its own story straight, which is the one thing it can verify without
+/// taking our word for anything.
+pub fn user_agent() -> String {
+    format!(
+        "Hydranos/{}",
+        VERSION.get().map(String::as_str).unwrap_or("0.0.0")
+    )
+}
+
 fn default_peer_fingerprint() -> String {
     peer_fingerprint_for(VERSION.get().map(String::as_str).unwrap_or("0.0.0"))
 }
@@ -244,7 +260,7 @@ mod fingerprint_tests {
         assert_eq!(fp, "-HY0000-");
     }
 }
-fn default_user_agent() -> String { "Hydra/2.4.3-typhon".into() }
+fn default_user_agent() -> String { user_agent() }
 
 impl EngineConfig {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {

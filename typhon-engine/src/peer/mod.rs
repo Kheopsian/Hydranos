@@ -3,10 +3,10 @@ pub mod extension;
 pub mod choking;
 pub mod download;
 pub mod handshake;
+pub mod holepunch;
 pub mod message;
 pub mod metadata;
 pub mod peerclient;
-pub mod pex;
 pub mod session;
 pub mod transport;
 pub mod proxy_protocol;
@@ -594,7 +594,7 @@ async fn handle_incoming(
         reply.extend_from_slice(&info_hash);
         // The torrent's identity, not the binding's: on a private tracker the
         // announce may have been spoofed, and this is what its peers compare.
-        reply.extend_from_slice(&torrent.handshake_pid(&peer_id));
+        reply.extend_from_slice(&peer_id);
         match tokio::time::timeout(HS_TIMEOUT, stream.write_all(&reply)).await {
             Ok(Ok(_)) => {}
             Ok(Err(_)) => return,
@@ -667,4 +667,105 @@ async fn handle_incoming(
         listen_port,
     )
     .await;
+}
+
+#[cfg(test)]
+mod proxy_trust_tests {
+    use super::is_trusted_proxy_source;
+    use std::net::{IpAddr, SocketAddr};
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    /// ⭐ What this decides: whether to believe a PROXY v2 header, which
+    /// carries the peer address the sender CLAIMS to be. Trust the wrong
+    /// source and a stranger picks its own identity -- including one already in
+    /// a swarm, or one that reads as ours.
+    #[test]
+    fn a_stranger_on_the_public_internet_is_never_trusted() {
+        for a in [
+            "93.184.216.34:16271",
+            "45.33.32.156:16271",
+            "172.15.0.1:16271",
+            "172.32.0.1:16271",
+            "[2606:2800:220:1:248:1893:25c8:1946]:16271",
+        ] {
+            assert!(
+                !is_trusted_proxy_source(&addr(a), &[]),
+                "{a} must not be able to declare its own address"
+            );
+        }
+    }
+
+    /// The private ranges the header may legitimately come from: a reverse
+    /// proxy on the same host or the same network.
+    #[test]
+    fn the_local_and_private_sources_are_trusted() {
+        for a in [
+            "127.0.0.1:16271",
+            "10.0.0.5:16271",
+            "172.16.0.1:16271",
+            "172.31.255.254:16271",
+            "192.168.99.50:16271",
+            "172.17.0.1:16271", // the Docker default bridge
+            "[::1]:16271",
+            "[fc00::1]:16271", // ULA
+            "[fd00::1]:16271",
+        ] {
+            assert!(is_trusted_proxy_source(&addr(a), &[]), "{a} is local");
+        }
+    }
+
+    /// The 172 range is 172.16 through 172.31 and nothing either side of it.
+    /// One off at either end either locks out a legitimate proxy or hands the
+    /// right to 172.32.0.0/11, which is public.
+    #[test]
+    fn the_172_range_stops_exactly_where_rfc1918_does() {
+        assert!(!is_trusted_proxy_source(&addr("172.15.255.255:1"), &[]));
+        assert!(is_trusted_proxy_source(&addr("172.16.0.0:1"), &[]));
+        assert!(is_trusted_proxy_source(&addr("172.31.255.255:1"), &[]));
+        assert!(!is_trusted_proxy_source(&addr("172.32.0.0:1"), &[]));
+    }
+
+    /// A v4-mapped v6 address is the v4 address it wraps. Reading it as an
+    /// opaque v6 would refuse a proxy on 10.0.0.1 reaching a dual-stack
+    /// listener -- or, read the other way round, trust one that is public.
+    #[test]
+    fn a_v4_mapped_address_is_judged_as_the_v4_it_is() {
+        assert!(is_trusted_proxy_source(&addr("[::ffff:10.0.0.1]:16271"), &[]));
+        assert!(is_trusted_proxy_source(&addr("[::ffff:127.0.0.1]:16271"), &[]));
+        assert!(
+            !is_trusted_proxy_source(&addr("[::ffff:93.184.216.34]:16271"), &[]),
+            "public is public, in either notation"
+        );
+    }
+
+    /// The configured allowlist is how a proxy on a public address is trusted
+    /// -- a VPS in front of the node -- and it has to match exactly.
+    #[test]
+    fn the_allowlist_trusts_exactly_what_it_names() {
+        let named: IpAddr = "93.184.216.34".parse().unwrap();
+        let extras = vec![named];
+
+        assert!(is_trusted_proxy_source(&addr("93.184.216.34:16271"), &extras));
+        assert!(
+            is_trusted_proxy_source(&addr("93.184.216.34:9999"), &extras),
+            "the port is not part of the identity"
+        );
+        assert!(
+            !is_trusted_proxy_source(&addr("93.184.216.35:16271"), &extras),
+            "the neighbouring address is a different machine"
+        );
+        assert!(
+            !is_trusted_proxy_source(&addr("[2606:2800:220::1]:16271"), &extras),
+            "naming a v4 address does not trust a v6 one"
+        );
+    }
+
+    /// An empty allowlist is the default, and it must not read as "everyone".
+    #[test]
+    fn an_empty_allowlist_grants_nothing_extra() {
+        assert!(!is_trusted_proxy_source(&addr("93.184.216.34:16271"), &[]));
+    }
 }

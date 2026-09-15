@@ -44,6 +44,8 @@ pub struct PeerExt {
     pub ut_pex_id: Option<u8>,
     /// Their extended message id for ut_metadata, if they carry BEP 9.
     pub ut_metadata_id: Option<u8>,
+    /// ... and for ut_holepunch (BEP 55), if they carry that.
+    pub ut_holepunch_id: Option<u8>,
     /// Info dict size they advertised, if any.
     pub metadata_size: Option<usize>,
     /// Last time we sent a PEX message to this peer.
@@ -57,6 +59,7 @@ impl PeerExt {
         Self {
             ut_pex_id: None,
             ut_metadata_id: None,
+            ut_holepunch_id: None,
             metadata_size: None,
             last_pex_sent: None,
             sent_peers: HashSet::new(),
@@ -81,6 +84,15 @@ pub fn build_extension_handshake(
         m.insert(b"ut_pex".to_vec(), Bencode::Int(OUR_UT_PEX_ID as i64));
     }
     m.insert(b"ut_metadata".to_vec(), Bencode::Int(OUR_UT_METADATA_ID as i64));
+    // BEP 55. Advertised on the same condition as PEX: both are ways of
+    // learning about peers outside the tracker, and a private torrent uses
+    // neither.
+    if policy.pex() {
+        m.insert(
+            b"ut_holepunch".to_vec(),
+            Bencode::Int(crate::peer::holepunch::OUR_UT_HOLEPUNCH_ID as i64),
+        );
+    }
 
     let mut root = BTreeMap::new();
     root.insert(b"m".to_vec(), Bencode::Dict(m));
@@ -88,7 +100,13 @@ pub fn build_extension_handshake(
         root.insert(b"metadata_size".to_vec(), Bencode::Int(size as i64));
     }
     root.insert(b"p".to_vec(), Bencode::Int(listen_port as i64));
-    root.insert(b"v".to_vec(), Bencode::Bytes(b"typhon 0.2".to_vec()));
+    // What every peer sees us call ourselves. Same string as the announce's
+    // User-Agent: a peer and a tracker comparing notes must not be told two
+    // different things.
+    root.insert(
+        b"v".to_vec(),
+        Bencode::Bytes(crate::config::user_agent().into_bytes()),
+    );
     root.insert(b"reqq".to_vec(), Bencode::Int(250));
 
     Bencode::Dict(root).to_vec()
@@ -103,6 +121,9 @@ pub fn parse_extension_handshake(payload: &[u8]) -> Option<u8> {
 pub struct ExtHandshake {
     pub ut_pex_id: Option<u8>,
     pub ut_metadata_id: Option<u8>,
+    /// Their id for `ut_holepunch` (BEP 55). An extended message must be sent
+    /// with the id the RECEIVER advertised, never with ours.
+    pub ut_holepunch_id: Option<u8>,
     /// Total size of their info dict, from the top-level `metadata_size` key.
     pub metadata_size: Option<usize>,
 }
@@ -126,6 +147,9 @@ pub fn parse_extension_handshake_full(payload: &[u8], policy: &PeerPolicy) -> Op
         // for it later and start a conversation the config forbade.
         ut_pex_id: if policy.pex() { id_of(b"ut_pex") } else { None },
         ut_metadata_id: id_of(b"ut_metadata"),
+        // Same gate as PEX: both are ways of learning peers outside the
+        // tracker, and a private torrent uses neither.
+        ut_holepunch_id: if policy.pex() { id_of(b"ut_holepunch") } else { None },
         metadata_size,
     })
 }
@@ -268,6 +292,41 @@ pub fn parse_pex(payload: &[u8], policy: &PeerPolicy) -> Vec<SocketAddr> {
     out
 }
 
+/// Whether an address a peer told us about could be a peer at all.
+///
+/// PEX arrives from strangers and feeds straight into the dial queue, so an
+/// address nobody could be listening on is an instruction to open a connection
+/// somewhere for somebody else's reasons. Only the port was checked before:
+/// `127.0.0.1:631` was accepted and dialled.
+///
+/// Deliberately less strict than `holepunch::is_punchable`. PEX names a peer
+/// for US to dial; a hole-punch rendezvous makes a THIRD PARTY dial an address
+/// the asker chose, which is an amplifier and has to refuse anything private.
+/// Two machines of one LAN in a swarm is an ordinary thing, so private
+/// addresses stay allowed here.
+fn is_plausible_peer(addr: &SocketAddr) -> bool {
+    if addr.port() == 0 {
+        return false;
+    }
+    match addr.ip() {
+        IpAddr::V4(v4) => {
+            !v4.is_loopback()
+                && !v4.is_unspecified()
+                && !v4.is_multicast()
+                && !v4.is_broadcast()
+                && !v4.is_link_local()
+                && !v4.is_documentation()
+        }
+        IpAddr::V6(v6) => {
+            !v6.is_loopback()
+                && !v6.is_unspecified()
+                && !v6.is_multicast()
+                // fe80::/10, link local
+                && (v6.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
 /// Decode compact peer list (IPv6: 18 bytes per entry, BEP 7).
 fn parse_compact_v6(buf: &[u8]) -> Vec<SocketAddr> {
     let mut out = Vec::with_capacity(buf.len() / 18);
@@ -275,14 +334,16 @@ fn parse_compact_v6(buf: &[u8]) -> Vec<SocketAddr> {
         let mut octets = [0u8; 16];
         octets.copy_from_slice(&chunk[..16]);
         let port = u16::from_be_bytes([chunk[16], chunk[17]]);
-        if port == 0 { continue; }
         let ip = Ipv6Addr::from(octets);
         // A v4-mapped entry is a v4 peer wearing a v6 hat: unwrap it so it
-        // matches everywhere else we compare addresses.
-        match ip.to_ipv4_mapped() {
-            Some(v4) => out.push(SocketAddr::new(IpAddr::V4(v4), port)),
-            None => out.push(SocketAddr::new(IpAddr::V6(ip), port)),
-        }
+        // matches everywhere else we compare addresses -- and so the check
+        // below sees the v4 address it really is.
+        let addr = match ip.to_ipv4_mapped() {
+            Some(v4) => SocketAddr::new(IpAddr::V4(v4), port),
+            None => SocketAddr::new(IpAddr::V6(ip), port),
+        };
+        if !is_plausible_peer(&addr) { continue; }
+        out.push(addr)
     }
     out
 }
@@ -293,8 +354,9 @@ fn parse_compact_v4(buf: &[u8]) -> Vec<SocketAddr> {
     for chunk in buf.chunks_exact(6) {
         let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
         let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-        if port == 0 { continue; }
-        out.push(SocketAddr::new(IpAddr::V4(ip), port));
+        let addr = SocketAddr::new(IpAddr::V4(ip), port);
+        if !is_plausible_peer(&addr) { continue; }
+        out.push(addr);
     }
     out
 }
@@ -377,5 +439,199 @@ mod tests {
         assert!(!hoard.pex());
         assert!(build_extension_handshake(6881, None, &race).windows(6).any(|w| w == b"ut_pex"));
         assert!(!build_extension_handshake(6881, None, &hoard).windows(6).any(|w| w == b"ut_pex"));
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // BEP 9 -- metadata exchange
+    // -----------------------------------------------------------------------
+
+    /// BEP 9 splits the info dict into fixed 16 KiB blocks; only the last is
+    /// short. Getting the count wrong asks for a block that does not exist, and
+    /// the peer answers `reject` forever.
+    #[test]
+    fn bep9_the_dict_is_cut_into_sixteen_kib_blocks() {
+        assert_eq!(metadata_block_count(0), 0);
+        assert_eq!(metadata_block_count(1), 1);
+        assert_eq!(metadata_block_count(METADATA_BLOCK), 1, "exactly one block");
+        assert_eq!(metadata_block_count(METADATA_BLOCK + 1), 2, "one byte over");
+        assert_eq!(metadata_block_count(METADATA_BLOCK * 4), 4);
+    }
+
+    #[test]
+    fn bep9_a_request_round_trips() {
+        let m = parse_metadata_message(&build_metadata_request(7)).expect("parses");
+        assert_eq!(m.msg_type, METADATA_REQUEST);
+        assert_eq!(m.piece, 7);
+        assert_eq!(m.total_size, None, "a request states no size");
+    }
+
+    #[test]
+    fn bep9_a_reject_round_trips() {
+        let m = parse_metadata_message(&build_metadata_reject(3)).expect("parses");
+        assert_eq!(m.msg_type, METADATA_REJECT);
+        assert_eq!(m.piece, 3);
+    }
+
+    /// ⭐ The shape of BEP 9 that catches people out: the block is NOT inside
+    /// the bencoded dictionary, it is appended after it. `data_offset` is where
+    /// the dict ended and the bytes begin -- read it wrong and the info dict is
+    /// assembled from the tail of its own header and never hashes.
+    #[test]
+    fn bep9_the_block_follows_the_dictionary_rather_than_sitting_in_it() {
+        let block = b"the raw bytes of the info dict";
+        let msg = build_metadata_data(2, 40000, block);
+
+        let m = parse_metadata_message(&msg).expect("parses");
+        assert_eq!(m.msg_type, METADATA_DATA);
+        assert_eq!(m.piece, 2);
+        assert_eq!(m.total_size, Some(40000), "data carries the total size");
+        assert_eq!(
+            &msg[m.data_offset..],
+            block,
+            "everything past the dictionary is the block, byte for byte"
+        );
+    }
+
+    /// The peer is unauthenticated and we index on what it says. A piece index
+    /// that is negative or past u32 is refused rather than wrapped.
+    #[test]
+    fn bep9_an_impossible_piece_index_is_refused() {
+        let mut d = BTreeMap::new();
+        d.insert(b"msg_type".to_vec(), Bencode::Int(METADATA_DATA));
+        d.insert(b"piece".to_vec(), Bencode::Int(-1));
+        assert!(parse_metadata_message(&Bencode::Dict(d).to_vec()).is_none());
+
+        let mut d = BTreeMap::new();
+        d.insert(b"msg_type".to_vec(), Bencode::Int(METADATA_DATA));
+        d.insert(b"piece".to_vec(), Bencode::Int(i64::from(u32::MAX) + 1));
+        assert!(parse_metadata_message(&Bencode::Dict(d).to_vec()).is_none());
+    }
+
+    #[test]
+    fn bep9_a_message_that_is_not_one_is_refused() {
+        assert!(parse_metadata_message(b"").is_none());
+        assert!(parse_metadata_message(b"not bencode").is_none());
+        // A dict with no msg_type is not a metadata message.
+        assert!(parse_metadata_message(b"d5:piecei0ee").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // BEP 10 -- the extension handshake
+    // -----------------------------------------------------------------------
+
+    /// `ut_metadata` is offered whatever the PEX setting: serving our own info
+    /// dict to a peer resolving a magnet is not peer discovery, and a private
+    /// torrent has every reason to answer it.
+    #[test]
+    fn bep10_metadata_is_offered_even_with_pex_off() {
+        let off = PeerPolicy::default();
+        off.set_pex(false);
+        let hs = build_extension_handshake(6881, Some(1234), &off);
+        assert!(hs.windows(11).any(|w| w == b"ut_metadata"));
+        assert!(
+            !hs.windows(6).any(|w| w == b"ut_pex"),
+            "PEX off means the key is absent, not advertised and ignored"
+        );
+    }
+
+    /// The handshake states our listen port and the size of the dict we can
+    /// serve, which is how a peer knows it may ask at all.
+    #[test]
+    fn bep10_the_handshake_states_the_port_and_the_dict_size() {
+        let on = PeerPolicy::default();
+        let hs = build_extension_handshake(16171, Some(40000), &on);
+        let parsed = parse_extension_handshake_full(&hs, &on).expect("our own handshake parses");
+        assert_eq!(parsed.metadata_size, Some(40000));
+        assert_eq!(parsed.ut_metadata_id, Some(OUR_UT_METADATA_ID));
+
+        // No dict to serve: the key is left out rather than sent as zero.
+        let hs = build_extension_handshake(16171, None, &on);
+        assert_eq!(parse_extension_handshake_full(&hs, &on).unwrap().metadata_size, None);
+    }
+
+    /// BEP 10: an id of zero means the peer is withdrawing an extension it
+    /// offered before. Treating it as a real id would address messages to 0,
+    /// which is the handshake itself.
+    #[test]
+    fn bep10_an_id_of_zero_is_a_withdrawal_not_an_id() {
+        let on = PeerPolicy::default();
+        let mut m = BTreeMap::new();
+        m.insert(b"ut_pex".to_vec(), Bencode::Int(0));
+        m.insert(b"ut_metadata".to_vec(), Bencode::Int(0));
+        let mut root = BTreeMap::new();
+        root.insert(b"m".to_vec(), Bencode::Dict(m));
+        let payload = Bencode::Dict(root).to_vec();
+
+        let parsed = parse_extension_handshake_full(&payload, &on).expect("parses");
+        assert_eq!(parsed.ut_pex_id, None);
+        assert_eq!(parsed.ut_metadata_id, None);
+    }
+
+    #[test]
+    fn bep10_a_handshake_without_an_m_dict_is_not_one() {
+        let on = PeerPolicy::default();
+        assert!(parse_extension_handshake_full(b"de", &on).is_none());
+        assert!(parse_extension_handshake_full(b"not bencode", &on).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // BEP 11 -- peer exchange
+    // -----------------------------------------------------------------------
+
+    /// BEP 11 carries peers in the compact form BEP 23 defines: six bytes each.
+    #[test]
+    fn bep11_peers_travel_in_the_compact_form() {
+        let on = PeerPolicy::default();
+        let peers: Vec<std::net::SocketAddr> = vec![
+            "93.184.216.34:6881".parse().unwrap(),
+            "45.33.32.156:51413".parse().unwrap(),
+        ];
+        let msg = build_pex_message(&peers, &[]);
+        let back = parse_pex(&msg, &on);
+        assert_eq!(back, peers, "what went out is what comes back");
+    }
+
+    /// ⭐ PEX arrives from strangers and feeds the dial queue. Only the port
+    /// was checked before, so a peer naming `127.0.0.1:631` had us open a
+    /// connection to a service on our own machine.
+    #[test]
+    fn bep11_an_address_that_cannot_be_a_peer_is_dropped() {
+        let on = PeerPolicy::default();
+        let junk: Vec<std::net::SocketAddr> = vec![
+            "127.0.0.1:631".parse().unwrap(),
+            "0.0.0.0:6881".parse().unwrap(),
+            "169.254.1.1:6881".parse().unwrap(),
+            "93.184.216.34:0".parse().unwrap(),
+        ];
+        let good: std::net::SocketAddr = "93.184.216.34:6881".parse().unwrap();
+        let mut all = junk.clone();
+        all.push(good);
+
+        let back = parse_pex(&build_pex_message(&all, &[]), &on);
+        assert_eq!(back, vec![good], "only the one that could be a peer");
+    }
+
+    /// And NOT stricter than that: two machines of one LAN in a swarm is an
+    /// ordinary thing, so a private address is a peer. This is where the rule
+    /// parts company with `holepunch::is_punchable`, which refuses them --
+    /// because a rendezvous makes somebody ELSE dial what the asker named.
+    #[test]
+    fn bep11_a_private_address_is_still_a_peer() {
+        let on = PeerPolicy::default();
+        let lan: std::net::SocketAddr = "192.168.99.50:6881".parse().unwrap();
+        assert_eq!(parse_pex(&build_pex_message(&[lan], &[]), &on), vec![lan]);
+    }
+
+    #[test]
+    fn bep11_an_empty_or_malformed_message_yields_no_peers() {
+        let on = PeerPolicy::default();
+        assert!(parse_pex(b"", &on).is_empty());
+        assert!(parse_pex(b"not bencode", &on).is_empty());
+        assert!(parse_pex(&build_pex_message(&[], &[]), &on).is_empty());
     }
 }

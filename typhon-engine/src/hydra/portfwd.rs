@@ -89,14 +89,38 @@ pub async fn map(
     suggested: u16,
     lifetime: Duration,
 ) -> Result<Mapping, String> {
+    map_to(
+        SocketAddr::new(gateway, NATPMP_PORT),
+        tcp,
+        internal,
+        suggested,
+        lifetime,
+        ATTEMPTS,
+    )
+    .await
+}
+
+/// The same, to a chosen address and with a chosen number of tries.
+///
+/// The port is a constant in the protocol and the retry count is a constant in
+/// the spec, which between them made this function unreachable from a test: a
+/// gateway on 5351 is not something a test may assume. Both are parameters
+/// here and constants at the only call site above.
+pub async fn map_to(
+    target: SocketAddr,
+    tcp: bool,
+    internal: u16,
+    suggested: u16,
+    lifetime: Duration,
+    attempts: usize,
+) -> Result<Mapping, String> {
     let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
         .await
         .map_err(|e| format!("cannot open a socket to ask: {e}"))?;
-    let target = SocketAddr::new(gateway, NATPMP_PORT);
     let req = request(tcp, internal, suggested, lifetime);
 
     let mut last = String::from("no attempt made");
-    for _ in 0..ATTEMPTS {
+    for _ in 0..attempts {
         if let Err(e) = socket.send_to(&req, target).await {
             last = format!("cannot send: {e}");
             continue;
@@ -105,7 +129,7 @@ pub async fn map(
         match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, _))) => return parse_reply(&buf[..n]),
             Ok(Err(e)) => last = format!("cannot read: {e}"),
-            Err(_) => last = format!("no answer from {gateway} in {}s", TIMEOUT.as_secs()),
+            Err(_) => last = format!("no answer from {target} in {}s", TIMEOUT.as_secs()),
         }
     }
     Err(last)
@@ -182,5 +206,82 @@ mod tests {
         assert_eq!(renew_interval(Duration::from_secs(3600)), Duration::from_secs(1800));
         assert_eq!(renew_interval(Duration::from_secs(4)), Duration::from_secs(5));
         assert_eq!(renew_interval(Duration::ZERO), Duration::from_secs(5));
+    }
+}
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    /// A gateway that answers one request with `reply`, then stops.
+    fn gateway(reply: Vec<u8>) -> (SocketAddr, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let addr = sock.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            if let Ok((n, from)) = sock.recv_from(&mut buf) {
+                let _ = tx.send(buf[..n].to_vec());
+                let _ = sock.send_to(&reply, from);
+            }
+        });
+        (addr, rx)
+    }
+
+    /// The request really goes out and the grant really comes back. Both halves
+    /// were covered as pure functions; nothing had ever put one on a socket.
+    #[test]
+    fn a_granted_mapping_is_asked_for_and_read_back() {
+        let mut reply = [0u8; 16];
+        reply[8..10].copy_from_slice(&16171u16.to_be_bytes());
+        reply[10..12].copy_from_slice(&50000u16.to_be_bytes());
+        reply[12..16].copy_from_slice(&7200u32.to_be_bytes());
+        let (addr, rx) = gateway(reply.to_vec());
+
+        let m = rt()
+            .block_on(map_to(addr, true, 16171, 16171, Duration::from_secs(7200), 1))
+            .expect("the gateway granted it");
+        assert_eq!(m.external_port, 50000);
+        assert_eq!(m.lifetime, Duration::from_secs(7200));
+
+        let sent = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a request arrived");
+        assert_eq!(sent.len(), 12, "NAT-PMP asks in twelve bytes");
+        assert_eq!(sent[1], OP_MAP_TCP);
+        assert_eq!(u16::from_be_bytes([sent[4], sent[5]]), 16171);
+    }
+
+    /// A refusal is the gateway's answer, not a timeout. Retrying through it
+    /// would hammer a gateway that already said no.
+    #[test]
+    fn a_refusal_comes_back_as_the_gateways_reason() {
+        let mut reply = [0u8; 16];
+        reply[2..4].copy_from_slice(&2u16.to_be_bytes()); // "refuses to map for us"
+        let (addr, _rx) = gateway(reply.to_vec());
+
+        let err = rt()
+            .block_on(map_to(addr, true, 16171, 16171, Duration::from_secs(3600), 1))
+            .expect_err("code 2 is a refusal");
+        assert!(err.contains("refuses to map"), "{err}");
+    }
+
+    /// Silence is the ordinary case -- most networks have no NAT-PMP at all --
+    /// and it has to end rather than wait.
+    #[test]
+    fn a_gateway_that_never_answers_gives_up() {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let addr = sock.local_addr().unwrap();
+        drop(sock);
+
+        let err = rt()
+            .block_on(map_to(addr, true, 16171, 16171, Duration::from_secs(3600), 1))
+            .expect_err("nobody answered");
+        assert!(!err.is_empty(), "the error says something");
     }
 }

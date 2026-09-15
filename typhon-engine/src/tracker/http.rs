@@ -22,42 +22,8 @@ fn fmt_err_chain<E: StdError + ?Sized>(e: &E) -> String {
     out
 }
 
-/// Lazy-initialized reqwest Client that routes through an IPv6 SOCKS5h proxy.
-/// Configured via env `TYPHON_ANNOUNCE_V6_PROXY` = e.g.
-/// `socks5h://user:pass@172.17.0.1:1080`. When set, every successful primary
-/// announce also fires a parallel announce through this client so the tracker
-/// registers us BOTH as v4 peer (main path via FOU) and v6 peer (proxy exits
-/// the VPS in IPv6). `socks5h` makes the proxy resolve the hostname — key for
-/// trackers behind CloudFlare whose AAAA is only selected when resolution
-/// happens on the proxy side. Set to empty string to disable.
-static V6_PROXY_CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
-
-fn v6_proxy_client() -> Option<&'static reqwest::Client> {
-    V6_PROXY_CLIENT
-        .get_or_init(|| {
-            let url = match std::env::var("TYPHON_ANNOUNCE_V6_PROXY") {
-                Ok(u) if !u.is_empty() => u,
-                _ => { eprintln!("[tracker] TYPHON_ANNOUNCE_V6_PROXY not set — no secondary announce"); return None; }
-            };
-            let proxy = match reqwest::Proxy::all(&url) {
-                Ok(p) => p,
-                Err(e) => { eprintln!("[tracker] TYPHON_ANNOUNCE_V6_PROXY parse failed ({}): {}", url, e); return None; }
-            };
-            match reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .user_agent("Hydra/2.4.3-typhon")
-                .proxy(proxy)
-                .build()
-            {
-                Ok(c) => { eprintln!("[tracker] secondary announce proxied via {}", url); Some(c) }
-                Err(e) => { eprintln!("[tracker] secondary client build failed: {}", e); None }
-            }
-        })
-        .as_ref()
-}
-
 /// Primary reqwest client — can optionally route through a SOCKS5 proxy
-/// via env `TYPHON_ANNOUNCE_PROXY` (same syntax as V6_PROXY). Lets us kill
+/// via env `TYPHON_ANNOUNCE_PROXY`. Lets us kill
 /// the IPv6 Freebox leak: without this, the default reqwest client would
 /// dial tracker.example.net AAAA straight from the styx netns source
 /// (2001:db8:abc:d12::3) — visible in tracker peer lists.
@@ -85,8 +51,13 @@ fn primary_proxy() -> Option<&'static reqwest::Proxy> {
         .as_ref()
 }
 
+#[derive(Debug)]
 pub struct AnnounceResponse {
     pub interval: u32,
+    /// BEP 3 `min interval`: the floor the tracker imposes. Below this it wants
+    /// no request at all, forced re-announce included. Zero when the tracker
+    /// did not state one.
+    pub min_interval: u32,
     pub peers: Vec<SocketAddr>,
     pub complete: u32,
     pub incomplete: u32,
@@ -144,7 +115,7 @@ pub async fn announce(
     // avoid leaking the styx-netns v6 source IP on AAAA-only trackers.
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("Hydra/2.4.3-typhon");
+        .user_agent(crate::config::user_agent());
     if let Some(px) = primary_proxy() {
         builder = builder.proxy(px.clone());
     }
@@ -152,28 +123,6 @@ pub async fn announce(
         .build()
         .map_err(|e| format!("http client: {}", fmt_err_chain(&e)))?;
 
-    // Fire-and-forget second announce through IPv6 SOCKS5h proxy if configured.
-    // Utilisé pour ajouter le path v4 via gost-v4 (nft ip6 gost_v4_block).
-    // On modifie le dernier byte du peer_id pour éviter le dédup tracker par
-    // peer_id (certains trackers écrasent l'entrée au lieu de stocker v4+v6).
-    if let Some(pxc) = v6_proxy_client() {
-        let mut pid_secondary = *peer_id;
-        pid_secondary[19] ^= 0x01;
-        let pid_sec_encoded = url_encode_binary(&pid_secondary);
-        let url2 = url.replace(&pid_encoded, &pid_sec_encoded);
-        let pxc = pxc.clone();
-        tokio::spawn(async move {
-            match pxc.get(&url2).send().await {
-                Ok(r) => {
-                    let st = r.status();
-                    if !st.is_success() {
-                        eprintln!("[tracker] secondary announce HTTP {} on {}", st, url2);
-                    }
-                }
-                Err(e) => eprintln!("[tracker] secondary announce FAIL on {} : {}", url2, e),
-            }
-        });
-    }
 
     let resp = client.get(&url)
         .send()
@@ -210,6 +159,14 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
     let interval = dict.get("interval")
         .and_then(|v| v.as_int())
         .unwrap_or(1800) as u32;
+
+    // Bencode spells it with a space. A tracker that omits it leaves us with
+    // zero, which means "no floor stated" and not "no floor".
+    let min_interval = dict
+        .get("min interval")
+        .and_then(|v| v.as_int())
+        .unwrap_or(0)
+        .max(0) as u32;
 
     let complete = dict.get("complete")
         .and_then(|v| v.as_int())
@@ -263,6 +220,7 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
 
     Ok(AnnounceResponse {
         interval,
+        min_interval,
         peers,
         complete,
         incomplete,
@@ -418,28 +376,6 @@ async fn finish_announce(resp: reqwest::Response) -> Result<AnnounceResponse, St
     parse_announce_response(&body)
 }
 
-/// The secondary announce, sent through the v6 SOCKS5 proxy when one is set.
-///
-/// Fire and forget: it exists to add a second egress path, and a failure on it
-/// must not fail the announce that already succeeded. The caller has already
-/// swapped the peer id, because some trackers dedup by it and would overwrite
-/// the primary entry instead of storing both.
-pub fn spawn_secondary_announce(url: String) {
-    let Some(pxc) = v6_proxy_client() else {
-        return;
-    };
-    let pxc = pxc.clone();
-    tokio::spawn(async move {
-        match pxc.get(&url).send().await {
-            Ok(r) if !r.status().is_success() => {
-                tracing::warn!(status = %r.status(), "secondary announce refused");
-            }
-            Err(e) => tracing::warn!(error = %e, "secondary announce failed"),
-            _ => {}
-        }
-    });
-}
-
 fn url_encode_binary(data: &[u8]) -> String {
     let mut result = String::with_capacity(data.len() * 3);
     for &b in data {
@@ -453,4 +389,183 @@ fn url_encode_binary(data: &[u8]) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod announce_wire_tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::Router;
+
+    struct FakeTracker {
+        url: String,
+        _shutdown: tokio::sync::oneshot::Sender<()>,
+    }
+
+    /// A tracker on loopback answering a canned bencoded body. Everything the
+    /// announce path does is HTTP, so the honest fixture is a real server.
+    async fn fake_tracker(body: &'static [u8]) -> FakeTracker {
+        let app = Router::new().route("/announce", get(move || async move { body.to_vec() }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        FakeTracker { url: format!("http://{addr}/announce"), _shutdown: tx }
+    }
+
+    /// A compact peer list is 6 bytes per peer: 4 of address, 2 of port, big
+    /// endian. `d8:completei5e10:incompletei2e8:intervali1800e5:peers6:...e`
+    const OK_BODY: &[u8] =
+        b"d8:completei5e10:incompletei2e8:intervali1800e12:min intervali900e5:peers6:\x5d\xb8\xd8\x22\x1a\xe1e";
+
+    /// ⭐⭐ `min interval` is the FLOOR the tracker imposes: below it, it wants
+    /// no request at all, forced reannounce included. Never reading it is one
+    /// of the four BEP defects found in September.
+    #[tokio::test]
+    async fn the_min_interval_the_tracker_states_is_read() {
+        let t = fake_tracker(OK_BODY).await;
+        let resp = announce(&t.url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "started")
+            .await
+            .expect("the tracker answered");
+        assert_eq!(resp.interval, 1800);
+        assert_eq!(resp.min_interval, 900, "the floor is carried, not dropped");
+    }
+
+    /// The swarm counts and the compact peer list are decoded as BEP 3 spells
+    /// them: 6 bytes a peer, port big-endian.
+    #[tokio::test]
+    async fn the_swarm_counts_and_the_compact_peers_are_decoded() {
+        let t = fake_tracker(OK_BODY).await;
+        let resp = announce(&t.url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "")
+            .await
+            .expect("answered");
+        assert_eq!(resp.complete, 5);
+        assert_eq!(resp.incomplete, 2);
+        assert_eq!(resp.peers.len(), 1, "got {:?}", resp.peers);
+        assert_eq!(resp.peers[0].to_string(), "93.184.216.34:6881");
+        assert!(resp.failure.is_none());
+    }
+
+    /// ⭐ A tracker refusing us answers 200 with a `failure reason`. Treating
+    /// that as a success is how a torrent announces into the void forever.
+    ///
+    /// ⚠️ The bencode length is COMPUTED: "unregistered torrent pass" is 25
+    /// bytes. Counting it by hand as 26 swallows the dict terminator and the
+    /// parser then refuses the body for a reason unrelated to the test.
+    #[tokio::test]
+    async fn a_failure_reason_is_carried_rather_than_read_as_success() {
+        const REASON: &str = "unregistered torrent pass";
+        assert_eq!(REASON.len(), 25, "the fixture length is computed, not counted");
+        const FAIL: &[u8] = b"d14:failure reason25:unregistered torrent passe";
+
+        let t = fake_tracker(FAIL).await;
+        let out = announce(&t.url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "").await;
+
+        // ⭐ A refusal comes back as an Err, not as an Ok carrying a failure:
+        // the caller cannot mistake it for a successful announce with no peers.
+        match out {
+            Err(e) => assert!(e.contains(REASON), "the reason reaches the caller: {e}"),
+            Ok(resp) => assert_eq!(
+                resp.failure.as_deref(),
+                Some(REASON),
+                "if it is an Ok, the failure must be carried"
+            ),
+        }
+    }
+
+    /// A body that is not bencode is an error, not a silently empty swarm --
+    /// an empty swarm looks exactly like a healthy tracker with no peers.
+    #[tokio::test]
+    async fn a_body_that_is_not_bencode_is_an_error() {
+        const JUNK: &[u8] = b"<html>we moved</html>";
+        let t = fake_tracker(JUNK).await;
+        let out = announce(&t.url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "").await;
+        assert!(out.is_err(), "got {out:?}");
+    }
+
+    /// A tracker that is not there is an error the caller can class, not a
+    /// panic and not an empty response.
+    #[tokio::test]
+    async fn a_tracker_that_is_not_there_is_an_error() {
+        let out = announce(
+            "http://127.0.0.1:1/announce",
+            &[0xABu8; 20],
+            &[0xCDu8; 20],
+            16371,
+            0,
+            0,
+            0,
+            "",
+        )
+        .await;
+        assert!(out.is_err(), "got {out:?}");
+    }
+
+    /// ⭐⭐ The info hash and peer id are RAW BYTES in the query string, each
+    /// escaped byte by byte. Encoding them as UTF-8 text mangles every byte
+    /// above 0x7F, and the tracker then looks up a torrent nobody has.
+    #[test]
+    fn binary_values_are_percent_encoded_byte_by_byte() {
+        let raw = [0x00u8, 0x41, 0x7f, 0x80, 0xff];
+        let out = url_encode_binary(&raw);
+        assert!(out.contains("%00"), "got {out}");
+        assert!(out.contains("%80"), "a high byte is escaped, not re-encoded: {out}");
+        assert!(out.contains("%FF") || out.contains("%ff"), "got {out}");
+        assert!(out.contains('A'), "an unreserved byte stays literal: {out}");
+    }
+
+    #[test]
+    fn the_unreserved_set_is_left_literal() {
+        let raw = b"AZaz09-_.~";
+        assert_eq!(url_encode_binary(raw), "AZaz09-_.~");
+    }
+
+    /// A 20-byte hash always encodes to something a tracker accepts, whatever
+    /// the bytes are.
+    #[test]
+    fn any_twenty_byte_hash_encodes_without_losing_a_byte() {
+        let mut hash = [0u8; 20];
+        for (i, b) in hash.iter_mut().enumerate() {
+            *b = (i * 13) as u8;
+        }
+        let out = url_encode_binary(&hash);
+        assert!(!out.is_empty());
+        assert!(!out.contains(' '), "a space would break the query: {out}");
+        assert!(!out.contains('&'), "an ampersand would break the query: {out}");
+    }
+
+    /// The response parser is what every announce goes through; a missing
+    /// `min interval` is zero rather than a parse failure, because most
+    /// trackers do not state one.
+    #[test]
+    fn a_response_without_a_min_interval_parses_with_zero() {
+        let body = b"d8:completei1e10:incompletei0e8:intervali1800e5:peers0:e";
+        let resp = parse_announce_response(body).expect("a valid response");
+        assert_eq!(resp.interval, 1800);
+        assert_eq!(resp.min_interval, 0, "absent means no floor, not a failure");
+        assert!(resp.peers.is_empty());
+    }
+
+    /// A peer list whose length is not a multiple of 6 is malformed. Taking
+    /// the prefix would hand back a peer built from another peer's bytes.
+    #[test]
+    fn a_truncated_compact_peer_list_does_not_invent_a_peer() {
+        let body = b"d8:intervali1800e5:peers4:\x5d\xb8\xd8\x22e";
+        match parse_announce_response(body) {
+            Ok(resp) => assert!(resp.peers.is_empty(), "no peer invented: {:?}", resp.peers),
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn an_empty_body_is_a_parse_error() {
+        assert!(parse_announce_response(b"").is_err());
+        assert!(parse_announce_response(b"not bencode").is_err());
+    }
 }

@@ -551,3 +551,401 @@ pub fn routes() -> axum::Router<AppState> {
 
 /// Kept so the module owns its Arc import even when the runner changes shape.
 pub type Shared = Arc<std::sync::Mutex<crate::store::Store>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::testing::{body_json, keyed, state_from, TestState};
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    fn wf_json(name: &str) -> String {
+        serde_json::json!({
+            "id": "",
+            "name": name,
+            "enabled": true,
+            "interval_secs": 3600,
+            "cap": 10,
+            "when": {"kind": "all", "of": [
+                {"kind": "cond", "field": "ratio", "op": "gt", "value": "2"}
+            ]},
+            "then": [{"type": "pause"}]
+        })
+        .to_string()
+    }
+
+    /// Every route here rides the same gate as the rest of `/api`. A workflow
+    /// can stop and delete torrents, so an unauthenticated caller reaching it
+    /// is worse than a read leak.
+    #[tokio::test]
+    async fn the_routes_refuse_a_caller_with_no_key() {
+        let s = st("rules-refuse");
+        for resp in [
+            list(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+            fields(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+        ] {
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fresh_install_lists_no_workflows() {
+        let s = st("rules-empty");
+        let resp = list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body.as_array().map(|a| a.len()), Some(0));
+    }
+
+    /// The editor's dropdowns are built from `rules::FIELDS`, the same
+    /// constant the compiler validates against: a field cannot be offered in
+    /// the editor and rejected on save.
+    #[tokio::test]
+    async fn every_offered_field_is_a_field_the_engine_knows() {
+        let s = st("rules-fields");
+        let resp = fields(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let offered = body["fields"].as_array().expect("a fields array");
+        assert_eq!(offered.len(), rules::FIELDS.len(), "the catalogue is served whole");
+
+        let known: Vec<&str> = rules::FIELDS.iter().map(|(n, _)| *n).collect();
+        for f in offered {
+            let name = f["name"].as_str().expect("a field has a name");
+            assert!(known.contains(&name), "{name} is offered but unknown to the engine");
+            assert!(!f["label"].as_str().unwrap_or_default().is_empty(), "{name} has a label");
+            assert!(
+                !f["operators"].as_array().expect("operators").is_empty(),
+                "{name} offers at least one operator"
+            );
+            assert_eq!(
+                f["operators"].as_array().unwrap().len(),
+                f["operators_labelled"].as_array().expect("labelled operators").len(),
+                "{name}: every operator has a label"
+            );
+        }
+    }
+
+    /// A field with no label of its own still reads as the engine spells it,
+    /// rather than coming back blank.
+    #[test]
+    fn an_unlabelled_field_falls_back_to_its_own_name() {
+        assert_eq!(field_label("no_such_field_yet"), "no_such_field_yet");
+        assert_eq!(field_label("tracker_host"), "tracker");
+        assert_eq!(field_label("completed_age"), "time since completed");
+    }
+
+    /// ⭐ "greater than" is right for a ratio and WRONG for an age:
+    /// `added_age > 2d` means added MORE than two days ago. Reading it as
+    /// "greater" is how a rule gets written backwards.
+    #[test]
+    fn a_duration_comparison_reads_as_age_not_as_magnitude() {
+        assert_eq!(op_label("gt", rules::Kind::Duration), "is older than");
+        assert_eq!(op_label("lt", rules::Kind::Duration), "is newer than");
+        assert_eq!(op_label("gt", rules::Kind::Number), "is more than");
+        assert_eq!(op_label("lt", rules::Kind::Number), "is less than");
+    }
+
+    #[test]
+    fn an_unknown_operator_reads_as_itself() {
+        assert_eq!(op_label("no_such_op", rules::Kind::Text), "no_such_op");
+    }
+
+    #[test]
+    fn a_workflow_needs_a_name() {
+        let body = serde_json::json!({
+            "id": "", "name": "   ",
+            "when": {"kind": "all", "of": []},
+            "then": []
+        })
+        .to_string();
+        let err = parse(&body).expect_err("a nameless workflow is refused");
+        assert!(err.contains("name"), "the reason names the problem: {err}");
+    }
+
+    #[test]
+    fn a_workflow_with_no_id_is_given_one() {
+        let w = parse(&wf_json("ratio reached")).expect("a valid workflow");
+        assert!(!w.id.trim().is_empty(), "an id was generated");
+        assert!(w.id.starts_with("wf"));
+    }
+
+    /// An interval below the floor would have the runner scan the whole
+    /// library far more often than the work it does could ever justify.
+    #[test]
+    fn an_interval_below_the_floor_is_raised_to_it() {
+        let mut v: serde_json::Value = serde_json::from_str(&wf_json("too eager")).unwrap();
+        v["interval_secs"] = serde_json::json!(1);
+        let w = parse(&v.to_string()).expect("a valid workflow");
+        assert_eq!(w.interval_secs, rules::MIN_INTERVAL_SECS);
+    }
+
+    /// A cap of zero is not "act on nothing"; it is the unset value, and the
+    /// default is what bounds a first run from touching the whole library.
+    #[test]
+    fn a_cap_of_zero_takes_the_default_rather_than_acting_on_nothing() {
+        let mut v: serde_json::Value = serde_json::from_str(&wf_json("uncapped")).unwrap();
+        v["cap"] = serde_json::json!(0);
+        let w = parse(&v.to_string()).expect("a valid workflow");
+        assert_eq!(w.cap, rules::DEFAULT_CAP);
+        assert!(w.cap > 0);
+    }
+
+    /// ⭐ Compiled BEFORE it is stored. A rule that cannot compile would fail
+    /// silently every interval forever, and the operator would find out by
+    /// noticing that nothing happened.
+    #[test]
+    fn a_rule_that_cannot_compile_is_refused_at_save_time() {
+        let mut v: serde_json::Value = serde_json::from_str(&wf_json("bad field")).unwrap();
+        v["when"] = serde_json::json!({"kind": "all", "of": [
+            {"kind": "cond", "field": "no_such_field", "op": "eq", "value": "x"}
+        ]});
+        assert!(parse(&v.to_string()).is_err(), "an unknown field is refused");
+
+        let mut v2: serde_json::Value = serde_json::from_str(&wf_json("bad regex")).unwrap();
+        v2["when"] = serde_json::json!({"kind": "all", "of": [
+            {"kind": "cond", "field": "name", "op": "matches", "value": "([unclosed"}
+        ]});
+        assert!(parse(&v2.to_string()).is_err(), "an uncompilable regex is refused");
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_refused_without_panicking() {
+        assert!(parse("not json").is_err());
+        assert!(parse("").is_err());
+    }
+
+    /// A workflow that round-trips through the store comes back with the same
+    /// clauses: `to_json` re-splits the stored body, and losing `when`/`then`
+    /// there would leave the editor showing an empty rule that still runs.
+    #[tokio::test]
+    async fn a_saved_workflow_comes_back_with_its_clauses() {
+        let s = st("rules-roundtrip");
+        let resp = save(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            wf_json("ratio reached"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "the save was accepted");
+
+        let listed = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let rows = listed.as_array().expect("an array");
+        assert_eq!(rows.len(), 1, "exactly the workflow that was saved");
+        assert_eq!(rows[0]["name"], serde_json::json!("ratio reached"));
+        assert!(!rows[0]["when"].is_null(), "the when clause survived the round trip");
+        assert!(!rows[0]["then"].is_null(), "the then clause survived the round trip");
+        assert_eq!(rows[0]["enabled"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn saving_an_invalid_workflow_is_a_bad_request_not_a_panic() {
+        let s = st("rules-badsave");
+        let resp = save(State(s.state.clone()), RawQuery(None), keyed(KEY), "{".into()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use crate::api::testing::{body_json, keyed, state_from, TestState};
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    fn wf(name: &str) -> String {
+        serde_json::json!({
+            "id": "", "name": name, "enabled": true, "interval_secs": 3600, "cap": 10,
+            "when": {"kind": "all", "of": [
+                {"kind": "cond", "field": "ratio", "op": "gt", "value": "2"}
+            ]},
+            "then": [{"type": "pause"}]
+        })
+        .to_string()
+    }
+
+    /// Every route here can stop and delete torrents. None of them may answer
+    /// an unauthenticated caller.
+    #[tokio::test]
+    async fn every_workflow_route_refuses_a_caller_with_no_key() {
+        let s = st("rules2-auth");
+        let no_key = HeaderMap::new();
+        assert_eq!(
+            remove(State(s.state.clone()), Path("wf1".into()), RawQuery(None), no_key.clone())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            run_now(State(s.state.clone()), Path("wf1".into()), RawQuery(None), no_key.clone())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            preview(State(s.state.clone()), RawQuery(None), no_key.clone(), wf("x")).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            activity(State(s.state.clone()), RawQuery(None), no_key).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// ⭐⭐ A preview must not DO anything. It is the one way to find out what
+    /// a rule would touch before trusting it, and a preview with side effects
+    /// is worse than no preview at all.
+    #[tokio::test]
+    async fn a_preview_reports_without_storing_the_workflow() {
+        let s = st("rules2-preview");
+        let resp = preview(State(s.state.clone()), RawQuery(None), keyed(KEY), wf("dry run")).await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        let _ = body_json(resp).await;
+
+        let listed = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert_eq!(
+            listed.as_array().map(|a| a.len()),
+            Some(0),
+            "a preview stores nothing: {listed}"
+        );
+    }
+
+    /// A preview of a rule that cannot compile is a 400, not a stored rule
+    /// and not a panic.
+    #[tokio::test]
+    async fn a_preview_of_an_uncompilable_rule_is_refused() {
+        let s = st("rules2-badpreview");
+        let mut v: serde_json::Value = serde_json::from_str(&wf("bad")).unwrap();
+        v["when"] = serde_json::json!({"kind": "all", "of": [
+            {"kind": "cond", "field": "no_such_field", "op": "eq", "value": "x"}
+        ]});
+        let resp =
+            preview(State(s.state.clone()), RawQuery(None), keyed(KEY), v.to_string()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Running a workflow that does not exist is a refusal, never a silent
+    /// "ok" for a pass that never happened.
+    #[tokio::test]
+    async fn running_a_workflow_that_does_not_exist_is_refused() {
+        let s = st("rules2-runmissing");
+        let resp = run_now(
+            State(s.state.clone()),
+            Path("no-such-workflow".into()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(
+            !resp.status().is_success(),
+            "a workflow that is not here cannot have run: {:?}",
+            resp.status()
+        );
+    }
+
+    /// Deleting one that does not exist says so rather than reporting success.
+    #[tokio::test]
+    async fn deleting_a_workflow_that_does_not_exist_is_reported() {
+        let s = st("rules2-delmissing");
+        let resp = remove(
+            State(s.state.clone()),
+            Path("no-such-workflow".into()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(!resp.status().is_success(), "got {:?}", resp.status());
+    }
+
+    /// The full life of a rule: saved, listed, run on an empty library, and
+    /// removed.
+    #[tokio::test]
+    async fn a_workflow_can_be_saved_run_and_removed() {
+        let s = st("rules2-life");
+        let saved = save(State(s.state.clone()), RawQuery(None), keyed(KEY), wf("ratio")).await;
+        assert!(saved.status().is_success());
+        let body = body_json(saved).await;
+        let id = body["id"].as_str().expect("the saved workflow has an id").to_string();
+
+        let ran = run_now(
+            State(s.state.clone()),
+            Path(id.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(ran.status().is_success(), "a pass on an empty library still runs: {:?}", ran.status());
+
+        let gone = remove(State(s.state.clone()), Path(id), RawQuery(None), keyed(KEY)).await;
+        assert!(gone.status().is_success());
+
+        let listed = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert_eq!(listed.as_array().map(|a| a.len()), Some(0));
+    }
+
+    /// The activity trail answers on a fresh install -- empty, not absent.
+    #[tokio::test]
+    async fn the_activity_trail_is_empty_on_a_fresh_install() {
+        let s = st("rules2-activity");
+        let body =
+            body_json(activity(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let empty = body.as_array().map(|a| a.is_empty()).unwrap_or(false)
+            || body.get("activity").and_then(|a| a.as_array()).map(|a| a.is_empty()).unwrap_or(false);
+        assert!(empty, "got {body}");
+    }
+
+    /// ⭐ A new workflow is OFF. It is the only default that cannot cause
+    /// damage while its author is still typing.
+    #[test]
+    fn a_workflow_with_no_enabled_flag_is_off() {
+        let body = serde_json::json!({
+            "id": "", "name": "half typed",
+            "when": {"kind": "all", "of": [
+                {"kind": "cond", "field": "ratio", "op": "gt", "value": "2"}
+            ]},
+            "then": [{"type": "pause"}]
+        })
+        .to_string();
+        let w = parse(&body).expect("a complete workflow is valid");
+        assert!(!w.enabled, "a rule nobody switched on must not run");
+    }
+
+    /// ⭐⭐ A workflow with NO condition is refused: an empty `when` matches
+    /// every torrent in the library. Paired with a `delete` action that is the
+    /// whole seedbox, from a rule its author had not finished typing.
+    #[test]
+    fn a_workflow_with_no_condition_is_refused() {
+        let body = serde_json::json!({
+            "id": "", "name": "matches everything",
+            "when": {"kind": "all", "of": []},
+            "then": [{"type": "pause"}]
+        })
+        .to_string();
+        let err = parse(&body).expect_err("an unconditioned workflow is refused");
+        assert!(err.contains("condition"), "the reason names the problem: {err}");
+    }
+
+    /// ⭐ A workflow with no action at all is refused rather than stored: it
+    /// would run on its interval forever and do nothing, and the operator
+    /// would find out by noticing that nothing happened.
+    #[test]
+    fn a_workflow_with_no_action_is_refused() {
+        let body = serde_json::json!({
+            "id": "", "name": "does nothing",
+            "when": {"kind": "all", "of": []},
+            "then": []
+        })
+        .to_string();
+        let err = parse(&body).expect_err("an actionless workflow is refused");
+        assert!(err.contains("action"), "the reason names the problem: {err}");
+    }
+}

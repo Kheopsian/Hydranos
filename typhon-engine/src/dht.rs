@@ -96,7 +96,7 @@ impl DhtSession {
     /// than gaining a second one. `start_torrent` calls this on every resume,
     /// and the boot loop calls it for every loaded torrent.
     pub fn track_torrent(self: &Arc<Self>, torrent: Arc<TorrentState>) {
-        if torrent.meta.private {
+        if !torrent.meta.allows_peer_discovery() {
             return;
         }
         let ih = torrent.info_hash;

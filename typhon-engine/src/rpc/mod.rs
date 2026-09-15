@@ -220,3 +220,157 @@ async fn handle_conn<Rd, Wr>(
 
     info!("[rpc] client disconnected");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    /// A manager rooted in a directory of its own, so a test never writes into
+    /// the crate root -- `cargo test` has already left a stray `hydra.db` there
+    /// once.
+    fn fixture(tag: &str) -> (Arc<TorrentManager>, Arc<DiskManager>, Arc<EngineConfig>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("typhon-rpc-{tag}-{}", std::process::id()));
+        let data = root.join("data");
+        let resume = root.join("resume");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let disk = Arc::new(DiskManager::new(100));
+        let tm = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        // Every field carries a serde default, so an empty document is the
+        // configuration a fresh install runs with.
+        let cfg: EngineConfig = toml::from_str("").expect("EngineConfig defaults");
+        (tm, disk, Arc::new(cfg), root)
+    }
+
+    /// Drive `handle_conn` over an in-memory duplex and collect what it wrote.
+    /// The transport is generic precisely so it can be something other than a
+    /// socket; this is the payoff.
+    async fn exchange(tag: &str, input: &str) -> Vec<serde_json::Value> {
+        let (tm, dm, cfg, root) = fixture(tag);
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let (srv_rd, srv_wr) = tokio::io::split(server);
+
+        let task = tokio::spawn(handle_conn(srv_rd, srv_wr, tm, dm, cfg));
+
+        client.write_all(input.as_bytes()).await.unwrap();
+        // Half-closing the write side is the EOF that ends the loop.
+        client.shutdown().await.unwrap();
+
+        let mut out = String::new();
+        client.read_to_string(&mut out).await.unwrap();
+        task.await.unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+
+        out.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON: {l:?} ({e})")))
+            .collect()
+    }
+
+    /// Every reply is one line of JSON. A reply split across lines would
+    /// desynchronise a line-delimited client for the rest of the connection.
+    #[tokio::test]
+    async fn a_reply_is_exactly_one_line() {
+        let out = exchange("oneline", "{\"id\":1,\"method\":\"subscribe_events\"}\n").await;
+        assert_eq!(out.len(), 1);
+    }
+
+    /// Malformed input is answered, not dropped: a client that sent garbage
+    /// still has a request outstanding and would otherwise hang on it.
+    #[tokio::test]
+    async fn unparseable_input_gets_an_error_reply_and_the_connection_survives() {
+        let out = exchange("parse", "not json at all\n{\"id\":7,\"method\":\"subscribe_events\"}\n").await;
+        assert_eq!(out.len(), 2, "the bad line is answered AND the good one after it");
+        assert!(
+            out[0].get("error").and_then(|e| e.as_str()).unwrap_or_default().contains("parse error"),
+            "first reply names the parse failure: {:?}",
+            out[0]
+        );
+        assert_eq!(out[1].get("id").and_then(|v| v.as_i64()), Some(7));
+    }
+
+    /// Blank lines are keepalive noise, not requests. Answering them would
+    /// send a reply the client never asked for and shift every later id.
+    #[tokio::test]
+    async fn a_blank_line_is_not_a_request() {
+        let out = exchange("blank", "\n\n   \n{\"id\":3,\"method\":\"subscribe_events\"}\n").await;
+        assert_eq!(out.len(), 1, "only the real request is answered");
+        assert_eq!(out[0].get("id").and_then(|v| v.as_i64()), Some(3));
+    }
+
+    /// `subscribe_events` is intercepted before dispatch and acknowledged, so
+    /// the client knows the stream is live before events start arriving.
+    #[tokio::test]
+    async fn subscribing_is_acknowledged() {
+        let out = exchange("sub", "{\"id\":42,\"method\":\"subscribe_events\"}\n").await;
+        assert_eq!(out[0]["result"]["subscribed"], serde_json::json!(true));
+        assert_eq!(out[0].get("id").and_then(|v| v.as_i64()), Some(42));
+    }
+
+    /// Subscribing twice must not swap the receiver: the second one would
+    /// start at the current head and drop whatever was already queued.
+    #[tokio::test]
+    async fn subscribing_twice_is_acknowledged_twice_and_keeps_one_receiver() {
+        let out = exchange(
+            "sub2",
+            "{\"id\":1,\"method\":\"subscribe_events\"}\n{\"id\":2,\"method\":\"subscribe_events\"}\n",
+        )
+        .await;
+        assert_eq!(out.len(), 2);
+        for (i, r) in out.iter().enumerate() {
+            assert_eq!(r["result"]["subscribed"], serde_json::json!(true), "reply {i}");
+        }
+    }
+
+    /// A notification -- a request with no id -- gets a reply with no id.
+    /// Echoing an id the client never sent is worse than sending none.
+    #[tokio::test]
+    async fn a_request_without_an_id_is_answered_without_one() {
+        let out = exchange("noid", "{\"method\":\"subscribe_events\"}\n").await;
+        assert_eq!(out.len(), 1);
+        assert!(out[0].get("id").is_none(), "no id was sent, so none comes back: {:?}", out[0]);
+    }
+
+    /// An unknown method is a reply, never a dropped request or a panic.
+    #[tokio::test]
+    async fn an_unknown_method_is_answered() {
+        let out = exchange("unknown", "{\"id\":5,\"method\":\"no_such_method_at_all\"}\n").await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].get("id").and_then(|v| v.as_i64()), Some(5));
+        assert!(out[0].get("error").is_some(), "unknown methods report an error: {:?}", out[0]);
+    }
+
+    /// A request missing `method` cannot be dispatched; it is a parse failure
+    /// because `method` is the one field with no serde default.
+    #[tokio::test]
+    async fn a_request_without_a_method_is_a_parse_error() {
+        let out = exchange("nometh", "{\"id\":1,\"params\":{}}\n").await;
+        assert_eq!(out.len(), 1);
+        assert!(out[0].get("error").is_some());
+    }
+
+    /// Closing with nothing sent is an ordinary disconnect.
+    #[tokio::test]
+    async fn an_empty_connection_closes_cleanly() {
+        let out = exchange("empty", "").await;
+        assert!(out.is_empty());
+    }
+
+    /// Requests are answered in the order they arrived: a line-delimited
+    /// client matches replies by position when it omits ids.
+    #[tokio::test]
+    async fn replies_come_back_in_request_order() {
+        let out = exchange(
+            "order",
+            "{\"id\":1,\"method\":\"subscribe_events\"}\n{\"id\":2,\"method\":\"no_such_method\"}\n{\"id\":3,\"method\":\"subscribe_events\"}\n",
+        )
+        .await;
+        let ids: Vec<i64> = out.iter().filter_map(|r| r.get("id")?.as_i64()).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+}

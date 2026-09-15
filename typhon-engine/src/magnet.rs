@@ -256,3 +256,150 @@ async fn dht_peers(
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// EngineConfig has no Default; every field carries a serde default, so an
+    /// empty document is the configuration a fresh install runs with.
+    fn test_config() -> crate::config::EngineConfig {
+        toml::from_str("").expect("every EngineConfig field has a serde default")
+    }
+
+    fn ih(n: u8) -> [u8; 20] {
+        [n; 20]
+    }
+
+    fn jobs_with(state: JobState, age: Duration) -> Arc<MagnetJobs> {
+        let jobs = Arc::new(MagnetJobs::default());
+        jobs.map.lock().unwrap().insert(
+            ih(1),
+            Job { state, started: Instant::now() - age },
+        );
+        jobs
+    }
+
+    #[test]
+    fn hex_pads_every_byte_to_two_digits() {
+        assert_eq!(hex(&[0x00, 0x0f, 0xff]), "000fff");
+        assert_eq!(hex(&[]), "");
+        assert_eq!(hex(&ih(0xab)).len(), 40, "a 20-byte hash is 40 hex digits");
+    }
+
+    #[test]
+    fn an_unknown_hash_has_no_state() {
+        let jobs = Arc::new(MagnetJobs::default());
+        assert!(jobs.state_of(&ih(9)).is_none());
+    }
+
+    #[test]
+    fn a_live_job_reports_resolving() {
+        let jobs = jobs_with(JobState::Resolving, Duration::from_secs(1));
+        assert!(matches!(jobs.state_of(&ih(1)), Some(JobState::Resolving)));
+    }
+
+    /// A job that blew its ceiling must report failed rather than resolve
+    /// forever: `Resolving` is what the UI spins on, and nothing else would
+    /// ever stop it.
+    #[test]
+    fn a_job_past_its_ceiling_reports_failed_not_resolving() {
+        let jobs = jobs_with(JobState::Resolving, JOB_TIMEOUT + Duration::from_secs(1));
+        match jobs.state_of(&ih(1)) {
+            Some(JobState::Failed(msg)) => assert!(msg.contains("timed out"), "{msg}"),
+            other => panic!("expected a timeout failure, got {other:?}"),
+        }
+    }
+
+    /// The ceiling applies to `Resolving` only. A dict that took longer than
+    /// the ceiling to arrive is still a dict, and reporting it as a timeout
+    /// would throw away work that succeeded.
+    #[test]
+    fn a_finished_job_is_not_retroactively_timed_out() {
+        let jobs = jobs_with(JobState::Done(vec![1, 2, 3]), JOB_TIMEOUT * 2);
+        match jobs.state_of(&ih(1)) {
+            Some(JobState::Done(d)) => assert_eq!(d, vec![1, 2, 3]),
+            other => panic!("expected the resolved dict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forgetting_a_job_releases_its_dict() {
+        let jobs = jobs_with(JobState::Done(vec![0u8; 64]), Duration::from_secs(0));
+        assert!(jobs.state_of(&ih(1)).is_some());
+        jobs.forget(&ih(1));
+        assert!(jobs.state_of(&ih(1)).is_none(), "a collected job stops occupying memory");
+    }
+
+    #[test]
+    fn forgetting_a_job_that_never_existed_is_not_an_error() {
+        let jobs = Arc::new(MagnetJobs::default());
+        jobs.forget(&ih(7));
+    }
+
+    /// `set_state` addresses a job by hash; with no such job there is nothing
+    /// to write, and inventing one would resurrect a resolution the caller
+    /// already collected.
+    #[test]
+    fn setting_the_state_of_a_forgotten_job_does_not_recreate_it() {
+        let jobs = jobs_with(JobState::Resolving, Duration::from_secs(0));
+        jobs.forget(&ih(1));
+        jobs.set_state(ih(1), JobState::Done(vec![9]));
+        assert!(jobs.state_of(&ih(1)).is_none());
+    }
+
+    /// Two engines in one process share no job map, but within ONE engine a
+    /// second start on a live hash must not displace the first.
+    #[test]
+    fn a_second_start_on_a_live_job_is_refused() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _g = rt.enter();
+        let jobs = jobs_with(JobState::Resolving, Duration::from_secs(1));
+        let cfg = test_config();
+        assert!(
+            !jobs.start(ih(1), vec![], vec![], &cfg, None, None),
+            "a resolution already in flight is not restarted"
+        );
+        assert!(matches!(jobs.state_of(&ih(1)), Some(JobState::Resolving)));
+    }
+
+    /// A finished-but-uncollected job also refuses a restart: its dict is
+    /// still owed to whoever asked for it.
+    #[test]
+    fn a_finished_uncollected_job_is_not_restarted() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _g = rt.enter();
+        let jobs = jobs_with(JobState::Done(vec![4]), JOB_TIMEOUT * 2);
+        let cfg = test_config();
+        assert!(!jobs.start(ih(1), vec![], vec![], &cfg, None, None));
+    }
+
+    /// Resolving always goes out on a binding: without one we would dial the
+    /// swarm over the default route and show our real address. That is a
+    /// reported failure, never a silent fallback.
+    #[test]
+    fn with_no_binding_the_job_fails_rather_than_dialling_in_the_clear() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _g = rt.enter();
+        let jobs = Arc::new(MagnetJobs::default());
+        let cfg = test_config();
+        if !cfg.resolved_bindings().is_empty() {
+            return; // a default config that has a binding cannot exercise this
+        }
+        assert!(jobs.start(ih(2), vec![], vec![], &cfg, None, None), "the job was accepted");
+        match jobs.state_of(&ih(2)) {
+            Some(JobState::Failed(msg)) => {
+                assert!(msg.contains("binding"), "the reason names the binding: {msg}")
+            }
+            other => panic!("expected a binding failure, got {other:?}"),
+        }
+    }
+
+    /// The budget exists so a resolution cannot sit forever; a ceiling below
+    /// the discovery budget would cut discovery off before it ever reported.
+    #[test]
+    fn the_job_ceiling_is_wider_than_the_discovery_budget() {
+        assert!(JOB_TIMEOUT > DISCOVERY_BUDGET);
+        assert!(MAX_PEERS > 0);
+    }
+}

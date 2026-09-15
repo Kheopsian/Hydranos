@@ -454,3 +454,199 @@ pub async fn fetch_metainfo(
     }
     Ok((blob, port as u16))
 }
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    use axum::routing::{get, post};
+    use axum::Router;
+
+    /// A throwaway Hydra on loopback. Everything `nodes.rs` does is HTTP, so
+    /// the honest fixture is a real server on a real port -- bound to :0 so
+    /// tests never collide, and shut down with the test.
+    struct FakeNode {
+        url: String,
+        _shutdown: tokio::sync::oneshot::Sender<()>,
+    }
+
+    async fn fake_node(app: Router) -> FakeNode {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        FakeNode { url: format!("http://{addr}"), _shutdown: tx }
+    }
+
+    /// A node that answers a proper status.
+    fn healthy() -> Router {
+        Router::new().route(
+            "/api/status",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "version": "4.27.0",
+                    "engines": [{"id": "race"}, {"id": "hoard"}],
+                    "hoard": {"total_torrents": 293194},
+                    "race": {"torrents": 475}
+                }))
+            }),
+        )
+    }
+
+    /// ⭐ A probe NEVER fails: an error IS the answer. The nodes list is
+    /// rendered on demand, and a node that is down must render as down rather
+    /// than take the page with it.
+    #[tokio::test]
+    async fn a_node_that_is_not_there_answers_offline_rather_than_erroring() {
+        // Port 1 on loopback: nothing listens, and the connection is refused
+        // immediately rather than hanging.
+        let h = probe("http://127.0.0.1:1", "key").await;
+        assert!(!h.online, "an unreachable node is offline");
+        assert!(!h.error.is_empty(), "and says why: {h:?}");
+    }
+
+    #[tokio::test]
+    async fn a_healthy_node_reports_its_version_and_its_torrents() {
+        let node = fake_node(healthy()).await;
+        let h = probe(&node.url, "key").await;
+        assert!(h.online, "got {h:?}");
+        assert_eq!(h.version, "4.27.0");
+        assert!(h.error.is_empty(), "a healthy node reports no error: {h:?}");
+        assert!(h.torrents > 0, "the catalogue size came back: {h:?}");
+    }
+
+    /// ⭐ A node that refuses our key is ONLINE but unusable. Reporting it as
+    /// offline would send the operator looking at the network when the problem
+    /// is the credential.
+    #[tokio::test]
+    async fn a_node_that_refuses_the_key_is_not_reported_as_offline_without_a_reason() {
+        let app = Router::new().route(
+            "/api/status",
+            get(|| async {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({"error": "Invalid or missing API key"})),
+                )
+            }),
+        );
+        let node = fake_node(app).await;
+        let h = probe(&node.url, "wrong-key").await;
+        assert!(!h.error.is_empty(), "the refusal is reported: {h:?}");
+    }
+
+    /// A node answering something that is not JSON must not panic the probe.
+    #[tokio::test]
+    async fn a_node_answering_garbage_is_an_error_not_a_panic() {
+        let app = Router::new().route("/api/status", get(|| async { "this is not json" }));
+        let node = fake_node(app).await;
+        let h = probe(&node.url, "key").await;
+        assert!(!h.error.is_empty() || !h.online, "got {h:?}");
+    }
+
+    /// A trailing slash on the declared URL must not produce `//api/status`.
+    #[tokio::test]
+    async fn a_trailing_slash_in_the_node_url_is_tolerated() {
+        let node = fake_node(healthy()).await;
+        let h = probe(&format!("{}/", node.url), "key").await;
+        assert!(h.online, "a trailing slash must not break the path: {h:?}");
+    }
+
+    /// ⭐ The relay carries the remote's key server-side: it never reaches a
+    /// browser and never sits in a URL. Here we prove it is actually sent.
+    #[tokio::test]
+    async fn the_relay_sends_the_nodes_own_key_rather_than_ours() {
+        let app = Router::new().route(
+            "/api/engines",
+            get(|headers: axum::http::HeaderMap| async move {
+                let key = headers
+                    .get("X-API-Key")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                axum::Json(serde_json::json!({"seen_key": key}))
+            }),
+        );
+        let node = fake_node(app).await;
+        let (status, body, _ctype) =
+            forward(&node.url, "the-remote-key", reqwest::Method::GET, "/api/engines", vec![])
+                .await
+                .expect("the relay reached the node");
+        assert!(status.is_success());
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(v["seen_key"], serde_json::json!("the-remote-key"));
+    }
+
+    /// The relay passes the node's status through rather than flattening every
+    /// answer to 200: a 404 on the far side is a 404 here.
+    #[tokio::test]
+    async fn the_relay_passes_the_remote_status_through() {
+        let app = Router::new().route(
+            "/api/nope",
+            get(|| async { (axum::http::StatusCode::NOT_FOUND, "nope") }),
+        );
+        let node = fake_node(app).await;
+        let (status, _body, _ct) =
+            forward(&node.url, "k", reqwest::Method::GET, "/api/nope", vec![])
+                .await
+                .expect("the relay reached the node");
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+    }
+
+    /// A POST body must arrive intact, or a bulk action on a remote node acts
+    /// on nothing.
+    #[tokio::test]
+    async fn the_relay_carries_the_body_it_was_given() {
+        let app = Router::new().route(
+            "/api/echo",
+            post(|body: String| async move { body }),
+        );
+        let node = fake_node(app).await;
+        let (status, body, _ct) = forward(
+            &node.url,
+            "k",
+            reqwest::Method::POST,
+            "/api/echo",
+            br#"{"hashes":["a","b"]}"#.to_vec(),
+        )
+        .await
+        .expect("the relay reached the node");
+        assert!(status.is_success());
+        assert_eq!(String::from_utf8_lossy(&body), r#"{"hashes":["a","b"]}"#);
+    }
+
+    /// A node that is not there is an Err, not a silent empty answer that the
+    /// fleet page would merge as "this node has nothing".
+    #[tokio::test]
+    async fn relaying_to_a_node_that_is_not_there_is_an_error() {
+        let out =
+            forward("http://127.0.0.1:1", "k", reqwest::Method::GET, "/api/engines", vec![]).await;
+        assert!(out.is_err(), "an unreachable node must not look like an empty one");
+    }
+
+    /// Fetching a metainfo the node does not have is a reported failure, never
+    /// an empty torrent file that would be stored as if it were real.
+    #[tokio::test]
+    async fn fetching_a_metainfo_the_node_does_not_have_is_refused() {
+        let app = Router::new().route(
+            "/api/torrents/{hash}/torrent",
+            get(|| async { (axum::http::StatusCode::NOT_FOUND, "no such torrent") }),
+        );
+        let node = fake_node(app).await;
+        let out = fetch_metainfo(&node.url, "k", &"0".repeat(40), "race").await;
+        assert!(out.is_err(), "a missing metainfo is an error: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn fetching_a_metainfo_from_a_node_that_is_not_there_says_it_is_unreachable() {
+        let out = fetch_metainfo("http://127.0.0.1:1", "k", &"0".repeat(40), "race").await;
+        match out {
+            Err(e) => assert!(e.contains("unreachable"), "got {e}"),
+            Ok(_) => panic!("there is nothing to fetch from"),
+        }
+    }
+}

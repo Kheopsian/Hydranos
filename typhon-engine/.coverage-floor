@@ -1,0 +1,12 @@
+# Line coverage the engine must not fall below, in percent.
+#
+# A ratchet, not a target. Chasing a number produces tests written for the
+# metric; what this guards is narrower and worth more -- that a change cannot
+# quietly arrive with less of it covered than what is already there. The V4
+# port shipped whole subsystems with no call site and no test, and nothing said
+# so.
+#
+# Raise it when a run comes in comfortably above: `cargo llvm-cov` prints the
+# figure, and moving this line is the whole of it. Never lower it without
+# saying why in the commit message.
+71.0

@@ -871,24 +871,6 @@
                             <input type="text" id="trk-host" placeholder="tracker.example.net" autocomplete="off">
                         </div>
                         <div class="form-group">
-                            <label>Client preset</label>
-                            <select id="trk-preset" onchange="applyTrackerPreset()">
-                                <option value="">(custom)</option>
-                                <option value="qb522">qBittorrent 5.2.2</option>
-                                <option value="qb461">qBittorrent 4.6.1</option>
-                                <option value="tr405">Transmission 4.0.5</option>
-                                <option value="de211">Deluge 2.1.1</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>peer_id prefix <span class="sr-desc">8 chars, e.g. -qB5220-</span></label>
-                            <input type="text" id="trk-pid" placeholder="(no spoof)" maxlength="8" autocomplete="off">
-                        </div>
-                        <div class="form-group">
-                            <label>User-Agent</label>
-                            <input type="text" id="trk-ua" placeholder="qBittorrent/5.2.2" autocomplete="off">
-                        </div>
-                        <div class="form-group">
                             <label>Passkey <span class="sr-desc">leave blank = unchanged</span></label>
                             <input type="text" id="trk-passkey" placeholder="(unchanged)" autocomplete="off">
                         </div>
@@ -907,7 +889,6 @@
                     </div>
                     <div class="cat-form-actions">
                         <button class="btn-primary" onclick="saveTracker()">Save</button>
-                        <button class="btn-small" onclick="clearTrackerSpoof()">Clear spoof</button>
                         <button class="btn-small btn-danger" onclick="clearTrackerPasskey()">Clear passkey</button>
                         <button class="btn-cancel" onclick="hideTrackerForm()">Cancel</button>
                     </div>
@@ -915,8 +896,6 @@
                 </div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-                <button class="btn-small" onclick="spoofAllTrackers()">Spoof every tracker as qBittorrent</button>
-                <button class="btn-small" onclick="spoofAllTrackers(true)">Clear every spoof</button>
                 <span id="trackers-bulk-result" class="sr-desc"></span>
             </div>
             <!-- Listing trackers from the catalogue turned 15 rows into 91 on a
@@ -932,7 +911,7 @@
             </div>
             <table id="trackers-table">
                 <thead>
-                    <tr><th>Tracker</th><th>Torrents</th><th>Status</th><th>Client spoof</th><th>Passkey</th><th>Min seed</th><th>Announce</th><th>Last error</th><th>Actions</th></tr>
+                    <tr><th>Tracker</th><th>Torrents</th>en-tete (principal)<th>Passkey</th><th>Min seed</th><th>Announce</th><th>Last error</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="trackers-tbody">
                     <tr><td colspan="7" class="empty">No announces yet</td></tr>
@@ -949,7 +928,7 @@
                 </div>
                 <table id="trk-hidden-table" style="display:none">
                     <thead>
-                        <tr><th>Tracker</th><th>Torrents</th><th>Passkey</th><th>Client spoof</th><th>Actions</th></tr>
+                        <tr><th>Tracker</th><th>Torrents</th>en-tete (masques)<th>Actions</th></tr>
                     </thead>
                     <tbody id="trk-hidden-tbody"></tbody>
                 </table>
@@ -1454,6 +1433,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.18"></script>
+    <script src="/static/app.js?v=1.6.19"></script>
 </body>
 </html>
