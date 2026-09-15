@@ -24,6 +24,20 @@ fn we_are_complete(t: &std::sync::Arc<crate::torrent::meta::TorrentState>) -> bo
     t.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8
 }
 
+/// Does this frame count as the peer being alive, for the idle timeout?
+///
+/// Everything except a keep-alive. BEP 3 has a client send one every ~2 min to
+/// hold a connection open, which is well inside `PEER_IDLE_TIMEOUT`; treating
+/// it as activity made the deadline unreachable and every peer immortal. The
+/// timeout exists to drop peers that do nothing, and a peer whose entire
+/// contribution is "still here" is doing nothing.
+///
+/// Split out of the loop so the rule can be tested without standing up a
+/// session, and so restoring the bug means deleting a test.
+fn pushes_idle_deadline(m: &Message) -> bool {
+    !matches!(m, Message::KeepAlive)
+}
+
 /// turned the loop, so a non-seeding session reset its own 300s timeout every
 /// 10 seconds and never hit it. Seeding sessions are unaffected -- their choke
 /// arm is disabled, so only peer traffic ever turned their loop.
@@ -260,15 +274,26 @@ pub async fn run(
                 }
             }
             msg = framed.next() => {
-                // Traffic from the peer is what "not idle" means, so this is
-                // the only arm that pushes the deadline out.
-                let now = tokio::time::Instant::now();
-                if now.duration_since(deadline_set_at) >= DEADLINE_GRANULARITY {
-                    deadline_set_at = now;
-                    deadline.as_mut().reset(now + PEER_IDLE_TIMEOUT);
-                }
                 match msg {
                     Some(Ok(message)) => {
+                        // USEFUL traffic from the peer is what "not idle"
+                        // means. A keep-alive is not traffic: BEP 3 has every
+                        // client emit one every ~2 min, which is well inside
+                        // the 300 s timeout, so counting it made the deadline
+                        // unreachable and every connection immortal. Measured
+                        // 15/09/2026 on the prod hoard: 16 k standing peers,
+                        // p50 lastrcv 33 s (breathing) next to p50 bytes_sent
+                        // 305 B (a handshake and nothing since), climbing
+                        // ~350/h with no plateau. The two numbers are not a
+                        // contradiction -- they are the portrait of a peer
+                        // kept alive by its own keep-alives.
+                        if pushes_idle_deadline(&message) {
+                            let now = tokio::time::Instant::now();
+                            if now.duration_since(deadline_set_at) >= DEADLINE_GRANULARITY {
+                                deadline_set_at = now;
+                                deadline.as_mut().reset(now + PEER_IDLE_TIMEOUT);
+                            }
+                        }
                         match message {
                             Message::Interested => {
                                 stats.interested.store(true, Ordering::Relaxed);
@@ -310,6 +335,19 @@ pub async fn run(
                                     let prev = stats.num_pieces_have.fetch_add(1, Ordering::Relaxed);
                                     if num_pieces > 0 && prev + 1 >= num_pieces {
                                         stats.is_seed.store(true, Ordering::Relaxed);
+                                        // Same rule as Bitfield/HaveAll, which
+                                        // is where a peer that arrives complete
+                                        // gets dropped. A peer that finishes
+                                        // piece by piece while connected to us
+                                        // reaches the same state by a different
+                                        // road, and used to keep its socket for
+                                        // ever: neither side can give the other
+                                        // anything any more.
+                                        if we_are_complete(&torrent) {
+                                            crate::peer::SEED_SEED_DROPPED
+                                                .fetch_add(1, Ordering::Relaxed);
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -569,4 +607,42 @@ pub async fn run(
     dl.on_disconnect();
     // guard drops here -> peer_stats.remove + peers_connected/interested decrement
     drop(guard);
+}
+
+#[cfg(test)]
+mod idle_deadline_tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn a_keep_alive_does_not_push_the_deadline() {
+        assert!(!pushes_idle_deadline(&Message::KeepAlive));
+    }
+
+    #[test]
+    fn a_peer_that_asks_for_data_is_alive() {
+        assert!(pushes_idle_deadline(&Message::Request {
+            index: 0,
+            begin: 0,
+            length: 16384
+        }));
+        assert!(pushes_idle_deadline(&Message::Interested));
+        assert!(pushes_idle_deadline(&Message::Have { piece: 3 }));
+    }
+
+    #[test]
+    fn every_other_frame_counts_as_activity() {
+        for m in [
+            Message::Choke,
+            Message::Unchoke,
+            Message::NotInterested,
+            Message::Bitfield { data: Bytes::new() },
+            Message::HaveAll,
+            Message::HaveNone,
+            Message::Extended { ext_id: 0, payload: Bytes::new() },
+            Message::Unknown { id: 99, payload: Bytes::new() },
+        ] {
+            assert!(pushes_idle_deadline(&m), "{m:?} should push the deadline");
+        }
+    }
 }

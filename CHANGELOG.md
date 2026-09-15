@@ -17,7 +17,39 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
-## Unreleased
+## v4.28.0 -- a keep-alive is not activity
+
+### Fixed: a peer that only breathes is no longer immortal
+
+`PEER_IDLE_TIMEOUT` is 300 s, and it had never once fired. Every frame from a
+peer pushed the deadline out -- including `KeepAlive`, which BEP 3 has clients
+send every ~2 min precisely to hold an idle connection open. A peer that did
+nothing but keep-alive therefore reset the 300 s timeout forever, and the only
+thing that ever closed such a connection was the peer itself.
+
+Measured on the production hoard before the fix, at 32 h of uptime: **16 000
+standing peer connections, climbing ~350/h with no plateau** and resetting to
+~1 000 at every restart. The two halves of the diagnosis look contradictory
+until you put them side by side -- `lastrcv` p50 **33 s** (the connection is
+alive) next to `bytes_sent` p50 **305 bytes** (a handshake, and nothing since).
+86 % of connections had sent 1 KB or less over their whole life; 99 %, 64 KB or
+less. The bytes were moving on a handful of sockets and the other sixteen
+thousand were furniture.
+
+Only a *useful* frame now pushes the deadline (`pushes_idle_deadline`, split
+out so the rule is unit-tested rather than buried in a `select!` arm). Note
+what this is not: no new ceiling, no tunable, no magic number. `max_connections`
+would not have helped even set -- it bounds what we *dial*, and 14 472 of those
+17 046 connections were inbound.
+
+### Fixed: a peer that seeds up while connected is now dropped too
+
+Seed-to-seed connections were already cut on `Bitfield` and `HaveAll`, and that
+path is busy -- 25 253 128 drops in 32 h. But a peer that arrives incomplete and
+finishes piece by piece while connected to us reaches the same dead end by a
+different road: `Message::Have` set `is_seed` and kept the socket. Neither side
+can give the other anything; it now takes the same exit and the same counter.
+
 
 ### Removed: client spoofing — and it is not coming back
 
