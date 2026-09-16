@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.28.0";
+pub const HYDRA_VERSION: &str = "4.29.0";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -4715,6 +4715,27 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "total_download_rate": race_live.download_rate,
             "total_peers": race_live.active_peers,
             "total_upload_rate": race_live.upload_rate,
+        },
+        // Process-wide peer counters. These live in atomics that only
+        // `rpc::dispatch::get_diagnostics` used to read, and that function is
+        // reachable only over the unix-socket RPC the 3.x Go control plane
+        // spoke -- so since the full-Rust V4 they have been written and never
+        // read by anything. Surfaced here because a counter nobody can read is
+        // not a measurement.
+        "engine_counters": {
+            "have_rx_disarmed": typhon_engine::peer::HAVE_RX_DISARMED.load(std::sync::atomic::Ordering::Relaxed),
+            "have_rx_lagged": typhon_engine::peer::HAVE_RX_LAGGED.load(std::sync::atomic::Ordering::Relaxed),
+            "seed_seed_dropped": typhon_engine::peer::SEED_SEED_DROPPED.load(std::sync::atomic::Ordering::Relaxed),
+            "hs_timed_out": typhon_engine::peer::HS_TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed),
+            "inbound_accepted": typhon_engine::peer::INBOUND_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
+            "worker_threads": typhon_engine::runtime::worker_threads(),
+            // Size of the incomplete index the webseed scanner walks. Watched
+            // rather than assumed: if this ever drifts toward the catalogue
+            // size, the pruning in collect_incomplete has stopped working.
+            // Summed over every engine rather than the two well-known roles:
+            // a node can run vpn7/vpn8/... too, and a per-role list would go
+            // stale the day one is added.
+            "incomplete_indexed": state.engines.engines().iter().map(|e| e.manager.incomplete_len()).sum::<usize>(),
         },
         "server_ts": now,
         "tunnels": [],

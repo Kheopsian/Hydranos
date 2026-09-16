@@ -536,17 +536,27 @@ async fn scanner(mgr: Arc<TorrentManager>) {
                 // Borrowed inside the closure, not captured from the loop: the
                 // blocking task must own everything it touches.
                 let ws = mgr2.webseed();
-                mgr2.collect_torrents(QUEUE_TARGET, |t| {
+                // Walk the incomplete index, not the catalogue. A webseed is
+                // a mirror to DOWNLOAD from, so a finished torrent can never
+                // be a candidate -- yet this scan used to read all 293k of
+                // them twice a second to select ~17, which measured at ~19% of
+                // the process CPU (2026-09-14). See
+                // TorrentManager::collect_incomplete.
+                mgr2.collect_incomplete(QUEUE_TARGET, |t| {
+                    // Cheap, allocation-free rejects first. `wants_webseed`
+                    // opens on `url_list.is_empty()`, so the two DashMap
+                    // lookups below -- two SipHash rounds each -- are now paid
+                    // only for torrents that could actually use a mirror.
+                    if !wants_webseed(t) {
+                        return false;
+                    }
                     let ih = t.info_hash;
                     if let Some(b) = ws.backoff.get(&ih) {
                         if b.1 > now {
                             return false;
                         }
                     }
-                    if ws.claimed.contains(&ih) {
-                        return false;
-                    }
-                    wants_webseed(t)
+                    !ws.claimed.contains(&ih)
                 })
             })
             .await

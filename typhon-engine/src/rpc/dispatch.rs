@@ -625,6 +625,8 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     put_u!("inbound_accepted", crate::peer::INBOUND_ACCEPTED.load(Ordering::Relaxed));
     put_u!("dial_hs_timed_out", crate::tracker::DIAL_HS_TIMED_OUT.load(Ordering::Relaxed));
     put_u!("seed_seed_dropped", crate::peer::SEED_SEED_DROPPED.load(Ordering::Relaxed));
+    put_u!("have_rx_disarmed", crate::peer::HAVE_RX_DISARMED.load(Ordering::Relaxed));
+    put_u!("have_rx_lagged", crate::peer::HAVE_RX_LAGGED.load(Ordering::Relaxed));
     put_u!("mse_inbound_refused", crate::tracker::MSE_INBOUND_REFUSED.load(Ordering::Relaxed));
     put_u!("mse_outbound_skipped", crate::tracker::MSE_OUTBOUND_SKIPPED.load(Ordering::Relaxed));
     put_u!("mse_sessions_dropped", crate::tracker::MSE_SESSIONS_DROPPED.load(Ordering::Relaxed));
