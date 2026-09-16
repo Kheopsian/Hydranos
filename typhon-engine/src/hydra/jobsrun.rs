@@ -227,7 +227,9 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         // directory the bytes left.
         let _ = store.set_save_path(&hash, &dest_root);
         if !category.is_empty() {
-            let _ = store.set_category(&hash, &category);
+            // The row moved to `to` a few lines up; the category belongs to that
+            // copy and to no other.
+            let _ = store.set_category_in(&hash, &to, &category);
         }
     }
     tracing::info!(hash = %hash, from = %from, to = %to, moved_bytes = done, seed_secs = seeded,

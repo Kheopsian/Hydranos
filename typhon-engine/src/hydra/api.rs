@@ -5895,14 +5895,16 @@ async fn hoard_unpin_one(
     .into_response()
 }
 
-torrent_write!(set_torrent_category, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
+torrent_write!(set_torrent_category, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, engine: &str| {
     // The body is {"category": "..."} on the native API.
     let category = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("category").and_then(|c| c.as_str()).map(str::to_string))
         .unwrap_or_default();
     let store = state.store.lock().unwrap();
-    let _ = store.set_category(hash, &category);
+    // The engine was already a parameter here, ignored as `_engine`, so the
+    // native API relabelled every copy of a torrent it was given one of.
+    let _ = store.set_category_in(hash, engine, &category);
 });
 
 torrent_write!(set_torrent_tags, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
@@ -6630,7 +6632,9 @@ async fn qbit_set_category(
     let store = state.store.lock().unwrap();
     for prefix in hashes {
         if let Some(hash) = store.resolve_hash(&prefix) {
-            let _ = store.set_category(&hash, &category);
+            // The shim has no engine to name: qBit clients send a hash and a
+            // category and nothing else. Every copy it is, deliberately.
+            let _ = store.set_category_everywhere(&hash, &category);
         }
     }
     qbit_ok()
