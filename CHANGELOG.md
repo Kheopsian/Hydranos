@@ -52,6 +52,20 @@ Two ways to title a new entry:
   them: one response contradicting itself. A hash names a CONTENT; only
   (hash, session) names a copy.
 
+- **The drain judged a torrent on the other copy's category.**
+  `Store::category_of` looked up by hash alone, and `category_graduation` reads
+  it to decide what may graduate and where to -- so a torrent held by both
+  engines could be judged on rules that belong to the other one. Unlike the
+  table above this moved data, not pixels. It now takes the engine, as do
+  `category_of_hash` and `category_graduation`.
+- **A fresh database was born with the wrong primary key.** `SCHEMA` declared
+  `info_hash TEXT PRIMARY KEY` while `migrate_composite_key` re-keys production
+  on `(info_hash, session)`. A new install therefore could not hold two copies
+  of a torrent until the migration ran, and every test written on the bare
+  constant tested a shape production does not have. The constant now carries the
+  composite key, in the exact wording the migration looks for, so the migration
+  is a no-op on a new file.
+
 ### Documented
 
 - `/api/hoard/pause` and `/api/hoard/torrents/bulk` reach `docs/API.md` for the

@@ -121,13 +121,14 @@ pub fn now_secs() -> i64 {
 /// The frozen schema, as the production database has it.
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS torrents (
-    info_hash TEXT PRIMARY KEY, session TEXT NOT NULL, torrent BLOB NOT NULL,
+    info_hash TEXT NOT NULL, session TEXT NOT NULL, torrent BLOB NOT NULL,
     save_path TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '',
     added_time REAL NOT NULL DEFAULT 0, completed_time REAL NOT NULL DEFAULT 0,
     total_uploaded INTEGER NOT NULL DEFAULT 0, total_downloaded INTEGER NOT NULL DEFAULT 0,
     paused INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '',
     content_folder INTEGER NOT NULL DEFAULT -1, pinned INTEGER NOT NULL DEFAULT 0,
-    seeding_time INTEGER NOT NULL DEFAULT 0);
+    seeding_time INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (info_hash, session));
 CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, ul INTEGER NOT NULL DEFAULT 0, dl INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tag_registry (name TEXT PRIMARY KEY);
@@ -1683,12 +1684,19 @@ impl Store {
         Ok(())
     }
 
-    /// This torrent's category, or empty when it has none.
-    pub fn category_of(&self, info_hash: &str) -> Option<String> {
+    /// This COPY's category, or `None` when this session does not hold it.
+    ///
+    /// ⚠⚠ The session is not optional. A category is a property of the copy,
+    /// not of the content: the same torrent is `Race` in the race engine and
+    /// `series` in the hoard. Asked by hash alone this returned whichever row
+    /// SQLite reached first, and the drain took its decisions on it -- which
+    /// category may graduate, and where to. Same root cause as the Hoard table
+    /// showing "Race" on 2026-09-16, but this one moves data rather than pixels.
+    pub fn category_of(&self, info_hash: &str, session: &str) -> Option<String> {
         self.conn
             .query_row(
-                "SELECT category FROM torrents WHERE info_hash = ?1",
-                rusqlite::params![info_hash],
+                "SELECT category FROM torrents WHERE info_hash = ?1 AND session = ?2",
+                rusqlite::params![info_hash, session],
                 |r| r.get::<_, String>(0),
             )
             .ok()
@@ -2216,6 +2224,43 @@ mod tests {
         assert!(fresh().check_schema().is_ok());
     }
 
+    /// ⭐ A FRESH database must be born with the key it will end up with.
+    ///
+    /// `SCHEMA` declared `info_hash TEXT PRIMARY KEY` while the production
+    /// database has been re-keyed to `(info_hash, session)` by
+    /// `migrate_composite_key`. A new install therefore started life unable to
+    /// hold two copies of a torrent, and -- worse -- every test written on the
+    /// bare constant silently tested a shape production does not have. Two of
+    /// mine failed on it on 2026-09-16 with a UNIQUE constraint violation, on a
+    /// case that is perfectly legal in production.
+    #[test]
+    fn a_new_database_is_keyed_on_the_copy_like_a_migrated_one() {
+        let s = fresh();
+        let sql: String = s
+            .conn
+            .query_row(
+                "SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='table' AND name='torrents'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("PRIMARY KEY (info_hash, session)"),
+            "a fresh schema must carry the composite key: {sql}"
+        );
+        // Exactly the string `migrate_composite_key` looks for, so the
+        // migration is a no-op here instead of rewriting a brand new table.
+        assert!(s.migrate_composite_key().is_ok());
+
+        // And the shape holds: two engines, one content, two rows.
+        s.conn
+            .execute_batch(
+                "INSERT INTO torrents (info_hash, session, torrent) VALUES
+                   ('aa','hoard',x''), ('aa','race',x'');",
+            )
+            .expect("a fresh database must accept one row per copy");
+    }
+
     // Proven by breaking it: the guard is only worth having if it actually
     // refuses a database that drifted, so drop a column and check it complains.
     #[test]
@@ -2574,7 +2619,34 @@ mod absorb_and_copies_tests {
         s.set_save_path(H, "/data/moved").unwrap();
         assert_eq!(s.all_hashes("race").unwrap(), vec![H.to_string()],
             "the torrent is still listed under its engine after the move");
-        assert_eq!(s.category_of(H).as_deref(), Some("cat"), "and keeps its category");
+        assert_eq!(s.category_of(H, "race").as_deref(), Some("cat"), "and keeps its category");
+    }
+
+    /// ⭐ The drain reads this to decide what may graduate and where to. Asked
+    /// by hash alone it answered for whichever copy SQLite reached first, so a
+    /// torrent seeded by both engines could be judged on the other one's rules.
+    #[test]
+    fn a_category_belongs_to_the_copy_not_to_the_content() {
+        let s = store();
+        add(&s, H, "race");
+        add(&s, H, "hoard");
+        // Written per copy on purpose: `set_category` still updates EVERY copy
+        // (the qBit shim has no notion of engines), so it cannot set up this
+        // case. That write is the next one to look at.
+        s.conn
+            .execute(
+                "UPDATE torrents SET category = 'series' WHERE info_hash = ?1 AND session = 'hoard'",
+                rusqlite::params![H],
+            )
+            .unwrap();
+
+        assert_eq!(s.category_of(H, "race").as_deref(), Some("cat"));
+        assert_eq!(s.category_of(H, "hoard").as_deref(), Some("series"));
+        assert_eq!(
+            s.category_of(H, "vpn1"),
+            None,
+            "an engine that does not hold it must not borrow another copy's category"
+        );
     }
 
     #[test]

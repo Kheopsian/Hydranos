@@ -492,7 +492,7 @@ pub fn spawn_transit_sweep(
                 let mut removed = 0usize;
                 for t in manager.all() {
                     let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
-                    if !targets.contains(&crate::api::category_of_hash(&state, &hash)) {
+                    if !targets.contains(&crate::api::category_of_hash(&state, &hash, &engine_id)) {
                         continue;
                     }
                     let (met, host, hours) = seed_obligation_met(&t, &cfg, now);
@@ -714,7 +714,7 @@ pub fn drain_once(
         let (met, host, _hours) = seed_obligation_met(&torrent, cfg, now);
         if !met {
             let Some((to_engine, to_category, save_path)) =
-                crate::api::category_graduation(state, &hash)
+                crate::api::category_graduation(state, &hash, engine_id)
             else {
                 // Nowhere to put it and no right to delete it. Said out loud,
                 // with the category, because a silent counter here is exactly
@@ -723,7 +723,7 @@ pub fn drain_once(
                 tracing::warn!(
                     name = %torrent.meta.name,
                     tracker = %host,
-                    category = %crate::api::category_of_hash(state, &hash),
+                    category = %crate::api::category_of_hash(state, &hash, engine_id),
                     "still owes seeding time and its category has no graduate_to:                      it can be neither deleted nor moved"
                 );
                 continue;
@@ -734,7 +734,7 @@ pub fn drain_once(
                 // every 60s over the whole volume, so a line each would be
                 // hundreds a minute -- and the category is the thing to fix.
                 *stuck_graduate_here
-                    .entry(crate::api::category_of_hash(state, &hash))
+                    .entry(crate::api::category_of_hash(state, &hash, engine_id))
                     .or_insert(0usize) += 1;
                 stuck += 1;
                 continue;
