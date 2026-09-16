@@ -7341,7 +7341,7 @@ function _renderHiddenTrackers(hidden) {
             ? '<span class="mode-tag mode-hoard">set</span>'
             : '<span class="sr-desc">-</span>';
         return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td>`
-            + `cellule spoof (masques)`
+            + `<td>${passkey}</td>`
             + `<td><button class="btn-small" onclick="hideTracker('${esc(r.host)}',false)">${esc(t("Unhide"))}</button></td></tr>`;
     }).join("");
 }
@@ -7532,7 +7532,6 @@ async function updateTrackers() {
                 amber: ["sev-amber", "unreachable"],
                 muted: ["sev-muted", "acknowledged"],
             };
-            const dot = "";
             const mute = `<button class="btn-small" onclick="muteTracker('${esc(r.host)}',${muted ? "false" : "true"})">${muted ? "Unmute" : "Mute"}</button>`;
             const hide = `<button class="btn-small" onclick="hideTracker('${esc(r.host)}',${r.hidden ? "false" : "true"})" title="${esc(t("Still announced to. Out of this table and out of the tab badge until you show hidden trackers again"))}">${r.hidden ? t("Unhide") : t("Hide")}</button>`;
             // The severity replaces the bare ok/error tag: two words saying the
@@ -7544,7 +7543,7 @@ async function updateTrackers() {
             const rowTip = SEV[sev]
                 ? esc(r.host + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
-            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td>cellule spoof (principal)<td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
+            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
         }).join("");
         updateTabBadges();
         if (_thtml === _trackersSig) return;
