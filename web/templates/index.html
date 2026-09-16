@@ -862,7 +862,7 @@
                 <h2>Trackers</h2>
                 <button class="btn-small" onclick="showTrackerForm()">+ Manual host</button>
             </div>
-            <p class="sr-desc" style="margin:0 0 12px">Trackers we are actively announcing to (hot torrents only). Override the announced client identity (peer_id + User-Agent) to pass a tracker's client whitelist, or override the announce passkey. Applies on the next announce, no restart.</p>
+            <p class="sr-desc" style="margin:0 0 12px">Trackers we are actively announcing to (hot torrents only). Override the announce passkey, the announce IP family, or the seed obligation. Applies on the next announce, no restart.</p>
             <div id="trk-form" class="card" style="display:none;margin-bottom:16px">
                 <div class="card-body">
                     <div class="cat-form-grid">
@@ -895,9 +895,6 @@
                     <div id="trk-result" class="result-msg"></div>
                 </div>
             </div>
-            <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-                <span id="trackers-bulk-result" class="sr-desc"></span>
-            </div>
             <!-- Listing trackers from the catalogue turned 15 rows into 91 on a
                  300k library: every public tracker baked into a stray .torrent
                  gets one. Hiding is a view choice, kept apart from Mute. -->
@@ -911,7 +908,7 @@
             </div>
             <table id="trackers-table">
                 <thead>
-                    <tr><th>Tracker</th><th>Torrents</th>en-tete (principal)<th>Passkey</th><th>Min seed</th><th>Announce</th><th>Last error</th><th>Actions</th></tr>
+                    <tr><th>Tracker</th><th>Torrents</th><th>Status</th><th>Passkey</th><th>Min seed</th><th>Announce</th><th>Last error</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="trackers-tbody">
                     <tr><td colspan="7" class="empty">No announces yet</td></tr>
@@ -928,7 +925,7 @@
                 </div>
                 <table id="trk-hidden-table" style="display:none">
                     <thead>
-                        <tr><th>Tracker</th><th>Torrents</th>en-tete (masques)<th>Actions</th></tr>
+                        <tr><th>Tracker</th><th>Torrents</th><th>Passkey</th><th>Actions</th></tr>
                     </thead>
                     <tbody id="trk-hidden-tbody"></tbody>
                 </table>
