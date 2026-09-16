@@ -73,7 +73,7 @@ pub const BENCH_COLUMNS: &str = "ts, race_upload_rate, race_download_rate, race_
      race_announce_fail_rate, hoard_announce_fail_rate";
 
 /// One recorded moment in a torrent's life.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RaceEvent {
     pub ts: f64,
     pub info_hash: String,
@@ -228,7 +228,7 @@ impl RaceRecorder {
 }
 
 /// A race torrent as it stood at one instant.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RaceSnapshot {
     pub ts: f64,
     pub info_hash: String,
@@ -276,6 +276,38 @@ impl BenchDb {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
+    }
+
+    /// One sample of a race in flight.
+    ///
+    /// `race_snapshots` was created, indexed, read by `snapshots_for` and
+    /// written by nothing: the V4 port carried the table and the reader across
+    /// and left the writer behind, so every race timeline answered with an
+    /// empty graph. The events survived -- 2585 of them on the production node
+    /// -- which is why the panel looked broken rather than empty.
+    pub fn record_snapshot(&self, s: &RaceSnapshot) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO race_snapshots (ts, info_hash, progress, upload_rate, download_rate,
+                 total_upload, total_download, peers, seeds, swarm_seeds, swarm_leechers,
+                 ratio, peers_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            rusqlite::params![
+                s.ts,
+                s.info_hash,
+                s.progress,
+                s.upload_rate,
+                s.download_rate,
+                s.total_upload,
+                s.total_download,
+                s.peers,
+                s.seeds,
+                s.swarm_seeds,
+                s.swarm_leechers,
+                s.ratio,
+                s.peers_json,
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn record(&self, e: &RaceEvent) -> anyhow::Result<()> {
