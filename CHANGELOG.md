@@ -66,6 +66,15 @@ Two ways to title a new entry:
   composite key, in the exact wording the migration looks for, so the migration
   is a no-op on a new file.
 
+- **Relabelling a torrent relabelled its other copy too.** `set_category` wrote
+  `WHERE info_hash = ?1`, so renaming the hoard copy `movies` from the interface
+  also made the race copy `movies` -- handing it another category's save path and
+  graduation rules. It is now `set_category_in(hash, session, category)`, and the
+  three callers that know their engine use it: the native API (which already had
+  `engine` as a parameter and ignored it), the graduation job, and the workflow
+  action. The qBit shim keeps the torrent-wide write under the name
+  `set_category_everywhere`, because Sonarr and Radarr have no engine to name.
+
 ### Documented
 
 - `/api/hoard/pause` and `/api/hoard/torrents/bulk` reach `docs/API.md` for the

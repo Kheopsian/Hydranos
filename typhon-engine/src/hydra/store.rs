@@ -1702,7 +1702,34 @@ impl Store {
             .ok()
     }
 
-    pub fn set_category(&self, info_hash: &str, category: &str) -> anyhow::Result<()> {
+    /// Per COPY, like pause and pin.
+    ///
+    /// A category is not a label on the content: it decides where the payload
+    /// lives and what the drain may do with it. The same torrent is `Race` in
+    /// the race engine, seeded from /race, and `series` in the hoard, seeded
+    /// from /data/downloads -- production holds five of those. Writing both at
+    /// once would move one copy's rules onto the other.
+    pub fn set_category_in(
+        &self,
+        info_hash: &str,
+        session: &str,
+        category: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE torrents SET category = ?3 WHERE info_hash = ?1 AND session = ?2",
+            rusqlite::params![info_hash, session, category],
+        )?;
+        Ok(())
+    }
+
+    /// EVERY copy. For the qBit shim ONLY.
+    ///
+    /// Sonarr, Radarr and the rest speak a protocol with no notion of engines:
+    /// they name a torrent and a category, and there is no third field to carry
+    /// which copy they mean. Every other caller knows its engine and must use
+    /// `set_category_in`; this one is named for what it does so the choice is
+    /// visible at the call site rather than hidden in a WHERE clause.
+    pub fn set_category_everywhere(&self, info_hash: &str, category: &str) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE torrents SET category = ?2 WHERE info_hash = ?1",
             rusqlite::params![info_hash, category],
@@ -2076,7 +2103,7 @@ mod tests {
         let after_insert = store.write_mark();
         assert!(after_insert > start, "an insert must move the mark");
 
-        store.set_category(&a, "movies").unwrap();
+        store.set_category_in(&a, "hoard", "movies").unwrap();
         let after_update = store.write_mark();
         assert!(after_update > after_insert, "an update must move the mark");
 
@@ -2620,6 +2647,33 @@ mod absorb_and_copies_tests {
         assert_eq!(s.all_hashes("race").unwrap(), vec![H.to_string()],
             "the torrent is still listed under its engine after the move");
         assert_eq!(s.category_of(H, "race").as_deref(), Some("cat"), "and keeps its category");
+    }
+
+    /// ⭐ A write must not relabel the other engine's copy either.
+    ///
+    /// `set_category` updated every row for the hash. Renaming the hoard copy
+    /// `movies` from the interface also made the race copy `movies`, which
+    /// hands it another category's save path and graduation rules.
+    #[test]
+    fn setting_a_category_touches_only_that_copy() {
+        let s = store();
+        add(&s, H, "race");
+        add(&s, H, "hoard");
+        s.set_category_in(H, "hoard", "movies").unwrap();
+        assert_eq!(s.category_of(H, "hoard").as_deref(), Some("movies"));
+        assert_eq!(s.category_of(H, "race").as_deref(), Some("cat"), "the race copy is untouched");
+    }
+
+    /// The qBit shim has no engine to name, so its write stays torrent-wide --
+    /// on purpose, and under a name that says so.
+    #[test]
+    fn the_shim_writes_every_copy_by_design() {
+        let s = store();
+        add(&s, H, "race");
+        add(&s, H, "hoard");
+        s.set_category_everywhere(H, "movies").unwrap();
+        assert_eq!(s.category_of(H, "hoard").as_deref(), Some("movies"));
+        assert_eq!(s.category_of(H, "race").as_deref(), Some("movies"));
     }
 
     /// ⭐ The drain reads this to decide what may graduate and where to. Asked

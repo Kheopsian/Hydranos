@@ -244,8 +244,11 @@ pub fn apply(
                 // the caller: a pass that copied terabytes inline would hold
                 // itself open for hours.
                 let store = store.lock().map_err(|_| "store lock")?;
+                // Per COPY, unlike the tag write above: a tag identifies the
+                // content, a category decides where THIS copy lives and what
+                // the drain may do with it. `Match` carries its engine.
                 store
-                    .set_category(&m.info_hash, to)
+                    .set_category_in(&m.info_hash, &m.engine, to)
                     .map_err(|e| e.to_string())?;
             }
             Action::Delete { with_files } => {
