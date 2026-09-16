@@ -60,6 +60,40 @@ pub fn spawn(engines: Arc<crate::engines::EngineHost>, bench: crate::benchdb::Sh
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
 
+                // Sampled BEFORE the lifecycle check, because most ticks have
+                // no event to report and those are exactly the ticks the graph
+                // is made of. A race that is still downloading is the only one
+                // worth sampling: past completion the curve is flat, the front
+                // truncates it anyway, and at 5s a tick the whole race engine
+                // would otherwise write hundreds of rows a minute for ever.
+                if progress < 1.0 {
+                    let snap = crate::benchdb::RaceSnapshot {
+                        ts: now,
+                        info_hash: info_hash.clone(),
+                        progress,
+                        upload_rate: num("upload_rate") as f64,
+                        download_rate: num("download_rate") as f64,
+                        total_upload: num("total_upload"),
+                        total_download: num("total_download"),
+                        peers: num("num_peers"),
+                        seeds: num("list_seeds"),
+                        swarm_seeds: num("list_seeds"),
+                        swarm_leechers: num("list_peers"),
+                        ratio: row.get("ratio").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        // The per-peer detail is not on the list row, and
+                        // asking the engine per torrent every 5s is a cost the
+                        // graph does not need. Empty publishes no key.
+                        peers_json: String::new(),
+                    };
+                    let db = match bench.lock() {
+                        Ok(db) => db,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    if let Err(e) = db.record_snapshot(&snap) {
+                        tracing::warn!(info_hash = %snap.info_hash, "race snapshot not recorded: {e}");
+                    }
+                }
+
                 let Some((kind, ts, download_time)) =
                     recorder.sight(&info_hash, added_time, progress, now)
                 else {

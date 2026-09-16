@@ -9946,8 +9946,31 @@ async fn get_race_timeline(
         })
         .unwrap_or_default();
 
+    // Read from bench.db, which has been recording this all along.
+    //
+    // This handler returned two hard-coded empty arrays from the V4 port until
+    // 2026-09-16, so every race timeline drew "No timeline data" while the
+    // events piled up underneath -- 2585 rows on the production node.
+    //
+    // An unreadable measurement database is not an error worth a 500: the
+    // timeline is observability, and losing it must never cost the seedbox.
+    // The empty answer the front already handles is the right one.
+    let (events, snapshots) = match state.bench.as_ref() {
+        Some(bench) => {
+            let db = match bench.lock() {
+                Ok(db) => db,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            (
+                db.events_for(&hash).unwrap_or_default(),
+                db.snapshots_for(&hash).unwrap_or_default(),
+            )
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+
     Json(serde_json::json!({
-        "events": [], "snapshots": [], "info_hash": hash, "state": state_str,
+        "events": events, "snapshots": snapshots, "info_hash": hash, "state": state_str,
     }))
     .into_response()
 }
@@ -15354,6 +15377,89 @@ mod remaining_routes_tests {
         )
         .await;
         assert!(!ok.status().is_server_error(), "got {:?}", ok.status());
+    }
+
+    /// ⭐ The timeline must SERVE what was recorded, not merely answer 200.
+    ///
+    /// The test above -- "does not 500" -- passed for the whole life of the V4
+    /// port, during which this handler returned two hard-coded empty arrays
+    /// while the recorder filled bench.db underneath. Asserting on the shape of
+    /// the answer is the difference between a route that replies and a route
+    /// that works.
+    #[tokio::test]
+    async fn the_timeline_serves_the_recorded_event_and_snapshot() {
+        let (s, hash) = populated("rest-timeline-data");
+        let bench = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::benchdb::BenchDb::open_in_memory().expect("bench"),
+        ));
+        {
+            let db = bench.lock().unwrap();
+            db.record(&crate::benchdb::RaceEvent {
+                ts: 1000.0,
+                info_hash: hash.clone(),
+                event: "added".into(),
+                name: "a.release".into(),
+                size: 42,
+                ..Default::default()
+            })
+            .expect("record event");
+            db.record_snapshot(&crate::benchdb::RaceSnapshot {
+                ts: 1005.0,
+                info_hash: hash.clone(),
+                progress: 0.5,
+                download_rate: 1234.0,
+                ..Default::default()
+            })
+            .expect("record snapshot");
+            // A different torrent's rows must not leak into this timeline.
+            db.record_snapshot(&crate::benchdb::RaceSnapshot {
+                ts: 1006.0,
+                info_hash: "f".repeat(40),
+                progress: 0.9,
+                ..Default::default()
+            })
+            .expect("record other");
+        }
+        let mut state = s.state.clone();
+        state.bench = Some(bench);
+
+        let resp = super::get_race_timeline(
+            State(state),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+
+        let events = body["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 1, "the recorded event is served: {body}");
+        assert_eq!(events[0]["event"], "added");
+
+        let snaps = body["snapshots"].as_array().expect("snapshots array");
+        assert_eq!(snaps.len(), 1, "only THIS torrent's snapshot: {body}");
+        assert_eq!(snaps[0]["progress"], 0.5);
+        assert_eq!(snaps[0]["download_rate"], 1234.0);
+    }
+
+    /// No measurement database is not an error: the timeline is observability,
+    /// and losing it must never take the API down with it.
+    #[tokio::test]
+    async fn a_timeline_without_a_bench_db_is_empty_rather_than_a_failure() {
+        let (s, hash) = populated("rest-timeline-nobench");
+        assert!(s.state.bench.is_none(), "the fixture has no bench db");
+        let resp = super::get_race_timeline(
+            State(s.state.clone()),
+            axum::extract::Path(hash),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["events"].as_array().map(|a| a.len()), Some(0));
+        assert_eq!(body["snapshots"].as_array().map(|a| a.len()), Some(0));
     }
 
     /// ⚠️ `get_fs_browse` walks the filesystem from a path the CALLER gives.
