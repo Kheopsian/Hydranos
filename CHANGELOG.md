@@ -75,6 +75,20 @@ Two ways to title a new entry:
   action. The qBit shim keeps the torrent-wide write under the name
   `set_category_everywhere`, because Sonarr and Radarr have no engine to name.
 
+- **The race timeline had no peers, no per-peer download and no announces.**
+  The snapshot wrote `peers_json` empty -- a decision taken the same day, and
+  wrong: the peer table and the per-peer download column are what the panel is
+  for, so all 14516 snapshots recorded that evening were useless for it. Ten
+  peers per sample now, fastest first, for downloading torrents only. And the
+  recorder only ever emitted `added` and `completed`, while the panel has always
+  known how to draw `first_peer`, `first_upload` and `announce`; all three are
+  recorded now. An announce is taken from the announce cache's stamp, which the
+  runner sets on every successful announce -- a fact, not a guess from swarm
+  counts that can answer the same numbers twice.
+- **The drain history printed fourteen decimals.** A disk that went from
+  95.12606489907212% to 89.2658601277033% is a fill level, not a measurement.
+  Two decimals.
+
 ### Documented
 
 - `/api/hoard/pause` and `/api/hoard/torrents/bulk` reach `docs/API.md` for the

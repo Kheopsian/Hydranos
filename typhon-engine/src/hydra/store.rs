@@ -885,6 +885,15 @@ impl Store {
         Ok(())
     }
 
+    /// A fill percentage as a human reads it.
+    ///
+    /// `statvfs` arithmetic yields the full float expansion -- 95.12606489907212
+    /// -- and the drain history printed every digit. Two decimals is already
+    /// more precision than a disk gauge carries.
+    fn pct2(v: f64) -> f64 {
+        (v * 100.0).round() / 100.0
+    }
+
     pub fn drain_history(&self, limit: i64) -> anyhow::Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
             "SELECT at, volume, before_pct, after_pct, deleted, graduated, stuck, freed
@@ -897,8 +906,12 @@ impl Store {
                 Ok(serde_json::json!({
                     "timestamp": row.get::<_, i64>(0)?,
                     "volume": row.get::<_, String>(1)?,
-                    "before_pct": crate::row::num_json(row.get::<_, f64>(2)?),
-                    "after_pct": crate::row::num_json(row.get::<_, f64>(3)?),
+                    // Two decimals. A disk that went from 95.12606489907212%
+                    // to 89.2658601277033% is a fill level, not a measurement
+                    // worth fourteen digits: the extra ones are float noise and
+                    // they make the history column unreadable.
+                    "before_pct": crate::row::num_json(Self::pct2(row.get::<_, f64>(2)?)),
+                    "after_pct": crate::row::num_json(Self::pct2(row.get::<_, f64>(3)?)),
                     "deleted": deleted,
                     "graduated": graduated,
                     "removed_count": deleted + graduated,
