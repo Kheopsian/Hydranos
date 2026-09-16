@@ -683,6 +683,11 @@ pub fn drain_once(
     let mut deleted = 0usize;
     let mut graduated = 0usize;
     let mut stuck = 0usize;
+    // Categories whose `graduate_to` lands back on this same engine, with a
+    // count each. A silent `stuck += 1` here is how 142 torrents piled up over
+    // ten hours on 2026-09-16 with nothing in the log to explain it.
+    let mut stuck_graduate_here: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for torrent in torrents {
         if to_free <= 0.0 {
             break;
@@ -724,6 +729,13 @@ pub fn drain_once(
                 continue;
             };
             if to_engine == engine_id {
+                // Graduating onto the engine it is already on moves nothing.
+                // Counted by category rather than logged per torrent: this runs
+                // every 60s over the whole volume, so a line each would be
+                // hundreds a minute -- and the category is the thing to fix.
+                *stuck_graduate_here
+                    .entry(crate::api::category_of_hash(state, &hash))
+                    .or_insert(0usize) += 1;
                 stuck += 1;
                 continue;
             }
@@ -776,6 +788,18 @@ pub fn drain_once(
     // A drain that cannot free what it needs has to SAY so. Otherwise the disk
     // fills while the worker reports nothing, which is the failure this very
     // drain already had once when it was watching the wrong path.
+    if !stuck_graduate_here.is_empty() {
+        let detail = stuck_graduate_here
+            .iter()
+            .map(|(cat, n)| format!("{cat} x{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            volume = %volume.id,
+            categories = %detail,
+            "graduate_to points back at this engine, so these torrents can never leave the volume:              set graduate_to to a category that files under a DIFFERENT engine"
+        );
+    }
     if to_free > 0.0 {
         tracing::warn!(
             volume = %volume.id,
