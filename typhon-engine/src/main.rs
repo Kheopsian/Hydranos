@@ -7,8 +7,17 @@ use tracing::{info, error};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let workers = typhon_engine::runtime::worker_threads();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+        .block_on(async_main(workers))
+}
+
+async fn async_main(workers: usize) {
     // SIGUSR1 => dump a jemalloc heap profile to $prof_prefix (set via
     // MALLOC_CONF). The Go watchdog raises this on a ballooning engine right
     // before killing it, so the 85GB heap leak (2026-07-09) gets an
@@ -277,6 +286,10 @@ async fn main() {
     }
 
     info!("[engine] typhon-engine starting");
+    // After the subscriber is installed, not before: the first version of
+    // this line was emitted from the top of async_main and vanished, because
+    // nothing was collecting spans yet.
+    info!("[engine] tokio runtime: {} worker threads", workers);
     info!("[engine] config: {}", config_path);
     info!("[engine] socket: {}", config.socket_path);
 

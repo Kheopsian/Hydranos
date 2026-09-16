@@ -17,6 +17,30 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.29.0 -- the two lineages become one
+
+The engine work of the last week lived on `v4`; the CPU work of 13-14/09 lived
+on `cpufat`, which is what production actually ran. Neither branch contained the
+other, and an image built from `v4` silently dropped `runtime.rs` -- the explicit
+tokio runtime that replaced `#[tokio::main]` and took production from 8.4 cores
+to 3.3. Deploying `v4` would have shipped holepunch and given back the 13 % of
+CPU that work-stealing was burning.
+
+This merges `cpufat` into `v4`. It brings together, with no conflicts:
+
+- **holepunch** (BEP 55) and the peer work that came with it,
+- the explicit tokio runtime and `HYDRA_WORKER_THREADS`,
+- the webseed scanner that walks incomplete torrents instead of the catalogue,
+- the keep-alive fix of 4.27.1.
+
+### Known: first bind is slow on a large catalogue
+
+With the real volumes mounted, an image from this lineage took ~6 min to bind
+its API against 293 148 torrents, against ~90 s before. The engine is up and
+serving throughout -- peers, announces and downloads all run; it is the control
+plane that arrives late. Measured, not fixed, and it is the next thing to look
+at.
+
 ## v4.28.0 -- a keep-alive is not activity
 
 ### Fixed: a peer that only breathes is no longer immortal

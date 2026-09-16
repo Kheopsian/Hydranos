@@ -581,12 +581,40 @@ pub async fn run(
             }
             piece = async {
                 match have_rx.as_mut() {
-                    Some(rx) => rx.recv().await.ok(),
+                    // Hand the Result out instead of `.ok()`. An error here is
+                    // not "nothing to send": once the torrent reaches Seeding,
+                    // `release_have_tx` drops the sender, so every surviving
+                    // Receiver returns Closed *immediately, forever*. With
+                    // `.ok()` that became a select! arm ready on every single
+                    // turn, and the body's `if let Some` silently swallowed it
+                    // without disarming -- a busy loop for the rest of the
+                    // session's life (up to PEER_IDLE_TIMEOUT, 300 s).
+                    // Measured in prod 2026-09-13: `broadcast::recv_ref` was
+                    // 5.3% of all CPU, ~11M recv/s against a legitimate Have
+                    // rate of ~10^3/s.
+                    Some(rx) => Some(rx.recv().await),
                     None => std::future::pending().await,
                 }
             } => {
-                if let Some(piece) = piece {
-                    framed.send(Message::Have { piece }).await.ok();
+                match piece {
+                    Some(Ok(piece)) => {
+                        framed.send(Message::Have { piece }).await.ok();
+                    }
+                    // The 256-slot ring overflowed and we missed some Have's.
+                    // Transient, and the peer can still ask for those pieces --
+                    // keep listening. (`.ok()` used to hide this too.)
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                        crate::peer::HAVE_RX_LAGGED.fetch_add(n, Ordering::Relaxed);
+                    }
+                    // The sender is gone for good: the torrent is seeding and
+                    // will never announce another piece on this channel.
+                    // Disarm the arm so `pending()` parks it instead.
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        have_rx = None;
+                        crate::peer::HAVE_RX_DISARMED.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Unreachable: `pending()` never resolves.
+                    None => {}
                 }
             }
             _ = &mut choke_poll, if !is_seeding => {
