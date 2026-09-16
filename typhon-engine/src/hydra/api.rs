@@ -2870,7 +2870,7 @@ async fn engine_page_value(
         .collect();
     let rich = {
         let store = state.store.lock().unwrap();
-        store.facts_for_hashes(&page_hashes).unwrap_or_default()
+        store.facts_for_hashes(&page_hashes, engine_id).unwrap_or_default()
     };
     let empty_facts = crate::row::StoreFacts::default();
     let agent = local_agent(engine_id);

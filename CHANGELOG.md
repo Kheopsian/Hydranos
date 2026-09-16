@@ -43,6 +43,15 @@ Two ways to title a new entry:
   doing another until the next restart. It now applies to the engine too, and a
   failed write is logged instead of being swallowed by `let _ =`.
 
+- **The Hoard table showed torrents as category "Race".** A torrent seeded by
+  both engines has one row per copy, and the page read its facts with
+  `WHERE info_hash IN (...)` -- no session -- keyed by hash alone, so whichever
+  row SQLite returned last won. Five torrents held by hoard and race painted the
+  race copy's category and save path (`/race/torrents`) onto their hoard row,
+  while the facet chips, which go through `slim_facts(engine_id)`, did not count
+  them: one response contradicting itself. A hash names a CONTENT; only
+  (hash, session) names a copy.
+
 ### Documented
 
 - `/api/hoard/pause` and `/api/hoard/torrents/bulk` reach `docs/API.md` for the
