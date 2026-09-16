@@ -17,6 +17,37 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## Unreleased -- an empty selection is a refusal, not a wildcard
+
+### Fixed
+
+- **A bulk start aimed at 70k torrents started all 293k.** The interface sent
+  the *filter* that produced the selection for anything over 500 rows, and
+  `BulkBody` had no `filter` field: serde dropped the key without a word,
+  `hashes` fell back to its empty default, and an empty list meant "every
+  torrent in this engine". Nothing in the request, the response or the logs
+  said otherwise. `hashes: []` is now a 400 unless the caller passes
+  `"all": true`, and the body refuses unknown fields instead of ignoring them.
+- **The selection now travels as hashes, in chunks of 2000.** The filter branch
+  is gone rather than implemented: a second definition of "the rows I am looking
+  at", living on the other side of the wire, is exactly what drifted.
+- **Bulk pause/resume no longer freezes the API.** Both bulk paths walked their
+  targets calling a single-statement `UPDATE` per hash -- one autocommit and one
+  fsync each, ~17 rows/s measured on a 293k library -- while holding the store's
+  `std::sync::Mutex` across the whole loop. Because that mutex is blocking, every
+  other worker that touched the store lost its thread, and the daemon stopped
+  accepting connections entirely for about half an hour. Both now write in one
+  transaction, on `spawn_blocking`.
+- **`/api/hoard/torrents/bulk` told the engine nothing.** It wrote `paused` to
+  the store and returned `ok`, leaving the rows claiming one thing and the engine
+  doing another until the next restart. It now applies to the engine too, and a
+  failed write is logged instead of being swallowed by `let _ =`.
+
+### Documented
+
+- `/api/hoard/pause` and `/api/hoard/torrents/bulk` reach `docs/API.md` for the
+  first time, including which of the two to prefer.
+
 ## v4.29.0 -- the two lineages become one
 
 The engine work of the last week lived on `v4`; the CPU work of 13-14/09 lived

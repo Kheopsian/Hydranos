@@ -6399,20 +6399,43 @@ async fn pause_bulk(state: &AppState, engine: &str, body: &str) -> Response {
     // native API does not, and a caller passing a prefix here gets applied=0
     // rather than a silent match on whichever torrent happened to share those
     // twelve characters.
-    let mut applied = 0usize;
-    let mut touched: Vec<String> = Vec::new();
-    {
-        let store = state.store.lock().unwrap();
-        for hash in &req.hashes {
-            let exists = store
-                .resolve_hash_in(engine, hash)
-                .is_some_and(|found| found == hash.to_lowercase());
-            if exists && store.set_paused(&hash.to_lowercase(), engine, req.paused).is_ok() {
-                applied += 1;
-                touched.push(hash.to_lowercase());
+    // Resolve, then write the survivors in ONE transaction, off the runtime.
+    // Same reasoning as `bulk_action`: a per-hash autocommit under a blocking
+    // mutex is what took the API down on 2026-09-16. Resolution stays inside
+    // the same locked section so a torrent cannot vanish between the check and
+    // the write.
+    let (applied, touched) = {
+        let state_cl = state.clone();
+        let hashes = req.hashes.clone();
+        let engine_id = engine.to_string();
+        let paused = req.paused;
+        match tokio::task::spawn_blocking(move || {
+            let store = state_cl.store.lock().unwrap();
+            let touched: Vec<String> = hashes
+                .iter()
+                .map(|h| h.to_lowercase())
+                .filter(|h| {
+                    store
+                        .resolve_hash_in(&engine_id, h)
+                        .is_some_and(|found| &found == h)
+                })
+                .collect();
+            let n = store.set_paused_batch(&touched, &engine_id, paused)?;
+            Ok::<_, rusqlite::Error>((n, touched))
+        })
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                tracing::error!("[api] bulk pause failed to write: {e}");
+                (0, Vec::new())
+            }
+            Err(e) => {
+                tracing::error!("[api] bulk pause panicked: {e}");
+                (0, Vec::new())
             }
         }
-    }
+    };
     // The intent is written; now stop the transfers it describes.
     for hash in &touched {
         apply_pause_to_engine(state, engine, hash, req.paused);
@@ -7521,7 +7544,20 @@ fn set_one_paused(state: &AppState, engine: &str, prefix: &str, paused: bool) ->
     }
 }
 
+/// ⚠⚠ `deny_unknown_fields` IS THE POINT OF THIS STRUCT, NOT A DETAIL.
+///
+/// Until 2026-09-16 the error message for this body read
+/// `expected {action, filter, exclude, hashes}` while the struct declared no
+/// `filter` at all. The browser believed the message and sent the filter for
+/// any selection over 500 rows, serde dropped the unknown key without a word,
+/// `hashes` defaulted to empty -- and empty meant THE WHOLE ENGINE. A start
+/// aimed at 70k calewood torrents started all 293k instead, and nothing in the
+/// request, the response or the logs said so.
+///
+/// A field this API does not implement must now be a 400. Silence is what made
+/// the incident invisible.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BulkBody {
     #[serde(default)]
     action: String,
@@ -7529,6 +7565,11 @@ struct BulkBody {
     exclude: Vec<String>,
     #[serde(default)]
     hashes: Vec<String>,
+    /// Opt IN to "every torrent in this engine". Never inferred from an empty
+    /// list: that inference is exactly what turned a filtered selection into
+    /// the whole library.
+    #[serde(default)]
+    all: bool,
 }
 
 /// Apply start/stop to a named set, minus an exclusion list.
@@ -7537,12 +7578,21 @@ struct BulkBody {
 /// the browser, so the only real risk is the two drifting apart, and a visible
 /// number turns that from a silent wrong-set into something somebody notices.
 async fn bulk_action(state: &AppState, engine: &str, body: &str) -> Response {
-    let Ok(req) = serde_json::from_str::<BulkBody>(body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "expected {action, filter, exclude, hashes}"})),
-        )
-            .into_response();
+    let req: BulkBody = match serde_json::from_str::<BulkBody>(body) {
+        Ok(req) => req,
+        // The parse error is echoed back. `deny_unknown_fields` names the
+        // offending key, which is the whole point: a caller sending `filter`
+        // now learns that this endpoint has never implemented one.
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "expected {action, hashes, exclude, all}",
+                    "detail": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
     };
     let stop = match req.action.as_str() {
         "stop" => true,
@@ -7559,18 +7609,28 @@ async fn bulk_action(state: &AppState, engine: &str, body: &str) -> Response {
     let excluded: std::collections::HashSet<String> =
         req.exclude.iter().map(|h| h.to_lowercase()).collect();
 
-    // ⚠⚠ AN EMPTY `hashes` MEANS EVERY TORRENT, NOT NONE.
+    // ⚠⚠ AN EMPTY `hashes` IS A REFUSAL, NOT A WILDCARD.
     //
-    // Measured against 3.x: {"action":"stop","hashes":[],"exclude":[]} paused
-    // all 486 torrents. The field is a filter, and an empty filter selects the
-    // whole engine. It is reproduced because that is the contract, but it is
-    // worth knowing: a UI that sends an empty list by accident stops the entire
-    // library, and the request looks like a no-op.
+    // 3.x read an empty list as "every torrent in the engine", and that is what
+    // fired on 2026-09-16: the browser sent a filter this endpoint never
+    // implemented, serde dropped it, and the empty default started all 293k
+    // torrents instead of the 70k the operator had selected. The old contract
+    // is reachable, but only by SAYING so with `"all": true`.
+    //
     // "Everything" is the ENGINE's list, not the front store's. The two differ
     // -- 486 torrents in the race engine against 148 rows in the store, the gap
     // recorded in project_hydra_api_db_count_gap -- and counting from the store
     // would silently leave 338 torrents running.
     let targets: Vec<String> = if req.hashes.is_empty() {
+        if !req.all {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "hashes is empty; pass \"all\": true to mean every torrent in this engine",
+                })),
+            )
+                .into_response();
+        }
         match state.engines.get(engine) {
             Some(e) => e
                 .manager
@@ -7589,21 +7649,50 @@ async fn bulk_action(state: &AppState, engine: &str, body: &str) -> Response {
         req.hashes.iter().map(|h| h.to_lowercase()).collect()
     };
 
-    let mut matched = 0usize;
-    let mut applied = 0usize;
-    {
-        let store = state.store.lock().unwrap();
-        for hash in &targets {
-            if excluded.contains(hash) {
-                continue;
+    let selected: Vec<String> = targets
+        .into_iter()
+        .filter(|h| !excluded.contains(h))
+        .collect();
+    let matched = selected.len();
+
+    // ONE transaction, off the async runtime.
+    //
+    // Both halves matter. The loop used to call a single-statement update per
+    // hash -- 293k autocommits, ~17 rows/s measured -- while holding a
+    // std::sync::Mutex across every await-free iteration of it. Every other
+    // worker that wanted the store blocked its whole thread, so the API stopped
+    // accepting connections entirely for half an hour. The batch makes the work
+    // short; spawn_blocking keeps what is left off the tokio workers.
+    let applied = {
+        let state = state.clone();
+        let hashes = selected.clone();
+        match tokio::task::spawn_blocking(move || {
+            let store = state.store.lock().unwrap();
+            store.set_paused_everywhere_batch(&hashes, stop)
+        })
+        .await
+        {
+            Ok(Ok(n)) => n,
+            // The store row may not exist -- see the count gap above. A failed
+            // write is reported, not swallowed: `let _ =` on this path is what
+            // let a half-applied bulk look like a clean one.
+            Ok(Err(e)) => {
+                tracing::error!("[api] bulk {} failed to write: {e}", req.action);
+                0
             }
-            matched += 1;
-            // The store row may not exist -- see the count gap above. The
-            // engine still counts it as applied, because the pause landed on
-            // the engine; only the durable half is missing.
-            let _ = store.set_paused_everywhere(hash, stop);
-            applied += 1;
+            Err(e) => {
+                tracing::error!("[api] bulk {} panicked: {e}", req.action);
+                0
+            }
         }
+    };
+
+    // The intent is written; now stop or start the transfers it describes.
+    // `bulk_action` used to skip this entirely, so a bulk start marked 293k rows
+    // as running in the database and left the engine seeding none of them --
+    // the rows said one thing and the engine did another until the next restart.
+    for hash in &selected {
+        apply_pause_to_engine(state, engine, hash, stop);
     }
     Json(serde_json::json!({
         "status": "ok",
@@ -11375,6 +11464,60 @@ mod fleet_tests {
         assert!(q.contains("offset=0"), "{q}");
         assert!(q.contains("limit=1000"), "{q}");
         assert!(!q.contains("offset=500"), "the old window must go: {q}");
+    }
+}
+
+#[cfg(test)]
+mod bulk_body_tests {
+    use super::*;
+
+    /// ⭐ THE REGRESSION TEST FOR 2026-09-16.
+    ///
+    /// This is the exact body the browser sent for any selection over 500 rows.
+    /// It parsed without complaint, `filter` was dropped on the floor, `hashes`
+    /// defaulted to empty -- and empty meant the whole engine. A start aimed at
+    /// 70k torrents started 293k.
+    ///
+    /// It must now be refused. If someone re-adds a `filter` field, they have to
+    /// implement it: this test fails the moment it parses again.
+    #[test]
+    fn the_body_that_started_the_whole_library_is_refused() {
+        let body = r#"{"action":"start","filter":{"category":"Calewood","search":"","tracker":"","tag":"","state":""},"exclude":[]}"#;
+        let parsed = serde_json::from_str::<BulkBody>(body);
+        let err = parsed.err().expect("a filter this API never implemented must not parse");
+        assert!(
+            err.to_string().contains("filter"),
+            "the error must NAME the field, or the caller learns nothing: {err}"
+        );
+    }
+
+    /// The same shape without the unknown key still parses -- and still means
+    /// nothing, because `all` was not set. The refusal of an empty selection
+    /// lives in `bulk_action`; this pins the value it reads.
+    #[test]
+    fn an_empty_selection_does_not_opt_into_everything() {
+        let req: BulkBody =
+            serde_json::from_str(r#"{"action":"start","hashes":[],"exclude":[]}"#).unwrap();
+        assert!(req.hashes.is_empty());
+        assert!(!req.all, "empty must never imply the whole engine");
+    }
+
+    #[test]
+    fn everything_is_reachable_but_only_on_purpose() {
+        let req: BulkBody =
+            serde_json::from_str(r#"{"action":"stop","hashes":[],"all":true}"#).unwrap();
+        assert!(req.all);
+    }
+
+    #[test]
+    fn a_normal_selection_still_parses() {
+        let req: BulkBody = serde_json::from_str(
+            r#"{"action":"stop","hashes":["aa","BB"],"exclude":["cc"]}"#,
+        )
+        .unwrap();
+        assert_eq!(req.hashes, vec!["aa", "BB"]);
+        assert_eq!(req.exclude, vec!["cc"]);
+        assert!(!req.all);
     }
 }
 

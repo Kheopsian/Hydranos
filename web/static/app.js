@@ -4236,47 +4236,32 @@ function _markLocallyStopped(hashes, stopped) {
 // Stop or start the selection. This writes the user's intent: it outlives a
 // restart and no scheduler will undo it.
 //
-// Past a threshold the selection stops travelling as hashes and travels as the
-// filter that produced it -- the daemon already holds the list, so shipping
-// 89k hashes back to it would be a multi-megabyte way of saying "the ones I am
-// looking at". The daemon answers with the count it matched, and we compare it
-// against what the table showed: the filter exists on both sides, so the thing
-// worth catching is the two drifting apart.
-const BULK_FILTER_THRESHOLD = 500;
+// ⚠⚠ THE SELECTION TRAVELS AS HASHES. ALWAYS.
+//
+// It used to travel as the FILTER that produced it past 500 rows, to avoid
+// "a multi-megabyte way of saying the ones I am looking at". The daemon never
+// implemented that filter: it parsed the body into a struct with no such field,
+// serde dropped the key, and the empty `hashes` that remained meant THE WHOLE
+// ENGINE. On 2026-09-16 a start aimed at 70k calewood torrents started all 293k.
+//
+// Hashes are 41 bytes each; 70k of them is ~2.9 MB, sent in chunks of 2000 --
+// perfectly ordinary, and it exercises the one path that has always worked.
+// The saving was never worth a second definition of "the ones I am looking at"
+// living on the other side of the wire.
+const BULK_CHUNK = 2000;
+const BULK_CONFIRM_THRESHOLD = 500;
 
 async function _pauseSelected(paused) {
     _hideCtxMenu();
     const action = paused ? "stop" : "start";
 
-    // Big selection that IS the filtered set (with at most a few rows
-    // deselected): send the filter, not the hashes.
-    if (_selected.size > BULK_FILTER_THRESHOLD && _hoardFiltered.length) {
-        const excluded = _hoardFiltered
-            .filter(t => !_selected.has(_selKeyOf(t.info_hash, t.agent)))
-            .map(t => t.info_hash);
-        // Only worth it while the selection really is "the filter minus a few".
-        if (excluded.length * 4 < _selected.size) {
-            if (!await hydraConfirm(action === "stop" ? t("Stop {n} torrents?", { n: _selected.size }) : t("Start {n} torrents?", { n: _selected.size }))) return;
-            try {
-                const r = await fetch("/api/hoard/torrents/bulk", {
-                    method: "POST",
-                    headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
-                    body: JSON.stringify({ action, filter: _currentHoardFilter(), exclude: excluded }),
-                });
-                const j = await r.json();
-                if (j && typeof j.matched === "number" && j.matched !== _selected.size) {
-                    console.warn(`bulk ${action}: server matched ${j.matched}, UI had ${_selected.size}`);
-                    hydraNotify(t("Heads up: the server matched {matched} torrents, the table showed {shown}. Applied to {applied}.", { matched: j.matched, shown: _selected.size, applied: j.applied }));
-                }
-                _markLocallyStopped(
-                    _hoardFiltered.map(t => t.info_hash).filter(h => !excluded.includes(h)),
-                    paused);
-            } catch (err) {
-                console.error(`Failed to ${action} in bulk`, err);
-            }
-            updateHoardStats();
-            return;
-        }
+    // Confirm anything big enough to be hard to undo. This prompt used to live
+    // in the filter branch only, so removing that branch would have removed the
+    // last thing standing between a stray click and 70k torrents.
+    if (_selected.size > BULK_CONFIRM_THRESHOLD) {
+        if (!await hydraConfirm(action === "stop"
+            ? t("Stop {n} torrents?", { n: _selected.size })
+            : t("Start {n} torrents?", { n: _selected.size }))) return;
     }
 
     // Grouped by the ENGINE the row actually sits in, not by its mode. The same
@@ -4309,31 +4294,45 @@ async function _pauseSelected(paused) {
         const url = (engine === "hoard" || engine === "race")
             ? `/api/${engine}/pause`
             : `/api/engines/${encodeURIComponent(engine)}/pause`;
-        try {
-            await fetch(url, {
-                method: "POST",
-                headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
-                body: JSON.stringify({ hashes, paused }),
-            });
-        } catch (err) {
-            console.error(`Failed to ${action} ${engine}`, err);
+        // Chunked: one request per 2000 hashes. The daemon holds the store lock
+        // for the duration of a batch, so a single 70k-hash call would freeze
+        // every other request for the whole write instead of letting them
+        // interleave between chunks.
+        let done = 0;
+        for (let i = 0; i < hashes.length; i += BULK_CHUNK) {
+            const chunk = hashes.slice(i, i + BULK_CHUNK);
+            try {
+                const r = await fetch(url, {
+                    method: "POST",
+                    headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
+                    body: JSON.stringify({ hashes: chunk, paused }),
+                });
+                const j = await r.json().catch(() => null);
+                // A chunk that applied fewer rows than it sent is worth saying
+                // out loud: that is how a half-applied bulk used to pass for a
+                // clean one.
+                if (j && typeof j.applied === "number") done += j.applied;
+                else if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            } catch (err) {
+                console.error(`Failed to ${action} ${engine} (chunk at ${i})`, err);
+                hydraNotify(t("Failed to {action} some torrents in {engine} -- see the console.", { action, engine }));
+                break;
+            }
+        }
+        if (done !== hashes.length) {
+            console.warn(`bulk ${action} ${engine}: applied ${done}, selected ${hashes.length}`);
+            hydraNotify(t("Applied to {applied} of {shown} torrents.", { applied: done, shown: hashes.length }));
         }
     }
     _markLocallyStopped(byEngine.hoard || [], paused);
     updateHoardStats();
 }
 
-// The filter the hoard table is currently applying, in the shape the daemon
-// expects. Kept next to renderHoardTable's filtering so the two stay in step.
-function _currentHoardFilter() {
-    return {
-        search: (document.getElementById("hoard-search")?.value || ""),
-        category: _hoardCatInc.join(",")
-        , tracker: _hoardTrackerInc.join(",")
-        , tag: _hoardTagInc.join(","),
-        state: _hoardStateFilter || "",
-    };
-}
+// `_currentHoardFilter()` lived here until 2026-09-16. It built "the filter the
+// daemon expects" -- and the daemon expected no such thing: `BulkBody` had no
+// `filter` field, so every call it fed was silently read as "the whole engine".
+// Removed rather than fixed: the selection now travels as hashes, which means
+// there is no second definition of the filtered set to drift out of step.
 
 async function _recheckSelected() {
     _hideCtxMenu();

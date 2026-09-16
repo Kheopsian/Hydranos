@@ -62,6 +62,13 @@ Auth = `X-API-Key`.
   - `DELETE /api/categories/:name` -> `{cleared, cleared_stored, was_orphan}` : retire l'entrée de `categories.json`, efface le label dans les DEUX moteurs et dans le store SQLite. Accepte un label orphelin (absent de la liste) ; **404 seulement si aucun torrent ne le porte non plus**.
 **Pause de démarrage (3.61.0+)** : `GET /api/startup-pause` -> `{held:["hoard"], holding:true}` ; `POST /api/startup-pause/release` -> `{status:"ok", released:[...], holding:false}`. Verrou **niveau process** armé par `start_paused` (par moteur) : tant qu'il tient, aucune annonce ni aucun dial ne sort. **N'écrit rien** — l'intention `paused` par torrent est intacte, la relâche ne réveille pas un torrent mis en pause à la main. Relâche globale (pas de granularité par moteur) et **idempotente** : relâcher à vide = 200 avec `released:[]`.
 
+**Pause/reprise en masse** — deux routes, et elles ne font pas la même chose :
+  - `POST /api/hoard/pause` (aussi `/api/race/pause`, `/api/engines/:id/pause`) `{hashes:[...], paused:bool}` -> `{status,applied,paused}`. Par COPIE, dans le moteur nommé : la copie tenue par un autre moteur n'est pas touchée. Résout chaque hash avant d'écrire (**hash exact**, pas de préfixe, contrairement au shim qBit) et applique au moteur en plus du store. **C'est la route à utiliser.**
+  - `POST /api/hoard/torrents/bulk` `{action:"start"|"stop", hashes:[...], exclude:[...], all:bool}` -> `{status,action,matched,applied,failed}`. Sur TOUTES les copies de chaque hash.
+  - ⚠️⚠️ **`hashes` vide est un 400, pas un joker.** Jusqu'au 16/09/2026 une liste vide voulait dire « tout le moteur » : l'interface envoyait un champ `filter` que cette route n'a jamais implémenté, serde le jetait en silence, `hashes` retombait sur sa valeur par défaut et un démarrage visant 70 k torrents en a démarré 293 k. Pour viser tout le moteur, il faut désormais le dire : `"all": true`.
+  - ⚠️ Le corps **refuse tout champ inconnu** (`deny_unknown_fields`) et nomme le coupable dans `detail`. Un client qui envoie un champ non implémenté l'apprend au lieu de le voir disparaître.
+  - Les deux écrivent en **une transaction** et hors du runtime async. Envoyer par lots (~2 000 hashes) reste préférable : le verrou du store est tenu le temps d'un lot.
+
 **Override passkey (2.7.10+)** : `GET /api/announce/passkeys` ; `POST /api/announce/passkeys` `{"host":"tracker.torr9.net","passkey":"..."}` (vide = clear). Hot, pas de restart, par-tracker.
 **Divers** : `GET /api/public-ip`, `/api/fs/browse`, `/api/peers/top`, `/health`, `/metrics`.
 
@@ -108,7 +115,7 @@ La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DIS
 | config | `GET/POST /config/create-folder` |
 | port-forward | `GET /port-forward` · `GET /port-forward/assignment` · `POST /port-forward/assignment` |
 | **`/api/race`** | `GET /torrents` · `GET /torrents/:ih` · `GET /choking` · `GET/POST /settings` · `POST /uploader` · `GET /uploaders` · `GET /uploaders/:username` · `GET /timeline/:ih` · `POST /torrents/:ih/purge` · `POST /listen-port` · `POST /dial-limits` |
-| **`/api/hoard`** | `GET /stats` · `GET /torrents` · `GET /torrents/:ih` · `POST /pause-all` · `POST /resume-all` · `POST /restart-stuck` · `POST /verify-downloading` · `POST /torrents/:ih/verify` · `POST /torrents/:ih/category` · `GET/POST/DELETE /download-slots` · `POST /listen-port` · `POST /dial-limits` |
+| **`/api/hoard`** | `GET /stats` · `GET /torrents` · `GET /torrents/:ih` · `POST /pause` · `POST /torrents/bulk` · `POST /pause-all` · `POST /resume-all` · `POST /restart-stuck` · `POST /verify-downloading` · `POST /torrents/:ih/verify` · `POST /torrents/:ih/category` · `GET/POST/DELETE /download-slots` · `POST /listen-port` · `POST /dial-limits` |
 | **`/api/hardlinks`** | `GET /summary` · `POST /scan` · `GET /orphans` · `GET /orphans/:ih/files` · `GET/POST /config` · `GET /orphan-media` · `GET /ghosts` · `POST /cleanup` · `POST /relink` · `GET /superseded` |
 | **`/api/drain`** | `GET /status` · `GET /history` · `POST /now` |
 | **`/api/huntarr`** | `GET /status` · `GET /history` · `GET/POST /config` · `GET /library` · `GET /grabs` · `GET /found` · `POST /scan` |
