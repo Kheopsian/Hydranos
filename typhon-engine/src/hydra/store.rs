@@ -994,9 +994,20 @@ impl Store {
     /// and that read is 21 seconds of it -- but the page paints from the first
     /// batch instead of after the last. Lookups go through the primary key
     /// rather than the session index, which also spares the row fetch.
+    /// ⚠⚠ THE SESSION IS PART OF THE KEY. A hash alone names a CONTENT, not a
+    /// copy.
+    ///
+    /// This looked up `WHERE info_hash IN (...)` and keyed the result by hash
+    /// alone, so for a torrent held by two engines the last row SQLite happened
+    /// to return won. On 2026-09-16 five torrents seeded by both hoard and race
+    /// showed up in the Hoard table carrying the race copy's category ("Race")
+    /// and its save path ("/race/torrents") -- while the facet chips, which go
+    /// through `slim_facts(engine_id)`, did not count them. One response
+    /// contradicting itself.
     pub fn facts_for_hashes(
         &self,
         hashes: &[String],
+        session: &str,
     ) -> anyhow::Result<std::collections::HashMap<String, crate::row::StoreFacts>> {
         let mut out = std::collections::HashMap::with_capacity(hashes.len());
         if hashes.is_empty() {
@@ -1009,11 +1020,12 @@ impl Store {
         let sql = format!(
             "SELECT info_hash, category, save_path, added_time, completed_time,
                     seeding_time, tags, paused, content_folder
-             FROM torrents WHERE info_hash IN ({holes})"
+             FROM torrents WHERE session = ?1 AND info_hash IN ({holes})"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
-            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(hashes.len() + 1);
+        params.push(&session as &dyn rusqlite::ToSql);
+        params.extend(hashes.iter().map(|h| h as &dyn rusqlite::ToSql));
         let rows = stmt.query_map(params.as_slice(), |row| {
             let info_hash: String = row.get(0)?;
             let tags: String = row.get(6)?;
@@ -2317,6 +2329,44 @@ mod paused_batch_tests {
             .unwrap();
         assert_eq!(n, 3, "two copies of A plus B; the unknown hash matches nothing");
         assert_eq!(paused_of(&store, B, "hoard"), 1);
+    }
+
+    /// ⭐ THE REGRESSION OF 2026-09-16: the Hoard table showed "Race".
+    ///
+    /// A torrent seeded by both engines has two rows. Looked up by hash alone,
+    /// whichever row SQLite returned last won, and the Hoard page painted the
+    /// race copy's category and save path onto the hoard row.
+    #[test]
+    fn facts_are_read_per_copy_not_per_content() {
+        let s = Store::open_in_memory().expect("in-memory store");
+        s.ensure_schema().expect("schema");
+        s.insert_torrent(A, "hoard", b"d4:infod4:name4:teseee", "/data/tv", "series", 1.0, false, "")
+            .expect("hoard copy");
+        s.insert_torrent(A, "race", b"d4:infod4:name4:teseee", "/race/torrents", "Race", 1.0, false, "")
+            .expect("race copy");
+
+        let hashes = vec![A.to_string()];
+        let hoard = s.facts_for_hashes(&hashes, "hoard").expect("hoard facts");
+        let race = s.facts_for_hashes(&hashes, "race").expect("race facts");
+
+        let h = hoard.get(A).expect("the hoard copy is found");
+        let r = race.get(A).expect("the race copy is found");
+        assert_eq!(h.category, "series", "the hoard row must not wear the race category");
+        assert_eq!(h.save_path, "/data/tv");
+        assert_eq!(r.category, "Race", "and the race row keeps its own");
+        assert_eq!(r.save_path, "/race/torrents");
+    }
+
+    /// A session that holds nothing answers nothing, rather than borrowing the
+    /// other engine's copy.
+    #[test]
+    fn a_session_without_the_torrent_gets_no_facts() {
+        let s = Store::open_in_memory().expect("in-memory store");
+        s.ensure_schema().expect("schema");
+        s.insert_torrent(A, "race", b"d4:infod4:name4:teseee", "/race/torrents", "Race", 1.0, false, "")
+            .expect("race copy");
+        let facts = s.facts_for_hashes(&[A.to_string()], "hoard").expect("facts");
+        assert!(facts.is_empty(), "hoard holds no copy, so it has no facts to show");
     }
 
     #[test]
