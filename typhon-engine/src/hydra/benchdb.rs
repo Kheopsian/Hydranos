@@ -178,11 +178,27 @@ fn tracker_row_json(row: &rusqlite::Row) -> serde_json::Value {
 /// was already complete when this process started -- the latter must not
 /// publish a completion it did not witness.
 pub struct RaceRecorder {
-    /// Last progress seen, per info hash.
-    seen: std::collections::HashMap<String, f64>,
+    /// What was true of each torrent last tick.
+    seen: std::collections::HashMap<String, Seen>,
     /// When this process started watching. Anything already complete at its
     /// first sighting predates us.
     started_at: f64,
+}
+
+/// The little that has to be remembered between two ticks.
+///
+/// `first_peer` and `first_upload` are firsts: without a flag they would fire
+/// on every tick for the whole life of the torrent.
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
+    progress: f64,
+    had_peer: bool,
+    had_upload: bool,
+    /// The announce cache's stamp for this torrent last tick. It is set by
+    /// `cache.record()` on every SUCCESSFUL announce and nowhere else, so a new
+    /// value is an announce that happened -- not a guess from swarm counts,
+    /// which can answer the same numbers twice.
+    last_announce: Option<std::time::Instant>,
 }
 
 impl RaceRecorder {
@@ -190,34 +206,72 @@ impl RaceRecorder {
         Self { seen: std::collections::HashMap::new(), started_at }
     }
 
-    /// One sighting. Returns the event to record, if this one is a moment.
+    /// One sighting. Returns every moment this tick crossed.
+    ///
+    /// Several can land on the same tick -- a torrent that finds its first peer
+    /// and its first byte of upload between two looks -- so this answers a list.
+    /// Each entry is (event, ts, download_time).
     pub fn sight(
         &mut self,
         info_hash: &str,
         added_time: f64,
         progress: f64,
+        peers: i64,
+        upload_total: i64,
+        announced_at: Option<std::time::Instant>,
         now: f64,
-    ) -> Option<(String, f64, f64)> {
+    ) -> Vec<(String, f64, f64)> {
         let complete = progress >= 1.0;
-        match self.seen.insert(info_hash.to_string(), progress) {
+        let mut out = Vec::new();
+        let previous = self.seen.get(info_hash).copied();
+        let mut state = previous.unwrap_or(Seen { progress, ..Default::default() });
+
+        match previous {
             None => {
                 // First sighting. A torrent added before we started is not news
                 // -- it would date every old torrent to this boot.
                 if added_time >= self.started_at && !complete {
-                    Some(("added".to_string(), now, 0.0))
-                } else {
-                    None
+                    out.push(("added".to_string(), now, 0.0));
                 }
             }
-            Some(previous) => {
-                if complete && previous < 1.0 {
+            Some(prev) => {
+                if complete && prev.progress < 1.0 {
                     let download_time = if added_time > 0.0 { now - added_time } else { 0.0 };
-                    Some(("completed".to_string(), now, download_time))
-                } else {
-                    None
+                    out.push(("completed".to_string(), now, download_time));
                 }
             }
         }
+
+        // Firsts, reported once each. Only for torrents this process saw
+        // arrive: an old torrent meeting its first peer of the day is not the
+        // first peer of the race, and dating it here would be a lie.
+        let witnessed = added_time >= self.started_at;
+        if witnessed && !state.had_peer && peers > 0 {
+            out.push(("first_peer".to_string(), now, 0.0));
+        }
+        if witnessed && !state.had_upload && upload_total > 0 {
+            out.push(("first_upload".to_string(), now, 0.0));
+        }
+
+        // An announce is a moment for any race, old or new: unlike the firsts
+        // above it says what the tracker answered just now, which is the whole
+        // point of having it on the timeline.
+        if let Some(at) = announced_at {
+            let is_new = match state.last_announce {
+                None => previous.is_some(),
+                Some(before) => at > before,
+            };
+            if is_new {
+                out.push(("announce".to_string(), now, 0.0));
+            }
+            state.last_announce = Some(at);
+        }
+
+        state.progress = progress;
+        state.had_peer |= peers > 0;
+        state.had_upload |= upload_total > 0;
+        self.seen.insert(info_hash.to_string(), state);
+        out
     }
 
     /// Forget torrents that left the engine, so the map tracks the library
@@ -836,6 +890,114 @@ mod tests {
         let json = serde_json::to_string(&ev("a", "added", 1.0)).unwrap();
         assert!(!json.contains("uploader"), "{json}");
         assert!(!json.contains("injected_peers"), "{json}");
+    }
+}
+
+#[cfg(test)]
+mod race_recorder_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const H: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const START: f64 = 1_000.0;
+
+    fn kinds(v: &[(String, f64, f64)]) -> Vec<&str> {
+        v.iter().map(|(k, _, _)| k.as_str()).collect()
+    }
+
+    /// The module header claimed these decisions were unit-tested. They were
+    /// not: `RaceRecorder::new` appeared in no test until 2026-09-16.
+    #[test]
+    fn a_torrent_added_after_we_started_is_announced_as_added() {
+        let mut r = RaceRecorder::new(START);
+        let out = r.sight(H, START + 10.0, 0.0, 0, 0, None, START + 11.0);
+        assert_eq!(kinds(&out), ["added"]);
+    }
+
+    /// A torrent that predates this process must not be dated to this boot.
+    #[test]
+    fn an_older_torrent_is_not_news() {
+        let mut r = RaceRecorder::new(START);
+        let out = r.sight(H, START - 500.0, 0.3, 4, 99, None, START + 1.0);
+        assert!(out.is_empty(), "got {:?}", kinds(&out));
+    }
+
+    #[test]
+    fn crossing_into_complete_reports_the_download_time() {
+        let mut r = RaceRecorder::new(START);
+        r.sight(H, START + 10.0, 0.5, 1, 0, None, START + 11.0);
+        let out = r.sight(H, START + 10.0, 1.0, 1, 0, None, START + 70.0);
+        assert_eq!(kinds(&out), ["completed"]);
+        assert_eq!(out[0].2, 60.0, "now - added_time");
+    }
+
+    /// Already complete when first seen: we did not witness it finishing.
+    #[test]
+    fn a_torrent_already_complete_publishes_no_completion() {
+        let mut r = RaceRecorder::new(START);
+        let out = r.sight(H, START + 10.0, 1.0, 0, 0, None, START + 11.0);
+        assert!(out.is_empty(), "got {:?}", kinds(&out));
+    }
+
+    #[test]
+    fn the_first_peer_and_the_first_upload_fire_once_each() {
+        let mut r = RaceRecorder::new(START);
+        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.0, 0, 0, None, START + 2.0)), ["added"]);
+        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.1, 3, 0, None, START + 7.0)), ["first_peer"]);
+        // Still peers, still no upload: nothing new to say.
+        assert!(r.sight(H, START + 1.0, 0.2, 5, 0, None, START + 12.0).is_empty());
+        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.3, 5, 128, None, START + 17.0)), ["first_upload"]);
+        assert!(r.sight(H, START + 1.0, 0.4, 5, 900, None, START + 22.0).is_empty());
+    }
+
+    /// Both firsts can land between two looks. The tick answers a list, not one.
+    #[test]
+    fn one_tick_can_cross_several_moments() {
+        let mut r = RaceRecorder::new(START);
+        r.sight(H, START + 1.0, 0.0, 0, 0, None, START + 2.0);
+        let out = r.sight(H, START + 1.0, 1.0, 6, 4096, None, START + 7.0);
+        assert_eq!(kinds(&out), ["completed", "first_peer", "first_upload"]);
+    }
+
+    /// The announce stamp is set by the runner on every SUCCESSFUL announce.
+    /// A new value is an announce; the same value is the same announce.
+    #[test]
+    fn an_announce_is_reported_when_its_stamp_moves() {
+        let mut r = RaceRecorder::new(START);
+        let t1 = Instant::now();
+        // First sighting: the stamp is only remembered, never reported -- we
+        // cannot tell a fresh announce from one that happened before we looked.
+        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.0, 0, 0, Some(t1), START + 2.0)), ["added"]);
+        assert!(r.sight(H, START + 1.0, 0.1, 0, 0, Some(t1), START + 7.0).is_empty());
+
+        let t2 = t1 + Duration::from_secs(1800);
+        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.2, 0, 0, Some(t2), START + 12.0)), ["announce"]);
+        assert!(r.sight(H, START + 1.0, 0.3, 0, 0, Some(t2), START + 17.0).is_empty());
+    }
+
+    /// An old torrent still reports its announces: unlike the firsts, an
+    /// announce says what the tracker answered just now.
+    #[test]
+    fn an_older_torrent_still_reports_announces() {
+        let mut r = RaceRecorder::new(START);
+        let t1 = Instant::now();
+        assert!(r.sight(H, START - 500.0, 0.9, 2, 1, Some(t1), START + 2.0).is_empty());
+        let t2 = t1 + Duration::from_secs(60);
+        assert_eq!(kinds(&r.sight(H, START - 500.0, 0.9, 2, 1, Some(t2), START + 7.0)), ["announce"]);
+    }
+
+    #[test]
+    fn pruning_forgets_torrents_that_left() {
+        let mut r = RaceRecorder::new(START);
+        r.sight(H, START + 1.0, 0.5, 1, 1, None, START + 2.0);
+        r.prune(&std::collections::HashSet::new());
+        // Forgotten, so the next sighting is a first one again -- and that means
+        // the firsts fire again too, which is right: as far as the recorder can
+        // tell, this is a torrent arriving.
+        assert_eq!(
+            kinds(&r.sight(H, START + 1.0, 0.5, 1, 1, None, START + 9.0)),
+            ["added", "first_peer", "first_upload"]
+        );
     }
 }
 
