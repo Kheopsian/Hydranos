@@ -1508,6 +1508,59 @@ impl Store {
         Ok(())
     }
 
+    /// The same intent for a whole SET, in ONE transaction.
+    ///
+    /// The per-hash version above is right for a context menu and wrong for a
+    /// bulk action: on 2026-09-16 a bulk start walked 293k hashes calling it in
+    /// a loop, which is 293k autocommits and 293k fsyncs. Measured on the
+    /// production box that ran at ~17 rows/s, so the loop held the store lock
+    /// for about half an hour and no other request was served in the meantime.
+    /// Same shape as `update_seeding_times`, for the same reason.
+    pub fn set_paused_everywhere_batch(
+        &self,
+        hashes: &[String],
+        paused: bool,
+    ) -> Result<usize, rusqlite::Error> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0usize;
+        {
+            let mut stmt =
+                tx.prepare_cached("UPDATE torrents SET paused = ?2 WHERE info_hash = ?1")?;
+            for hash in hashes {
+                n += stmt.execute(rusqlite::params![hash, i64::from(paused)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Per COPY, for a whole set. Same reason as above.
+    pub fn set_paused_batch(
+        &self,
+        hashes: &[String],
+        session: &str,
+        paused: bool,
+    ) -> Result<usize, rusqlite::Error> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0usize;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE torrents SET paused = ?3 WHERE info_hash = ?1 AND session = ?2",
+            )?;
+            for hash in hashes {
+                n += stmt.execute(rusqlite::params![hash, session, i64::from(paused)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// EVERY copy, for the same reason.
     pub fn set_pinned_everywhere(&self, info_hash: &str, pinned: bool) -> anyhow::Result<()> {
         self.conn.execute(
@@ -2179,6 +2232,102 @@ mod tests {
             store.count_by_session().unwrap(),
             vec![("hoard".to_string(), 2), ("race".to_string(), 1)]
         );
+    }
+
+}
+
+/// The batched pause/resume added after the 2026-09-16 bulk-start incident.
+///
+/// ⚠ These use `ensure_schema()`, not the raw `SCHEMA` constant the module
+/// above uses: `SCHEMA` still declares `info_hash TEXT PRIMARY KEY`, one row per
+/// torrent, and the migration to `(info_hash, session)` is what gives a torrent
+/// one row per COPY. Tests written on the bare constant cannot hold two copies
+/// of the same hash at all, which is precisely the case that matters here.
+#[cfg(test)]
+mod paused_batch_tests {
+    use super::*;
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// 'A' is held by two engines, 'B' by one: three rows, two hashes.
+    fn three_copies() -> Store {
+        let s = Store::open_in_memory().expect("in-memory store");
+        s.ensure_schema().expect("schema");
+        for (hash, session) in [(A, "hoard"), (B, "hoard"), (A, "race")] {
+            s.insert_torrent(hash, session, b"d4:infod4:name4:teseee", "/data", "cat", 1.0, false, "")
+                .expect("insert");
+        }
+        s
+    }
+
+    fn paused_of(store: &Store, hash: &str, session: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT paused FROM torrents WHERE info_hash = ?1 AND session = ?2",
+                rusqlite::params![hash, session],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn the_batch_pauses_every_copy_and_counts_rows_not_hashes() {
+        let store = three_copies();
+        let n = store
+            .set_paused_everywhere_batch(&[A.to_string(), B.to_string()], true)
+            .unwrap();
+        assert_eq!(n, 3, "both copies of A plus B");
+        assert_eq!(paused_of(&store, A, "hoard"), 1);
+        assert_eq!(paused_of(&store, A, "race"), 1);
+        assert_eq!(paused_of(&store, B, "hoard"), 1);
+    }
+
+    #[test]
+    fn the_per_session_batch_leaves_the_other_copy_alone() {
+        let store = three_copies();
+        let n = store.set_paused_batch(&[A.to_string()], "hoard", true).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(paused_of(&store, A, "hoard"), 1);
+        // The race copy of the same content keeps running: pause describes an
+        // execution, not the content.
+        assert_eq!(paused_of(&store, A, "race"), 0);
+    }
+
+    // An empty set is a no-op, NOT "everything". The whole 2026-09-16 incident
+    // was one layer reading empty as a wildcard; the store must never do it.
+    #[test]
+    fn an_empty_batch_touches_nothing() {
+        let store = three_copies();
+        assert_eq!(store.set_paused_everywhere_batch(&[], true).unwrap(), 0);
+        assert_eq!(store.set_paused_batch(&[], "hoard", true).unwrap(), 0);
+        assert_eq!(paused_of(&store, A, "hoard"), 0);
+        assert_eq!(paused_of(&store, B, "hoard"), 0);
+    }
+
+    // The batch is one transaction: a hash nobody holds updates zero rows and
+    // must not abort the ones around it.
+    #[test]
+    fn an_unknown_hash_does_not_sink_the_batch() {
+        let store = three_copies();
+        let nope = "cccccccccccccccccccccccccccccccccccccccc".to_string();
+        let n = store
+            .set_paused_everywhere_batch(&[A.to_string(), nope, B.to_string()], true)
+            .unwrap();
+        assert_eq!(n, 3, "two copies of A plus B; the unknown hash matches nothing");
+        assert_eq!(paused_of(&store, B, "hoard"), 1);
+    }
+
+    #[test]
+    fn the_batch_resumes_as_well_as_it_pauses() {
+        let store = three_copies();
+        let both = [A.to_string(), B.to_string()];
+        store.set_paused_everywhere_batch(&both, true).unwrap();
+        assert_eq!(store.set_paused_everywhere_batch(&both, false).unwrap(), 3);
+        assert_eq!(paused_of(&store, A, "hoard"), 0);
+        assert_eq!(paused_of(&store, A, "race"), 0);
+        assert_eq!(paused_of(&store, B, "hoard"), 0);
     }
 }
 
