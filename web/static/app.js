@@ -4299,6 +4299,10 @@ async function _pauseSelected(paused) {
         // every other request for the whole write instead of letting them
         // interleave between chunks.
         let done = 0;
+        // Only the chunks the daemon confirmed are repainted. Marking the whole
+        // selection would put the table back in the state this fix exists to
+        // prevent: rows claiming one thing while the engine does another.
+        const confirmed = [];
         for (let i = 0; i < hashes.length; i += BULK_CHUNK) {
             const chunk = hashes.slice(i, i + BULK_CHUNK);
             try {
@@ -4307,24 +4311,25 @@ async function _pauseSelected(paused) {
                     headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
                     body: JSON.stringify({ hashes: chunk, paused }),
                 });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 const j = await r.json().catch(() => null);
                 // A chunk that applied fewer rows than it sent is worth saying
                 // out loud: that is how a half-applied bulk used to pass for a
                 // clean one.
                 if (j && typeof j.applied === "number") done += j.applied;
-                else if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                confirmed.push(...chunk);
             } catch (err) {
                 console.error(`Failed to ${action} ${engine} (chunk at ${i})`, err);
                 hydraNotify(t("Failed to {action} some torrents in {engine} -- see the console.", { action, engine }));
                 break;
             }
         }
+        if (engine === "hoard") _markLocallyStopped(confirmed, paused);
         if (done !== hashes.length) {
             console.warn(`bulk ${action} ${engine}: applied ${done}, selected ${hashes.length}`);
             hydraNotify(t("Applied to {applied} of {shown} torrents.", { applied: done, shown: hashes.length }));
         }
     }
-    _markLocallyStopped(byEngine.hoard || [], paused);
     updateHoardStats();
 }
 
