@@ -9581,23 +9581,31 @@ pub(crate) fn graduation_target_categories(state: &AppState) -> std::collections
         .collect()
 }
 
-/// The category a torrent is filed under, or empty.
-pub(crate) fn category_of_hash(state: &AppState, hash: &str) -> String {
+/// The category THIS ENGINE's copy is filed under, or empty.
+///
+/// `engine_id` is required for the reason spelled out on `Store::category_of`:
+/// a torrent held by two engines has one category per copy, and the caller
+/// always knows which engine it is asking for.
+pub(crate) fn category_of_hash(state: &AppState, hash: &str, engine_id: &str) -> String {
     let store = match state.store.lock() {
         Ok(s) => s,
         Err(e) => e.into_inner(),
     };
-    store.category_of(hash).unwrap_or_default()
+    store.category_of(hash, engine_id).unwrap_or_default()
 }
 
-/// The graduation target of this torrent's category: (engine, category, path).
-pub(crate) fn category_graduation(state: &AppState, hash: &str) -> Option<(String, String, String)> {
+/// The graduation target of THIS ENGINE's copy: (engine, category, path).
+pub(crate) fn category_graduation(
+    state: &AppState,
+    hash: &str,
+    engine_id: &str,
+) -> Option<(String, String, String)> {
     let cat = {
         let store = match state.store.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        store.category_of(hash).unwrap_or_default()
+        store.category_of(hash, engine_id).unwrap_or_default()
     };
     let entry = category_entry(state, &cat)?;
     if entry.graduate_to.is_empty() {
