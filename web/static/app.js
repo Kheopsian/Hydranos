@@ -7346,9 +7346,65 @@ function _renderHiddenTrackers(hidden) {
     }).join("");
 }
 
+// The drain's own verdict, put where it can be seen.
+//
+// `stuck` is the drain saying it can neither delete a torrent nor move it: the
+// torrent still owes seeding time -- an UNDECLARED tracker counts as owing --
+// and its category has no `graduate_to`. That is a configuration mistake, and
+// until now it only ever reached a warn! line. The volume fills up, races stop
+// being admitted for lack of projected space, and nothing on screen says why.
+//
+// Counted over a 24h window, and over the LATEST run per volume rather than
+// every row. Two reasons, both learned the hard way:
+//   - a history row is only written when a drain did something, so once the
+//     configuration is fixed no new row arrives, and the last bad one would
+//     keep the badge lit for ever;
+//   - the drain ticks every 60s, so summing rows counts one jam dozens of times.
+const RACE_STUCK_WINDOW_S = 24 * 3600;
+
+async function _updateRaceBadge() {
+    const el = document.querySelector('.tab[data-tab="race"]');
+    if (!el) return;
+    let h;
+    try { h = await api("/api/drain/history"); } catch (e) { return; }
+    const cutoff = (Date.now() / 1000) - RACE_STUCK_WINDOW_S;
+    const latest = new Map();
+    for (const d of (h || [])) {
+        const ts = d.timestamp || 0;
+        if (ts < cutoff) continue;
+        const prev = latest.get(d.volume);
+        if (!prev || ts > (prev.timestamp || 0)) latest.set(d.volume, d);
+    }
+    const jammed = [...latest.values()].filter(d => (d.stuck || 0) > 0);
+    const n = jammed.reduce((a, d) => a + (d.stuck || 0), 0);
+    let dot = el.querySelector(".tab-badge");
+    if (!n) { if (dot) dot.remove(); return; }
+    if (!dot) {
+        dot = document.createElement("span");
+        dot.className = "tab-badge";
+        el.appendChild(dot);
+    }
+    dot.textContent = String(n);
+    dot.className = "tab-badge red";
+    dot.style.cursor = "pointer";
+    dot.title = t("{n} torrent(s) the drain can neither delete nor move: they still owe seeding time and their category has no graduate_to. Click for the drain history.", { n });
+    // Straight to the evidence. The history carries a Stuck column already, but
+    // it is folded shut by default, which is one fold too many for the thing
+    // that explains why the disk is full.
+    dot.onclick = (e) => {
+        e.stopPropagation();
+        for (const d of jammed) _rpHistOpen.add(d.volume);
+        _activateTabNow("race");
+        loadRacePolicy();
+    };
+}
+
 // Tab badges. Counted in distinct trackers, never in errors, and muted hosts
 // are excluded: an indicator that is always lit teaches you to ignore it.
 async function updateTabBadges() {
+    // Kept apart from the tracker badge below: one failing request must not
+    // take the other badge down with it.
+    _updateRaceBadge();
     try {
         const h = await api("/api/announce/health");
         const b = (h && h.badges) || {};
