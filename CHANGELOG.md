@@ -100,6 +100,21 @@ Two ways to title a new entry:
   hours-old race back into it. Measured the same day on 288 races: 74% find a
   first peer within 15s, 91% within 60s.
 
+- **Announces left in bursts, and the admission quota was stricter than the
+  regime it protected.** Two faults in the same limit. `MAX_NEW_PER_CYCLE = 500`
+  was justified as "fifty announces a second, which trackers tolerate", but
+  nothing spread those 500 across the ten seconds: measured in production, the
+  announce rate alternated **127/s and 0** on a 10s period -- the shape of
+  `RECONCILE`, not of a rate limit. And once every torrent has a deadline a
+  catalogue announces at `total / interval` anyway, which is 163/s at 293k and
+  555/s at 1M; capping admission at 50/s meant 98 minutes (5h33 at the 1M
+  target) climbing toward a regime several times faster, during which the
+  torrents not yet admitted were announced nowhere at all.
+  Admission is now derived from that regime, so the catalogue is taken on in
+  **one interval whatever its size**, and both the join and the return are
+  offset by a deterministic per-torrent value -- otherwise a group admitted
+  together comes due in the same millisecond for ever.
+
 ### Documented
 
 - `/api/hoard/pause` and `/api/hoard/torrents/bulk` reach `docs/API.md` for the

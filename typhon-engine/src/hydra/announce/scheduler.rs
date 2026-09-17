@@ -36,14 +36,66 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MIN_INTERVAL: Duration = Duration::from_secs(60);
 /// Let the engine finish loading its resume data before the first announce.
 const BOOT_DELAY: Duration = Duration::from_secs(5);
-/// How many torrents may JOIN the schedule per reconcile cycle.
+/// Floor on how many torrents may JOIN the schedule per reconcile cycle.
 ///
-/// Anti thundering-herd, and the number is not arbitrary: 500 per ten seconds
-/// is fifty announces a second, which trackers tolerate. Admitting the whole
-/// catalogue at once makes every torrent due at the same instant -- 300k
-/// announces in a burst, which is how a tracker answers 429 and how an account
-/// gets noticed.
-const MAX_NEW_PER_CYCLE: usize = 500;
+/// ⚠ This used to be a FLAT 500, justified as "fifty announces a second, which
+/// trackers tolerate". Two things were wrong with that.
+///
+/// The division was fiction: nothing spread those 500 across the ten seconds,
+/// so they left in one burst and the next nine seconds were silent. Measured on
+/// 2026-09-17, the announce rate alternated 127/s and 0 with a 10s period --
+/// the shape of `RECONCILE`, not of a rate limit.
+///
+/// And the ceiling was stricter than the regime it protected. A 293k catalogue
+/// in steady state announces at `total / interval` = 163/s; admitting at 50/s
+/// meant 98 minutes of climb toward a state running three times faster, during
+/// which the torrents not yet admitted were announced NOWHERE. At the 1M target
+/// it would have been 5h33 toward a regime ten times faster.
+///
+/// The quota is now derived from that regime (`admit_quota`), and this is only
+/// the floor so a small catalogue still joins promptly.
+const MIN_NEW_PER_CYCLE: usize = 100;
+
+/// How many torrents may join this cycle, given how many there are in total.
+///
+/// `total / DEFAULT_INTERVAL` announces per second is what the catalogue will
+/// demand once every torrent has a deadline, so admitting at that rate never
+/// exceeds the steady state -- it just reaches it. The catalogue is taken on in
+/// ONE interval whatever its size: half an hour for 5k as for 1M.
+fn admit_quota(total: usize) -> usize {
+    let per_cycle = total.saturating_mul(RECONCILE.as_secs() as usize)
+        / DEFAULT_INTERVAL.as_secs() as usize;
+    per_cycle.max(MIN_NEW_PER_CYCLE)
+}
+
+/// A stable offset in `[0, window)`, derived from the info hash.
+///
+/// Deterministic on purpose, where `rand` would have done: the same torrent
+/// always lands on the same offset, so a group admitted together stays spread
+/// apart for good instead of re-converging at the next deadline. It is also the
+/// only version of this that can be tested -- and an untestable guard is how
+/// the unbounded race burst survived a whole release.
+///
+/// FNV-1a over the hash: no dependency, and hex info hashes differing in one
+/// character land far apart.
+fn spread(info_hash: &str, window: Duration) -> Duration {
+    let millis = window.as_millis() as u64;
+    if millis == 0 {
+        return Duration::ZERO;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in info_hash.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    Duration::from_millis(h % millis)
+}
+/// The reschedule offset is at most `wait / JITTER_FRACTION`, and never more
+/// than `MAX_JITTER`. Announcing LATE is always safe -- it is announcing early
+/// that a tracker minds -- so the offset is only ever added.
+const JITTER_FRACTION: u32 = 10;
+const MAX_JITTER: Duration = Duration::from_secs(120);
+
 /// Floor between two manual reannounces of the same torrent.
 ///
 /// The button exists to jump the queue, not to become a hammer: a private
@@ -145,8 +197,8 @@ pub trait Catalogue: Send + Sync + 'static {
 
 /// How far the scheduler has got admitting the catalogue.
 ///
-/// A 300k catalogue joins at `MAX_NEW_PER_CYCLE` per `RECONCILE`, so for the
-/// first hour or so of a boot most torrents have no deadline yet and no
+/// A catalogue joins at `admit_quota()` per `RECONCILE` -- one interval for the
+/// whole of it -- so early in a boot many torrents have no deadline yet and no
 /// announce behind them. Nothing published that, so the detail panel had to
 /// guess -- and guessed "Success", which is the one answer that is certainly
 /// wrong about a tracker nobody has spoken to.
@@ -173,7 +225,10 @@ impl Admission {
         if waiting == 0 {
             return 0;
         }
-        let cycles = waiting.div_ceil(MAX_NEW_PER_CYCLE as u64);
+        // Against the quota for the WHOLE catalogue, which is what the
+        // scheduler will actually apply -- not the floor.
+        let total = self.admitted.load(Ordering::Relaxed).saturating_add(waiting);
+        let cycles = waiting.div_ceil(admit_quota(total as usize) as u64);
         (cycles * RECONCILE.as_secs()) as i64
     }
 }
@@ -287,8 +342,17 @@ where
                 } else {
                     outcome.next_in
                 };
+                // Spread the return too, or the group re-forms: everyone
+                // admitted together gets the same `wait` and comes due in the
+                // same millisecond, thirty minutes later, for ever. The offset
+                // is a fraction of the wait and is capped, so it disperses the
+                // pack without meaningfully delaying any single torrent.
+                let jitter = spread(
+                    &outcome.info_hash,
+                    (wait / JITTER_FRACTION).min(MAX_JITTER),
+                );
                 heap.push(Reverse(Deadline {
-                    at: Instant::now() + wait,
+                    at: Instant::now() + wait + jitter,
                     info_hash: outcome.info_hash,
                     epoch: state.epoch,
                 }));
@@ -318,6 +382,9 @@ fn reconcile_now<C: Catalogue>(
 ) {
     let live = catalogue.hashes();
     let total = live.len() as u64;
+    // Derived from the catalogue in hand: the bigger it is, the faster it has
+    // to be taken on, because the steady state it is heading for is faster too.
+    let quota = admit_quota(live.len());
     let mut seen = std::collections::HashSet::with_capacity(live.len());
     let mut added = 0usize;
     for hash in live {
@@ -327,7 +394,7 @@ fn reconcile_now<C: Catalogue>(
         }
         // The rest join on the next cycle. `seen` already holds them, so they
         // are not mistaken for departures in the meantime.
-        if added >= MAX_NEW_PER_CYCLE {
+        if added >= quota {
             continue;
         }
         added += 1;
@@ -344,7 +411,13 @@ fn reconcile_now<C: Catalogue>(
         // A torrent that has just appeared announces now: it is either newly
         // added or the engine has just started, and both want the tracker told
         // rather than a thirty-minute wait.
-        heap.push(Reverse(Deadline { at: Instant::now(), info_hash: hash, epoch: 0 }));
+        //
+        // "Now" is spread across the cycle rather than taken literally: a whole
+        // quota leaving in the same millisecond is the burst this admission
+        // limit exists to prevent, and it would only get bigger now that the
+        // quota scales with the catalogue.
+        let at = Instant::now() + spread(&hash, RECONCILE);
+        heap.push(Reverse(Deadline { at, info_hash: hash, epoch: 0 }));
     }
     // A torrent in flight is left alone: its worker still holds it, and its
     // result will remove it.
@@ -363,7 +436,7 @@ fn reconcile_now<C: Catalogue>(
 /// than silently dropped.
 ///
 /// A torrent the scheduler has never seen is admitted here and now, deliberately
-/// outside `MAX_NEW_PER_CYCLE`: that quota exists to stop a whole catalogue
+/// outside the admission quota: that quota exists to stop a whole catalogue
 /// arriving at once, and one person pressing one button is not a herd.
 fn bump_now(
     states: &mut HashMap<String, State>,
@@ -443,16 +516,23 @@ mod tests {
         a.waiting.store(1, Ordering::Relaxed);
         assert_eq!(a.drain_seconds(), RECONCILE.as_secs() as i64);
 
-        a.waiting.store(MAX_NEW_PER_CYCLE as u64, Ordering::Relaxed);
+        a.waiting.store(MIN_NEW_PER_CYCLE as u64, Ordering::Relaxed);
         assert_eq!(a.drain_seconds(), RECONCILE.as_secs() as i64);
 
-        a.waiting.store(MAX_NEW_PER_CYCLE as u64 + 1, Ordering::Relaxed);
+        a.waiting.store(MIN_NEW_PER_CYCLE as u64 + 1, Ordering::Relaxed);
         assert_eq!(a.drain_seconds(), 2 * RECONCILE.as_secs() as i64);
 
         // The number that made this worth showing: a 300k catalogue at boot.
+        // It used to be ~100 minutes, because admission was capped at a flat
+        // 500/cycle whatever the size. Derived from the regime, the whole
+        // catalogue is now taken on in ONE interval.
         a.waiting.store(300_000, Ordering::Relaxed);
         let minutes = a.drain_seconds() as f64 / 60.0;
-        assert!((99.0..=101.0).contains(&minutes), "{minutes} minutes for 300k");
+        let target = DEFAULT_INTERVAL.as_secs_f64() / 60.0;
+        assert!(
+            (minutes - target).abs() <= 1.0,
+            "{minutes} minutes for 300k, expected about {target}"
+        );
     }
 
     /// The scheduler publishes what it admitted, and what is still queued.
@@ -466,33 +546,112 @@ mod tests {
                 (0..self.0).map(|i| format!("{i:040x}")).collect()
             }
         }
-        let catalogue = Arc::new(Big(MAX_NEW_PER_CYCLE * 3));
+        let catalogue = Arc::new(Big(MIN_NEW_PER_CYCLE * 3));
         let admission = Admission::default();
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
 
         reconcile_now(&catalogue, &mut states, &mut heap, &admission);
-        assert_eq!(admission.admitted.load(Ordering::Relaxed), MAX_NEW_PER_CYCLE as u64);
-        assert_eq!(admission.waiting.load(Ordering::Relaxed), (MAX_NEW_PER_CYCLE * 2) as u64);
+        assert_eq!(admission.admitted.load(Ordering::Relaxed), MIN_NEW_PER_CYCLE as u64);
+        assert_eq!(admission.waiting.load(Ordering::Relaxed), (MIN_NEW_PER_CYCLE * 2) as u64);
 
         reconcile_now(&catalogue, &mut states, &mut heap, &admission);
-        assert_eq!(admission.admitted.load(Ordering::Relaxed), (MAX_NEW_PER_CYCLE * 2) as u64);
-        assert_eq!(admission.waiting.load(Ordering::Relaxed), MAX_NEW_PER_CYCLE as u64);
+        assert_eq!(admission.admitted.load(Ordering::Relaxed), (MIN_NEW_PER_CYCLE * 2) as u64);
+        assert_eq!(admission.waiting.load(Ordering::Relaxed), MIN_NEW_PER_CYCLE as u64);
 
         reconcile_now(&catalogue, &mut states, &mut heap, &admission);
         assert_eq!(admission.waiting.load(Ordering::Relaxed), 0, "the whole catalogue is in");
         assert_eq!(admission.drain_seconds(), 0);
     }
 
+    /// ⭐ Admission never runs faster than the steady state it leads to.
+    ///
+    /// That is the whole justification for the quota: a catalogue of N torrents
+    /// will announce at `N / interval` per second once every one of them has a
+    /// deadline, so taking them on at that same rate adds nothing a tracker was
+    /// not going to see anyway. The old flat 500/cycle was BOTH too slow for a
+    /// large catalogue (98 minutes of climb at 300k, 5h33 at 1M, during which
+    /// the torrents not yet admitted announced nowhere) and unrelated to the
+    /// load it claimed to bound.
     #[test]
-    fn no_more_than_a_slice_of_the_catalogue_joins_per_cycle() {
-        assert_eq!(MAX_NEW_PER_CYCLE, 500);
-        let per_second = MAX_NEW_PER_CYCLE as f64 / RECONCILE.as_secs_f64();
-        assert!(per_second <= 50.0, "{per_second}/s is more than a tracker tolerates");
-        // And a catalogue of 300k takes a bounded, knowable time to enter.
-        let cycles = 300_000_f64 / MAX_NEW_PER_CYCLE as f64;
-        let minutes = cycles * RECONCILE.as_secs_f64() / 60.0;
-        assert!(minutes < 120.0, "{minutes} minutes to admit the catalogue is too slow");
+    fn admission_never_exceeds_the_steady_state_it_leads_to() {
+        // ⚠ Above the floor only. Below it the floor wins, on purpose: a 5k
+        // catalogue has a 2.8/s regime, and admitting at the floor's 10/s to
+        // get it in within minutes is a rate no tracker has an opinion about.
+        // The rule is about large catalogues, where the absolute numbers bite.
+        for total in [50_000usize, 300_000, 1_000_000] {
+            let quota = admit_quota(total);
+            assert!(quota > MIN_NEW_PER_CYCLE, "{total} should be past the floor");
+            let admit_per_s = quota as f64 / RECONCILE.as_secs_f64();
+            let steady_per_s = total as f64 / DEFAULT_INTERVAL.as_secs_f64();
+            assert!(
+                admit_per_s <= steady_per_s * 1.05,
+                "{total}: admitting {admit_per_s}/s exceeds the {steady_per_s}/s regime"
+            );
+        }
+        // And the floor never lets a small catalogue announce at a rate worth
+        // noticing in absolute terms.
+        let floor_per_s = MIN_NEW_PER_CYCLE as f64 / RECONCILE.as_secs_f64();
+        assert!(floor_per_s <= 20.0, "the floor alone is {floor_per_s}/s");
+    }
+
+    /// Whatever its size, the catalogue is taken on in about one interval.
+    #[test]
+    fn a_catalogue_joins_in_one_interval_whatever_its_size() {
+        for total in [50_000usize, 300_000, 1_000_000] {
+            let cycles = total as f64 / admit_quota(total) as f64;
+            let minutes = cycles * RECONCILE.as_secs_f64() / 60.0;
+            let target = DEFAULT_INTERVAL.as_secs_f64() / 60.0;
+            assert!(
+                (minutes - target).abs() <= 1.0,
+                "{total} torrents take {minutes} minutes, expected about {target}"
+            );
+        }
+    }
+
+    /// A small catalogue must not crawl: `300 / 1800` is one torrent per cycle,
+    /// which would take an hour to admit three hundred torrents.
+    #[test]
+    fn a_small_catalogue_gets_the_floor() {
+        assert_eq!(admit_quota(300), MIN_NEW_PER_CYCLE);
+        assert_eq!(admit_quota(0), MIN_NEW_PER_CYCLE);
+    }
+
+    /// ⭐ THE SHAPE, not just the rate. A quota that leaves in one burst is the
+    /// thundering herd this limit exists to prevent -- and the burst gets bigger
+    /// now that the quota scales. Measured on 2026-09-17 before this existed:
+    /// the announce rate alternated 127/s and 0 on a 10s period.
+    #[test]
+    fn the_offset_spreads_a_group_across_the_window() {
+        let window = RECONCILE;
+        let offsets: Vec<u128> = (0..500)
+            .map(|i| spread(&format!("{i:040x}"), window).as_millis())
+            .collect();
+
+        assert!(
+            offsets.iter().all(|o| *o < window.as_millis()),
+            "an offset must stay inside the window"
+        );
+        // Spread across the window rather than clumped: every tenth of the
+        // window holds some of them.
+        let tenth = window.as_millis() / 10;
+        let buckets: std::collections::HashSet<u128> =
+            offsets.iter().map(|o| o / tenth).collect();
+        assert_eq!(buckets.len(), 10, "500 torrents left {} of 10 slots empty", 10 - buckets.len());
+    }
+
+    /// Deterministic: the same torrent always lands on the same offset, so a
+    /// group that was spread apart stays apart instead of re-converging.
+    #[test]
+    fn the_offset_is_stable_for_a_given_torrent() {
+        let h = "a".repeat(40);
+        assert_eq!(spread(&h, RECONCILE), spread(&h, RECONCILE));
+        assert_ne!(
+            spread(&h, RECONCILE),
+            spread(&"b".repeat(40), RECONCILE),
+            "two torrents must not share one offset"
+        );
+        assert_eq!(spread(&h, Duration::ZERO), Duration::ZERO, "a zero window is not a panic");
     }
 
     fn fresh(hash: &str) -> State {
@@ -598,7 +757,7 @@ mod tests {
 
         assert_eq!(bump_now(&mut states, &mut heap, "new".into()), BumpOutcome::Bumped);
 
-        assert!(states.contains_key("new"), "admitted outside MAX_NEW_PER_CYCLE");
+        assert!(states.contains_key("new"), "admitted outside MIN_NEW_PER_CYCLE");
         assert!(states["new"].first_announce, "and it announces as a first announce");
         assert_eq!(heap.len(), 1);
     }
