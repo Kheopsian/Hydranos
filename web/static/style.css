@@ -1862,27 +1862,53 @@ footer {
     footer { flex-direction: column; gap: 4px; text-align: center; }
 
     /* Benchmark */
-    .bm-metrics-grid { grid-template-columns: repeat(4, 1fr); }
-    .bm-charts-grid { grid-template-columns: 1fr; }
-    .bm-range-bar { flex-wrap: wrap; }
+    /* The Benchmark overrides are NOT here: see the block at the end of this
+       file. `.bm-metrics-grid` is defined further down, and a media query adds
+       no specificity, so anything written here loses to it. */
 
-    /* Race table (Name/Size/Progress/Seeds/Leechers/Down/Up/Ratio/Completed)
-       Keep: Name, Progress, Down, Up  |  Hide: Size(2), Seeds(4), Leechers(5), Ratio(8), Completed(9) */
-    #race-table th:nth-child(2), #race-table td:nth-child(2),
-    #race-table th:nth-child(4), #race-table td:nth-child(4),
-    #race-table th:nth-child(5), #race-table td:nth-child(5),
-    #race-table th:nth-child(8), #race-table td:nth-child(8),
-    #race-table th:nth-child(9), #race-table td:nth-child(9) { display: none; }
+    /* The hoard and race tables choose their narrow column set in JS
+       (`_visibleCols`), NOT here.
 
-    /* Hoard table (Name/Size/State/Progress/Seeds/Leechers/Down/Up/Ratio/Category/Added/Completed)
-       Keep: Name, Size, State, Progress, Up  |  Hide: 5,6,7,9,10,11,12 */
-    #hoard-table th:nth-child(5), #hoard-table td:nth-child(5),
-    #hoard-table th:nth-child(6), #hoard-table td:nth-child(6),
-    #hoard-table th:nth-child(7), #hoard-table td:nth-child(7),
-    #hoard-table th:nth-child(9), #hoard-table td:nth-child(9),
-    #hoard-table th:nth-child(10), #hoard-table td:nth-child(10),
-    #hoard-table th:nth-child(11), #hoard-table td:nth-child(11),
-    #hoard-table th:nth-child(12), #hoard-table td:nth-child(12) { display: none; }
+       There used to be `nth-child` rules in this block hiding columns 5,6,7,
+       9..12. They could not work: both tables are reorderable by drag and drop
+       and their order is restored from localStorage, so a positional rule hid
+       whichever column happened to land in that slot. They also still counted
+       twelve columns after three more had been added, which is how `Location`,
+       `Added` and `Completed` stayed visible. Measured at 390px on
+       2026-09-17: the table rendered 1702px wide and scrolled the whole page
+       sideways, header and tabs included.
+
+       One list of columns, in one place, used for both the header and the
+       cells. Adding a column now means deciding whether it carries `mobile`. */
+
+    /* Whatever still overflows scrolls INSIDE the tab, not by dragging the
+       whole document sideways. Without this the header, the tab bar and the
+       filter chips all slide off with the table, and there is no way back but
+       scrolling left again -- measured at 1714px of page for a 390px screen. */
+    .tab-content {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    /* A summary is a SENTENCE: it wraps. Kept on one line it was 761px wide on
+       its own and dragged the page with it. (A truncated phrase says nothing,
+       so ellipsis is not the answer here -- see the Exit IP note.) */
+    .hoard-summary, #hoard-summary-text,
+    .race-summary, #race-summary-text {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    /* A long release name is the single widest thing on the page -- 1005px of
+       the 1702 measured. Truncate rather than let one cell set the table's
+       width; the full value stays in the row's title attribute. */
+    #hoard-table td, #race-table td,
+    #hoard-table th, #race-table th {
+        max-width: 52vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
 
     /* Peers table (IP/Score/AvgSpeed/MaxSpeed/Sessions/Reliability/Client/Seedbox)
        Keep: IP, Score, AvgSpeed, Client  |  Hide: 4,5,6,8 */
@@ -3480,3 +3506,23 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .vol-card .inh input[type=number]{border-style:dashed}
 .vol-card .abs{color:var(--text-secondary);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .vol-card .rp2-tip{width:380px;line-height:1.6;z-index:60}
+
+/* ── Benchmark on a phone ────────────────────────────────────────────────────
+   This block sits at the END of the file on purpose.
+
+   The responsive section higher up already carried `.bm-metrics-grid`,
+   `.bm-charts-grid` and `.bm-range-bar` rules -- and none of them had ever
+   applied. `.bm-metrics-grid { grid-template-columns: repeat(8, 1fr) }` is
+   declared BELOW that block, a media query contributes no specificity, and the
+   later rule of equal weight wins. The result on a 390px screen was eight
+   tiles about one character wide, each label reading downwards, one letter per
+   line. It measured as no overflow, which is why only the screenshot caught it.
+
+   Anything added here must stay after the base `.bm-*` declarations. */
+@media (max-width: 768px) {
+    .bm-metrics-grid { grid-template-columns: repeat(2, 1fr); }
+    .bm-metric-card { min-width: 0; }
+    .bm-metric-label, .bm-metric-value { overflow-wrap: anywhere; }
+    .bm-charts-grid { grid-template-columns: 1fr; }
+    .bm-range-bar { flex-wrap: wrap; }
+}

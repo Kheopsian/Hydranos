@@ -21,6 +21,33 @@ Two ways to title a new entry:
 
 ### Fixed
 
+- **The torrent tables were unusable on a phone, and the responsive rules that
+  were supposed to fix that had never applied.** Measured at 390px: the hoard
+  table rendered 1702px wide and dragged the whole document sideways -- header,
+  tab bar and filter chips included -- with `Location`, `Added` and `Completed`
+  fully visible. The CSS hid columns by POSITION (`#hoard-table
+  th:nth-child(5)`), which cannot work here: both tables are reorderable by
+  drag and drop and their order is restored from localStorage, so the rules hid
+  whichever column happened to land in that slot, and they still counted twelve
+  columns after three more had been added. The narrow column set is now chosen
+  in `_visibleCols()`, the one list that feeds both the header and the cells,
+  from a `mobile` flag on the column itself; it is never written back to the
+  saved config, so a phone no longer erases the desktop layout. Saved pixel
+  widths are ignored below the breakpoint as well -- they pinned a 1700px table
+  via `table-layout: fixed`. Turning the phone sideways rebuilds both tables
+  instead of leaving a header that no longer matches its rows.
+
+- **Every Benchmark rule in the responsive block was dead code.** They sit
+  above `.bm-metrics-grid { grid-template-columns: repeat(8, 1fr) }`, a media
+  query adds no specificity, and the later rule of equal weight wins -- so a
+  phone drew eight tiles about one character wide, each label reading
+  downwards one letter per line. It measured as zero overflow, which is why
+  only a screenshot caught it. The overrides now live at the end of the file,
+  where they apply.
+
+- **Anything still too wide scrolls inside its tab** instead of moving the
+  page, and the hoard summary wraps rather than running 761px off the edge.
+
 - **A tracker that recovered stayed red until the daemon restarted.** The
   per-tracker error breakdown behind the Trackers tab was a count kept for the
   life of the process: it only ever grew, so one bad afternoon marked a tracker
