@@ -21,6 +21,20 @@ Two ways to title a new entry:
 
 ### Fixed
 
+- **A tracker that recovered stayed red until the daemon restarted.** The
+  per-tracker error breakdown behind the Trackers tab was a count kept for the
+  life of the process: it only ever grew, so one bad afternoon marked a tracker
+  as unhealthy for ever and the only way to clear it was a restart -- the worst
+  possible trigger for a panel whose job is to say what is wrong *right now*.
+  Measured on a live node: `bt1.archive.org` showed 64126 errors while it was
+  answering announces normally again. The counts are now kept in one-minute
+  buckets over a rolling hour, a host whose failures have all aged out is
+  dropped from the breakdown rather than reported as zero, and the column is
+  labelled *Errors (1h)* so the number says what it counts. The lifetime
+  `announces_failed` counter is deliberately left alone: the benchmark sampler
+  differences it into a per-second rate, and a counter that reset would draw a
+  spike that never happened.
+
 - **A bulk start aimed at 70k torrents started all 293k.** The interface sent
   the *filter* that produced the selection for anything over 500 rows, and
   `BulkBody` had no `filter` field: serde dropped the key without a word,

@@ -71,5 +71,6 @@
   "no engine": "sem motor",
   "this machine": "esta maquina",
   "{id} engine interface ({role})": "Interface do motor {id} ({role})",
-  "{id} listen port": "Porta de escuta de {id}"
+  "{id} listen port": "Porta de escuta de {id}",
+  "Errors (1h)": "Erros (1 h)"
 }

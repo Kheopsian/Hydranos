@@ -71,5 +71,6 @@
   "no agent": "geen agent",
   "this machine": "deze machine",
   "{id} engine interface ({role})": "Interface van agent {id} ({role})",
-  "{id} listen port": "Luisterpoort van {id}"
+  "{id} listen port": "Luisterpoort van {id}",
+  "Errors (1h)": "Fouten (1 u)"
 }

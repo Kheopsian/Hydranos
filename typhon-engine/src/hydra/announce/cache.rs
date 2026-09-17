@@ -71,6 +71,58 @@ impl Verify {
     }
 }
 
+/// How far back the error counts look. Everything older is forgotten.
+const WINDOW_MINS: u64 = 60;
+
+/// Minutes since this process started.
+///
+/// Monotonic on purpose: an epoch clock can step backwards (NTP, or the RTC
+/// fixups this fleet has already been bitten by) and a bucket index that moves
+/// backwards would drop counts that are still inside the window.
+fn now_min() -> u64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_secs() / 60
+}
+
+/// One-minute buckets over the last hour, oldest first.
+///
+/// A deque of (minute, count) rather than a fixed [u64; 60]: a tracker that
+/// fails twice a day holds two entries instead of sixty zeroes, and expiry is
+/// a pop from the front instead of a scan.
+#[derive(Default, Debug)]
+struct Window {
+    buckets: std::collections::VecDeque<(u64, u64)>,
+}
+
+impl Window {
+    fn cutoff(now: u64) -> u64 {
+        now.saturating_sub(WINDOW_MINS - 1)
+    }
+
+    fn add(&mut self, now: u64) {
+        self.expire(now);
+        match self.buckets.back_mut() {
+            Some((m, n)) if *m == now => *n += 1,
+            _ => self.buckets.push_back((now, 1)),
+        }
+    }
+
+    fn expire(&mut self, now: u64) {
+        let cutoff = Self::cutoff(now);
+        while self.buckets.front().is_some_and(|(m, _)| *m < cutoff) {
+            self.buckets.pop_front();
+        }
+    }
+
+    /// What is still inside the window. Expiry is applied on read too, so a
+    /// tracker that stopped failing reads zero without waiting for a write
+    /// that may never come.
+    fn total(&self, now: u64) -> u64 {
+        let cutoff = Self::cutoff(now);
+        self.buckets.iter().filter(|(m, _)| *m >= cutoff).map(|(_, n)| n).sum()
+    }
+}
+
 #[derive(Default)]
 pub struct Cache {
     entries: RwLock<HashMap<String, Entry>>,
@@ -86,14 +138,21 @@ pub struct Cache {
     /// update is exact rather than a periodic recount.
     swarm_seeds_total: std::sync::atomic::AtomicI64,
     swarm_leechers_total: std::sync::atomic::AtomicI64,
-    /// (host, error class) -> how many announces failed that way.
+    /// (host, error class) -> how many announces failed that way IN THE LAST HOUR.
     ///
     /// A single number for "failed" says a tracker is unhappy; it does not say
     /// whether we are rate limited, banned, unreachable, or announcing torrents
     /// it deleted -- which are four different jobs for the operator. The class
     /// is derived from the REDACTED message: a raw reqwest error embeds the
     /// announce URL, and that URL carries the passkey.
-    errors: RwLock<HashMap<(String, String), u64>>,
+    ///
+    /// ⚠ This was a LIFETIME count until 2026-09-17, and a lifetime count is
+    /// the wrong shape for a health signal: it only ever grows, so a tracker
+    /// that broke once at boot stayed red for the life of the process and the
+    /// only way to clear it was a restart -- the worst possible trigger for a
+    /// panel that exists to say what is wrong RIGHT NOW. Measured that day:
+    /// bt1.archive.org sat at 64126 errors while announcing successfully.
+    errors: RwLock<HashMap<(String, String), Window>>,
     /// host -> what the last announce self-check saw.
     verify: RwLock<HashMap<String, Verify>>,
 }
@@ -110,19 +169,41 @@ impl Cache {
     /// Record a failure under its class, for the trackers tab.
     pub fn count_failed_kind(&self, host: &str, class: &str) {
         self.count_failed();
-        *self
-            .errors
-            .write()
-            .unwrap()
-            .entry((host.to_string(), class.to_string()))
-            .or_insert(0) += 1;
+        self.count_failed_kind_at(host, class, now_min());
     }
 
-    /// host -> [(class, count)], most frequent first.
+    /// The clock is a parameter so the window can be tested without sleeping
+    /// for an hour.
+    fn count_failed_kind_at(&self, host: &str, class: &str, now: u64) {
+        let mut errors = self.errors.write().unwrap();
+        errors
+            .entry((host.to_string(), class.to_string()))
+            .or_default()
+            .add(now);
+        // Drop what has aged out entirely, so a host that recovered stops
+        // costing a map entry -- and, more importantly, stops being named by
+        // `error_breakdown`, which is what paints its row red.
+        errors.retain(|_, w| w.total(now) > 0);
+    }
+
+    /// host -> [(class, count)] over the last hour, most frequent first.
+    ///
+    /// A host whose failures have all aged out is ABSENT from the map rather
+    /// than present with zero: the callers use the key set to decide that a
+    /// tracker is in trouble, so an empty entry would keep it red for ever --
+    /// which is the whole bug this window replaced.
     pub fn error_breakdown(&self) -> HashMap<String, Vec<(String, u64)>> {
+        self.error_breakdown_at(now_min())
+    }
+
+    fn error_breakdown_at(&self, now: u64) -> HashMap<String, Vec<(String, u64)>> {
         let mut out: HashMap<String, Vec<(String, u64)>> = HashMap::new();
-        for ((host, class), n) in self.errors.read().unwrap().iter() {
-            out.entry(host.clone()).or_default().push((class.clone(), *n));
+        for ((host, class), w) in self.errors.read().unwrap().iter() {
+            let n = w.total(now);
+            if n == 0 {
+                continue;
+            }
+            out.entry(host.clone()).or_default().push((class.clone(), n));
         }
         for v in out.values_mut() {
             v.sort_by(|a, b| b.1.cmp(&a.1));
@@ -273,5 +354,88 @@ mod tests {
         assert_eq!(c.len(), 1, "one entry per torrent, not one per announce");
         c.forget("aa");
         assert!(c.is_empty());
+    }
+
+    /// ⭐ The point of the whole change: an hour after it stopped failing, a
+    /// tracker is not named at all -- so the row that reads this key set goes
+    /// back to green WITHOUT a restart. Until 2026-09-17 this count was kept
+    /// for the life of the process and only a restart could clear it.
+    #[test]
+    fn a_tracker_that_stopped_failing_leaves_the_breakdown() {
+        let c = Cache::default();
+        for _ in 0..40 {
+            c.count_failed_kind_at("tracker.example", "timeout", 100);
+        }
+        assert_eq!(
+            c.error_breakdown_at(100).get("tracker.example").unwrap()[0],
+            ("timeout".to_string(), 40)
+        );
+        // 59 minutes on: the bucket is the oldest one still inside the window.
+        assert_eq!(
+            c.error_breakdown_at(159).get("tracker.example").unwrap()[0].1,
+            40,
+            "the window is inclusive of its oldest minute"
+        );
+        // One more minute and it has aged out entirely.
+        assert!(
+            c.error_breakdown_at(160).get("tracker.example").is_none(),
+            "an hour later the host is absent, not present with zero"
+        );
+    }
+
+    /// Failures spread across minutes add up while they share the window, and
+    /// only the part that aged out is lost.
+    #[test]
+    fn the_window_forgets_only_what_fell_out_of_it() {
+        let c = Cache::default();
+        c.count_failed_kind_at("t", "connect", 10);
+        c.count_failed_kind_at("t", "connect", 50);
+        c.count_failed_kind_at("t", "connect", 69);
+        assert_eq!(c.error_breakdown_at(69).get("t").unwrap()[0].1, 3);
+        // At minute 70 the cutoff is 11, so the first one is gone and the
+        // other two remain.
+        assert_eq!(c.error_breakdown_at(70).get("t").unwrap()[0].1, 2);
+    }
+
+    /// The classes stay apart: "rate limited" and "banned" are different jobs
+    /// for the operator, which is why they were split in the first place.
+    #[test]
+    fn classes_are_counted_separately_and_sorted_by_weight() {
+        let c = Cache::default();
+        c.count_failed_kind_at("t", "timeout", 5);
+        for _ in 0..3 {
+            c.count_failed_kind_at("t", "connect", 5);
+        }
+        let b = c.error_breakdown_at(5);
+        let v = b.get("t").unwrap();
+        assert_eq!(v[0], ("connect".to_string(), 3), "most frequent first");
+        assert_eq!(v[1], ("timeout".to_string(), 1));
+    }
+
+    /// The lifetime `announces_failed` counter must NOT become a window: the
+    /// bench sampler differences it to draw a rate, and a counter that resets
+    /// would draw a negative spike.
+    #[test]
+    fn the_rate_counter_stays_monotonic_while_the_breakdown_expires() {
+        let c = Cache::default();
+        c.count_failed_kind_at("t", "timeout", 0);
+        c.count_failed_kind_at("t", "timeout", 0);
+        assert!(c.error_breakdown_at(500).is_empty(), "the breakdown forgets");
+        assert_eq!(c.outcomes().1, 0, "counted by count_failed, not by the window");
+        c.count_failed_kind("t", "timeout");
+        assert_eq!(c.outcomes().1, 1, "the lifetime counter still only grows");
+    }
+
+    /// A host that never failed was never in the map, and a window that is
+    /// pruned must not resurrect it.
+    #[test]
+    fn an_expired_host_stops_costing_an_entry() {
+        let c = Cache::default();
+        c.count_failed_kind_at("old", "timeout", 0);
+        c.count_failed_kind_at("new", "timeout", 500);
+        let b = c.error_breakdown_at(500);
+        assert!(b.get("old").is_none());
+        assert!(b.get("new").is_some());
+        assert_eq!(c.errors.read().unwrap().len(), 1, "the dead entry is dropped, not kept at zero");
     }
 }
