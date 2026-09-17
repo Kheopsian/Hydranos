@@ -71,5 +71,6 @@
   "no agent": "nessun agente",
   "this machine": "questa macchina",
   "{id} engine interface ({role})": "Interfaccia dell'agente {id} ({role})",
-  "{id} listen port": "Porta di ascolto di {id}"
+  "{id} listen port": "Porta di ascolto di {id}",
+  "Errors (1h)": "Errori (1 h)"
 }
