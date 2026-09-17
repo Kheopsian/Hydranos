@@ -7848,6 +7848,17 @@ async function restartHydra(){
 // the columns back up, which is the very behaviour being removed.
 function initResizableColumns(table, key) {
     if (!table || table._colResizeInit) return;
+    // ⚠ Saved widths are DESKTOP widths, in pixels, and restoring them also
+    // switches the table to `table-layout: fixed` with a pinned total. On a
+    // 390px screen that pins a 1700px table and undoes the narrow column set.
+    // Dragging a 6px grip with a thumb is not a gesture that exists either.
+    if (_colsAreMobile()) {
+        table.style.tableLayout = "";
+        table.style.width = "";
+        table.querySelectorAll("thead th").forEach(th => { th.style.width = ""; });
+        table._colFixed = false;
+        return;
+    }
     table._colResizeInit = true;
     const ths = Array.from(table.querySelectorAll("thead th[data-colid], thead th[data-col]"));
     if (!ths.length) return;
@@ -7992,14 +8003,14 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
 // are persisted per-table in localStorage (hydra_colcfg_<table>).
 const TABLE_COLS = {
     "hoard-table": [
-        { id: "name", label: "Name", sort: "name", render: t => `<td title="${esc(t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash))}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
+        { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash))}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
-        { id: "state", label: "State", sort: "state", render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${esc(d.title)}">${d.label}</span></td>`; } },
-        { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
+        { id: "state", label: "State", sort: "state", mobile: true, render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${esc(d.title)}">${d.label}</span></td>`; } },
+        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate ?? 0)}</td>` },
-        { id: "upload_rate", label: "Up", sort: "upload_rate", render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
+        { id: "upload_rate", label: "Up", sort: "upload_rate", mobile: true, render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
         { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "-")}</td>` },
         { id: "category", label: "Category", sort: "category", render: t => `<td>${esc(incoCat(t.category))}</td>` },
@@ -8013,13 +8024,13 @@ const TABLE_COLS = {
         { id: "agent", label: "Location", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
     ],
     "race-table": [
-        { id: "name", label: "Name", sort: "name", render: t => `<td title="${esc(t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
+        { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
-        { id: "progress", label: "Progress", sort: "progress", render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
+        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
-        { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate)}</td>` },
-        { id: "upload_rate", label: "Up", sort: "upload_rate", render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
+        { id: "download_rate", label: "Down", sort: "download_rate", mobile: true, render: t => `<td>${formatSpeed(t.download_rate)}</td>` },
+        { id: "upload_rate", label: "Up", sort: "upload_rate", mobile: true, render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
         { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "-")}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
@@ -8045,12 +8056,65 @@ function _colCfg(tableId) {
     return cfg;
 }
 function _colSaveCfg(tableId, cfg) { localStorage.setItem("hydra_colcfg_" + tableId, JSON.stringify(cfg)); }
+/// The width below which a torrent table keeps only its `mobile` columns.
+///
+/// Matches the CSS breakpoint: two thresholds that drift apart would hide a
+/// column while its header stayed, or the reverse.
+const MOBILE_COLS_Q = "(max-width: 768px)";
+function _colsAreMobile() {
+    return typeof window.matchMedia === "function" && window.matchMedia(MOBILE_COLS_Q).matches;
+}
+
 function _visibleCols(tableId) {
     const cfg = _colCfg(tableId);
     const hidden = new Set(cfg.hidden);
     const byId = {}; TABLE_COLS[tableId].forEach(c => byId[c.id] = c);
-    return cfg.order.map(id => byId[id]).filter(c => c && !hidden.has(c.id));
+    const cols = cfg.order.map(id => byId[id]).filter(c => c && !hidden.has(c.id));
+    // ⚠ The narrow set is applied HERE and never written back to the saved
+    // config: it is a rendering decision, not a preference. Persisting it would
+    // silently drop the operator's desktop columns the first time they opened
+    // the page on a phone.
+    //
+    // It also replaces the old CSS, which hid columns by POSITION
+    // (`#hoard-table th:nth-child(5)`). That could not work: this table is
+    // reorderable by drag and drop and its order is restored from
+    // localStorage, so the nth-child rules hid whichever column happened to
+    // sit in that slot -- and they still counted twelve columns after three
+    // more were added. Measured 2026-09-17 at 390px: the table came to 1702px
+    // wide, with `Location`, `Added` and `Completed` fully visible.
+    if (!_colsAreMobile()) return cols;
+    const narrow = cols.filter(c => c.mobile);
+    // A table with nothing marked would render as an empty row rather than a
+    // narrow one; falling back to the full set at least keeps it readable by
+    // scrolling.
+    return narrow.length ? narrow : cols;
 }
+// Crossing the breakpoint changes which columns exist, and the tables are only
+// built when their data arrives -- so a phone turned sideways kept the narrow
+// set until the next poll, with a header that no longer matched its rows.
+// Listening to the query itself, not to `resize`, fires once per crossing
+// instead of on every pixel of a desktop window drag.
+if (typeof window.matchMedia === "function") {
+    const _mq = window.matchMedia(MOBILE_COLS_Q);
+    const _onCross = () => {
+        for (const id of ["hoard-table", "race-table"]) {
+            const table = document.getElementById(id);
+            if (!table) continue;
+            // The resizer caches "already wired" on the element; the column set
+            // is about to change under it, so it has to be re-run.
+            table._colResizeInit = false;
+        }
+        // `_rerenderTable` redraws the HEADER as well as the body. Redrawing
+        // only the body would leave a header with the old column count over
+        // rows with the new one.
+        for (const id of ["hoard-table", "race-table"]) {
+            try { _rerenderTable(id); } catch (e) {}
+        }
+    };
+    if (typeof _mq.addEventListener === "function") _mq.addEventListener("change", _onCross);
+    else if (typeof _mq.addListener === "function") _mq.addListener(_onCross);
+}
+
 // Row cells for a torrent in the current column order (used by the renderers).
 function renderRowCells(tableId, t) {
     return _visibleCols(tableId).map(c => c.render(t)).join("");
