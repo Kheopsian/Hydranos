@@ -808,5 +808,6 @@
   "▶ Run now": "▶ Lancer maintenant",
   "✓ reachable": "✓ joignable",
   "✗ unreachable: {err}": "✗ injoignable : {err}",
-  "Errors (1h)": "Erreurs (1 h)"
+  "Errors (1h)": "Erreurs (1 h)",
+  "Filters": "Filtres"
 }

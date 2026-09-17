@@ -3687,3 +3687,60 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
         margin-top: 4px;
     }
 }
+
+/* ── The torrent detail panel, and the facet fold ───────────────────────────
+   `.detail-panel` is a desktop drawer: `position: fixed; right: 0;
+   width: min(50vw, 960px)` with `min-width: 480px`. On a 390px screen that
+   floor makes it 480 wide anchored to the right edge, so it starts at x = -90
+   and ninety pixels of it -- the entire label column -- sit off screen. Every
+   row read "...ded", "...th", "& CONNECTIONS", with the values invisible. */
+@media (max-width: 768px) {
+    .detail-panel {
+        width: 100%;
+        min-width: 0;
+        left: 0;
+        right: 0;
+        padding: 16px 12px;
+        border-left: none;
+    }
+    .detail-panel .detail-grid { grid-template-columns: 1fr !important; }
+    /* A 40-char info hash and a full save path have no spaces to break on, so
+       they run to the edge and get clipped. Values wrap instead; the label
+       column is short and unaffected. */
+    .detail-panel { overflow-wrap: anywhere; }
+    .detail-panel table { width: 100%; }
+
+    /* The facet families fold away: nine state chips plus four error chips
+       plus twelve trackers plus fifteen categories came to two screens before
+       the first torrent. Closed by default here, always open on a desktop. */
+    .facets-toggle {
+        display: block;
+        width: 100%;
+        margin: 8px 0 4px;
+        padding: 9px 12px;
+        text-align: left;
+        background: var(--bg-tertiary);
+        color: var(--text-secondary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: .3px;
+        cursor: pointer;
+    }
+    /* A fold that hides an ACTIVE filter would be the same dead end as a chip
+       that vanishes: the list looks wrong and the control is out of sight. So
+       the button changes colour as well as counting. */
+    .facets-toggle.has-filters {
+        color: var(--accent-yellow);
+        border-color: var(--accent-yellow);
+    }
+    #hoard-facets { display: none; }
+    #hoard-facets.open { display: block; }
+}
+
+/* On a desktop there is room: no button, nothing folded. */
+@media (min-width: 769px) {
+    .facets-toggle { display: none; }
+    #hoard-facets { display: block !important; }
+}

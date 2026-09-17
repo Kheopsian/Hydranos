@@ -2733,6 +2733,33 @@ function _facetKeys(counts, inc, exc, metas) {
     return out.filter(k => !metas.includes(k)).sort();
 }
 
+/// Fold the facet families away on a phone.
+///
+/// They come to two screens of chips before the first torrent. The state lives
+/// on the container class, and the button always carries the number of active
+/// filters: a folded panel must never be able to hide that something is
+/// filtering the list -- that is the dead end `resetHoardFilters` exists for.
+function toggleHoardFacets() {
+    const box = document.getElementById("hoard-facets");
+    if (!box) return;
+    box.classList.toggle("open");
+    _syncHoardFacetsToggle();
+}
+
+function _syncHoardFacetsToggle() {
+    const btn = document.getElementById("hoard-facets-toggle");
+    const box = document.getElementById("hoard-facets");
+    if (!btn || !box) return;
+    const n = _hoardActiveFilters();
+    const open = box.classList.contains("open");
+    // `t` comes from i18n.js. This runs inside the facet render, so if the
+    // shorthand is not up yet a throw here would take the whole facet panel
+    // down with it -- the label is worth less than the chips.
+    const label = (typeof t === "function") ? t("Filters") : "Filters";
+    btn.textContent = (open ? "\u25BE " : "\u25B8 ") + label + (n ? " (" + n + ")" : "");
+    btn.classList.toggle("has-filters", n > 0);
+}
+
 /// How many filters are narrowing the list right now, search included.
 function _hoardActiveFilters() {
     return _hoardCatInc.length + _hoardCatExc.length
@@ -2805,6 +2832,9 @@ function _renderHoardCounts() {
         resetBtn.style.display = n ? "" : "none";
         resetBtn.textContent = tp(n, "Reset {n} filter", "Reset {n} filters");
     }
+    // Same refresh for the fold-away button: its label carries the active
+    // count, and this is the one place that runs whenever a facet changes.
+    _syncHoardFacetsToggle();
 
     const catCounts = F ? (F.category || {}) : {};
     const cats = _facetKeys(catCounts, _hoardCatInc, _hoardCatExc, ["__none__"]);

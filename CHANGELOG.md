@@ -21,6 +21,22 @@ Two ways to title a new entry:
 
 ### Fixed
 
+- **The torrent detail panel started ninety pixels off the left edge of a
+  phone.** It is a desktop drawer -- `position: fixed; right: 0` with
+  `min-width: 480px` -- and that floor makes it 480 wide on a 390 screen, so it
+  began at x = -90 and the whole label column sat off screen: every row read
+  "...ded", "...th", with the values invisible. Full width below the
+  breakpoint, and long values (info hash, save path) wrap instead of running
+  under the edge.
+
+- **The hoard facets fold away on a phone.** Nine state chips, four error
+  chips, twelve trackers and fifteen categories came to two full screens before
+  the first torrent. They now sit behind a `Filters` button that carries the
+  number of active filters and turns amber when there is one -- a fold that
+  could hide an active filter would be the same dead end as a chip that
+  vanishes: the list looks wrong and the control that explains it is out of
+  sight. Desktop is untouched, there is room there.
+
 - **A phone no longer drags any page sideways: 20 scrollable strips down to 4.**
   The previous round confined overflow inside each tab, which removed it from
   the measurement and left it under the thumb -- the wrong fix, measured with
