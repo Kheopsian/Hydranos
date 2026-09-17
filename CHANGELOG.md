@@ -21,6 +21,22 @@ Two ways to title a new entry:
 
 ### Fixed
 
+- **A phone no longer drags any page sideways: 20 scrollable strips down to 4.**
+  The previous round confined overflow inside each tab, which removed it from
+  the measurement and left it under the thumb -- the wrong fix, measured with
+  the wrong instrument. What actually went out:
+  - **The tab bar wraps instead of scrolling.** Thirteen tabs come to 946px and
+    will never fit 390 at any font size, so a scrollable bar meant a sideways
+    drag on *every* screen in the app. Two rows of height, once, and it is gone
+    everywhere. Nothing is hidden: a tab that comes and goes reads as a bug.
+  - **Torrent tables become one card per torrent.** A table's width is the sum
+    of its columns, so the only lever was choosing what to sacrifice, and `Up` --
+    the figure that matters most on a seedbox -- was what fell off the edge.
+    Each cell carries its column label (`data-label`), set where the cells are
+    rendered, since the header is gone.
+  - Log lines wrap, the race summary wraps, and the drain card's fields and note
+    stop printing on top of each other.
+
 - **The torrent tables were unusable on a phone, and the responsive rules that
   were supposed to fix that had never applied.** Measured at 390px: the hoard
   table rendered 1702px wide and dragged the whole document sideways -- header,

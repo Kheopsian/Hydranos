@@ -1820,15 +1820,25 @@ footer {
         flex-wrap: wrap;
     }
 
-    /* Nav */
+    /* Nav: WRAPPED, not scrolled.
+       Thirteen tabs come to 946px and will never fit 390 whatever the font
+       size, so a scrollable bar means a sideways drag on EVERY screen of the
+       app -- the single most present piece of friction there was. Wrapping
+       costs two rows of height once and removes it everywhere. Nothing is
+       hidden either: a tab that appears and disappears reads as a bug. */
     nav {
-        overflow-x: auto;
-        padding: 0 8px;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
+        display: flex;
+        flex-wrap: wrap;
+        overflow-x: visible;
+        padding: 4px 8px;
+        gap: 2px;
     }
-    nav::-webkit-scrollbar { display: none; }
-    .tab { padding: 10px 12px; font-size: 12px; white-space: nowrap; }
+    .tab {
+        padding: 8px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+        flex: 0 0 auto;
+    }
 
     /* Main */
     main { padding: 12px; width: 100%; }
@@ -1881,6 +1891,19 @@ footer {
        One list of columns, in one place, used for both the header and the
        cells. Adding a column now means deciding whether it carries `mobile`. */
 
+
+    /* Stat rows and control rows wrap instead of running off the edge:
+       "Grabbed" was cut in half on the race summary, and the auto-drain row
+       pushed its inputs out of view. */
+    .stats-bar, .rp2-row, .rp2-seg, .section-header,
+    .hoard-filter-bar, .race-filter-bar, .bm-vpn-header {
+        flex-wrap: wrap;
+    }
+    #rp-volumes.cards, .cards { grid-template-columns: 1fr; }
+
+    /* A log line wraps rather than making the pane scroll sideways; reading a
+       stack trace by dragging left and right is not reading. */
+    .logs-view, #logs-body { white-space: pre-wrap; overflow-wrap: anywhere; }
     /* Whatever still overflows scrolls INSIDE the tab, not by dragging the
        whole document sideways. Without this the header, the tab bar and the
        filter chips all slide off with the table, and there is no way back but
@@ -1899,16 +1922,74 @@ footer {
         overflow-wrap: anywhere;
     }
 
-    /* A long release name is the single widest thing on the page -- 1005px of
-       the 1702 measured. Truncate rather than let one cell set the table's
-       width; the full value stays in the row's title attribute. */
-    #hoard-table td, #race-table td,
-    #hoard-table th, #race-table th {
-        max-width: 52vw;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+    /* ── One card per torrent ────────────────────────────────────────────
+       A table cannot be made to fit a phone: its width is the sum of its
+       columns, so the only lever is choosing which ones to sacrifice, and
+       something always gets cut -- `Up`, the figure that matters most on a
+       seedbox, was the one falling off the right edge.
+
+       So below the breakpoint there is no table. Each row becomes a card, each
+       cell a line inside it, labelled from `data-label` (set in
+       renderRowCells) since the header is gone. Nothing is dropped and nothing
+       scrolls sideways. */
+    #hoard-table, #race-table,
+    #hoard-table tbody, #race-table tbody,
+    #hoard-table tr, #race-table tr,
+    #hoard-table td, #race-table td {
+        display: block;
+        width: auto;
+        max-width: none;
     }
+    #hoard-table thead, #race-table thead { display: none; }
+
+    #hoard-table tr, #race-table tr {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 10px 12px;
+        margin-bottom: 8px;
+    }
+    #hoard-table td, #race-table td {
+        border: none;
+        padding: 2px 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+    }
+    #hoard-table td::before, #race-table td::before {
+        content: attr(data-label);
+        flex: 0 0 38%;
+        color: var(--text-secondary);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+    }
+    /* The name is the title of the card, not a labelled field. It wraps: a
+       release name cut at 13 characters identifies nothing. */
+    #hoard-table td:first-child, #race-table td:first-child {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 6px;
+        overflow-wrap: anywhere;
+    }
+    #hoard-table td:first-child::before, #race-table td:first-child::before {
+        display: none;
+    }
+    /* The progress bar has a width of its own; let it take the space left. */
+    #hoard-table td .progress-bar, #race-table td .progress-bar { flex: 1 1 auto; }
+    #hoard-table td .progress-text, #race-table td .progress-text { flex: 0 0 auto; }
+    /* The empty-state row is a message, not a card. */
+    #hoard-table td.empty, #race-table td.empty { display: block; text-align: center; }
+    #hoard-table td.empty::before, #race-table td.empty::before { display: none; }
+
+    /* ⚠ There WAS a truncation rule here (`max-width: 52vw` + ellipsis on every
+       cell). It is gone: the cards above already let the name wrap, and this
+       block -- declared LATER in the file, at equal specificity -- won against
+       them, so names kept being cut at "[Digital.Sin][PACK]Another.Ma...".
+       Same trap as the `.bm-*` rules: in one stylesheet, order decides. */
 
     /* Peers table (IP/Score/AvgSpeed/MaxSpeed/Sessions/Reliability/Client/Seedbox)
        Keep: IP, Score, AvgSpeed, Client  |  Hide: 4,5,6,8 */
@@ -3525,4 +3606,84 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     .bm-metric-label, .bm-metric-value { overflow-wrap: anywhere; }
     .bm-charts-grid { grid-template-columns: 1fr; }
     .bm-range-bar { flex-wrap: wrap; }
+}
+
+/* ── Volume / drain card on a phone ─────────────────────────────────────────
+   Same ordering rule as the Benchmark block: `.rp2-row`, `.rp2-gauge` and
+   friends are declared around line 2930, so an override written in the
+   responsive section higher up loses to them. It goes here instead.
+
+   The row already had `flex-wrap`, which was not enough: the gauge is a fixed
+   150px with `flex-shrink: 0`, the sentences never wrapped, and a flex item
+   defaults to `min-width: auto` -- so it refuses to shrink below its content
+   and the row stays wider than its card. Measured: 549px inside 366. */
+@media (max-width: 768px) {
+    /* A grid item defaults to `min-width: auto`, so it refuses to shrink below
+       its content and the card ends up wider than the column it sits in. */
+    #rp-volumes.cards { grid-template-columns: minmax(0, 1fr); }
+    #rp-volumes > * { min-width: 0; }
+    #rp-volumes .card, #rp-volumes .card-body, #rp-volumes h3 {
+        max-width: 100%;
+        box-sizing: border-box;
+        min-width: 0;
+    }
+    #rp-volumes h3 { flex-wrap: wrap; row-gap: 6px; }
+    .rp2-row, .rp2-body { max-width: 100%; }
+    .rp2-row > *, .rp2-body > * { min-width: 0; }
+    /* The gauge is the one thing that should take the width it is given. */
+    .rp2-gauge { width: 100%; flex: 1 1 100%; }
+    /* "that is 1.728 TiB, back to 1.546" is a sentence: it wraps. */
+    .rp2-body .abs, .rp2-row .abs { white-space: normal; overflow-wrap: anywhere; }
+}
+
+/* The race summary row: `.race-stats-bar`, not `.race-stats` -- I wrote the
+   wrong class first and it silently did nothing, which is the whole reason
+   "Grabbed" was still cut off. Declared at line ~799, so the override belongs
+   here, after it. A 24px gap is also too wide once the items wrap. */
+@media (max-width: 768px) {
+    .race-stats-bar { flex-wrap: wrap; gap: 6px 16px; }
+}
+
+/* ── Two rules that beat the card layout on SPECIFICITY, not on order ───────
+   Both live further up and both win against what the mobile block declares,
+   because a later rule only wins at EQUAL specificity:
+
+   - `#race-table tbody td` (1,0,2) beats `#race-table td` (1,0,1), so every
+     torrent name kept its `white-space: nowrap` and stayed cut at
+     "Severance.S01.MULTi.1080p.WEB.EAC3.5.1.Atmos...". That truncation exists
+     for narrow RESIZED columns on a desktop; inside a card it hides the one
+     thing the card is for.
+   - `.vol-card .rp2-row` (0,2,0) sets `flex-wrap: nowrap` and beats `.rp2-row`
+     (0,1,0), so the auto-drain row could not wrap: its inputs and the
+     "that is 1.728 TiB" note printed ON TOP of each other.
+
+   Matched here selector for selector. */
+@media (max-width: 768px) {
+    #race-table tbody td, #hoard-table tbody td {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+    }
+    .vol-card .rp2-row { flex-wrap: wrap; }
+    /* ⚠ `!important` on purpose, and only here: the drain row is rendered with
+       `style="flex-wrap:nowrap"` INLINE by the JS, and an inline style beats
+       every stylesheet rule whatever its specificity. Nothing else can unstick
+       it. The fields keep their own width so the inputs stop spilling out of
+       a 55px box and printing over their neighbour. */
+    .vol-card .rp2-body { flex-wrap: wrap !important; row-gap: 6px; }
+    .vol-card .rp2-f {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        flex: 0 0 auto;
+    }
+    .vol-card .rp2-f input[type=number] { width: 62px; }
+    /* The note takes a full row of its own rather than squeezing in beside the
+       two inputs: wrapped onto the same line it printed over the "%" signs. */
+    .vol-card .abs, .rp2-body .abs {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        flex: 1 1 100%;
+        margin-top: 4px;
+    }
 }

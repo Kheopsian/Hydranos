@@ -8116,8 +8116,16 @@ if (typeof window.matchMedia === "function") {
 }
 
 // Row cells for a torrent in the current column order (used by the renderers).
-function renderRowCells(tableId, t) {
-    return _visibleCols(tableId).map(c => c.render(t)).join("");
+function renderRowCells(tableId, row) {
+    // Each cell carries its column label. On a phone the table turns into one
+    // card per torrent (see style.css) and the header is gone, so without this
+    // a card would read "61.6%  2.8 MiB/s  0 B/s" with nothing saying which is
+    // which. The parameter is `row`, not `t`: `t` is the translation function,
+    // and naming the torrent `t` shadowed it here.
+    return _visibleCols(tableId).map(c => {
+        const html = c.render(row);
+        return html.replace("<td", `<td data-label="${esc(t(c.label))}"`);
+    }).join("");
 }
 function renderTableHeader(tableId, sortCol, sortAsc) {
     const thead = document.querySelector("#" + tableId + " thead");
