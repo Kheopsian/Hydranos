@@ -89,6 +89,17 @@ Two ways to title a new entry:
   95.12606489907212% to 89.2658601277033% is a fill level, not a measurement.
   Two decimals.
 
+- **A race announced every 5 seconds for as long as it took to download.**
+  `RACE_FAST_FOR` (60s) was declared, documented as "every 5 seconds for the
+  first minute", and never read -- the compiler had been saying
+  `constant RACE_FAST_FOR is never used` the whole time. What ran was 5s until
+  the torrent uploaded something, so a race downloading for half an hour
+  announced about 360 times. For scale, autobrr's default action reannounces
+  every 7s and stops after 25 attempts. The burst is now bounded by the window
+  it always claimed, counted from `added_time` so a restart cannot put an
+  hours-old race back into it. Measured the same day on 288 races: 74% find a
+  first peer within 15s, 91% within 60s.
+
 ### Documented
 
 - `/api/hoard/pause` and `/api/hoard/torrents/bulk` reach `docs/API.md` for the

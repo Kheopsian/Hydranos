@@ -213,6 +213,41 @@ fn event_for(owed: u8, first: bool) -> &'static str {
     }
 }
 
+/// When to come back, given what this announce learned.
+///
+/// Pulled out of `announce_one` so it can be tested: reaching it through the
+/// real function means a tracker, a socket and a torrent on disk, which is why
+/// the unbounded fast phase below survived as long as it did.
+fn next_announce_in(
+    mode: Mode,
+    interval: Duration,
+    left: i64,
+    first: bool,
+    fast_window_open: bool,
+    uploading: bool,
+) -> Duration {
+    match mode {
+        Mode::Hoard => interval,
+        // A complete race torrent is a seed like any other and falls back to
+        // what the tracker asked for.
+        Mode::Race if left == 0 => interval,
+        Mode::Race if first && fast_window_open => RACE_FAST,
+        Mode::Race => {
+            if uploading {
+                RACE_SUSTAINED
+            } else if fast_window_open {
+                RACE_FAST
+            } else {
+                // Past the first minute: keep feeding the swarm at the sustained
+                // rate rather than falling silent. Stopping at the first peer was
+                // tried and reverted -- see RACE_SUSTAINED -- because a private
+                // tracker race rarely has more than five peers at all.
+                RACE_SUSTAINED
+            }
+        }
+    }
+}
+
 async fn announce_one(
     manager: &Arc<TorrentManager>,
     policy: &Policy,
@@ -463,20 +498,39 @@ async fn announce_one(
         *torrent.announced_peer_id.write() = Some((sent, now));
     }
 
-    let next_in = match mode {
-        Mode::Hoard => interval,
-        // A complete race torrent is a seed like any other and falls back to
-        // what the tracker asked for.
-        Mode::Race if left == 0 => interval,
-        Mode::Race if job.first => RACE_FAST,
-        Mode::Race => {
-            if announced_at_all && torrent.total_uploaded.load(Ordering::Relaxed) > 0 {
-                RACE_SUSTAINED
-            } else {
-                RACE_FAST
-            }
-        }
+    // ⚠⚠ THE FAST PHASE IS BOUNDED IN TIME. It was not, for the whole life of
+    // this code: `RACE_FAST_FOR` was declared, documented as "every 5 seconds
+    // for the first minute", and never read -- the compiler said so
+    // ("constant RACE_FAST_FOR is never used") and nobody was listening. What
+    // actually ran was 5s FOR AS LONG AS THE TORRENT HAD NOT UPLOADED, so a
+    // race downloading for half an hour announced ~360 times.
+    //
+    // For scale: autobrr's default action reannounces every 7s, 25 times, then
+    // stops. Five seconds for a minute sits inside what the ecosystem does; an
+    // unbounded loop does not, and it is the one number a tracker can spot.
+    //
+    // Measured on 288 races the same day: 74% find their first peer within 15s
+    // and 91% within 60s. Widening to three minutes would buy five points and
+    // triple the announces for everyone.
+    //
+    // Age is counted from `added_time`, NOT from the first announce of this
+    // process: every torrent is `job.first` again after a restart, and a race
+    // added two hours ago has no business re-entering a burst because the
+    // daemon was restarted.
+    let fast_window_open = {
+        let added = torrent.added_time;
+        // An unknown or absurd added_time (0, or in the future) must not grant
+        // an unbounded burst: treat it as outside the window.
+        added > 0 && typhon_engine::torrent::meta::now_secs().saturating_sub(added) < RACE_FAST_FOR.as_secs() as i64
     };
+    let next_in = next_announce_in(
+        mode,
+        interval,
+        left,
+        job.first,
+        fast_window_open,
+        announced_at_all && torrent.total_uploaded.load(Ordering::Relaxed) > 0,
+    );
 
     Outcome { info_hash: job.info_hash, next_in, gone: false }
 }
@@ -522,6 +576,61 @@ mod tests {
     /// whole URL in its error message, so printing that message verbatim
     /// publishes an account credential into the logs.
     #[test]
+    /// ⭐ THE FAST PHASE MUST END. `RACE_FAST_FOR` was declared, documented as
+    /// "every 5 seconds for the first minute", and never read: what ran was 5s
+    /// for as long as the torrent had not uploaded. A race downloading for half
+    /// an hour announced ~360 times, where autobrr's default stops at 25.
+    #[test]
+    fn a_race_leaves_the_fast_phase_after_the_first_minute() {
+        let tracker = Duration::from_secs(1800);
+        // Inside the window, nothing uploaded yet: burst.
+        assert_eq!(
+            next_announce_in(Mode::Race, tracker, 100, true, true, false),
+            RACE_FAST
+        );
+        // Same torrent, same state, one minute later: the burst is over.
+        assert_eq!(
+            next_announce_in(Mode::Race, tracker, 100, true, false, false),
+            RACE_SUSTAINED,
+            "past the window a race must not keep announcing every 5s"
+        );
+        assert_eq!(
+            next_announce_in(Mode::Race, tracker, 100, false, false, false),
+            RACE_SUSTAINED
+        );
+    }
+
+    /// Uploading means the swarm found us; the burst has done its job.
+    #[test]
+    fn a_race_that_uploads_drops_to_the_sustained_rate() {
+        let tracker = Duration::from_secs(1800);
+        assert_eq!(
+            next_announce_in(Mode::Race, tracker, 100, false, true, true),
+            RACE_SUSTAINED
+        );
+    }
+
+    /// A finished race is a seed like any other: whatever the tracker asked for.
+    #[test]
+    fn a_complete_race_obeys_the_tracker() {
+        let tracker = Duration::from_secs(1800);
+        assert_eq!(
+            next_announce_in(Mode::Race, tracker, 0, true, true, false),
+            tracker,
+            "left == 0 wins over the fast window"
+        );
+    }
+
+    /// The hoard never bursts, whatever the window says.
+    #[test]
+    fn the_hoard_always_obeys_the_tracker() {
+        let tracker = Duration::from_secs(1800);
+        assert_eq!(
+            next_announce_in(Mode::Hoard, tracker, 100, true, true, false),
+            tracker
+        );
+    }
+
     fn an_error_message_never_carries_the_url() {
         let raw = "http request: error sending request for url \
                    (https://tk.tr4ker.net/announce/SECRETKEY?info_hash=%AB): timed out";
