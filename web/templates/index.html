@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.4">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.5">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -452,6 +452,13 @@
             <!-- The three facet families used the same chip with nothing between
                  them, so a row of trackers ran straight into a row of
                  categories. The label is what separates them. -->
+            <!-- On a phone the four facet families came to two full screens
+                 before the first torrent. They collapse behind this button,
+                 which is hidden on a desktop (CSS) because there the room
+                 exists. The count is on the button, so a folded panel can
+                 never hide the fact that something is filtering. -->
+            <button id="hoard-facets-toggle" class="facets-toggle" onclick="toggleHoardFacets()"></button>
+            <div id="hoard-facets">
             <!-- Tracker errors, grouped by what they ask you to DO. Hidden
                  until something is actually in error. -->
             <div class="facet-group" id="facet-errors" style="display:none">
@@ -470,6 +477,7 @@
                 <span class="facet-label">Tags</span>
                 <div class="hoard-chips-row hoard-chips-tags" id="hoard-tag-chips"></div>
             </div>
+            </div><!-- /#hoard-facets -->
             <table id="hoard-table">
                 <thead>
                     <tr>
@@ -1430,6 +1438,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.22"></script>
+    <script src="/static/app.js?v=1.6.23"></script>
 </body>
 </html>

@@ -72,5 +72,6 @@
   "this machine": "diese Maschine",
   "{id} engine interface ({role})": "Interface der Agent {id} ({role})",
   "{id} listen port": "Listen-Port von {id}",
-  "Errors (1h)": "Fehler (1 Std.)"
+  "Errors (1h)": "Fehler (1 Std.)",
+  "Filters": "Filter"
 }
