@@ -1312,7 +1312,7 @@ had it.
 ## v4.20.4 -- no space between the sections
 
 Third attempt at the same sentence, and the first one aimed at the right thing.
-The blocks the maintainer meant are the ones the code literally calls sections:
+The blocks meant here are the ones the code literally calls sections:
 `.settings-section`, the groups with the blue monospace titles inside Advanced
 settings -- Language, Display units, Network interfaces, then one per TOML
 table.
@@ -1341,7 +1341,7 @@ heading no longer pads inside a row that already does.
 
 ## v4.20.2 -- the Personalisation card is one block
 
-the maintainer, on the screenshot: "pas d'espace entre les sections". The card read as
+On the screenshot: "pas d'espace entre les sections". The card read as
 three loose pieces because both headings were `.settings-row` -- a row built for
 a label facing a control on the right, so it pads top and bottom and rules a
 line underneath. Here the control is the grid directly below, and that padding
