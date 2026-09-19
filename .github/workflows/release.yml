@@ -152,19 +152,19 @@ jobs:
       # needs a musl toolchain: `cargo build --target ...-musl` on the runner
       # host finds no std for it and dies on the first dependency with
       # "can't find crate for `core`". This step only collects the artefact.
-      - name: Collect hydra
+      - name: Collect hydranos
         working-directory: typhon-engine
-        run: cp target/${{ matrix.target }}/release/hydra ../hydra
+        run: cp target/${{ matrix.target }}/release/hydranos ../hydranos
 
       - name: Package tarball
         run: |
           VER="${REL_TAG}"
           DIR="hydranos-${VER}-linux-${{ matrix.arch }}"
           mkdir -p "$DIR"
-          cp hydra "$DIR"/hydranos
-          cp typhon-engine/target/${{ matrix.target }}/release/typhon-engine "$DIR"/hydra-engine
+          cp hydranos "$DIR"/hydranos
+          cp typhon-engine/target/${{ matrix.target }}/release/typhon-engine "$DIR"/hydranos-engine
           cp configs/default.toml "$DIR"/default.toml.example
-          cp packaging/hydra.service "$DIR"/hydra.service
+          cp packaging/hydranos.service "$DIR"/hydranos.service
           cp packaging/install.sh "$DIR"/install.sh
           chmod +x "$DIR"/install.sh
           tar czf "${DIR}.tar.gz" "$DIR"
