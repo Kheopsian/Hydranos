@@ -1,7 +1,10 @@
 name: docker
 on:
+  # Tags only. Building on every push to main meant a wiki edit, a README
+  # fix or a changelog line each produced a multi-architecture Rust release
+  # build and pushed an image nobody asked for -- minutes of runner time and
+  # a GHCR version per documentation commit. An image belongs to a release.
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 permissions:
