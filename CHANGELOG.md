@@ -17,6 +17,17 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.0.1 -- the release publishes the daemon that ships
+
+v4.0.0 published a release with no binaries: its three build jobs failed. They
+built the published  from the Go tree that this version removed, while
+the container image built it from cargo -- the two had been shipping different
+programs since the port, and nothing compared them.
+
+The Linux archives now carry the same binary the image runs. The Windows job
+refuses rather than guessing: its daemon was Go, and the Rust one has never
+been compiled for that target.
+
 ## v4.0.0 -- one process, one language
 
 The daemon is Rust. Until now Hydranos ran as two programs -- a Go daemon
