@@ -85,21 +85,32 @@ jobs:
   # involved -- the peer endpoint is TEST-NET-1 and never answers. The
   # handshake is not what is under test; the routing table is.
   wireguard:
+    # This built ./internal/wgtun (Go) and the Go tree is gone. The tunnel was
+    # ported -- typhon-engine/src/hydra/wgtun.rs, with its own tests -- so the
+    # job follows it rather than disappearing with the language.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          go-version: "1.25"
+          workspaces: typhon-engine
       - name: Tools
         run: sudo apt-get install -y --no-install-recommends wireguard-tools iproute2
-      # Built as an unprivileged user and only RUN as root: a `sudo go test`
-      # would hand root a module cache and a compiler, for one syscall's worth
-      # of privilege.
+      # Built unprivileged and only RUN as root: a `sudo cargo test` would hand
+      # root a toolchain and a registry cache for one syscall's worth of
+      # privilege.
       - name: Build the test binary
-        run: go test -mod=vendor -c -o wgtun.test ./internal/wgtun/
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          cargo test --release --bin hydra --no-run --message-format=json \
+            | python3 -c "import json,sys;print([json.loads(l)['executable'] for l in sys.stdin if l.strip().startswith('{') and json.loads(l).get('executable')][-1])" \
+            > /tmp/wgtun-test-path
+          cp "$(cat /tmp/wgtun-test-path)" ../wgtun.test
       - name: Bring a tunnel up for real
-        run: sudo HYDRA_WG_ROOT_TEST=1 ./wgtun.test -test.v -test.run TestRoot
+        run: sudo HYDRA_WG_ROOT_TEST=1 ./wgtun.test --test-threads=1 wgtun
 
   rust:
     runs-on: ubuntu-latest

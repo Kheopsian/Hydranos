@@ -83,10 +83,6 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
 
       # The engine is built against musl so the tarball is a static binary.
       # Built against the runner's glibc it inherited that glibc's symbol
@@ -144,8 +140,18 @@ jobs:
             exit 1
           fi
 
+      # The daemon is the Rust binary. This step built ./cmd/hydra, the Go
+      # daemon of the 3.x architecture, which means the tarballs and the
+      # container image had not been shipping the same program since the port:
+      # the image ran cargo --bin hydra, the downloads carried the Go one.
+      # Nothing compared them, so nothing said so.
       - name: Build hydra
-        run: CGO_ENABLED=0 go build -mod=vendor -ldflags="-s -w" -o hydra ./cmd/hydra
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin hydra
+          cp target/${{ matrix.target }}/release/hydra ../hydra
 
       - name: Package tarball
         run: |
@@ -187,10 +193,6 @@ jobs:
         with:
           workspaces: typhon-engine
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
 
       - name: Build Typhon engine
         working-directory: typhon-engine
@@ -198,23 +200,15 @@ jobs:
           RUSTFLAGS: "--cfg tokio_unstable"
         run: cargo build --release --bin typhon-engine
 
-      - name: Build hydra
-        env:
-          CGO_ENABLED: "0"
-        # -H windowsgui: link as a GUI-subsystem binary so a double-click
-        # does not leave a cmd.exe window on the desktop. The app attaches to
-        # the parent console when started from a terminal, and puts an icon in
-        # the notification area otherwise.
-        run: go build -mod=vendor -ldflags="-s -w -H windowsgui" -o hydra.exe ./cmd/hydra
-
-      - name: Build the updater
-        env:
-          CGO_ENABLED: "0"
-        # Separate binary on purpose: Windows locks a running image, so
-        # hydra.exe cannot overwrite itself. Also GUI-subsystem -- it talks to
-        # the user through message boxes, and a console window flashing up
-        # would undo what -H windowsgui buys us.
-        run: go build -mod=vendor -ldflags="-s -w -H windowsgui" -o hydra-update.exe ./cmd/hydra-update
+      # ⚠ The Windows job built ./cmd/hydra and ./cmd/hydra-update, both Go,
+      # both removed with the Go tree. `hydra` has a Rust target and has never
+      # been compiled for Windows; `hydra-update` has no Rust equivalent at
+      # all. Publishing a Windows archive would mean shipping something nobody
+      # has ever run, so the step refuses rather than guessing.
+      - name: Windows build is not ported
+        run: |
+          echo "::error::the Windows daemon was ./cmd/hydra (Go) and has no Rust replacement yet"
+          exit 1
 
       - name: Package zip
         shell: pwsh
