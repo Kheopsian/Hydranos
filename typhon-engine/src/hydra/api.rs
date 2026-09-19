@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRA_VERSION: &str = "4.0.2";
+pub const HYDRANOS_VERSION: &str = "4.0.2";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -1486,11 +1486,11 @@ async fn get_update_check(
     }
 
     let (latest, url) = latest_release(&state).await;
-    let available = !latest.is_empty() && version_less(HYDRA_VERSION, &latest);
+    let available = !latest.is_empty() && version_less(HYDRANOS_VERSION, &latest);
 
     Json(serde_json::json!({
         "enabled": true,
-        "current": HYDRA_VERSION,
+        "current": HYDRANOS_VERSION,
         "latest": latest,
         "update_available": available,
         "url": url,
@@ -1520,7 +1520,7 @@ async fn latest_release(state: &AppState) -> (String, String) {
 
     let response = client
         .get("https://api.github.com/repos/Kheopsian/Hydra/tags?per_page=100")
-        .header("User-Agent", format!("Hydra/{HYDRA_VERSION}"))
+        .header("User-Agent", format!("Hydra/{HYDRANOS_VERSION}"))
         .header("Accept", "application/vnd.github+json")
         .send()
         .await;
@@ -4741,7 +4741,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "tunnels": [],
         // Seconds with a fraction, as 3.x publishes it.
         "uptime": (now - state.started_at) as f64,
-        "version": HYDRA_VERSION,
+        "version": HYDRANOS_VERSION,
     })
 }
 
@@ -11055,7 +11055,7 @@ async fn get_health(State(state): State<AppState>) -> Response {
         .unwrap_or(0);
     Json(serde_json::json!({
         "status": "healthy",
-        "version": HYDRA_VERSION,
+        "version": HYDRANOS_VERSION,
         "uptime": (now - state.started_at) as f64,
     }))
     .into_response()

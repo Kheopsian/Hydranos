@@ -18,7 +18,7 @@ body:
     attributes:
       label: Hydra version
       description: Run `hydra -version`, or `curl localhost:PORT/health`. Include the image tag if you run Docker.
-      placeholder: "3.43.0-typhon (ghcr.io/kheopsian/hydra:3.43.0)"
+      placeholder: "3.43.0-typhon (ghcr.io/kheopsian/hydranos:3.43.0)"
     validations:
       required: true
 

@@ -177,7 +177,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Before any engine builds its peer id: the fingerprint's four characters
     // ARE the version to every client that decodes them, and ours said 2.4.3.0 // leak-ok: a version
     // on a 4.x daemon for the whole life of the project.
-    typhon_engine::config::set_version(api::HYDRA_VERSION);
+    typhon_engine::config::set_version(api::HYDRANOS_VERSION);
     let engine_host = Arc::new(engines::EngineHost::start(&config, &config_dir).await);
 
     // Same file 3.x writes: the store is what makes the switch reversible.
@@ -546,7 +546,7 @@ async fn shutdown_signal() -> () {
 /// Engines are flushed on threads of their own: one slow disk must not spend
 /// another engine's share of the budget.
 fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>) {
-    let budget = std::env::var("HYDRA_STOP_TIMEOUT")
+    let budget = std::env::var("HYDRANOS_STOP_TIMEOUT")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(120);
@@ -576,7 +576,7 @@ fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>) {
     let took = started.elapsed();
     if took > budget {
         tracing::warn!(took_s = took.as_secs(), budget_s = budget.as_secs(),
-                       "shutdown flush overran its budget; raise HYDRA_STOP_TIMEOUT and docker stop -t");
+                       "shutdown flush overran its budget; raise HYDRANOS_STOP_TIMEOUT and docker stop -t");
     } else {
         tracing::info!(took_s = took.as_secs(), "shutdown flush complete");
     }

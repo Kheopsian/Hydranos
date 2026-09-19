@@ -151,7 +151,7 @@ def dump_store(path):
 
 
 # Compteurs que le moteur fait avancer tout seul. La reference seme pendant le
-# banc, le candidat tourne avec HYDRA_ENGINE_NET=0 et reste fige sur la valeur
+# banc, le candidat tourne avec HYDRANOS_ENGINE_NET=0 et reste fige sur la valeur
 # de reprise: les comparer, c est poser une question qui n a pas de reponse, et
 # la difference observee (512 Kio, 480 Kio -- des multiples de la taille de
 # bloc) mesure le temps qui passe, pas le portage. Une mutation qui toucherait

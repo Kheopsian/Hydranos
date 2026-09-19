@@ -109,7 +109,7 @@ step "starting the Go reference"
 docker rm -f v4-go-a >/dev/null 2>&1 || true
 prune_name v4-go-a
 docker run -d --name v4-go-a --network $NET \
-  -e HYDRA_CONFIG_DIR=/configs \
+  -e HYDRANOS_CONFIG_DIR=/configs \
   -v "$STAGING/go":/configs -v "$STAGING/go":/config \
   -v "$STAGING/racemount":/race \
   hydra-v4:goref >/dev/null
@@ -124,7 +124,7 @@ docker run -d --name v4-rust --network $NET \
   -v "$STAGING/rust":/configs \
   -v "$STAGING/racemount":/race \
   -e RUST_LOG=info \
-  -e HYDRA_ENGINE_NET=0 \
+  -e HYDRANOS_ENGINE_NET=0 \
   --entrypoint /target/debug/hydra \
   rust:1-bookworm --config /configs/default.toml >/dev/null
 

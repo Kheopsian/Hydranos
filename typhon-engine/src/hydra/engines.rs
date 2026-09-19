@@ -16,7 +16,7 @@
 //! drift is silent -- a listener that binds differently, a switch applied to
 //! one and not the other.
 //!
-//! `HYDRA_ENGINE_NET=0` holds every engine off the network: the managers are
+//! `HYDRANOS_ENGINE_NET=0` holds every engine off the network: the managers are
 //! built and their state loaded, and no socket is opened. It is an environment
 //! variable and not a config key on purpose -- `/api/settings` echoes the
 //! config file back verbatim, so a key here would change an answer that has to
@@ -494,19 +494,19 @@ mod tests {
 
     /// The switch is off only for the three spellings a bench would use, and
     /// on for everything else -- including an empty or misspelt value. An
-    /// engine that silently stayed offline because someone wrote `HYDRA_ENGINE_NET=no`
+    /// engine that silently stayed offline because someone wrote `HYDRANOS_ENGINE_NET=no`
     /// would look alive and seed nothing.
     #[test]
     fn only_an_explicit_off_holds_the_engines_back() {
         for off in ["0", "false", "off"] {
-            unsafe { std::env::set_var("HYDRA_ENGINE_NET", off) };
+            unsafe { std::env::set_var("HYDRANOS_ENGINE_NET", off) };
             assert!(!super::networking_enabled(), "{off} should hold the engines off");
         }
         for on in ["1", "true", "", "no", "yes"] {
-            unsafe { std::env::set_var("HYDRA_ENGINE_NET", on) };
+            unsafe { std::env::set_var("HYDRANOS_ENGINE_NET", on) };
             assert!(super::networking_enabled(), "{on:?} must not be read as off");
         }
-        unsafe { std::env::remove_var("HYDRA_ENGINE_NET") };
+        unsafe { std::env::remove_var("HYDRANOS_ENGINE_NET") };
         assert!(super::networking_enabled(), "unset means on");
     }
 }
@@ -518,7 +518,7 @@ mod tests {
 /// about a machine nobody meant to publish.
 fn networking_enabled() -> bool {
     !matches!(
-        std::env::var("HYDRA_ENGINE_NET").as_deref(),
+        std::env::var("HYDRANOS_ENGINE_NET").as_deref(),
         Ok("0") | Ok("false") | Ok("off")
     )
 }

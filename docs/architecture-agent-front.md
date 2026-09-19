@@ -230,15 +230,15 @@ Chaque paramètre est réglable de trois façons, résolues **flag > env > TOML 
 défaut** (la même précédence que le token d'agent) :
 
 - `--engine id=race-0,role=race,port=12314,ipv6=true`, répétable ;
-- `HYDRA_ENGINES` pour la forme multi-moteurs, même grammaire, séparée par `;` ;
-- `HYDRA_ENGINE_ID` / `_ROLE` / `_LISTEN_PORT` / `_ENABLE_IPV6` pour le cas
+- `HYDRANOS_ENGINES` pour la forme multi-moteurs, même grammaire, séparée par `;` ;
+- `HYDRANOS_ENGINE_ID` / `_ROLE` / `_LISTEN_PORT` / `_ENABLE_IPV6` pour le cas
   courant d'un rôle par conteneur ;
 - ou des blocs `[[engine]]` minimaux dans un TOML.
 
-Plomberie : `HYDRA_AGENT_ADDR`, `HYDRA_DATA_DIR`, `HYDRA_AGENT_TLS_CERT`,
-`HYDRA_AGENT_TLS_KEY`, `HYDRA_LISTEN_PORT_HOOK`, `HYDRA_HEALTH_ADDR`,
-`HYDRA_AGENT_TOKEN`.
-(`HYDRA_ENGINE_BIN` et `HYDRA_ENGINE_TCP` existaient déjà et désignent le
+Plomberie : `HYDRANOS_AGENT_ADDR`, `HYDRANOS_DATA_DIR`, `HYDRANOS_AGENT_TLS_CERT`,
+`HYDRANOS_AGENT_TLS_KEY`, `HYDRANOS_LISTEN_PORT_HOOK`, `HYDRANOS_HEALTH_ADDR`,
+`HYDRANOS_AGENT_TOKEN`.
+(`HYDRANOS_ENGINE_BIN` et `HYDRANOS_ENGINE_TCP` existaient déjà et désignent le
 *process* moteur — binaire, transport IPC — pas son identité.)
 
 Une identité malformée fait échouer le boot : id vide, rôle hors

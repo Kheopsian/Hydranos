@@ -340,7 +340,7 @@ async fn async_main(workers: usize) {
     }
 
     // Save on shutdown. Hydra allows a bounded budget for this (10s per engine
-    // by default, HYDRA_STOP_TIMEOUT) and kills the process when it runs out,
+    // by default, HYDRANOS_STOP_TIMEOUT) and kills the process when it runs out,
     // so a partial sweep is still better than none: every torrent written
     // before the kill is one the next start does not have to re-check.
     torrent_mgr.save_all_resume();

@@ -110,7 +110,7 @@ jobs:
             > /tmp/wgtun-test-path
           cp "$(cat /tmp/wgtun-test-path)" ../wgtun.test
       - name: Bring a tunnel up for real
-        run: sudo HYDRA_WG_ROOT_TEST=1 ./wgtun.test --test-threads=1 wgtun
+        run: sudo HYDRANOS_WG_ROOT_TEST=1 ./wgtun.test --test-threads=1 wgtun
 
   rust:
     runs-on: ubuntu-latest

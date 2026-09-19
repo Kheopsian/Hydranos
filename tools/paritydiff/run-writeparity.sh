@@ -71,14 +71,14 @@ docker rm -f v4-go-a v4-rust >/dev/null 2>&1 || true
 
 step "starting A (Go reference)"
 prune_name v4-go-a
-docker run -d --name v4-go-a --network $NET -e HYDRA_CONFIG_DIR=/configs \
+docker run -d --name v4-go-a --network $NET -e HYDRANOS_CONFIG_DIR=/configs \
   -v "$STAGING/go":/configs -v "$STAGING/go":/config -v "$STAGING/racemount":/race \
   hydra-v4:goref >/dev/null
 
 if [ "$TWIN" = 1 ]; then
   step "starting B (a second Go, for calibration)"
   prune_name v4-rust
-  docker run -d --name v4-rust --network $NET -e HYDRA_CONFIG_DIR=/configs \
+  docker run -d --name v4-rust --network $NET -e HYDRANOS_CONFIG_DIR=/configs \
     -v "$STAGING/rust":/configs -v "$STAGING/rust":/config -v "$STAGING/racemount":/race \
     hydra-v4:goref >/dev/null
 else
@@ -86,7 +86,7 @@ else
   prune_name v4-rust
   docker run -d --name v4-rust --network $NET \
     -v /mnt/v4build/target:/target:ro -v "$STAGING/rust":/configs \
-    -v "$STAGING/racemount":/race -e RUST_LOG=info -e HYDRA_ENGINE_NET=0 \
+    -v "$STAGING/racemount":/race -e RUST_LOG=info -e HYDRANOS_ENGINE_NET=0 \
     --entrypoint /target/debug/hydra rust:1-bookworm --config /configs/default.toml >/dev/null
 fi
 

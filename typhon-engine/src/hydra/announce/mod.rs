@@ -65,7 +65,7 @@ pub fn policy_from_config(config: &Config, peer_id: String, public_ip: String) -
         peer_id,
         // The User-Agent carries the version, as 3.x did: a tracker operator
         // asking "which client is this" gets an answer.
-        user_agent: format!("Hydra/{}", crate::api::HYDRA_VERSION),
+        user_agent: format!("Hydra/{}", crate::api::HYDRANOS_VERSION),
         public_ip,
     }
 }

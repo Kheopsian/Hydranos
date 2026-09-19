@@ -5,17 +5,17 @@ All notable changes to Hydranos are documented here. This project follows
 
 This file is compiled into the binary and served at `/api/changelog`, so a
 release with no entry here is a release that cannot describe itself. CI checks
-that the top entry matches `HYDRA_VERSION` (`.github/scripts/version_guard.py`).
+that the top entry matches `HYDRANOS_VERSION` (`.github/scripts/version_guard.py`).
 
 Two ways to title a new entry:
 
-- `## v<major>.<minor>.<patch> -- title`, matching `HYDRA_VERSION`, when you
+- `## v<major>.<minor>.<patch> -- title`, matching `HYDRANOS_VERSION`, when you
   know the number this will ship as.
 - `## Unreleased -- title`, when you do not. Preferred for a branch that will
   sit for a while: this repository has merged as many as four minor bumps in a
   day, so a number chosen while writing a branch is often taken by the time
   anyone reviews it. Whoever tags the release renames the heading and sets
-  `HYDRA_VERSION` in the same commit.
+  `HYDRANOS_VERSION` in the same commit.
 
 ## v4.0.2 -- the musl daemon is built by the musl toolchain
 
@@ -1913,7 +1913,7 @@ engines, so existing categories, placements and save paths are untouched.
 ## v3.100.0 - 2026-08-21
 
 ### Added
-- **`HYDRA_LOG_STDOUT` streams the log to stdout instead of `hydra.log`.** Under
+- **`HYDRANOS_LOG_STDOUT` streams the log to stdout instead of `hydra.log`.** Under
   Docker, systemd or any other supervisor the log belongs on stdout, where
   `docker logs` and the journal pick it up and rotate it; a file inside the
   config volume is the wrong place to look. Set the variable to anything but
@@ -2010,7 +2010,7 @@ engines, so existing categories, placements and save paths are untouched.
 
 ### Added
 
-- **The agent token can be set from the config file or the environment.** `--agent-token` was the only way to give a node's gRPC data-plane its shared secret, which meant putting it in the command line of every agent -- visible in `ps`, and in the Kubernetes manifest or compose file that spells the command out. It now comes from `[daemon] agent_token` or `$HYDRA_AGENT_TOKEN` as well, so the token can travel as a mounted config or a secret reference like every other credential. Precedence runs `--agent-token`, then `$HYDRA_AGENT_TOKEN`, then `[daemon] agent_token`; an empty or absent environment variable falls through to the config rather than silently disabling authentication, and `--agent-token=""` remains the explicit way to turn it off. The value is trimmed, because a secret arriving from an env file or a mounted volume usually carries a trailing newline and a token off by one invisible byte fails with nothing on either side to explain why. Where the token came from is logged; the token itself is not. `agentprobe` reads the same variable when `-token` is not given.
+- **The agent token can be set from the config file or the environment.** `--agent-token` was the only way to give a node's gRPC data-plane its shared secret, which meant putting it in the command line of every agent -- visible in `ps`, and in the Kubernetes manifest or compose file that spells the command out. It now comes from `[daemon] agent_token` or `$HYDRANOS_AGENT_TOKEN` as well, so the token can travel as a mounted config or a secret reference like every other credential. Precedence runs `--agent-token`, then `$HYDRANOS_AGENT_TOKEN`, then `[daemon] agent_token`; an empty or absent environment variable falls through to the config rather than silently disabling authentication, and `--agent-token=""` remains the explicit way to turn it off. The value is trimmed, because a secret arriving from an env file or a mounted volume usually carries a trailing newline and a token off by one invisible byte fails with nothing on either side to explain why. Where the token came from is logged; the token itself is not. `agentprobe` reads the same variable when `-token` is not given.
 
 ## v3.96.3 - 2026-08-20
 
@@ -2666,7 +2666,7 @@ engines, so existing categories, placements and save paths are untouched.
 
 ### Added
 
-- **`HYDRA_STOP_TIMEOUT`** sets how long each engine gets to flush before it is
+- **`HYDRANOS_STOP_TIMEOUT`** sets how long each engine gets to flush before it is
   killed (default `10s`; accepts `45s`, `2m`, or a bare number of seconds). The
   default suits an ordinary instance — a full resume sweep runs at roughly
   36 000 torrents per second on an SSD. Raise it if you hold several hundred
@@ -2721,7 +2721,7 @@ engines, so existing categories, placements and save paths are untouched.
   This hold is process-level and writes nothing: torrents you paused yourself
   stay paused, and releasing the hold does not resume them.
 
-- **Official arm64 container images.** `ghcr.io/kheopsian/hydra` is now a
+- **Official arm64 container images.** `ghcr.io/kheopsian/hydranos` is now a
   multi-architecture image covering `linux/amd64` and `linux/arm64`, so a Pi,
   an Ampere box or an Apple-silicon Docker host pulls the right one with no
   change to the pull command or the compose file. Linux arm64 *binaries* have
@@ -3385,7 +3385,7 @@ engines, so existing categories, placements and save paths are untouched.
   CrowdSec already holds 6060 there, so the bind failed and the error was logged
   at warning level and never seen — while `curl` against the port answered 200,
   because CrowdSec was answering. It now defaults to 6061, honours
-  `HYDRA_PPROF_ADDR`, logs the address it listens on, and reports a failed bind
+  `HYDRANOS_PPROF_ADDR`, logs the address it listens on, and reports a failed bind
   as an error.
 
 ## v3.42.2 — 2026-08-04
@@ -3607,7 +3607,7 @@ engines, so existing categories, placements and save paths are untouched.
 ## v3.32.4 — 2026-08-02
 
 ### Security
-- **The ntfy alert topic is now opt-in via the `HYDRA_NTFY_TOPIC` env var, with no built-in default.** Health/watchdog push alerts are disabled unless the operator sets the topic explicitly, so a stock deployment never posts to a shared or third-party topic.
+- **The ntfy alert topic is now opt-in via the `HYDRANOS_NTFY_TOPIC` env var, with no built-in default.** Health/watchdog push alerts are disabled unless the operator sets the topic explicitly, so a stock deployment never posts to a shared or third-party topic.
 
 ## v3.32.3 — 2026-08-02
 
@@ -4010,7 +4010,7 @@ engines, so existing categories, placements and save paths are untouched.
 
 ### Added
 - **Bare-metal install**: tagged releases now ship a self-contained Linux tarball (`hydra-vX.Y.Z-linux-{amd64,arm64}.tar.gz`) with the `hydra` and `hydra-engine` binaries, a sample config, a systemd unit, and an `install.sh`. `sudo ./install.sh` drops everything under `/opt/hydra` + `/etc/hydra` + `/var/lib/hydra`, creates a `hydra` user, and enables the service (starts on boot, restarts on failure). No Docker required.
-- The engine binary path is now resolved via `HYDRA_ENGINE_BIN`, then next to the `hydra` binary, then the Docker default — so the two binaries can live anywhere together.
+- The engine binary path is now resolved via `HYDRANOS_ENGINE_BIN`, then next to the `hydra` binary, then the Docker default — so the two binaries can live anywhere together.
 
 ### Changed
 - Web UI assets (templates + static + changelog) are now **embedded in the binary**. Hydra no longer depends on a `web/` directory next to its working directory, and the changelog is served from `/changelog.md`.
