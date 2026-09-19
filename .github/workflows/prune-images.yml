@@ -6,9 +6,16 @@ name: prune-images
 # counts versions: a multi-arch image is several versions (the index, one manifest
 # per platform, the attestation), so keeping the N newest versions strands platform
 # manifests under indexes that are still tagged.
+# WARNING: NOT `release: published`. These ran on that event and never once
+# fired: release.yml creates the release with softprops/action-gh-release,
+# authenticating as GITHUB_TOKEN, and GitHub does not start a workflow from
+# an event raised by that token. The trigger was unreachable by design, so
+# the retention policy in SECURITY.md was written down and never applied.
+#
+# The tag is the real signal, and the same one release.yml answers.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       keep:
@@ -41,7 +48,11 @@ jobs:
       # inputs keeps the declared boolean type; github.event.inputs would hand back
       # a string, and comparing a string to a boolean is always true.
       - name: Prune
-        if: ${{ github.event_name == 'release' || !inputs.dry_run }}
+        # 'push' since the trigger became the tag: this said 'release', an
+        # event_name this workflow can no longer receive, so the guard hung on
+        # its second term alone and happened to pass. A condition that is true
+        # by accident is a condition nobody can read.
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
           OWNER: ${{ github.repository_owner }}

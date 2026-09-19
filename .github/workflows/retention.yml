@@ -4,9 +4,16 @@ name: retention
 # SECURITY.md. Older releases keep their tag, notes and changelog entry; only
 # their binaries and container images are pruned. Runs after every published
 # release, and can be replayed by hand.
+# WARNING: NOT `release: published`. These ran on that event and never once
+# fired: release.yml creates the release with softprops/action-gh-release,
+# authenticating as GITHUB_TOKEN, and GitHub does not start a workflow from
+# an event raised by that token. The trigger was unreachable by design, so
+# the retention policy in SECURITY.md was written down and never applied.
+#
+# The tag is the real signal, and the same one release.yml answers.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       keep:
