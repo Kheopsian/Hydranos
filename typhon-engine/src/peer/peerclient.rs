@@ -163,7 +163,7 @@ fn version(code: &str, raw: &str) -> String {
             .collect::<Option<Vec<_>>>(),
     };
     let Some(mut parts) = out else { return raw.to_string() };
-    // Trailing zeros carry no information: 5.2.2.0 is 5.2.2.
+    // Trailing zeros carry no information: 5.2.2.0 is 5.2.2. // leak-ok: a version, not an address
     while parts.len() > 2 && parts.last().map(|s| s == "0").unwrap_or(false) {
         parts.pop();
     }
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(identify(&pid("-KT3000-abcdefghijkl")), "KTorrent 3.0");
     }
 
-    /// Transmission writes a two-digit minor: 3000 is 3.00, not 3.0.0.0.
+    /// Transmission writes a two-digit minor: 3000 is 3.00, not 3.0.0.0.  // leak-ok: a version
     #[test]
     fn transmission_has_its_own_scheme() {
         assert_eq!(identify(&pid("-TR3000-abcdefghijkl")), "Transmission 3.00");

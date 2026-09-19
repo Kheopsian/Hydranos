@@ -42,7 +42,7 @@ CHANGELOG_FILE = Path("CHANGELOG.md")
 VERSION_RE = re.compile(r'HYDRA_VERSION\s*:\s*&str\s*=\s*"([^"]+)"')
 # The fingerprint is no longer a literal: it is derived from HYDRA_VERSION by
 # `peer_fingerprint_for`, because the four characters of an Azureus-style peer
-# id ARE the version and ours said 2.4.3.0 on a 4.x daemon for years.
+# id ARE the version and ours said 2.4.3.0 on a 4.x daemon for years.  # leak-ok: a version
 #
 # So this no longer reads a value -- it checks that the derivation is still
 # there. The eight-byte invariant it used to enforce is now covered for EVERY
@@ -137,7 +137,7 @@ def check(version: str, fingerprint: str, changelog: str, tags: list) -> list:
             "peer_fingerprint_for is gone from typhon-engine/src/config.rs.\n"
             "    The peer id's four characters are the version to every client "
             "that decodes them; a literal there goes stale the day it is "
-            "written, which is how ours announced 2.4.3.0 from a 4.x daemon."
+            "written, which is how ours announced 2.4.3.0 from a 4.x daemon."  # leak-ok: a version
         )
 
     return problems

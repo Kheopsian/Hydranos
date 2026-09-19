@@ -155,7 +155,7 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
 ";
 
     /// The kernel writes the address little-endian. Reading it the other way
-    /// round gives 192.168.99.1 as 1.1.168.192 -- a plausible address on a
+    /// round gives 192.168.99.1 as 1.99.168.192 -- a plausible address on a // leak-ok: byte order
     /// network that does not exist, so the NAT-PMP request goes nowhere and
     /// times out instead of failing.
     #[test]
