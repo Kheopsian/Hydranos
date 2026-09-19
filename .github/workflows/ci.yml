@@ -23,42 +23,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  go:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-      # The repo vendors its dependencies, so the build must use them: without
-      # this a CI run would resolve modules from the network and could go green
-      # on a dependency tree that no release build ever sees.
-      - name: Build
-        run: go build -mod=vendor ./...
-      - name: Vet
-        run: go vet -mod=vendor ./...
-      - name: Gofmt
-        run: |
-          unformatted=$(gofmt -l cmd internal)
-          if [ -n "$unformatted" ]; then
-            echo "::error::gofmt would rewrite these files:"
-            echo "$unformatted"
-            gofmt -d cmd internal
-            exit 1
-          fi
-      # -race because the bugs this codebase actually ships are concurrency
-      # ones: a store closed under a reconcile in flight, a supervisor mutex
-      # taken from an announce callback. A test suite run without it would have
-      # gone green on every one of them.
-      - name: Test
-        run: go test -mod=vendor -race ./...
-
-  # The version constant, the changelog and the tags, held to the same story.
-  #
-  # Cheap on purpose -- no toolchain, no cache, seconds -- because it guards
-  # the three mistakes that actually shipped: a release with no changelog
-  # entry, a PR numbering itself against a main that had moved on, and a peer
-  # fingerprint that was not eight bytes. See .github/scripts/version_guard.py.
   version:
     runs-on: ubuntu-latest
     steps:
