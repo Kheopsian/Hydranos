@@ -17,18 +17,35 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.1 -- the changelog entry for the rename, unmangled
+
+v4.1.0 shipped its own entry with holes in it: every word in backticks was
+eaten by a shell before it reached the file, so the release that renames the
+program could not name it. The changelog is compiled into the binary, so the
+gaps went out with it.
+
 ## v4.1.0 -- the program is hydranos
 
-The visible text moved in the 4.x line; the identifiers stayed behind because
-each one breaks a running install. A major version is when that is worth doing
-once rather than carrying two names for ever, and  is taken in six
-package repositories out of seven.
+The visible text moved earlier in the 4.x line; the identifiers stayed behind
+because each one breaks a running install. A major version is when that is
+worth doing once rather than carrying two names for ever, and `hydra` is taken
+in six package repositories out of seven -- `apt install hydra` gets THC-Hydra.
 
-⚠ Breaking. The binary, the system account and the entrypoint are .
-The 82  environment variables are  and the old names are
-not read. The image is ; versions already published
-stay where they are, a registry path has no redirect. install.sh uses
-/opt/hydranos, a  container and a  systemd unit.
+⚠ Breaking:
+
+- the binary, the system account and the entrypoint are `hydranos`. A container
+  whose image and entrypoint disagree on the name restarts for ever, so these
+  move together or not at all;
+- the 82 `HYDRA_*` environment variables are `HYDRANOS_*`, and the old names
+  are not read;
+- the image is `ghcr.io/kheopsian/hydranos`. Versions already published stay
+  where they are: a registry path has no redirect;
+- install.sh uses `/opt/hydranos`, a `hydranos` container and a `hydranos`
+  systemd unit, and looks for `hydranos` inside the tarball.
+
+The crate directory `typhon-engine/src/hydra` keeps its name: it is layout,
+invisible from outside, and renaming it would churn every module path for
+nothing.
 
 ## v4.0.2 -- the musl daemon is built by the musl toolchain
 
