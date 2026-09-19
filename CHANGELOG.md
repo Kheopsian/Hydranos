@@ -17,6 +17,14 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRA_VERSION` in the same commit.
 
+## v4.0.2 -- the musl daemon is built by the musl toolchain
+
+v4.0.1 published no binaries either: the daemon was compiled on the runner host
+for a musl target with no standard library for it. It is built in the same musl
+container as the engine now.
+
+The leak guard also checks commit and tag authorship, not just files.
+
 ## v4.0.1 -- the release publishes the daemon that ships
 
 v4.0.0 published a release with no binaries: its three build jobs failed. They

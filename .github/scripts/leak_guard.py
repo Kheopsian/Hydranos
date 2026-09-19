@@ -172,6 +172,43 @@ def scan(path: str, deny: list[str]) -> list[tuple[int, str]]:
     return found
 
 
+def identities(deny: list[str]) -> list[str]:
+    """Commit and tag authorship carrying a denylisted string.
+
+    Files were only half of it. A work address sat in the author field of eight
+    commits and in two tag objects, where no amount of scanning the tree could
+    find it -- git records who wrote a change beside the change, and that
+    record is as public as the code.
+
+    Every commit, not just the pushed range: the range tells you what is new,
+    and an address that arrives by a rebase or a cherry-pick is not new. The
+    repository is under a thousand commits, so reading all of them costs less
+    than deciding which ones to skip.
+    """
+    if not deny:
+        return []
+    try:
+        out = subprocess.run(
+            ["git", "log", "--all", "--format=%H%x00%ae%x00%ce"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except Exception:
+        return []
+    found = []
+    for line in out.splitlines():
+        parts = line.split("\x00")
+        if len(parts) != 3:
+            continue
+        sha, author, committer = parts
+        blob = (author + " " + committer).lower()
+        for needle in deny:
+            if needle.lower() in blob:
+                # The sha is enough to find it; the address is not printed.
+                found.append(f"  commit {sha[:12]}  authorship carries a denylisted string")
+                break
+    return found
+
+
 def main() -> int:
     deny = denylist()
     if not deny:
@@ -181,6 +218,7 @@ def main() -> int:
     for path in tracked_files():
         for n, rule in scan(path, deny):
             findings.append(f"  {path}:{n}  {rule}")
+    findings += identities(deny)
 
     if not findings:
         print(f"leak guard: clean ({len(tracked_files())} files)")
