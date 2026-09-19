@@ -51,10 +51,26 @@ SKIP_SUFFIX = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".woff",
 
 ALLOW_MARK = "leak-ok"
 
+# Public, and belonging to nobody here: the IANA example host and the two
+# best-known resolvers. Naming them costs nothing -- that is the test for
+# whether a value may live in this file at all.
+IMPERSONAL_IPS = {
+    "93.184.216.34", "93.184.216.35",      # example.com, IANA
+    "2606:2800:220:1:248:1893:25c8:1946",  # example.com, v6
+    "45.33.32.156",                        # scanme.nmap.org
+    "8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1",
+    "1.2.3.4",                             # the universal placeholder
+}
+
 IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 IPV6_RE = re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b")
-# 32 hex characters or more: an API key, a passkey, an info hash in a config.
-HEX_RE = re.compile(r"\b[0-9a-fA-F]{32,}\b")
+# ⚠ NOT "32 hex characters": an info hash is 40 of them and this is a
+# BitTorrent client -- that rule reported every fixture in the test suite and
+# would have been switched off within a week. What matters is hex ASSIGNED to
+# something that calls itself a secret.
+SECRETISH_RE = re.compile(
+    r"(?i)\b(?:api[_-]?key|passkey|secret|token|password|passwd)\b"
+    r"\s*[:=]\s*[\"\']?[0-9a-fA-F]{16,}")
 PRIVKEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 TOKEN_RE = re.compile(
     r"\b(?:AKIA[0-9A-Z]{16}"          # AWS access key
@@ -71,6 +87,8 @@ def is_documentation_ipv4(text: str) -> bool:
     has to borrow a real one. RFC 1918, loopback, link-local and multicast
     describe no particular machine on the internet. Everything else does.
     """
+    if text in IMPERSONAL_IPS:
+        return True
     try:
         ip = ipaddress.IPv4Address(text)
     except ValueError:
@@ -86,6 +104,8 @@ def is_documentation_ipv4(text: str) -> bool:
 
 
 def is_documentation_ipv6(text: str) -> bool:
+    if text in IMPERSONAL_IPS:
+        return True
     try:
         ip = ipaddress.IPv6Address(text)
     except ValueError:
@@ -112,6 +132,7 @@ def denylist() -> list[str]:
 
 
 def scan(path: str, deny: list[str]) -> list[tuple[int, str]]:
+    is_prose = path.endswith((".md", ".txt")) or path.startswith("docs/")
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             lines = fh.readlines()
@@ -122,20 +143,26 @@ def scan(path: str, deny: list[str]) -> list[tuple[int, str]]:
     for n, line in enumerate(lines, 1):
         if ALLOW_MARK in line:
             continue
-        for m in IPV4_RE.findall(line):
-            if not is_documentation_ipv4(m):
-                found.append((n, "public IPv4 literal"))
-                break
-        for m in IPV6_RE.findall(line):
-            if not is_documentation_ipv6(m):
-                found.append((n, "public IPv6 literal"))
-                break
+        # Prose is exempt from the address rule, NOT from the denylist below.
+        # The changelog recounts real incidents and naming an address is often
+        # the whole point of the entry; rewriting it would falsify the record.
+        # Code is held to the stricter rule: a literal there is a fixture, and
+        # a fixture never needs to be somebody's machine.
+        if not is_prose:
+            for m in IPV4_RE.findall(line):
+                if not is_documentation_ipv4(m):
+                    found.append((n, "public IPv4 literal in code"))
+                    break
+            for m in IPV6_RE.findall(line):
+                if not is_documentation_ipv6(m):
+                    found.append((n, "public IPv6 literal in code"))
+                    break
         if PRIVKEY_RE.search(line):
             found.append((n, "private key block"))
         if TOKEN_RE.search(line):
             found.append((n, "provider token"))
-        if HEX_RE.search(line):
-            found.append((n, "32+ hex characters (key or passkey?)"))
+        if SECRETISH_RE.search(line):
+            found.append((n, "a secret-looking value assigned to a secret-looking name"))
         low = line.lower()
         for needle in deny:
             if needle.lower() in low:

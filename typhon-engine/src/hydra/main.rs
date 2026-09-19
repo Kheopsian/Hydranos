@@ -175,7 +175,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         .unwrap_or_else(|| std::path::Path::new("/config"))
         .to_path_buf();
     // Before any engine builds its peer id: the fingerprint's four characters
-    // ARE the version to every client that decodes them, and ours said 2.4.3.0
+    // ARE the version to every client that decodes them, and ours said 2.4.3.0 // leak-ok: a version
     // on a 4.x daemon for the whole life of the project.
     typhon_engine::config::set_version(api::HYDRA_VERSION);
     let engine_host = Arc::new(engines::EngineHost::start(&config, &config_dir).await);

@@ -6549,7 +6549,7 @@ async fn qbit_build_info(
     // The library versions a real qBittorrent 4.6.0 reports. Hydra runs none of
     // them; the values exist so a client's build check does not refuse to talk.
     Json(serde_json::json!({
-        "bitness": 64, "boost": "1.83.0", "libtorrent": "2.0.9.0",
+        "bitness": 64, "boost": "1.83.0", "libtorrent": "2.0.9.0", // leak-ok: library versions
         "openssl": "3.1.4", "qt": "6.5.3",
     }))
     .into_response()

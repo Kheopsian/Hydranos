@@ -700,8 +700,8 @@ mod proxy_trust_tests {
         for a in [
             "93.184.216.34:16271",
             "45.33.32.156:16271",
-            "172.15.0.1:16271",
-            "172.32.0.1:16271",
+            "172.15.0.1:16271", // leak-ok: just outside RFC1918, the boundary is the test
+            "172.32.0.1:16271", // leak-ok: just outside RFC1918, the boundary is the test
             "[2606:2800:220:1:248:1893:25c8:1946]:16271",
         ] {
             assert!(
@@ -732,13 +732,13 @@ mod proxy_trust_tests {
 
     /// The 172 range is 172.16 through 172.31 and nothing either side of it.
     /// One off at either end either locks out a legitimate proxy or hands the
-    /// right to 172.32.0.0/11, which is public.
+    /// right to 172.32.0.0/11, which is public.  // leak-ok: prose about the range
     #[test]
     fn the_172_range_stops_exactly_where_rfc1918_does() {
-        assert!(!is_trusted_proxy_source(&addr("172.15.255.255:1"), &[]));
+        assert!(!is_trusted_proxy_source(&addr("172.15.255.255:1"), &[])); // leak-ok: RFC1918 boundary
         assert!(is_trusted_proxy_source(&addr("172.16.0.0:1"), &[]));
         assert!(is_trusted_proxy_source(&addr("172.31.255.255:1"), &[]));
-        assert!(!is_trusted_proxy_source(&addr("172.32.0.0:1"), &[]));
+        assert!(!is_trusted_proxy_source(&addr("172.32.0.0:1"), &[])); // leak-ok: RFC1918 boundary
     }
 
     /// A v4-mapped v6 address is the v4 address it wraps. Reading it as an

@@ -23,6 +23,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  leaks:
+    # This repository is public and tied to a named account. The check that was
+    # missing let a real public IP sit in three files for seven weeks, entered
+    # by a commit that was itself fixing a leak.
+    #
+    # The specific values -- a name, an address, a topic -- are NOT in this
+    # repository: they arrive in LEAK_DENYLIST, a repository secret. Writing
+    # them into a public workflow would publish exactly what the workflow
+    # defends. Without the secret (a fork, an outside pull request) the
+    # generic rules still run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Leak guard
+        env:
+          LEAK_DENYLIST: ${{ secrets.LEAK_DENYLIST }}
+        run: python3 .github/scripts/leak_guard.py
+
   version:
     runs-on: ubuntu-latest
     steps:
