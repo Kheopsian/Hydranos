@@ -17,6 +17,19 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.2 -- the packaging follows the rename, and the installer can find a tarball
+
+The rename moved the binary and left the packaging pointing at the old name:
+the release job copied a file called hydra out of a build that now produces
+hydranos, and would have failed on the first tag after v4.1.1. The systemd unit
+file, the engine binary inside the archive and packaging/ move with it.
+
+Also fixed, and older than the rename: install.sh fetched
+latest/download/hydranos-$ARCH.tar.gz, a name no release has ever published --
+the asset carries the version. The binary install path had been answering 404
+since it was written. It resolves the latest tag first, and
+HYDRANOS_VERSION_PIN overrides it.
+
 ## v4.1.1 -- the changelog entry for the rename, unmangled
 
 v4.1.0 shipped its own entry with holes in it: every word in backticks was

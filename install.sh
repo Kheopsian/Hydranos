@@ -88,7 +88,13 @@ else
     esac
     # The release tarballs are built against musl, so the binary carries its own
     # libc: nothing to install and nothing to match against the host distro.
-    URL="https://github.com/Kheopsian/Hydranos/releases/latest/download/hydranos-$ARCH.tar.gz"
+    # ⚠ The asset name carries the version, so "latest/download/<name>" cannot
+    # be spelled without knowing it. This asked for hydranos-$ARCH.tar.gz,
+    # which no release has ever published: the binary install path answered
+    # 404 from the day it was written. The tag comes from the API first.
+    VER="${HYDRANOS_VERSION_PIN:-$(curl -fsSL https://api.github.com/repos/Kheopsian/Hydranos/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)}"
+    [ -n "$VER" ] || { echo "could not resolve the latest release tag" >&2; exit 1; }
+    URL="https://github.com/Kheopsian/Hydranos/releases/download/$VER/hydranos-$VER-linux-$ARCH.tar.gz"
     echo "==> fetching $URL"
     tmp=$(mktemp -d)
     if ! curl -fsSL "$URL" -o "$tmp/hydranos.tar.gz"; then
