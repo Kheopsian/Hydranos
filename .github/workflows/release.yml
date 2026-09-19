@@ -123,7 +123,7 @@ jobs:
               apk add --no-cache build-base musl-dev cmake perl
               # Both binaries, one invocation, inside the musl toolchain.
               cargo build --release --target ${{ matrix.target }} \
-                --bin typhon-engine --bin hydra
+                --bin typhon-engine --bin hydranos
             '
           # The container writes as root; later steps read as the runner user.
           sudo chown -R "$(id -u):$(id -g)" typhon-engine/target .cargo-home
@@ -145,7 +145,7 @@ jobs:
       # The daemon is the Rust binary now: this step used to build ./cmd/hydra,
       # the Go daemon of the 3.x architecture, so the tarballs and the container
       # image had not been shipping the same program since the port -- the image
-      # ran cargo --bin hydra, the downloads carried the Go one, and nothing
+      # ran cargo --bin hydranos, the downloads carried the Go one, and nothing
       # compared them.
       #
       # ⚠ It is built ABOVE, in the alpine container, not here. A musl target
