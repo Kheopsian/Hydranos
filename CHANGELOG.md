@@ -17,6 +17,19 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.0 -- the program is hydranos
+
+The visible text moved in the 4.x line; the identifiers stayed behind because
+each one breaks a running install. A major version is when that is worth doing
+once rather than carrying two names for ever, and  is taken in six
+package repositories out of seven.
+
+⚠ Breaking. The binary, the system account and the entrypoint are .
+The 82  environment variables are  and the old names are
+not read. The image is ; versions already published
+stay where they are, a registry path has no redirect. install.sh uses
+/opt/hydranos, a  container and a  systemd unit.
+
 ## v4.0.2 -- the musl daemon is built by the musl toolchain
 
 v4.0.1 published no binaries either: the daemon was compiled on the runner host
