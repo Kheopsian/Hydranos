@@ -105,7 +105,7 @@ jobs:
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
         run: |
-          cargo test --release --bin hydra --no-run --message-format=json \
+          cargo test --release --bin hydranos --no-run --message-format=json \
             | python3 -c "import json,sys;print([json.loads(l)['executable'] for l in sys.stdin if l.strip().startswith('{') and json.loads(l).get('executable')][-1])" \
             > /tmp/wgtun-test-path
           cp "$(cat /tmp/wgtun-test-path)" ../wgtun.test

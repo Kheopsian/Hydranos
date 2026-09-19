@@ -17,6 +17,22 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.3 -- the CI builds the binary that exists
+
+The rename shipped as far as the code and the packaging, then stopped at two
+workflow lines. `[[bin]] name` is `hydranos`, but the WireGuard job in `ci.yml`
+and the musl cross-build in `release.yml` still asked cargo for `--bin hydra`.
+
+Cargo answers that with `no bin target named hydra`, so:
+
+- `ci` on `main` went red at *Build the test binary*. The tunnel test never
+  ran; it had nothing to run.
+- the release build would have died in the Alpine container, which is why the
+  tag jobs produced no Linux archive.
+
+Both now name `hydranos`. Nothing else changed -- this is the rename finishing,
+not a behaviour change.
+
 ## v4.1.2 -- the packaging follows the rename, and the installer can find a tarball
 
 The rename moved the binary and left the packaging pointing at the old name:
