@@ -557,7 +557,7 @@ mod tests {
         })
     }
 
-    /// the maintainer's two examples, which are the whole point of the feature.
+    /// The two examples that motivated the feature, and its whole point.
     #[test]
     fn the_two_canonical_workflows_match() {
         let f = facts();
