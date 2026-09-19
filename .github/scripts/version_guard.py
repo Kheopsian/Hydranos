@@ -38,9 +38,9 @@ VERSION_FILE = Path("typhon-engine/src/hydra/api.rs")
 FINGERPRINT_FILE = Path("typhon-engine/src/config.rs")
 CHANGELOG_FILE = Path("CHANGELOG.md")
 
-# `pub const HYDRA_VERSION: &str = "4.15.0";`
-VERSION_RE = re.compile(r'HYDRA_VERSION\s*:\s*&str\s*=\s*"([^"]+)"')
-# The fingerprint is no longer a literal: it is derived from HYDRA_VERSION by
+# `pub const HYDRANOS_VERSION: &str = "4.15.0";`
+VERSION_RE = re.compile(r'HYDRANOS_VERSION\s*:\s*&str\s*=\s*"([^"]+)"')
+# The fingerprint is no longer a literal: it is derived from HYDRANOS_VERSION by
 # `peer_fingerprint_for`, because the four characters of an Azureus-style peer
 # id ARE the version and ours said 2.4.3.0 on a 4.x daemon for years.  # leak-ok: a version
 #
@@ -109,7 +109,7 @@ def check(version: str, fingerprint: str, changelog: str, tags: list) -> list:
             pass
         elif top.lstrip("v") != version:
             problems.append(
-                f"HYDRA_VERSION is {version} but the changelog leads with {top!r}.\n"
+                f"HYDRANOS_VERSION is {version} but the changelog leads with {top!r}.\n"
                 f"    Add a `## v{version}` entry at the top of CHANGELOG.md, or title "
                 f"the new entry `## Unreleased` and let the release set the number.\n"
                 f"    The changelog is embedded in the binary, so this ships as a "
@@ -126,7 +126,7 @@ def check(version: str, fingerprint: str, changelog: str, tags: list) -> list:
             if parse_version(version) <= highest:
                 dotted = ".".join(str(n) for n in highest)
                 problems.append(
-                    f"HYDRA_VERSION {version} is not above the highest tag v{dotted}.\n"
+                    f"HYDRANOS_VERSION {version} is not above the highest tag v{dotted}.\n"
                     f"    This branch picked its number before {dotted} was tagged. "
                     f"Renumber above it, or use `## Unreleased`, which cannot go stale."
                 )
@@ -202,7 +202,7 @@ def main() -> int:
         return self_test()
 
     try:
-        version = find_one(VERSION_RE, VERSION_FILE, "HYDRA_VERSION")
+        version = find_one(VERSION_RE, VERSION_FILE, "HYDRANOS_VERSION")
         fingerprint = find_one(
             FINGERPRINT_RE, FINGERPRINT_FILE, "peer_fingerprint_for"
         )

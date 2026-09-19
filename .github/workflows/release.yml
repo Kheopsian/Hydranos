@@ -159,9 +159,9 @@ jobs:
       - name: Package tarball
         run: |
           VER="${REL_TAG}"
-          DIR="hydra-${VER}-linux-${{ matrix.arch }}"
+          DIR="hydranos-${VER}-linux-${{ matrix.arch }}"
           mkdir -p "$DIR"
-          cp hydra "$DIR"/hydra
+          cp hydra "$DIR"/hydranos
           cp typhon-engine/target/${{ matrix.target }}/release/typhon-engine "$DIR"/hydra-engine
           cp configs/default.toml "$DIR"/default.toml.example
           cp packaging/hydra.service "$DIR"/hydra.service
@@ -217,7 +217,7 @@ jobs:
         shell: pwsh
         run: |
           $VER = $env:REL_TAG
-          $DIR = "hydra-$VER-windows-amd64"
+          $DIR = "hydranos-$VER-windows-amd64"
           New-Item -ItemType Directory -Force -Path $DIR | Out-Null
           Copy-Item hydra.exe "$DIR/hydra.exe"
           Copy-Item typhon-engine/target/release/typhon-engine.exe "$DIR/hydra-engine.exe"

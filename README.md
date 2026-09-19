@@ -79,7 +79,7 @@ docker run --stop-timeout 30 ...      # and: docker stop -t 30 hydra
 
 Each engine gets ten seconds of that budget, and the two are stopped one after
 the other. If you hold several hundred thousand torrents the sweep takes
-longer -- raise `HYDRA_STOP_TIMEOUT` (e.g. `45s`) and keep the supervisor's
+longer -- raise `HYDRANOS_STOP_TIMEOUT` (e.g. `45s`) and keep the supervisor's
 grace period above twice that.
 
 ---

@@ -12,7 +12,7 @@ name = "typhon-engine"
 path = "src/main.rs"
 
 [[bin]]
-name = "hydra"
+name = "hydranos"
 path = "src/hydra/main.rs"
 
 [dependencies]

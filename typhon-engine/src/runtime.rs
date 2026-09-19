@@ -22,12 +22,12 @@
 
 /// Worker threads for the engine runtime.
 ///
-/// `HYDRA_WORKER_THREADS` overrides it, so the number can follow the machine
+/// `HYDRANOS_WORKER_THREADS` overrides it, so the number can follow the machine
 /// without a rebuild. The default caps rather than scales: past this point extra
 /// workers add stealing, not throughput. The engine is I/O bound, and blocking
 /// work goes to the blocking pool, which is sized separately and left alone.
 pub fn worker_threads() -> usize {
-    if let Some(n) = std::env::var("HYDRA_WORKER_THREADS")
+    if let Some(n) = std::env::var("HYDRANOS_WORKER_THREADS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| *n > 0)

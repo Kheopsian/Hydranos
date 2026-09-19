@@ -12,7 +12,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/kheopsian/hydra
+  IMAGE: ghcr.io/kheopsian/hydranos
 
 jobs:
   # One job per architecture, on a native runner for that architecture.

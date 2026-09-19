@@ -4,15 +4,15 @@
 #   docker compose logs hydra | grep "temporary admin password"
 services:
   hydra:
-    image: ghcr.io/kheopsian/hydra:latest
+    image: ghcr.io/kheopsian/hydranos:latest
     container_name: hydra
     restart: unless-stopped
     # Shutdown budget. On SIGTERM Hydra saves its store, then stops the two
     # engines one after the other, each with its own timeout (10s by default,
-    # HYDRA_STOP_TIMEOUT below). Docker's own default is 10s for the whole
+    # HYDRANOS_STOP_TIMEOUT below). Docker's own default is 10s for the whole
     # container, which is not enough: it would SIGKILL mid-flush and leave the
     # resume data stale, so a restart re-checks pieces that were already done.
-    # Keep this above 2 x HYDRA_STOP_TIMEOUT.
+    # Keep this above 2 x HYDRANOS_STOP_TIMEOUT.
     stop_grace_period: 30s
     ulimits:
       nofile: { soft: 1048576, hard: 1048576 }
@@ -30,16 +30,16 @@ services:
     #   # Per-engine shutdown budget. The default 10s fits an ordinary
     #   # instance; raise it (and stop_grace_period above with it) if you hold
     #   # several hundred thousand torrents, where the resume sweep is longer.
-    #   HYDRA_STOP_TIMEOUT: 10s
+    #   HYDRANOS_STOP_TIMEOUT: 10s
     #   # Send the log stream to stdout (`docker logs hydra`) instead of
     #   # /config/hydra.log. Any value but 0/false/no/off turns it on. Mind the
     #   # logging block below: on stdout it is Docker, not Hydra, that caps the
     #   # log, and the default json-file driver caps nothing.
-    #   HYDRA_LOG_STDOUT: 1
+    #   HYDRANOS_LOG_STDOUT: 1
     # The file mirror rotates itself at 128 MiB x 5. Nothing rotates the Docker
     # json-file driver unless you say so, and this is a chatty log -- one line
     # per inbound peer connection, which reached 41 GB in production before the
-    # file mirror was capped. Same ceiling here, so HYDRA_LOG_STDOUT cannot
+    # file mirror was capped. Same ceiling here, so HYDRANOS_LOG_STDOUT cannot
     # bring that back.
     logging:
       driver: json-file

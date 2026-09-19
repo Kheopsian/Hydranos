@@ -172,7 +172,7 @@ fn default_socks5_port() -> u16 { 1080 }
 /// this remains only so a config that predates it still parses.
 /// The running version, set once by the binary at startup.
 ///
-/// `HYDRA_VERSION` lives in `hydra/api.rs` because CI pins it there (it checks
+/// `HYDRANOS_VERSION` lives in `hydra/api.rs` because CI pins it there (it checks
 /// the changelog against it), and this crate is below that module. Rather than
 /// keep a second copy that would drift, the binary hands it down.
 static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();

@@ -7,7 +7,7 @@ api_port = 8199
 api_key = ""
 # Shared bearer token the HydraAgent gRPC data-plane requires from a front
 # (--agent-addr / --agent-only). Empty = no auth: fine on a private LAN, not
-# fine anywhere else. Overridden by $HYDRA_AGENT_TOKEN, then by --agent-token.
+# fine anywhere else. Overridden by $HYDRANOS_AGENT_TOKEN, then by --agent-token.
 agent_token = ""
 data_dir = "/config"
 create_torrent_folder = false
@@ -163,8 +163,8 @@ password_hash = ""
 # ─────────────────────────────────────────────
 # An agent (started with --agent-only) knows only its own identity: for each
 # engine an id, a role, a listen port and whether IPv6 is on, given through
-# --engine or $HYDRA_ENGINE_ID / $HYDRA_ENGINE_ROLE / $HYDRA_ENGINE_LISTEN_PORT
-# / $HYDRA_ENGINE_ENABLE_IPV6. It needs no config file of its own. Everything
+# --engine or $HYDRANOS_ENGINE_ID / $HYDRANOS_ENGINE_ROLE / $HYDRANOS_ENGINE_LISTEN_PORT
+# / $HYDRANOS_ENGINE_ENABLE_IPV6. It needs no config file of its own. Everything
 # else is composed here and pushed to it over the gRPC channel: [race] and
 # [hoard] above double as the FLEET PROFILES for remote engines of that role.
 #
@@ -175,7 +175,7 @@ password_hash = ""
 # [[agent]]
 # name  = "de-1"                 # how this node is named in the UI
 # addr  = "10.0.0.5:9090"        # its --agent-addr, reachable from here
-# token = ""                     # must match the agent's $HYDRA_AGENT_TOKEN
+# token = ""                     # must match the agent's $HYDRANOS_AGENT_TOKEN
 # tls_ca = ""                    # path to the CA cert when the agent serves TLS
 #
 # A sparse exception to the role profile, for one engine, keyed by the id the

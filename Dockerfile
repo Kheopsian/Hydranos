@@ -29,8 +29,8 @@ ENV RUSTFLAGS="--cfg tokio_unstable"
 # does not exist in the final layer, so the runtime stage cannot read from it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/typhon-engine/target,sharing=locked \
-    cargo build --release --bin hydra \
-    && cp target/release/hydra /usr/local/bin/hydra
+    cargo build --release --bin hydranos \
+    && cp target/release/hydranos /usr/local/bin/hydranosnos
 
 # Stage 2: Runtime.
 FROM debian:bookworm-slim
@@ -44,16 +44,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # on SIGUSR1 by the watchdog. One process now, so this covers all of it.
 ENV MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/config/jeprof
 # One binary. The front and the engines are the same process in 4.0.0, so
-# there is no hydra-engine to ship and no unix socket between them.
-COPY --from=typhon-builder /usr/local/bin/hydra /usr/local/bin/hydra
+# there is no hydranos-engine to ship and no unix socket between them.
+COPY --from=typhon-builder /usr/local/bin/hydranosnos /usr/local/bin/hydranosnos
 COPY configs/ /app/configs/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Unprivileged account used when PUID/PGID are set (see entrypoint.sh). The
 # container still runs as root by default, so existing setups are unchanged.
-RUN groupadd -g 1000 hydra \
- && useradd -u 1000 -g 1000 -d /config -s /usr/sbin/nologin hydra
+RUN groupadd -g 1000 hydranos \
+ && useradd -u 1000 -g 1000 -d /config -s /usr/sbin/nologin hydranos
 
 WORKDIR /app
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
