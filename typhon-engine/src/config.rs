@@ -165,7 +165,7 @@ fn default_file_pool_size() -> usize { 5000 }
 fn default_socks5_port() -> u16 { 1080 }
 /// The fallback fingerprint, used only when nothing supplies a real one.
 ///
-/// It says 2.4.3.0 and has done since the first public commit, on a daemon
+/// It says 2.4.3.0 and has done since the first public commit, on a daemon  // leak-ok: a version
 /// that is now 4.x: the four digits of an Azureus-style peer id ARE the
 /// version, and every client that decodes them -- including ours -- read a
 /// number that was never true. `peer_fingerprint_for` derives the real one;
