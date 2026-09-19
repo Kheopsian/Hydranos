@@ -121,7 +121,9 @@ jobs:
             rust:alpine sh -c '
               set -e
               apk add --no-cache build-base musl-dev cmake perl
-              cargo build --release --target ${{ matrix.target }} --bin typhon-engine
+              # Both binaries, one invocation, inside the musl toolchain.
+              cargo build --release --target ${{ matrix.target }} \
+                --bin typhon-engine --bin hydra
             '
           # The container writes as root; later steps read as the runner user.
           sudo chown -R "$(id -u):$(id -g)" typhon-engine/target .cargo-home
@@ -140,18 +142,19 @@ jobs:
             exit 1
           fi
 
-      # The daemon is the Rust binary. This step built ./cmd/hydra, the Go
-      # daemon of the 3.x architecture, which means the tarballs and the
-      # container image had not been shipping the same program since the port:
-      # the image ran cargo --bin hydra, the downloads carried the Go one.
-      # Nothing compared them, so nothing said so.
-      - name: Build hydra
+      # The daemon is the Rust binary now: this step used to build ./cmd/hydra,
+      # the Go daemon of the 3.x architecture, so the tarballs and the container
+      # image had not been shipping the same program since the port -- the image
+      # ran cargo --bin hydra, the downloads carried the Go one, and nothing
+      # compared them.
+      #
+      # ⚠ It is built ABOVE, in the alpine container, not here. A musl target
+      # needs a musl toolchain: `cargo build --target ...-musl` on the runner
+      # host finds no std for it and dies on the first dependency with
+      # "can't find crate for `core`". This step only collects the artefact.
+      - name: Collect hydra
         working-directory: typhon-engine
-        env:
-          RUSTFLAGS: "--cfg tokio_unstable"
-        run: |
-          cargo build --release --target ${{ matrix.target }} --bin hydra
-          cp target/${{ matrix.target }}/release/hydra ../hydra
+        run: cp target/${{ matrix.target }}/release/hydra ../hydra
 
       - name: Package tarball
         run: |
