@@ -74,7 +74,12 @@ fn parse_args() -> PathBuf {
                 }
             }
             "--version" => {
-                println!("hydra {}", env!("CARGO_PKG_VERSION"));
+                // CARGO_PKG_VERSION is 0.1.0 and has never been bumped: the
+                // release number lives in HYDRANOS_VERSION, which is what the
+                // API, the changelog and the CI guard all agree on. This
+                // printed "hydra 0.1.0" -- the old name and a version no
+                // release has ever carried.
+                println!("hydranos {}", api::HYDRANOS_VERSION);
                 std::process::exit(0);
             }
             _ => {}

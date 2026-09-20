@@ -131,3 +131,23 @@ jobs:
       - name: Inspect
         run: |
           docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
+
+      # Nothing in this pipeline had ever RUN the image. v4.1.0 through v4.1.4
+      # built, pushed, tagged and inspected an image whose binary was named
+      # hydranosnos while the entrypoint exec'd hydranos -- every one of them
+      # died on the first container start, and every job was green. Inspecting
+      # a manifest proves the layers exist, not that the program runs.
+      - name: The image actually starts
+        run: |
+          REF="${IMAGE}:${{ steps.meta.outputs.version }}"
+          docker pull -q "$REF"
+          # --version exits immediately; it still goes through entrypoint.sh,
+          # so a broken exec path or a missing binary fails right here.
+          OUT="$(docker run --rm "$REF" --version 2>&1)" || {
+            echo "::error::the published image does not start"; echo "$OUT"; exit 1; }
+          echo "$OUT"
+          # The exact shape matters: this is the string the daemon uses to
+          # identify itself, and it used to read "hydra 0.1.0" -- the old name
+          # and the untouched Cargo version, not the release number.
+          printf '%s' "$OUT" | grep -qE '^hydranos [0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::--version did not identify the build"; exit 1; }
