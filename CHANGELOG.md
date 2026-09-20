@@ -17,6 +17,31 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.5 -- the image starts
+
+Every published v4.1.x container exited on its first instruction:
+
+    exec: "hydranos": executable file not found in $PATH
+
+The Dockerfile installed the binary as **`hydranosnos`**. The rename was applied
+with a blunt `s/hydra/hydranos/` that also rewrote the already-renamed name,
+while `entrypoint.sh` execs `hydranos`. v4.1.0 through v4.1.4 were built,
+pushed, tagged and `imagetools inspect`-ed, and every job was green --
+inspecting a manifest proves the layers exist, not that the program runs.
+Nothing in the pipeline had ever started the image.
+
+- The binary is installed as `hydranos`.
+- `docker.yml` gained **The image actually starts**: it pulls the tag it just
+  published, runs it, and requires `--version` to identify the build. This is
+  the check that was missing.
+- `hydranos --version` printed `hydra 0.1.0` -- the old name, and
+  `CARGO_PKG_VERSION`, which has never been bumped off `0.1.0`. It now prints
+  `hydranos <HYDRANOS_VERSION>`, the number the API, the changelog and the CI
+  guard already agree on.
+
+Also adds `purge-releases.yml` (manual, dry-run by default) to withdraw the
+releases that cannot be installed.
+
 ## v4.1.4 -- the release actually uploads something
 
 v4.1.3 made both Linux builds go green and still published a release with zero

@@ -1,0 +1,68 @@
+# Deletes releases that must not be installable.
+#
+# v4.1.0 through v4.1.4 all shipped a container image whose binary was called
+# hydranosnos while the entrypoint exec'd hydranos: every one of them exits
+# instantly with "executable file not found in $PATH". v4.1.0-v4.1.3 also
+# published no archive at all (the upload glob said hydra-*, the tarball is
+# hydranos-*). None of them can be installed by any documented path, so leaving
+# them listed only offers a download that cannot work.
+#
+# Run it from the Actions tab. dry_run is ON by default: the first run shows
+# what it would delete and deletes nothing.
+name: purge-releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: "Space-separated tags to purge"
+        required: true
+        default: "v4.1.0 v4.1.1 v4.1.2 v4.1.3 v4.1.4"
+      delete_tags:
+        description: "Also delete the git tags (the commits stay in history)"
+        type: boolean
+        default: false
+      dry_run:
+        description: "List only, delete nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Purge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAGS: ${{ github.event.inputs.tags }}
+          DRY: ${{ github.event.inputs.dry_run }}
+          DELTAGS: ${{ github.event.inputs.delete_tags }}
+        run: |
+          set -u
+          rc=0
+          for t in $TAGS; do
+            # Resolve the release id from the tag. A tag with no release is not
+            # an error: several of these may already have been cleaned up.
+            id=$(gh api "repos/$REPO/releases/tags/$t" --jq .id 2>/dev/null || true)
+            if [ -z "$id" ]; then
+              echo "  $t: no release"
+            elif [ "$DRY" = "true" ]; then
+              echo "  $t: WOULD delete release $id"
+            else
+              gh api -X DELETE "repos/$REPO/releases/$id" && echo "  $t: release deleted" || rc=1
+            fi
+            if [ "$DELTAGS" = "true" ]; then
+              if [ "$DRY" = "true" ]; then
+                echo "  $t: WOULD delete the git tag"
+              else
+                gh api -X DELETE "repos/$REPO/git/refs/tags/$t" && echo "  $t: tag deleted" || rc=1
+              fi
+            fi
+          done
+          # ⚠ Fail loudly. A purge that half-worked and exited 0 would leave a
+          # broken release installable while the run showed green.
+          exit $rc

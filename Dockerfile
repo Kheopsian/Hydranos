@@ -27,10 +27,14 @@ ENV RUSTFLAGS="--cfg tokio_unstable"
 # minutes per build.
 # The binary has to be copied OUT of the cache in the same RUN: a cache mount
 # does not exist in the final layer, so the runtime stage cannot read from it.
+# ⚠ The binary is hydranos, not hydranosnos. The rename was applied with a
+# blunt s/hydra/hydranos/ that also rewrote the already-renamed name, while
+# entrypoint.sh execs `hydranos`: v4.1.0 through v4.1.4 all built an image
+# that exited instantly with "executable file not found in $PATH".
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/typhon-engine/target,sharing=locked \
     cargo build --release --bin hydranos \
-    && cp target/release/hydranos /usr/local/bin/hydranosnos
+    && cp target/release/hydranos /usr/local/bin/hydranos
 
 # Stage 2: Runtime.
 FROM debian:bookworm-slim
@@ -45,7 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/config/jeprof
 # One binary. The front and the engines are the same process in 4.0.0, so
 # there is no hydranos-engine to ship and no unix socket between them.
-COPY --from=typhon-builder /usr/local/bin/hydranosnos /usr/local/bin/hydranosnos
+COPY --from=typhon-builder /usr/local/bin/hydranos /usr/local/bin/hydranos
 COPY configs/ /app/configs/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
