@@ -9,7 +9,7 @@ Pas d action tierce: chaque appel est explicite et verifiable.
 import json, os, sys, time, urllib.request, urllib.error
 
 OWNER = os.environ.get("OWNER", "Kheopsian")
-PKG   = os.environ.get("PKG", "hydra")
+PKG   = os.environ.get("PKG", "hydranos")
 KEEP_N = int(os.environ.get("KEEP") or 10)
 BATCH = 20
 TOKEN = os.environ["GHCR_TOKEN"]

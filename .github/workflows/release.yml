@@ -174,11 +174,22 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          # ⚠ The tarball is hydranos-<ver>-linux-<arch>.tar.gz. This glob
+          # said hydra-*, which does NOT match hydranos- (it wants a literal
+          # dash after "hydra"), so it selected nothing -- and
+          # action-gh-release treats an empty match as success. v4.1.1 through
+          # v4.1.3 built both architectures, passed, and published a release
+          # with zero assets.
           files: |
-            hydra-*-linux-*.tar.gz
-            hydra-*-linux-*.tar.gz.sha256
+            hydranos-*-linux-*.tar.gz
+            hydranos-*-linux-*.tar.gz.sha256
 
   build-windows:
+    # Disabled rather than failed. The step below exited 1 to say "not ported",
+    # which is true, but it turned every single release red -- so a release
+    # that genuinely broke looked exactly like one that worked. The job and its
+    # steps stay in the file so the gap is visible to whoever ports it.
+    if: false
     needs: meta
     runs-on: windows-latest
     steps:

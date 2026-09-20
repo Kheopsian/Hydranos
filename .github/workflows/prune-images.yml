@@ -42,6 +42,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
           OWNER: ${{ github.repository_owner }}
+          PKG: hydranos
           KEEP: ${{ github.event.inputs.keep || 10 }}
         run: python3 .github/scripts/ghcr_prune.py
 
@@ -56,5 +57,6 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
           OWNER: ${{ github.repository_owner }}
+          PKG: hydranos
           KEEP: ${{ github.event.inputs.keep || 10 }}
         run: python3 .github/scripts/ghcr_prune.py --apply
