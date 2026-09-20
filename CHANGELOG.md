@@ -17,6 +17,28 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.4 -- the release actually uploads something
+
+v4.1.3 made both Linux builds go green and still published a release with zero
+assets, which is the same symptom as v4.1.1 and v4.1.2 for a different reason.
+
+- **The upload glob never matched.** The tarball is
+  `hydranos-<ver>-linux-<arch>.tar.gz`; the `files:` pattern asked for
+  `hydra-*-linux-*.tar.gz`, which wants a literal dash after `hydra` and so
+  matches nothing. `action-gh-release` treats an empty match as success, so the
+  step was green while uploading nothing. Three tags shipped no binary because
+  of one missing suffix.
+- **The Windows job failed on purpose.** It exited 1 to report that the Go
+  Windows daemon has no Rust replacement. True, but it painted every release
+  red, so a release that genuinely broke was indistinguishable from one that
+  worked. It is now `if: false`; the job and its comment stay in the file so
+  the gap remains visible.
+- **The image pruner still pointed at the old package.** `ghcr_prune.py`
+  defaulted to `PKG=hydra` while the images publish to `ghcr.io/kheopsian/hydranos`.
+  It was pruning the wrong repository and reporting success. The default now
+  names `hydranos`, and `prune-images.yml` passes `PKG` explicitly rather than
+  relying on it.
+
 ## v4.1.3 -- the CI builds the binary that exists
 
 The rename shipped as far as the code and the packaging, then stopped at two
