@@ -11,6 +11,12 @@ import json, os, sys, time, urllib.request, urllib.error
 OWNER = os.environ.get("OWNER", "Kheopsian")
 PKG   = os.environ.get("PKG", "hydranos")
 KEEP_N = int(os.environ.get("KEEP") or 10)
+# ⚠ One-off mode. ONLY_TAGS names the versions to remove outright, for images
+# that must not exist rather than images that have simply aged out. Retention
+# answers "how many do we keep"; this answers "this one is broken". Lowering
+# KEEP to reach a bad release would change the policy to do a cleanup, and
+# leave it changed.
+ONLY_TAGS = [t for t in (os.environ.get("ONLY_TAGS") or "").replace(",", " ").split() if t]
 BATCH = 20
 TOKEN = os.environ["GHCR_TOKEN"]
 APPLY = "--apply" in sys.argv
@@ -106,7 +112,45 @@ print("index conserves resolus : %d digests enfants proteges (%d index illisible
       % (len(protected_digests), unreadable))
 
 doomed, spared_untagged, spared_kept = [], 0, 0
-for v in versions:
+
+if ONLY_TAGS:
+    # Explicit removal. The named indexes go, and their children with them --
+    # deleting an index alone leaves per-platform manifests and attestations
+    # behind, orphaned and invisible, which is how the registry grew to
+    # hundreds of versions before.
+    wanted = set(ONLY_TAGS)
+    # ⚠ Take them OUT of the retention set first. With nine release tags and
+    # KEEP=10, `keep` holds every tag there is -- so the guard below, which
+    # refuses to delete anything carrying a kept tag, would refuse this whole
+    # plan. Explicit removal has to say so where retention can see it.
+    keep -= wanted
+    doomed_digests = set()
+    for v in versions:
+        tags = v["metadata"]["container"]["tags"]
+        if not (tags and wanted.intersection(tags)):
+            continue
+        kids = children_of(tags[0])
+        if kids is None:
+            sys.exit("REFUS: %s est illisible, ses enfants sont inconnus" % tags[0])
+        doomed_digests.update(kids)
+        doomed.append((v["id"], tags))
+    for v in versions:
+        if v["metadata"]["container"]["tags"]:
+            continue
+        if v["name"] in doomed_digests:
+            doomed.append((v["id"], ["<enfant de %s>" % v["name"][:19]]))
+    # ⚠ The same guard as the retention path, and it matters more here: a
+    # child shared with an index we are KEEPING must never go, or that tag
+    # stays resolvable until a client asks for that architecture and gets a
+    # 404 no one can explain.
+    for vid, tags in doomed:
+        dig = next(v["name"] for v in versions if v["id"] == vid)
+        assert dig not in protected_digests, (
+            "REFUS: %s (%s) est aussi un enfant d un index conserve" % (vid, dig[:19]))
+    print("mode explicite: %d versions visees pour %s" % (len(doomed), sorted(wanted)))
+    spared_kept = len(versions) - len(doomed)
+else:
+ for v in versions:
     tags = v["metadata"]["container"]["tags"]
     if v["id"] in recent:
         spared_kept += 1; continue

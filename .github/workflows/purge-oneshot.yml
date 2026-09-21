@@ -1,0 +1,93 @@
+# One-off removal of v4.1.0 - v4.1.4, releases and container images alike.
+#
+# Those five tags cannot be installed by ANY route: the image's binary was
+# named hydranosnos while the entrypoint exec'd hydranos, so every container
+# exited instantly, and v4.1.0-v4.1.3 published no archive at all because the
+# upload glob said hydra-* against a hydranos-* tarball. Leaving them listed
+# only offers downloads that cannot work.
+#
+# ⚠ Triggered by pushing a TAG, not by workflow_dispatch, because the person
+# doing this has push rights over SSH and no API token. The two tag names are
+# the safety: `purge-dry` prints the plan, `purge-apply` carries it out.
+# Delete this file once it has run -- a destructive workflow that anyone with
+# push rights can fire by tag name is not something to leave lying around.
+name: purge-oneshot
+
+on:
+  push:
+    tags:
+      - purge-dry
+      - purge-apply
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    env:
+      TAGS: "v4.1.0 v4.1.1 v4.1.2 v4.1.3 v4.1.4"
+      APPLY: ${{ github.ref_name == 'purge-apply' && 'yes' || 'no' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: What this will do
+        run: echo "tags=$TAGS  apply=$APPLY"
+
+      # --- GitHub releases -------------------------------------------------
+      # ⚠ Drafts first and separately. Deleting a tag does NOT delete its
+      # release: GitHub keeps it as a DRAFT, which no longer answers
+      # /releases/tags/<tag>. v4.1.3 and v4.1.4 became drafts exactly that way
+      # when their tags were removed, and a lookup by tag cannot see them.
+      - name: Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          rc=0
+          drafts=$(gh api "repos/$REPO/releases" --paginate \
+                     --jq '.[] | select(.draft == true) | "\(.id) \(.tag_name)"')
+          echo "$drafts" | while read -r id tag; do
+            [ -z "${id:-}" ] && continue
+            if [ "$APPLY" = "yes" ]; then
+              gh api -X DELETE "repos/$REPO/releases/$id" && echo "  draft $tag deleted" || rc=1
+            else
+              echo "  draft $tag ($id): WOULD delete"
+            fi
+          done
+          for t in $TAGS; do
+            id=$(gh api "repos/$REPO/releases/tags/$t" --jq .id 2>/dev/null || true)
+            if [ -z "$id" ]; then
+              echo "  $t: no published release"
+            elif [ "$APPLY" = "yes" ]; then
+              gh api -X DELETE "repos/$REPO/releases/$id" && echo "  $t deleted" || rc=1
+              gh api -X DELETE "repos/$REPO/git/refs/tags/$t" >/dev/null 2>&1 \
+                && echo "  $t: git tag deleted too" || true
+            else
+              echo "  $t (release $id): WOULD delete"
+            fi
+          done
+          # Fail loudly: a purge that half-worked and exited 0 would leave a
+          # broken release installable while the run showed green.
+          exit $rc
+
+      # --- GHCR images -----------------------------------------------------
+      # Explicit mode, not a lowered KEEP: retention answers "how many do we
+      # keep", this answers "this one is broken". It removes each index AND
+      # its untagged children, which a manual tag deletion would orphan.
+      - name: Images
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PKG: hydranos
+          ONLY_TAGS: ${{ 'v4.1.0 v4.1.1 v4.1.2 v4.1.3 v4.1.4' }}
+        run: |
+          if [ "$APPLY" = "yes" ]; then
+            python3 .github/scripts/ghcr_prune.py --apply
+          else
+            python3 .github/scripts/ghcr_prune.py
+          fi

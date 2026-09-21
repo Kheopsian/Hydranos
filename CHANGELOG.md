@@ -17,6 +17,33 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.9 -- the broken v4.1.x are withdrawn
+
+v4.1.0 through v4.1.4 cannot be installed by any route: the image named its
+binary `hydranosnos` while the entrypoint exec'd `hydranos`, so every container
+exited on its first instruction, and v4.1.0-v4.1.3 published no archive at all.
+Leaving them listed only offers downloads that cannot work.
+
+- `ghcr_prune.py` gains an **explicit** mode (`ONLY_TAGS`). Retention answers
+  "how many do we keep"; this answers "this one is broken". Lowering KEEP to
+  reach a bad release would change the policy to perform a cleanup and leave it
+  changed.
+  ⚠ It removes each index **and its untagged children** -- deleting the index
+  alone leaves per-platform manifests and attestations orphaned and invisible,
+  which is how the registry grew to hundreds of versions before.
+  ⚠ It also takes the named tags OUT of the retention set first: with nine
+  release tags and KEEP=10, `keep` holds every tag there is, so the guard that
+  refuses to delete a kept tag would have refused the whole plan.
+- `purge-oneshot.yml` runs both purges, triggered by pushing a tag rather than
+  by workflow_dispatch -- push rights over SSH are what this repository is
+  driven with, and an API token is not. `purge-dry` prints the plan,
+  `purge-apply` carries it out. The file is deleted once it has run.
+
+Noted while investigating: `prune-images` reporting success and removing
+nothing was **not a fault**. Nine version tags against KEEP=10 leaves nothing
+outside the window. It pruned for real when the package was `hydra` and carried
+hundreds of 3.x tags.
+
 ## v4.1.8 -- the tray wears the logo again
 
 4.1.7 shipped the tray with the stock Windows icon, and said so. Looking for
