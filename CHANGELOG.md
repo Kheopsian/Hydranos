@@ -17,6 +17,27 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.11 -- the explicit purge, in the right order
+
+The dry run refused itself, and the guard was right:
+
+    conserves : ['v4.1.0' ... 'v4.1.8']        <- the five targets still kept
+    index conserves resolus : 36 digests enfants proteges
+    REFUS: 1271040643 (sha256:f289e574b0ae) est aussi un enfant d un index conserve
+
+`keep -= ONLY_TAGS` sat inside the plan, where it reads naturally -- and that is
+after `protected_digests` is built from the kept indexes. The children of the
+very tags being removed were therefore resolved as protected, and the guard
+refused a plan for containing them. **The ordering was wrong, not the rule.**
+
+The subtraction now happens where `keep` is first computed, before anything
+reads it. The run also prints which tags explicit mode took out of retention,
+so the two sets can be compared at a glance instead of inferred.
+
+⚠ Worth keeping: this is the second time in this sequence that a safety check
+caught my own mistake rather than a real hazard. A guard that only ever fires
+on genuine danger has not been tested.
+
 ## v4.1.10 -- the pruner can no longer succeed at nothing
 
 The one-off purge failed on its image step, and reproducing it locally found
