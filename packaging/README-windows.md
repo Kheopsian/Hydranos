@@ -38,9 +38,6 @@ Pass `--config <path>` to keep it somewhere else.
 for every torrent before exiting. Killing `hydranos.exe` from Task Manager
 skips it, and the next start has to re-check the affected torrents.
 
-⚠ The icon is the stock Windows application icon. The 3.x package embedded its
-own, which needs an `.ico` compiled in as a resource; there is none yet.
-
 ⚠ A service started by a wrapper runs in its own session and **shows no tray
 icon** - manage it from the web UI in that setup.
 

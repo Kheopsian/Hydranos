@@ -118,11 +118,17 @@ mod win {
             data.uID = 1;
             data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
             data.uCallbackMessage = WM_TRAY;
-            // ⚠ The stock application icon. The 3.x package embedded its own,
-            // which needs an .ico compiled into the binary as a resource --
-            // there is none in this tree yet, and a generic icon that works
-            // beats a missing one.
-            data.hIcon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+            // The logo, decoded and scaled at run time exactly as 3.x did --
+            // there never was a .ico to ship. Falls back to the stock icon if
+            // anything about the PNG surprises us, because a tray with a
+            // generic icon still works and one with no icon does not.
+            data.hIcon = match crate::trayicon::from_logo() {
+                Some(h) => h,
+                None => {
+                    tracing::warn!("tray: the logo would not build an icon, using the stock one");
+                    LoadIconW(std::ptr::null_mut(), IDI_APPLICATION)
+                }
+            };
             set_tip(&mut data, &tooltip());
 
             if Shell_NotifyIconW(NIM_ADD, &data) == 0 {
