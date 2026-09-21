@@ -15,6 +15,13 @@ path = "src/main.rs"
 name = "hydranos"
 path = "src/hydra/main.rs"
 
+# The updater is a SEPARATE binary, not a subcommand: Windows locks a running
+# program's own file, so hydranos.exe cannot overwrite itself. This one waits
+# for the daemon to exit first.
+[[bin]]
+name = "hydranos-update"
+path = "src/update/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full", "tracing"] }
 tokio-util = { version = "0.7", features = ["codec"] }
@@ -44,11 +51,19 @@ libc = "0.2"
 # verify against that same hash, so an upgrade keeps the account.
 bcrypt = "0.15"
 
+# hydranos-update: verify the published SHA-256 before replacing anything, and
+# read the release archive of either platform. sha1 is already here for info
+# hashes and is NOT the same algorithm.
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
+
 # Already in the tree as a transitive dependency, so naming it costs no build
 # time. Workflow conditions offer a "matches" operator and hand-rolling one
 # would be a worse regex engine with the same surface.
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "cookies", "json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "cookies", "json", "multipart", "blocking"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"
@@ -82,6 +97,19 @@ windows-sys = { version = "0.59", features = [
     # passes anything but a null pointer for it.
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    # AttachConsole / AllocConsole / SetStdHandle: with windows_subsystem =
+    # "windows" the process starts with no standard handles, and these give
+    # them back when a terminal launched it.
+    "Win32_System_Console",
+    # The notification-area icon: a message-only window, its popup menu and
+    # Shell_NotifyIconW.
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    # WNDCLASSW carries an hbrBackground: HBRUSH, which lives in Gdi -- so the
+    # whole struct is gated out of the crate without this, exactly like
+    # CreateFileW is without Win32_Security. Nothing here draws anything.
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
     "Win32_System_SystemInformation",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",

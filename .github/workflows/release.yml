@@ -123,7 +123,7 @@ jobs:
               apk add --no-cache build-base musl-dev cmake perl
               # Both binaries, one invocation, inside the musl toolchain.
               cargo build --release --target ${{ matrix.target }} \
-                --bin typhon-engine --bin hydranos
+                --bin typhon-engine --bin hydranos --bin hydranos-update
             '
           # The container writes as root; later steps read as the runner user.
           sudo chown -R "$(id -u):$(id -g)" typhon-engine/target .cargo-home
@@ -154,7 +154,9 @@ jobs:
       # "can't find crate for `core`". This step only collects the artefact.
       - name: Collect hydranos
         working-directory: typhon-engine
-        run: cp target/${{ matrix.target }}/release/hydranos ../hydranos
+        run: |
+          cp target/${{ matrix.target }}/release/hydranos ../hydranos
+          cp target/${{ matrix.target }}/release/hydranos-update ../hydranos-update
 
       - name: Package tarball
         run: |
@@ -162,6 +164,10 @@ jobs:
           DIR="hydranos-${VER}-linux-${{ matrix.arch }}"
           mkdir -p "$DIR"
           cp hydranos "$DIR"/hydranos
+          # ⚠ The updater has to be IN the archive it installs, or it can
+          # never replace itself: an install would be stuck on whatever
+          # version of hydranos-update it first unpacked.
+          cp hydranos-update "$DIR"/hydranos-update
           cp typhon-engine/target/${{ matrix.target }}/release/typhon-engine "$DIR"/hydranos-engine
           cp configs/default.toml "$DIR"/default.toml.example
           cp packaging/hydranos.service "$DIR"/hydranos.service
@@ -220,7 +226,7 @@ jobs:
         working-directory: typhon-engine
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
-        run: cargo build --release --bin typhon-engine --bin hydranos
+        run: cargo build --release --bin typhon-engine --bin hydranos --bin hydranos-update
 
       # The image job learned this the hard way: building an artefact proves
       # nothing about running it. v4.1.0 through v4.1.4 shipped a container
@@ -243,6 +249,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $DIR | Out-Null
           Copy-Item typhon-engine/target/release/hydranos.exe "$DIR/hydranos.exe"
           Copy-Item typhon-engine/target/release/typhon-engine.exe "$DIR/hydranos-engine.exe"
+          # ⚠ In the archive it installs, so it can replace itself.
+          Copy-Item typhon-engine/target/release/hydranos-update.exe "$DIR/hydranos-update.exe"
           Copy-Item configs/default.toml "$DIR/default.toml.example"
           Copy-Item packaging/README-windows.md "$DIR/README.md"
           Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"

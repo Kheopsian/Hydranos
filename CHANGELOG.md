@@ -17,6 +17,52 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.7 -- the Windows build catches up with 3.x
+
+4.1.6 made the daemon build and pass its tests on Windows. It still had none
+of what the 3.x package offered, and `README-windows.md` promised all of it.
+Everything below existed in 3.x, was lost in the V4 rewrite, and is back:
+
+- **A notification-area icon** (`src/hydra/tray.rs`). Open, Check for updates,
+  Quit, double-click to open the UI, and a tooltip with version, torrent count
+  and totals. It runs on its OWN thread: a Win32 window belongs to the thread
+  that created it and only that thread may pump its messages, so it cannot
+  live in the tokio runtime.
+  ⚠ **Quit is a clean stop**, routed into the same `select!` as Ctrl+C and
+  SIGTERM -- the path that flushes resume data. A tray that terminated the
+  process would be the Task Manager kill 3.x warned against.
+  ⚠ The icon is the stock Windows one: 3.x embedded its own, which needs an
+  `.ico` compiled in as a resource. There is none in this tree yet.
+- **`hydranos-update`** (`src/update/main.rs`), a fourth binary. Separate, not
+  a subcommand, because Windows locks a running program's own file: it waits
+  for the daemon to exit before touching anything. The 3.x contract is kept
+  word for word -- **if the download or the checksum fails, nothing is
+  replaced and the daemon is not stopped.** It refuses outright when no
+  `.sha256` is published beside the archive, and renames the old binary aside
+  rather than deleting it, so a failed write puts it back.
+  It now ships INSIDE both archives, or an install could never update it.
+- **A config on first run.** The daemon exited with "reading <path>: No such
+  file or directory" on a fresh install. Only the container ever worked,
+  because entrypoint.sh seeds the file itself -- so the documented Windows
+  route and every bare-metal Linux install hit a wall we never saw.
+- **`hydranos.log`**, beside the config, without ANSI colour. Set
+  `HYDRANOS_LOG_STDOUT` and no file is written.
+- **No console window**, with `--console` to force one. The process attaches
+  to the terminal that launched it, so running it from PowerShell still
+  prints.
+
+🩸 And one fault of my own, worth the note because the symptom looked nothing
+like the cause: **every log line was written twice.** Attaching the console
+wrapped the `CONOUT$` handle in a `File` "so it would not leak"; dropping that
+File CLOSED the handle just installed as `STD_OUTPUT_HANDLE`, and the freed
+handle NUMBER was then reused by the next `CreateFile` -- which was
+`hydranos.log`. stdout silently became the log file, so both tracing layers
+wrote there, each with its own timestamp. The handle is now held for the life
+of the process: that is not a leak, it is stdout.
+
+Tests: 856/856 on Linux, and the updater exercised against the real v4.1.6
+release on Windows hardware -- download, SHA-256, replacement, restart.
+
 ## v4.1.6 -- Windows is built again, and three faults it uncovered
 
 The Windows job had been disabled since the V4 port: it built `./cmd/hydra`
