@@ -17,6 +17,30 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.13 -- the one-off purge is removed, having run
+
+v4.1.0 through v4.1.4 are gone from both the registry and the releases, with
+the untagged children that a tag-only deletion would have orphaned:
+
+    images   : v4.1.5 v4.1.6 v4.1.7 v4.1.8
+    releases : v4.1.5 v4.1.6 v4.1.7 v4.1.8
+
+`purge-oneshot.yml` is deleted along with its `purge-dry` / `purge-apply` tags.
+It was triggered by pushing a tag because this repository is driven over SSH
+with no API token, and **a destructive workflow that anyone with push rights
+can fire by tag name is not something to leave in a tree.** Its own header said
+to remove it once it had run.
+
+⚠ Its release step still exited non-zero on the final run, with nothing left to
+delete. A stray return code, not a failed deletion -- the registry and the
+release list both say so. It is not chased further because the file is gone;
+the reusable `purge-releases.yml`, which is manual and dry-run by default,
+remains for any future withdrawal.
+
+What the explicit mode leaves behind in `ghcr_prune.py` is worth keeping: a
+pruner that refuses an empty token, refuses a registry that will not answer 200
+on its first page, and refuses to claim it removed a tag it never saw.
+
 ## v4.1.12 -- one failure should not skip the other purge
 
 The releases went; the images did not. `purge-apply` deleted v4.1.0-v4.1.2 and
