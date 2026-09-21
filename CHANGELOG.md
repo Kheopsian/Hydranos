@@ -17,6 +17,21 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.12 -- one failure should not skip the other purge
+
+The releases went; the images did not. `purge-apply` deleted v4.1.0-v4.1.2 and
+the two drafts, exited non-zero, and GitHub skipped the next step -- so the
+five broken images stayed, and the job showed ONE failure for TWO different
+outcomes.
+
+- The image step is now `if: always()`. The two purges are independent and
+  chaining them made a partial result look like a total one.
+- The drafts loop read from a pipe, so its `while` ran in a **subshell**: the
+  `rc` it set there never reached the `exit` below, and a failed draft deletion
+  was invisible. It reads from a here-string now, in the same shell.
+
+⚠ The images are still in the registry. This releases the second half.
+
 ## v4.1.11 -- the explicit purge, in the right order
 
 The dry run refused itself, and the guard was right:
