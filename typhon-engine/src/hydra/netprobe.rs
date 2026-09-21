@@ -110,8 +110,19 @@ pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: 
 /// Ask one echo service what address it saw, optionally out through `device`.
 async fn echo(device: Option<&str>, url: &str) -> Option<String> {
     let mut builder = reqwest::Client::builder().timeout(ATTEMPT);
+    // ⚠ Binding a request to a named interface is SO_BINDTODEVICE, which only
+    // exists on Linux -- reqwest does not expose `interface()` anywhere else.
+    // Windows has no equivalent by device NAME (it binds by source ADDRESS),
+    // so the probe answers None rather than silently reporting the address of
+    // the default route as if it had gone out through the tunnel. A wrong
+    // answer here reads as "the VPN is up" when it is not.
+    #[cfg(target_os = "linux")]
     if let Some(dev) = device {
         builder = builder.interface(dev);
+    }
+    #[cfg(not(target_os = "linux"))]
+    if device.is_some() {
+        return None;
     }
     let client = builder.build().ok()?;
     let body = client.get(url).send().await.ok()?.text().await.ok()?;

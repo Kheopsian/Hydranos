@@ -47,8 +47,7 @@ pub fn same_filesystem(a: &Path, b: &Path) -> bool {
 }
 
 fn device_of(p: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(p).ok().map(|m| m.dev())
+    crate::platform::volume_id(p)
 }
 
 fn device_of_nearest(p: &Path) -> Option<u64> {
@@ -68,19 +67,12 @@ fn device_of_nearest(p: &Path) -> Option<u64> {
 /// library's copy stops being the same bytes. A move like that has to be a
 /// rename or nothing.
 pub fn link_count(p: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(p).map(|m| m.nlink()).unwrap_or(1)
+    crate::platform::link_count(p)
 }
 
 /// Free bytes on the filesystem holding `path`.
 pub fn free_space(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
-        return None;
-    }
-    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+    crate::platform::free_space(path)
 }
 
 /// Copy one file, then remove the source.

@@ -855,19 +855,7 @@ pub fn drain_once(
 
 /// Bytes used and total on the filesystem holding `path`.
 fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
-        return None;
-    }
-    let block = stat.f_frsize as u64;
-    let total = stat.f_blocks as u64 * block;
-    // Used is what the filesystem counts as taken, not total minus free: the
-    // reserved blocks are neither available nor used by us, and counting them
-    // as used would trigger a drain on a disk that is not full.
-    let used = (stat.f_blocks as u64 - stat.f_bfree as u64) * block;
-    Some((used, total))
+    crate::platform::usage(path).map(|(used, total, _)| (used, total))
 }
 
 /// Watch our own memory and say so before the kernel does.
@@ -908,10 +896,7 @@ pub fn spawn_memory_watch(limit_bytes: u64) {
 /// From statm, whose second field is the resident page count. Not from
 /// `VmRSS` in status: same number, more parsing.
 fn resident_bytes() -> Option<u64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
-    Some(pages * page_size)
+    crate::platform::resident_bytes()
 }
 
 #[cfg(test)]

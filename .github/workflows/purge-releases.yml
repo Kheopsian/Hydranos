@@ -34,6 +34,35 @@ jobs:
   purge:
     runs-on: ubuntu-latest
     steps:
+      # ⚠ Deleting a tag does NOT delete its release: GitHub keeps the release
+      # and turns it into a DRAFT, which no longer answers /releases/tags/<tag>
+      # and so is invisible to the loop below. v4.1.3 and v4.1.4 became drafts
+      # exactly that way. Drafts are listed, never published, and only findable
+      # by walking every release.
+      - name: Drafts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DRY: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -u
+          rc=0
+          ids=$(gh api "repos/$REPO/releases" --paginate \
+                  --jq '.[] | select(.draft == true) | "\(.id) \(.tag_name)"')
+          if [ -z "$ids" ]; then
+            echo "  no draft release"
+          else
+            echo "$ids" | while read -r id tag; do
+              if [ "$DRY" = "true" ]; then
+                echo "  draft $id ($tag): WOULD delete"
+              else
+                gh api -X DELETE "repos/$REPO/releases/$id" \
+                  && echo "  draft $id ($tag): deleted" || rc=1
+              fi
+            done
+          fi
+          exit $rc
+
       - name: Purge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -129,14 +129,7 @@ fn is_network(path: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };
-    let Ok(c_path) = std::ffi::CString::new(parent.to_string_lossy().as_bytes()) else {
-        return false;
-    };
-    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c_path.as_ptr(), &mut st) } != 0 {
-        return false;
-    }
-    matches!(st.f_type as i64, NFS | SMB | CIFS | SMB2 | FUSE)
+    crate::platform::is_network_fs(parent)
 }
 
 /// Copy the database beside itself before anything rewrites it.

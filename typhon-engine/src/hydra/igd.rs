@@ -240,6 +240,16 @@ pub async fn discover_at(target: SocketAddr) -> Result<Gateway, String> {
         }
         let n = match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, _))) => n,
+            // ⚠ Windows surfaces the ICMP port-unreachable from our own
+            // search as WSAECONNRESET on the NEXT recv of the same UDP
+            // socket; Linux swallows it. Treating it as fatal turned "no
+            // router answered" -- the ordinary case on a machine with no
+            // UPnP gateway -- into a hard error on every Windows host. Keep
+            // listening until the deadline; other devices may still answer.
+            Ok(Err(e)) if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused
+            ) => continue,
             Ok(Err(e)) => return Err(format!("cannot read the answer: {e}")),
             Err(_) => return Err(last),
         };

@@ -185,11 +185,6 @@ jobs:
             hydranos-*-linux-*.tar.gz.sha256
 
   build-windows:
-    # Disabled rather than failed. The step below exited 1 to say "not ported",
-    # which is true, but it turned every single release red -- so a release
-    # that genuinely broke looked exactly like one that worked. The job and its
-    # steps stay in the file so the gap is visible to whoever ports it.
-    if: false
     needs: meta
     runs-on: windows-latest
     steps:
@@ -200,6 +195,15 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # aws-lc-sys assembles its primitives with NASM on Windows and panics
+      # outright when it is missing ("NASM command not found! Build cannot
+      # continue."). The Linux container installs it the same way.
+      - name: Install NASM
+        run: |
+          choco install nasm -y --no-progress
+          echo "C:\\Program Files\\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: pwsh
+
       # Same reason as on linux: with no cache, every release rebuilt the
       # engine's entire dependency tree on the Windows runner, the slowest of
       # the lot.
@@ -207,22 +211,29 @@ jobs:
         with:
           workspaces: typhon-engine
 
-
-      - name: Build Typhon engine
+      # Both binaries, one invocation. The daemon is the Rust `hydranos` bin
+      # now: this job used to build ./cmd/hydra and ./cmd/hydra-update, both Go
+      # and both removed with the Go tree, and it has been disabled since.
+      # ⚠ hydra-update has NO Rust equivalent and is not shipped. The archive
+      # carries the daemon and the engine; updating is a download.
+      - name: Build
         working-directory: typhon-engine
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
-        run: cargo build --release --bin typhon-engine
+        run: cargo build --release --bin typhon-engine --bin hydranos
 
-      # ⚠ The Windows job built ./cmd/hydra and ./cmd/hydra-update, both Go,
-      # both removed with the Go tree. `hydra` has a Rust target and has never
-      # been compiled for Windows; `hydra-update` has no Rust equivalent at
-      # all. Publishing a Windows archive would mean shipping something nobody
-      # has ever run, so the step refuses rather than guessing.
-      - name: Windows build is not ported
+      # The image job learned this the hard way: building an artefact proves
+      # nothing about running it. v4.1.0 through v4.1.4 shipped a container
+      # that exited instantly and every job was green.
+      - name: The binary actually starts
+        shell: pwsh
         run: |
-          echo "::error::the Windows daemon was ./cmd/hydra (Go) and has no Rust replacement yet"
-          exit 1
+          $out = & typhon-engine\target\release\hydranos.exe --version 2>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch "hydranos \d+\.\d+\.\d+") {
+            Write-Output "::error::hydranos.exe did not identify the build"
+            exit 1
+          }
 
       - name: Package zip
         shell: pwsh
@@ -230,9 +241,9 @@ jobs:
           $VER = $env:REL_TAG
           $DIR = "hydranos-$VER-windows-amd64"
           New-Item -ItemType Directory -Force -Path $DIR | Out-Null
-          Copy-Item hydra.exe "$DIR/hydra.exe"
-          Copy-Item typhon-engine/target/release/typhon-engine.exe "$DIR/hydra-engine.exe"
-          Copy-Item hydra-update.exe "$DIR/hydra-update.exe"
+          Copy-Item typhon-engine/target/release/hydranos.exe "$DIR/hydranos.exe"
+          Copy-Item typhon-engine/target/release/typhon-engine.exe "$DIR/hydranos-engine.exe"
+          Copy-Item configs/default.toml "$DIR/default.toml.example"
           Copy-Item packaging/README-windows.md "$DIR/README.md"
           Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"
           $hash = (Get-FileHash "$DIR.zip" -Algorithm SHA256).Hash.ToLower()
@@ -242,6 +253,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          # ⚠ hydranos-*, not hydra-*. The Linux glob carried this exact typo
+          # and silently uploaded nothing for three tags: hydra-* wants a
+          # literal dash after "hydra" and never matches "hydranos-".
           files: |
-            hydra-*-windows-*.zip
-            hydra-*-windows-*.zip.sha256
+            hydranos-*-windows-*.zip
+            hydranos-*-windows-*.zip.sha256
