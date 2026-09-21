@@ -72,7 +72,17 @@ print("versions dans le registre :", len(versions))
 
 rel_tags = sorted({t for v in versions for t in v["metadata"]["container"]["tags"] if vkey(t)}, key=vkey)
 keep = set(rel_tags[-KEEP_N:])
+# ⚠ Subtract the explicit targets HERE, before anything reads `keep`.
+# Doing it later -- inside the plan, where it reads naturally -- was too late:
+# `protected_digests` below is built from the KEPT indexes, so the children of
+# the very tags being removed were resolved as protected, and the guard then
+# refused the plan for containing them. The guard was right; the ordering was
+# not.
+if ONLY_TAGS:
+    keep -= set(ONLY_TAGS)
 print("tags de version : %d | conserves : %s" % (len(rel_tags), sorted(keep, key=vkey)))
+if ONLY_TAGS:
+    print("mode explicite, retires de la retention : %s" % sorted(ONLY_TAGS, key=vkey))
 
 # filet: les 15 versions les plus recentes sont intouchables quoi qu il arrive
 recent = {v["id"] for v in sorted(versions, key=lambda x: x["created_at"], reverse=True)[:15]}
@@ -135,11 +145,6 @@ if ONLY_TAGS:
     # behind, orphaned and invisible, which is how the registry grew to
     # hundreds of versions before.
     wanted = set(ONLY_TAGS)
-    # ⚠ Take them OUT of the retention set first. With nine release tags and
-    # KEEP=10, `keep` holds every tag there is -- so the guard below, which
-    # refuses to delete anything carrying a kept tag, would refuse this whole
-    # plan. Explicit removal has to say so where retention can see it.
-    keep -= wanted
     doomed_digests = set()
     for v in versions:
         tags = v["metadata"]["container"]["tags"]
