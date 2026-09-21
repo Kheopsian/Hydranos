@@ -17,6 +17,44 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.8 -- the tray wears the logo again
+
+4.1.7 shipped the tray with the stock Windows icon, and said so. Looking for
+the `.ico` to embed turned up the real answer: **there never was one.**
+
+The 3.x icon lived in `internal/wintray/icon_windows.go`, which went with every
+other .go file in the history rewrite. Recovered from a backup clone, its own
+comment explains the design:
+
+> Decoding at runtime (rather than shipping a .ico) keeps a single source image
+> in the repo and lets the icon follow the user's DPI, which a fixed 16x16
+> resource cannot do.
+
+So `src/hydra/trayicon.rs` ports the algorithm rather than inventing an asset.
+It decodes `web/static/hydra-logo.png` -- still in the tree, 220x220 RGBA8 --
+and builds an HICON at the shell's small-icon size. The three decisions that
+made the 3.x icon legible are kept, with the measurements that justified them:
+
+- **Crop to the opaque bounds.** An alpha floor of 64 ignores the antialiasing
+  fringe, which peaks at 48/255: invisible on screen, but it widens the
+  bounding box by a pixel on each side and that pixel is wasted at icon size.
+- **Cover, not contain.** Scale until the glyph fills the square on both axes
+  and let the wider one spill. Containing leaves a dead row above and below;
+  covering trims ~7% of each side for ~3% of the ink, because all that lives
+  out there are the tips of the outer two snouts.
+- **Average, do not sample.** Nearest-neighbour from 214px to 16px lands on
+  isolated pixels: **38% of the icon carried ink where neighbouring tray icons
+  carry 69%.** Box-averaging lifts that to 68%.
+
+⚠ One thing the port had to add: Go reached pixels through `color.RGBA()`,
+which premultiplies alpha, while the `png` crate hands back straight alpha.
+Premultiplying explicitly is what keeps the two identical at the edges --
+without it the ports would have diverged silently on exactly the fringe the
+alpha floor exists to manage.
+
+Falls back to the stock icon if anything about the PNG surprises it: a tray
+with a generic icon works, one with no icon does not.
+
 ## v4.1.7 -- the Windows build catches up with 3.x
 
 4.1.6 made the daemon build and pass its tests on Windows. It still had none

@@ -33,6 +33,7 @@ mod allocdiag;
 mod api;
 mod platform;
 mod tray;
+mod trayicon;
 mod engines;
 mod errclass;
 mod logbuf;

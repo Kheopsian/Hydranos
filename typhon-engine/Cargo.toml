@@ -90,6 +90,9 @@ nix = { version = "0.29", features = ["fs"] }
 # hard-link count, free space, page size, working set, local time and the
 # network-filesystem test. See src/hydra/platform.rs.
 [target.'cfg(windows)'.dependencies]
+# The tray icon is built from web/static/hydra-logo.png at run time, as the Go
+# tray did: one source image, and an icon that follows the user's DPI.
+png = "0.17"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     # CreateFileW takes a *const SECURITY_ATTRIBUTES, so the function is gated
