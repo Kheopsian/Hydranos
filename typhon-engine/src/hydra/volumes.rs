@@ -120,8 +120,7 @@ pub fn clear_policy(state: &crate::api::AppState, mount: &str) -> anyhow::Result
 }
 
 pub fn device_of(p: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(p).ok().map(|m| m.dev())
+    crate::platform::volume_id(p)
 }
 
 /// Device of the nearest existing ancestor.
@@ -144,17 +143,7 @@ pub fn device_of_nearest(p: &Path) -> Option<u64> {
 /// reserved blocks are neither available to us nor used by us, and counting
 /// them as used would drain a disk that is not full.
 pub fn usage(path: &Path) -> Option<(u64, u64, u64)> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
-        return None;
-    }
-    let block = stat.f_frsize as u64;
-    let total = stat.f_blocks as u64 * block;
-    let used = (stat.f_blocks as u64 - stat.f_bfree as u64) * block;
-    let free = stat.f_bavail as u64 * block;
-    Some((used, total, free))
+    crate::platform::usage(path)
 }
 
 /// Mount point of the filesystem a path sits on.
@@ -289,19 +278,30 @@ mod tests {
         assert!(off.inherited);
     }
 
+    /// The OS temp directory, which exists on every platform this builds for.
+    /// These tests used to write "/tmp", which on Windows is neither absolute
+    /// nor present -- and the assertions still passed, because the Win32 path
+    /// lookup answered for a directory that was not there.
+    fn tmp() -> PathBuf {
+        std::env::temp_dir()
+    }
+
     #[test]
     fn device_of_answers_for_a_path_that_exists_and_not_for_one_that_does_not() {
-        assert!(device_of(Path::new("/tmp")).is_some());
-        assert!(device_of(Path::new("/tmp/typhon-no-such-path-6f1a2b")).is_none());
+        assert!(device_of(&tmp()).is_some());
+        assert!(device_of(&tmp().join("typhon-no-such-path-6f1a2b")).is_none());
     }
 
     /// A save path may point at a directory nobody has created yet. That is
     /// not a reason to lose the torrent from its volume.
     #[test]
     fn a_save_path_not_yet_created_still_resolves_to_its_volume() {
-        let deep = Path::new("/tmp/typhon-absent-a/typhon-absent-b/typhon-absent-c");
-        let got = device_of_nearest(deep).expect("walks up to /tmp, which exists");
-        assert_eq!(got, device_of(Path::new("/tmp")).unwrap());
+        let deep = tmp()
+            .join("typhon-absent-a")
+            .join("typhon-absent-b")
+            .join("typhon-absent-c");
+        let got = device_of_nearest(&deep).expect("walks up to the temp dir, which exists");
+        assert_eq!(got, device_of(&tmp()).unwrap());
     }
 
     /// Walking up from an existing path must land on a real ancestor that is
@@ -309,12 +309,15 @@ mod tests {
     /// point the UI shows.
     #[test]
     fn the_mount_point_is_an_ancestor_on_the_same_device() {
-        let p = Path::new("/tmp");
-        let mount = mount_point_of(p);
-        assert!(p.starts_with(&mount) || mount.starts_with(p), "{mount:?} must be on the /tmp branch");
+        let p = tmp();
+        let mount = mount_point_of(&p);
+        assert!(
+            p.starts_with(&mount) || mount.starts_with(&p),
+            "{mount:?} must be on the same branch as the temp dir"
+        );
         assert_eq!(
             device_of(&mount).unwrap(),
-            device_of_nearest(p).unwrap(),
+            device_of_nearest(&p).unwrap(),
             "the mount point sits on the same filesystem as the path"
         );
     }
@@ -325,7 +328,7 @@ mod tests {
     fn an_unreachable_path_is_its_own_mount_point() {
         // Nothing under a path that cannot exist is stattable, and `/` always
         // is, so the walk terminates either way.
-        let mount = mount_point_of(Path::new("/tmp/typhon-absent-x/y"));
+        let mount = mount_point_of(&tmp().join("typhon-absent-x").join("y"));
         assert!(mount.is_absolute());
     }
 
@@ -334,7 +337,7 @@ mod tests {
     /// disk that is not full.
     #[test]
     fn usage_does_not_count_reserved_blocks_as_used() {
-        let (used, total, free) = usage(Path::new("/tmp")).expect("/tmp is a filesystem");
+        let (used, total, free) = usage(&tmp()).expect("the temp dir is on a filesystem");
         assert!(total > 0, "a mounted filesystem has a size");
         assert!(used <= total);
         assert!(free <= total);
@@ -346,10 +349,14 @@ mod tests {
 
     #[test]
     fn usage_of_a_path_that_does_not_exist_is_none() {
-        assert!(usage(Path::new("/tmp/typhon-no-such-path-6f1a2b")).is_none());
+        assert!(usage(&tmp().join("typhon-no-such-path-6f1a2b")).is_none());
     }
 
     /// An interior NUL cannot be handed to statvfs; that is a None, not a panic.
+    ///
+    /// Unix only: the Windows path goes through encode_wide, which has no
+    /// CString conversion to fail, so there is nothing to assert there.
+    #[cfg(unix)]
     #[test]
     fn usage_rejects_a_path_with_an_interior_nul() {
         use std::ffi::OsStr;

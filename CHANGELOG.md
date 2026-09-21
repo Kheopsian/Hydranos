@@ -17,6 +17,61 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.6 -- Windows is built again, and three faults it uncovered
+
+The Windows job had been disabled since the V4 port: it built `./cmd/hydra`
+and `./cmd/hydra-update`, both Go, both removed with the Go tree. The daemon
+is Rust now and compiles for `x86_64-pc-windows-msvc`.
+
+`src/hydra/platform.rs` holds the seven primitives Unix takes from libc --
+volume identity, hard-link count, free space, page size, working set, local
+date and the network-filesystem test. **Every Unix implementation is unchanged
+byte for byte**; the Windows side is written to the same *meaning*, not the
+same call.
+
+Porting it found three real faults, two of which would have been silent:
+
+- 🩸 **`volume_id` answered for paths that do not exist.**
+  `GetVolumePathNameW` is a LEXICAL operation: handed a missing path it still
+  succeeds, walking up to the current drive root. The Unix side goes through
+  `metadata()` and answers None, and callers lean on that -- `same_volume()`
+  returning false is what makes a move fall back to copy instead of rename.
+  Windows now checks existence first.
+- 🩸 **UPnP discovery failed hard on Windows.** Windows surfaces the ICMP
+  port-unreachable from our own search as `WSAECONNRESET` on the next recv of
+  the same UDP socket; Linux swallows it. "No router answered" -- the ordinary
+  case on a machine with no gateway -- became an error on every Windows host.
+  A reset is now treated as no answer, and the search runs to its deadline.
+- **The daemon never created its `data_dir`.** SQLite makes the file, never
+  the directory, so a fresh `data_dir` failed with "unable to open database
+  file" and the daemon fell straight into rescue mode. The container hid this
+  because `entrypoint.sh` does its own `mkdir -p`; **every bare-metal install
+  hit it, on Linux as much as on Windows** -- the same untravelled path as the
+  `install.sh` 404 fixed in 4.1.2.
+
+Also:
+
+- The Windows release job carried the same `files: hydra-*` glob that made
+  v4.1.1 through v4.1.3 publish nothing. Fixed before it ever ran, and the job
+  gained a **binary actually starts** step for the same reason the image one
+  did.
+- ⚠ `hydra-update.exe` is NOT shipped: it was Go and has no Rust equivalent.
+  The archive carries the daemon, the engine, a config example and a README.
+- `purge-releases.yml` learned about **drafts**. Deleting a tag does not delete
+  its release, it turns it into a draft, which no longer answers
+  `/releases/tags/<tag>` and was invisible to the tag loop.
+- Ten hard-coded `/tmp` paths in the volumes tests now use the OS temp
+  directory. Some of them passed on Windows *because* of the `volume_id` fault
+  above.
+
+- `packaging/README-windows.md` described the 3.x Go package: a tray icon, an
+  updater, no console window, a config written on first run and an engine
+  started as a second process. **None of that is true of the V4 binary**, and
+  the file ships inside the archive. Rewritten to describe what is actually
+  there, with an explicit table of what was lost in the rewrite.
+
+Tests: **855/855 on Windows** (run on real hardware), **856/856 on Linux**.
+
 ## v4.1.5 -- the image starts
 
 Every published v4.1.x container exited on its first instruction:

@@ -71,6 +71,22 @@ tikv-jemallocator = { version = "0.5", features = ["profiling", "unprefixed_mall
 tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 nix = { version = "0.29", features = ["fs"] }
 
+# Win32 for the seven system primitives Unix gets from libc: volume identity,
+# hard-link count, free space, page size, working set, local time and the
+# network-filesystem test. See src/hydra/platform.rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    # CreateFileW takes a *const SECURITY_ATTRIBUTES, so the function is gated
+    # out of the crate unless Win32_Security is on -- even though nothing here
+    # passes anything but a null pointer for it.
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
 [features]
 default = []
 tokio-console = ["dep:console-subscriber"]

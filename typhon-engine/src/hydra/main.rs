@@ -24,6 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod allocdiag;
 mod api;
+mod platform;
 mod engines;
 mod errclass;
 mod logbuf;
@@ -165,6 +166,22 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // otherwise answer every caller who sends no key. See config::ensure_api_key.
     config::ensure_api_key(&mut config, &config_path);
     let config = config;
+
+    // ⚠ Create data_dir HERE, before anything opens a database in it. SQLite
+    // makes the FILE but never the DIRECTORY: a data_dir that does not exist
+    // fails with "unable to open database file", and the engines -- which
+    // start below and read the store themselves -- fall back to the .torrent
+    // files while the daemon drops into rescue mode.
+    //
+    // ⚠ Placing this next to store_path (some 25 lines down) is too late:
+    // EngineHost::start runs first and has already failed by then. That is
+    // exactly the mistake this comment exists to stop someone repeating.
+    //
+    // The container never hit any of it, because entrypoint.sh does its own
+    // mkdir -p. Every bare-metal install did, on Linux as much as on Windows.
+    if let Err(e) = std::fs::create_dir_all(&config.daemon.data_dir) {
+        tracing::warn!("could not create data_dir {}: {}", config.daemon.data_dir, e);
+    }
 
     let host = if config.daemon.api_host.is_empty() {
         "0.0.0.0".to_string()

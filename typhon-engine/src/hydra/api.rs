@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRANOS_VERSION: &str = "4.1.5";
+pub const HYDRANOS_VERSION: &str = "4.1.6";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -144,13 +144,7 @@ pub type Odo = Arc<std::sync::Mutex<Odometer>>;
 /// Local, not UTC: the operator's day ends at midnight where they are, and the
 /// container is given TZ=Europe/Paris for exactly this.
 fn local_date() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&now as *const i64, &mut tm) };
-    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    crate::platform::local_date()
 }
 
 /// Bytes this session and today, from the engines' lifetime counters.
@@ -3561,17 +3555,13 @@ async fn get_engines(
 
 /// Free-space figures for a path, from statvfs.
 fn disk_usage(path: &str) -> (i64, i64, f64) {
-    use std::ffi::CString;
-    let Ok(c_path) = CString::new(path) else {
+    let Some((_, total, free)) = crate::platform::usage(std::path::Path::new(path)) else {
         return (0, 0, 0.0);
     };
-    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c_path.as_ptr(), &mut st) } != 0 {
-        return (0, 0, 0.0);
-    }
-    let block = st.f_frsize as i64;
-    let total = st.f_blocks as i64 * block;
-    let free = st.f_bavail as i64 * block;
+    let (total, free) = (total as i64, free as i64);
+    // ⚠ Kept as total-minus-available, which is what 3.x published on this
+    // endpoint. platform::usage also returns a "used" that excludes reserved
+    // blocks; swapping to it here would move a number the UI has always shown.
     let used = total - free;
     // One decimal, as 3.x publishes it.
     let pct = if total > 0 {

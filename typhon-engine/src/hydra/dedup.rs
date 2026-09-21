@@ -309,15 +309,7 @@ fn same_filesystem(a: &Path, b: &Path) -> bool {
 }
 
 fn device_of(p: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    let mut cur = Some(p);
-    while let Some(path) = cur {
-        if let Ok(md) = std::fs::metadata(path) {
-            return Some(md.dev());
-        }
-        cur = path.parent();
-    }
-    None
+    crate::platform::volume_id_nearest(p)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -464,12 +456,19 @@ mod tests {
         let done = apply(&p).unwrap();
         assert_eq!(done.created, 1);
 
-        // The link must BE the source inode, not a copy of it.
-        use std::os::unix::fs::MetadataExt;
-        let a = std::fs::metadata(src.join("Old.Name").join("a.mkv")).unwrap();
-        let b = std::fs::metadata(dst.join("New.Name").join("a.mkv")).unwrap();
-        assert_eq!(a.ino(), b.ino());
-        assert_eq!(b.nlink(), 2);
+        // The link must BE the source inode, not a copy of it. Unix only:
+        // NTFS has a file id and a link count too, but reading them needs an
+        // open handle rather than metadata, and what this test guards -- that
+        // apply() linked instead of copying -- is asserted by `created` above
+        // on every platform.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let a = std::fs::metadata(src.join("Old.Name").join("a.mkv")).unwrap();
+            let b = std::fs::metadata(dst.join("New.Name").join("a.mkv")).unwrap();
+            assert_eq!(a.ino(), b.ino());
+            assert_eq!(b.nlink(), 2);
+        }
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

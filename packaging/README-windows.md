@@ -1,108 +1,90 @@
-# Hydra on Windows
+# Hydranos on Windows
 
 Native Windows build. This archive contains:
 
-- `hydranos.exe` — the app (web UI + API). **This is the only one you run.**
-- `hydranos-engine.exe` — the BitTorrent engine, started automatically by `hydranos.exe`.
-- `hydranos-update.exe` — the updater. You do not run this one directly;
-  Hydra starts it for you from the tray.
+- `hydranos.exe` - the daemon: web UI, API and the BitTorrent engine, all in
+  one process. **This is the one you run.**
+- `hydranos-engine.exe` - the engine as a standalone binary, for multi-node
+  setups (`--agent-only`). A single-machine install never needs it.
+- `default.toml.example` - a starting configuration.
 
 ## Run
 
-1. Unzip all three into a folder you can write to, e.g. `C:\Hydra` (keep them
-   **together** — the app looks for the engine next to itself).
-2. Double-click **`hydranos.exe`**.
+1. Unzip into a folder you can write to, e.g. `C:\Hydranos`.
+2. Copy `default.toml.example` to `default.toml` and edit `data_dir` to point
+   somewhere you can write, e.g. `data_dir = "C:/Hydranos/data"`.
+3. Start it:
 
-Hydra starts in the background with **no console window**. You will find it in
-the notification area (the tray, next to the clock) — that icon is how you open
-and stop it.
+```
+hydranos.exe --config C:\Hydranos\default.toml
+```
 
-On first run it writes a `default.toml` and a `data\` folder next to itself and
-generates an API key. There is **no password to copy down**: you create the
-admin account yourself, in the browser, on the welcome screen.
+An API key is generated into that file on first start, and the `data_dir` is
+created if it does not exist.
 
-3. Open the web UI at `http://127.0.0.1:8199` — or double-click the tray icon,
-   which does the same thing.
+4. Open the web UI at `http://127.0.0.1:8199` (or whatever `api_port` you set).
 
-No config file to copy, no `--config` to pass. To change ports or paths later,
-edit the `default.toml` it created and restart.
+## What is NOT in this build
 
-## The tray icon
+The 3.x Windows package was a different program -- a Go daemon with a
+notification-area icon and a separate updater. The V4 rewrite is one Rust
+binary, and these have **not** been ported:
 
-| Action | Result |
+| Gone | What to do instead |
 | --- | --- |
-| Hover | Version, current download / upload rate, torrent count |
-| Double-click | Opens the web UI |
-| Right-click → **Open Hydra** | Same |
-| Right-click → **Check for updates** | Fetches the newest release and restarts Hydra |
-| Right-click → **Quit Hydra** | **Stops Hydra cleanly** |
+| Tray icon (open / quit / update) | Run it from a terminal, or as a service |
+| `hydranos-update.exe` | Download the new archive and replace the `.exe` |
+| Starting with no console window | It is a console program; a service wrapper hides it |
+| Config written automatically on first run | Copy `default.toml.example` yourself |
 
-**Use "Quit Hydra" to stop it.** That is the path that saves resume data for
-every torrent before exiting. Killing `hydranos.exe` from Task Manager skips it,
-and the next start has to re-check the affected torrents.
-
-## Running it from a terminal
-
-Started from PowerShell or `cmd`, Hydra attaches to *that* window and prints its
-banner and log lines there, as any console program would. Nothing is hidden —
-the console is simply not created when you don't ask for one.
-
-If you need a console window in a case where there isn't one to attach to (a
-shortcut, a scheduler, debugging), start it with `--console`.
-
-Either way every line is also written to **`hydranos.log`**, next to the config,
-and shown in the UI's **Logs** tab. Setting `HYDRANOS_LOG_STDOUT` sends that
-mirror to stdout instead, and no `hydranos.log` is written at all.
-
-## Updating
-
-Right-click the tray icon and pick **Check for updates**.
-
-Hydra checks what the latest published release is and, if there is a newer one,
-asks before doing anything. If you say yes it downloads the archive, checks it
-against the SHA-256 published beside it, stops Hydra cleanly, replaces
-`hydranos.exe` and `hydranos-engine.exe`, and starts Hydra again.
-
-Your settings and data are never touched. `default.toml`, `data\` and
-`hydranos.log` sit beside the executables and are not part of the archive, so
-updating in place is the one route that cannot lose them - unzipping a new
-release into a *different* folder is what leaves people wondering where their
-torrents went.
-
-Hydra has to stop for its files to be replaced, because Windows locks a running
-program's own file. That is why the updater is a separate `hydranos-update.exe`:
-it waits for Hydra to exit before touching anything. If the download or the
-checksum fails, nothing is replaced and Hydra is not stopped.
-
-You can also update by hand: quit Hydra from the tray, unzip the new release
-over the old files, and start it again.
+⚠ **Stopping it cleanly matters.** Ctrl+C in its console flushes resume data for
+every torrent before exiting. Killing it from Task Manager skips that, and the
+next start has to re-check the affected torrents.
 
 ## Start on boot / run as a service
 
-Hydra has no window and no console of its own, so a service wrapper such as
-[NSSM](https://nssm.cc/) works cleanly:
+A service wrapper such as [NSSM](https://nssm.cc/) works:
 
 ```
-nssm install Hydra "C:\Hydra\hydranos.exe"
-nssm start Hydra
+nssm install Hydranos "C:\Hydranos\hydranos.exe" "--config C:\Hydranos\default.toml"
+nssm start Hydranos
 ```
 
-Note that a service runs in its own session, so **the tray icon will not be
-visible** — manage it from the web UI in that setup.
+For a plain start-on-login, put a shortcut in the Startup folder
+(`Win+R` -> `shell:startup`).
 
-For a plain start-on-login, a shortcut to `hydranos.exe` in the Startup folder
-(`Win+R` → `shell:startup`) is enough, and keeps the tray icon.
+## Updating
+
+Stop Hydranos, unzip the new archive **over the old files**, start it again.
+
+Your settings and data are never touched: `default.toml` and `data\` are not
+part of the archive. Unzipping a new release into a *different* folder is what
+leaves people wondering where their torrents went.
+
+Verify the download against the `.sha256` published beside it:
+
+```
+(Get-FileHash hydranos-<version>-windows-amd64.zip -Algorithm SHA256).Hash
+```
 
 ## VPN
 
-Hydra does not manage the VPN on Windows — use your VPN client's system-wide or
-per-app binding / kill-switch (Mullvad, AirVPN, Proton, etc.). All of Hydra's
-traffic then goes through the tunnel like any other app.
+Hydranos does not manage the VPN on Windows, and the Linux mechanism does not
+exist here: interface binding is `SO_BINDTODEVICE`, which Windows has no
+equivalent for. Use your VPN client system-wide or per-app
+(Mullvad, AirVPN, Proton...). All traffic then goes through the tunnel like any
+other application.
+
+⚠ For the same reason the **exit-IP probe reports nothing on Windows** rather
+than guess. A probe that answered with the default route address would read as
+"the VPN is up" when it is not.
 
 ## Notes
 
-- **Windows Firewall** may prompt on first listen — allow it on your private
+- **Windows Firewall** may prompt on first listen -- allow it on your private
   network so peers can reach you.
+- **uTP** needs its UDP port free. If another program holds it, uTP is disabled
+  with a log line and TCP carries on alone.
 - Heap profiling (jemalloc) is Linux-only and absent here; the system allocator
   is used instead. No difference for normal use.
-- Full docs: https://github.com/Kheopsian/Hydranos/wiki/Windows-Install
+- Full docs: https://github.com/Kheopsian/Hydranos/wiki
