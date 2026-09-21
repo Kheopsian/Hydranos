@@ -18,7 +18,14 @@ KEEP_N = int(os.environ.get("KEEP") or 10)
 # leave it changed.
 ONLY_TAGS = [t for t in (os.environ.get("ONLY_TAGS") or "").replace(",", " ").split() if t]
 BATCH = 20
-TOKEN = os.environ["GHCR_TOKEN"]
+# ⚠ Demand it. An absent secret arrives as an EMPTY string, and an empty
+# bearer makes every request 401 -- which the inventory loop below read as
+# "the last page", leaving zero versions, an empty plan, "garde-fou OK" and
+# exit 0. A pruner that cannot tell "nothing to prune" from "I could not read
+# the registry" reports success either way, which is how this went unnoticed.
+TOKEN = os.environ.get("GHCR_TOKEN") or ""
+if not TOKEN.strip():
+    sys.exit("REFUS: GHCR_TOKEN est vide ou absent -- impossible de lire le registre")
 APPLY = "--apply" in sys.argv
 BASE  = "https://api.github.com/users/%s/packages/container/%s" % (OWNER, PKG)
 
@@ -48,10 +55,19 @@ def vkey(t):
 versions, page = [], 1
 while True:
     st, batch = api("%s/versions?per_page=100&page=%d" % (BASE, page))
-    if st != 200 or not batch:
+    # ⚠ Distinguish the end of the pages from a refusal. Treating 401/404 as
+    # "no more pages" is exactly what turned an unreadable registry into an
+    # empty, successful plan.
+    if st != 200:
+        if page == 1:
+            sys.exit("REFUS: le registre repond %d sur %s -- droits ou nom de paquet" % (st, BASE))
+        break
+    if not batch:
         break
     versions += batch
     page += 1
+if not versions:
+    sys.exit("REFUS: zero version lue alors que le paquet existe -- lecture incomplete")
 print("versions dans le registre :", len(versions))
 
 rel_tags = sorted({t for v in versions for t in v["metadata"]["container"]["tags"] if vkey(t)}, key=vkey)
@@ -147,6 +163,13 @@ if ONLY_TAGS:
         dig = next(v["name"] for v in versions if v["id"] == vid)
         assert dig not in protected_digests, (
             "REFUS: %s (%s) est aussi un enfant d un index conserve" % (vid, dig[:19]))
+    # ⚠ A tag asked for and not found is a failure, not an empty plan: it means
+    # the registry was read wrong, or the name is wrong, and reporting success
+    # would claim a removal that never happened.
+    found = {t for _, tags in doomed for t in tags if t in wanted}
+    missing = wanted - found
+    if missing:
+        sys.exit("REFUS: ces tags sont introuvables dans le registre: %s" % sorted(missing))
     print("mode explicite: %d versions visees pour %s" % (len(doomed), sorted(wanted)))
     spared_kept = len(versions) - len(doomed)
 else:
