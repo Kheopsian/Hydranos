@@ -17,6 +17,30 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.1.10 -- the pruner can no longer succeed at nothing
+
+The one-off purge failed on its image step, and reproducing it locally found
+something worse than the failure.
+
+🩸 **An empty GHCR token produced a green run.** A missing secret arrives as an
+EMPTY string, an empty bearer makes every request 401, and the inventory loop
+read that 401 as "the last page". Zero versions, an empty plan, "garde-fou OK",
+exit 0. **The pruner could not tell "nothing to prune" from "I could not read
+the registry", and reported success either way.**
+
+This matters beyond the purge: it means `prune-images` reporting success while
+the registry kept every tag has TWO possible explanations -- nine release tags
+against KEEP=10, which leaves nothing outside the window, or a token that never
+worked. Both look identical from outside, which is the whole problem.
+
+Now it refuses, loudly, on all three:
+
+- a `GHCR_TOKEN` that is empty or absent;
+- a registry answering anything but 200 on the FIRST page (later pages may
+  legitimately end the walk; the first cannot);
+- in explicit mode, a tag asked for and not found -- claiming to have removed
+  something never seen would assert a cleanup that did not happen.
+
 ## v4.1.9 -- the broken v4.1.x are withdrawn
 
 v4.1.0 through v4.1.4 cannot be installed by any route: the image named its
