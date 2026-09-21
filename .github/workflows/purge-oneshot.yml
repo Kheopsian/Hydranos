@@ -49,16 +49,19 @@ jobs:
         run: |
           set -u
           rc=0
+          # ⚠ A `while` on the right of a pipe runs in a SUBSHELL: rc set in
+          # there never reached the exit below, so a failed draft deletion was
+          # invisible. Read from a here-string instead, in this shell.
           drafts=$(gh api "repos/$REPO/releases" --paginate \
                      --jq '.[] | select(.draft == true) | "\(.id) \(.tag_name)"')
-          echo "$drafts" | while read -r id tag; do
+          while read -r id tag; do
             [ -z "${id:-}" ] && continue
             if [ "$APPLY" = "yes" ]; then
               gh api -X DELETE "repos/$REPO/releases/$id" && echo "  draft $tag deleted" || rc=1
             else
               echo "  draft $tag ($id): WOULD delete"
             fi
-          done
+          done <<< "$drafts"
           for t in $TAGS; do
             id=$(gh api "repos/$REPO/releases/tags/$t" --jq .id 2>/dev/null || true)
             if [ -z "$id" ]; then
@@ -79,7 +82,12 @@ jobs:
       # Explicit mode, not a lowered KEEP: retention answers "how many do we
       # keep", this answers "this one is broken". It removes each index AND
       # its untagged children, which a manual tag deletion would orphan.
+      # ⚠ always(): the two purges are independent, and chaining them meant a
+      # non-zero exit from the releases step silently skipped the images -- the
+      # releases went, the five broken images stayed, and the job reported one
+      # failure for two different outcomes.
       - name: Images
+        if: ${{ always() }}
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
           OWNER: ${{ github.repository_owner }}
