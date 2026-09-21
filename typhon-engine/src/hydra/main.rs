@@ -1,3 +1,10 @@
+// ⚠ Windows only: without this the daemon is a console program, and
+// double-clicking it opens a black window that closes when it does. The 3.x
+// package had no such window and this build regressed it. `windows` means "no
+// console is created for me"; the startup code below ATTACHES to the terminal
+// that launched us when there is one, so running it from PowerShell still
+// prints, and --console makes one on purpose.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! hydra -- the unified daemon.
 //!
 //! 4.0.0 replaces two processes with one. The Go front and the Rust engine used
@@ -11,7 +18,7 @@
 //! the Go binary with tools/paritydiff, running both against the same frozen
 //! store, before the next one begins.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // Per BINARY, not per crate. `typhon-engine`'s main.rs carries this attribute;
@@ -25,6 +32,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod allocdiag;
 mod api;
 mod platform;
+mod tray;
 mod engines;
 mod errclass;
 mod logbuf;
@@ -64,11 +72,20 @@ mod session;
 
 use config::Config;
 
-fn parse_args() -> PathBuf {
+/// What the command line asked for.
+struct Args {
+    config: PathBuf,
+    /// Make a console window even when launched without one.
+    console: bool,
+}
+
+fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut path = PathBuf::from("/config/default.toml");
+    let mut console = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--console" => console = true,
             "--config" => {
                 if let Some(value) = args.next() {
                     path = PathBuf::from(value);
@@ -86,8 +103,64 @@ fn parse_args() -> PathBuf {
             _ => {}
         }
     }
-    path
+    Args { config: path, console }
 }
+
+/// Attach to the terminal that launched us, or make one when asked.
+///
+/// With `windows_subsystem = "windows"` the process starts with NO standard
+/// handles at all. `AttachConsole(ATTACH_PARENT_PROCESS)` gives them back when
+/// a terminal launched us -- so `hydranos.exe` in PowerShell prints its log as
+/// any console program would -- and fails harmlessly when nothing launched us
+/// from a console, which is the double-click case the 3.x package handled by
+/// having no window either.
+///
+/// ⚠ Attaching is not enough on its own: the C runtime opened stdout before
+/// main ran and still points at nothing. The handles are reopened onto CONOUT$
+/// so `println!` reaches the window.
+#[cfg(windows)]
+fn attach_console(force: bool) {
+    use windows_sys::Win32::System::Console::{AllocConsole, AttachConsole, ATTACH_PARENT_PROCESS};
+    let attached = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0;
+    if !attached && force {
+        unsafe { AllocConsole() };
+    } else if !attached {
+        return;
+    }
+    // Point the standard streams at the console we now have.
+    //
+    // ⚠ The handle is deliberately NEVER closed. Wrapping it in a File "so it
+    // does not leak" closes it when that File drops -- and the freed handle
+    // NUMBER is then reused by the next CreateFile, which is hydranos.log.
+    // stdout silently became the log file, so the console layer and the file
+    // layer both wrote there and every line appeared twice. The process owns
+    // this handle for its whole life; that is not a leak, it is stdout.
+    unsafe {
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileA, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows_sys::Win32::System::Console::{
+            SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        let h = CreateFileA(
+            c"CONOUT$".as_ptr() as *const u8,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        );
+        if h != INVALID_HANDLE_VALUE {
+            SetStdHandle(STD_OUTPUT_HANDLE, h);
+            SetStdHandle(STD_ERROR_HANDLE, h);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console(_force: bool) {}
 
 /// Serve the rescue surface and nothing else.
 async fn rescue(
@@ -122,6 +195,65 @@ async fn rescue(
     Ok(())
 }
 
+/// Write a starting config when there is none.
+///
+/// ⚠ The daemon used to exit with "reading <path>: No such file or directory"
+/// on a fresh install. Only the container ever worked, because entrypoint.sh
+/// seeds the file itself -- so the documented Windows route ("unzip and run")
+/// and every bare-metal Linux install hit a wall the maintainers never saw.
+/// The template is the one shipped in configs/, compiled in so the binary
+/// needs nothing beside it.
+fn seed_config(path: &Path) {
+    if path.exists() {
+        return;
+    }
+    let Some(dir) = path.parent() else { return };
+    if !dir.as_os_str().is_empty() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("hydranos: cannot create {}: {e}", dir.display());
+            return;
+        }
+    }
+    // data_dir follows the config rather than staying at the Linux default:
+    // "/config" is not writable on Windows and does not exist on a bare-metal
+    // Linux box either.
+    let data_dir = if dir.as_os_str().is_empty() {
+        PathBuf::from("data")
+    } else {
+        dir.join("data")
+    };
+    let template = include_str!("../../../configs/default.toml");
+    let seeded = template.replace(
+        "data_dir = \"/config\"",
+        &format!("data_dir = \"{}\"", data_dir.display().to_string().replace('\\', "/")),
+    );
+    match std::fs::write(path, seeded) {
+        Ok(()) => eprintln!("hydranos: wrote a starting config at {}", path.display()),
+        Err(e) => eprintln!("hydranos: cannot write {}: {e}", path.display()),
+    }
+}
+
+/// The on-disk log, beside the config. None when the operator asked for stdout
+/// only, or when the file cannot be opened -- a daemon that will not start
+/// because its log file is read-only would be a poor trade.
+fn log_file(config_path: &Path) -> Option<std::fs::File> {
+    if std::env::var_os("HYDRANOS_LOG_STDOUT").is_some() {
+        return None;
+    }
+    let dir = config_path.parent().filter(|d| !d.as_os_str().is_empty());
+    let path = match dir {
+        Some(d) => d.join("hydranos.log"),
+        None => PathBuf::from("hydranos.log"),
+    };
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("hydranos: no log file at {} ({e}); console only", path.display());
+            None
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // Explicit runtime instead of #[tokio::main]: the macro's default is one
     // worker per core, which on a 128-core host is ~4x more workers than this
@@ -144,23 +276,47 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Every event goes both to stderr and to the in-memory ring the Logs tab
     // reads. Registering the ring as a layer rather than scraping stderr keeps
     // the level and the message as fields instead of a line to re-parse.
+    // ⚠ The command line is read BEFORE logging starts, not after: the log
+    // file lives next to the config, so there is no file to open until the
+    // config path is known. Initialising the subscriber first is what used to
+    // send every startup line to a console that may not exist.
+    let args = parse_args();
+    attach_console(args.console);
+    let config_path = args.config;
+    seed_config(&config_path);
+
     let logs = logbuf::LogBuffer::new();
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "info".into()),
-            )
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "info".into());
+        let registry = tracing_subscriber::registry()
+            .with(filter)
             .with(tracing_subscriber::fmt::layer())
-            .with(logbuf::LogLayer { buffer: logs.clone() })
-            .init();
+            .with(logbuf::LogLayer { buffer: logs.clone() });
+
+        // A second copy on disk, beside the config. Without it a daemon
+        // started with no console -- a service, a shortcut, the Windows
+        // double-click -- keeps no record of why it would not start.
+        // HYDRANOS_LOG_STDOUT means "the console copy is enough", and no file
+        // is written at all.
+        match log_file(&config_path) {
+            Some(file) => registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        // No colour: this is read in Notepad, and escape
+                        // codes there are line noise.
+                        .with_ansi(false)
+                        .with_writer(move || file.try_clone().expect("clone the log handle")),
+                )
+                .init(),
+            None => registry.init(),
+        }
     }
 
     tracing::info!("tokio runtime: {} worker threads", workers);
 
-    let config_path = parse_args();
     let mut config = Config::load(&config_path)?;
     // Before anything is served: an install with no key of its own would
     // otherwise answer every caller who sends no key. See config::ensure_api_key.
@@ -486,6 +642,28 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Taken before the router consumes the state: `flush_on_shutdown` needs the
     // engines, and by then `state` has been moved.
     let engines_for_shutdown = state.engines.clone();
+
+    // The notification-area icon, as the 3.x Windows package had. A no-op on
+    // Unix. The closure is what it shows on hover, rebuilt every couple of
+    // seconds by the tray thread -- it holds engine handles, not a snapshot,
+    // so a tooltip cannot go stale the way a copied value would.
+    {
+        let engines = state.engines.clone();
+        tray::spawn(
+            port,
+            std::sync::Arc::new(move || {
+                let (up, down) = engines.session_totals();
+                let torrents = engines.total_torrents();
+                format!(
+                    "Hydranos {}\n{} torrents\nup {:.1} MB  down {:.1} MB",
+                    api::HYDRANOS_VERSION,
+                    torrents,
+                    up as f64 / 1e6,
+                    down as f64 / 1e6,
+                )
+            }),
+        );
+    }
     let app = api::router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -547,6 +725,8 @@ async fn shutdown_signal() -> () {
 
     let which = tokio::select! {
         _ = recv(&mut term) => "SIGTERM",
+        // No tray on Unix, but the same future keeps the two paths identical.
+        _ = tray::quit_notify().notified() => "tray quit",
         _ = recv(&mut int) => "SIGINT",
     };
     tracing::warn!("{which} received, draining the API and flushing resume data");
@@ -554,7 +734,13 @@ async fn shutdown_signal() -> () {
 
 #[cfg(not(unix))]
 async fn shutdown_signal() -> () {
-    let _ = tokio::signal::ctrl_c().await;
+    // The tray's Quit ends here too, so it flushes resume data exactly like
+    // Ctrl+C does. A tray that terminated the process would be the Task
+    // Manager kill the 3.x README told people not to use.
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = tray::quit_notify().notified() => tracing::info!("shutdown requested from the tray"),
+    }
 }
 
 /// Write every engine's resume state before the process ends.

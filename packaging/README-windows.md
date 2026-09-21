@@ -4,6 +4,8 @@ Native Windows build. This archive contains:
 
 - `hydranos.exe` - the daemon: web UI, API and the BitTorrent engine, all in
   one process. **This is the one you run.**
+- `hydranos-update.exe` - the updater. You do not normally run it yourself;
+  the tray starts it for you.
 - `hydranos-engine.exe` - the engine as a standalone binary, for multi-node
   setups (`--agent-only`). A single-machine install never needs it.
 - `default.toml.example` - a starting configuration.
@@ -11,35 +13,67 @@ Native Windows build. This archive contains:
 ## Run
 
 1. Unzip into a folder you can write to, e.g. `C:\Hydranos`.
-2. Copy `default.toml.example` to `default.toml` and edit `data_dir` to point
-   somewhere you can write, e.g. `data_dir = "C:/Hydranos/data"`.
-3. Start it:
+2. Double-click **`hydranos.exe`**.
 
-```
-hydranos.exe --config C:\Hydranos\default.toml
-```
+It starts with **no console window** and writes `default.toml`, a `data\`
+folder and `hydranos.log` beside itself on first run, generating an API key.
+You will find it in the notification area, next to the clock.
 
-An API key is generated into that file on first start, and the `data_dir` is
-created if it does not exist.
+3. Open the web UI at `http://127.0.0.1:8199` - or double-click the tray icon.
 
-4. Open the web UI at `http://127.0.0.1:8199` (or whatever `api_port` you set).
+To change ports or paths, edit the `default.toml` it created and restart.
+Pass `--config <path>` to keep it somewhere else.
 
-## What is NOT in this build
+## The tray icon
 
-The 3.x Windows package was a different program -- a Go daemon with a
-notification-area icon and a separate updater. The V4 rewrite is one Rust
-binary, and these have **not** been ported:
-
-| Gone | What to do instead |
+| Action | Result |
 | --- | --- |
-| Tray icon (open / quit / update) | Run it from a terminal, or as a service |
-| `hydranos-update.exe` | Download the new archive and replace the `.exe` |
-| Starting with no console window | It is a console program; a service wrapper hides it |
-| Config written automatically on first run | Copy `default.toml.example` yourself |
+| Hover | Version, torrent count, totals |
+| Double-click | Opens the web UI |
+| Right-click -> **Open Hydranos** | Same |
+| Right-click -> **Check for updates** | Runs the updater in a console |
+| Right-click -> **Quit Hydranos** | **Stops it cleanly** |
 
-⚠ **Stopping it cleanly matters.** Ctrl+C in its console flushes resume data for
-every torrent before exiting. Killing it from Task Manager skips that, and the
-next start has to re-check the affected torrents.
+⚠ **Use "Quit Hydranos" to stop it.** That is the path that saves resume data
+for every torrent before exiting. Killing `hydranos.exe` from Task Manager
+skips it, and the next start has to re-check the affected torrents.
+
+⚠ The icon is the stock Windows application icon. The 3.x package embedded its
+own, which needs an `.ico` compiled in as a resource; there is none yet.
+
+⚠ A service started by a wrapper runs in its own session and **shows no tray
+icon** - manage it from the web UI in that setup.
+
+## Running it from a terminal
+
+Started from PowerShell or `cmd` it attaches to *that* window and prints its
+log there. Nothing is hidden; the console is simply not created when you do not
+ask for one. Use `--console` to force one (a shortcut, a scheduler, debugging).
+
+Either way every line is also written to **`hydranos.log`**, beside the config.
+Setting `HYDRANOS_LOG_STDOUT` stops the file being written at all.
+
+## Updating
+
+Right-click the tray icon and pick **Check for updates**, or run it yourself:
+
+```
+hydranos-update.exe --check
+hydranos-update.exe --dir C:\Hydranos
+```
+
+It reports the latest release, downloads the archive, checks it against the
+**SHA-256 published beside it**, stops Hydranos, replaces the binaries and
+tells you to start it again. `--tag vX.Y.Z` installs a specific release,
+including an older one.
+
+⚠ **If the download or the checksum fails, nothing is replaced and Hydranos is
+not stopped.** It also refuses outright when no `.sha256` is published beside
+the archive rather than install unverified bytes.
+
+Your settings and data are never touched: `default.toml`, `data\` and
+`hydranos.log` are not part of the archive, which is what makes updating in
+place the one route that cannot lose them.
 
 ## Start on boot / run as a service
 
