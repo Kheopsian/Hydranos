@@ -57,7 +57,22 @@ pub struct Facts {
     /// Bytes free on the filesystem holding this torrent's data.
     pub free_space: f64,
     /// Highest link count across the torrent's files: >1 means hardlinked.
+    ///
+    /// ⚠️ On its own this number decides nothing. It counts an inode's names
+    /// without saying whose they are, so two cross-seeds of each other report
+    /// the same `2` as a file the media library is using. `external_links` is
+    /// the one that separates them.
     pub link_count: f64,
+    /// Names held by someone OUTSIDE this catalogue. Zero means every name is
+    /// ours, so removing our torrents orphans the bytes and nothing else
+    /// notices. `NEVER` until a scan has actually measured it.
+    pub external_links: f64,
+    /// Bytes that removing this torrent would really give back: only the files
+    /// no other name shares. `NEVER` until measured.
+    pub freeable_bytes: f64,
+    /// Not one of the torrent's files could be read. A seeding torrent in this
+    /// state announces data it cannot serve.
+    pub data_missing: bool,
 }
 
 /// The value of a duration that has not happened yet.
@@ -274,7 +289,26 @@ pub const FIELDS: &[(&str, Kind)] = &[
     ("completed_age", Kind::Duration),
     ("free_space", Kind::Size),
     ("link_count", Kind::Number),
+    ("external_links", Kind::Number),
+    ("freeable_bytes", Kind::Size),
+    ("data_missing", Kind::Bool),
 ];
+
+/// Does this condition tree ask anything that needs the link scan?
+///
+/// The scan is one `stat` per file in the catalogue. Worth it when a rule uses
+/// it, pure waste every fifteen minutes when none does -- and no workflow uses
+/// it by default, so the common case must stay free.
+pub fn needs_link_scan(n: &Node) -> bool {
+    match n {
+        Node::All { of } | Node::Any { of } => of.iter().any(needs_link_scan),
+        Node::Not { of } => needs_link_scan(of),
+        Node::Cond(c) => matches!(
+            c.field.as_str(),
+            "link_count" | "external_links" | "freeable_bytes" | "data_missing"
+        ),
+    }
+}
 
 pub fn kind_of(field: &str) -> Option<Kind> {
     FIELDS.iter().find(|(n, _)| *n == field).map(|(_, k)| *k)
@@ -370,6 +404,8 @@ fn number_of(f: &Facts, field: &str) -> Option<f64> {
         "completed_age" => f.completed_age,
         "free_space" => f.free_space,
         "link_count" => f.link_count,
+        "external_links" => f.external_links,
+        "freeable_bytes" => f.freeable_bytes,
         _ => return None,
     })
 }
