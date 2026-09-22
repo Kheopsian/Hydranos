@@ -355,9 +355,15 @@ fn link_map(
     if !want {
         return std::collections::HashMap::new();
     }
-    let store = state.store.lock().unwrap();
     LINK_CACHE.get_or_build(crate::store::now_secs(), || {
-        rulesrun::scan_links(&state.engines, &store)
+        // ⚠️ The lock lives and dies inside this block. What follows it is
+        // minutes of `stat` whose cost depends on the ARC, and holding the
+        // store across that would freeze the daemon for the duration.
+        let plan = {
+            let store = state.store.lock().unwrap();
+            rulesrun::plan_scan(&state.engines, &store)
+        };
+        rulesrun::run_scan(plan)
     })
 }
 
