@@ -181,7 +181,12 @@ pub fn gather(
                 external_links: l.map(|x| x.external_links as f64).unwrap_or(rules::NEVER),
                 freeable_bytes: l.map(|x| x.freeable_bytes as f64).unwrap_or(rules::NEVER),
                 data_missing: l.is_some_and(|x| x.data_missing),
-                ..Default::default()
+                // ⚠️⚠️ NO `..Default::default()` here, deliberately. It is what
+                // let thirteen fields read 0 or "" for every torrent while the
+                // picker offered them: `num_peers == 0` matched EVERYTHING, a
+                // tracker condition matched nothing, and nothing complained.
+                // Listing every field makes the compiler refuse a new one that
+                // nobody taught this function to measure.
             }
         })
         .collect()
