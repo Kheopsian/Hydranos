@@ -210,15 +210,16 @@ pub fn torrent_files(
     }
 }
 
-/// Every file this catalogue holds, stat'd once, across ALL engines.
+/// What the scan intends to stat: every torrent's files, resolved, no syscall.
 ///
-/// ⭐ Global on purpose, and it is not an optimisation. `owned` must count every
-/// name we hold; a file held by hoard AND by race is two of ours. Building this
-/// per engine would see one name, report an external holder that does not
-/// exist, and the arithmetic would be wrong in the direction that keeps rubbish
-/// forever -- or, with the engines the other way round, deletes a live file.
-pub fn scan_links(host: &EngineHost, store: &Store) -> std::collections::HashMap<String, LinkFacts> {
-    let mut entries: Vec<linkindex::Entry> = Vec::new();
+/// ⚠️⚠️ Split from the stat pass for one reason, and it is not tidiness. This
+/// half needs the store; the other half is minutes of `stat` on a large
+/// catalogue, and its cost depends on how warm the ARC happens to be, so it
+/// cannot be bounded in advance. Holding the store mutex across it would
+/// freeze every other request for as long as the disk felt like taking. Build
+/// the plan under the lock, drop it, then touch the filesystem.
+pub fn plan_scan(host: &EngineHost, store: &Store) -> Vec<(String, Vec<std::path::PathBuf>)> {
+    let mut plan = Vec::new();
     for engine in host.engines().iter() {
         let stored = store.workflow_facts(&engine.id).unwrap_or_default();
         for t in engine.manager.all() {
@@ -229,21 +230,54 @@ pub fn scan_links(host: &EngineHost, store: &Store) -> std::collections::HashMap
             if save_path.is_empty() {
                 continue;
             }
-            let files = torrent_files(&t, &save_path);
-            entries.push((
-                hash,
-                files
-                    .into_iter()
-                    .map(|p| {
-                        let id = crate::platform::file_id(&p);
-                        (p, id)
-                    })
-                    .collect(),
-            ));
+            plan.push((hash, torrent_files(&t, &save_path)));
         }
     }
-    linkindex::compute(&entries)
+    plan
 }
+
+/// The stat pass. No lock held, no engine touched: just the filesystem.
+///
+/// ⭐ Global across engines on purpose. `owned` must count every name we hold,
+/// and a file held by hoard AND race is two of ours. A per-engine index would
+/// see one name, invent an external holder, and the arithmetic would be wrong
+/// in the direction that keeps rubbish forever -- or, with the engines the
+/// other way round, deletes a live file.
+pub fn run_scan(plan: Vec<(String, Vec<std::path::PathBuf>)>) -> HashMapFacts {
+    let started = std::time::Instant::now();
+    let mut files = 0usize;
+    let mut unreadable = 0usize;
+    let entries: Vec<linkindex::Entry> = plan
+        .into_iter()
+        .map(|(hash, paths)| {
+            let stats = paths
+                .into_iter()
+                .map(|p| {
+                    files += 1;
+                    let id = crate::platform::file_id(&p);
+                    if id.is_none() {
+                        unreadable += 1;
+                    }
+                    (p, id)
+                })
+                .collect();
+            (hash, stats)
+        })
+        .collect();
+    let out = linkindex::compute(&entries);
+    // Logged rather than predicted: the cost rides on the ARC, so the only
+    // honest number is the one the last run actually took.
+    tracing::info!(
+        torrents = out.len(),
+        files,
+        unreadable,
+        secs = started.elapsed().as_secs_f64(),
+        "link scan complete"
+    );
+    out
+}
+
+pub type HashMapFacts = std::collections::HashMap<String, LinkFacts>;
 
 /// Phase one: decide, without touching anything.
 ///
