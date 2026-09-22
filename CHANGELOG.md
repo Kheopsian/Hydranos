@@ -41,6 +41,26 @@ when a workflow's conditions ask for it.
 
 `link_count` stays, and is now documented as the number that misleads.
 
+Thirteen more facts stop reading zero. `state`, `tracker_host`, `tracker_error`,
+`tracker_error_msg`, `torrent_error`, `upload_rate`, `download_rate`,
+`num_peers`, `num_seeds`, `swarm_seeds`, `swarm_leechers` and `free_space` were
+all offered in the field picker while falling through a `..Default::default()`
+that gave every torrent 0 or "". `num_peers == 0` matched the entire catalogue;
+a condition on a tracker matched nothing at all.
+
+`seeding_time` comes back to the picker with them. It was withheld because the
+store column is never written in 4.x, which was right -- but the engine keeps
+the accumulated counter, and that is a real measurement.
+
+`state` is derived the same way the torrent list derives it, intent included. A
+workflow matching `stopped` on torrents the UI calls queued would be one view
+contradicting another.
+
+The link scan is cached for an hour and shared between passes, so a workflow on
+a fifteen-minute interval no longer spends its life in `stat`. `recheck` is
+there for the delete path: cached facts are fine for tagging, and not fine for
+removing files an hour-old count says nobody wants.
+
 The condition editor gained the nested groups the engine has always accepted.
 A single AND/OR over a flat list could not express
 `(category is movies or category is series) and external_links = 0`, and the
