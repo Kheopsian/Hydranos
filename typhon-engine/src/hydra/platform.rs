@@ -144,6 +144,95 @@ pub fn link_count(p: &Path) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// File identity
+// ---------------------------------------------------------------------------
+
+/// What a file IS, as opposed to what it is called.
+///
+/// `volume` + `index` is the pair that says two names are the same bytes:
+/// `(st_dev, st_ino)` on Unix, `dwVolumeSerialNumber` + `nFileIndex` on
+/// Windows. Both platforms can answer; neither can be emulated by the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileId {
+    pub volume: u64,
+    pub index: u64,
+    pub links: u64,
+    pub size: u64,
+}
+
+/// Identify the file a path names, WITHOUT following a symlink.
+///
+/// ⚠️ Deliberately different from `link_count` above, and the difference is
+/// not an oversight. `link_count` asks "how many names do these bytes have",
+/// so it resolves the path first -- a move has to know about the target. This
+/// asks "what is the name WE hold", and a symlink we hold is a name of the
+/// symlink, not of its target. Counting it as the target would credit us with
+/// owning a library file we merely point at, and that arithmetic decides
+/// whether a torrent is safe to delete.
+#[cfg(unix)]
+pub fn file_id(p: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(p).ok()?;
+    if !m.is_file() {
+        return None;
+    }
+    Some(FileId {
+        volume: m.dev(),
+        index: m.ino(),
+        links: m.nlink(),
+        size: m.size(),
+    })
+}
+
+#[cfg(windows)]
+pub fn file_id(p: &Path) -> Option<FileId> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+
+    let mut wide: Vec<u16> = p.as_os_str().encode_wide().collect();
+    wide.push(0);
+    // Same zero-access open as `link_count` -- metadata needs no read right,
+    // and asking for one fails on a file another process holds exclusively.
+    // OPEN_REPARSE_POINT is what keeps a symlink from resolving, matching the
+    // `symlink_metadata` on the Unix side.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        return None;
+    }
+    Some(FileId {
+        volume: info.dwVolumeSerialNumber as u64,
+        index: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        links: info.nNumberOfLinks.max(1) as u64,
+        size: ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Free space
 // ---------------------------------------------------------------------------
 
@@ -319,4 +408,86 @@ pub fn is_network_fs(path: &Path) -> bool {
 #[cfg(not(any(target_os = "linux", windows)))]
 pub fn is_network_fs(_path: &Path) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real hardlink on a real filesystem, because the whole point of
+    /// `file_id` is a claim ABOUT a filesystem: a table of made-up numbers
+    /// would pass on an implementation that reads the wrong struct field.
+    /// Portable on purpose -- this is the test that has to run on Windows,
+    /// where the identity comes from a different syscall entirely.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("hydranos-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("a writable temp dir");
+        d
+    }
+
+    #[test]
+    fn two_names_for_one_file_share_one_identity() {
+        let dir = scratch("fileid");
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, b"0123456789").expect("write");
+
+        let first = file_id(&a).expect("the file is there");
+        assert_eq!(first.links, 1, "a file just created has one name");
+        assert_eq!(first.size, 10);
+
+        std::fs::hard_link(&a, &b).expect("hard_link");
+        let ai = file_id(&a).expect("still there");
+        let bi = file_id(&b).expect("the new name too");
+
+        assert_eq!(
+            (ai.volume, ai.index),
+            (bi.volume, bi.index),
+            "two names, one set of bytes -- this pair IS the identity"
+        );
+        assert_eq!(ai.links, 2);
+        assert_eq!(bi.links, 2);
+
+        // And it comes back down, which is what makes the count a live fact
+        // rather than a high-water mark.
+        std::fs::remove_file(&b).expect("unlink");
+        assert_eq!(file_id(&a).expect("a survives").links, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_separate_files_never_share_an_identity() {
+        let dir = scratch("distinct");
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, b"same").expect("write");
+        std::fs::write(&b, b"same").expect("write");
+        let ai = file_id(&a).expect("a");
+        let bi = file_id(&b).expect("b");
+        assert_ne!(
+            (ai.volume, ai.index),
+            (bi.volume, bi.index),
+            "identical CONTENTS are not one file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_is_not_a_file() {
+        let dir = scratch("dir");
+        assert!(
+            file_id(&dir).is_none(),
+            "a directory's link count counts its children, which would read as \
+             'someone else holds these bytes'"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_that_is_not_there_answers_none() {
+        let missing = std::env::temp_dir().join("hydranos-no-such-file-4a9f2e");
+        assert!(file_id(&missing).is_none());
+    }
 }

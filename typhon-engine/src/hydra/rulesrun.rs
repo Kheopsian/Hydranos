@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::engines::EngineHost;
+use crate::linkindex::{self, LinkFacts};
 use crate::rules::{self, Action, Facts, Workflow};
 use crate::store::{ActivityEntry, Store};
 
@@ -49,7 +50,12 @@ pub struct PassReport {
 /// One store query for the whole session -- an index-only scan -- joined to the
 /// engine's live map in memory. The alternative, a lookup per torrent, is
 /// 300 000 queries.
-pub fn gather(host: &EngineHost, store: &Store, engine_id: &str) -> Vec<Facts> {
+pub fn gather(
+    host: &EngineHost,
+    store: &Store,
+    engine_id: &str,
+    links: &std::collections::HashMap<String, LinkFacts>,
+) -> Vec<Facts> {
     let Some(engine) = host.engines().iter().find(|e| e.id == engine_id) else {
         return Vec::new();
     };
@@ -64,6 +70,11 @@ pub fn gather(host: &EngineHost, store: &Store, engine_id: &str) -> Vec<Facts> {
             let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
             let s = stored.get(&hash).cloned().unwrap_or_default();
 
+            // ⚠️ NEVER, not zero, when no scan ran. Zero is a measurement, and
+            // `external_links == 0` means "safe to delete" -- defaulting to it
+            // would arm every deletion rule against the whole catalogue before
+            // a single file had been looked at.
+            let l = links.get(&hash);
             let downloaded = t.total_downloaded.load(Ordering::Relaxed) as f64;
             let uploaded = t.total_uploaded.load(Ordering::Relaxed) as f64;
             let size = t.meta.total_size as f64;
@@ -109,10 +120,64 @@ pub fn gather(host: &EngineHost, store: &Store, engine_id: &str) -> Vec<Facts> {
                 } else {
                     rules::NEVER
                 },
+                link_count: l.map(|x| x.link_count as f64).unwrap_or(rules::NEVER),
+                external_links: l.map(|x| x.external_links as f64).unwrap_or(rules::NEVER),
+                freeable_bytes: l.map(|x| x.freeable_bytes as f64).unwrap_or(rules::NEVER),
+                data_missing: l.is_some_and(|x| x.data_missing),
                 ..Default::default()
             }
         })
         .collect()
+}
+
+/// Every file this catalogue holds, stat'd once, across ALL engines.
+///
+/// ⭐ Global on purpose, and it is not an optimisation. `owned` must count every
+/// name we hold; a file held by hoard AND by race is two of ours. Building this
+/// per engine would see one name, report an external holder that does not
+/// exist, and the arithmetic would be wrong in the direction that keeps rubbish
+/// forever -- or, with the engines the other way round, deletes a live file.
+pub fn scan_links(host: &EngineHost, store: &Store) -> std::collections::HashMap<String, LinkFacts> {
+    let mut entries: Vec<linkindex::Entry> = Vec::new();
+    for engine in host.engines().iter() {
+        let stored = store.workflow_facts(&engine.id).unwrap_or_default();
+        for t in engine.manager.all() {
+            let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
+            let Some(save_path) = stored.get(&hash).map(|s| s.save_path.clone()) else {
+                continue;
+            };
+            if save_path.is_empty() {
+                continue;
+            }
+            let base = std::path::Path::new(&save_path);
+            // The layout rule `Layout::on_disk` encodes: a multi-file torrent
+            // puts its files under a folder named after the torrent, a
+            // single-file one is the name itself at the root of save_path.
+            // ⚠️ Walking save_path instead would collect the NEIGHBOURS of a
+            // torrent that shares a folder, and credit it with their links.
+            let files = if t.meta.multi_file {
+                let root = base.join(&t.meta.name);
+                t.meta
+                    .files
+                    .iter()
+                    .map(|f| root.join(&f.path))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![base.join(&t.meta.name)]
+            };
+            entries.push((
+                hash,
+                files
+                    .into_iter()
+                    .map(|p| {
+                        let id = crate::platform::file_id(&p);
+                        (p, id)
+                    })
+                    .collect(),
+            ));
+        }
+    }
+    linkindex::compute(&entries)
 }
 
 /// Phase one: decide, without touching anything.

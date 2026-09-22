@@ -17,6 +17,30 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.2.0 -- a workflow can tell a hardlink that matters from one that does not
+
+`link_count` counts an inode's names. It does not say whose they are, and that
+is the whole difference: two torrents cross-seeded from each other both report
+two names while nothing outside Hydranos refers to their bytes at all. A rule
+written on `link_count` protects them forever, and protects nothing that
+deserves it.
+
+Workflows gain the number that answers the actual question:
+
+- `external_links` -- names held by someone OUTSIDE the catalogue. Zero means
+  every name is ours. No list of protected folders to configure and keep up to
+  date: a media library, a backup, a folder made by hand all count, wherever
+  they are.
+- `freeable_bytes` -- bytes removing the torrent would really give back, which
+  is only the files no other name shares.
+- `data_missing` -- not one of the torrent's files could be read.
+
+All three read `NEVER` until a scan has measured them, so a condition on an
+unmeasured torrent is false rather than accidentally true. The scan runs only
+when a workflow's conditions ask for it.
+
+`link_count` stays, and is now documented as the number that misleads.
+
 ## v4.1.13 -- the one-off purge is removed, having run
 
 v4.1.0 through v4.1.4 are gone from both the registry and the releases, with

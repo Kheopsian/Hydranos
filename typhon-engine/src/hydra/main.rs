@@ -66,6 +66,7 @@ mod portmap;
 mod raceevents;
 mod reconnect;
 mod config;
+mod linkindex;
 mod rules;
 mod rulesrun;
 mod rulesapi;
