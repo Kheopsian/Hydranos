@@ -3745,30 +3745,63 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     #hoard-facets { display: block !important; }
 }
 
-/* Workflow condition tree. The indent is the only thing that says which
-   AND/OR a condition answers to, so it has to be a border and not a margin:
-   a margin leaves the nesting to be inferred from alignment alone. */
+/* Workflow condition tree.
+   The operator has to READ as the heading of what follows it. Full width it
+   looked like one more condition row, and a condition sitting next to a
+   sub-group looked like a sequence rather than two children of one AND.
+   So: a compact badge, and a coloured rule down the left that starts at the
+   badge and runs past everything it governs. */
 .wf-group {
-    border-left: 2px solid var(--border, #3a3a3a);
-    padding-left: 10px;
+    position: relative;
     margin: 6px 0;
+    padding-left: 14px;
+    border-left: 2px solid var(--accent-hoard);
+}
+.wf-group[data-kind="any"] {
+    border-left-color: var(--accent-purple);
 }
 .wf-group.wf-root {
-    border-left: none;
-    padding-left: 0;
+    margin-top: 0;
 }
 .wf-group-head {
     display: flex;
-    gap: 6px;
+    gap: 8px;
     align-items: center;
-    flex-wrap: wrap;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
 }
+/* width:auto against the global `select { width: 100% }`, which is what made
+   the operator look like a field to fill in. */
 .wf-group-head .wf-g-kind {
-    min-width: 160px;
+    width: auto;
+    min-width: 0;
+    flex: 0 0 auto;
+    padding: 3px 26px 3px 9px;
+    font-size: .82em;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--accent-hoard);
+    border-color: var(--accent-hoard);
+    background-color: rgba(88, 166, 255, .1);
+}
+.wf-group[data-kind="any"] > .wf-group-head .wf-g-kind {
+    color: var(--accent-purple);
+    border-color: var(--accent-purple);
+    background-color: rgba(188, 140, 255, .1);
+}
+.wf-kids {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
 }
 .wf-kids:empty::after {
     content: "no condition yet";
-    opacity: .6;
-    font-size: .9em;
+    color: var(--text-muted);
+    font-size: .85em;
+}
+/* Below the children, next to where the new row will actually appear. */
+.wf-group-foot {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
 }
