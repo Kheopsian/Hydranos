@@ -306,7 +306,8 @@ pub async fn preview(
         Err(e) => return bad(e),
     };
 
-    let facts = gather_all_for(&state, rules::needs_link_scan(&w.when));
+    let links = link_map(&state, rules::needs_link_scan(&w.when));
+    let facts = gather_all_with(&state, &links);
     let (matches, report) = match rulesrun::evaluate(&w, &facts) {
         Ok(x) => x,
         Err(e) => return bad(e),
@@ -340,12 +341,30 @@ static LINK_CACHE: std::sync::LazyLock<crate::linkindex::Cache> =
 
 /// Facts for every engine this node runs.
 fn gather_all(state: &AppState) -> Vec<rules::Facts> {
-    gather_all_for(state, false)
+    gather_all_with(state, &std::collections::HashMap::new())
 }
 
-/// `want_links` decides whether the catalogue gets stat'd. Callers that know
-/// the workflow they are about to run pass what its condition tree asks for.
-fn gather_all_for(state: &AppState, want_links: bool) -> Vec<rules::Facts> {
+/// The scan, or an empty map when no rule asked for it.
+///
+/// Returned rather than kept private, because the delete guard has to check
+/// against the very counting the pass decided on.
+fn link_map(
+    state: &AppState,
+    want: bool,
+) -> std::collections::HashMap<String, crate::linkindex::LinkFacts> {
+    if !want {
+        return std::collections::HashMap::new();
+    }
+    let store = state.store.lock().unwrap();
+    LINK_CACHE.get_or_build(crate::store::now_secs(), || {
+        rulesrun::scan_links(&state.engines, &store)
+    })
+}
+
+fn gather_all_with(
+    state: &AppState,
+    links: &std::collections::HashMap<String, crate::linkindex::LinkFacts>,
+) -> Vec<rules::Facts> {
     let ids: Vec<String> = state
         .engines
         .engines()
@@ -353,18 +372,9 @@ fn gather_all_for(state: &AppState, want_links: bool) -> Vec<rules::Facts> {
         .map(|e| e.id.clone())
         .collect();
     let store = state.store.lock().unwrap();
-    let links = if want_links {
-        // Shared between passes: on a large catalogue the scan is minutes, and
-        // a workflow on a fifteen-minute interval would spend its life in it.
-        LINK_CACHE.get_or_build(crate::store::now_secs(), || {
-            rulesrun::scan_links(&state.engines, &store)
-        })
-    } else {
-        std::collections::HashMap::new()
-    };
     let mut out = Vec::new();
     for id in ids {
-        out.extend(rulesrun::gather(&state.engines, &store, &id, &links));
+        out.extend(rulesrun::gather(&state.engines, &store, &id, links));
     }
     out
 }
@@ -402,7 +412,10 @@ pub async fn run_now(
 
 /// One pass of one workflow. The single path both the timer and the button use.
 pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
-    let facts = gather_all_for(state, rules::needs_link_scan(&w.when));
+    // One scan for the whole run: the pass decides on it, and the delete guard
+    // re-measures against it.
+    let links = link_map(state, rules::needs_link_scan(&w.when));
+    let facts = gather_all_with(state, &links);
     let (matches, mut report) = match rulesrun::evaluate(w, &facts) {
         Ok(x) => x,
         Err(e) => {
@@ -458,7 +471,15 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
             .collect::<Vec<_>>()
             .join("+");
 
-        match rulesrun::apply(&state.engines, &state.store, w, m, &hook, &delete_hook) {
+        match rulesrun::apply(
+            &state.engines,
+            &state.store,
+            w,
+            m,
+            &hook,
+            &delete_hook,
+            links.get(&m.info_hash),
+        ) {
             Ok(()) => {
                 report.applied += 1;
                 let store = state.store.lock().unwrap();

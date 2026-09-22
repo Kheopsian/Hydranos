@@ -187,6 +187,29 @@ pub fn gather(
         .collect()
 }
 
+/// Where one torrent's files live on disk.
+///
+/// The layout rule `dedup::Layout::on_disk` encodes: a multi-file torrent puts
+/// its files under a folder named after the torrent, a single-file one is the
+/// name itself at the root of save_path.
+///
+/// ⚠️ Walking save_path instead would collect the NEIGHBOURS of a torrent that
+/// shares a folder and credit it with their links. And the guard below has to
+/// call the SAME function as the scan: two resolutions that disagree would
+/// protect one set of files while measuring another.
+pub fn torrent_files(
+    t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+    save_path: &str,
+) -> Vec<std::path::PathBuf> {
+    let base = std::path::Path::new(save_path);
+    if t.meta.multi_file {
+        let root = base.join(&t.meta.name);
+        t.meta.files.iter().map(|f| root.join(&f.path)).collect()
+    } else {
+        vec![base.join(&t.meta.name)]
+    }
+}
+
 /// Every file this catalogue holds, stat'd once, across ALL engines.
 ///
 /// ⭐ Global on purpose, and it is not an optimisation. `owned` must count every
@@ -206,22 +229,7 @@ pub fn scan_links(host: &EngineHost, store: &Store) -> std::collections::HashMap
             if save_path.is_empty() {
                 continue;
             }
-            let base = std::path::Path::new(&save_path);
-            // The layout rule `Layout::on_disk` encodes: a multi-file torrent
-            // puts its files under a folder named after the torrent, a
-            // single-file one is the name itself at the root of save_path.
-            // ⚠️ Walking save_path instead would collect the NEIGHBOURS of a
-            // torrent that shares a folder, and credit it with their links.
-            let files = if t.meta.multi_file {
-                let root = base.join(&t.meta.name);
-                t.meta
-                    .files
-                    .iter()
-                    .map(|f| root.join(&f.path))
-                    .collect::<Vec<_>>()
-            } else {
-                vec![base.join(&t.meta.name)]
-            };
+            let files = torrent_files(&t, &save_path);
             entries.push((
                 hash,
                 files
@@ -298,6 +306,58 @@ pub fn is_due(w: &crate::store::StoredWorkflow, now: i64) -> bool {
     now - w.last_run >= interval
 }
 
+/// Refuse a deletion the scan no longer justifies.
+///
+/// ⭐ The cache is an hour old by design, and for tagging that is fine. For
+/// `delete` it is not: between the scan and the action a cross-seed, an import
+/// or a hand-made link can claim a name, and the whole point of
+/// `external_links == 0` is that nobody else wants these bytes.
+///
+/// So the nlink values are read again, now, against the `owned` count the scan
+/// established. Only an INCREASE refuses: a name that appeared since the scan
+/// means someone took an interest, and the answer has to be no. A name that
+/// disappeared leaves the stale count conservative, which is the harmless
+/// direction.
+///
+/// ⚠️ Deliberately not a re-evaluation of the whole rule. The condition may
+/// have stopped holding for a dozen reasons between the pass and the action;
+/// this guards the one whose cost is irreversible.
+pub fn link_guard(
+    host: &EngineHost,
+    store: &Store,
+    m: &Match,
+    cached: &LinkFacts,
+) -> Result<(), String> {
+    let Some(engine) = host.engines().iter().find(|e| e.id == m.engine) else {
+        return Err(format!("engine {} is not running here", m.engine));
+    };
+    let Some(t) = engine
+        .manager
+        .all()
+        .into_iter()
+        .find(|t| t.info_hash.iter().map(|b| format!("{b:02x}")).collect::<String>() == m.info_hash)
+    else {
+        return Err("torrent is no longer in the engine".into());
+    };
+    let save_path = store
+        .workflow_facts(&m.engine)
+        .unwrap_or_default()
+        .get(&m.info_hash)
+        .map(|s| s.save_path.clone())
+        .unwrap_or_default();
+    if save_path.is_empty() {
+        return Err("no save path to check the links against".into());
+    }
+    let fresh = linkindex::recheck(&torrent_files(&t, &save_path), cached);
+    if fresh.external_links > cached.external_links {
+        return Err(format!(
+            "refused: {} external link(s) now, {} when the catalogue was scanned",
+            fresh.external_links, cached.external_links
+        ));
+    }
+    Ok(())
+}
+
 /// Record what happened, including what did not.
 pub fn log(store: &Store, w: &Workflow, m: &Match, action: &str, outcome: &str, detail: &str) {
     let _ = store.log_workflow_activity(&ActivityEntry {
@@ -323,6 +383,9 @@ pub fn apply(
     m: &Match,
     pause_hook: &dyn Fn(&str, &str, bool),
     delete_hook: &dyn Fn(&str, &str, bool) -> Result<(), String>,
+    // The scan's answer for this torrent, when the rule depended on it.
+    // `Some` is what arms the guard on the delete path below.
+    link_facts: Option<&LinkFacts>,
 ) -> Result<(), String> {
     for action in &m.actions {
         match action {
@@ -379,6 +442,12 @@ pub fn apply(
                 }
                 if crate::store::hex20(&m.info_hash).is_none() {
                     return Err("bad info hash".into());
+                }
+                // A rule that decided on link facts has to decide again, now:
+                // the numbers it used may be up to an hour old.
+                if let Some(cached) = link_facts {
+                    let store = store.lock().map_err(|_| "store lock")?;
+                    link_guard(host, &store, m, cached)?;
                 }
                 // Through the hook, which is the route a human click takes:
                 // calling `manager.remove_torrent` and dropping the row here
