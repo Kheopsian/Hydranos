@@ -278,13 +278,10 @@ pub const FIELDS: &[(&str, Kind)] = &[
     ("num_seeds", Kind::Number),
     ("swarm_seeds", Kind::Number),
     ("swarm_leechers", Kind::Number),
-    // ⚠️ `seeding_time` is deliberately NOT here. The column exists in the
-    // store and 4.x never writes it -- the 3.x seedtime counter was not
-    // ported -- so it reads zero for every torrent, always. Offering it would
-    // hand the operator a condition that silently never fires, which is worse
-    // than not having it: `seeding_time >= 2d` looks right and does nothing.
-    // Until something writes it, "seed for two days then stop" is
-    // `completed_age >= 2d`, which is a real measurement.
+    // Back, and real: it comes from the engine's accumulated counter now, not
+    // from the store column that 4.x never writes. Withholding it was right
+    // while it read zero for every torrent.
+    ("seeding_time", Kind::Duration),
     ("added_age", Kind::Duration),
     ("completed_age", Kind::Duration),
     ("free_space", Kind::Size),
