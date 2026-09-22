@@ -225,6 +225,56 @@ mod tests {
         assert_eq!(built, 2, "at the TTL it is");
     }
 
+    /// While the store mutex was held across the scan it serialised racers for
+    /// free. The scan holds no lock now, so single-flight has to be explicit:
+    /// two passes whose TTL expires together must not stat the whole catalogue
+    /// twice at once.
+    #[test]
+    fn two_passes_racing_an_expired_cache_scan_once() {
+        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+
+        let c = Arc::new(Cache::default());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicUsize::new(0));
+
+        let (c1, b1, e1) = (c.clone(), builds.clone(), entered.clone());
+        let first = std::thread::spawn(move || {
+            c1.get_or_build(0, || {
+                b1.fetch_add(1, Ordering::SeqCst);
+                e1.fetch_add(1, Ordering::SeqCst);
+                // Stand in for the stat pass, long enough for the racer to arrive.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let mut m = HashMap::new();
+                m.insert("x".to_string(), LinkFacts::default());
+                m
+            })
+        });
+
+        // Only start racing once the first thread is demonstrably inside build().
+        while entered.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let (c2, b2) = (c.clone(), builds.clone());
+        let second = std::thread::spawn(move || {
+            c2.get_or_build(0, || {
+                b2.fetch_add(1, Ordering::SeqCst);
+                HashMap::new()
+            })
+        });
+
+        let a = first.join().expect("first");
+        let b = second.join().expect("second");
+
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "the racer must wait for the scan in flight, not launch a second one"
+        );
+        assert_eq!(a, b, "and it must be handed the scan that actually ran");
+        assert!(b.contains_key("x"));
+    }
+
     #[test]
     fn invalidating_forces_the_next_caller_to_measure() {
         let c = Cache::default();
@@ -313,12 +363,16 @@ pub const TTL_SECS: i64 = 3600;
 /// somebody just started using. `recheck` below is what the delete path calls.
 pub struct Cache {
     inner: Mutex<Option<(i64, HashMap<String, LinkFacts>)>>,
+    /// Held only by a thread that is actually scanning. Separate from `inner`
+    /// on purpose: a reader with a warm cache must never queue behind a scan.
+    building: Mutex<()>,
 }
 
 impl Default for Cache {
     fn default() -> Self {
         Self {
             inner: Mutex::new(None),
+            building: Mutex::new(()),
         }
     }
 }
@@ -326,14 +380,28 @@ impl Default for Cache {
 impl Cache {
     /// The cached scan if it is younger than the TTL, otherwise `build()`.
     ///
-    /// `build` runs OUTSIDE the lock on purpose: it walks the catalogue and
-    /// stats every file, and holding a mutex across that would stall every
-    /// other workflow for the whole scan. Two passes racing may both build,
-    /// which costs one extra scan and never a wrong answer.
+    /// `build` runs OUTSIDE `inner` on purpose: it stats every file in the
+    /// catalogue, and holding the read lock across that would stall every
+    /// other workflow for the whole scan.
+    ///
+    /// ⚠️ But it runs UNDER `building`, which is single-flight. While the
+    /// store mutex was held across the scan it serialised racers for free;
+    /// now that the scan touches no lock, two passes expiring together would
+    /// stat the whole catalogue twice AT THE SAME TIME -- the one moment the
+    /// disk can least afford it. The second waiter re-checks `inner` after
+    /// acquiring `building` and finds the fresh scan the first one just
+    /// stored, so it pays a wait instead of a duplicate scan.
     pub fn get_or_build<F>(&self, now: i64, build: F) -> HashMap<String, LinkFacts>
     where
         F: FnOnce() -> HashMap<String, LinkFacts>,
     {
+        if let Some((at, map)) = self.inner.lock().unwrap().as_ref() {
+            if now - at < TTL_SECS {
+                return map.clone();
+            }
+        }
+        let _flight = self.building.lock().unwrap();
+        // Re-check: a racer may have built while this thread queued.
         if let Some((at, map)) = self.inner.lock().unwrap().as_ref() {
             if now - at < TTL_SECS {
                 return map.clone();
