@@ -383,13 +383,7 @@ pub fn link_guard(
         return Err("no save path to check the links against".into());
     }
     let fresh = linkindex::recheck(&torrent_files(&t, &save_path), cached);
-    if fresh.external_links > cached.external_links {
-        return Err(format!(
-            "refused: {} external link(s) now, {} when the catalogue was scanned",
-            fresh.external_links, cached.external_links
-        ));
-    }
-    Ok(())
+    linkindex::guard_verdict(&fresh, cached)
 }
 
 /// Record what happened, including what did not.
