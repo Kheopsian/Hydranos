@@ -306,7 +306,7 @@ pub async fn preview(
         Err(e) => return bad(e),
     };
 
-    let facts = gather_all(&state);
+    let facts = gather_all_for(&state, rules::needs_link_scan(&w.when));
     let (matches, report) = match rulesrun::evaluate(&w, &facts) {
         Ok(x) => x,
         Err(e) => return bad(e),
@@ -336,6 +336,12 @@ pub async fn preview(
 
 /// Facts for every engine this node runs.
 fn gather_all(state: &AppState) -> Vec<rules::Facts> {
+    gather_all_for(state, false)
+}
+
+/// `want_links` decides whether the catalogue gets stat'd. Callers that know
+/// the workflow they are about to run pass what its condition tree asks for.
+fn gather_all_for(state: &AppState, want_links: bool) -> Vec<rules::Facts> {
     let ids: Vec<String> = state
         .engines
         .engines()
@@ -343,9 +349,14 @@ fn gather_all(state: &AppState) -> Vec<rules::Facts> {
         .map(|e| e.id.clone())
         .collect();
     let store = state.store.lock().unwrap();
+    let links = if want_links {
+        rulesrun::scan_links(&state.engines, &store)
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut out = Vec::new();
     for id in ids {
-        out.extend(rulesrun::gather(&state.engines, &store, &id));
+        out.extend(rulesrun::gather(&state.engines, &store, &id, &links));
     }
     out
 }
@@ -383,7 +394,7 @@ pub async fn run_now(
 
 /// One pass of one workflow. The single path both the timer and the button use.
 pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
-    let facts = gather_all(state);
+    let facts = gather_all_for(state, rules::needs_link_scan(&w.when));
     let (matches, mut report) = match rulesrun::evaluate(w, &facts) {
         Ok(x) => x,
         Err(e) => {
