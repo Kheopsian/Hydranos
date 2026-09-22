@@ -105,6 +105,33 @@ pub fn compute(entries: &[Entry]) -> HashMap<String, LinkFacts> {
     out
 }
 
+/// Does a fresh measurement still justify the deletion the pass decided on?
+///
+/// The decision, alone, so it can be exercised without an engine or a store.
+/// `link_guard` is the plumbing that fetches the two arguments.
+///
+/// ⭐ Only an INCREASE refuses. A name that appeared since the scan means
+/// somebody took an interest in these bytes, and that is the whole premise of
+/// `external_links == 0` gone. A name that DISAPPEARED leaves the cached count
+/// too high, which only ever protects a torrent that could have been removed:
+/// the harmless direction, and one more pass will catch it.
+///
+/// ⚠️ Not a re-evaluation of the rule. The condition may have stopped holding
+/// for a dozen reasons between the pass and the action; this guards the single
+/// one whose cost cannot be undone.
+pub fn guard_verdict(fresh: &LinkFacts, cached: &LinkFacts) -> Result<(), String> {
+    if fresh.data_missing && !cached.data_missing {
+        return Err("refused: the files are no longer readable".into());
+    }
+    if fresh.external_links > cached.external_links {
+        return Err(format!(
+            "refused: {} external link(s) now, {} when the catalogue was scanned",
+            fresh.external_links, cached.external_links
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +233,64 @@ mod tests {
             got["gone"].external_links, 0,
             "nothing was measured, so nothing is claimed"
         );
+    }
+
+    fn lf(external: u64, links: u64) -> LinkFacts {
+        LinkFacts {
+            external_links: external,
+            link_count: links,
+            freeable_bytes: 0,
+            data_missing: false,
+        }
+    }
+
+    #[test]
+    fn the_guard_refuses_a_name_that_appeared_since_the_scan() {
+        let e = guard_verdict(&lf(1, 3), &lf(0, 2)).unwrap_err();
+        assert!(e.contains("1 external link(s) now, 0"), "{e}");
+    }
+
+    #[test]
+    fn the_guard_lets_through_what_it_measured() {
+        assert!(guard_verdict(&lf(0, 2), &lf(0, 2)).is_ok());
+    }
+
+    /// A rule may legitimately delete at a non-zero count. What matters is that
+    /// the number did not GROW, not that it is zero.
+    #[test]
+    fn the_guard_is_about_growth_not_about_zero() {
+        assert!(guard_verdict(&lf(2, 5), &lf(2, 5)).is_ok());
+        assert!(guard_verdict(&lf(3, 6), &lf(2, 5)).is_err());
+    }
+
+    #[test]
+    fn a_name_removed_since_the_scan_does_not_refuse() {
+        assert!(
+            guard_verdict(&lf(0, 1), &lf(1, 2)).is_ok(),
+            "fewer holders than measured only ever protects too much"
+        );
+    }
+
+    #[test]
+    fn the_guard_refuses_when_the_files_went_missing() {
+        let gone = LinkFacts {
+            data_missing: true,
+            ..Default::default()
+        };
+        assert!(
+            guard_verdict(&gone, &lf(0, 1)).is_err(),
+            "unreadable is not the same as unwanted"
+        );
+    }
+
+    /// And a torrent already known to be missing is not blocked by that alone.
+    #[test]
+    fn already_missing_at_scan_time_is_not_a_refusal() {
+        let gone = LinkFacts {
+            data_missing: true,
+            ..Default::default()
+        };
+        assert!(guard_verdict(&gone, &gone).is_ok());
     }
 
     #[test]
