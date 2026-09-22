@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.5">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.6">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -810,16 +810,7 @@
                     </div>
 
                     <h3 style="margin:16px 0 6px">When</h3>
-                    <div class="form-group" style="margin-bottom:8px">
-                        <label>Match
-                            <select id="wf-join">
-                                <option value="all">all of these (AND)</option>
-                                <option value="any">any of these (OR)</option>
-                            </select>
-                        </label>
-                    </div>
                     <div id="wf-conds"></div>
-                    <button class="btn-small" onclick="addCondRow()">+ Condition</button>
 
                     <h3 style="margin:16px 0 6px">Then</h3>
                     <div id="wf-actions"></div>
@@ -1438,6 +1429,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.23"></script>
+    <script src="/static/app.js?v=1.6.24"></script>
 </body>
 </html>

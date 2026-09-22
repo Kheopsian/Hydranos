@@ -41,6 +41,13 @@ when a workflow's conditions ask for it.
 
 `link_count` stays, and is now documented as the number that misleads.
 
+The condition editor gained the nested groups the engine has always accepted.
+A single AND/OR over a flat list could not express
+`(category is movies or category is series) and external_links = 0`, and the
+old form indexed its rows by position, which stops meaning anything once one
+group sits inside another. Workflows saved by the flat form load unchanged:
+that shape was already a valid root group.
+
 ## v4.1.13 -- the one-off purge is removed, having run
 
 v4.1.0 through v4.1.4 are gone from both the registry and the releases, with
