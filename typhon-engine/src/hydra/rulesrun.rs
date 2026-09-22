@@ -61,6 +61,10 @@ pub fn gather(
     };
     let stored = store.workflow_facts(engine_id).unwrap_or_default();
     let now = crate::store::now_secs() as f64;
+    // statvfs once per distinct save_path, not once per torrent: a catalogue
+    // shares a handful of them, and the syscall is the same answer every time.
+    let mut free_by_path: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
 
     engine
         .manager
@@ -75,6 +79,20 @@ pub fn gather(
             // would arm every deletion rule against the whole catalogue before
             // a single file had been looked at.
             let l = links.get(&hash);
+            let tracker_err = t
+                .last_announce_error
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let free_space = if s.save_path.is_empty() {
+                rules::NEVER
+            } else {
+                *free_by_path.entry(s.save_path.clone()).or_insert_with(|| {
+                    crate::platform::free_space(std::path::Path::new(&s.save_path))
+                        .map(|b| b as f64)
+                        .unwrap_or(rules::NEVER)
+                })
+            };
             let downloaded = t.total_downloaded.load(Ordering::Relaxed) as f64;
             let uploaded = t.total_uploaded.load(Ordering::Relaxed) as f64;
             let size = t.meta.total_size as f64;
@@ -106,7 +124,9 @@ pub fn gather(
                 total_size: size,
                 total_uploaded: uploaded,
                 total_downloaded: downloaded,
-                seeding_time: s.seeding_time as f64,
+                // The engine accumulates this; the store column never gets
+                // written, which is why the field used to be withheld.
+                seeding_time: t.seed_time_now(now as i64) as f64,
                 added_age: if s.added_time > 0.0 {
                     now - s.added_time
                 } else {
@@ -120,6 +140,43 @@ pub fn gather(
                 } else {
                     rules::NEVER
                 },
+                // ⚠️ Everything below used to fall through `..Default::default()`
+                // and read 0 or "" for every torrent in the catalogue, while
+                // being offered in the field picker. `num_peers == 0` matched
+                // EVERYTHING; a condition on a tracker matched nothing.
+                // ⚠️ The ENGINE's state is not the state anyone sees. It says
+                // "paused" for any halt and cannot tell a scheduler hold from a
+                // user pressing stop, so `derive_state` folds in the intent --
+                // and the list does the same. Reporting the raw one here would
+                // make `state == stopped` match torrents the UI shows as
+                // queued, which is a view contradicting another.
+                state: crate::row::derive_state_static(
+                    typhon_engine::rpc::dispatch::state_str(
+                        t.status.load(Ordering::Relaxed),
+                        t.is_paused.load(Ordering::Relaxed),
+                    ),
+                    s.paused,
+                )
+                .to_string(),
+                tracker_host: t
+                    .live_trackers
+                    .read()
+                    .iter()
+                    .flatten()
+                    .next()
+                    .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u))
+                    .unwrap_or_default(),
+                tracker_error: !tracker_err.is_empty(),
+                tracker_error_msg: tracker_err,
+                torrent_error: t.status.load(Ordering::Relaxed)
+                    == typhon_engine::torrent::meta::TorrentStatus::Error as u8,
+                upload_rate: t.upload_rate.get() as f64,
+                download_rate: t.download_rate.get() as f64,
+                num_peers: t.peers_connected.load(Ordering::Relaxed) as f64,
+                num_seeds: t.scrape_seeders.load(Ordering::Relaxed) as f64,
+                swarm_seeds: t.scrape_seeders.load(Ordering::Relaxed) as f64,
+                swarm_leechers: t.scrape_leechers.load(Ordering::Relaxed) as f64,
+                free_space,
                 link_count: l.map(|x| x.link_count as f64).unwrap_or(rules::NEVER),
                 external_links: l.map(|x| x.external_links as f64).unwrap_or(rules::NEVER),
                 freeable_bytes: l.map(|x| x.freeable_bytes as f64).unwrap_or(rules::NEVER),

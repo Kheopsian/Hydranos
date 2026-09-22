@@ -334,6 +334,10 @@ pub async fn preview(
     .into_response()
 }
 
+/// The one scan shared by every workflow pass on this node.
+static LINK_CACHE: std::sync::LazyLock<crate::linkindex::Cache> =
+    std::sync::LazyLock::new(crate::linkindex::Cache::default);
+
 /// Facts for every engine this node runs.
 fn gather_all(state: &AppState) -> Vec<rules::Facts> {
     gather_all_for(state, false)
@@ -350,7 +354,11 @@ fn gather_all_for(state: &AppState, want_links: bool) -> Vec<rules::Facts> {
         .collect();
     let store = state.store.lock().unwrap();
     let links = if want_links {
-        rulesrun::scan_links(&state.engines, &store)
+        // Shared between passes: on a large catalogue the scan is minutes, and
+        // a workflow on a fifteen-minute interval would spend its life in it.
+        LINK_CACHE.get_or_build(crate::store::now_secs(), || {
+            rulesrun::scan_links(&state.engines, &store)
+        })
     } else {
         std::collections::HashMap::new()
     };

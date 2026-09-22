@@ -264,10 +264,15 @@ pub struct TorrentCore {
     pub status_u8: u8,
 }
 
-pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
-    let status_u8 = t.status.load(Ordering::Relaxed);
-    let is_paused = t.is_paused.load(Ordering::Relaxed);
-    let state = if status_u8 == TorrentStatus::Error as u8 {
+/// The state string, from the two flags that decide it.
+///
+/// Split out of `torrent_core` so a caller that wants only the state does not
+/// pay for the progress it also computes -- `torrent_core` takes the picker
+/// lock, and a workflow pass asking 300 000 torrents what state they are in
+/// would take it 300 000 times. One definition either way: two places deciding
+/// separately what "paused" means is how a view starts contradicting another.
+pub fn state_str(status_u8: u8, is_paused: bool) -> &'static str {
+    if status_u8 == TorrentStatus::Error as u8 {
         "error"
     } else if is_paused {
         "paused"
@@ -280,7 +285,13 @@ pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore 
             4 => "error",
             _ => "unknown",
         }
-    };
+    }
+}
+
+pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
+    let status_u8 = t.status.load(Ordering::Relaxed);
+    let is_paused = t.is_paused.load(Ordering::Relaxed);
+    let state = state_str(status_u8, is_paused);
     // Real progress from picker's have count (was a 0.0/1.0 placeholder).
     let (num_have, progress) = if status_u8 == TorrentStatus::Seeding as u8 {
         (t.meta.num_pieces(), 1.0_f64)
