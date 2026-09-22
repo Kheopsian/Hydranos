@@ -25,6 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::platform::FileId;
 
@@ -207,6 +208,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_cache_serves_one_scan_and_rebuilds_after_the_ttl() {
+        let c = Cache::default();
+        let mut built = 0;
+        let mut build = |n: &mut i32| {
+            *n += 1;
+            let mut m = HashMap::new();
+            m.insert("x".to_string(), LinkFacts::default());
+            m
+        };
+        c.get_or_build(1_000, || build(&mut built));
+        c.get_or_build(1_000 + TTL_SECS - 1, || build(&mut built));
+        assert_eq!(built, 1, "inside the TTL the scan is not redone");
+        c.get_or_build(1_000 + TTL_SECS, || build(&mut built));
+        assert_eq!(built, 2, "at the TTL it is");
+    }
+
+    #[test]
+    fn invalidating_forces_the_next_caller_to_measure() {
+        let c = Cache::default();
+        let mut built = 0;
+        c.get_or_build(0, || {
+            built += 1;
+            HashMap::new()
+        });
+        c.invalidate();
+        c.get_or_build(1, || {
+            built += 1;
+            HashMap::new()
+        });
+        assert_eq!(built, 2);
+        assert_eq!(c.age(5), Some(4));
+    }
+
+    /// The guard that stands between an hour-old scan and `delete`.
+    #[test]
+    fn a_recheck_sees_a_name_added_since_the_scan() {
+        let dir = std::env::temp_dir().join(format!("hydranos-recheck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let a = dir.join("a.bin");
+        std::fs::write(&a, b"0123456789").expect("write");
+
+        // What the scan concluded: one name, ours, nobody else. Deletable.
+        let cached = LinkFacts {
+            external_links: 0,
+            link_count: 1,
+            freeable_bytes: 10,
+            data_missing: false,
+        };
+        let files = vec![a.clone()];
+        assert_eq!(recheck(&files, &cached).external_links, 0);
+
+        // Then the media library hardlinks it, as it would between two passes.
+        let b = dir.join("b.mkv");
+        std::fs::hard_link(&a, &b).expect("hard_link");
+        let now = recheck(&files, &cached);
+        assert_eq!(
+            now.external_links, 1,
+            "a name appeared since the scan, so the torrent is no longer free to delete"
+        );
+        assert_eq!(now.freeable_bytes, 0, "and unlinking one of two frees nothing");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recheck_of_a_vanished_file_reports_missing_not_deletable() {
+        let missing = std::env::temp_dir().join("hydranos-recheck-absent-7c1f");
+        let r = recheck(&[missing], &LinkFacts::default());
+        assert!(r.data_missing);
+        assert_eq!(r.external_links, 0, "nothing measured, nothing claimed");
+    }
+
     /// Not reachable through `compute`'s own dedup, but the guard has to hold
     /// on its own: an over-count must never read as "free to delete".
     #[test]
@@ -219,4 +294,101 @@ mod tests {
             "two names on a one-link inode is incoherent, so keep"
         );
     }
+}
+
+/// How long a scan's answers stay usable.
+///
+/// The scan is one `stat` per file in the catalogue: minutes on a large one.
+/// Redoing it every pass would mean a workflow on a fifteen-minute interval
+/// spending most of its life in `stat`. An hour is chosen against what the
+/// number actually measures -- hardlinks appear when the media library imports
+/// something, which is not a per-minute event.
+pub const TTL_SECS: i64 = 3600;
+
+/// The last scan, kept so consecutive passes share it.
+///
+/// ⚠️ Cached facts are fine for tagging and fine for a preview. They are NOT
+/// fine for `delete`: between the scan and the action, a cross-seed can add a
+/// name, and acting on an hour-old `external_links == 0` would remove a file
+/// somebody just started using. `recheck` below is what the delete path calls.
+pub struct Cache {
+    inner: Mutex<Option<(i64, HashMap<String, LinkFacts>)>>,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+}
+
+impl Cache {
+    /// The cached scan if it is younger than the TTL, otherwise `build()`.
+    ///
+    /// `build` runs OUTSIDE the lock on purpose: it walks the catalogue and
+    /// stats every file, and holding a mutex across that would stall every
+    /// other workflow for the whole scan. Two passes racing may both build,
+    /// which costs one extra scan and never a wrong answer.
+    pub fn get_or_build<F>(&self, now: i64, build: F) -> HashMap<String, LinkFacts>
+    where
+        F: FnOnce() -> HashMap<String, LinkFacts>,
+    {
+        if let Some((at, map)) = self.inner.lock().unwrap().as_ref() {
+            if now - at < TTL_SECS {
+                return map.clone();
+            }
+        }
+        let fresh = build();
+        *self.inner.lock().unwrap() = Some((now, fresh.clone()));
+        fresh
+    }
+
+    pub fn age(&self, now: i64) -> Option<i64> {
+        self.inner.lock().unwrap().as_ref().map(|(at, _)| now - at)
+    }
+
+    /// Drop the scan, so the next caller measures again.
+    pub fn invalidate(&self) {
+        *self.inner.lock().unwrap() = None;
+    }
+}
+
+/// Re-measure ONE torrent, against the catalogue the scan already counted.
+///
+/// ⭐ The guard for irreversible actions. `owned` cannot be recomputed for one
+/// torrent alone -- it is a property of the whole catalogue -- so the cached
+/// count is reused while the `nlink` values are read fresh. A name added since
+/// the scan raises `nlink`, which raises `external_links`, which is the
+/// direction that stops a deletion. A name REMOVED since the scan lowers it,
+/// and there the stale count is the conservative one anyway.
+pub fn recheck(files: &[PathBuf], cached: &LinkFacts) -> LinkFacts {
+    let mut out = LinkFacts {
+        data_missing: true,
+        ..Default::default()
+    };
+    let mut any_unknown = false;
+    for p in files {
+        let Some(id) = crate::platform::file_id(p) else {
+            continue;
+        };
+        out.data_missing = false;
+        out.link_count = out.link_count.max(id.links);
+        if id.links == 1 {
+            out.freeable_bytes += id.size;
+        }
+        // How many of this inode's names the catalogue held at scan time. The
+        // cached torrent-level count is the best available: if it looks
+        // impossible against the live nlink, say "someone else holds this".
+        let held = cached.link_count.saturating_sub(cached.external_links);
+        if held > id.links || held == 0 {
+            any_unknown = true;
+        }
+        let ext = if held > id.links { 1 } else { id.links - held };
+        out.external_links = out.external_links.max(ext);
+    }
+    if any_unknown && out.external_links == 0 {
+        out.external_links = 1;
+    }
+    out
 }
