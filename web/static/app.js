@@ -9575,18 +9575,26 @@ function addGroupRow(node, wrap) {
     const div = document.createElement("div");
     div.className = "wf-group";
     const kind = node && node.kind === "any" ? "any" : "all";
+    // The kind drives the colour of the rule running down the left, so the
+    // operator and everything it governs are one shape rather than a select
+    // sitting above an unrelated pile.
+    div.dataset.kind = kind;
     div.innerHTML = `
         <div class="wf-group-head">
             <select class="wf-g-kind">
                 <option value="all" ${kind === "all" ? "selected" : ""}>${esc(t("all of these (AND)"))}</option>
                 <option value="any" ${kind === "any" ? "selected" : ""}>${esc(t("any of these (OR)"))}</option>
             </select>
-            <button class="btn-small wf-g-cond">${esc(t("+ Condition"))}</button>
-            <button class="btn-small wf-g-group">${esc(t("+ Group"))}</button>
             <button class="btn-cancel wf-g-del">${esc(t("Remove"))}</button>
         </div>
-        <div class="wf-kids"></div>`;
+        <div class="wf-kids"></div>
+        <div class="wf-group-foot">
+            <button class="btn-small wf-g-cond">${esc(t("+ Condition"))}</button>
+            <button class="btn-small wf-g-group">${esc(t("+ Group"))}</button>
+        </div>`;
     const kids = div.querySelector(".wf-kids");
+    const kindSel = div.querySelector(".wf-g-kind");
+    kindSel.onchange = () => { div.dataset.kind = kindSel.value; };
     div.querySelector(".wf-g-cond").onclick = () => addCondRow(null, kids);
     div.querySelector(".wf-g-group").onclick = () => addGroupRow(null, kids);
     div.querySelector(".wf-g-del").onclick = () => div.remove();
