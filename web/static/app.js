@@ -9486,8 +9486,7 @@ function newWorkflow() {
     document.getElementById("wf-name").value = "";
     document.getElementById("wf-interval").value = 900;
     document.getElementById("wf-cap").value = 500;
-    document.getElementById("wf-join").value = "all";
-    document.getElementById("wf-conds").innerHTML = "";
+    wfRootGroup();
     document.getElementById("wf-actions").innerHTML = "";
     const _r = document.getElementById("wf-result");
     _r.textContent = "";
@@ -9547,9 +9546,9 @@ function _wfChoiceList(f) {
     return list && list.length ? list : null;
 }
 
-function addCondRow(cond) {
-    const wrap = document.getElementById("wf-conds");
-    const i = wrap.children.length;
+function addCondRow(cond, wrap) {
+    wrap = wrap || document.querySelector("#wf-conds .wf-kids");
+    if (!wrap) { wfRootGroup(); wrap = document.querySelector("#wf-conds .wf-kids"); }
     const opts = _wfFields.map(f =>
         `<option value="${esc(f.name)}" ${cond && cond.field === f.name ? "selected" : ""}>${esc(f.label || f.name)}</option>`
     ).join("");
@@ -9557,20 +9556,93 @@ function addCondRow(cond) {
     const div = document.createElement("div");
     div.className = "wf-row";
     div.innerHTML = `
-        <select class="wf-c-field" onchange="syncCondOps(${i})">${opts}</select>
+        <select class="wf-c-field" onchange="syncCondOps(this)">${opts}</select>
         <select class="wf-c-op"></select>
         ${_wfValueControl(f0, cond ? cond.value : "")}
         <span class="sr-desc wf-c-hint"></span>
         <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this condition">Remove</button>`;
     wrap.appendChild(div);
     if (cond) div.querySelector(".wf-c-op").dataset.want = cond.op;
-    syncCondOps(i);
+    syncCondOps(div.querySelector(".wf-c-field"));
+}
+
+// A group: its own AND/OR, its children, and the two buttons that grow it.
+// The tree the engine already accepts, which the flat list could not express:
+// "(tracker is A or tracker is B) and ratio >= 2" needed the ratio written
+// twice, and there was no way to write it at all.
+function addGroupRow(node, wrap) {
+    wrap = wrap || document.querySelector("#wf-conds .wf-kids");
+    const div = document.createElement("div");
+    div.className = "wf-group";
+    const kind = node && node.kind === "any" ? "any" : "all";
+    div.innerHTML = `
+        <div class="wf-group-head">
+            <select class="wf-g-kind">
+                <option value="all" ${kind === "all" ? "selected" : ""}>${esc(t("all of these (AND)"))}</option>
+                <option value="any" ${kind === "any" ? "selected" : ""}>${esc(t("any of these (OR)"))}</option>
+            </select>
+            <button class="btn-small wf-g-cond">${esc(t("+ Condition"))}</button>
+            <button class="btn-small wf-g-group">${esc(t("+ Group"))}</button>
+            <button class="btn-cancel wf-g-del">${esc(t("Remove"))}</button>
+        </div>
+        <div class="wf-kids"></div>`;
+    const kids = div.querySelector(".wf-kids");
+    div.querySelector(".wf-g-cond").onclick = () => addCondRow(null, kids);
+    div.querySelector(".wf-g-group").onclick = () => addGroupRow(null, kids);
+    div.querySelector(".wf-g-del").onclick = () => div.remove();
+    wrap.appendChild(div);
+    (node && node.of || []).forEach(c => wfRenderNode(c, kids));
+    return div;
+}
+
+// The root group cannot be removed: a workflow with no condition would match
+// everything, which the engine refuses anyway.
+function wfRootGroup(node) {
+    const host = document.getElementById("wf-conds");
+    host.innerHTML = "";
+    const g = addGroupRow(node, host);
+    g.classList.add("wf-root");
+    g.querySelector(".wf-g-del").remove();
+    return g;
+}
+
+function wfRenderNode(node, wrap) {
+    if (!node) return;
+    if (node.kind === "all" || node.kind === "any") return addGroupRow(node, wrap);
+    if (node.kind === "not") {
+        // Read back as the group it wraps. Nothing in the form builds a `not`,
+        // so this only has to avoid losing one written elsewhere.
+        return wfRenderNode(node.of, wrap);
+    }
+    return addCondRow(node, wrap);
+}
+
+// Walks the DOM the same way it was built. A group with no child is dropped
+// rather than sent: `{kind:"all", of:[]}` matches every torrent in the
+// catalogue, and that is not what an empty box looks like it means.
+function wfCollectNode(groupEl) {
+    const of = [];
+    for (const el of groupEl.querySelector(".wf-kids").children) {
+        if (el.classList.contains("wf-group")) {
+            const sub = wfCollectNode(el);
+            if (sub) of.push(sub);
+        } else if (el.classList.contains("wf-row")) {
+            of.push({
+                kind: "cond",
+                field: el.querySelector(".wf-c-field").value,
+                op: el.querySelector(".wf-c-op").value,
+                value: el.querySelector(".wf-c-val").value,
+            });
+        }
+    }
+    if (!of.length) return null;
+    return { kind: groupEl.querySelector(".wf-g-kind").value, of };
 }
 
 // The operators offered follow the field's kind, so a duration never gets
 // "contains" and a tag never gets ">=".
-function syncCondOps(i) {
-    const row = document.getElementById("wf-conds").children[i];
+function syncCondOps(el) {
+    const row = el && el.closest ? el.closest(".wf-row") : null;
     if (!row) return;
     const name = row.querySelector(".wf-c-field").value;
     const f = _wfFields.find(x => x.name === name);
@@ -9670,12 +9742,7 @@ function addActionRow(act) {
 }
 
 function _wfCollect() {
-    const conds = [...document.getElementById("wf-conds").children].map(r => ({
-        kind: "cond",
-        field: r.querySelector(".wf-c-field").value,
-        op: r.querySelector(".wf-c-op").value,
-        value: r.querySelector(".wf-c-val").value,
-    }));
+    const root = document.querySelector("#wf-conds .wf-group");
     const then = [...document.getElementById("wf-actions").children].map(r => {
         const type = r.querySelector(".wf-a-type").value;
         const el = r.querySelector(".wf-a-arg");
@@ -9687,14 +9754,13 @@ function _wfCollect() {
         }
         return { type };
     });
-    const join = document.getElementById("wf-join").value;
     return {
         id: _wfEditing || "",
         name: document.getElementById("wf-name").value.trim(),
         enabled: false,
         interval_secs: parseInt(document.getElementById("wf-interval").value, 10) || 900,
         cap: parseInt(document.getElementById("wf-cap").value, 10) || 500,
-        when: { kind: join, of: conds },
+        when: (root && wfCollectNode(root)) || { kind: "all", of: [] },
         then,
     };
 }
@@ -9759,10 +9825,10 @@ async function editWorkflow(id) {
     document.getElementById("wf-name").value = w.name;
     document.getElementById("wf-interval").value = w.interval_secs;
     document.getElementById("wf-cap").value = w.cap || 500;
+    // A workflow saved by the old flat form is `{kind, of:[cond...]}`, which
+    // is already a valid root group, so it loads with no migration.
     const when = w.when || {};
-    document.getElementById("wf-join").value = when.kind === "any" ? "any" : "all";
-    document.getElementById("wf-conds").innerHTML = "";
-    (when.of || []).forEach(c => addCondRow(c));
+    wfRootGroup(when.kind === "any" || when.kind === "all" ? when : { kind: "all", of: when.kind ? [when] : [] });
     document.getElementById("wf-actions").innerHTML = "";
     (w.then || []).forEach(a => addActionRow(a));
 }

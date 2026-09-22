@@ -3744,3 +3744,31 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     .facets-toggle { display: none; }
     #hoard-facets { display: block !important; }
 }
+
+/* Workflow condition tree. The indent is the only thing that says which
+   AND/OR a condition answers to, so it has to be a border and not a margin:
+   a margin leaves the nesting to be inferred from alignment alone. */
+.wf-group {
+    border-left: 2px solid var(--border, #3a3a3a);
+    padding-left: 10px;
+    margin: 6px 0;
+}
+.wf-group.wf-root {
+    border-left: none;
+    padding-left: 0;
+}
+.wf-group-head {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+.wf-group-head .wf-g-kind {
+    min-width: 160px;
+}
+.wf-kids:empty::after {
+    content: "no condition yet";
+    opacity: .6;
+    font-size: .9em;
+}
