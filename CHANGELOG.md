@@ -39,6 +39,15 @@ All three read `NEVER` until a scan has measured them, so a condition on an
 unmeasured torrent is false rather than accidentally true. The scan runs only
 when a workflow's conditions ask for it.
 
+The scan stats the catalogue on as many threads as the storage will take
+(`HYDRANOS_LINK_SCAN_THREADS`, 32 by default). Measured on a 293k-torrent
+catalogue, a single thread spent 98% of its life inside `statx` at roughly
+43 ms a call -- disk wait on cold metadata, near-zero CPU -- which bought 23
+files a second and would have taken some 36 hours to finish a scan its own
+one-hour cache outlives. Threads buy overlap in the disk queue; they are
+capped rather than unbounded, because these are real syscalls against a pool
+that is also serving torrents.
+
 `link_count` stays, and is now documented as the number that misleads.
 
 Thirteen more facts stop reading zero. `state`, `tracker_host`, `tracker_error`,
