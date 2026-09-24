@@ -164,6 +164,7 @@ impl EngineHost {
                             rw.lock()
                                 .map_err(|_| "store lock".to_string())?
                                 .insert_torrent(hash, id, bytes, "", "", 0.0, false, "")
+                                .map(|_| ())
                                 .map_err(|e| e.to_string())
                         };
                         let (imported, lost) = manager.import_missing_blobs(&uploads, &sink);

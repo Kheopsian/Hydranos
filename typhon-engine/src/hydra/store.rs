@@ -1613,6 +1613,16 @@ impl Store {
     /// by the time we get here -- racing two adds of the same hash should leave
     /// the first row alone rather than overwrite its category and added_time.
     #[allow(clippy::too_many_arguments)]
+    /// Returns whether a row was CREATED, which is not the same as success.
+    ///
+    /// `INSERT OR IGNORE` answers Ok either way, and swallowing that difference
+    /// is how a re-add came to destroy the torrent it duplicated: the caller
+    /// cleaned up "its" row on failure, but on a duplicate the row it deleted
+    /// belonged to the copy already running (2026-09-24, 20 torrents left
+    /// running in the engine with nothing in the store -- no lookup, no
+    /// category, and every piece refused for want of a metainfo to hash
+    /// against). A caller that undoes its own work has to be told what its own
+    /// work was.
     pub fn insert_torrent(
         &self,
         info_hash: &str,
@@ -1623,8 +1633,8 @@ impl Store {
         added_time: f64,
         paused: bool,
         tags: &str,
-    ) -> anyhow::Result<()> {
-        self.conn.execute(
+    ) -> anyhow::Result<bool> {
+        let n = self.conn.execute(
             "INSERT OR IGNORE INTO torrents
                  (info_hash, session, torrent, save_path, category, added_time, paused, tags)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -1639,7 +1649,7 @@ impl Store {
                 tags
             ],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Re-home a torrent to another engine of this node.
@@ -1954,6 +1964,34 @@ mod composite_key_tests {
     use super::*;
 
     fn blob() -> Vec<u8> { b"d4:infod6:lengthi1eee".to_vec() }
+
+    /// A second add of a torrent already held must NOT look like a first one.
+    ///
+    /// The caller cleans up "its" row when the engine refuses, and the refusal
+    /// it meets in practice is "already added". Told the insert succeeded, it
+    /// deletes the row of the copy still running: 2026-09-24, 20 torrents left
+    /// in the engine with no store row, no lookup by infohash, no category, and
+    /// every piece refused for want of a metainfo.
+    #[test]
+    fn insert_torrent_reports_only_the_row_it_created() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(
+            s.insert_torrent("aa", "hoard", &blob(), "/data", "movies", 1.0, false, "")
+                .unwrap(),
+            "the first add creates the row"
+        );
+        assert!(
+            !s.insert_torrent("aa", "hoard", &blob(), "/data", "movies", 1.0, false, "")
+                .unwrap(),
+            "a duplicate add creates nothing, and must say so"
+        );
+        // A DIFFERENT engine is a different copy, so that one IS a creation.
+        assert!(
+            s.insert_torrent("aa", "vpn1", &blob(), "/data", "movies", 1.0, false, "")
+                .unwrap(),
+            "a second engine holding the same torrent is its own row"
+        );
+    }
 
     /// The migration must keep every row and change only the key.
     ///

@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRANOS_VERSION: &str = "4.2.0";
+pub const HYDRANOS_VERSION: &str = "4.2.1";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -1974,9 +1974,11 @@ fn add_torrent_bytes(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    {
+    // Whether THIS call created the row, which decides whether this call may
+    // delete it again further down. See the cleanup on the engine's refusal.
+    let row_is_ours = {
         let store = state.store.lock().unwrap();
-        store
+        let created = store
             .insert_torrent(&hash, &engine_id, bytes, &save_path, category, added_time, paused, tags)
             .map_err(|e| format!("store: {e}"))?;
         // Indexed here rather than at boot: a torrent that is never indexed is
@@ -1987,7 +1989,8 @@ fn add_torrent_bytes(
                 tracing::warn!(hash = %hash, "content index: {e}");
             }
         }
-    }
+        created
+    };
 
     // Data we already hold, under a name we have not seen before.
     //
@@ -2007,8 +2010,17 @@ fn add_torrent_bytes(
         .manager
         .add_torrent_bytes(bytes, &save_path, paused, seed_mode)
         .map_err(|e| {
-            // The engine refused it, so nothing owns this row.
-            let _ = state.store.lock().unwrap().delete_torrent(&hash);
+            // Undo the row ONLY if this call is what put it there.
+            //
+            // ⚠ The refusal this hits in practice is "already added", and there
+            // the row belongs to the copy the engine is still running -- the
+            // previous code deleted it and left a live torrent with no store
+            // row at all. `delete_copy` and not `delete_torrent` for the same
+            // reason one notch down: a torrent seeded from two engines has two
+            // rows, and only ours is ours to drop.
+            if row_is_ours {
+                let _ = state.store.lock().unwrap().delete_copy(&hash, &engine_id);
+            }
             e
         })?;
 
