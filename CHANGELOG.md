@@ -17,6 +17,24 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## v4.2.1 -- a re-add no longer deletes the torrent it duplicates
+
+### Fixed
+- **Adding a torrent that is already held destroyed its store row.** `insert_torrent`
+  is an `INSERT OR IGNORE` that answered `Ok(())` whether or not it created
+  anything, so the add path could not tell its own row from one that was already
+  there. When the engine then refused the duplicate with "already added", the
+  cleanup deleted the row belonging to the copy still running -- and
+  `delete_torrent` drops EVERY copy, so a torrent seeded from two engines lost
+  both. The torrent kept running in the engine with nothing in the store: no
+  lookup by infohash (404 while the same torrent was listed by
+  `GET /api/hoard/torrents`), no category and none settable from the interface,
+  and every piece refused with `no piece hashes` because the metainfo is read
+  from the row that had just been deleted. None of it was logged. Found on
+  2026-09-24 on 20 torrents, after a client re-sent an add it had already made.
+  `insert_torrent` now reports whether it created the row, the cleanup only runs
+  when it did, and it drops one copy rather than all of them.
+
 ## v4.2.0 -- a workflow can tell a hardlink that matters from one that does not
 
 `link_count` counts an inode's names. It does not say whose they are, and that
