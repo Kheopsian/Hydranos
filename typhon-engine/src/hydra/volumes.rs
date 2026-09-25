@@ -28,11 +28,34 @@ pub struct Volume {
     pub total: u64,
     pub used: u64,
     pub free: u64,
+    /// Bytes this volume's downloads have PROMISED to write and have not
+    /// written yet. The admission check already refuses a new race on
+    /// `free - committed`; the drain has to trigger on the same arithmetic or
+    /// the two disagree about when the disk is full -- which is exactly the
+    /// window where an add is refused and nothing frees anything.
+    pub committed: u64,
     pub torrents: usize,
     pub policy: Policy,
 }
 
 impl Volume {
+    /// What the disk holds plus what it has already agreed to hold.
+    pub fn allocated(&self) -> u64 {
+        self.used.saturating_add(self.committed)
+    }
+
+    /// Occupancy the drain and the admission check both reason on.
+    ///
+    /// Can exceed 100: promising more than the disk has is precisely the state
+    /// worth reacting to, and clamping it would hide the worst case.
+    pub fn alloc_pct(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.allocated() as f64 * 100.0 / self.total as f64
+        }
+    }
+
     pub fn used_pct(&self) -> f64 {
         if self.total == 0 {
             0.0
@@ -185,17 +208,23 @@ pub fn discover(
     manager: &Arc<TorrentManager>,
     cfg: &crate::config::RaceDrain,
 ) -> Vec<Volume> {
-    let mut by_dev: HashMap<u64, (PathBuf, usize)> = HashMap::new();
+    let mut by_dev: HashMap<u64, (PathBuf, usize, u64)> = HashMap::new();
     for t in manager.all() {
         let path = t.save_path.read().clone();
         let Some(dev) = device_of_nearest(&path) else {
             continue;
         };
-        let entry = by_dev.entry(dev).or_insert_with(|| (path.clone(), 0));
+        let entry = by_dev.entry(dev).or_insert_with(|| (path.clone(), 0, 0));
         entry.1 += 1;
+        // Same sum as `race_admission`: what is still to be written, here.
+        let core = typhon_engine::rpc::dispatch::torrent_core(&t);
+        let remaining = (t.meta.total_size as i64) - (core.total_done as i64);
+        if remaining > 0 {
+            entry.2 = entry.2.saturating_add(remaining as u64);
+        }
     }
     let mut out: Vec<Volume> = Vec::new();
-    for (dev, (sample, count)) in by_dev {
+    for (dev, (sample, count, committed)) in by_dev {
         let mount = mount_point_of(&sample);
         let Some((used, total, free)) = usage(&mount) else {
             continue;
@@ -208,15 +237,16 @@ pub fn discover(
             total,
             used,
             free,
+            committed,
             torrents: count,
             policy,
         });
     }
-    // Fullest first: the one that needs attention leads the list, and the UI
-    // does not have to sort what the API already knows how to order.
+    // Fullest first -- by ALLOCATION, because a disk at 60% with 400 GB in
+    // flight needs attention before one at 80% that has finished downloading.
     out.sort_by(|a, b| {
-        b.used_pct()
-            .partial_cmp(&a.used_pct())
+        b.alloc_pct()
+            .partial_cmp(&a.alloc_pct())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     out
@@ -241,6 +271,7 @@ mod tests {
             total,
             used,
             free: total.saturating_sub(used),
+            committed: 0,
             torrents: 0,
             policy: Policy { enabled: true, high: 90, low: 80, inherited: true },
         }
@@ -254,6 +285,34 @@ mod tests {
         let v = vol(0, 0);
         assert_eq!(v.used_pct(), 0.0);
         assert!(!v.used_pct().is_nan());
+    }
+
+    #[test]
+    /// The whole point of the change: a disk that LOOKS half empty can already
+    /// be full, and that is the state an add gets refused in.
+    #[test]
+    fn allocation_counts_what_is_still_to_be_written() {
+        let mut v = vol(1000, 600);
+        v.committed = 350;
+        assert_eq!(v.used_pct(), 60.0, "occupancy is what statvfs says");
+        assert_eq!(v.alloc_pct(), 95.0, "allocation is occupancy plus what is promised");
+    }
+
+    /// Promising more than the disk holds is exactly the case worth reacting
+    /// to. Clamping it to 100 would erase the severity.
+    #[test]
+    fn allocation_may_exceed_one_hundred_percent() {
+        let mut v = vol(1000, 900);
+        v.committed = 400;
+        assert_eq!(v.alloc_pct(), 130.0);
+    }
+
+    /// With nothing in flight the new rule must behave exactly like the old
+    /// one, otherwise every idle disk changes behaviour on upgrade.
+    #[test]
+    fn with_nothing_in_flight_allocation_is_occupancy() {
+        let v = vol(1000, 830);
+        assert_eq!(v.alloc_pct(), v.used_pct());
     }
 
     #[test]
