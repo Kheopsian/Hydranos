@@ -6251,15 +6251,23 @@ struct PortBody {
     port: u16,
 }
 
-/// Change an engine's peer listen port.
+/// Rebind an engine's peer listen port, live.
 ///
-/// ⚠ NOT ROUTED YET, on purpose. This looked like a config write and is not:
-/// 3.x asks the LIVE engine to rebind and answers 500
-/// ("listen-port rebind unsupported on this engine client") when it cannot,
-/// without touching the file. Persisting the value here would change the
-/// operator's config in a case where the reference deliberately changes
-/// nothing -- a silent divergence, and the write bench is what caught it.
-/// Belongs to the network slice, with the listeners.
+/// An ENGINE ACTION: the TCP accept socket is rebound while torrents and live
+/// peer connections are kept, and NOTHING is written to the config. That is the
+/// point of the route -- its reason to exist is a dynamic upstream port
+/// (gluetun, a Proton forward) that rotates, so a value persisted here would be
+/// stale by the next rotation and would diverge from the operator's file.
+///
+/// ⚠⚠ Two stale claims used to sit on this function: "NOT ROUTED YET, on
+/// purpose" (it was routed, at `/api/race/listen-port`) and that the engine
+/// client could not rebind (`TorrentManager::request_listen_rebind` has always
+/// been there, and `peer::listen` registers its supervisor). Nothing contradicted
+/// either, because no test built the router and no test called this path.
+///
+/// A false return means the supervisor is not up: the engine is loaded but not
+/// on the network, so there is no accept socket to move. That is a 503 and not a
+/// 500 -- the request was fine, the engine is simply not in a state to serve it.
 async fn set_listen_port(state: &AppState, engine: &str, body: &str) -> Response {
     let Ok(req) = serde_json::from_str::<PortBody>(body) else {
         return (StatusCode::BAD_REQUEST,
@@ -6270,12 +6278,27 @@ async fn set_listen_port(state: &AppState, engine: &str, body: &str) -> Response
                 Json(serde_json::json!({"error": "port out of range (1-65535)"})))
             .into_response();
     }
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error":
-            format!("{engine}: listen-port rebind unsupported on this engine client")})),
-    )
+    let Some(eng) = state.engines.get(engine) else {
+        return (StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "agent unavailable"}))).into_response();
+    };
+    if eng.manager.request_listen_rebind(req.port) {
+        Json(serde_json::json!({
+            "ok": true,
+            "engine": engine,
+            "port": req.port,
+            "persisted": false,
+        }))
         .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": format!(
+                "{engine}: listener supervisor not ready -- the engine is not on the network"
+            )})),
+        )
+            .into_response()
+    }
 }
 
 async fn set_race_listen_port(
@@ -8161,16 +8184,19 @@ struct DialLimits {
 
 /// Outbound dial pacing for one engine.
 ///
-/// ⚠ Same story as the listen port, and the third route of this family to catch
-/// me out. It LOOKS like a setting and is an ENGINE ACTION. 3.x asks the live engine and answers 500
-/// ("race: dial limits unsupported on this engine client") when it cannot,
-/// WITHOUT writing the config. Persisting here would change the operator's file
-/// in a case where the reference changes nothing.
+/// An ENGINE ACTION, not a config write: nothing is persisted, so a restart
+/// returns to the configured ceilings. That is deliberate and matches 3.x --
+/// writing the operator's file here would diverge from the reference, and the
+/// callers that move these numbers (a VPN whose port rotates, a burst being
+/// throttled by hand) want the live value, not a permanent one.
 ///
-/// The rule, written down after the first two and forgotten by the third:
-/// classify the route -- config write / store write / engine action -- by
-/// reading the Go handler AND watching its answer on the bench, before writing
-/// a line of it.
+/// ⚠⚠ This answered 500 "dial limits unsupported on this engine client" until
+/// now, and the comment explaining why said the typhon client did not implement
+/// it. That was true of the 3.x RPC client and FALSE of this build: the engine
+/// has carried `limiter().set_max_dials_per_sec()` all along, and
+/// `rpc/dispatch.rs::set_dial_limits` was already calling it. The V4 port simply
+/// never re-wired the HTTP route to the in-process engine -- the subsystem was
+/// not missing, the last inch of wiring was. cf `project_hydra_v4_full_rust`.
 async fn set_dial_limits(state: &AppState, engine: &str, body: &str) -> Response {
     let Ok(req) = serde_json::from_str::<DialLimits>(body) else {
         return (StatusCode::BAD_REQUEST,
@@ -8201,19 +8227,31 @@ async fn set_dial_limits(state: &AppState, engine: &str, body: &str) -> Response
         )
             .into_response();
     }
-    if state.engines.get(engine).is_none() {
+    let Some(eng) = state.engines.get(engine) else {
         return (StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"error": "agent unavailable"}))).into_response();
-    }
+    };
 
-    // Same as the listen port: 3.x asks the live engine and the typhon client
-    // does not implement it, so it answers 500 and writes nothing.
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error":
-            format!("{engine}: dial limits unsupported on this engine client")})),
-    )
-        .into_response()
+    // Apply to the live limiter, then read BACK from it. Echoing the request
+    // would report what was asked for; reading the limiter reports what the
+    // engine now holds, which is the only number worth answering with.
+    let limiter = eng.manager.limiter();
+    if let Some(r) = req.max_dials_per_sec {
+        limiter.set_max_dials_per_sec(r);
+    }
+    if let Some(c) = req.max_connections {
+        limiter.set_max_connections(c as usize);
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "engine": engine,
+        "max_dials_per_sec": limiter.max_dials_per_sec(),
+        "max_connections": limiter.max_connections(),
+        // Said out loud so nobody has to read the source to find out: the
+        // ceilings are live only, and a restart returns to the config.
+        "persisted": false,
+    }))
+    .into_response()
 }
 
 async fn hoard_dial_limits(
@@ -11397,6 +11435,40 @@ async fn engine_bulk_by_id(
     bulk_action(&state, &id, &body).await
 }
 
+/// Rebind any engine's listen port, addressed by ID.
+async fn engine_listen_port_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(sel): axum::extract::Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let id = match engine_or_refusal(&state, &sel) {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    set_listen_port(&state, &id, &body).await
+}
+
+/// Set any engine's dial ceilings, addressed by ID.
+async fn engine_dial_limits_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(sel): axum::extract::Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let id = match engine_or_refusal(&state, &sel) {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    set_dial_limits(&state, &id, &body).await
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(get_health))
@@ -11416,6 +11488,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/engines/:id/torrents", get(get_engine_torrents))
         .route("/api/engines/:id/page", get(get_engine_page_by_id))
         .route("/api/engines/:id/pinned", get(get_engine_pinned_by_id))
+        .route(
+            "/api/engines/:id/listen-port",
+            axum::routing::post(engine_listen_port_by_id),
+        )
+        .route(
+            "/api/engines/:id/dial-limits",
+            axum::routing::post(engine_dial_limits_by_id),
+        )
         .route(
             "/api/engines/:id/pause-all",
             axum::routing::post(engine_pause_all_by_id),
@@ -13996,40 +14076,98 @@ mod body_route_tests {
         pb_post_torrent_engine => post_torrent_engine, ABSENT, r#"{"engine":"hoard"}"#;
     );
 
-    /// 🧟 THESE FOUR ROUTES ARE STUBS. They validate the body, then answer
-    /// 500 unconditionally -- there is no success path in `set_listen_port`
-    /// nor in `set_dial_limits` at all.
+    /// ⭐⭐ These four routes WERE stubs: they validated the body and then
+    /// answered 500 unconditionally, with a comment saying the engine client
+    /// could not do it. The comment was about 3.x's RPC client. This build has
+    /// always carried `limiter().set_max_dials_per_sec()` and
+    /// `request_listen_rebind()`, and `rpc/dispatch.rs` already called both --
+    /// only the HTTP wiring was missing. So the test that pinned the stubs is
+    /// replaced by one that pins the behaviour.
     ///
-    /// Not an artefact of the fixture: the refusal does not depend on any
-    /// state. The Network panel calls the listen-port one (23 references in
-    /// app.js), so an operator changing the port there gets a 500 every time.
-    /// Pinned here so the day someone implements it, this test fails and says
-    /// so, rather than the stub living on unnoticed.
+    /// Dial ceilings apply to a loaded engine whether or not it is on the
+    /// network, because the limiter is a plain counter -- so this asserts a 200
+    /// and reads the value BACK off the limiter rather than trusting the echo.
     #[tokio::test]
-    async fn the_listen_port_and_dial_limit_routes_are_still_stubs() {
-        let s = st("stubs");
-        let cases: Vec<(&str, Response)> = vec![
-            ("set_race_listen_port", super::set_race_listen_port(
-                State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"port":16371}"#.into()).await),
-            ("set_hoard_listen_port", super::set_hoard_listen_port(
-                State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"port":16372}"#.into()).await),
-            ("race_dial_limits", super::race_dial_limits(
-                State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"max_dials_per_sec":5}"#.into()).await),
-            ("hoard_dial_limits", super::hoard_dial_limits(
-                State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"max_dials_per_sec":5}"#.into()).await),
-        ];
-        for (name, resp) in cases {
-            assert_eq!(
-                resp.status(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "{name} is a stub: if this now succeeds, the stub was implemented -- update this test"
-            );
-            let body = body_json(resp).await;
-            assert!(
-                body["error"].as_str().unwrap_or_default().contains("unsupported"),
-                "{name} says why: {body}"
-            );
-        }
+    async fn dial_limits_move_the_live_limiter() {
+        let s = st("dial-limits");
+        let before = s
+            .state
+            .engines
+            .get("race")
+            .expect("race engine")
+            .manager
+            .limiter()
+            .max_dials_per_sec();
+
+        let resp = super::race_dial_limits(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"max_dials_per_sec":7.5,"max_connections":4242}"#.into(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "got {:?}", resp.status());
+
+        let body = body_json(resp).await;
+        assert_eq!(body["max_dials_per_sec"], 7.5, "answered {body}");
+        assert_eq!(body["max_connections"], 4242, "answered {body}");
+        assert_eq!(
+            body["persisted"], false,
+            "an engine action must say it wrote nothing: {body}"
+        );
+
+        // The answer could be an echo. The limiter cannot.
+        let limiter = s.state.engines.get("race").expect("race").manager.limiter();
+        assert_eq!(limiter.max_dials_per_sec(), 7.5, "the limiter did not move");
+        assert_eq!(limiter.max_connections(), 4242);
+        assert_ne!(before, 7.5, "the fixture must not start at the tested value");
+    }
+
+    /// The two engines of a test state are loaded but NOT on the network, so no
+    /// listener supervisor is registered and there is no accept socket to move.
+    ///
+    /// ⭐ That is a 503, not the old 500: the request is well-formed and the
+    /// engine is simply not in a state to serve it. A 500 said "this build
+    /// cannot do it", which was never true.
+    #[tokio::test]
+    async fn a_listen_port_rebind_off_the_network_is_unavailable_not_broken() {
+        let s = st("listen-port-offline");
+        let resp = super::set_race_listen_port(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"port":16371}"#.into(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "got {:?}",
+            resp.status()
+        );
+        let body = body_json(resp).await;
+        let err = body["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("not on the network"),
+            "the refusal must say WHY, said {err:?}"
+        );
+        assert!(
+            !err.contains("unsupported"),
+            "no longer an unsupported operation: {err:?}"
+        );
+    }
+
+    /// An unknown engine is not an excuse to answer ok.
+    #[tokio::test]
+    async fn dial_limits_on_an_absent_engine_is_refused() {
+        let s = st("dial-limits-absent");
+        let resp = super::set_dial_limits(
+            &s.state,
+            "no-such-engine",
+            r#"{"max_dials_per_sec":1.0}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// The stubs still VALIDATE: a body they cannot parse is a 400, and that

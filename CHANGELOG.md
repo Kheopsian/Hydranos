@@ -41,6 +41,19 @@ Two ways to title a new entry:
 - **A race torrent could not be tagged at all**: there was no
   `/api/race/torrents/:info_hash/tags` route, only the hoard one.
 
+- **The listen-port and dial-limit routes did nothing and blamed the engine.**
+  All four validated their body and then answered 500 "unsupported on this engine
+  client", with a comment explaining that the engine client could not do it. That
+  was true of the 3.x RPC client and false of this build: `request_listen_rebind`
+  and `limiter().set_max_dials_per_sec` have been there all along, and
+  `rpc/dispatch.rs` was already calling both -- only the HTTP wiring was missing.
+  A rebind now moves the live accept socket, keeping torrents and peer
+  connections, and the ceilings reach the live limiter. Nothing is persisted, and
+  the answer says so (`"persisted": false`): these are engine actions, and the
+  reason the rebind route exists is an upstream port that rotates. An engine
+  loaded but not on the network answers 503 rather than 500 -- the request is
+  fine, the engine is not in a state to serve it.
+
 ### Added
 - **Engine-addressed routes**: `/api/engines/:id/torrents`, `/page`, `/pinned`,
   `/pause-all`, `/resume-all`, `/torrents/bulk`. The stock spellings
