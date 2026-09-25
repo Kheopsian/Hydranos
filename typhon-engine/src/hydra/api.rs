@@ -5823,7 +5823,7 @@ fn resolve_in_hoard(state: &AppState, engine: &str, prefix: &str, message: &str)
 }
 
 macro_rules! torrent_write {
-    ($name:ident, $message:expr, $ok:expr, $body:expr) => {
+    ($name:ident, $fallback:expr, $message:expr, $ok:expr, $body:expr) => {
         async fn $name(
             State(state): State<AppState>,
             Path(info_hash): Path<String>,
@@ -5837,7 +5837,16 @@ macro_rules! torrent_write {
             // Which copy. `?agent=` carries the row the operator clicked, so a
             // torrent seeded from three engines is paused in the one they
             // pointed at instead of whichever the lookup happened to find.
-            let engine = engine_param(&query, "hoard");
+            //
+            // ⚠⚠ The fallback is the engine THIS ROUTE NAMES, not the constant
+            // "hoard" it used to be. The front end's category call carries no
+            // query at all -- `fetch(`/api/${mode}/torrents/${hash}/category`)`
+            // -- so with a hardcoded fallback the engine in the path was
+            // ignored: labelling a race torrent aimed the write at hoard. On a
+            // torrent only race held that was a 404 for something that plainly
+            // existed; on one held by both, the label landed on the wrong copy
+            // and the answer was still `{"status":"ok"}`.
+            let engine = engine_param(&query, $fallback);
             let hash = match resolve_in_hoard(&state, &engine, &info_hash, $message) {
                 Ok(h) => h,
                 Err(response) => return response,
@@ -5850,7 +5859,7 @@ macro_rules! torrent_write {
     };
 }
 
-torrent_write!(hoard_pause_one, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
+torrent_write!(hoard_pause_one, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
     {
         let store = state.store.lock().unwrap();
         let _ = store.set_paused(hash, engine, true);
@@ -5858,7 +5867,7 @@ torrent_write!(hoard_pause_one, "torrent not found", |_ih: &str| serde_json::jso
     apply_pause_to_engine(state, engine, hash, true);
 });
 
-torrent_write!(hoard_resume_one, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
+torrent_write!(hoard_resume_one, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
     {
         let store = state.store.lock().unwrap();
         let _ = store.set_paused(hash, engine, false);
@@ -5866,7 +5875,7 @@ torrent_write!(hoard_resume_one, "torrent not found", |_ih: &str| serde_json::js
     apply_pause_to_engine(state, engine, hash, false);
 });
 
-torrent_write!(hoard_pin_one, "torrent not in hoard: {}", |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
+torrent_write!(hoard_pin_one, "hoard", "torrent not in hoard: {}", |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
     let store = state.store.lock().unwrap();
     let _ = store.set_pinned(hash, engine, true);
 });
@@ -5897,7 +5906,7 @@ async fn hoard_unpin_one(
     .into_response()
 }
 
-torrent_write!(set_torrent_category, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, engine: &str| {
+torrent_write!(set_torrent_category, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, engine: &str| {
     // The body is {"category": "..."} on the native API.
     let category = serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -5909,7 +5918,34 @@ torrent_write!(set_torrent_category, "torrent not found", |_ih: &str| serde_json
     let _ = store.set_category_in(hash, engine, &category);
 });
 
-torrent_write!(set_torrent_tags, "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
+torrent_write!(set_torrent_tags, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
+    // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
+    // here: the caller sends the state it wants, not a delta.
+    let tags: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("tags").cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let store = state.store.lock().unwrap();
+    let _ = store.register_tags(&tags);
+    let _ = store.set_tags(hash, &tags);
+});
+
+// The race-side twins of the two label writers. Identical bodies; what
+// differs is the engine they resolve in when the caller names none, which is
+// the engine their route spells.
+torrent_write!(set_race_torrent_category, "race", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, engine: &str| {
+    // The body is {"category": "..."} on the native API.
+    let category = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("category").and_then(|c| c.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    let store = state.store.lock().unwrap();
+    // The engine was already a parameter here, ignored as `_engine`, so the
+    // native API relabelled every copy of a torrent it was given one of.
+    let _ = store.set_category_in(hash, engine, &category);
+});
+torrent_write!(set_race_torrent_tags, "race", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
     // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
     // here: the caller sends the state it wants, not a delta.
     let tags: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
@@ -10648,18 +10684,139 @@ async fn qbit_set_preferences(
     qbit_ok()
 }
 
-/// qBittorrent routes that answer an empty 200.
-async fn qbit_empty_ok(
+/// Every engine holding a copy of `hash`, with that copy.
+///
+/// A torrent can sit in more than one engine at a time, and a bulk action from a
+/// qBittorrent client names hashes only -- never an engine. So the action has to
+/// reach every copy, the way `apply_pause_everywhere` already does for pause.
+fn copies_of(
+    state: &AppState,
+    hash: &str,
+) -> Vec<(
+    String,
+    std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+)> {
+    let ids: Vec<String> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| e.id.clone())
+        .collect();
+    ids.into_iter()
+        .filter_map(|id| find_copy(state, &id, hash).map(|t| (id, t)))
+        .collect()
+}
+
+/// The hashes of a qBittorrent bulk form, resolved against the store.
+///
+/// Resolved inside the lock and acted on outside it: rechecking or announcing
+/// touches engines and sockets, and holding the database across that would
+/// serialise every other request behind one bulk call.
+fn resolved_hashes(state: &AppState, form: &Fields) -> Vec<String> {
+    let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
+    let store = state.store.lock().unwrap();
+    hashes
+        .into_iter()
+        .filter_map(|prefix| store.resolve_hash(&prefix))
+        .collect()
+}
+
+/// qBittorrent's bulk reannounce.
+///
+/// ⚠⚠ This was `qbit_empty_ok`: it answered an empty 200 and announced NOTHING,
+/// while the native `/api/torrents/:info_hash/reannounce` had been doing the
+/// real work since 4.17.2. autobrr and the *arr clients speak this dialect and
+/// no other, so every bulk reannounce they asked for was a no-op reported as a
+/// success -- the same shape of lie as the 540-torrent bulk of 2026-09-12, one
+/// layer further out.
+///
+/// ⭐ `try_send` with no reply channel, deliberately, and this is the one place
+/// that differs from the native route. The native one waits for the scheduler's
+/// answer because it speaks for a single click. Waiting on N answers here would
+/// be a cost this handler cannot bound -- a client may name every torrent in the
+/// catalogue. What is bounded is the queue: a scheduler too busy to accept a
+/// bump is counted and logged, not waited for.
+async fn qbit_reannounce(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
+    Form(form): Form<Fields>,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
+    let resolved = resolved_hashes(&state, &form);
+    let asked = resolved.len();
+    let mut bumped = 0usize;
+    let mut not_announcing = 0usize;
+    let mut queue_full = 0usize;
+    for hash in resolved {
+        for (id, _copy) in copies_of(&state, &hash) {
+            let Some(engine) = state.engines.get(&id) else {
+                continue;
+            };
+            // Loaded but not on the network: there is no announce loop to jump.
+            let Some(bump) = engine.bump.get() else {
+                not_announcing += 1;
+                continue;
+            };
+            match bump.try_send(crate::announce::scheduler::BumpReq {
+                info_hash: hash.to_lowercase(),
+                reply: None,
+            }) {
+                Ok(()) => bumped += 1,
+                Err(_) => queue_full += 1,
+            }
+        }
+    }
+    // The answer stays an empty 200 because that is the qBittorrent contract and
+    // a client would break on anything else. The counts go to the log, so a
+    // reannounce that reached nothing is visible somewhere.
+    tracing::info!(
+        asked,
+        bumped,
+        not_announcing,
+        queue_full,
+        "qbit bulk reannounce"
+    );
     qbit_ok()
 }
+
+/// qBittorrent's bulk recheck.
+///
+/// ⚠⚠ Also `qbit_empty_ok` until now: it claimed to have checked and had not.
+/// Same fix, same reason -- the *arr clients call this one after an import to
+/// confirm the data on disk, and an empty OK told them the check had run.
+async fn qbit_recheck(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    Form(form): Form<Fields>,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let resolved = resolved_hashes(&state, &form);
+    let asked = resolved.len();
+    let mut checking = 0usize;
+    let mut refused = 0usize;
+    for hash in resolved {
+        for (id, copy) in copies_of(&state, &hash) {
+            let Some(engine) = state.engines.get(&id) else {
+                continue;
+            };
+            // The engine owns the hash: take the typed one off the torrent
+            // rather than re-parsing the prefix the caller sent.
+            match engine.manager.recheck(&copy.info_hash) {
+                Ok(()) => checking += 1,
+                // recheck refuses a torrent it cannot check -- no metadata yet,
+                // or a check already running. Counted, not fatal to the batch.
+                Err(_) => refused += 1,
+            }
+        }
+    }
+    tracing::info!(asked, checking, refused, "qbit bulk recheck");
+    qbit_ok()
+}
+
 
 /// Cancel a job. 409, not 404: the id may be well-formed and simply finished,
 /// and a client retrying a 404 forever is worse than one told it conflicts.
@@ -11063,6 +11220,183 @@ async fn get_health(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// An engine selector to a concrete engine ID.
+///
+/// ⭐⭐ BY ID ONLY, and that is a measured decision rather than a shortcut.
+/// `Config::local_engines` unconditionally pushes an engine called `race` and
+/// one called `hoard` before reading any `[[engine]]` block -- both sections are
+/// `#[serde(default)]`, so they exist even in a config that never mentions
+/// them. The two IDs are therefore ALWAYS taken, which means the deprecated
+/// `/api/race/...` spelling already resolves as an ID and needs no role
+/// fallback to keep working.
+///
+/// Resolving a role here would only add a way for one engine to answer under
+/// another's name: with `engine_id = "vpn1"`, `role = "race"`, a role fallback
+/// would make `/api/race/torrents` return vpn1 on some installs and the stock
+/// race engine on others, depending on nothing the caller can see. An ID is
+/// what the caller asked for, so an ID is what is looked up.
+///
+/// The role keeps the two jobs it actually has -- picking the fleet profile in
+/// `profile_for_role`, and choosing `Mode::Race` / `Mode::Hoard` for the
+/// announcer. Neither is a name.
+fn resolve_engine(state: &AppState, sel: &str) -> Option<String> {
+    state.engines.get(sel).map(|e| e.id.clone())
+}
+
+/// Every torrent held by one engine, addressed BY ID.
+///
+/// ⚠⚠ Nested under `/api/engines/:id/`, NOT `/api/:engine/`. A bare first
+/// segment would have been shorter and is a trap: 39 names are already taken by
+/// literal routes at that position -- `stats`, `settings`, `torrents`, `jobs`,
+/// `nodes`, `import`, `dedup`, `network`, `store`, `logs`, `events`... `matchit`
+/// gives a literal segment priority over a parameter, so an engine called
+/// `stats` would be shadowed by `/api/stats/...` and unreachable. No error, no
+/// log, and nothing in the config to warn the operator that its name was one of
+/// thirty-nine reserved words.
+///
+/// Nesting costs one segment and the set of legal engine IDs stops depending on
+/// the rest of the route table.
+///
+/// ⭐ Replaces `/api/race/torrents` and `/api/hoard/torrents`, which passed the
+/// ROLE straight into `engine_rows`, whose parameter is an engine ID. An engine
+/// called `vpn1` with `role = "race"` was therefore absent from
+/// `/api/race/torrents`: `state.engines.get("race")` missed, `engine_rows`
+/// returned `Vec::new()`, and the caller got an empty list -- no error, no log,
+/// nothing to notice. cf the three sibling faults found on 2026-09-09.
+async fn get_engine_torrents(
+    State(state): State<AppState>,
+    axum::extract::Path(engine): axum::extract::Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let id = match engine_or_refusal(&state, &engine) {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    Json(engine_rows(&state, &id)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Engine-addressed routes -- `/api/engines/:id/...`
+//
+// ⭐⭐ Why these exist. The stock routes spell the engine into the path:
+// `/api/race/torrents`, `/api/hoard/pause-all`. That works for the two engines
+// every install has and for NOTHING ELSE -- there was simply no URL that named
+// a third engine. An operator running `vpn1`, `vpn2`, `vpn3` could list the
+// catalogue, and could not list ONE tunnel's share of it, pause one tunnel, or
+// bulk-act on one tunnel. The multi-VPN model was reachable from the config and
+// not from the API.
+//
+// These routes are additive: the stock spellings keep working unchanged, which
+// is what keeps `docs/API.md` honest and the front end untouched. They resolve
+// `:id` through `resolve_engine`, so an engine that does not exist is a 404
+// instead of an empty answer that reads like "this engine holds nothing".
+// ---------------------------------------------------------------------------
+
+/// An engine selector resolved to an ID, or the refusal to send back.
+///
+/// The message names the engine on purpose: a bare 404 on
+/// `/api/engines/vpn1/page` is indistinguishable from "that page does not
+/// exist", and an operator who mistyped a tunnel name would have nothing to go
+/// on. Same wording as `engine_pause_bulk`, which got there first.
+fn engine_or_refusal(state: &AppState, sel: &str) -> Result<String, Response> {
+    resolve_engine(state, sel).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no engine named {sel} on this node")})),
+        )
+            .into_response()
+    })
+}
+
+/// The paged listing of one engine, addressed by ID.
+async fn get_engine_page_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(sel): axum::extract::Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let id = match engine_or_refusal(&state, &sel) {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    get_engine_page(&state, &id, &query).await
+}
+
+/// The pinned hashes of one engine, addressed by ID.
+async fn get_engine_pinned_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(sel): axum::extract::Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let id = match engine_or_refusal(&state, &sel) {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    let pinned = {
+        let store = state.store.lock().unwrap();
+        store.pinned(&id).unwrap_or_default()
+    };
+    Json(serde_json::json!({"pinned": pinned})).into_response()
+}
+
+/// Pause every torrent of one engine, addressed by ID.
+async fn engine_pause_all_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(sel): axum::extract::Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let id = match engine_or_refusal(&state, &sel) {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    pause_all(&state, &id, true).await
+}
+
+/// Resume every torrent of one engine, addressed by ID.
+async fn engine_resume_all_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(sel): axum::extract::Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let id = match engine_or_refusal(&state, &sel) {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    pause_all(&state, &id, false).await
+}
+
+
+/// A bulk action within one engine, addressed by ID.
+async fn engine_bulk_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(sel): axum::extract::Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let id = match engine_or_refusal(&state, &sel) {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    bulk_action(&state, &id, &body).await
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(get_health))
@@ -11079,6 +11413,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs", get(get_jobs))
         .route("/changelog.md", get(get_changelog))
         .route("/api/race/torrents", get(get_race_torrents))
+        .route("/api/engines/:id/torrents", get(get_engine_torrents))
+        .route("/api/engines/:id/page", get(get_engine_page_by_id))
+        .route("/api/engines/:id/pinned", get(get_engine_pinned_by_id))
+        .route(
+            "/api/engines/:id/pause-all",
+            axum::routing::post(engine_pause_all_by_id),
+        )
+        .route(
+            "/api/engines/:id/resume-all",
+            axum::routing::post(engine_resume_all_by_id),
+        )
+        .route(
+            "/api/engines/:id/torrents/bulk",
+            axum::routing::post(engine_bulk_by_id),
+        )
         .route("/api/hoard/torrents", get(get_hoard_torrents))
         .route("/api/hoard/page", get(get_hoard_page))
         .route("/api/race/page", get(get_race_page))
@@ -11154,8 +11503,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hoard/torrents/:info_hash/move-preview", get(move_preview))
         .route("/api/benchmark/race-snapshots/:info_hash", get(race_snapshots))
         .route("/api/v2/app/setPreferences", axum::routing::post(qbit_set_preferences))
-        .route("/api/v2/torrents/reannounce", axum::routing::post(qbit_empty_ok))
-        .route("/api/v2/torrents/recheck", axum::routing::post(qbit_empty_ok))
+        .route("/api/v2/torrents/reannounce", axum::routing::post(qbit_reannounce))
+        .route("/api/v2/torrents/recheck", axum::routing::post(qbit_recheck))
         .route("/api/import/check-paths", axum::routing::post(import_check_paths))
         .route("/api/vpn-speedtest/run", axum::routing::post(vpn_speedtest_run))
         .route("/api/hoard/pause-all", axum::routing::post(hoard_pause_all))
@@ -11244,7 +11593,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hoard/torrents/:info_hash/unpin", axum::routing::post(hoard_unpin_one))
         .route("/api/hoard/torrents/:info_hash/category", axum::routing::post(set_torrent_category))
         .route("/api/hoard/torrents/:info_hash/tags", axum::routing::post(set_torrent_tags))
-        .route("/api/race/torrents/:info_hash/category", axum::routing::post(set_torrent_category))
+        .route("/api/race/torrents/:info_hash/category", axum::routing::post(set_race_torrent_category))
+        .route("/api/race/torrents/:info_hash/tags", axum::routing::post(set_race_torrent_tags))
         .route("/api/categories", axum::routing::post(category_create))
         .route("/api/announce/ip-modes", get(get_ip_modes).post(set_announce_ip_mode))
         .route("/api/announce/health", get(get_announce_health))
@@ -13395,7 +13745,6 @@ mod more_route_tests {
         r_qbit_torrent_files => qbit_torrent_files,
         r_qbit_torrent_properties => qbit_torrent_properties,
         r_qbit_torrent_trackers => qbit_torrent_trackers,
-        r_qbit_empty_ok => qbit_empty_ok,
         r_get_fs_browse => get_fs_browse,
         r_post_node_enrol => post_node_enrol,
         r_clear_download_slots => clear_download_slots,
@@ -15517,6 +15866,596 @@ mod remaining_routes_tests {
                 !resp.status().is_server_error(),
                 "a missing bench db must not be a server error: {:?}",
                 resp.status()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod route_table_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    /// The whole router, served on a real loopback port. Bound to :0 so tests
+    /// never collide, and shut down with the test.
+    struct Served {
+        url: String,
+        _shutdown: tokio::sync::oneshot::Sender<()>,
+        _state: TestState,
+    }
+
+    async fn serve(tag: &str) -> Served {
+        let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        // Building it is itself the assertion -- see `the_router_builds`.
+        let app = super::router(s.state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        Served {
+            url: format!("http://{addr}"),
+            _shutdown: tx,
+            _state: s,
+        }
+    }
+
+    /// ⭐⭐ The first test in this file that builds the REAL router. Every other
+    /// API test calls handlers directly, which is why a route could be absent,
+    /// shadowed or misspelt without a single failure: `set_listen_port` carried
+    /// a doc comment reading "NOT ROUTED YET, on purpose" while it had been
+    /// routed all along, and nothing contradicted it.
+    ///
+    /// `matchit` panics when a pattern conflicts with one already registered,
+    /// and that panic happens while BUILDING. So a parameter segment that
+    /// collides with a literal one -- `/api/:engine/torrents` next to
+    /// `/api/engines/:id` -- is caught here rather than at boot, in front of an
+    /// operator.
+    #[tokio::test]
+    async fn the_router_builds() {
+        let s = state_from("router-builds", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let _app = super::router(s.state.clone());
+    }
+
+    /// Every route this pass touches, in the spelling a caller actually uses.
+    ///
+    /// Kept as data rather than one test each: the point is that NONE of them
+    /// is missing, and a list makes the one that vanished obvious.
+    const TOUCHED: &[&str] = &[
+        // The four stubs that answer 500 unconditionally.
+        "/api/race/listen-port",
+        "/api/hoard/listen-port",
+        "/api/race/dial-limits",
+        "/api/hoard/dial-limits",
+        // The two qBit-shim stubs that answer an empty OK.
+        "/api/v2/torrents/reannounce",
+        "/api/v2/torrents/recheck",
+        // The role-in-the-path family.
+        "/api/race/torrents",
+        "/api/hoard/torrents",
+        "/api/race/page",
+        "/api/hoard/page",
+        "/api/hoard/stats",
+        "/api/hoard/pinned",
+        "/api/race/settings",
+        "/api/race/choking",
+        "/api/hoard/download-slots",
+        "/api/hoard/pause",
+        "/api/race/pause",
+        "/api/hoard/pause-all",
+        "/api/hoard/resume-all",
+        "/api/hoard/verify-downloading",
+        "/api/hoard/restart-stuck",
+        "/api/hoard/torrents/bulk",
+        "/api/race/torrents/bulk",
+        // The canonical, engine-addressed spelling this pass introduces.
+        "/api/engines/race/torrents",
+        "/api/engines/hoard/torrents",
+        "/api/engines/race/page",
+        "/api/engines/hoard/pinned",
+        "/api/engines/race/pause-all",
+        "/api/engines/race/resume-all",
+        "/api/engines/race/pause",
+        "/api/engines/race/torrents/bulk",
+    ];
+
+    /// A route that exists answers 405 to a method it does not declare; one
+    /// that does not exist answers 404. So TRACE separates "the path is in the
+    /// table" from "the path is not", and it does it WITHOUT running the
+    /// handler -- no pause, no purge, no restart as a side effect of asking.
+    ///
+    /// ⚠ Only valid for routes declared with a concrete method. A route on
+    /// `axum::routing::any` accepts TRACE and would execute; none of the paths
+    /// above is one.
+    #[tokio::test]
+    async fn every_touched_route_is_in_the_table() {
+        let srv = serve("route-table").await;
+        let c = reqwest::Client::new();
+        let mut missing = Vec::new();
+        for path in TOUCHED {
+            let resp = c
+                .request(reqwest::Method::TRACE, format!("{}{path}", srv.url))
+                .header("X-API-Key", KEY)
+                .send()
+                .await
+                .expect("request");
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                missing.push(*path);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these paths are not in the route table: {missing:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_by_id_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    /// An install with a THIRD engine whose ID is not its role. Two engines
+    /// prove nothing here: every role-as-ID fault is invisible until an engine
+    /// is spelt differently from the behaviour it carries.
+    fn three_engines(tag: &str) -> TestState {
+        state_from(
+            tag,
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\n\
+                 [race]\nlisten_port = 16371\n\n\
+                 [hoard]\nlisten_port = 16372\n\n\
+                 [[engine]]\nengine_id = \"vpn1\"\nrole = \"race\"\n\
+                 [engine.session]\nlisten_port = 26991\n"
+            ),
+        )
+    }
+
+    /// ⚠ The fixture is the first thing under test. A config that quietly fails
+    /// to start `vpn1` would make every assertion below pass for the wrong
+    /// reason -- the engine would be absent because it never existed, not
+    /// because the lookup missed it.
+    #[tokio::test]
+    async fn the_fixture_really_starts_a_third_engine() {
+        let s = three_engines("fixture-3");
+        let ids: Vec<&str> = s
+            .state
+            .engines
+            .engines()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"vpn1"),
+            "the fixture must start vpn1, got {ids:?}"
+        );
+        let vpn1 = s.state.engines.get("vpn1").expect("vpn1 present");
+        assert_eq!(vpn1.role, "race", "vpn1 carries the race behaviour");
+    }
+
+    /// ⭐⭐ ID first, role second, and the order is the assertion. An ID
+    /// resolves to itself even when some other engine's role is spelt the same.
+    #[tokio::test]
+    async fn an_id_resolves_before_a_role() {
+        let s = three_engines("resolve-order");
+        assert_eq!(
+            resolve_engine(&s.state, "vpn1").as_deref(),
+            Some("vpn1"),
+            "an ID resolves to itself"
+        );
+        assert_eq!(
+            resolve_engine(&s.state, "race").as_deref(),
+            Some("race"),
+            "the stock engine is found by its own ID, not by the role fallback"
+        );
+        assert_eq!(
+            resolve_engine(&s.state, "no-such-engine"),
+            None,
+            "an unknown selector resolves to nothing, rather than to a default"
+        );
+    }
+
+    /// ⭐⭐ Why the resolver needs no role fallback, pinned as a fact about the
+    /// model rather than a choice: `race` and `hoard` are pushed by
+    /// `local_engines` before any `[[engine]]` block is read, so NO config can
+    /// produce an install without them. This test failed when it asserted the
+    /// opposite, which is how the fact was found.
+    #[tokio::test]
+    async fn the_stock_engine_ids_exist_even_when_the_config_omits_them() {
+        let s = state_from(
+            "stock-ids",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\n\
+                 [[engine]]\nengine_id = \"vpn1\"\nrole = \"race\"\n\
+                 [engine.session]\nlisten_port = 26991\n"
+            ),
+        );
+        let ids: Vec<&str> = s
+            .state
+            .engines
+            .engines()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"race") && ids.contains(&"hoard"),
+            "race and hoard exist without being configured, got {ids:?}"
+        );
+        // So the deprecated spelling resolves as an ID, with no role lookup.
+        assert_eq!(resolve_engine(&s.state, "race").as_deref(), Some("race"));
+        assert_eq!(resolve_engine(&s.state, "hoard").as_deref(), Some("hoard"));
+    }
+
+    /// A role is NOT a selector. `vpn1` carries the race behaviour, and asking
+    /// for `race` must still mean the engine called race -- never "some engine
+    /// that behaves like one", which would differ between installs.
+    #[tokio::test]
+    async fn a_role_is_not_a_selector() {
+        let s = three_engines("role-not-selector");
+        assert_eq!(
+            resolve_engine(&s.state, "race").as_deref(),
+            Some("race"),
+            "race means the engine called race, not whichever engine races"
+        );
+        let vpn1 = s.state.engines.get("vpn1").expect("vpn1 present");
+        assert_eq!(vpn1.role, "race", "even though vpn1 races too");
+    }
+}
+
+#[cfg(test)]
+mod qbit_bulk_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(
+            format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes(),
+        );
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[0u8; 20]);
+        info.extend_from_slice(b"e");
+        let mut out = Vec::new();
+        out.extend_from_slice(b"d4:infod");
+        out.extend_from_slice(&info[1..]);
+        out.extend_from_slice(b"e");
+        out
+    }
+
+    /// A node holding one torrent in the `race` engine.
+    fn populated(tag: &str) -> (TestState, String) {
+        let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (hash, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "fr",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        (s, hash)
+    }
+
+    fn form(hashes: &str) -> Fields {
+        let mut f = Fields::new();
+        f.insert("hashes".into(), hashes.into());
+        f
+    }
+
+    /// ⭐⭐ Both routes used to be `qbit_empty_ok`, which was covered by the
+    /// auth-gate macro. Replacing them must not drop that coverage: an open
+    /// mutation route is exactly the hole found on 10/09.
+    #[tokio::test]
+    async fn the_bulk_routes_refuse_a_caller_with_no_key() {
+        let (s, hash) = populated("qbit-bulk-auth");
+        for resp in [
+            super::qbit_reannounce(
+                State(s.state.clone()),
+                RawQuery(None),
+                HeaderMap::new(),
+                axum::extract::Form(form(&hash)),
+            )
+            .await,
+            super::qbit_recheck(
+                State(s.state.clone()),
+                RawQuery(None),
+                HeaderMap::new(),
+                axum::extract::Form(form(&hash)),
+            )
+            .await,
+        ] {
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "a bulk mutation must refuse an unauthenticated caller"
+            );
+        }
+    }
+
+    /// The qBittorrent contract is an empty 200, and clients break on anything
+    /// else -- so the answer stays 200 even when nothing could be done. What
+    /// changed is that the work is attempted; the counts go to the log.
+    ///
+    /// ⚠ This asserts the CONTRACT, not the effect. The effect is not visible in
+    /// the response by design, which is why it is checked against the log line
+    /// on the :8399 bench rather than pretended here.
+    #[tokio::test]
+    async fn the_bulk_routes_keep_the_empty_200_contract() {
+        let (s, hash) = populated("qbit-bulk-contract");
+        for (name, resp) in [
+            (
+                "reannounce",
+                super::qbit_reannounce(
+                    State(s.state.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                    axum::extract::Form(form(&hash)),
+                )
+                .await,
+            ),
+            (
+                "recheck",
+                super::qbit_recheck(
+                    State(s.state.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                    axum::extract::Form(form(&hash)),
+                )
+                .await,
+            ),
+        ] {
+            assert_eq!(resp.status(), StatusCode::OK, "{name} answers 200");
+        }
+    }
+
+    /// A hash the node does not hold, and a form with no `hashes` at all: both
+    /// are ordinary, and neither may panic or turn into a 500. The old stub got
+    /// this right by doing nothing at all -- the new one has to get it right
+    /// while actually looking things up.
+    #[tokio::test]
+    async fn an_unknown_hash_or_an_empty_form_is_not_an_error() {
+        let (s, _hash) = populated("qbit-bulk-unknown");
+        let cases = [form(&"f".repeat(40)), Fields::new()];
+        for f in cases {
+            for resp in [
+                super::qbit_reannounce(
+                    State(s.state.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                    axum::extract::Form(f.clone()),
+                )
+                .await,
+                super::qbit_recheck(
+                    State(s.state.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                    axum::extract::Form(f.clone()),
+                )
+                .await,
+            ] {
+                assert_eq!(resp.status(), StatusCode::OK, "got {:?}", resp.status());
+            }
+        }
+    }
+
+    /// ⭐ The fixture is under test too: if `populated` silently failed to load
+    /// the torrent, every assertion above would pass against an empty node and
+    /// prove nothing about a node that holds something.
+    #[tokio::test]
+    async fn the_fixture_really_holds_the_torrent() {
+        let (s, hash) = populated("qbit-bulk-fixture");
+        let copies = copies_of(&s.state, &hash);
+        assert!(
+            !copies.is_empty(),
+            "the fixture must hold a copy of {hash}, found none"
+        );
+        assert!(
+            copies.iter().any(|(id, _)| id == "race"),
+            "the copy must live in the race engine, got {:?}",
+            copies.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[cfg(test)]
+mod race_path_engine_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(
+            format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes(),
+        );
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[0u8; 20]);
+        info.extend_from_slice(b"e");
+        let mut out = Vec::new();
+        out.extend_from_slice(b"d4:infod");
+        out.extend_from_slice(&info[1..]);
+        out.extend_from_slice(b"e");
+        out
+    }
+
+    /// A node holding one torrent, in RACE only.
+    fn race_only(tag: &str) -> (TestState, String) {
+        let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (hash, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("racer"),
+            "",
+            "/tmp",
+            "fr",
+            true,
+            true,
+            "race",
+        )
+        .expect("added to race");
+        (s, hash)
+    }
+
+    /// ⚠ The fixture first: the torrent must really be in race and NOT in hoard,
+    /// or the assertion below would pass for the wrong reason.
+    #[tokio::test]
+    async fn the_fixture_holds_the_torrent_in_race_only() {
+        let (s, hash) = race_only("race-only-fixture");
+        let store = s.state.store.lock().unwrap();
+        assert!(
+            store.resolve_hash_in("race", &hash).is_some(),
+            "the torrent must be in race"
+        );
+        assert!(
+            store.resolve_hash_in("hoard", &hash).is_none(),
+            "the torrent must NOT be in hoard, or this fixture proves nothing"
+        );
+    }
+
+    /// ⭐⭐ Setting a category through the RACE route must act on the RACE copy.
+    ///
+    /// `torrent_write!` defaults its engine to the literal `"hoard"` when the
+    /// request carries no `?agent=`, and the front end's category call carries
+    /// none -- `fetch(`/api/${mode}/torrents/${hash}/category`)`, no query at
+    /// all. So the engine named in the PATH was ignored: the write was aimed at
+    /// hoard whatever the URL said.
+    ///
+    /// On a torrent that only race holds, that is a 404 for a torrent which
+    /// plainly exists. On one held by both, it is worse and silent: the label
+    /// lands on the other copy and the answer is still `{"status":"ok"}`.
+    #[tokio::test]
+    async fn the_race_category_route_acts_on_the_race_copy() {
+        let (s, hash) = race_only("race-category");
+        let resp = super::set_race_torrent_category(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"category": "Anime"}).to_string(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the race route must find the race copy, got {:?}",
+            resp.status()
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_refusal_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    /// ⭐⭐ Every engine-addressed route must name the engine it could not find.
+    ///
+    /// Caught by the :8399 bench, not by a unit test: `get_engine_torrents` had
+    /// kept a bare `not_found()` and answered `{"error":"torrent not found"}` for
+    /// an engine that does not exist. The status was right and the sentence was
+    /// about the wrong noun -- an operator who mistyped a tunnel name would go
+    /// looking for a missing torrent.
+    ///
+    /// Pinned as a table so a route added later without the shared lookup fails
+    /// here instead of shipping its own wording.
+    #[tokio::test]
+    async fn an_unknown_engine_is_refused_by_name_on_every_route() {
+        let s = state_from("unknown-engine", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let sel = "no-such-tunnel".to_string();
+
+        let responses = vec![
+            (
+                "torrents",
+                super::get_engine_torrents(
+                    State(s.state.clone()),
+                    axum::extract::Path(sel.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                )
+                .await,
+            ),
+            (
+                "page",
+                super::get_engine_page_by_id(
+                    State(s.state.clone()),
+                    axum::extract::Path(sel.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                )
+                .await,
+            ),
+            (
+                "pinned",
+                super::get_engine_pinned_by_id(
+                    State(s.state.clone()),
+                    axum::extract::Path(sel.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                )
+                .await,
+            ),
+            (
+                "pause-all",
+                super::engine_pause_all_by_id(
+                    State(s.state.clone()),
+                    axum::extract::Path(sel.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                )
+                .await,
+            ),
+            (
+                "resume-all",
+                super::engine_resume_all_by_id(
+                    State(s.state.clone()),
+                    axum::extract::Path(sel.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                )
+                .await,
+            ),
+            (
+                "bulk",
+                super::engine_bulk_by_id(
+                    State(s.state.clone()),
+                    axum::extract::Path(sel.clone()),
+                    RawQuery(None),
+                    keyed(KEY),
+                    "{}".to_string(),
+                )
+                .await,
+            ),
+        ];
+
+        for (name, resp) in responses {
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{name}: an unknown engine must be a 404"
+            );
+            let body = body_json(resp).await;
+            let err = body["error"].as_str().unwrap_or_default().to_string();
+            assert!(
+                err.contains(&sel),
+                "{name}: the refusal must name the engine asked for, said {err:?}"
             );
         }
     }
