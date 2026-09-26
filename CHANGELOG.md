@@ -17,7 +17,7 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a header that moves from the first minute
+## v4.2.4 -- a header that moves from the first minute
 
 ### Fixed
 - **The live header froze for the first quarter of an hour after a start.**
