@@ -169,7 +169,7 @@ pub async fn login(State(state): State<AppState>, body: String) -> Response {
 /// Public and cheap: the page polls it while the engines come up, and a
 /// quarter of a million torrents take minutes.
 pub async fn startup(State(state): State<AppState>) -> Response {
-    let total: i64 = state.engines.engines().iter().map(|e| e.manager.all().len() as i64).sum();
+    let total: i64 = state.engines.engines().iter().map(|e| e.manager.len() as i64).sum();
     Json(serde_json::json!({
         "ready": true,
         "total": total,
@@ -192,7 +192,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         out.push_str(&format!(
             "hydra_torrents{{engine=\"{}\"}} {}\n",
             engine.id,
-            engine.manager.all().len()
+            engine.manager.len()
         ));
     }
     ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
