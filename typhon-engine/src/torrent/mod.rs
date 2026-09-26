@@ -35,6 +35,17 @@ pub struct TorrentManager {
     pub cached_active_peers: std::sync::atomic::AtomicUsize,
     pub cached_torrents_with_peers: std::sync::atomic::AtomicUsize,
     pub cached_torrents_uploading: std::sync::atomic::AtomicUsize,
+    /// Cumulative bytes every torrent of this engine has moved, summed by the
+    /// same `update_rates` walk. The header asked for these once a second per
+    /// open tab, and each ask cloned the whole catalogue into a Vec to add two
+    /// counters: at 500k torrents that was four full copies a second, fighting
+    /// the peer tasks for the map's shard locks and freezing the header for
+    /// the first quarter of an hour after a start. `totals_ready` stays false
+    /// until the first walk, so an early reader is counted exactly instead of
+    /// being handed a zero that would read as the whole library arriving.
+    cached_total_uploaded: std::sync::atomic::AtomicU64,
+    cached_total_downloaded: std::sync::atomic::AtomicU64,
+    totals_ready: std::sync::atomic::AtomicBool,
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
@@ -239,6 +250,9 @@ impl TorrentManager {
             cached_active_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_with_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_uploading: std::sync::atomic::AtomicUsize::new(0),
+            cached_total_uploaded: std::sync::atomic::AtomicU64::new(0),
+            cached_total_downloaded: std::sync::atomic::AtomicU64::new(0),
+            totals_ready: std::sync::atomic::AtomicBool::new(false),
             skey_index: DashMap::new(),
             incomplete: DashSet::new(),
             dht: std::sync::OnceLock::new(),
@@ -393,6 +407,34 @@ impl TorrentManager {
 
     pub fn all(&self) -> Vec<Arc<TorrentState>> {
         self.torrents.iter().map(|r| r.value().clone()).collect()
+    }
+
+    /// How many torrents this engine holds, counted in place. `all().len()`
+    /// cloned every entry into a fresh Vec to read one number.
+    pub fn len(&self) -> usize {
+        self.torrents.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.torrents.is_empty()
+    }
+
+    /// Cumulative (uploaded, downloaded) bytes over this engine's torrents, as
+    /// of the last `update_rates` tick (every 2 s). Before the first tick the
+    /// map is walked once, in place, so the first reader gets the true figure.
+    pub fn totals(&self) -> (u64, u64) {
+        if self.totals_ready.load(Ordering::Acquire) {
+            return (
+                self.cached_total_uploaded.load(Ordering::Relaxed),
+                self.cached_total_downloaded.load(Ordering::Relaxed),
+            );
+        }
+        let (mut up, mut down) = (0u64, 0u64);
+        for entry in self.torrents.iter() {
+            up += entry.value().total_uploaded.load(Ordering::Relaxed);
+            down += entry.value().total_downloaded.load(Ordering::Relaxed);
+        }
+        (up, down)
     }
 
     /// How many torrents in this catalogue name each tracker host.
@@ -1002,6 +1044,9 @@ impl TorrentManager {
         }
         self.upload_rate.update(total_ul);
         self.download_rate.update(total_dl);
+        self.cached_total_uploaded.store(total_ul, Ordering::Relaxed);
+        self.cached_total_downloaded.store(total_dl, Ordering::Relaxed);
+        self.totals_ready.store(true, Ordering::Release);
         self.cached_active_peers.store(active_peers, Ordering::Relaxed);
         self.cached_torrents_with_peers.store(with_peers, Ordering::Relaxed);
         self.cached_torrents_uploading.store(uploading, Ordering::Relaxed);
@@ -2108,6 +2153,28 @@ mod manager_tests {
         mgr.add_torrent_bytes(&torrent_bytes(name, &["https://tracker.example/announce"]), "/tmp", true, true)
             .unwrap_or_else(|e| panic!("add {name}: {e}"))
             .0
+    }
+
+    /// ⭐ The header reads totals once a second per tab; they must be the same
+    /// number whether they come from the walk or from the cache, and a reader
+    /// that arrives before the first tick must not be handed a zero.
+    #[test]
+    fn totals_are_exact_before_the_first_tick_and_cached_after() {
+        let (mgr, root) = manager("totals");
+        let a = add(&mgr, "alpha");
+        let b = add(&mgr, "bravo");
+        mgr.get(&a).unwrap().total_uploaded.store(1_000, Ordering::Relaxed);
+        mgr.get(&b).unwrap().total_uploaded.store(234, Ordering::Relaxed);
+        mgr.get(&b).unwrap().total_downloaded.store(56, Ordering::Relaxed);
+        assert_eq!(mgr.len(), 2);
+        assert_eq!(mgr.totals(), (1_234, 56), "before any tick: counted in place");
+        mgr.update_rates();
+        assert_eq!(mgr.totals(), (1_234, 56), "after a tick: same figure, from the cache");
+        mgr.get(&a).unwrap().total_uploaded.store(2_000, Ordering::Relaxed);
+        assert_eq!(mgr.totals(), (1_234, 56), "between ticks the cache holds");
+        mgr.update_rates();
+        assert_eq!(mgr.totals(), (2_234, 56));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

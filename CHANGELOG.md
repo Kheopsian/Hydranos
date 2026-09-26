@@ -17,6 +17,18 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a header that moves from the first minute
+
+### Fixed
+- **The live header froze for the first quarter of an hour after a start.**
+  Each status frame -- once a second per open tab, and every `/api/status` --
+  copied the whole hoard catalogue four times to add two counters and read a
+  length, under the same map locks the peer tasks were fighting over while the
+  engine came up. On 500k torrents `/api/status` took 4 to 13 s and the page
+  went up to 47 s without an update. The totals now come from the rate tick
+  that already sums them every 2 s, and counting torrents no longer copies
+  them: the status path does not walk the catalogue at all.
+
 ## v4.2.3 -- a record the line could have carried
 
 ### Fixed

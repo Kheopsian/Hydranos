@@ -363,13 +363,11 @@ impl EngineHost {
     /// the status route polls this, and serializing 300k torrents to JSON to
     /// add up two integers made every poll a multi-second walk.
     pub fn session_totals(&self) -> (i64, i64) {
-        use std::sync::atomic::Ordering;
         let (mut up, mut down) = (0i64, 0i64);
         for engine in &self.engines {
-            for t in engine.manager.all().iter() {
-                up += t.total_uploaded.load(Ordering::Relaxed) as i64;
-                down += t.total_downloaded.load(Ordering::Relaxed) as i64;
-            }
+            let (u, d) = engine.manager.totals();
+            up += u as i64;
+            down += d as i64;
         }
         (up, down)
     }
@@ -381,13 +379,11 @@ impl EngineHost {
     /// report a hardcoded zero. A per-engine block has to be countable on its
     /// own or it is decoration.
     pub fn session_totals_of(&self, engine_id: &str) -> (i64, i64) {
-        use std::sync::atomic::Ordering;
         let (mut up, mut down) = (0i64, 0i64);
         if let Some(engine) = self.get(engine_id) {
-            for t in engine.manager.all().iter() {
-                up += t.total_uploaded.load(Ordering::Relaxed) as i64;
-                down += t.total_downloaded.load(Ordering::Relaxed) as i64;
-            }
+            let (u, d) = engine.manager.totals();
+            up += u as i64;
+            down += d as i64;
         }
         (up, down)
     }
@@ -415,7 +411,7 @@ impl EngineHost {
     /// timer, which is why it could disagree with the database. Here it is
     /// counted from the live maps at the moment of asking.
     pub fn total_torrents(&self) -> usize {
-        self.engines.iter().map(|e| e.manager.all().len()).sum()
+        self.engines.iter().map(|e| e.manager.len()).sum()
     }
 }
 

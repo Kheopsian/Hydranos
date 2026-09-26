@@ -3521,7 +3521,7 @@ async fn get_hoard_stats(
     let torrents = state
         .engines
         .get("hoard")
-        .map(|e| e.manager.all().len() as i64)
+        .map(|e| e.manager.len() as i64)
         .unwrap_or(0);
 
     let live = live_stats(&state, "hoard");
@@ -3580,7 +3580,7 @@ async fn get_engines(
                 "start_paused": e.start_paused,
                 // What the socket did, not what the config asked for.
                 "listening": e.listening.load(std::sync::atomic::Ordering::Relaxed),
-                "torrents": e.manager.all().len(),
+                "torrents": e.manager.len(),
             })
         })
         .collect();
@@ -4689,7 +4689,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
     let hoard_torrents = state
         .engines
         .get("hoard")
-        .map(|e| e.manager.all().len() as i64)
+        .map(|e| e.manager.len() as i64)
         .unwrap_or(0);
 
     let ratio = if session_down > 0 {
@@ -4861,7 +4861,7 @@ async fn stream_events(
                     "total_torrents": state
                         .engines
                         .get("hoard")
-                        .map(|e| e.manager.all().len() as i64)
+                        .map(|e| e.manager.len() as i64)
                         .unwrap_or(0),
                     "unseeded_peers": live.unseeded_peers,
                 },
@@ -5052,7 +5052,7 @@ async fn stream_events(
                         "total_torrents": state
                             .engines
                             .get("hoard")
-                            .map(|e| e.manager.all().len() as i64)
+                            .map(|e| e.manager.len() as i64)
                             .unwrap_or(0),
                         "unseeded_peers": live.unseeded_peers,
                     },
@@ -5130,7 +5130,7 @@ async fn get_bench_current(
     let race_torrents = state
         .engines
         .get("race")
-        .map(|e| e.manager.all().len() as i64)
+        .map(|e| e.manager.len() as i64)
         .unwrap_or(0);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -14574,7 +14574,7 @@ mod filter_tests {
         assert_eq!(race.manager.count(), 0);
         add(&s, "race", "alpha");
         assert_eq!(race.manager.count(), 1);
-        assert_eq!(race.manager.all().len(), 1);
+        assert_eq!(race.manager.len(), 1);
     }
 
     /// The same torrent cannot be added twice to one engine: the second add is
