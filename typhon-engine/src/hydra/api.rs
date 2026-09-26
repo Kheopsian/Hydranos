@@ -27,7 +27,7 @@ use crate::config::Config;
 /// It must stay in lockstep with internal/version/version.go for as long as the
 /// two binaries coexist: /api/update-check publishes it, and the release
 /// pipeline compares it against the changelog.
-pub const HYDRANOS_VERSION: &str = "4.2.1";
+pub const HYDRANOS_VERSION: &str = "4.3.0";
 
 type UpdateCheckCache = Option<(std::time::Instant, String, String)>;
 
@@ -3656,6 +3656,10 @@ async fn get_drain_status(
                 "used": v.used,
                 "free": v.free,
                 "used_pct": crate::row::num_json(v.used_pct()),
+                // What the panel needs to explain a drain that fired on a disk
+                // the operator sees as half empty.
+                "committed": v.committed,
+                "alloc_pct": crate::row::num_json(v.alloc_pct()),
                 "torrents": v.torrents,
                 "enabled": v.policy.enabled,
                 "high_watermark": v.policy.high,
@@ -8383,7 +8387,7 @@ async fn drain_now(
                 if !want.is_empty() && volume.id != want {
                     continue;
                 }
-                if want.is_empty() && volume.used_pct() < volume.policy.high as f64 {
+                if want.is_empty() && volume.alloc_pct() < volume.policy.high as f64 {
                     continue;
                 }
                 let o = crate::workers::drain_once(&st, &engine.manager, &volume, &cfg, &engine.id);
