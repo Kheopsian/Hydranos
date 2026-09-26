@@ -17,7 +17,7 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
-## 4.3.0 -- engines addressed by id, drain on allocation, and honest day counters
+## v4.2.2 -- engines addressed by id, drain on allocation, and honest day counters
 
 ### Fixed
 - **A bulk reannounce or recheck asked through the qBittorrent shim did nothing
