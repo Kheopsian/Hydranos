@@ -27,6 +27,10 @@ Two ways to title a new entry:
   Gbps on an 8 Gbps link. Both records are now averaged per minute, and a
   minute counts only with at least half of its samples. On the same history
   the peak reads 7.86 Gbps.
+- **A milestone Hydranos reached printed its date in the middle column and a
+  dash on the right**, where every other row of the card puts its date. The
+  date is now on the right; the time since the previous milestone, when there
+  is one, sits in the middle.
 
 ## v4.2.2 -- engines addressed by id, drain on allocation, and honest day counters
 
