@@ -281,7 +281,7 @@ where
     let mut heap: BinaryHeap<Reverse<Deadline>> = BinaryHeap::new();
     let mut reconcile = tokio::time::interval(RECONCILE);
 
-    reconcile_now(&catalogue, &mut states, &mut heap, &admission);
+    off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission));
 
     loop {
         // Sleep until the next deadline, or an hour if there is nothing to do.
@@ -366,9 +366,24 @@ where
                 }
             }
             _ = reconcile.tick() => {
-                reconcile_now(&catalogue, &mut states, &mut heap, &admission);
+                off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission));
             }
         }
+    }
+}
+
+/// Run a synchronous pass without holding a runtime worker hostage.
+///
+/// `reconcile_now` walks the whole catalogue: at 300k torrents it takes over
+/// half a second, every ten seconds, with no await inside. On the worker it
+/// ran on, every other task waited it out -- the API's accept loop included,
+/// so `/health` itself stalled on the same beat. `block_in_place` hands those
+/// tasks to another worker first. It needs the multi-thread runtime; on any
+/// other (the unit tests) the pass simply runs inline.
+fn off_the_runtime<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
     }
 }
 

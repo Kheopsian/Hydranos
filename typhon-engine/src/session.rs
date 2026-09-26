@@ -188,11 +188,13 @@ pub async fn start(
         config.resume_dir,
     );
 
-    // Rate tracking tick (every 2s)
+    // Rate tracking tick, once a second: the page pushes a status frame every
+    // second, and a 2 s tick left every other frame repeating the last figure,
+    // so the speeds on screen moved at half the rate of everything around them.
     let tm_rate = mgr.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             tm_rate.update_rates();
         }
     });

@@ -26,7 +26,7 @@ pub struct TorrentManager {
     pub upload_rate: rate::RateTracker,
     pub download_rate: rate::RateTracker,
     pub cached_unseeded_peers: std::sync::atomic::AtomicUsize,
-    /// Live swarm gauges for this engine, refreshed by `update_rates` every 2s.
+    /// Live swarm gauges for this engine, refreshed by `update_rates` every second.
     ///
     /// Cached rather than computed per request: the header polls them and a
     /// fresh walk of 300k torrents on every poll is the kind of O(N) the idle
@@ -419,8 +419,18 @@ impl TorrentManager {
         self.torrents.is_empty()
     }
 
+    /// How many torrents match `pred`, counted in place rather than over a copy.
+    pub fn count_matching(&self, pred: impl Fn(&TorrentState) -> bool) -> usize {
+        self.torrents.iter().filter(|r| pred(r.value())).count()
+    }
+
+    /// How many torrents satisfy `pred`, walking the map in place.
+    pub fn count_where(&self, pred: impl Fn(&TorrentState) -> bool) -> usize {
+        self.torrents.iter().filter(|e| pred(e.value())).count()
+    }
+
     /// Cumulative (uploaded, downloaded) bytes over this engine's torrents, as
-    /// of the last `update_rates` tick (every 2 s). Before the first tick the
+    /// of the last `update_rates` tick (every second). Before the first tick the
     /// map is walked once, in place, so the first reader gets the true figure.
     pub fn totals(&self) -> (u64, u64) {
         if self.totals_ready.load(Ordering::Acquire) {
@@ -1006,7 +1016,7 @@ impl TorrentManager {
         loaded
     }
 
-    /// Update rate counters — call every 2s.
+    /// Update rate counters — called every second.
     pub fn update_rates(&self) {
         let mut total_ul = 0u64;
         let mut total_dl = 0u64;
@@ -2174,6 +2184,7 @@ mod manager_tests {
         assert_eq!(mgr.totals(), (1_234, 56), "between ticks the cache holds");
         mgr.update_rates();
         assert_eq!(mgr.totals(), (2_234, 56));
+        assert_eq!(mgr.count_where(|t| t.total_downloaded.load(Ordering::Relaxed) > 0), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 

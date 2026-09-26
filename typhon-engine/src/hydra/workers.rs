@@ -35,11 +35,11 @@ pub fn spawn_verify_throttle(manager: Arc<TorrentManager>) {
         tokio::time::sleep(Duration::from_secs(5)).await;
         loop {
             tokio::time::sleep(VERIFY_INTERVAL).await;
-            let torrents = manager.all();
-            let checking = torrents
-                .iter()
-                .filter(|t| t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8)
-                .count();
+            // Counted in place. `all()` copied the whole catalogue every ten
+            // seconds for exactly as long as the boot lasts -- the window in
+            // which the header was frozen.
+            let checking = manager
+                .count_where(|t| t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8);
             if checking == 0 {
                 tracing::info!("verify throttle: nothing left to check, stopping");
                 return;
