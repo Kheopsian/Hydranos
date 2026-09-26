@@ -560,6 +560,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         let (up, down) = engine_host.session_totals();
         Arc::new(std::sync::Mutex::new(api::Odometer {
             session_offset: (up, down),
+            prev_totals: (up, down),
             day_baseline: (0, 0),
             day_date: String::new(),
             // The same mark per engine, taken in the same breath: marking them
