@@ -63,6 +63,11 @@ CREATE INDEX IF NOT EXISTS idx_tracker_samples_trk ON tracker_samples(tracker);
 ///
 /// Written out rather than `SELECT *` so a future migration adding a column
 /// cannot silently shift what each position means.
+/// Window a rate record is averaged over, and the samples it needs to count.
+/// The sampler ticks every 5 s, so a full minute holds twelve.
+const RATE_WINDOW_SECS: i64 = 60;
+const RATE_WINDOW_MIN_SAMPLES: i64 = 6;
+
 pub const BENCH_COLUMNS: &str = "ts, race_upload_rate, race_download_rate, race_peers, \
      race_torrents, hoard_upload_rate, hoard_peers, hoard_active, hoard_with_peers, \
      hoard_uploading, iowait_pct, arc_size_bytes, arc_hit_rate_pct, \
@@ -553,6 +558,23 @@ impl BenchDb {
                 .query_row(&sql, [], |r| Ok((r.get(0).unwrap_or(0.0), r.get(1).unwrap_or(0.0))))
                 .ok()
         };
+        // A rate record is held over a minute, not read off one sample. The
+        // engine counts a byte when it hands it to the kernel, and the send
+        // buffers of thousands of sockets absorb a burst for a few seconds: on
+        // single 5 s samples upload once peaked at 9.28 Gbps on an 8 Gbps line,
+        // a rate no wire carried. The best minute of that same week was 7.86.
+        // A minute needs half of its samples, so a lone sample cannot stand in
+        // for one.
+        let sustained = |expr: &str| -> Option<(f64, f64)> {
+            let sql = format!(
+                "SELECT MIN(ts), AVG({expr}) v FROM bench_samples WHERE ({expr}) IS NOT NULL \
+                 GROUP BY CAST(ts / {RATE_WINDOW_SECS} AS INTEGER) \
+                 HAVING COUNT(*) >= {RATE_WINDOW_MIN_SAMPLES} ORDER BY v DESC LIMIT 1"
+            );
+            self.conn
+                .query_row(&sql, [], |r| Ok((r.get(0).unwrap_or(0.0), r.get(1).unwrap_or(0.0))))
+                .ok()
+        };
         let rec = |label: &str, value: f64, unit: &str, ts: f64, hi: bool| {
             serde_json::json!({
                 "label": label,
@@ -564,10 +586,10 @@ impl BenchDb {
         };
 
         let mut records = Vec::new();
-        if let Some((ts, v)) = peak("race_upload_rate + hoard_upload_rate") {
+        if let Some((ts, v)) = sustained("race_upload_rate + hoard_upload_rate") {
             records.push(rec("Peak upload", v * 8.0 / 1e9, "Gbps", ts, true));
         }
-        if let Some((ts, v)) = peak("race_download_rate") {
+        if let Some((ts, v)) = sustained("race_download_rate") {
             records.push(rec("Peak download", v * 8.0 / 1e9, "Gbps", ts, false));
         }
         if let Some((ts, v)) = peak("race_peers + hoard_peers") {
@@ -1114,6 +1136,37 @@ mod sample_tests {
         let d = db();
         let payload = d.records_payload().expect("an empty database still has a payload");
         assert!(payload.is_object(), "got {payload}");
+    }
+
+    fn peak_upload_gbps(d: &BenchDb) -> f64 {
+        let payload = d.records_payload().unwrap();
+        payload["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["label"] == "Peak upload")
+            .and_then(|r| r["value"].as_f64())
+            .expect("a Peak upload record")
+    }
+
+    /// ⭐ A rate record is the best MINUTE, not the best sample. One 5 s spike
+    /// is the kernel's send buffers filling, not the line: it once read 9.28
+    /// Gbps on an 8 Gbps link.
+    #[test]
+    fn a_rate_record_is_the_best_minute_not_the_best_sample() {
+        let d = db();
+        // Minute 0: a steady 900 MB/s, twelve samples.
+        for i in 0..12 {
+            d.record_sample(&sample(f64::from(i) * 5.0, 900_000_000.0)).unwrap();
+        }
+        // Minute 1: one 1.2 GB/s spike in an otherwise quiet minute.
+        for i in 0..12 {
+            let rate = if i == 6 { 1_200_000_000.0 } else { 100_000_000.0 };
+            d.record_sample(&sample(60.0 + f64::from(i) * 5.0, rate)).unwrap();
+        }
+        // Minute 2: a lone sample, too thin to stand for a minute.
+        d.record_sample(&sample(125.0, 1_500_000_000.0)).unwrap();
+        assert_eq!(peak_upload_gbps(&d), 7.2);
     }
 
     /// A read-only handle is how a refresh opens the file beside the writer.

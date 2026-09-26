@@ -17,6 +17,17 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a record the line could have carried
+
+### Fixed
+- **Peak upload and Peak download are the best minute, not the best 5 s
+  sample.** The engine counts a byte when it hands it to the kernel, and the
+  send buffers of thousands of sockets absorb a burst for a few seconds, so a
+  single sample can read above the line itself: the Records card showed 9.28
+  Gbps on an 8 Gbps link. Both records are now averaged per minute, and a
+  minute counts only with at least half of its samples. On the same history
+  the peak reads 7.86 Gbps.
+
 ## v4.2.2 -- engines addressed by id, drain on allocation, and honest day counters
 
 ### Fixed
