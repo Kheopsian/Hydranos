@@ -28,6 +28,13 @@ Two ways to title a new entry:
   went up to 47 s without an update. The totals now come from the rate tick
   that already sums them every 2 s, and counting torrents no longer copies
   them: the status path does not walk the catalogue at all.
+- **Every endpoint, `/health` included, stalled for over half a second every
+  ten seconds.** The announce scheduler's reconcile pass walks the whole
+  catalogue without yielding, and held its runtime worker -- and whatever else
+  was queued on it, the API's accept loop among them -- until it finished. It
+  now steps off the runtime first. The boot-time verify throttle, which copied
+  the catalogue every ten seconds until nothing was left to check, counts in
+  place instead.
 
 ## v4.2.3 -- a record the line could have carried
 
