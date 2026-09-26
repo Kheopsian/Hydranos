@@ -2226,10 +2226,10 @@ function trackerRowHtml(tr) {
     // not an error -- nothing has gone wrong -- and it is not a success.
     const statusHtml =
         status === "error"
-            ? `<span class="tracker-err" title="${esc(msg)}">${esc(msg.substring(0, 60) || t("error"))}</span>`
+            ? `<span class="tracker-err" title="${esc(incoMsg(msg))}">${esc(incoMsg(msg).substring(0, 60) || t("error"))}</span>`
         : status === "never"
             ? `<span class="tracker-pending" title="${esc(t("Hydranos has not announced this torrent to the tracker yet. At startup the catalogue joins the announce queue in slices, so this clears on its own."))}">${esc(t("not announced yet"))}</span>`
-            : `<span class="tracker-ok">${esc(msg || "OK")}</span>`;
+            : `<span class="tracker-ok">${esc(incoMsg(msg) || "OK")}</span>`;
 
     const nextStr =
         nextAnn > 0 ? fmtCountdown(nextAnn)
@@ -2858,7 +2858,7 @@ function _renderHoardCounts() {
     const trkContainer = document.getElementById("hoard-tracker-chips");
     if (trkContainer) {
         let trkHtml = trks.map(h =>
-            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(h)} <span class="chip-count">${trkCounts[h] || 0}</span></button>`
+            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(incoTracker(h))} <span class="chip-count">${trkCounts[h] || 0}</span></button>`
         ).join("");
         // First in the row, like Uncategorized and Untagged: a torrent with no
         // tracker at all was in no facet and matched by no filter, so the only
@@ -4635,7 +4635,7 @@ function _previewCardHTML(fileName, sum) {
         sum.isPrivate ? t("private") : "",
     ].filter(Boolean).join(" · ");
     const trackers = sum.trackers.length
-        ? `<div class="tp-trackers">${sum.trackers.slice(0, 8).map(u => esc(u)).join("<br>")}` +
+        ? `<div class="tp-trackers">${sum.trackers.slice(0, 8).map(u => esc(incoAnnounce(u))).join("<br>")}` +
           (sum.trackers.length > 8 ? "<br>" + t("and {n} more", { n: sum.trackers.length - 8 }) : "") + `</div>`
         : `<div class="tp-trackers">${t("no tracker (DHT only)")}</div>`;
     return `<details class="tp-card" open>
@@ -6527,6 +6527,27 @@ function incoExitIP(ip) {
     if (!_incognito || !ip) return ip;
     return "\u2022\u2022\u2022.\u2022\u2022\u2022.\u2022\u2022\u2022.\u2022\u2022\u2022";
 }
+function incoTracker(h) {
+    // A tracker hostname names the community someone belongs to. Masking the
+    // torrent names and leaving "some-private-tracker.org" in the column, the
+    // facets and the Trackers tab defeats the whole point of the mode.
+    // Stable and distinct per host, so two trackers stay two rows.
+    if (!_incognito || !h) return h;
+    return "tracker-" + (_incoHash(h) % 9000 + 1000) + ".example.org";
+}
+function incoAnnounce(u) {
+    // ⚠ An announce URL carries the PASSKEY. A screenshot of the detail panel
+    // in incognito was publishing an account credential; keep only the scheme.
+    if (!_incognito || !u) return u;
+    const m = String(u).match(/^([a-z]+):\/\/([^\/:?#]+)/i);
+    return m ? m[1] + "://" + incoTracker(m[2]) + "/announce"
+             : "http://" + incoTracker(String(u)) + "/announce";
+}
+function incoMsg(m) {
+    // Tracker errors quote the URL they failed on, passkey included.
+    if (!_incognito || !m) return m;
+    return String(m).replace(/\b[a-z]+:\/\/\S+/gi, x => incoAnnounce(x));
+}
 function toggleIncognito() {
     _incognito = !_incognito;
     try { localStorage.setItem("hydra_incognito", _incognito ? "1" : "0"); } catch (e) {}
@@ -7370,7 +7391,7 @@ function _renderHiddenTrackers(hidden) {
         const passkey = r.passkey_set
             ? '<span class="mode-tag mode-hoard">set</span>'
             : '<span class="sr-desc">-</span>';
-        return `<tr><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td>`
+        return `<tr><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td>`
             + `<td>${passkey}</td>`
             + `<td><button class="btn-small" onclick="hideTracker('${esc(r.host)}',false)">${esc(t("Unhide"))}</button></td></tr>`;
     }).join("");
@@ -7627,9 +7648,9 @@ async function updateTrackers() {
                 status = `<span class="sev ${SEV[sev][0]}"></span><span class="sev-label">${SEV[sev][1]}</span>`;
             }
             const rowTip = SEV[sev]
-                ? esc(r.host + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
+                ? esc(incoTracker(r.host) + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
-            return `<tr title="${rowTip}"><td><strong>${esc(r.host)}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.last_error || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
+            return `<tr title="${rowTip}"><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(incoMsg(r.last_error) || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
         }).join("");
         updateTabBadges();
         if (_thtml === _trackersSig) return;
@@ -7695,7 +7716,7 @@ function _populateTrackerStatsSelect(rows) {
     const cur = sel.value;
     if (sig !== _trkSelSig) {
         _trkSelSig = sig;
-        sel.innerHTML = trackers.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+        sel.innerHTML = trackers.map(t => `<option value="${esc(t)}">${esc(incoTracker(t))}</option>`).join("");
         if (trackers.includes(cur)) sel.value = cur;
     }
     if (sel.value && !_trkStatsChart) loadTrackerStatsChart(sel.value);
@@ -8042,7 +8063,7 @@ const TABLE_COLS = {
         { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate ?? 0)}</td>` },
         { id: "upload_rate", label: "Up", sort: "upload_rate", mobile: true, render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
         { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
-        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "-")}</td>` },
+        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(incoTracker(t.tracker_host) || "-")}</td>` },
         { id: "category", label: "Category", sort: "category", render: t => `<td>${esc(incoCat(t.category))}</td>` },
         { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "-"}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
@@ -8062,7 +8083,7 @@ const TABLE_COLS = {
         { id: "download_rate", label: "Down", sort: "download_rate", mobile: true, render: t => `<td>${formatSpeed(t.download_rate)}</td>` },
         { id: "upload_rate", label: "Up", sort: "upload_rate", mobile: true, render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
         { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
-        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(t.tracker_host || "-")}</td>` },
+        { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(incoTracker(t.tracker_host) || "-")}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
         // "Location", not "Agent": the value is `local-<engine>` for a row held here
