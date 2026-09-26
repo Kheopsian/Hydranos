@@ -17,7 +17,7 @@ Two ways to title a new entry:
   anyone reviews it. Whoever tags the release renames the heading and sets
   `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a record the line could have carried
+## v4.2.3 -- a record the line could have carried
 
 ### Fixed
 - **Peak upload and Peak download are the best minute, not the best 5 s
