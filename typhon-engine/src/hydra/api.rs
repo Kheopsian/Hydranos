@@ -108,6 +108,10 @@ pub struct Odometer {
     pub session_offset: (i64, i64),
     /// Session totals at the last Europe/Paris midnight rollover.
     pub day_baseline: (i64, i64),
+    /// Engine totals seen on the previous poll, so a fall can be measured.
+    /// Without it the only reaction to a fall is to re-mark on the new total,
+    /// which throws away the session instead of stepping the mark down with it.
+    pub prev_totals: (i64, i64),
     /// The date that baseline belongs to, `YYYY-MM-DD` in Europe/Paris.
     pub day_date: String,
     /// The same startup mark, per engine id, so a per-engine block can publish
@@ -130,6 +134,11 @@ impl Odometer {
     pub fn forget(&mut self, engine_id: &str, ul: i64, dl: i64) {
         self.session_offset.0 -= ul;
         self.session_offset.1 -= dl;
+        // The next poll will see the totals minus these bytes. Step the
+        // previous-totals mark down too, or `session_and_day` reads the same
+        // fall a second time and compensates for it twice.
+        self.prev_totals.0 -= ul;
+        self.prev_totals.1 -= dl;
         if let Some(mark) = self.per_engine.get_mut(engine_id) {
             mark.0 -= ul;
             mark.1 -= dl;
@@ -157,13 +166,22 @@ pub fn session_and_day(state: &AppState) -> ((i64, i64), (i64, i64), (i64, i64))
     let (total_up, total_down) = state.engines.session_totals();
     let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
 
-    // Totals below the mark mean torrents were removed, taking their lifetime
-    // bytes out of the sum. Follow them down rather than publishing a negative
-    // day: the alternative is a counter that reads zero until the engines have
-    // re-earned everything the removed torrent had ever uploaded.
-    if total_up < odo.session_offset.0 || total_down < odo.session_offset.1 {
-        odo.session_offset = (total_up, total_down);
-    }
+    // A fall means torrents left the engines, taking their lifetime bytes out
+    // of the sum -- a delete whose `forget` never landed, or an engine that
+    // reloaded. Step the mark down by exactly what was lost, so the session is
+    // unchanged by the fall. Re-marking on the new total instead (what this did
+    // before) sets the session to zero, and `day`, being `session` minus a
+    // baseline, is dragged to zero with it: the header then republishes the
+    // whole session as today's traffic until the next midnight.
+    // The mark may go negative; that is the point -- it holds the bytes the
+    // engines no longer account for.
+    let fall = (
+        (odo.prev_totals.0 - total_up).max(0),
+        (odo.prev_totals.1 - total_down).max(0),
+    );
+    odo.session_offset.0 -= fall.0;
+    odo.session_offset.1 -= fall.1;
+    odo.prev_totals = (total_up, total_down);
     let session = (
         (total_up - odo.session_offset.0).max(0),
         (total_down - odo.session_offset.1).max(0),
@@ -174,8 +192,17 @@ pub fn session_and_day(state: &AppState) -> ((i64, i64), (i64, i64), (i64, i64))
         odo.day_date = today;
         odo.day_baseline = session;
     }
+    // A session below the baseline means the session itself fell -- a removal
+    // whose `forget` never landed, or an engine that reloaded. Follow it down
+    // to `session`, never to zero: zeroing the baseline makes `day` equal
+    // `session` from that moment until the next midnight, so the header
+    // publishes weeks of traffic as today's. Clamping restarts the day at 0,
+    // which is wrong by at most the traffic since the dip instead of by all of it.
+    // Safety net only: with the mark stepping down, the session no longer
+    // falls under its own baseline. Clamp rather than zero if it ever does --
+    // zeroing is what made `day` equal `session`.
     if session.0 < odo.day_baseline.0 || session.1 < odo.day_baseline.1 {
-        odo.day_baseline = (0, 0);
+        odo.day_baseline = session;
     }
     let day = (
         (session.0 - odo.day_baseline.0).max(0),
@@ -11568,9 +11595,13 @@ mod tests {
     /// keeps, because the bug it guards is not a crash: it is a lifetime total
     /// published in a field labelled "day", which reads as a plausible number.
     fn split(odo: &mut Odometer, totals: (i64, i64), today: &str) -> ((i64, i64), (i64, i64)) {
-        if totals.0 < odo.session_offset.0 || totals.1 < odo.session_offset.1 {
-            odo.session_offset = totals;
-        }
+        let fall = (
+            (odo.prev_totals.0 - totals.0).max(0),
+            (odo.prev_totals.1 - totals.1).max(0),
+        );
+        odo.session_offset.0 -= fall.0;
+        odo.session_offset.1 -= fall.1;
+        odo.prev_totals = totals;
         let session = (
             (totals.0 - odo.session_offset.0).max(0),
             (totals.1 - odo.session_offset.1).max(0),
@@ -11580,7 +11611,7 @@ mod tests {
             odo.day_baseline = session;
         }
         if session.0 < odo.day_baseline.0 || session.1 < odo.day_baseline.1 {
-            odo.day_baseline = (0, 0);
+            odo.day_baseline = session;
         }
         let day = (
             (session.0 - odo.day_baseline.0).max(0),
@@ -11595,6 +11626,7 @@ mod tests {
         let mut odo = Odometer {
             per_engine: Default::default(),
             session_offset: (321_000, 90_000),
+            prev_totals: (321_000, 90_000),
             day_baseline: (0, 0),
             day_date: "2026-09-08".into(),
         };
@@ -11614,6 +11646,7 @@ mod tests {
         let mut odo = Odometer {
             per_engine: Default::default(),
             session_offset: (1000, 0),
+            prev_totals: (1000, 0),
             day_baseline: (0, 0),
             day_date: "2026-09-08".into(),
         };
@@ -11634,6 +11667,7 @@ mod tests {
         let mut odo = Odometer {
             per_engine: Default::default(),
             session_offset: (1000, 0),
+            prev_totals: (1000, 0),
             day_baseline: (0, 0),
             day_date: "2026-09-08".into(),
         };
@@ -11641,8 +11675,14 @@ mod tests {
         // A torrent carrying 1.2k lifetime bytes is removed: the sum drops
         // below the mark taken at boot.
         let (session, day) = split(&mut odo, (300, 0), "2026-09-08");
-        assert_eq!(session, (0, 0), "follow the totals down, never go negative");
-        assert_eq!(day, (0, 0));
+        // The mark steps down with the fall, so the 500 already moved this
+        // session survive it. Before, this read (0, 0): the removal erased the
+        // session, and the day with it.
+        assert_eq!(session, (500, 0), "a removal does not erase the session");
+        assert_eq!(day, (500, 0));
+        // And nothing goes negative on the way.
+        let (session, day) = split(&mut odo, (0, 0), "2026-09-08");
+        assert!(session.0 >= 0 && day.0 >= 0);
     }
 
     /// The bug, stated as a test.
@@ -11658,6 +11698,7 @@ mod tests {
         let mut odo = Odometer {
             per_engine: [("hoard".to_string(), (1000, 0))].into_iter().collect(),
             session_offset: (1000, 0),
+            prev_totals: (1000, 0),
             day_baseline: (0, 0),
             day_date: "2026-09-08".into(),
         };
@@ -11682,10 +11723,42 @@ mod tests {
     /// removal -- a typo'd engine id silently moving the wrong mark is exactly
     /// the kind of quiet drift this whole change exists to end.
     #[test]
+    fn a_session_dip_after_midnight_does_not_publish_the_session_as_the_day() {
+        // The shape actually seen in prod on 2026-09-26: the header read the
+        // same 33.93 TB on "UL session" and "UL day", to the byte, on a daemon
+        // that had been up since the previous morning.
+        let mut odo = Odometer {
+            per_engine: Default::default(),
+            session_offset: (1000, 0),
+            prev_totals: (1000, 0),
+            day_baseline: (0, 0),
+            day_date: "2026-09-25".into(),
+        };
+        let _ = split(&mut odo, (1700, 0), "2026-09-25");
+        // Midnight: the day restarts, the session keeps its 900.
+        let (session, day) = split(&mut odo, (1900, 0), "2026-09-26");
+        assert_eq!((session.0, day.0), (900, 0));
+
+        // A removal the marks did not hear about: the sum falls by 1400.
+        // The mark steps down with it, so the session keeps its 900.
+        let (session, day) = split(&mut odo, (500, 0), "2026-09-26");
+        assert_eq!(session, (900, 0), "a fall does not erase the session");
+        assert_eq!(day, (0, 0), "and the day is still today's traffic: none yet");
+
+        // Hours of seeding later. The day is what moved since midnight, and
+        // it is NOT the session -- that equality was the bug.
+        let (session, day) = split(&mut odo, (34_000, 0), "2026-09-26");
+        assert_eq!(session.0, 34_400, "session = since boot, across the fall");
+        assert_eq!(day.0, 33_500, "day = since midnight");
+        assert_ne!(day, session, "the header must not publish one as the other");
+    }
+
+    #[test]
     fn forgetting_names_an_engine_or_moves_only_the_global_mark() {
         let mut odo = Odometer {
             per_engine: [("hoard".to_string(), (10, 0))].into_iter().collect(),
             session_offset: (10, 0),
+            prev_totals: (10, 0),
             day_baseline: (0, 0),
             day_date: "2026-09-08".into(),
         };
