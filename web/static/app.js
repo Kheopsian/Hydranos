@@ -1385,10 +1385,13 @@ async function updateRecords(force) {
                     '</span><span class="via">libtorrent (C++) &middot; qBittorrent</span><span class="dur">pre-Hydranos</span></div>');
             } else {
                 const hot = (i === d.milestones.length - 1) ? " hot" : "";
-                const dur = m.since_prev || "-";
+                // The date goes in the right-hand column, where the rows above
+                // and below put theirs ("pre-Hydranos", "ETA ..."); the gap
+                // since the previous milestone, when there is one, is detail.
+                const gap = m.since_prev ? ' &middot; ' + m.since_prev : '';
                 rows.push('<div class="ar' + hot + '"><span class="when">' + label(m.pib) +
-                    '</span><span class="via">Typhon (Rust) &middot; Hydranos &middot; ' + m.date +
-                    '</span><span class="dur">' + dur + '</span></div>');
+                    '</span><span class="via">Typhon (Rust) &middot; Hydranos' + gap +
+                    '</span><span class="dur">' + m.date + '</span></div>');
             }
         });
         if (d.next_eta_date) {
