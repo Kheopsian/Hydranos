@@ -122,13 +122,23 @@ pub async fn fields(
                 // What the editor should show under the value box. A duration
                 // typed as "2 days" is the commonest way to get a rule that
                 // silently never fires.
-                "hint": match kind {
-                    rules::Kind::Duration => "2d, 36h, 90m, or seconds",
-                    rules::Kind::Size => "500GB or 500GiB (they differ)",
-                    rules::Kind::Percent => "0 to 100",
-                    rules::Kind::Bool => "true or false",
-                    rules::Kind::Tags => "one tag name",
-                    _ => "",
+                // Per FIELD first: the confusing part of these is what the
+                // number means, not how to type it.
+                "hint": match *name {
+                    "link_count" => "counts every hardlink, ours included: two cross-seeds of each other both say 2",
+                    "external_links" => "0 means only Hydranos points at these files, so deleting them loses nothing",
+                    "freeable_bytes" => "only files nothing else points at; deleting a shared one frees nothing",
+                    "data_missing" => "the torrent is seeding data it cannot read",
+                    "seeding_time" => "counted since the torrent completed, pauses included",
+                    "ratio" => "uploaded divided by downloaded; 0 when nothing was downloaded",
+                    _ => match kind {
+                        rules::Kind::Duration => "2d, 36h, 90m, or seconds",
+                        rules::Kind::Size => "500GB or 500GiB (they differ)",
+                        rules::Kind::Percent => "0 to 100",
+                        rules::Kind::Bool => "true or false",
+                        rules::Kind::Tags => "one tag name",
+                        _ => "",
+                    },
                 },
             })
         })
@@ -168,6 +178,16 @@ fn field_label(name: &str) -> String {
         "swarm_leechers" => "leechers in swarm",
         "added_age" => "time since added",
         "completed_age" => "time since completed",
+        "seeding_time" => "time spent seeding",
+        "free_space" => "free space where it is stored",
+        // ⚠️ "name" is how POSIX counts this, and it is the wrong word here:
+        // in a torrent client it reads as the torrent's name, so the label
+        // suggested a string comparison when the question is about the bytes.
+        // "hardlink" is the word for what these actually are.
+        "link_count" => "hardlinks to its files",
+        "external_links" => "hardlinks from outside Hydranos",
+        "freeable_bytes" => "space deleting would really free",
+        "data_missing" => "its files are missing from disk",
         // A field added to FIELDS without a label still works; it
         // just reads as the engine spells it.
         other => return other.to_string(),

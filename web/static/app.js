@@ -9522,19 +9522,59 @@ async function _loadWfChoices() {
 
 /// The value control for a field: a list when the set of values is known, a
 /// box when it is not.
-function _wfValueControl(f, value) {
-    const list = _wfChoiceList(f);
-    if (!list) {
-        return `<input type="text" class="wf-c-val" placeholder="value" value="${esc(value || "")}" autocomplete="off">`;
+// The value box follows the FIELD's kind. A free-text box for a number is how
+// a rule ends up holding "2 days" where the engine wants "2d", or a category
+// that does not exist: it looks right, matches nothing, and says nothing.
+const WF_UNITS = {
+    duration: [["s", "seconds"], ["m", "minutes"], ["h", "hours"], ["d", "days"]],
+    size: [["MB", "MB"], ["GB", "GB"], ["TB", "TB"], ["MiB", "MiB"], ["GiB", "GiB"], ["TiB", "TiB"]],
+};
+
+// "500GiB" -> ["500", "GiB"] ; "2d" -> ["2", "d"]. Splitting on the number is
+// enough: every unit the engine parses is a suffix.
+function _wfSplitUnit(value, kind) {
+    const units = WF_UNITS[kind] || [];
+    const m = String(value == null ? "" : value).trim().match(/^(-?[\d.]*)\s*(.*)$/);
+    const num = m ? m[1] : "";
+    let unit = m ? m[2].trim() : "";
+    if (!units.some(u => u[0].toLowerCase() === unit.toLowerCase())) {
+        unit = kind === "duration" ? "d" : "GiB";
+    } else {
+        unit = units.find(u => u[0].toLowerCase() === unit.toLowerCase())[0];
     }
-    // The current value is kept even if it is no longer in the list -- a
-    // category deleted under a saved rule must stay visible, not be silently
-    // rewritten to whatever happens to be first.
-    const opts = list.slice();
-    if (value && !opts.includes(value)) opts.unshift(value);
-    return `<select class="wf-c-val">`
-        + opts.map(o => `<option value="${esc(o)}" ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")
-        + `</select>`;
+    return [num, unit];
+}
+
+function _wfValueControl(f, value) {
+    const kind = f.kind || "text";
+    // A fixed set of values the engine itself defined: state, and every bool.
+    const fixed = Array.isArray(f.choices) && f.choices.length ? f.choices : null;
+    const list = _wfChoiceList(f) || fixed;
+    if (list) {
+        return `<select class="wf-c-val">`
+            + list.map(o => `<option value="${esc(o)}" ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")
+            + `</select>`;
+    }
+    if (kind === "number" || kind === "percent") {
+        const extra = kind === "percent" ? ` min="0" max="100"` : "";
+        // Strip any unit carried over from a size or duration field: a number
+        // input silently shows nothing when its value will not parse.
+        const num = (String(value == null ? "" : value).match(/^-?[\d.]*/) || [""])[0];
+        return `<input type="number" step="any" class="wf-c-val" placeholder="0"`
+            + `${extra} value="${esc(num)}" autocomplete="off">`;
+    }
+    if (kind === "duration" || kind === "size") {
+        const [num, unit] = _wfSplitUnit(value, kind);
+        // Two controls, one value: the unit is part of what gets sent, and
+        // typing it by hand is the mistake this is here to remove.
+        return `<input type="number" step="any" min="0" class="wf-c-val" placeholder="0"`
+            + ` value="${esc(num)}" autocomplete="off">`
+            + `<select class="wf-c-unit">`
+            + WF_UNITS[kind].map(([u, lbl]) =>
+                `<option value="${esc(u)}" ${u === unit ? "selected" : ""}>${esc(lbl)}</option>`).join("")
+            + `</select>`;
+    }
+    return `<input type="text" class="wf-c-val" placeholder="value" value="${esc(value == null ? "" : value)}" autocomplete="off">`;
 }
 
 function _wfChoiceList(f) {
@@ -9635,11 +9675,14 @@ function wfCollectNode(groupEl) {
             const sub = wfCollectNode(el);
             if (sub) of.push(sub);
         } else if (el.classList.contains("wf-row")) {
+            const unit = el.querySelector(".wf-c-unit");
+            const raw = el.querySelector(".wf-c-val").value;
             of.push({
                 kind: "cond",
                 field: el.querySelector(".wf-c-field").value,
                 op: el.querySelector(".wf-c-op").value,
-                value: el.querySelector(".wf-c-val").value,
+                // The unit belongs to the value: the engine parses "500GiB".
+                value: unit && raw !== "" ? `${raw}${unit.value}` : raw,
             });
         }
     }
@@ -9668,16 +9711,20 @@ function syncCondOps(el) {
     // The value control belongs to the FIELD, so it is rebuilt when the field
     // changes: a free-text box left over from "torrent name" under a "category"
     // condition is exactly the typo trap the lists are here to close.
+    // Rebuilt wholesale rather than patched: a number box left over from
+    // "ratio" under a "category" condition is the typo trap the lists close,
+    // and a unit select left over from "size" under "connected peers" would
+    // append "GiB" to a peer count.
     const old = row.querySelector(".wf-c-val");
-    const keep = old ? old.value : "";
-    const list = _wfChoiceList(f);
-    const wanted = list ? "SELECT" : "INPUT";
-    if (old && old.tagName !== wanted) {
-        old.outerHTML = _wfValueControl(f, list && !list.includes(keep) ? "" : keep);
-    } else if (old && list) {
-        old.innerHTML = list.map(o =>
-            `<option value="${esc(o)}" ${o === keep ? "selected" : ""}>${esc(o)}</option>`).join("");
-    }
+    const oldUnit = row.querySelector(".wf-c-unit");
+    // ⚠️ The unit is PART of the value. Reading the box alone turned "36h"
+    // into "36", which then took the default unit back: a 36 hour retention
+    // rule silently became 36 days, with the form still looking right.
+    const keep = old ? (oldUnit ? old.value + oldUnit.value : old.value) : "";
+    const list = _wfChoiceList(f) || (Array.isArray(f.choices) && f.choices.length ? f.choices : null);
+    const carried = list && !list.includes(keep) ? "" : keep;
+    if (oldUnit) oldUnit.remove();
+    if (old) old.outerHTML = _wfValueControl(f, carried);
 }
 
 const WF_ACTIONS = [
