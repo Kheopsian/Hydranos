@@ -596,7 +596,9 @@ pub fn spawn_race_drain(
                 if !volume.policy.enabled {
                     continue;
                 }
-                if volume.used_pct() < volume.policy.high as f64 {
+                // ALLOCATION, not occupancy: the add is refused on what is
+                // promised, so the drain must start on what is promised too.
+                if volume.alloc_pct() < volume.policy.high as f64 {
                     continue;
                 }
                 drain_once(&state, &manager, &volume, &cfg, &engine_id);
@@ -652,8 +654,11 @@ pub fn drain_once(
     cfg: &crate::config::Config,
     engine_id: &str,
 ) -> DrainOutcome {
+    // Both ends in the same unit. Triggering on allocation and stopping on
+    // occupancy would free NOTHING whenever the disk is committed but not yet
+    // written -- the drain would fire and return empty-handed.
     let target = volume.total as f64 * volume.policy.low as f64 / 100.0;
-    let wanted = volume.used as f64 - target;
+    let wanted = volume.allocated() as f64 - target;
     let mut to_free = wanted;
     if to_free <= 0.0 {
         return DrainOutcome::default();
@@ -661,6 +666,8 @@ pub fn drain_once(
     tracing::warn!(
         volume = %volume.id,
         pct = volume.used_pct().round(),
+        alloc_pct = volume.alloc_pct().round(),
+        committed_gb = (volume.committed as f64 / 1e9).round(),
         high = volume.policy.high,
         "race volume over its high watermark, draining"
     );
@@ -1139,6 +1146,7 @@ mod drain_tests {
             total,
             used,
             free: total.saturating_sub(used),
+            committed: 0,
             torrents: 0,
             policy: Policy { enabled, high, low, inherited: true },
         }
@@ -1302,6 +1310,7 @@ mod drain_policy_gate_tests {
             total,
             used: total / 100 * used_pct,
             free: total - total / 100 * used_pct,
+            committed: 0,
             torrents: 1,
             policy: Policy { enabled, high, low, inherited: true },
         }
