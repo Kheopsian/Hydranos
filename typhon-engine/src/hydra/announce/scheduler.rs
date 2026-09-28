@@ -331,7 +331,7 @@ where
     let mut control = Control::new();
     admission.concurrency.store(control.limit as u64, Ordering::Relaxed);
 
-    off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission));
+    let mut joined = off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission));
 
     loop {
         // Sleep until the next deadline, or an hour if there is nothing to do.
@@ -424,9 +424,9 @@ where
                 }
             }
             _ = reconcile.tick() => {
-                off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission));
                 let health = off_the_runtime(|| measure(&states, &heap, Instant::now()));
-                control.adjust(health.needed_per_s);
+                control.adjust(demand(&health, joined));
+                joined = off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission));
                 health.publish(&admission, &control);
             }
         }
@@ -497,6 +497,27 @@ impl Control {
         };
     }
 }
+
+/// How many announces a second the pool has to sustain right now.
+///
+/// ⚠ The steady-state need (the sum of 1/interval over admitted torrents) is
+/// not enough, and production proved it on the first boot of 4.3: at start
+/// almost nothing is admitted yet, the sum said ~20/s, and the limit dropped to
+/// its floor of 64 -- while every torrent admitted wants its FIRST announce at
+/// once, 5 400 per cycle on a 972k catalogue, ~540/s. Lateness grew by 5 000
+/// every ten seconds. The bench had not shown it: 60k torrents admit at 33/s,
+/// which 64 slots absorb.
+///
+/// So the demand is three flows: the steady state, the torrents joining this
+/// cycle, and the backlog already late, to be cleared within a minute.
+fn demand(health: &Health, joined_last_cycle: usize) -> f64 {
+    health.needed_per_s
+        + joined_last_cycle as f64 / RECONCILE.as_secs_f64()
+        + health.late as f64 / BACKLOG_DRAIN.as_secs_f64()
+}
+
+/// How fast a backlog of late torrents should be cleared.
+const BACKLOG_DRAIN: Duration = Duration::from_secs(60);
 
 /// The schedule's health at one instant.
 struct Health {
@@ -575,7 +596,7 @@ fn reconcile_now<C: Catalogue>(
     states: &mut HashMap<String, State>,
     heap: &mut BinaryHeap<Reverse<Deadline>>,
     admission: &Admission,
-) {
+) -> usize {
     let live = catalogue.hashes();
     let total = live.len() as u64;
     // Derived from the catalogue in hand: the bigger it is, the faster it has
@@ -624,6 +645,7 @@ fn reconcile_now<C: Catalogue>(
     let admitted = states.len() as u64;
     admission.admitted.store(admitted, Ordering::Relaxed);
     admission.waiting.store(total.saturating_sub(admitted), Ordering::Relaxed);
+    added
 }
 
 /// Move one torrent to the head of the queue, out of band.
@@ -976,6 +998,31 @@ mod tests {
         assert_eq!(h.lag_p50, Duration::from_secs(100));
         let want = 3.0 / 1800.0 + 1.0 / 60.0;
         assert!((h.needed_per_s - want).abs() < 1e-9, "{}", h.needed_per_s);
+    }
+
+    /// The first boot of 4.3 in production: 972k torrents joining at 5 400 a
+    /// cycle, a steady-state sum of ~20/s. The limit must follow the joining
+    /// flow, not collapse to its floor.
+    #[test]
+    fn a_booting_catalogue_is_not_held_to_the_floor() {
+        let mut c = Control::new();
+        c.in_flight = 1;
+        c.done(&answered(false), Duration::from_millis(600));
+        let boot = Health { needed_per_s: 20.0, late: 0, lag_p50: Duration::ZERO, lag_p90: Duration::ZERO };
+        for _ in 0..30 {
+            c.adjust(demand(&boot, 5_400));
+        }
+        // (20 + 540) x 0.6 s x 1.5
+        assert_eq!(c.limit, 504, "{}", c.limit);
+    }
+
+    /// A backlog is cleared, not merely kept from growing.
+    #[test]
+    fn a_backlog_raises_the_demand() {
+        let late = Health { needed_per_s: 100.0, late: 30_000, lag_p50: Duration::ZERO, lag_p90: Duration::ZERO };
+        assert!((demand(&late, 0) - 600.0).abs() < 1e-9, "100/s + 30 000 over a minute");
+        let calm = Health { needed_per_s: 100.0, late: 0, lag_p50: Duration::ZERO, lag_p90: Duration::ZERO };
+        assert!((demand(&calm, 0) - 100.0).abs() < 1e-9);
     }
 
     #[test]
