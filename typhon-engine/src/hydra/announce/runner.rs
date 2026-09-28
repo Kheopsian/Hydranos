@@ -118,6 +118,13 @@ impl Catalogue for EngineCatalogue {
             .map(|t| hex(&t.info_hash))
             .collect()
     }
+
+    fn host_of(&self, info_hash: &str) -> String {
+        let Some(ih) = parse_hex(info_hash) else { return String::new() };
+        let Some(t) = self.manager.get(&ih) else { return String::new() };
+        let tiers = t.live_trackers.read();
+        tiers.iter().flatten().next().map(|u| super::cache::host_of(u)).unwrap_or_default()
+    }
 }
 
 fn hex(hash: &[u8; 20]) -> String {
@@ -257,7 +264,7 @@ async fn announce_one(
     mode: Mode,
     job: Job,
 ) -> Outcome {
-    let gone = Outcome { info_hash: job.info_hash.clone(), next_in: Duration::ZERO, gone: true, throttled: false };
+    let gone = Outcome { info_hash: job.info_hash.clone(), next_in: Duration::ZERO, gone: true, throttled: false, timed_out: false };
 
     let Some(hash) = parse_hex(&job.info_hash) else {
         return gone;
@@ -323,6 +330,7 @@ async fn announce_one(
     let mut announced_at_all = false;
     // Any tracker answered 429: reported to the scheduler's concurrency control.
     let mut throttled = false;
+    let mut timed_out = false;
     for tier in &torrent.meta.trackers {
         let mut tier_answered = false;
         for tracker_url in tier {
@@ -457,6 +465,9 @@ async fn announce_one(
                     if kind == "rate_limited" {
                         throttled = true;
                     }
+                    if kind == "timeout" {
+                        timed_out = true;
+                    }
                     cache.count_failed_kind(&host, kind);
                     // At warn, not debug: a breaker that says a tracker
                     // "stopped answering" without saying why sends an operator
@@ -538,7 +549,7 @@ async fn announce_one(
         announced_at_all && torrent.total_uploaded.load(Ordering::Relaxed) > 0,
     );
 
-    Outcome { info_hash: job.info_hash, next_in, gone: false, throttled }
+    Outcome { info_hash: job.info_hash, next_in, gone: false, throttled, timed_out }
 }
 
 /// An error message with any URL taken out of it.
