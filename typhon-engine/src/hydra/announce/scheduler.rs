@@ -56,10 +56,12 @@ const CALM_FACTOR: f64 = 1.5;
 /// up to 2.6 s on a tracker that answers in 0.5 s, "> 2x best" never fired, and
 /// the limit climbed to 1 257 -- the first adaptive pool's runaway, only slower.
 const BEST_WINDOW: usize = 30;
-/// A limit raised last cycle must have bought at least this much more
-/// throughput; if not, the tracker is saturated and the rise is taken back.
-/// That catches the queue that latency alone reads too late.
-const GROWTH_MUST_PAY: f64 = 1.05;
+/// A limit raised last cycle must have bought at least this share of the rise
+/// in more answers (+1/8 in flight, +1/16 answered); if not, the tracker is
+/// saturated and the rise is taken back. That catches the queue that latency
+/// alone reads too late. A share rather than a fixed gain: the last rise to the
+/// ceiling, or +1 on a small limit, is a small rise.
+const GROWTH_MUST_PAY: f64 = 0.5;
 /// A cut for latency must bring the latency down at least this much; if not,
 /// the latency is the route's, not a queue of ours, and becomes the new best.
 const CUT_MUST_PAY: f64 = 0.95;
@@ -540,13 +542,18 @@ impl Tracker {
             }
         }
         let busy = !self.pending.is_empty() || self.in_flight * 10 >= self.limit * 9;
-        let unpaid = self.grew.take().filter(|_| n < self.prev_n as f64 * GROWTH_MUST_PAY);
+        let unpaid = self.grew.take().filter(|&before| {
+            let rise = self.limit as f64 / before as f64 - 1.0;
+            n < self.prev_n as f64 * (1.0 + rise * GROWTH_MUST_PAY)
+        });
         if let Some(before) = unpaid {
-            // The rise bought nothing: the tracker is saturated. Go back under
-            // where the rise started, not just a step down from where it got
-            // to -- +1/8 then -1/10 is still a net rise, and the limit would
-            // creep past the knee by 1% every other cycle.
-            self.limit = (before * 9 / 10).max(HOST_MIN);
+            // The rise bought nothing: take it back, exactly. Not a step down
+            // from where it got to -- +1/8 then -1/10 is still a net rise, and
+            // the limit crept past the knee 1% every other cycle. Not below
+            // where it started either: at a limit of 12 a rise is one request,
+            // its gain drowns in the noise, and each missed probe cost 10% --
+            // archive.org fell from 28 to 12 while answering at its usual speed.
+            self.limit = before;
         } else if self.throttled as f64 / n > THROTTLE_BACKOFF || self.timed_out as f64 / n > TIMEOUT_BACKOFF {
             self.limit = (self.limit * 4 / 5).max(HOST_MIN);
         } else if mean > QUEUE_FACTOR * self.best_s {
@@ -1203,6 +1210,20 @@ mod tests {
             cycle(&mut t, lat, n, true);
         }
         assert!(t.limit > HOST_START, "stuck at {}", t.limit);
+    }
+
+    /// A probe that misses because of noise costs nothing: a tracker answering
+    /// at its usual speed never ends below where it started.
+    #[test]
+    fn a_missed_probe_costs_nothing() {
+        let mut t = Tracker::new();
+        t.limit = 12;
+        for i in 0..60 {
+            // Answers flat at 180 a cycle whatever the limit, +-3%.
+            let n = if i % 2 == 0 { 185 } else { 175 };
+            cycle(&mut t, 0.6, n, true);
+            assert!(t.limit >= 12, "fell to {} at cycle {i}", t.limit);
+        }
     }
 
     #[test]
