@@ -56,6 +56,12 @@ fn classify(err: &str) -> &'static str {
 /// Cheap on purpose: the point is a trickle of evidence per tracker per hour,
 /// not a measurement campaign. A check costs one `numwant` a tracker would have
 /// answered anyway.
+/// Whether a failed announce still shows the tracker is up, for the breaker.
+/// A 429 is the tracker answering, and asking us to slow down.
+fn proves_alive(kind: &str) -> bool {
+    kind == "rate_limited"
+}
+
 const VERIFY_EVERY: u64 = 64;
 /// How many peers a self-check asks for. Small enough that a tracker returning
 /// fewer than this proves the list was not truncated.
@@ -460,8 +466,16 @@ async fn announce_one(
                     }
                 }
                 Err(e) => {
-                    breaker.record(&host, false, std::time::Instant::now());
                     let kind = classify(&redact(&e));
+                    // A 429 is an answer, not an outage: the tracker is up and
+                    // asking us to slow down, which the scheduler does, per
+                    // tracker. Counted as a failure here, five of them paused
+                    // the host for ten minutes, and every torrent due in that
+                    // time was pushed back half an hour without a request, a
+                    // failure or a minute of lateness to show for it. Calewood
+                    // on 2026-09-28: announced one second in every ten minutes,
+                    // 1 150 announces in an hour for 789 000 torrents.
+                    breaker.record(&host, proves_alive(kind), std::time::Instant::now());
                     if kind == "rate_limited" {
                         throttled = true;
                     }
@@ -587,6 +601,26 @@ fn parse_hex(s: &str) -> Option<[u8; 20]> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// ⭐⭐ Calewood's 429 as it came on 2026-09-28: an answer, so the breaker
+    /// must not set the tracker aside however many come -- slowing down is the
+    /// scheduler's job. A tracker that does not answer at all still trips it.
+    #[test]
+    fn a_tracker_asking_to_slow_down_is_not_set_aside() {
+        let err = "v4: https://t.example/announce 429 Too Many Requests: Merci de bien vouloir boire un cafe, et ralentir votre spam. | v6: https://t.example/announce 429 Too Many Requests";
+        let b = Breaker::default();
+        let now = std::time::Instant::now();
+        for _ in 0..20 {
+            b.record("t.example", proves_alive(classify(err)), now);
+        }
+        assert!(b.allows("t.example", now), "twenty 429s are twenty answers, not an outage");
+        for _ in 0..20 {
+            b.record("dead.example", proves_alive(classify("v4: tcp connect error: Connection refused")), now);
+        }
+        assert!(!b.allows("dead.example", now), "a tracker that does not answer is still spared");
+    }
+
     use super::*;
 
     /// ⭐ A tracker URL carries the passkey in its path. reqwest puts the

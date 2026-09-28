@@ -59,6 +59,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   of the other engine's kind graduates the torrent there. `move-preview`,
   which answered 400 to everything, now says what a move would do.
 - The agent endpoint gained `move_to_category`.
+- **A tracker answering 429 was paused for ten minutes, silently.** The
+  breaker that spares a dead tracker counted "too many requests" as a failure:
+  five of them set the tracker aside for ten minutes, and every torrent due in
+  that time was pushed back half an hour without a request, a failure or any
+  lateness to show for it. A tracker rate-limiting us ended up announced one
+  second in every ten minutes while the announce figures read "on time". A 429
+  is an answer: the breaker leaves the tracker alone and the scheduler slows
+  down for it instead.
 - **IOWait and ARC misses were recorded as 0 since the Rust port.** The
   bench sampler wrote the columns but never read `/proc/stat` or the ZFS ARC
   counters; both are measured again, over each sample's interval.
