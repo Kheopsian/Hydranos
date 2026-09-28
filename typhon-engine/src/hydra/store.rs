@@ -185,15 +185,81 @@ pub struct SlimFact {
     pub user_paused: bool,
 }
 
+/// Hashes an info hash by folding its bytes, instead of SipHash.
+///
+/// Info hashes are SHA-1 outputs: already uniform, and nobody can choose one
+/// to collide in a table without breaking SHA-1 first. SipHash's protection is
+/// wasted on them, and it was 15 % of a list request -- one lookup per torrent.
+#[derive(Default, Clone, Copy)]
+pub struct InfoHashHasher(u64);
+
+impl std::hash::Hasher for InfoHashHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub type InfoHashMap<V> =
+    std::collections::HashMap<[u8; 20], V, std::hash::BuildHasherDefault<InfoHashHasher>>;
+
 /// The whole session's slim facts, with the text interned once.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SlimFacts {
-    pub by_hash: std::collections::HashMap<[u8; 20], SlimFact>,
+    pub by_hash: InfoHashMap<SlimFact>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
+    cat_ids: std::collections::HashMap<String, u16>,
+    tag_ids: std::collections::HashMap<String, u16>,
 }
 
 impl SlimFacts {
+    fn empty() -> Self {
+        // Index 0 is "no category" / "no tags", so the common case stores a
+        // zero and never touches the intern tables.
+        SlimFacts { categories: vec![String::new()], ..Default::default() }
+    }
+
+    /// One row of the torrents table as the list pass sees it.
+    fn fact_of(&mut self, category: String, tags_raw: &str, paused: i64) -> SlimFact {
+        let category_id = if category.is_empty() {
+            0
+        } else if let Some(id) = self.cat_ids.get(&category) {
+            *id
+        } else {
+            let id = self.categories.len() as u16;
+            self.categories.push(category.clone());
+            self.cat_ids.insert(category, id);
+            id
+        };
+
+        let mut tag_bits: u64 = 0;
+        for tag in split_tags(tags_raw) {
+            let id = if let Some(id) = self.tag_ids.get(&tag) {
+                *id
+            } else {
+                // 64 distinct tags is the ceiling of the bitset. Beyond it
+                // the extra tags stop being counted rather than corrupting
+                // the ones already there.
+                if self.tags.len() >= 64 {
+                    continue;
+                }
+                let id = self.tags.len() as u16;
+                self.tags.push(tag.clone());
+                self.tag_ids.insert(tag, id);
+                id
+            };
+            tag_bits |= 1u64 << id;
+        }
+        SlimFact { category_id, tag_bits, user_paused: paused != 0 }
+    }
+
     pub fn get(&self, hash: &[u8; 20]) -> SlimFact {
         self.by_hash.get(hash).copied().unwrap_or_default()
     }
@@ -228,8 +294,16 @@ pub(crate) fn hex20(hex: &str) -> Option<[u8; 20]> {
     Some(out)
 }
 
+/// Rows written since the last list request above which the list facts are
+/// read whole again rather than row by row.
+const SLIM_REREAD_MAX: usize = 100_000;
+
 pub struct Store {
     conn: Connection,
+    /// `slim_facts` per session, kept current by `slim_facts_current`.
+    slim: std::collections::HashMap<String, std::sync::Arc<SlimFacts>>,
+    slim_version: i64,
+    tracks_changes: bool,
 }
 
 impl Store {
@@ -245,15 +319,20 @@ impl Store {
                 | OpenFlags::SQLITE_OPEN_URI
         };
         let conn = Connection::open_with_flags(path, flags)?;
-        let store = Self { conn };
+        let mut store = Self::bare(conn);
         // 3.x applies its CREATE TABLE IF NOT EXISTS on every open, so a fresh
         // install comes up with an empty but complete database rather than
         // refusing to start. Reproduced here; read-only opens skip it, since a
         // bench pointed at a copy of production must not write to it.
         if !read_only {
             store.ensure_schema()?;
+            store.track_changes();
         }
         Ok(store)
+    }
+
+    fn bare(conn: Connection) -> Self {
+        Store { conn, slim: Default::default(), slim_version: -1, tracks_changes: false }
     }
 
     /// Create anything missing. Every statement is IF NOT EXISTS, so this is a
@@ -700,7 +779,9 @@ impl Store {
     pub fn open_in_memory() -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn })
+        let mut store = Self::bare(conn);
+        store.track_changes();
+        Ok(store)
     }
 
     pub fn check_schema(&self) -> anyhow::Result<()> {
@@ -1084,13 +1165,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare("SELECT info_hash, category, tags, paused FROM torrents WHERE session = ?1")?;
-        let mut out = SlimFacts::default();
-        // Index 0 is "no category" / "no tags", so the common case stores a
-        // zero and never touches the intern tables.
-        out.categories.push(String::new());
-        let mut cat_ids: std::collections::HashMap<String, u16> = Default::default();
-        let mut tag_ids: std::collections::HashMap<String, u16> = Default::default();
-
+        let mut out = SlimFacts::empty();
         let mut rows = stmt.query([session])?;
         while let Some(row) = rows.next()? {
             let hash: String = row.get(0)?;
@@ -1098,43 +1173,108 @@ impl Store {
             let category: String = row.get(1)?;
             let tags_raw: String = row.get(2)?;
             let paused: i64 = row.get(3)?;
-
-            let category_id = if category.is_empty() {
-                0
-            } else if let Some(id) = cat_ids.get(&category) {
-                *id
-            } else {
-                let id = out.categories.len() as u16;
-                out.categories.push(category.clone());
-                cat_ids.insert(category, id);
-                id
-            };
-
-            let mut tag_bits: u64 = 0;
-            for tag in split_tags(&tags_raw) {
-                let id = if let Some(id) = tag_ids.get(&tag) {
-                    *id
-                } else {
-                    // 64 distinct tags is the ceiling of the bitset. Beyond it
-                    // the extra tags stop being counted rather than corrupting
-                    // the ones already there.
-                    if out.tags.len() >= 64 {
-                        continue;
-                    }
-                    let id = out.tags.len() as u16;
-                    out.tags.push(tag.clone());
-                    tag_ids.insert(tag, id);
-                    id
-                };
-                tag_bits |= 1u64 << id;
-            }
-
-            out.by_hash.insert(
-                key,
-                SlimFact { category_id, tag_bits, user_paused: paused != 0 },
-            );
+            let fact = out.fact_of(category, &tags_raw, paused);
+            out.by_hash.insert(key, fact);
         }
         Ok(out)
+    }
+
+    /// `slim_facts`, kept in memory and brought up to date from the rows
+    /// written since the last call.
+    ///
+    /// Reading the whole session took 1.1 s at a million torrents, on every
+    /// list request, holding the store's lock -- every other store write
+    /// waited behind every search. A cache invalidated on any write was tried
+    /// before and never served: the store takes a write every few seconds
+    /// (Calewood adds torrents all day). So the triggers set up in
+    /// `track_changes` note WHICH rows changed, and only those are read again.
+    ///
+    /// Falls back to a full read when it cannot vouch for the copy: no
+    /// triggers on this connection (a read-only open), another connection
+    /// wrote to the file (`data_version` moved), or so many rows changed that
+    /// reading them one by one would cost more than reading them all.
+    pub fn slim_facts_current(&mut self, session: &str) -> anyhow::Result<std::sync::Arc<SlimFacts>> {
+        if !self.tracks_changes {
+            return Ok(std::sync::Arc::new(self.slim_facts(session)?));
+        }
+        let version: i64 = self.conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+        if version != self.slim_version {
+            self.slim.clear();
+            self.slim_version = version;
+        }
+        let dirty: Vec<(String, String)> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT session, info_hash FROM temp.slim_dirty LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([SLIM_REREAD_MAX as i64 + 1], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        if !dirty.is_empty() {
+            self.conn.execute("DELETE FROM temp.slim_dirty", [])?;
+        }
+        if dirty.len() > SLIM_REREAD_MAX {
+            self.slim.clear();
+        } else if !self.slim.is_empty() {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT category, tags, paused FROM torrents WHERE session = ?1 AND info_hash = ?2",
+            )?;
+            for (sess, hash) in &dirty {
+                let Some(cached) = self.slim.get_mut(sess) else { continue };
+                let Some(key) = hex20(hash) else { continue };
+                let facts = std::sync::Arc::make_mut(cached);
+                let row: Option<(String, String, i64)> = stmt
+                    .query_row([sess.as_str(), hash.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .map(Some)
+                    .or_else(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        e => Err(e),
+                    })?;
+                match row {
+                    Some((category, tags_raw, paused)) => {
+                        let fact = facts.fact_of(category, &tags_raw, paused);
+                        facts.by_hash.insert(key, fact);
+                    }
+                    None => {
+                        facts.by_hash.remove(&key);
+                    }
+                }
+            }
+        }
+        if let Some(f) = self.slim.get(session) {
+            return Ok(f.clone());
+        }
+        let f = std::sync::Arc::new(self.slim_facts(session)?);
+        self.slim.insert(session.to_string(), f.clone());
+        Ok(f)
+    }
+
+    /// Note every row of `torrents` that is written, for `slim_facts_current`.
+    ///
+    /// TEMP objects: they live with this connection, in its temp schema, and
+    /// never reach the file -- nothing about the database changes, and a
+    /// read-only open, where they cannot be created, simply goes without.
+    /// Only the columns the list pass reads count as a change; a write to any
+    /// other column leaves the copy valid.
+    fn track_changes(&mut self) {
+        let ddl = "
+            CREATE TEMP TABLE IF NOT EXISTS slim_dirty(session TEXT NOT NULL, info_hash TEXT NOT NULL);
+            CREATE TEMP TRIGGER IF NOT EXISTS slim_dirty_ins AFTER INSERT ON main.torrents
+                BEGIN INSERT INTO slim_dirty VALUES (NEW.session, NEW.info_hash); END;
+            CREATE TEMP TRIGGER IF NOT EXISTS slim_dirty_del AFTER DELETE ON main.torrents
+                BEGIN INSERT INTO slim_dirty VALUES (OLD.session, OLD.info_hash); END;
+            CREATE TEMP TRIGGER IF NOT EXISTS slim_dirty_upd
+                AFTER UPDATE OF session, info_hash, category, tags, paused ON main.torrents
+                BEGIN
+                    INSERT INTO slim_dirty VALUES (OLD.session, OLD.info_hash);
+                    INSERT INTO slim_dirty VALUES (NEW.session, NEW.info_hash);
+                END;";
+        self.tracks_changes = match self.conn.execute_batch(ddl) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("list facts will be read in full on every request: {e}");
+                false
+            }
+        };
     }
 
     /// SQLite's own tally of rows written on this connection.
@@ -2294,7 +2434,9 @@ mod tests {
     fn fresh() -> Store {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        Store { conn }
+        let mut store = Store::bare(conn);
+        store.track_changes();
+        store
     }
 
     #[test]
@@ -3104,5 +3246,149 @@ mod jobs_nodes_drain_tests {
         assert!(s.meta_doc("nothing-here").is_none());
         s.put_meta("k", "{\"a\":1}").unwrap();
         assert_eq!(s.meta_doc("k").as_deref(), Some("{\"a\":1}"));
+    }
+}
+
+#[cfg(test)]
+mod slim_current_tests {
+    use super::*;
+
+    /// A SlimFacts by what it says, not by how it numbered its names: ids are
+    /// assigned in the order names were first seen, which differs between a
+    /// full read and one kept up to date row by row.
+    fn canon(f: &SlimFacts) -> std::collections::BTreeMap<[u8; 20], (String, Vec<String>, bool)> {
+        f.by_hash
+            .iter()
+            .map(|(k, v)| {
+                let tags = (0..64)
+                    .filter(|i| v.tag_bits & (1u64 << i) != 0)
+                    .map(|i| f.tags[i].clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                (*k, (f.category(v.category_id).to_string(), tags, v.user_paused))
+            })
+            .collect()
+    }
+
+    fn hash(n: u8) -> String {
+        format!("{:02x}", n).repeat(20)
+    }
+
+    fn add(s: &Store, n: u8, session: &str, category: &str, tags: &str) {
+        s.conn
+            .execute(
+                "INSERT INTO torrents (info_hash, session, torrent, category, tags) VALUES (?1, ?2, x'00', ?3, ?4)",
+                rusqlite::params![hash(n), session, category, tags],
+            )
+            .unwrap();
+    }
+
+    fn agrees(s: &mut Store, session: &str) {
+        let kept = s.slim_facts_current(session).unwrap();
+        let read = s.slim_facts(session).unwrap();
+        assert_eq!(canon(&kept), canon(&read), "the kept copy says what a full read says");
+    }
+
+    /// ⭐ Every kind of write the store makes reaches the kept copy: an add, a
+    /// category, tags, a pause, a delete, a move between engines -- and a
+    /// write to a column the list does not read changes nothing.
+    #[test]
+    fn the_kept_copy_follows_every_write() {
+        let mut s = Store::open_in_memory().unwrap();
+        for n in 1..=20 {
+            add(&s, n, "hoard", if n % 2 == 0 { "Books" } else { "" }, if n % 3 == 0 { "a,b" } else { "" });
+        }
+        add(&s, 21, "race", "Race", "");
+        agrees(&mut s, "hoard");
+        agrees(&mut s, "race");
+
+        add(&s, 30, "hoard", "New", "fresh");
+        agrees(&mut s, "hoard");
+        s.set_category_everywhere(&hash(2), "Films").unwrap();
+        agrees(&mut s, "hoard");
+        s.set_tags(&hash(3), &["z".to_string()]).unwrap();
+        agrees(&mut s, "hoard");
+        s.set_paused(&hash(4), "hoard", true).unwrap();
+        agrees(&mut s, "hoard");
+        s.delete_torrent(&hash(5)).unwrap();
+        agrees(&mut s, "hoard");
+        s.conn
+            .execute("UPDATE torrents SET session = 'race' WHERE info_hash = ?1", [hash(6)])
+            .unwrap();
+        agrees(&mut s, "hoard");
+        agrees(&mut s, "race");
+        s.conn
+            .execute("UPDATE torrents SET total_uploaded = 99 WHERE info_hash = ?1", [hash(7)])
+            .unwrap();
+        let before = s.conn.query_row("SELECT count(*) FROM temp.slim_dirty", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(before, 0, "a column the list does not read is not a change");
+        agrees(&mut s, "hoard");
+    }
+
+    /// The copy is served, not re-read: with no write in between, a second
+    /// call hands back the same allocation.
+    #[test]
+    fn with_no_write_the_copy_is_served_as_is() {
+        let mut s = Store::open_in_memory().unwrap();
+        add(&s, 1, "hoard", "Books", "");
+        let a = s.slim_facts_current("hoard").unwrap();
+        let b = s.slim_facts_current("hoard").unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+    }
+
+    /// A request still holding the previous copy keeps what it read; the
+    /// update goes to a new one.
+    #[test]
+    fn a_copy_in_use_is_not_changed_under_its_reader() {
+        let mut s = Store::open_in_memory().unwrap();
+        add(&s, 1, "hoard", "Books", "");
+        let held = s.slim_facts_current("hoard").unwrap();
+        s.set_category_everywhere(&hash(1), "Films").unwrap();
+        let now = s.slim_facts_current("hoard").unwrap();
+        assert_eq!(canon(&held).values().next().unwrap().0, "Books");
+        assert_eq!(canon(&now).values().next().unwrap().0, "Films");
+    }
+
+    /// ⭐ A write made through ANOTHER connection fires no trigger here. The
+    /// file's data_version sees it, and the copy is read again in full.
+    #[test]
+    fn a_write_from_another_connection_is_not_missed() {
+        let dir = std::env::temp_dir().join(format!("slimcur-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hydra.db");
+        let _ = std::fs::remove_file(&path);
+        let mut s = Store::open(&path, false).unwrap();
+        add(&s, 1, "hoard", "Books", "");
+        agrees(&mut s, "hoard");
+        let other = Connection::open(&path).unwrap();
+        other
+            .execute("UPDATE torrents SET category = 'Films' WHERE info_hash = ?1", [hash(1)])
+            .unwrap();
+        let kept = s.slim_facts_current("hoard").unwrap();
+        assert_eq!(canon(&kept).values().next().unwrap().0, "Films");
+        drop(other);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store opened read-only cannot set up its triggers and reads in full
+    /// every time -- slower, never wrong.
+    #[test]
+    fn a_read_only_store_reads_in_full() {
+        let dir = std::env::temp_dir().join(format!("slimro-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hydra.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let s = Store::open(&path, false).unwrap();
+            add(&s, 1, "hoard", "Books", "");
+        }
+        let mut ro = Store::open(&path, true).unwrap();
+        assert!(!ro.tracks_changes);
+        let f = ro.slim_facts_current("hoard").unwrap();
+        assert_eq!(f.by_hash.len(), 1);
+        drop(ro);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
