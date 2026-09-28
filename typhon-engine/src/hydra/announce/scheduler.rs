@@ -24,8 +24,31 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-/// Sized for ~200k torrents: throughput times latency, not a number of cores.
-const WORKERS: usize = 512;
+/// Announces allowed in flight before any latency has been measured: what the
+/// pool was fixed at until 4.3, sized for ~200k torrents.
+///
+/// ⚠ A FIXED pool is what capped a 950k catalogue at ~350 announces a second
+/// on 2026-09-28, against ~416 its trackers' intervals asked for: concurrency
+/// needed is throughput times latency (Little's law), and both grow -- the
+/// throughput with the catalogue, the latency with the load on the tracker.
+/// Calewood torrents fell ~15 minutes behind their deadlines and nothing on
+/// screen said so. The pool is now sized from what is measured, every
+/// `RECONCILE`, between the two bounds below.
+const START_CONCURRENCY: usize = 512;
+const MIN_CONCURRENCY: usize = 64;
+/// Tasks spawned once. Idle ones cost a parked future each, not a thread.
+const MAX_CONCURRENCY: usize = 4096;
+/// Over throughput x latency: the rate is an average and deadlines bunch.
+const HEADROOM: f64 = 1.5;
+/// Share of 429 answers in a cycle above which the pool shrinks instead of
+/// growing. Past that point more concurrency is more refusals: the tracker,
+/// not the pool, is what limits.
+const THROTTLE_BACKOFF: f64 = 0.02;
+/// Weight of each new latency sample in the moving average.
+const LATENCY_ALPHA: f64 = 0.02;
+/// A torrent counts as late once its deadline is this far behind: dispatch
+/// itself takes a moment, and that is not lateness.
+const LATE_AFTER: Duration = Duration::from_secs(5);
 /// How often the set of torrents is re-read from the engine.
 const RECONCILE: Duration = Duration::from_secs(10);
 /// Used when a tracker gives no usable interval.
@@ -148,6 +171,9 @@ struct State {
     epoch: u64,
     /// When this torrent was last bumped by hand, for `BUMP_COOLDOWN`.
     last_bump: Option<Instant>,
+    /// The interval it was last rescheduled with, in seconds: what it will
+    /// cost per second in steady state is its inverse.
+    interval_s: u32,
 }
 
 /// A deadline in the heap. Ordered by time only; the hash breaks ties so the
@@ -187,6 +213,9 @@ pub struct Outcome {
     pub next_in: Duration,
     /// The torrent is gone from the engine; stop tracking it.
     pub gone: bool,
+    /// A tracker answered 429. Fed to the concurrency control, which backs
+    /// off instead of pushing harder at a tracker that asks for less.
+    pub throttled: bool,
 }
 
 /// What the scheduler needs from the engine it serves.
@@ -211,6 +240,22 @@ pub struct Admission {
     pub admitted: AtomicU64,
     /// Torrents the catalogue holds that it has not reached yet.
     pub waiting: AtomicU64,
+    /// Announces per second the schedule needs, x1000: the sum of
+    /// 1/interval over every admitted torrent. The line the achieved rate has
+    /// to meet; below it, lateness grows.
+    pub needed_milli: AtomicU64,
+    /// Torrents whose deadline passed more than `LATE_AFTER` ago.
+    pub late: AtomicU64,
+    /// How late they are, in seconds: median and 90th percentile.
+    pub lag_p50_s: AtomicU64,
+    pub lag_p90_s: AtomicU64,
+    /// Announces allowed in flight right now, and in flight at the sample.
+    pub concurrency: AtomicU64,
+    pub in_flight: AtomicU64,
+    /// Moving average of how long one announce takes, in milliseconds.
+    pub latency_ms: AtomicU64,
+    /// Share of the last cycle's answers that were 429, in thousandths.
+    pub throttled_permille: AtomicU64,
 }
 
 impl Admission {
@@ -251,11 +296,13 @@ where
 {
     tokio::time::sleep(BOOT_DELAY).await;
 
-    let (work_tx, work_rx) = mpsc::channel::<Job>(2 * WORKERS);
-    let (result_tx, mut result_rx) = mpsc::channel::<Outcome>(2 * WORKERS);
+    let (work_tx, work_rx) = mpsc::channel::<Job>(2 * MAX_CONCURRENCY);
+    let (result_tx, mut result_rx) = mpsc::channel::<(Outcome, Duration)>(2 * MAX_CONCURRENCY);
     let work_rx = Arc::new(tokio::sync::Mutex::new(work_rx));
 
-    for _ in 0..WORKERS {
+    // Every task the pool may ever use is spawned now; how many are allowed
+    // to work at once is decided by the scheduler when it hands out jobs.
+    for _ in 0..MAX_CONCURRENCY {
         let rx = work_rx.clone();
         let tx = result_tx.clone();
         let announce = announce.clone();
@@ -268,8 +315,9 @@ where
                         None => return,
                     }
                 };
+                let started = Instant::now();
                 let outcome = announce(job).await;
-                if tx.send(outcome).await.is_err() {
+                if tx.send((outcome, started.elapsed())).await.is_err() {
                     return;
                 }
             }
@@ -280,23 +328,30 @@ where
     let mut states: HashMap<String, State> = HashMap::new();
     let mut heap: BinaryHeap<Reverse<Deadline>> = BinaryHeap::new();
     let mut reconcile = tokio::time::interval(RECONCILE);
+    let mut control = Control::new();
+    admission.concurrency.store(control.limit as u64, Ordering::Relaxed);
 
     off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission));
 
     loop {
         // Sleep until the next deadline, or an hour if there is nothing to do.
         // An empty heap is normal on an engine with no torrents; it must not
-        // become a busy loop.
-        let next = heap
-            .peek()
-            .map(|Reverse(d)| d.at)
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
+        // become a busy loop. At the concurrency limit there is nothing to hand
+        // out either: the next result, or the next cycle, is what wakes us --
+        // sleeping until a deadline already past would spin.
+        let next = if control.in_flight >= control.limit {
+            Instant::now() + Duration::from_secs(3600)
+        } else {
+            heap.peek()
+                .map(|Reverse(d)| d.at)
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600))
+        };
 
         tokio::select! {
             _ = tokio::time::sleep_until(next) => {
                 let now = Instant::now();
                 while let Some(Reverse(d)) = heap.peek() {
-                    if d.at > now {
+                    if d.at > now || control.in_flight >= control.limit {
                         break;
                     }
                     let Some(state) = states.get_mut(&d.info_hash) else {
@@ -321,13 +376,15 @@ where
                     match work_tx.try_send(job) {
                         Ok(()) => {
                             state.in_flight = true;
+                            control.in_flight += 1;
                             heap.pop();
                         }
                         Err(_) => break,
                     }
                 }
             }
-            Some(outcome) = result_rx.recv() => {
+            Some((outcome, took)) = result_rx.recv() => {
+                control.done(&outcome, took);
                 let Some(state) = states.get_mut(&outcome.info_hash) else {
                     continue;
                 };
@@ -351,6 +408,7 @@ where
                     &outcome.info_hash,
                     (wait / JITTER_FRACTION).min(MAX_JITTER),
                 );
+                state.interval_s = wait.as_secs().clamp(1, u32::MAX as u64) as u32;
                 heap.push(Reverse(Deadline {
                     at: Instant::now() + wait + jitter,
                     info_hash: outcome.info_hash,
@@ -367,9 +425,132 @@ where
             }
             _ = reconcile.tick() => {
                 off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission));
+                let health = off_the_runtime(|| measure(&states, &heap, Instant::now()));
+                control.adjust(health.needed_per_s);
+                health.publish(&admission, &control);
             }
         }
     }
+}
+
+
+/// How many announces may be in flight, decided from what is measured.
+///
+/// Throughput times latency is the concurrency a schedule needs (Little's
+/// law). The latency is a moving average of real announces; the throughput is
+/// what the admitted torrents' intervals ask for. The limit moves toward that
+/// target -- up by a quarter per cycle at most, so one slow minute does not
+/// double the load on a tracker -- and shrinks by a fifth when more than
+/// `THROTTLE_BACKOFF` of a cycle's answers were 429: a tracker refusing is a
+/// tracker that wants fewer, and pushing harder would only turn lateness into
+/// refusals.
+struct Control {
+    limit: usize,
+    in_flight: usize,
+    latency_s: f64,
+    measured: bool,
+    done: u64,
+    throttled: u64,
+    /// The share of 429s the last `adjust` saw, kept for publishing.
+    last_throttled: f64,
+}
+
+impl Control {
+    fn new() -> Self {
+        Control { limit: START_CONCURRENCY, in_flight: 0, latency_s: 1.0, measured: false, done: 0, throttled: 0, last_throttled: 0.0 }
+    }
+
+    fn done(&mut self, outcome: &Outcome, took: Duration) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        // A torrent found gone never reached a tracker: its time says nothing
+        // about latency.
+        if outcome.gone {
+            return;
+        }
+        let t = took.as_secs_f64();
+        self.latency_s = if self.measured { self.latency_s + LATENCY_ALPHA * (t - self.latency_s) } else { t };
+        self.measured = true;
+        self.done += 1;
+        if outcome.throttled {
+            self.throttled += 1;
+        }
+    }
+
+    fn adjust(&mut self, needed_per_s: f64) {
+        let throttled_share = if self.done == 0 { 0.0 } else { self.throttled as f64 / self.done as f64 };
+        self.last_throttled = throttled_share;
+        self.done = 0;
+        self.throttled = 0;
+        if throttled_share > THROTTLE_BACKOFF {
+            self.limit = (self.limit * 4 / 5).max(MIN_CONCURRENCY);
+            return;
+        }
+        if !self.measured {
+            return;
+        }
+        let ideal = ((needed_per_s * self.latency_s * HEADROOM).ceil() as usize)
+            .clamp(MIN_CONCURRENCY, MAX_CONCURRENCY);
+        self.limit = if ideal > self.limit {
+            ideal.min(self.limit + (self.limit / 4).max(16))
+        } else {
+            ideal
+        };
+    }
+}
+
+/// The schedule's health at one instant.
+struct Health {
+    needed_per_s: f64,
+    late: usize,
+    lag_p50: Duration,
+    lag_p90: Duration,
+}
+
+impl Health {
+    fn publish(&self, a: &Admission, c: &Control) {
+        a.needed_milli.store((self.needed_per_s * 1000.0) as u64, Ordering::Relaxed);
+        a.late.store(self.late as u64, Ordering::Relaxed);
+        a.lag_p50_s.store(self.lag_p50.as_secs(), Ordering::Relaxed);
+        a.lag_p90_s.store(self.lag_p90.as_secs(), Ordering::Relaxed);
+        a.concurrency.store(c.limit as u64, Ordering::Relaxed);
+        a.in_flight.store(c.in_flight as u64, Ordering::Relaxed);
+        a.latency_ms.store((c.latency_s * 1000.0) as u64, Ordering::Relaxed);
+        a.throttled_permille.store((c.last_throttled * 1000.0).round() as u64, Ordering::Relaxed);
+    }
+}
+
+/// What the schedule needs and how far behind it is.
+///
+/// One pass over the states and one over the heap: at 950k torrents a few
+/// milliseconds, every `RECONCILE`. Stale heap entries (older epochs, forgotten
+/// torrents, torrents a worker holds) are not lateness and are skipped.
+fn measure(
+    states: &HashMap<String, State>,
+    heap: &BinaryHeap<Reverse<Deadline>>,
+    now: Instant,
+) -> Health {
+    let needed_per_s: f64 = states.values().map(|s| 1.0 / s.interval_s.max(1) as f64).sum();
+    let mut lags: Vec<Duration> = heap
+        .iter()
+        .filter_map(|Reverse(d)| {
+            let s = states.get(&d.info_hash)?;
+            if s.epoch != d.epoch || s.in_flight || d.at + LATE_AFTER > now {
+                return None;
+            }
+            Some(now.duration_since(d.at))
+        })
+        .collect();
+    let late = lags.len();
+    let pct = |lags: &mut Vec<Duration>, p: usize| -> Duration {
+        if lags.is_empty() {
+            return Duration::ZERO;
+        }
+        let i = (lags.len() * p / 100).min(lags.len() - 1);
+        *lags.select_nth_unstable(i).1
+    };
+    let lag_p50 = pct(&mut lags, 50);
+    let lag_p90 = pct(&mut lags, 90);
+    Health { needed_per_s, late, lag_p50, lag_p90 }
 }
 
 /// Run a synchronous pass without holding a runtime worker hostage.
@@ -421,6 +602,7 @@ fn reconcile_now<C: Catalogue>(
                 in_flight: false,
                 epoch: 0,
                 last_bump: None,
+                interval_s: DEFAULT_INTERVAL.as_secs() as u32,
             },
         );
         // A torrent that has just appeared announces now: it is either newly
@@ -465,6 +647,7 @@ fn bump_now(
         in_flight: false,
         epoch: 0,
         last_bump: None,
+        interval_s: DEFAULT_INTERVAL.as_secs() as u32,
     });
     if let Some(last) = state.last_bump {
         let since = now.duration_since(last);
@@ -676,7 +859,133 @@ mod tests {
             in_flight: false,
             epoch: 0,
             last_bump: None,
+            interval_s: DEFAULT_INTERVAL.as_secs() as u32,
         }
+    }
+
+    fn answered(throttled: bool) -> Outcome {
+        Outcome { info_hash: "x".into(), next_in: DEFAULT_INTERVAL, gone: false, throttled }
+    }
+
+    /// Little's law: 400 announces a second at 2 s each needs 800 in flight,
+    /// 1 200 with the headroom. The limit climbs there by at most a quarter a
+    /// cycle, so one slow minute cannot double the load on a tracker at once.
+    #[test]
+    fn the_limit_climbs_toward_throughput_times_latency() {
+        let mut c = Control::new();
+        for _ in 0..100 {
+            c.in_flight += 1;
+            c.done(&answered(false), Duration::from_secs(2));
+        }
+        assert!((c.latency_s - 2.0).abs() < 1e-9, "{}", c.latency_s);
+        let mut seen = vec![c.limit];
+        for _ in 0..8 {
+            c.adjust(400.0);
+            seen.push(c.limit);
+        }
+        assert_eq!(seen, [512, 640, 800, 1000, 1200, 1200, 1200, 1200, 1200]);
+    }
+
+    /// The fixed pool that capped production: 950k torrents on 30-minute
+    /// intervals at ~1.5 s per announce needs far more than 512.
+    #[test]
+    fn a_million_torrents_are_not_held_to_512() {
+        let mut c = Control::new();
+        c.in_flight = 1;
+        c.done(&answered(false), Duration::from_millis(1500));
+        for _ in 0..20 {
+            c.adjust(950_000.0 / 1800.0);
+        }
+        assert_eq!(c.limit, 1188, "ceil(527.8 x 1.5 x 1.5)");
+    }
+
+    /// A tracker answering 429 wants fewer requests: the limit shrinks by a
+    /// fifth, whatever the throughput target says.
+    #[test]
+    fn refusals_shrink_the_limit() {
+        let mut c = Control::new();
+        for i in 0..100 {
+            c.in_flight += 1;
+            c.done(&answered(i < 5), Duration::from_secs(2));
+        }
+        c.adjust(400.0);
+        assert_eq!(c.limit, 409, "512 x 4/5");
+        // Under the threshold is noise, not a message: growth resumes.
+        for i in 0..100 {
+            c.in_flight += 1;
+            c.done(&answered(i < 1), Duration::from_secs(2));
+        }
+        c.adjust(400.0);
+        assert!(c.limit > 409, "{}", c.limit);
+    }
+
+    #[test]
+    fn the_limit_stays_within_its_bounds() {
+        let mut c = Control::new();
+        c.in_flight = 1;
+        c.done(&answered(false), Duration::from_millis(1));
+        for _ in 0..10 {
+            c.adjust(1.0);
+        }
+        assert_eq!(c.limit, MIN_CONCURRENCY);
+        c.latency_s = 60.0;
+        for _ in 0..200 {
+            c.adjust(1_000_000.0);
+        }
+        assert_eq!(c.limit, MAX_CONCURRENCY);
+        for _ in 0..100 {
+            c.in_flight += 1;
+            c.done(&answered(true), Duration::from_secs(1));
+            c.adjust(1.0);
+        }
+        assert_eq!(c.limit, MIN_CONCURRENCY, "backing off never goes to zero");
+    }
+
+    /// A torrent found gone never reached a tracker; its time is not latency.
+    #[test]
+    fn a_gone_torrent_does_not_move_the_latency() {
+        let mut c = Control::new();
+        c.in_flight = 2;
+        c.done(&answered(false), Duration::from_millis(800));
+        let gone = Outcome { info_hash: "g".into(), next_in: Duration::ZERO, gone: true, throttled: false };
+        c.done(&gone, Duration::from_secs(30));
+        assert!((c.latency_s - 0.8).abs() < 1e-9);
+        assert_eq!(c.in_flight, 0, "but its slot is freed");
+    }
+
+    /// Lateness counts only real deadlines: not the future, not a torrent a
+    /// worker holds, not a deadline a bump made stale.
+    #[test]
+    fn lateness_is_measured_on_live_deadlines_only() {
+        let now = Instant::now() + Duration::from_secs(1000);
+        let mut states = HashMap::new();
+        states.insert("late".to_string(), fresh("late"));
+        states.insert("soon".to_string(), State { interval_s: 60, ..fresh("soon") });
+        states.insert("held".to_string(), State { in_flight: true, ..fresh("held") });
+        states.insert("bumped".to_string(), State { epoch: 1, ..fresh("bumped") });
+        let mut heap = BinaryHeap::new();
+        let d = |h: &str, at: Instant, epoch: u64| Reverse(Deadline { at, info_hash: h.into(), epoch });
+        heap.push(d("late", now - Duration::from_secs(100), 0));
+        heap.push(d("soon", now + Duration::from_secs(10), 0));
+        heap.push(d("held", now - Duration::from_secs(500), 0));
+        heap.push(d("bumped", now - Duration::from_secs(700), 0));
+        heap.push(d("bumped", now + Duration::from_secs(5), 1));
+        heap.push(d("forgotten", now - Duration::from_secs(900), 0));
+        let h = measure(&states, &heap, now);
+        assert_eq!(h.late, 1);
+        assert_eq!(h.lag_p50, Duration::from_secs(100));
+        let want = 3.0 / 1800.0 + 1.0 / 60.0;
+        assert!((h.needed_per_s - want).abs() < 1e-9, "{}", h.needed_per_s);
+    }
+
+    #[test]
+    fn a_deadline_just_due_is_not_late() {
+        let now = Instant::now() + Duration::from_secs(100);
+        let mut states = HashMap::new();
+        states.insert("a".to_string(), fresh("a"));
+        let mut heap = BinaryHeap::new();
+        heap.push(Reverse(Deadline { at: now - Duration::from_secs(2), info_hash: "a".into(), epoch: 0 }));
+        assert_eq!(measure(&states, &heap, now).late, 0, "dispatch takes a moment");
     }
 
     /// ⭐ The whole point of the button: skip the queue.

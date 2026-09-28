@@ -257,7 +257,7 @@ async fn announce_one(
     mode: Mode,
     job: Job,
 ) -> Outcome {
-    let gone = Outcome { info_hash: job.info_hash.clone(), next_in: Duration::ZERO, gone: true };
+    let gone = Outcome { info_hash: job.info_hash.clone(), next_in: Duration::ZERO, gone: true, throttled: false };
 
     let Some(hash) = parse_hex(&job.info_hash) else {
         return gone;
@@ -321,6 +321,8 @@ async fn announce_one(
 
     let mut interval = Duration::from_secs(30 * 60);
     let mut announced_at_all = false;
+    // Any tracker answered 429: reported to the scheduler's concurrency control.
+    let mut throttled = false;
     for tier in &torrent.meta.trackers {
         let mut tier_answered = false;
         for tracker_url in tier {
@@ -451,7 +453,11 @@ async fn announce_one(
                 }
                 Err(e) => {
                     breaker.record(&host, false, std::time::Instant::now());
-                    cache.count_failed_kind(&host, classify(&redact(&e)));
+                    let kind = classify(&redact(&e));
+                    if kind == "rate_limited" {
+                        throttled = true;
+                    }
+                    cache.count_failed_kind(&host, kind);
                     // At warn, not debug: a breaker that says a tracker
                     // "stopped answering" without saying why sends an operator
                     // to look at their network for a bug that is here. The
@@ -532,7 +538,7 @@ async fn announce_one(
         announced_at_all && torrent.total_uploaded.load(Ordering::Relaxed) > 0,
     );
 
-    Outcome { info_hash: job.info_hash, next_in, gone: false }
+    Outcome { info_hash: job.info_hash, next_in, gone: false, throttled }
 }
 
 /// An error message with any URL taken out of it.
