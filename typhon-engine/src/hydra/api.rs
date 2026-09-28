@@ -2543,6 +2543,14 @@ fn is_search_sep(c: char) -> bool {
 /// torrent per keystroke -- 300k of them on this library, on a request path
 /// whose whole design is to not allocate per field.
 fn name_has_token(hay: &str, token: &str) -> bool {
+    // An ASCII name is searched whole. The token holds no separator, and a
+    // separator folds to nothing but itself, so a match can never straddle two
+    // words: the whole-name search IS the word-wise one, without splitting the
+    // name and building a string searcher per word -- which was a quarter of
+    // a list request at a million torrents.
+    if hay.is_ascii() {
+        return ascii_contains_folded(hay.as_bytes(), token.as_bytes());
+    }
     hay.split(is_search_sep).any(|word| {
         if word.len() < token.len() {
             return false;
@@ -2558,6 +2566,71 @@ fn name_has_token(hay: &str, token: &str) -> bool {
             word.to_lowercase().contains(token)
         }
     })
+}
+
+/// A kept row: its sort key (text or number), its info hash for the
+/// tie-break, and its index in the engine's torrent list.
+type ListKey = (String, f64, [u8; 20], u32);
+
+/// Above this many torrents the list walk is split across threads; below it
+/// the threads cost more than they save.
+#[cfg(not(test))]
+const LIST_SCAN_PARALLEL_FROM: usize = 20_000;
+/// Zero under test, so every list test -- filters, facets, sorts, tie-breaks --
+/// goes through the sliced walk and its merge, not only the single slice.
+#[cfg(test)]
+const LIST_SCAN_PARALLEL_FROM: usize = 0;
+/// At most this many. The walk is latency-bound, and past a point more threads
+/// only take cores from the engines.
+const LIST_SCAN_THREADS: usize = 16;
+
+/// `needle` (lowercase) inside `hay`, ignoring ASCII case. Candidates are
+/// found by their first byte, in either case, and only those are compared.
+fn ascii_contains_folded(hay: &[u8], needle: &[u8]) -> bool {
+    let Some(&first) = needle.first() else { return true };
+    if hay.len() < needle.len() {
+        return false;
+    }
+    let upper = first.to_ascii_uppercase();
+    let last = hay.len() - needle.len();
+    let mut i = 0;
+    while i <= last {
+        match hay[i..=last].iter().position(|&c| c == first || c == upper) {
+            None => return false,
+            Some(p) => {
+                i += p;
+                if hay[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+                    return true;
+                }
+                i += 1;
+            }
+        }
+    }
+    false
+}
+
+/// An info hash as 40 lowercase hex characters, on the stack.
+fn hex40(hash: &[u8; 20]) -> [u8; 40] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0u8; 40];
+    for (i, b) in hash.iter().enumerate() {
+        out[i * 2] = HEX[(b >> 4) as usize];
+        out[i * 2 + 1] = HEX[(b & 15) as usize];
+    }
+    out
+}
+
+/// The host of a tracker URL, borrowed from it: `tracker_host_of` without the
+/// String, and without building a string searcher for "://" on every call --
+/// the list pass does this once per torrent per request.
+fn tracker_host_in(url: &str) -> &str {
+    let bytes = url.as_bytes();
+    let rest = match bytes.windows(3).position(|w| w == b"://") {
+        Some(i) => &url[i + 3..],
+        None => url,
+    };
+    let end = rest.bytes().position(|c| c == b'/' || c == b':').unwrap_or(rest.len());
+    &rest[..end]
 }
 
 async fn engine_page_value(
@@ -2610,18 +2683,19 @@ async fn engine_page_value(
     // request at 300k, against a control run. This is the same information in
     // a few MB, and it is needed on every request because a row's STATE is
     // derived from the store's paused flag.
-    // Read every time, on purpose. A cache sat here and was measured never to
-    // serve: 0 hits in 15 requests on an hour-old daemon, while the store took
-    // one write every 20s -- so neither staleness nor write pressure explains
-    // it, and a cache nobody can explain is a liability. A previous cache on
-    // this path had already been removed for growing with the catalogue.
-    //
-    // The 0.45s left is not the query (0.20s) but decoding it: 300k Strings and
-    // a HashMap grown from empty. That is where the next gain is.
-    let facts = {
-        let store = state.store.lock().unwrap();
-        store.slim_facts(engine_id).unwrap_or_default()
+    // Kept in the store and brought up to date from the rows written since the
+    // last request, cf `slim_facts_current`. Reading it whole took 1.1 s at a
+    // million torrents, under the store's lock, on every request.
+    let started = std::time::Instant::now();
+    let (facts, lock_wait) = {
+        let mut store = state.store.lock().unwrap();
+        let waited = started.elapsed();
+        let facts = store
+            .slim_facts_current(engine_id)
+            .unwrap_or_else(|_| std::sync::Arc::new(Default::default()));
+        (facts, waited)
     };
+    let facts_done = started.elapsed();
     let pinned: std::collections::HashSet<String> =
         if state_filter == "__pinned__" || want_facets {
             let store = state.store.lock().unwrap();
@@ -2670,215 +2744,266 @@ async fn engine_page_value(
 
     let torrents = engine.manager.all();
     let total = torrents.len();
+    // The class of a tracker error is read by its facet and its filter only;
+    // otherwise classifying every failing torrent's message is wasted work.
+    let need_err_class = want_facets || !err_inc.is_empty() || !err_exc.is_empty();
 
-    // Tracker hosts interned as we go, for the same reason: a few dozen
-    // distinct hosts across the whole library, one String each instead of one
-    // per torrent.
-    let mut tracker_names: Vec<String> = vec![String::new()];
-    let mut tracker_ids: std::collections::HashMap<String, u16> = Default::default();
-    // Grown in step with `tracker_names`, so the per-torrent test is an index
-    // rather than a walk over the filter list 300k times. Slot 0 is "no
-    // tracker", which no filter can name.
-    let mut trk_flag_inc: Vec<bool> = vec![false];
-    let mut trk_flag_exc: Vec<bool> = vec![false];
-    // Slot 0 is the torrent with NO tracker at all -- a magnet never given one,
-    // or a .torrent with no announce. It was counted in no facet and matched by
-    // no filter, so 23 torrents on this node could not be reached from the list
-    // by any route. "__none__" names that state, as it already does for a
-    // category and a tag.
-    trk_flag_inc[0] = trk_inc.iter().any(|x| x == "__none__");
-    trk_flag_exc[0] = trk_exc.iter().any(|x| x == "__none__");
+    // The walk over the library runs in slices, one thread each, and the
+    // slices are merged after. At a million torrents the walk is bound by
+    // memory latency, not arithmetic: every torrent is its own allocation, and
+    // reading it is a string of cache misses a single core waits out one after
+    // the other. Sixteen cores wait them out together.
+    //
+    // Everything a slice produces is either a count (summed) or a row index
+    // (kept in slice order, so the concatenation is the order a single walk
+    // gives). Tracker hosts are interned per slice and merged by NAME: a
+    // slice's ids mean nothing outside it.
+    let textual = matches!(sort.as_str(), "name" | "state" | "tracker_host" | "category");
+    struct Slice {
+        tracker_names: Vec<String>,
+        f_state: std::collections::BTreeMap<&'static str, i64>,
+        f_cat: std::collections::BTreeMap<u16, i64>,
+        f_tracker: std::collections::BTreeMap<u16, i64>,
+        f_tag: Vec<i64>,
+        f_errclass: std::collections::BTreeMap<&'static str, i64>,
+        counts: [i64; 8],
+        keyed: Vec<ListKey>,
+    }
+    let scan = |range: std::ops::Range<usize>| -> Slice {
+        // Tracker hosts interned as we go: a few dozen distinct hosts across
+        // the whole library, one String each instead of one per torrent.
+        let mut tracker_names: Vec<String> = vec![String::new()];
+        let mut tracker_ids: std::collections::HashMap<String, u16> = Default::default();
+        // Grown in step with `tracker_names`, so the per-torrent test is an
+        // index rather than a walk over the filter list. Slot 0 is the torrent
+        // with NO tracker at all -- a magnet never given one, or a .torrent
+        // with no announce -- which "__none__" names, as it does for a
+        // category and a tag.
+        let mut trk_flag_inc: Vec<bool> = vec![trk_inc.iter().any(|x| x == "__none__")];
+        let mut trk_flag_exc: Vec<bool> = vec![trk_exc.iter().any(|x| x == "__none__")];
 
-    let mut f_state: std::collections::BTreeMap<&'static str, i64> = Default::default();
-    let mut f_cat: std::collections::BTreeMap<u16, i64> = Default::default();
-    let mut f_tracker: std::collections::BTreeMap<u16, i64> = Default::default();
-    let mut f_tag: [i64; 64] = [0; 64];
-    let mut f_errclass: std::collections::BTreeMap<&'static str, i64> = Default::default();
-    let (mut n_all, mut n_active, mut n_trk_err, mut n_err, mut n_pinned) = (0i64, 0, 0, 0, 0);
-    let (mut n_uncat, mut n_untagged) = (0i64, 0i64);
-    let mut n_no_tracker = 0i64;
+        let mut f_state: std::collections::BTreeMap<&'static str, i64> = Default::default();
+        let mut f_cat: std::collections::BTreeMap<u16, i64> = Default::default();
+        let mut f_tracker: std::collections::BTreeMap<u16, i64> = Default::default();
+        let mut f_tag: Vec<i64> = vec![0; 64];
+        let mut f_errclass: std::collections::BTreeMap<&'static str, i64> = Default::default();
+        let (mut n_all, mut n_active, mut n_trk_err, mut n_err, mut n_pinned) = (0i64, 0, 0, 0, 0);
+        let (mut n_uncat, mut n_untagged) = (0i64, 0i64);
+        let mut n_no_tracker = 0i64;
+        // Decorated as they are kept, while the torrent is still in cache: the
+        // sort key is built once per row, never inside the comparator -- which
+        // cost a String allocation per COMPARISON.
+        let mut keyed: Vec<ListKey> = Vec::new();
 
-    // Kept rows are INDICES into `torrents`. Nothing per-torrent is copied out:
-    // the sort keys are read back through the index for the few that survive.
-    let mut kept: Vec<u32> = Vec::new();
-    let mut host_buf = String::new();
+        for idx in range {
+            let t = &torrents[idx];
+            let core = typhon_engine::rpc::dispatch::torrent_core(t);
+            let f = facts.get(&t.info_hash);
+            let row_state = crate::row::derive_state_static(core.state, f.user_paused);
+            let upload_rate = t.upload_rate.get() as i64;
 
-    for (idx, t) in torrents.iter().enumerate() {
-        let core = typhon_engine::rpc::dispatch::torrent_core(t);
-        let f = facts.get(&t.info_hash);
-        let row_state = crate::row::derive_state_static(core.state, f.user_paused);
-        let upload_rate = t.upload_rate.get() as i64;
-
-        // The host, interned. Read under the lock into a reused buffer so a
-        // torrent that shares a host with 100k others costs no allocation.
-        host_buf.clear();
-        if let Some(url) = t.live_trackers.read().iter().flatten().next() {
-            host_buf.push_str(&typhon_engine::rpc::dispatch::tracker_host_of(url));
-        }
-        let tracker_id: u16 = if host_buf.is_empty() {
-            0
-        } else if let Some(id) = tracker_ids.get(&host_buf) {
-            *id
-        } else {
-            let id = tracker_names.len() as u16;
-            trk_flag_inc.push(trk_inc.iter().any(|x| x == &host_buf));
-            trk_flag_exc.push(trk_exc.iter().any(|x| x == &host_buf));
-            tracker_names.push(host_buf.clone());
-            tracker_ids.insert(host_buf.clone(), id);
-            id
-        };
-
-        // Classified under the SAME lock that decides whether there is an
-        // error at all, so the string is read once. classify() borrows it and
-        // returns a &'static str, so a 300k walk allocates nothing here.
-        let (tracker_error, err_class) = t
-            .last_announce_error
-            .lock()
-            .map(|s| (!s.is_empty(), crate::errclass::classify(&s)))
-            .unwrap_or((false, ""));
-        let torrent_error =
-            core.status_u8 == typhon_engine::torrent::meta::TorrentStatus::Error as u8;
-
-        let m_search = search_tokens.is_empty() || {
-            if search_is_hex
-                && typhon_engine::torrent::hex_encode(&t.info_hash).contains(&search_raw)
-            {
-                true
-            } else if t.meta.name.is_empty() {
-                let hex = typhon_engine::torrent::hex_encode(&t.info_hash);
-                search_tokens.iter().all(|tok| hex.contains(tok.as_str()))
-            } else {
-                search_tokens
-                    .iter()
-                    .all(|tok| name_has_token(&t.meta.name, tok))
-            }
-        };
-        let m_tracker = (trk_inc.is_empty() || trk_flag_inc[tracker_id as usize])
-            && !trk_flag_exc[tracker_id as usize];
-        // A torrent with no tracker error is in no class, so it can never be
-        // included by one -- and an exclusion must not sweep it away either.
-        let m_errclass = (err_inc.is_empty() || err_inc.iter().any(|c| c == err_class))
-            && !err_exc.iter().any(|c| c == err_class);
-        let hash_hex_needed = state_filter == "__pinned__" || (want_facets && !pinned.is_empty());
-        let is_pinned = hash_hex_needed
-            && pinned.contains(&typhon_engine::torrent::hex_encode(&t.info_hash));
-        let m_state = match state_filter.as_str() {
-            "" => true,
-            "__active__" => row_state == "seeding" && upload_rate > 0,
-            "__tracker_err__" => tracker_error,
-            "__error__" => torrent_error,
-            "__pinned__" => is_pinned,
-            want => row_state == want,
-        };
-        let m_cat = {
-            let inc_ok = cat_inc.is_empty()
-                || (cat_none_inc && f.category_id == 0)
-                || cat_ids_inc.contains(&f.category_id);
-            let exc_hit = (cat_none_exc && f.category_id == 0)
-                || cat_ids_exc.contains(&f.category_id);
-            inc_ok && !exc_hit
-        };
-        let m_tag = {
-            let inc_ok = tag_inc.is_empty()
-                || (tag_none_inc && f.tag_bits == 0)
-                || (tag_mask_inc != 0 && f.tag_bits & tag_mask_inc != 0);
-            let exc_hit = (tag_none_exc && f.tag_bits == 0)
-                || (tag_mask_exc != 0 && f.tag_bits & tag_mask_exc != 0);
-            inc_ok && !exc_hit
-        };
-
-        if want_facets {
-            if m_search && m_cat && m_tag && m_tracker && m_errclass {
-                n_all += 1;
-                *f_state.entry(row_state).or_insert(0) += 1;
-                if row_state == "seeding" && upload_rate > 0 { n_active += 1; }
-                if tracker_error { n_trk_err += 1; }
-                if torrent_error { n_err += 1; }
-                if is_pinned { n_pinned += 1; }
-            }
-            if m_search && m_state && m_tag && m_tracker && m_errclass {
-                if f.category_id == 0 { n_uncat += 1; } else { *f_cat.entry(f.category_id).or_insert(0) += 1; }
-            }
-            if m_search && m_state && m_cat && m_tag && m_errclass {
-                if tracker_id == 0 {
-                    n_no_tracker += 1;
+            let tracker_id: u16 = {
+                let trackers = t.live_trackers.read();
+                let host = trackers.iter().flatten().next().map(|u| tracker_host_in(u)).unwrap_or("");
+                if host.is_empty() {
+                    0
+                } else if let Some(id) = tracker_ids.get(host) {
+                    *id
                 } else {
-                    *f_tracker.entry(tracker_id).or_insert(0) += 1;
+                    let id = tracker_names.len() as u16;
+                    trk_flag_inc.push(trk_inc.iter().any(|x| x == host));
+                    trk_flag_exc.push(trk_exc.iter().any(|x| x == host));
+                    tracker_names.push(host.to_string());
+                    tracker_ids.insert(host.to_string(), id);
+                    id
                 }
-            }
-            if m_search && m_state && m_cat && m_tracker && m_errclass {
-                if f.tag_bits == 0 {
-                    n_untagged += 1;
+            };
+
+            // Classified under the SAME lock that decides whether there is an
+            // error at all, so the string is read once.
+            let (tracker_error, err_class) = t
+                .last_announce_error
+                .lock()
+                .map(|s| {
+                    let class = if need_err_class { crate::errclass::classify(&s) } else { "" };
+                    (!s.is_empty(), class)
+                })
+                .unwrap_or((false, ""));
+            let torrent_error =
+                core.status_u8 == typhon_engine::torrent::meta::TorrentStatus::Error as u8;
+
+            let m_search = search_tokens.is_empty() || {
+                if search_is_hex
+                    && ascii_contains_folded(&hex40(&t.info_hash), search_raw.as_bytes())
+                {
+                    true
+                } else if t.meta.name.is_empty() {
+                    let hex = hex40(&t.info_hash);
+                    search_tokens.iter().all(|tok| ascii_contains_folded(&hex, tok.as_bytes()))
                 } else {
-                    for i in 0..64 {
-                        if f.tag_bits & (1u64 << i) != 0 { f_tag[i] += 1; }
+                    search_tokens
+                        .iter()
+                        .all(|tok| name_has_token(&t.meta.name, tok))
+                }
+            };
+            let m_tracker = (trk_inc.is_empty() || trk_flag_inc[tracker_id as usize])
+                && !trk_flag_exc[tracker_id as usize];
+            // A torrent with no tracker error is in no class, so it can never be
+            // included by one -- and an exclusion must not sweep it away either.
+            let m_errclass = (err_inc.is_empty() || err_inc.iter().any(|c| c == err_class))
+                && !err_exc.iter().any(|c| c == err_class);
+            let hash_hex_needed = state_filter == "__pinned__" || (want_facets && !pinned.is_empty());
+            let is_pinned = hash_hex_needed
+                && std::str::from_utf8(&hex40(&t.info_hash)).map_or(false, |h| pinned.contains(h));
+            let m_state = match state_filter.as_str() {
+                "" => true,
+                "__active__" => row_state == "seeding" && upload_rate > 0,
+                "__tracker_err__" => tracker_error,
+                "__error__" => torrent_error,
+                "__pinned__" => is_pinned,
+                want => row_state == want,
+            };
+            let m_cat = {
+                let inc_ok = cat_inc.is_empty()
+                    || (cat_none_inc && f.category_id == 0)
+                    || cat_ids_inc.contains(&f.category_id);
+                let exc_hit = (cat_none_exc && f.category_id == 0)
+                    || cat_ids_exc.contains(&f.category_id);
+                inc_ok && !exc_hit
+            };
+            let m_tag = {
+                let inc_ok = tag_inc.is_empty()
+                    || (tag_none_inc && f.tag_bits == 0)
+                    || (tag_mask_inc != 0 && f.tag_bits & tag_mask_inc != 0);
+                let exc_hit = (tag_none_exc && f.tag_bits == 0)
+                    || (tag_mask_exc != 0 && f.tag_bits & tag_mask_exc != 0);
+                inc_ok && !exc_hit
+            };
+
+            if want_facets {
+                if m_search && m_cat && m_tag && m_tracker && m_errclass {
+                    n_all += 1;
+                    *f_state.entry(row_state).or_insert(0) += 1;
+                    if row_state == "seeding" && upload_rate > 0 { n_active += 1; }
+                    if tracker_error { n_trk_err += 1; }
+                    if torrent_error { n_err += 1; }
+                    if is_pinned { n_pinned += 1; }
+                }
+                if m_search && m_state && m_tag && m_tracker && m_errclass {
+                    if f.category_id == 0 { n_uncat += 1; } else { *f_cat.entry(f.category_id).or_insert(0) += 1; }
+                }
+                if m_search && m_state && m_cat && m_tag && m_errclass {
+                    if tracker_id == 0 {
+                        n_no_tracker += 1;
+                    } else {
+                        *f_tracker.entry(tracker_id).or_insert(0) += 1;
+                    }
+                }
+                if m_search && m_state && m_cat && m_tracker && m_errclass {
+                    if f.tag_bits == 0 {
+                        n_untagged += 1;
+                    } else {
+                        for i in 0..64 {
+                            if f.tag_bits & (1u64 << i) != 0 { f_tag[i] += 1; }
+                        }
                     }
                 }
             }
+
+            if want_facets && !err_class.is_empty()
+                && m_search && m_state && m_cat && m_tag && m_tracker
+            {
+                *f_errclass.entry(err_class).or_insert(0) += 1;
+            }
+
+            if m_search && m_state && m_cat && m_tag && m_tracker && m_errclass {
+                let key = if textual {
+                    match sort.as_str() {
+                        "name" => t.meta.name.to_lowercase(),
+                        "state" => row_state.to_string(),
+                        "tracker_host" => tracker_names[tracker_id as usize].to_lowercase(),
+                        _ => facts.category(f.category_id).to_lowercase(),
+                    }
+                } else {
+                    String::new()
+                };
+                let total_upload = t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                let total_download =
+                    t.total_downloaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                let completed = t.completed_time.load(std::sync::atomic::Ordering::Relaxed);
+                let n = match sort.as_str() {
+                    "total_size" => t.meta.total_size as f64,
+                    "progress" => if core.state == "seeding" { 1.0 } else { core.progress },
+                    "ratio" => if total_download > 0 { total_upload as f64 / total_download as f64 } else { 0.0 },
+                    "upload_rate" => t.upload_rate.get() as f64,
+                    "download_rate" => t.download_rate.get() as f64,
+                    "num_peers" => t.peers_connected.load(std::sync::atomic::Ordering::Relaxed) as f64,
+                    "total_upload" => total_upload as f64,
+                    "total_download" => total_download as f64,
+                    "completed_time" => completed as f64,
+                    "seeding_time" => if completed > 0 { (now_secs() - completed).max(0) as f64 } else { 0.0 },
+                    _ => t.added_time as f64,
+                };
+                keyed.push((key, n, t.info_hash, idx as u32));
+            }
         }
-
-        if want_facets && !err_class.is_empty()
-            && m_search && m_state && m_cat && m_tag && m_tracker
-        {
-            *f_errclass.entry(err_class).or_insert(0) += 1;
+        Slice {
+            tracker_names,
+            f_state,
+            f_cat,
+            f_tracker,
+            f_tag,
+            f_errclass,
+            counts: [n_all, n_active, n_trk_err, n_err, n_pinned, n_uncat, n_untagged, n_no_tracker],
+            keyed,
         }
+    };
 
-        if m_search && m_state && m_cat && m_tag && m_tracker && m_errclass {
-            kept.push(idx as u32);
-        }
-    }
-
-    let filtered = kept.len();
-
-    // Decorate once, then sort. Building the key inside the comparator instead
-    // cost a String allocation per COMPARISON -- some five million of them for
-    // a name sort over 300k, which was most of the two seconds this took.
-    let textual = matches!(sort.as_str(), "name" | "state" | "tracker_host" | "category");
-    let mut keyed: Vec<(String, f64, u32)> = kept
-        .iter()
-        .map(|&idx| {
-            let t = &torrents[idx as usize];
-            let core = typhon_engine::rpc::dispatch::torrent_core(t);
-            let f = facts.get(&t.info_hash);
-            let key = if textual {
-                match sort.as_str() {
-                    "name" => t.meta.name.to_lowercase(),
-                    "state" => crate::row::derive_state_static(core.state, f.user_paused).to_string(),
-                    "tracker_host" => t
-                        .live_trackers
-                        .read()
-                        .iter()
-                        .flatten()
-                        .next()
-                        .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u).to_lowercase())
-                        .unwrap_or_default(),
-                    _ => facts.category(f.category_id).to_lowercase(),
-                }
-            } else {
-                String::new()
-            };
-            let total_upload = t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
-            let total_download =
-                t.total_downloaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
-            let completed = t.completed_time.load(std::sync::atomic::Ordering::Relaxed);
-            let n = match sort.as_str() {
-                "total_size" => t.meta.total_size as f64,
-                "progress" => if core.state == "seeding" { 1.0 } else { core.progress },
-                "ratio" => if total_download > 0 { total_upload as f64 / total_download as f64 } else { 0.0 },
-                "upload_rate" => t.upload_rate.get() as f64,
-                "download_rate" => t.download_rate.get() as f64,
-                "num_peers" => t.peers_connected.load(std::sync::atomic::Ordering::Relaxed) as f64,
-                "total_upload" => total_upload as f64,
-                "total_download" => total_download as f64,
-                "completed_time" => completed as f64,
-                "seeding_time" => if completed > 0 { (now_secs() - completed).max(0) as f64 } else { 0.0 },
-                _ => t.added_time as f64,
-            };
-            (key, n, idx)
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, LIST_SCAN_THREADS);
+    let slices: Vec<Slice> = if threads == 1 || total < LIST_SCAN_PARALLEL_FROM {
+        vec![scan(0..total)]
+    } else {
+        let per = total.div_ceil(threads);
+        std::thread::scope(|sc| {
+            let scan = &scan;
+            let handles: Vec<_> = (0..threads)
+                .map(|i| {
+                    let range = (i * per).min(total)..((i + 1) * per).min(total);
+                    sc.spawn(move || scan(range))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("list scan slice")).collect()
         })
-        .collect();
+    };
 
-    let cmp = |a: &(String, f64, u32), b: &(String, f64, u32)| {
+    let mut f_state: std::collections::BTreeMap<&'static str, i64> = Default::default();
+    let mut f_cat: std::collections::BTreeMap<u16, i64> = Default::default();
+    let mut f_tracker: std::collections::BTreeMap<String, i64> = Default::default();
+    let mut f_tag: Vec<i64> = vec![0; 64];
+    let mut f_errclass: std::collections::BTreeMap<&'static str, i64> = Default::default();
+    let mut counts = [0i64; 8];
+    let mut keyed: Vec<ListKey> =
+        Vec::with_capacity(slices.iter().map(|s| s.keyed.len()).sum());
+    for slice in slices {
+        for (k, n) in slice.f_state { *f_state.entry(k).or_insert(0) += n; }
+        for (k, n) in slice.f_cat { *f_cat.entry(k).or_insert(0) += n; }
+        for (id, n) in slice.f_tracker {
+            *f_tracker.entry(slice.tracker_names[id as usize].clone()).or_insert(0) += n;
+        }
+        for (i, n) in slice.f_tag.iter().enumerate() { f_tag[i] += n; }
+        for (k, n) in slice.f_errclass { *f_errclass.entry(k).or_insert(0) += n; }
+        for (i, n) in slice.counts.iter().enumerate() { counts[i] += n; }
+        keyed.extend(slice.keyed);
+    }
+    let [n_all, n_active, n_trk_err, n_err, n_pinned, n_uncat, n_untagged, n_no_tracker] = counts;
+
+    let filtered = keyed.len();
+    let scan_done = started.elapsed();
+
+    let cmp = |a: &ListKey, b: &ListKey| {
         let ord = if textual {
             a.0.cmp(&b.0)
         } else {
@@ -2886,10 +3011,11 @@ async fn engine_page_value(
         };
         let ord = if asc { ord } else { ord.reverse() };
         // Tie-break on the raw hash bytes: same total order as the hex string
-        // the client uses, without building one per comparison.
-        ord.then_with(|| {
-            torrents[a.2 as usize].info_hash.cmp(&torrents[b.2 as usize].info_hash)
-        })
+        // the client uses, without building one per comparison -- and carried
+        // in the key, because reaching into the torrent for it was a cache miss
+        // per comparison, and a sort by tracker over a million rows is almost
+        // all ties.
+        ord.then_with(|| a.2.cmp(&b.2))
     };
 
     // `fields=hash` answers the selection universe: every hash the filter
@@ -2899,7 +3025,7 @@ async fn engine_page_value(
         keyed.sort_by(cmp);
         let hashes: Vec<String> = keyed
             .iter()
-            .map(|(_, _, i)| typhon_engine::torrent::hex_encode(&torrents[*i as usize].info_hash))
+            .map(|(_, _, hash, _)| typhon_engine::torrent::hex_encode(hash))
             .collect();
         return serde_json::json!({
             "total": total,
@@ -2919,12 +3045,19 @@ async fn engine_page_value(
         keyed.select_nth_unstable_by(end, cmp);
     }
     let window = &mut keyed[..end];
-    window.sort_by(cmp);
+    // And only the page itself has to be sorted: a second partition at the
+    // offset leaves the rows before it unordered too. Page 1 200 of a million
+    // sorted six hundred thousand rows to show five hundred.
+    let start = offset.min(window.len());
+    if start > 0 && start < window.len() {
+        window.select_nth_unstable_by(start, cmp);
+    }
+    window[start..].sort_by(cmp);
 
     // Full rows for the page alone, and the only place the rich StoreFacts are
     // read: 500 indexed lookups instead of a walk of the whole session.
     let page: Vec<&std::sync::Arc<typhon_engine::torrent::meta::TorrentState>> =
-        window.iter().skip(offset).map(|(_, _, i)| &torrents[*i as usize]).collect();
+        window[start..].iter().map(|(_, _, _, i)| &torrents[*i as usize]).collect();
     let page_hashes: Vec<String> = page
         .iter()
         .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
@@ -2944,6 +3077,17 @@ async fn engine_page_value(
         })
         .collect();
 
+    tracing::debug!(
+        target: "hydranos::page",
+        engine = engine_id,
+        total,
+        filtered,
+        lock_wait_ms = lock_wait.as_millis() as u64,
+        facts_ms = (facts_done - lock_wait).as_millis() as u64,
+        scan_ms = (scan_done - facts_done).as_millis() as u64,
+        rest_ms = (started.elapsed() - scan_done).as_millis() as u64,
+        "list page"
+    );
     let facets = if want_facets {
         serde_json::json!({
             "all": n_all,
@@ -2959,10 +3103,7 @@ async fn engine_page_value(
                 .iter()
                 .map(|(id, n)| (facts.category(*id).to_string(), *n))
                 .collect::<std::collections::BTreeMap<String, i64>>(),
-            "tracker": f_tracker
-                .iter()
-                .map(|(id, n)| (tracker_names[*id as usize].clone(), *n))
-                .collect::<std::collections::BTreeMap<String, i64>>(),
+            "tracker": f_tracker,
             "error_class": f_errclass,
             "tag": facts
                 .tags
@@ -13116,6 +13257,31 @@ mod pure_tests {
     #[test]
     fn a_token_longer_than_the_word_cannot_match() {
         assert!(!name_has_token("ab", "abc"));
+        // The ASCII fast path agrees with the word-wise walk it replaces.
+        assert!(name_has_token("x.ABC.y", "abc"));
+        assert!(name_has_token("Aaab", "aab"), "a first-byte candidate that fails is not the last one");
+        assert!(!name_has_token("a.b", "ab"), "not across a separator");
+        assert!(name_has_token("anything", ""));
+    }
+
+    #[test]
+    fn the_borrowed_host_is_the_host() {
+        for url in [
+            "https://t.example.org/announce",
+            "http://t.example.org:8080/abc/announce",
+            "udp://tracker.opentrackr.org:1337/announce",
+            "t.example.org/announce",
+            "http://[::1]:80/a",
+            "",
+        ] {
+            assert_eq!(tracker_host_in(url), typhon_engine::rpc::dispatch::tracker_host_of(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn hex_on_the_stack_is_hex_encode() {
+        let h: [u8; 20] = core::array::from_fn(|i| (i * 37 + 11) as u8);
+        assert_eq!(std::str::from_utf8(&hex40(&h)).unwrap(), typhon_engine::torrent::hex_encode(&h));
     }
 
     /// The window is REPLACED, never appended: a query that already carried an
@@ -13721,6 +13887,43 @@ mod page_tests {
         let down = engine_page_value(&s.state, "race", "sort=name").await;
         let names: Vec<&str> = rows(&down).iter().filter_map(|r| r["name"].as_str()).collect();
         assert_eq!(names, vec!["Zebra", "apple"], "descending is the default");
+    }
+
+    /// ⭐ Walking the list page by page gives the whole list, once each and in
+    /// order, for every sort and direction. Only the page itself is sorted,
+    /// after a second partition at the offset; a slip there shows as a row
+    /// missing or repeated between two pages, which reads as data loss. The
+    /// sorts on state, category and size are all ties here, so the order rests
+    /// on the hash tie-break carried in the key.
+    #[tokio::test]
+    async fn paging_through_the_list_gives_the_whole_list_in_order() {
+        let s = st("page-walk");
+        for i in 0..37 {
+            add(&s, "race", &format!("Name{:02}", (i * 7) % 37));
+        }
+        let hash = |r: &serde_json::Value| {
+            r["hash"].as_str().or(r["info_hash"].as_str()).unwrap_or_default().to_string()
+        };
+        for sort in ["name", "added_time", "total_size", "state", "category"] {
+            for order in ["asc", "desc"] {
+                let all = engine_page_value(&s.state, "race", &format!("sort={sort}&order={order}&limit=5000")).await;
+                let want: Vec<String> = rows(&all).iter().map(hash).collect();
+                assert_eq!(want.len(), 37);
+                let mut got = Vec::new();
+                let mut offset = 0;
+                while offset < want.len() {
+                    let v = engine_page_value(
+                        &s.state,
+                        "race",
+                        &format!("sort={sort}&order={order}&offset={offset}&limit=6"),
+                    )
+                    .await;
+                    got.extend(rows(&v).iter().map(hash));
+                    offset += 6;
+                }
+                assert_eq!(got, want, "sort={sort} order={order}");
+            }
+        }
     }
 
     /// An unknown sort must still answer, in some stable order, rather than
