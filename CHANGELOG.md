@@ -84,6 +84,18 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   second, the limit settles near 200 in flight at the tracker's normal 0.5 s,
   where sizing the pool from demand alone climbed past 1,700 and pushed its
   answers to 2.8 s for the same throughput.
+- **The torrent list answers in a fifth of a second at a million torrents,
+  where it took three to five.** Every page, search or filter re-read the
+  category, tags and pause flag of the whole library from the database -- a
+  second of it, holding the store's lock, so every other write waited behind
+  every keystroke in the search box. That copy is now kept in memory and
+  brought up to date from the rows written since the previous request, which
+  is what makes it hold while torrents are being added all day. The walk over
+  the library is split across up to sixteen threads, reads each torrent's
+  tracker and name without allocating, and builds the sort keys as it goes;
+  only the page being shown is sorted, so page 1 200 no longer sorts 600 000
+  rows first. On a copy of the production library, the same 26 queries return
+  the same rows, counts and facets as before, 11 to 27 times faster.
 - **The bench shows announces as figures**: announces a second against the
   rate the catalogue needs, how many torrents are late and by how much, and
   workers in flight against the current limit. The announce lag chart is gone.
