@@ -159,6 +159,17 @@ pub struct Auth {
     pub password_hash: String,
 }
 
+/// `[mcp]`: what the agent endpoint may do.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Mcp {
+    /// List and allow the tools that cannot be undone: removing torrents,
+    /// with or without their data. Off by default, and OFF means the tools are
+    /// not even shown to the agent -- one it cannot see is one it cannot pick
+    /// by mistake.
+    #[serde(default)]
+    pub allow_destructive: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Dedup {
     /// Link an incoming torrent onto payload we already hold.
@@ -289,6 +300,10 @@ pub struct Config {
 
     #[serde(default)]
     pub race_drain: RaceDrain,
+
+    /// The agent endpoint, `/mcp`.
+    #[serde(default)]
+    pub mcp: Mcp,
 
     /// Every section not yet typed, preserved so nothing is lost on rewrite.
     #[serde(flatten)]

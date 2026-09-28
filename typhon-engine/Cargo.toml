@@ -34,6 +34,9 @@ serde_json = "1"
 anyhow = "1"
 toml = "0.8"
 axum = { version = "0.7", features = ["multipart"] }
+# `oneshot` on the router: the MCP endpoint runs its writes through the real
+# /api routes in-process. Already in the tree through axum, same version.
+tower = { version = "0.5", features = ["util"] }
 async-stream = "0.3"
 sha1 = "0.10"
 rand = "0.8"

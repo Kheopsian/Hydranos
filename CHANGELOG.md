@@ -1,21 +1,72 @@
 # Changelog
 
-All notable changes to Hydranos are documented here. This project follows
-[semantic versioning](https://semver.org).
+All notable changes to Hydranos are documented here.
+
+Versions read `major.release.patch`. This is not semantic versioning, and the
+numbers do not promise what semver's would:
+
+- **release** goes up by one for each weekly release, whatever it contains --
+  new features, fixes, or both. Releases are cut on Saturdays.
+- **patch** goes up for anything published between two weekly releases,
+  whatever it is. It says "not a Saturday release", nothing about the content.
+- **major** goes up when upgrading needs more than replacing the binary: a
+  configuration, API or storage change an existing install has to act on.
 
 This file is compiled into the binary and served at `/api/changelog`, so a
 release with no entry here is a release that cannot describe itself. CI checks
 that the top entry matches `HYDRANOS_VERSION` (`.github/scripts/version_guard.py`).
 
-Two ways to title a new entry:
+During the week, changes go under `## Unreleased -- title`. The number is only
+decided when the release is cut, by looking at what went in: whoever tags it
+renames the heading to `## v<major>.<release>.<patch> -- title` and sets
+`HYDRANOS_VERSION` in the same commit.
 
-- `## v<major>.<minor>.<patch> -- title`, matching `HYDRANOS_VERSION`, when you
-  know the number this will ship as.
-- `## Unreleased -- title`, when you do not. Preferred for a branch that will
-  sit for a while: this repository has merged as many as four minor bumps in a
-  day, so a number chosen while writing a branch is often taken by the time
-  anyone reviews it. Whoever tags the release renames the heading and sets
-  `HYDRANOS_VERSION` in the same commit.
+## Unreleased -- an endpoint for agents
+
+### Added
+- **`POST /mcp`: Hydranos speaks the Model Context Protocol.** An agent
+  (Claude Code, or any MCP client) connects with the API key -- as `X-Api-Key`
+  or `Authorization: Bearer` -- and gets tools instead of two hundred routes to
+  guess. Reads: `overview`, `find_torrents`, `torrent_detail`, `torrent_files`,
+  `tracker_errors`, `trackers`, `categories`, `health`, `drain`, `jobs`, `logs`.
+  Writes: `pause`, `resume`, `reannounce`, `recheck`, `set_category`,
+  `set_tags`, `add_torrent`. Every read answers a page or a summary, never the
+  whole library, and every write names its torrents by info_hash: there is no
+  write by filter.
+- **`[mcp] allow_destructive`**, off by default. It lists and allows
+  `delete_torrents` and `purge_race`; while it is off the agent is not even
+  shown them, and calling them anyway is refused.
+
+### Security
+- **A .torrent could name files outside its download folder.** File paths
+  from the metainfo were joined onto the save path unchecked, so a torrent
+  listing `../../somewhere/file`, or an absolute path, was accepted and would
+  have been downloaded there -- anywhere the daemon can write. Such a torrent
+  is now refused when it is added, as other clients do. No torrent in a
+  900,000-torrent library was affected by the change.
+
+### Fixed
+- **"Move to category" moved nothing.** Since the Rust port the category route
+  read only the category name: `move_files` was ignored, the answer was a 200,
+  and the page showed the torrent as moved while every byte stayed where it
+  was. The data now follows the category's save path, as a background job:
+  files on another filesystem are copied while the torrent keeps seeding, then
+  it is switched over and the originals removed; a failure puts everything
+  back where it was. It only ever touches the files the torrent names: a
+  file sitting directly in a shared category folder moves alone, and a move
+  is refused when another torrent reads the same files. Files hardlinked elsewhere are only copied across
+  filesystems after the operator agrees, as the page already asked. A category
+  of the other engine's kind graduates the torrent there. `move-preview`,
+  which answered 400 to everything, now says what a move would do.
+- The agent endpoint gained `move_to_category`.
+
+### Changed
+- **Counts are grouped by thousands**, in the interface's language: 945 775 in
+  French, 945,775 in English, instead of 945775. Header, overview, filter
+  chips, the list's status line and the records card.
+- The changelog no longer claims semantic versioning. Versions read
+  `major.release.patch`: one release a week, anything published in between is
+  a patch.
 
 ## v4.2.4 -- a header that moves from the first minute
 

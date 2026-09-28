@@ -2046,6 +2046,11 @@ footer {
 
 .bm-metric-value.bm-warn { color: var(--accent-red); }
 .bm-metric-value.bm-good { color: var(--accent-green); }
+.bm-metric-value.bm-amber { color: var(--accent-yellow); }
+/* The word that says what the figure means ("on time", "of 416/s needed"):
+   the colour alone would ask the reader to know the thresholds. */
+.bm-metric-sub { display: block; font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.bm-announce-grid { grid-template-columns: repeat(4, 1fr); margin-top: 12px; }
 
 .bm-range-bar {
     display: flex;

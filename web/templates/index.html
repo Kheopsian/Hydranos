@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.7">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.8">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -1065,6 +1065,32 @@
                 </div>
             </div>
 
+            <!-- Is the announce schedule keeping up? Figures, not a chart: on a
+                 healthy node lateness is zero, and a chart of zeros is noise.
+                 The history lives in the Announce Rate chart below. -->
+            <div class="bm-metrics-grid bm-announce-grid">
+                <div class="bm-metric-card" title="Hoard announces per second over the last 5 minutes, against what every torrent's interval requires.">
+                    <span class="bm-metric-label">Announces</span>
+                    <span class="bm-metric-value" id="bm-ann-rate">--</span>
+                    <span class="bm-metric-sub" id="bm-ann-rate-sub"></span>
+                </div>
+                <div class="bm-metric-card" title="Hoard torrents whose announce deadline passed more than 5 seconds ago.">
+                    <span class="bm-metric-label">Late</span>
+                    <span class="bm-metric-value" id="bm-ann-late">--</span>
+                    <span class="bm-metric-sub" id="bm-ann-late-sub"></span>
+                </div>
+                <div class="bm-metric-card" title="Announces allowed in flight at once, sized from the rate needed and the measured tracker latency.">
+                    <span class="bm-metric-label">In flight</span>
+                    <span class="bm-metric-value" id="bm-ann-conc">--</span>
+                    <span class="bm-metric-sub" id="bm-ann-conc-sub"></span>
+                </div>
+                <div class="bm-metric-card" title="Share of tracker answers that were 429 Too Many Requests over the last 10 seconds. Above 2% the announcer backs off.">
+                    <span class="bm-metric-label">Refused (429)</span>
+                    <span class="bm-metric-value" id="bm-ann-429">--</span>
+                    <span class="bm-metric-sub" id="bm-ann-429-sub"></span>
+                </div>
+            </div>
+
             <!-- Range selector + charts -->
             <div class="bm-range-bar">
                 <div class="bm-range-btns">
@@ -1429,6 +1455,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.31"></script>
+    <script src="/static/app.js?v=1.6.35"></script>
 </body>
 </html>
