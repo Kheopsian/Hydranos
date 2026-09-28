@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 /// path recorded it, so both are accepted. Port and path are dropped: the tab
 /// groups by host, and `tracker.example:2810` and `tracker.example` are the
 /// same tracker to an operator.
-fn host_of(tracker: &str) -> String {
+pub(crate) fn host_of(tracker: &str) -> String {
     let s = tracker.split("://").nth(1).unwrap_or(tracker);
     s.split(|c| c == '/' || c == ':').next().unwrap_or("").to_string()
 }

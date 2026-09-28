@@ -5540,7 +5540,9 @@ function _renderAnnounceFigures(history) {
     set("bm-ann-late-sub", late === 0 ? t("on time")
         : t("median {p50}, p90 {p90}", { p50: _fmtLag(last.hoard_announce_lag_p50), p90: _fmtLag(p90) }));
 
-    set("bm-ann-conc", fmtInt(last.hoard_announce_concurrency), "");
+    // Out now against allowed: a limit that is never used means the limit is
+    // not what holds the schedule back.
+    set("bm-ann-conc", fmtInt(last.hoard_announce_in_flight ?? 0) + " / " + fmtInt(last.hoard_announce_concurrency), "");
     set("bm-ann-conc-sub", t("latency {s}", { s: ((last.hoard_announce_latency_ms ?? 0) / 1000).toFixed(2) + " s" }));
 
     const pct = last.hoard_announce_throttled_pct ?? 0;

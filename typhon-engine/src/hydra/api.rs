@@ -1399,12 +1399,40 @@ async fn get_announce_health(
                 _ => {}
             }
         }
+        // The scheduler's own view: how many announces it may send to each
+        // tracker, how many are out, how many wait, and how fast the tracker
+        // answers against its best. The per-tracker limit is what a saturated
+        // tracker is held to; this is where to see it.
+        let schedule = {
+            use std::sync::atomic::Ordering::Relaxed;
+            let a = &engine.admission;
+            let trackers: Vec<serde_json::Value> = a
+                .trackers
+                .lock()
+                .map(|v| v.iter().map(|t| serde_json::json!({
+                    "host": t.host, "limit": t.limit, "in_flight": t.in_flight,
+                    "waiting": t.waiting, "latency_ms": t.latency_ms, "best_ms": t.best_ms,
+                })).collect())
+                .unwrap_or_default();
+            serde_json::json!({
+                "needed_per_s": a.needed_milli.load(Relaxed) as f64 / 1000.0,
+                "late": a.late.load(Relaxed),
+                "lag_p50_s": a.lag_p50_s.load(Relaxed),
+                "lag_p90_s": a.lag_p90_s.load(Relaxed),
+                "limit": a.concurrency.load(Relaxed),
+                "in_flight": a.in_flight.load(Relaxed),
+                "latency_ms": a.latency_ms.load(Relaxed),
+                "throttled_pct": a.throttled_permille.load(Relaxed) as f64 / 10.0,
+                "trackers": trackers,
+            })
+        };
         out.insert(
             id.to_string(),
             serde_json::json!({
                 "announces_ok": ok,
                 "announces_failed": failed,
                 "hosts": hosts,
+                "schedule": schedule,
             }),
         );
     }
@@ -5140,13 +5168,16 @@ async fn get_bench_current(
     let hoard_live = live_stats(&state, "hoard");
     let race_live = live_stats(&state, "race");
     let arc = arc_stats();
+    let sys = crate::benchsampler::latest_system();
 
     Json(serde_json::json!({
-        "arc_demand_hit_rate_pct": crate::row::num_json(arc.demand_hit_rate_pct),
-        "arc_demand_miss_per_sec": 0,
-        "arc_ghost_hits_per_sec": 0,
-        "arc_hit_rate_pct": crate::row::num_json(arc.hit_rate_pct),
-        "arc_miss_per_sec": 0,
+        "arc_demand_hit_rate_pct": crate::row::num_json(if sys.measured { sys.arc_demand_hit_rate_pct } else { arc.demand_hit_rate_pct }),
+        // Over the sampler's last interval: the figures above are ratios since
+        // the pool was imported, which a busy minute cannot move.
+        "arc_demand_miss_per_sec": crate::row::num_json(sys.arc_demand_miss_per_sec),
+        "arc_ghost_hits_per_sec": crate::row::num_json(sys.arc_ghost_hits_per_sec),
+        "arc_hit_rate_pct": crate::row::num_json(if sys.measured { sys.arc_hit_rate_pct } else { arc.hit_rate_pct }),
+        "arc_miss_per_sec": crate::row::num_json(sys.arc_miss_per_sec),
         "arc_size_bytes": arc.size_bytes,
         "global_downloaded": base_down + total_down,
         "global_uploaded": base_up + total_up,
@@ -5157,7 +5188,7 @@ async fn get_bench_current(
         "hoard_upload_rate": hoard_live.upload_rate,
         "hoard_uploading": hoard_live.torrents_uploading,
         "hoard_with_peers": hoard_live.torrents_with_peers,
-        "iowait_pct": 0, "open_fds": open_fd_count(),
+        "iowait_pct": crate::row::num_json(sys.iowait_pct), "open_fds": open_fd_count(),
         "race_announce_fail_rate": 0, "race_announce_rate": 0, "race_avg_share": 0,
         "race_download_rate": race_live.download_rate,
         // Not a peer count: 3.x publishes the torrent count here, and its own
