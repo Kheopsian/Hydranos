@@ -60,6 +60,9 @@ const BEST_WINDOW: usize = 30;
 /// throughput; if not, the tracker is saturated and the rise is taken back.
 /// That catches the queue that latency alone reads too late.
 const GROWTH_MUST_PAY: f64 = 1.05;
+/// A cut for latency must bring the latency down at least this much; if not,
+/// the latency is the route's, not a queue of ours, and becomes the new best.
+const CUT_MUST_PAY: f64 = 0.95;
 /// Share of a cycle's answers that were 429, and that timed out, above which
 /// the tracker's limit shrinks whatever the latency says.
 const THROTTLE_BACKOFF: f64 = 0.02;
@@ -467,6 +470,8 @@ struct Tracker {
     prev_n: u64,
     /// The limit before last cycle's rise, if it rose.
     grew: Option<usize>,
+    /// The cycle mean when last cycle cut the limit for latency, if it did.
+    cut_at: Option<f64>,
     /// This cycle's answers.
     n: u64,
     sum_s: f64,
@@ -486,6 +491,7 @@ impl Tracker {
             means: std::collections::VecDeque::new(),
             prev_n: 0,
             grew: None,
+            cut_at: None,
             n: 0,
             sum_s: 0.0,
             throttled: 0,
@@ -521,6 +527,18 @@ impl Tracker {
             self.means.pop_front();
         }
         self.best_s = self.means.iter().cloned().fold(f64::INFINITY, f64::min);
+        if let Some(was) = self.cut_at.take() {
+            if mean > was * CUT_MUST_PAY {
+                // ⭐ Prod, 2026-09-28: archive.org answered one early cycle in
+                // 0.29 s, then 0.6-1 s whatever we sent. Every cycle read as a
+                // queue, and the limit sat at the floor with 26 000 announces
+                // waiting. Sending less did not make it faster: that latency
+                // is where the tracker is, not a queue we built.
+                self.means.clear();
+                self.means.push_back(mean);
+                self.best_s = mean;
+            }
+        }
         let busy = !self.pending.is_empty() || self.in_flight * 10 >= self.limit * 9;
         let unpaid = self.grew.take().filter(|_| n < self.prev_n as f64 * GROWTH_MUST_PAY);
         if let Some(before) = unpaid {
@@ -534,6 +552,7 @@ impl Tracker {
         } else if mean > QUEUE_FACTOR * self.best_s {
             // The tracker is queueing us: more concurrency is only a longer queue.
             self.limit = (self.limit * 9 / 10).max(HOST_MIN);
+            self.cut_at = Some(mean);
         } else if mean < CALM_FACTOR * self.best_s && busy {
             let before = self.limit;
             self.limit = (self.limit + (self.limit / 8).max(1)).min(HOST_MAX);
@@ -1138,20 +1157,21 @@ mod tests {
         assert_eq!(t.limit, HOST_START);
     }
 
-    /// Latency rising with load must SHRINK the limit, never grow it.
+    /// Latency rising with our load must shrink the limit: a tracker falling
+    /// to a tenth of its capacity is queueing us, and each cut shortens that
+    /// queue -- so the cuts pay and continue down to the new knee.
     #[test]
     fn latency_rising_with_load_shrinks_the_limit() {
         let mut t = Tracker::new();
-        cycle(&mut t, 0.5, 20, true);
-        let before = t.limit;
-        cycle(&mut t, 4.0, 20, true);
-        assert!(t.limit < before, "{} -> {}", before, t.limit);
-        let mut last = t.limit;
-        for _ in 0..10 {
-            cycle(&mut t, 4.0, 20, true);
-            assert!(t.limit <= last, "never grows while queueing");
-            last = t.limit;
+        for _ in 0..40 {
+            saturable_cycle(&mut t, 0.5, 350.0);
         }
+        let before = t.limit;
+        for _ in 0..60 {
+            saturable_cycle(&mut t, 0.5, 35.0);
+        }
+        // The new knee is 35/s x 0.5 s = 17.5 in flight.
+        assert!(t.limit < 40, "{before} -> {}", t.limit);
     }
 
     /// A route that got slower for good becomes the new normal once the faster
@@ -1169,6 +1189,20 @@ mod tests {
         }
         assert!(t.best_s > 1.0, "best moved to {}", t.best_s);
         assert!(t.limit > lowest, "grew again at the new normal: {} from {lowest}", t.limit);
+    }
+
+    /// A tracker slower than its one lucky cycle, whatever we send, is not
+    /// congested: the limit must grow, not sit at the floor.
+    #[test]
+    fn latency_that_is_not_ours_is_learnt() {
+        let mut t = Tracker::new();
+        cycle(&mut t, 0.29, 20, true);
+        for i in 0..40 {
+            let lat = if i % 3 == 0 { 0.6 } else { 0.9 };
+            let n = t.limit * 10;
+            cycle(&mut t, lat, n, true);
+        }
+        assert!(t.limit > HOST_START, "stuck at {}", t.limit);
     }
 
     #[test]
