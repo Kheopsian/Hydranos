@@ -75,16 +75,16 @@ pub fn free_space(path: &Path) -> Option<u64> {
     crate::platform::free_space(path)
 }
 
-/// Copy one file, then remove the source.
+/// Copy one file, leaving the source where it is.
 ///
 /// ⚠ Deliberately a read/write loop and NOT `std::fs::copy`. On Linux that
 /// calls `copy_file_range`, which ZFS turns into block cloning -- and block
 /// cloning on this pool wedges the calling process in uninterruptible sleep.
 /// It has already frozen builds on this machine for 45 minutes at 0% CPU.
 ///
-/// The source is removed only after the copy is complete and flushed: a
-/// half-copied file with its source already gone is data lost.
-pub fn copy_then_delete(source: &Path, target: &Path) -> std::io::Result<u64> {
+/// The copy is flushed before this returns: a caller that deletes the source
+/// next must not be deleting the only complete copy.
+pub fn copy_only(source: &Path, target: &Path) -> std::io::Result<u64> {
     use std::io::{Read, Write};
 
     if let Some(parent) = target.parent() {
@@ -103,13 +103,29 @@ pub fn copy_then_delete(source: &Path, target: &Path) -> std::io::Result<u64> {
         copied += n as u64;
     }
     dst.sync_all()?;
-    drop(dst);
+    Ok(copied)
+}
+
+/// Copy one file, then remove the source.
+///
+/// The source is removed only after the copy is complete and flushed: a
+/// half-copied file with its source already gone is data lost.
+pub fn copy_then_delete(source: &Path, target: &Path) -> std::io::Result<u64> {
+    let copied = copy_only(source, target)?;
     std::fs::remove_file(source)?;
     Ok(copied)
 }
 
-/// Run one move to completion.
-pub fn run_move(source: &Path, target: &Path) -> std::io::Result<Plan> {
+/// Run one move, breaking a hardlink only if the operator said so.
+///
+/// Breaking one is not data loss -- the other name keeps its bytes -- but it
+/// doubles the space those bytes take, which is why it is asked and never
+/// assumed.
+pub fn run_move_allowing(
+    source: &Path,
+    target: &Path,
+    allow_breaking_hardlinks: bool,
+) -> std::io::Result<Plan> {
     let plan = plan(source, target)?;
     match plan {
         Plan::AlreadyThere => Ok(plan),
@@ -123,7 +139,7 @@ pub fn run_move(source: &Path, target: &Path) -> std::io::Result<Plan> {
         Plan::CopyThenDelete { bytes } => {
             // Refuse rather than fill the target disk and fail halfway, which
             // leaves the source deleted for the files already done.
-            match free_space(target.parent().unwrap_or(target)) {
+            match free_space_near(target) {
                 Some(free) if free < bytes => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::StorageFull,
@@ -132,7 +148,7 @@ pub fn run_move(source: &Path, target: &Path) -> std::io::Result<Plan> {
                 }
                 _ => {}
             }
-            if link_count(source) > 1 {
+            if !allow_breaking_hardlinks && link_count(source) > 1 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "this file is hardlinked elsewhere: copying it across a filesystem \
@@ -142,6 +158,18 @@ pub fn run_move(source: &Path, target: &Path) -> std::io::Result<Plan> {
             copy_then_delete(source, target)?;
             Ok(plan)
         }
+    }
+}
+
+/// Free bytes where `path` would land. The target usually does not exist yet,
+/// so its nearest existing ancestor is what gets asked.
+pub fn free_space_near(path: &Path) -> Option<u64> {
+    let mut cur = path;
+    loop {
+        if cur.exists() {
+            return free_space(cur);
+        }
+        cur = cur.parent()?;
     }
 }
 
@@ -190,7 +218,7 @@ mod tests {
         let dst = dir.join("b");
         std::fs::write(&src, b"hello").unwrap();
         assert_eq!(plan(&src, &dst).unwrap(), Plan::Rename);
-        run_move(&src, &dst).unwrap();
+        run_move_allowing(&src, &dst, false).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
         assert!(!src.exists(), "the source is gone after a rename");
         std::fs::remove_dir_all(&dir).ok();
@@ -209,6 +237,27 @@ mod tests {
         assert_eq!(link_count(&a), 1);
         std::fs::hard_link(&a, &b).unwrap();
         assert_eq!(link_count(&a), 2, "the file now has two names");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copy_only_leaves_the_source() {
+        let dir = std::env::temp_dir().join("hydra-jobs-test-copyonly");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a");
+        let b = dir.join("sub").join("b");
+        std::fs::write(&a, b"payload").unwrap();
+        assert_eq!(copy_only(&a, &b).unwrap(), 7);
+        assert_eq!(std::fs::read(&b).unwrap(), b"payload");
+        assert!(a.exists(), "a copy must not remove its source");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn free_space_is_asked_of_the_nearest_existing_ancestor() {
+        let dir = std::env::temp_dir().join("hydra-jobs-test-free");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(free_space_near(&dir.join("x").join("y")).is_some());
         std::fs::remove_dir_all(&dir).ok();
     }
 

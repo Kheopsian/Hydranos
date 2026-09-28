@@ -70,6 +70,7 @@ mod linkindex;
 mod rules;
 mod rulesrun;
 mod rulesapi;
+mod mcp;
 mod session;
 
 use config::Config;

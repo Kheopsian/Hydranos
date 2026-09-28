@@ -342,7 +342,9 @@ function formatBytes(bytes) {
     const sizes = decimal
         ? ["B", "KB", "MB", "GB", "TB", "PB"]
         : ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
+    // Clamped at 0 too: a chart axis ticks at fractions of a byte on an idle
+    // node, the logarithm goes negative, and sizes[-1] printed "819.2 undefined/s".
+    const i = Math.max(0, Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1));
     return (bytes / Math.pow(k, i)).toPrecision(4) + " " + sizes[i];
 }
 
@@ -411,6 +413,20 @@ function formatCount(n) {
     if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
     if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
     return n.toString();
+}
+
+// An integer with the thousands separator of the interface language: 930 230
+// in French, 930,230 in English. Near a million torrents a bare 930230 has to
+// be read digit by digit. The language is read on each call, so switching it
+// in the menu applies without a reload.
+const _intFormats = {};
+function fmtInt(n) {
+    const v = Number(n);
+    if (n == null || !Number.isFinite(v)) return n == null ? "0" : String(n);
+    const lang = (document.documentElement && document.documentElement.lang) || "";
+    const f = _intFormats[lang] || (_intFormats[lang] =
+        new Intl.NumberFormat(lang || undefined, { maximumFractionDigits: 0 }));
+    return f.format(v);
 }
 
 function formatUptime(seconds) {
@@ -1232,19 +1248,19 @@ async function checkHealth() {
 function _renderStatus(data) {
         // Race stats
         if (data.race) {
-            document.getElementById("race-count").textContent = data.race.torrents;
-            document.getElementById("race-with-peers").textContent = data.race.torrents_with_peers || 0;
+            document.getElementById("race-count").textContent = fmtInt(data.race.torrents);
+            document.getElementById("race-with-peers").textContent = fmtInt(data.race.torrents_with_peers || 0);
             document.getElementById("race-upload").textContent = formatSpeed(data.race.total_upload_rate);
             document.getElementById("race-download").textContent = formatSpeed(data.race.total_download_rate);
-            document.getElementById("race-peers").textContent = data.race.total_peers;
+            document.getElementById("race-peers").textContent = fmtInt(data.race.total_peers);
             document.getElementById("race-ov-ratio").textContent = (data.race.session_ratio || 0).toFixed(2);
 
             // Race tab stats bar
-            document.getElementById("race-active-dl").textContent = data.race.active_downloads || 0;
-            document.getElementById("race-active-seeds").textContent = data.race.active_seeds || 0;
+            document.getElementById("race-active-dl").textContent = fmtInt(data.race.active_downloads || 0);
+            document.getElementById("race-active-seeds").textContent = fmtInt(data.race.active_seeds || 0);
             document.getElementById("race-current-ul").textContent = formatSpeed(data.race.total_upload_rate);
             document.getElementById("race-session-ratio").textContent = (data.race.session_ratio || 0).toFixed(2);
-            document.getElementById("race-session-grabbed").textContent = data.race.session_grabbed || 0;
+            document.getElementById("race-session-grabbed").textContent = fmtInt(data.race.session_grabbed || 0);
 
             // Header speeds (Option 2 : Gbps)
             const _raceUlRateCurrent = data.race.total_upload_rate || 0; window._lastRaceUlRate = _raceUlRateCurrent; window._lastRaceDlRate = data.race.total_download_rate || 0; const hydraUl = _raceUlRateCurrent + (data.hoard?.active_upload_rate || 0);
@@ -1255,15 +1271,15 @@ function _renderStatus(data) {
 
         // Hoard stats
         if (data.hoard) {
-            document.getElementById("hoard-total").textContent = data.hoard.total_torrents;
-            document.getElementById("hoard-with-peers").textContent = data.hoard.torrents_with_peers;
-            document.getElementById("hoard-connections").textContent = data.hoard.active_peers;
+            document.getElementById("hoard-total").textContent = fmtInt(data.hoard.total_torrents);
+            document.getElementById("hoard-with-peers").textContent = fmtInt(data.hoard.torrents_with_peers);
+            document.getElementById("hoard-connections").textContent = fmtInt(data.hoard.active_peers);
             document.getElementById("hoard-upload").textContent = formatSpeed(data.hoard.active_upload_rate);
             document.getElementById("hoard-download").textContent = formatSpeed(data.hoard.active_download_rate);
             const hSU = data.hoard.session_uploaded || 0, hSD = data.hoard.session_downloaded || 0;
             document.getElementById("hoard-ov-ratio").textContent = (hSD > 0 ? hSU / hSD : 0).toFixed(2);
             const ovt = document.getElementById("ov-torrents-total");
-            if (ovt) ovt.textContent = ((data.hoard.total_torrents || 0) + (data.race?.torrents || 0)).toLocaleString();
+            if (ovt) ovt.textContent = fmtInt((data.hoard.total_torrents || 0) + (data.race?.torrents || 0));
         }
 
         // Day totals, UL/DL accumulated since midnight Europe/Paris (auto reset)
@@ -1329,7 +1345,7 @@ function _renderStatus(data) {
 
         // Peer intel stats
         if (data.peer_intel) {
-            const it = document.getElementById("intel-total"); if (it) it.textContent = data.peer_intel.total_peers?.toLocaleString() || "0";
+            const it = document.getElementById("intel-total"); if (it) it.textContent = fmtInt(data.peer_intel.total_peers || 0);
             const is = document.getElementById("intel-seedboxes"); if (is) is.textContent = data.peer_intel.known_seedboxes || "0";
             const ia = document.getElementById("intel-avg-score"); if (ia) ia.textContent = (data.peer_intel.avg_score || 0).toFixed(3);
         }
@@ -1363,7 +1379,7 @@ async function updateRecords(force) {
     const rc = recCard ? recCard.querySelector(".card-body") : null;
     if (rc && Array.isArray(d.records)) {
         rc.innerHTML = d.records.map(r => {
-            const val = r.unit ? (r.value + " " + r.unit) : Math.round(r.value).toLocaleString("en-US");
+            const val = r.unit ? (r.value + " " + r.unit) : fmtInt(Math.round(r.value));
             return '<div class="metric"><span>' + r.label + ' <small>' + (r.date || "") +
                 '</small></span><span class="' + (r.hi ? "hi" : "") + '">' + val + '</span></div>';
         }).join("");
@@ -1536,7 +1552,7 @@ function renderRaceTable() {
     // with whatever is typed in the search box.
     const query = (document.getElementById("race-search")?.value || "").trim().toLowerCase();
     const visible = query ? sorted.filter(t => _searchMatches(t, query)) : sorted;
-    if (raceCount) raceCount.textContent = query ? `${visible.length} / ${torrents.length}` : "";
+    if (raceCount) raceCount.textContent = query ? `${fmtInt(visible.length)} / ${fmtInt(torrents.length)}` : "";
 
     if (visible.length === 0) {
         tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">No match</td></tr>`;
@@ -2696,9 +2712,9 @@ function renderHoardTable() {
         const matched = _hoardServerFiltered || filtered.length;
         const total = _hoardServerTotal || _hoardAllTorrents.length;
         if (matched > HOARD_RENDER_LIMIT)
-            countEl.textContent = t("{shown} / {matched} ({total} total)", { shown: Math.min(visible.length, HOARD_RENDER_LIMIT), matched, total });
+            countEl.textContent = t("{shown} / {matched} ({total} total)", { shown: fmtInt(Math.min(visible.length, HOARD_RENDER_LIMIT)), matched: fmtInt(matched), total: fmtInt(total) });
         else
-            countEl.textContent = `${matched} / ${total}`;
+            countEl.textContent = `${fmtInt(matched)} / ${fmtInt(total)}`;
     }
 
     const tbody = document.getElementById("hoard-tbody");
@@ -2816,18 +2832,18 @@ function _renderHoardCounts() {
     const nTrackerErr = F ? (F.tracker_error || 0) : 0;
     const nTorrentErr = F ? (F.torrent_error || 0) : 0;
     const nPinned = F ? (F.pinned || 0) : 0;
-    document.querySelector(".chip-state[data-state='']").innerHTML = `All <span class="chip-count">${nAll}</span>`;
-    document.querySelector(".chip-state[data-state='seeding']").innerHTML = `Seeding <span class="chip-count">${stateCounts["seeding"] || 0}</span>`;
-    document.querySelector(".chip-state[data-state='__active__']").innerHTML = `Actively Seeding <span class="chip-count">${nActive}</span>`;
-    document.querySelector(".chip-state[data-state='downloading']").innerHTML = `Downloading <span class="chip-count">${stateCounts["downloading"] || 0}</span>`;
-    document.querySelector(".chip-state[data-state='__pinned__']").innerHTML = `Forced <span class="chip-count">${nPinned}</span>`;
+    document.querySelector(".chip-state[data-state='']").innerHTML = `All <span class="chip-count">${fmtInt(nAll)}</span>`;
+    document.querySelector(".chip-state[data-state='seeding']").innerHTML = `Seeding <span class="chip-count">${fmtInt(stateCounts["seeding"] || 0)}</span>`;
+    document.querySelector(".chip-state[data-state='__active__']").innerHTML = `Actively Seeding <span class="chip-count">${fmtInt(nActive)}</span>`;
+    document.querySelector(".chip-state[data-state='downloading']").innerHTML = `Downloading <span class="chip-count">${fmtInt(stateCounts["downloading"] || 0)}</span>`;
+    document.querySelector(".chip-state[data-state='__pinned__']").innerHTML = `Forced <span class="chip-count">${fmtInt(nPinned)}</span>`;
     // Stopped is the user's doing, Queued is a scheduler's. Both are halted,
     // and telling them apart is the whole point of the two chips.
-    document.querySelector(".chip-state[data-state='stopped']").innerHTML = `Stopped <span class="chip-count">${stateCounts["stopped"] || 0}</span>`;
-    document.querySelector(".chip-state[data-state='queued']").innerHTML = `Queued <span class="chip-count">${stateCounts["queued"] || 0}</span>`;
-    document.querySelector(".chip-state[data-state='checking_files']").innerHTML = `Checking <span class="chip-count">${stateCounts["checking_files"] || 0}</span>`;
-    document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `Tracker Error <span class="chip-count">${nTrackerErr}</span>`;
-    document.querySelector(".chip-state[data-state='__error__']").innerHTML = `Error <span class="chip-count">${nTorrentErr}</span>`;
+    document.querySelector(".chip-state[data-state='stopped']").innerHTML = `Stopped <span class="chip-count">${fmtInt(stateCounts["stopped"] || 0)}</span>`;
+    document.querySelector(".chip-state[data-state='queued']").innerHTML = `Queued <span class="chip-count">${fmtInt(stateCounts["queued"] || 0)}</span>`;
+    document.querySelector(".chip-state[data-state='checking_files']").innerHTML = `Checking <span class="chip-count">${fmtInt(stateCounts["checking_files"] || 0)}</span>`;
+    document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `Tracker Error <span class="chip-count">${fmtInt(nTrackerErr)}</span>`;
+    document.querySelector(".chip-state[data-state='__error__']").innerHTML = `Error <span class="chip-count">${fmtInt(nTorrentErr)}</span>`;
 
     const resetBtn = document.getElementById("hoard-reset-filters");
     if (resetBtn) {
@@ -2845,12 +2861,12 @@ function _renderHoardCounts() {
     const container = document.getElementById("hoard-cat-chips");
     if (container) {
         let html = cats.map(c =>
-            `<button class="chip chip-cat${(catCounts[c] || 0) ? "" : " chip-orphan"}${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')" oncontextmenu="setHoardCatFilter(this,'${c}',true);return false" title="Click to include, right-click to exclude">${esc(incoCat(c))} <span class="chip-count">${catCounts[c] || 0}</span></button>`
+            `<button class="chip chip-cat${(catCounts[c] || 0) ? "" : " chip-orphan"}${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')" oncontextmenu="setHoardCatFilter(this,'${c}',true);return false" title="Click to include, right-click to exclude">${esc(incoCat(c))} <span class="chip-count">${fmtInt(catCounts[c] || 0)}</span></button>`
         ).join("");
         // Meta-filter: only meaningful when at least one real category exists and
         // some torrents lack one (e.g. after a category was deleted).
         if ((cats.length > 0 && nUncat > 0) || _hoardCatInc.includes("__none__") || _hoardCatExc.includes("__none__")) {
-            html = `<button class="chip chip-cat chip-none${_hoardCatInc.includes("__none__") ? " active" : ""}${_hoardCatExc.includes("__none__") ? " excluded" : ""}" data-cat="__none__" style="font-style:italic;opacity:.85" onclick="setHoardCatFilter(this,'__none__')" oncontextmenu="setHoardCatFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Uncategorized <span class="chip-count">${nUncat}</span></button>` + html;
+            html = `<button class="chip chip-cat chip-none${_hoardCatInc.includes("__none__") ? " active" : ""}${_hoardCatExc.includes("__none__") ? " excluded" : ""}" data-cat="__none__" style="font-style:italic;opacity:.85" onclick="setHoardCatFilter(this,'__none__')" oncontextmenu="setHoardCatFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Uncategorized <span class="chip-count">${fmtInt(nUncat)}</span></button>` + html;
         }
         container.innerHTML = html;
     }
@@ -2861,13 +2877,13 @@ function _renderHoardCounts() {
     const trkContainer = document.getElementById("hoard-tracker-chips");
     if (trkContainer) {
         let trkHtml = trks.map(h =>
-            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(incoTracker(h))} <span class="chip-count">${trkCounts[h] || 0}</span></button>`
+            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(incoTracker(h))} <span class="chip-count">${fmtInt(trkCounts[h] || 0)}</span></button>`
         ).join("");
         // First in the row, like Uncategorized and Untagged: a torrent with no
         // tracker at all was in no facet and matched by no filter, so the only
         // way to reach one was to already know its name.
         if (nNoTracker > 0 || _hoardTrackerInc.includes("__none__") || _hoardTrackerExc.includes("__none__")) {
-            trkHtml = `<button class="chip chip-tracker chip-none${nNoTracker ? "" : " chip-orphan"}${_hoardTrackerInc.includes("__none__") ? " active" : ""}${_hoardTrackerExc.includes("__none__") ? " excluded" : ""}" data-tracker="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTrackerFilter(this,'__none__')" oncontextmenu="setHoardTrackerFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">No tracker <span class="chip-count">${nNoTracker}</span></button>` + trkHtml;
+            trkHtml = `<button class="chip chip-tracker chip-none${nNoTracker ? "" : " chip-orphan"}${_hoardTrackerInc.includes("__none__") ? " active" : ""}${_hoardTrackerExc.includes("__none__") ? " excluded" : ""}" data-tracker="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTrackerFilter(this,'__none__')" oncontextmenu="setHoardTrackerFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">No tracker <span class="chip-count">${fmtInt(nNoTracker)}</span></button>` + trkHtml;
         }
         trkContainer.innerHTML = trkHtml;
     }
@@ -2887,7 +2903,7 @@ function _renderHoardCounts() {
         errContainer.innerHTML = errKeys.map(k => {
             const label = t(ERR_CLASS_LABEL[k] || k);
             const hint = t(ERR_CLASS_HINT[k] || "");
-            return `<button class="chip chip-err chip-err-${esc(k)}${(errCounts[k] || 0) ? "" : " chip-orphan"}${_hoardErrInc.includes(k) ? " active" : ""}${_hoardErrExc.includes(k) ? " excluded" : ""}" data-err="${esc(k)}" onclick="setHoardErrFilter(this,'${esc(k)}')" oncontextmenu="setHoardErrFilter(this,'${esc(k)}',true);return false" title="${esc(hint)}">${esc(label)} <span class="chip-count">${errCounts[k] || 0}</span></button>`;
+            return `<button class="chip chip-err chip-err-${esc(k)}${(errCounts[k] || 0) ? "" : " chip-orphan"}${_hoardErrInc.includes(k) ? " active" : ""}${_hoardErrExc.includes(k) ? " excluded" : ""}" data-err="${esc(k)}" onclick="setHoardErrFilter(this,'${esc(k)}')" oncontextmenu="setHoardErrFilter(this,'${esc(k)}',true);return false" title="${esc(hint)}">${esc(label)} <span class="chip-count">${fmtInt(errCounts[k] || 0)}</span></button>`;
         }).join("");
     }
 
@@ -2897,11 +2913,11 @@ function _renderHoardCounts() {
     const tagContainer = document.getElementById("hoard-tag-chips");
     if (tagContainer) {
         let html = tagNames.map(tg =>
-            `<button class="chip chip-tag${(tagCounts[tg] || 0) ? "" : " chip-orphan"}${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')" oncontextmenu="setHoardTagFilter(this,'${tg}',true);return false" title="Click to include, right-click to exclude">${esc(tg)} <span class="chip-count">${tagCounts[tg] || 0}</span></button>`
+            `<button class="chip chip-tag${(tagCounts[tg] || 0) ? "" : " chip-orphan"}${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')" oncontextmenu="setHoardTagFilter(this,'${tg}',true);return false" title="Click to include, right-click to exclude">${esc(tg)} <span class="chip-count">${fmtInt(tagCounts[tg] || 0)}</span></button>`
         ).join("");
         // Untagged meta-filter: only when tags are actually in use.
         if ((tagNames.length > 0 && nUntagged > 0) || _hoardTagInc.includes("__none__") || _hoardTagExc.includes("__none__")) {
-            html = `<button class="chip chip-tag chip-none${_hoardTagInc.includes("__none__") ? " active" : ""}${_hoardTagExc.includes("__none__") ? " excluded" : ""}" data-tag="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTagFilter(this,'__none__')" oncontextmenu="setHoardTagFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Untagged <span class="chip-count">${nUntagged}</span></button>` + html;
+            html = `<button class="chip chip-tag chip-none${_hoardTagInc.includes("__none__") ? " active" : ""}${_hoardTagExc.includes("__none__") ? " excluded" : ""}" data-tag="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTagFilter(this,'__none__')" oncontextmenu="setHoardTagFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Untagged <span class="chip-count">${fmtInt(nUntagged)}</span></button>` + html;
         }
         tagContainer.innerHTML = html;
     }
@@ -2919,21 +2935,21 @@ function _renderHoardStatsHeader(data) {
         // The bar is gone; the numbers below carry the same two figures.
         const announced = data.torrents_announced ?? data.total_torrents;
         const annPct = data.total_torrents ? Math.round(announced / data.total_torrents * 100) : 100;
-        const annText = annPct >= 100 ? t("all announced") : t("{done}/{total} announced ({pct}%)", { done: announced, total: data.total_torrents, pct: annPct });
+        const annText = annPct >= 100 ? t("all announced") : t("{done}/{total} announced ({pct}%)", { done: fmtInt(announced), total: fmtInt(data.total_torrents), pct: annPct });
 
         // Peer efficiency: connected peers vs available swarm leechers
         const swarm = data.swarm_leechers || 0;
         const peers = data.unseeded_peers ?? data.active_peers ?? 0;
-        let peerText = t("{n} peers", { n: peers });
+        let peerText = t("{n} peers", { n: fmtInt(peers) });
         if (swarm > 0) {
             const peerPct = (peers / swarm * 100).toFixed(1);
-            peerText = t("{n}/{swarm} peers ({pct}%)", { n: peers, swarm: formatCount(swarm), pct: peerPct });
+            peerText = t("{n}/{swarm} peers ({pct}%)", { n: fmtInt(peers), swarm: formatCount(swarm), pct: peerPct });
         }
 
     document.getElementById("hoard-summary-text").textContent =
         t("{total} torrents: {up} uploading, {withPeers} with peers, {peers}. {announced}", {
-            total: data.total_torrents, up: data.torrents_uploading,
-            withPeers: data.torrents_with_peers, peers: peerText, announced: annText });
+            total: fmtInt(data.total_torrents), up: fmtInt(data.torrents_uploading),
+            withPeers: fmtInt(data.torrents_with_peers), peers: peerText, announced: annText });
 }
 
 // Called on tab activation, hash change, or page load. Live updates flow
@@ -3405,7 +3421,7 @@ function _flashSelectionCount(n) {
     const el = document.getElementById("hoard-filter-count");
     if (!el) return;
     const prev = el.textContent;
-    el.textContent = t("{n} selected", { n: n });
+    el.textContent = t("{n} selected", { n: fmtInt(n) });
     el.style.fontWeight = "bold";
     clearTimeout(_flashSelectionCount._t);
     _flashSelectionCount._t = setTimeout(() => {
@@ -5473,6 +5489,78 @@ function _fmtAnnRate(v) {
     return (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + "/s";
 }
 
+// Time-based moving average: each point is the mean of the samples in the
+// `win` seconds up to it. The raw 5 s announce rate swings by a third on a
+// schedule that is perfectly steady -- deadlines are discrete and bunch -- and
+// that swing was read as irregularity that was not there.
+function _movingAvg(history, key, win) {
+    const out = new Array(history.length);
+    let sum = 0, j = 0;
+    for (let i = 0; i < history.length; i++) {
+        sum += history[i][key] ?? 0;
+        while (history[i].ts - history[j].ts > win) { sum -= history[j][key] ?? 0; j++; }
+        out[i] = sum / (i - j + 1);
+    }
+    return out;
+}
+
+// The announce figures above the charts, from the newest samples.
+//
+// The achieved rate is averaged over the last five minutes, like the chart,
+// and set against the rate the schedule needs; the other three are what the
+// scheduler published at the last sample. Each carries a word, not only a
+// colour, so the card reads without knowing the thresholds.
+function _renderAnnounceFigures(history) {
+    const set = (id, text, cls) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        if (cls !== undefined) el.className = "bm-metric-value" + (cls ? " " + cls : "");
+    };
+    const last = history.length ? history[history.length - 1] : null;
+    // A node on an older release records none of these: say so, rather than
+    // printing zeros that read as "all is well".
+    if (!last || !(last.hoard_announce_concurrency > 0)) {
+        for (const id of ["bm-ann-rate", "bm-ann-late", "bm-ann-conc", "bm-ann-429"]) set(id, "--", "");
+        for (const id of ["bm-ann-rate-sub", "bm-ann-late-sub", "bm-ann-conc-sub", "bm-ann-429-sub"]) set(id, t("not measured yet"));
+        return;
+    }
+    // The last minute, not five: right after a restart the need starts again
+    // from zero while five minutes of history still hold the old rate, and the
+    // card read "419/s of 8/s needed" in green.
+    const recent = history.filter(p => p.ts > last.ts - 60);
+    const rate = recent.reduce((a, p) => a + (p.hoard_announce_rate ?? 0), 0) / recent.length;
+    const need = last.hoard_announce_needed ?? 0;
+    const ratio = need > 0 ? rate / need : 1;
+    set("bm-ann-rate", _fmtAnnRate(rate), ratio >= 0.95 ? "bm-good" : ratio >= 0.9 ? "bm-amber" : "bm-warn");
+    set("bm-ann-rate-sub", t("of {need} needed", { need: _fmtAnnRate(need) }));
+
+    const late = last.hoard_announce_late ?? 0, p90 = last.hoard_announce_lag_p90 ?? 0;
+    set("bm-ann-late", fmtInt(late), late === 0 ? "bm-good" : p90 < 300 ? "bm-amber" : "bm-warn");
+    set("bm-ann-late-sub", late === 0 ? t("on time")
+        : t("median {p50}, p90 {p90}", { p50: _fmtLag(last.hoard_announce_lag_p50), p90: _fmtLag(p90) }));
+
+    set("bm-ann-conc", fmtInt(last.hoard_announce_concurrency), "");
+    set("bm-ann-conc-sub", t("latency {s}", { s: ((last.hoard_announce_latency_ms ?? 0) / 1000).toFixed(2) + " s" }));
+
+    const pct = last.hoard_announce_throttled_pct ?? 0;
+    set("bm-ann-429", pct.toFixed(1) + " %", pct < 0.5 ? "bm-good" : pct < 2 ? "bm-amber" : "bm-warn");
+    set("bm-ann-429-sub", pct < 2 ? t("trackers accept the pace") : t("backing off"));
+}
+
+// A delay in seconds, at the precision it deserves.
+function _fmtLag(s) {
+    s = s ?? 0;
+    if (s < 60) return Math.round(s) + "s";
+    if (s < 3600) return Math.round(s / 60) + "min";
+    return (s / 3600).toFixed(1) + "h";
+}
+
+// Samples recorded before a release knew a figure carry 0 for it. Drawn as 0
+// they would claim "nothing needed, nobody late"; drawn as gaps they say
+// "not measured yet", which is the truth.
+const _orGap = v => (v ? v : null);
+
 function _updateDualChart(chart, history, key1, key2) {
     chart.data.labels = history.map(p => _bmLabel(p.ts));
     chart.data.datasets[0].data = history.map(p => p[key1] ?? 0);
@@ -5556,11 +5644,17 @@ function _initBmCharts() {
             type: "line",
             data: {
                 labels: [],
+                // Averaged over 5 minutes, against what the schedule NEEDS: the
+                // gap between the two is the lateness building up. Failures are
+                // their own series and never added to the rate -- a dead tracker
+                // answers fast, and summed in it looked like a burst of activity.
                 datasets: [
-                    { label: t("Race announces/s"), data: [], borderColor: "#f0883e", backgroundColor: "#f0883e18", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
-                    { label: t("Hoard announces/s"), data: [], borderColor: "#3fb950", backgroundColor: "#3fb95018", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
-                    { label: t("Race failed/s"), data: [], borderColor: "#f85149", backgroundColor: "#f8514918", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
-                    { label: t("Hoard failed/s"), data: [], borderColor: "#d29922", backgroundColor: "#d2992218", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
+                    { label: t("Hoard announces/s (5 min)"), data: [], borderColor: "#3fb950", backgroundColor: "#3fb95018", borderWidth: 2, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
+                    { label: t("Hoard needed/s"), data: [], borderColor: "#c9d1d9", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0, fill: false, borderDash: [6, 4], spanGaps: false },
+                    { label: t("Hoard failed/s (5 min)"), data: [], borderColor: "#d29922", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
+                    { label: t("Race announces/s (5 min)"), data: [], borderColor: "#f0883e", borderWidth: 1.5, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false },
+                    { label: t("Race failed/s (5 min)"), data: [], borderColor: "#f85149", borderWidth: 1, pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, borderDash: [4, 2] },
+                    { label: t("Hoard raw (5 s)"), data: [], borderColor: "#3fb95033", borderWidth: 1, pointRadius: 0, pointHitRadius: 0, pointHoverRadius: 0, tension: 0, fill: false },
                 ],
             },
             plugins: [crosshairPlugin],
@@ -5763,16 +5857,20 @@ async function updateBenchmark() {
             c.data.datasets[3].data = history.map(p => p.hoard_peers ?? 0);
             c.update("none");
         }
-        // Announce rate (4 datasets: per-engine cadence + failures)
+        // Announce rate: 5-minute averages against the rate the schedule needs.
         {
             const c = _bmCharts.announce;
+            const W = 300;
             c.data.labels = history.map(p => _bmLabel(p.ts));
-            c.data.datasets[0].data = history.map(p => p.race_announce_rate ?? 0);
-            c.data.datasets[1].data = history.map(p => p.hoard_announce_rate ?? 0);
-            c.data.datasets[2].data = history.map(p => p.race_announce_fail_rate ?? 0);
-            c.data.datasets[3].data = history.map(p => p.hoard_announce_fail_rate ?? 0);
+            c.data.datasets[0].data = _movingAvg(history, "hoard_announce_rate", W);
+            c.data.datasets[1].data = history.map(p => _orGap(p.hoard_announce_needed));
+            c.data.datasets[2].data = _movingAvg(history, "hoard_announce_fail_rate", W);
+            c.data.datasets[3].data = _movingAvg(history, "race_announce_rate", W);
+            c.data.datasets[4].data = _movingAvg(history, "race_announce_fail_rate", W);
+            c.data.datasets[5].data = history.map(p => p.hoard_announce_rate ?? 0);
             c.update("none");
         }
+        _renderAnnounceFigures(history);
         // Race Events, 20 stacked bars (added, completed, first_upload)
         {
             const N = 20;
@@ -6222,8 +6320,8 @@ async function _checkStartup() {
 
         if (d.total > 0) {
             document.getElementById("startup-phase").textContent = t("Restoring state…");
-            document.getElementById("startup-restored").textContent = d.restored.toLocaleString();
-            document.getElementById("startup-total").textContent = d.total.toLocaleString();
+            document.getElementById("startup-restored").textContent = fmtInt(d.restored);
+            document.getElementById("startup-total").textContent = fmtInt(d.total);
             const pct = Math.min(100, Math.round((d.restored / d.total) * 100));
             document.getElementById("startup-bar").style.width = pct + "%";
         }

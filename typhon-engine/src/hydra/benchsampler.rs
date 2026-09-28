@@ -102,6 +102,25 @@ fn sample_once(
     let (race_ann, race_ann_fail) = announce_rate("race");
     let (hoard_ann, hoard_ann_fail) = announce_rate("hoard");
 
+    // The schedule's own health, published by each engine's scheduler: what
+    // the catalogue needs per second, how many torrents are past their
+    // deadline and by how much, and the concurrency it runs at.
+    let health = |id: &str| -> [f64; 7] {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(e) = engines.get(id) else { return [0.0; 7] };
+        let a = &e.admission;
+        [
+            a.needed_milli.load(Relaxed) as f64 / 1000.0,
+            a.late.load(Relaxed) as f64,
+            a.lag_p50_s.load(Relaxed) as f64,
+            a.lag_p90_s.load(Relaxed) as f64,
+            a.concurrency.load(Relaxed) as f64,
+            a.latency_ms.load(Relaxed) as f64,
+            a.throttled_permille.load(Relaxed) as f64 / 10.0,
+        ]
+    };
+    let (race_h, hoard_h) = (health("race"), health("hoard"));
+
     let (base_up, base_down) = {
         let store = store.lock().unwrap_or_else(|e| e.into_inner());
         store.counter("global")
@@ -129,6 +148,20 @@ fn sample_once(
         "hoard_announce_rate": hoard_ann,
         "race_announce_fail_rate": race_ann_fail,
         "hoard_announce_fail_rate": hoard_ann_fail,
+        "race_announce_needed": race_h[0],
+        "race_announce_late": race_h[1],
+        "race_announce_lag_p50": race_h[2],
+        "race_announce_lag_p90": race_h[3],
+        "race_announce_concurrency": race_h[4],
+        "race_announce_latency_ms": race_h[5],
+        "race_announce_throttled_pct": race_h[6],
+        "hoard_announce_needed": hoard_h[0],
+        "hoard_announce_late": hoard_h[1],
+        "hoard_announce_lag_p50": hoard_h[2],
+        "hoard_announce_lag_p90": hoard_h[3],
+        "hoard_announce_concurrency": hoard_h[4],
+        "hoard_announce_latency_ms": hoard_h[5],
+        "hoard_announce_throttled_pct": hoard_h[6],
     });
 
     let db = bench.lock().unwrap_or_else(|e| e.into_inner());

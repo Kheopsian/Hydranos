@@ -1954,7 +1954,7 @@ fn race_admission(
     Ok(())
 }
 
-fn add_torrent_bytes(
+pub(crate) fn add_torrent_bytes(
     state: &AppState,
     bytes: &[u8],
     category: &str,
@@ -2409,13 +2409,13 @@ fn announced_count(state: &AppState, engine_id: &str) -> usize {
 /// across ~1000 peers report a flat zero on every counter. Reading them costs
 /// four atomic loads, so the status route can stay a cheap poll.
 #[derive(Default)]
-struct LiveStats {
-    upload_rate: i64,
-    download_rate: i64,
-    active_peers: i64,
-    torrents_with_peers: i64,
-    torrents_uploading: i64,
-    unseeded_peers: i64,
+pub(crate) struct LiveStats {
+    pub(crate) upload_rate: i64,
+    pub(crate) download_rate: i64,
+    pub(crate) active_peers: i64,
+    pub(crate) torrents_with_peers: i64,
+    pub(crate) torrents_uploading: i64,
+    pub(crate) unseeded_peers: i64,
 }
 
 /// Leechers the trackers report across the hoard, summed from the announce
@@ -2432,7 +2432,7 @@ fn swarm_leechers_total(state: &AppState) -> i64 {
         .unwrap_or(0)
 }
 
-fn live_stats(state: &AppState, engine_id: &str) -> LiveStats {
+pub(crate) fn live_stats(state: &AppState, engine_id: &str) -> LiveStats {
     use std::sync::atomic::Ordering;
     let Some(engine) = state.engines.get(engine_id) else {
         return LiveStats::default();
@@ -3164,7 +3164,7 @@ fn with_window(query: &str, offset: usize, limit: usize) -> String {
 ///
 /// With no nodes declared this is exactly the single-node path and costs
 /// nothing extra -- the common case must not pay for a feature it does not use.
-async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -> serde_json::Value {
+pub(crate) async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -> serde_json::Value {
     let nodes: Vec<crate::store::Node> = {
         let store = state.store.lock().unwrap();
         store.nodes().unwrap_or_default()
@@ -5937,17 +5937,199 @@ async fn hoard_unpin_one(
     .into_response()
 }
 
-torrent_write!(set_torrent_category, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, engine: &str| {
-    // The body is {"category": "..."} on the native API.
-    let category = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("category").and_then(|c| c.as_str()).map(str::to_string))
+
+// ---------------------------------------------------------------------------
+// Category, and where the data lives
+// ---------------------------------------------------------------------------
+
+/// What changing a torrent's category would do, decided before anything moves.
+enum CategoryChange {
+    /// The data is already where the category wants it: a label write.
+    Relabel,
+    /// The data moves inside the engine that holds it.
+    Move { plan: crate::jobsrun::MovePlan, name: String, total: i64 },
+    /// The category belongs to another engine: a graduation carries it there.
+    Graduate { to: String, plan: crate::jobsrun::MovePlan, name: String, total: i64 },
+}
+
+/// Work out a category change for the copy of `hash` held by `engine`.
+///
+/// The target engine: the one holding the torrent when its ROLE is what the
+/// category's mode asks for -- a torrent in a VPN-bound hoard engine stays in
+/// it -- and otherwise the engine the category places new torrents in.
+fn category_change(
+    state: &AppState,
+    engine: &str,
+    hash: &str,
+    category: &str,
+) -> Result<CategoryChange, Response> {
+    let refuse = |code: StatusCode, msg: String| {
+        (code, Json(serde_json::json!({"error": msg}))).into_response()
+    };
+    let Some(cat) = category_entry(state, category) else {
+        return Err(refuse(StatusCode::BAD_REQUEST, format!("unknown category {category:?}")));
+    };
+    if cat.save_path.is_empty() {
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            format!("category {category:?} has no save path to move the data to"),
+        ));
+    }
+    let Some(torrent) = find_copy(state, engine, hash) else {
+        return Err(not_found());
+    };
+    let role = state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.id == engine)
+        .map(|e| e.role.clone())
         .unwrap_or_default();
-    let store = state.store.lock().unwrap();
-    // The engine was already a parameter here, ignored as `_engine`, so the
-    // native API relabelled every copy of a torrent it was given one of.
-    let _ = store.set_category_in(hash, engine, &category);
-});
+    let target = if (cat.mode == "hoard") == (role == "hoard") {
+        engine.to_string()
+    } else {
+        placement(state, category, "").0
+    };
+    let plan = crate::jobsrun::plan_move_checked(state, &torrent, std::path::Path::new(&cat.save_path));
+    let (name, total) = (torrent.meta.name.clone(), torrent.meta.total_size as i64);
+    Ok(if target != engine {
+        CategoryChange::Graduate { to: target, plan, name, total }
+    } else if plan.is_noop() {
+        CategoryChange::Relabel
+    } else {
+        CategoryChange::Move { plan, name, total }
+    })
+}
+
+/// `POST /api/{hoard,race}/torrents/:hash/category`.
+///
+/// `{"category": c}` relabels. With `"move_files": true` the data follows the
+/// category's save path: 202 and a job when bytes have to move, 200 when they
+/// are already there, and 409 with `reason: "hardlinks"` when the move would
+/// copy hardlinked files across filesystems -- the UI asks, then resends with
+/// `"allow_breaking_hardlinks": true`.
+///
+/// ⚠ Until this handler, `move_files` was read by nobody. The route answered a
+/// relabel with `{"status":"ok"}`, the UI repainted the row as moved, and the
+/// files stayed where they were -- every "Move to category" since the Rust
+/// port. A field the client sends is either honoured or refused, never dropped.
+async fn post_category(state: &AppState, info_hash: &str, query: &str, body: &str, fallback: &str) -> Response {
+    let engine = engine_param(query, fallback);
+    let hash = match resolve_in_hoard(state, &engine, info_hash, "torrent not found") {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let category = v.get("category").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let move_files = v.get("move_files").and_then(|b| b.as_bool()).unwrap_or(false);
+    let allow = v.get("allow_breaking_hardlinks").and_then(|b| b.as_bool()).unwrap_or(false);
+
+    let relabel = |moved: bool| {
+        let store = state.store.lock().unwrap();
+        // The engine was already a parameter here, ignored as `_engine`, so the
+        // native API relabelled every copy of a torrent it was given one of.
+        let _ = store.set_category_in(&hash, &engine, &category);
+        Json(serde_json::json!({"status": "ok", "moved": moved})).into_response()
+    };
+    if !move_files {
+        return relabel(false);
+    }
+    if category.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "moving needs a category to move to"})),
+        )
+            .into_response();
+    }
+    let change = match category_change(state, &engine, &hash, &category) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let (plan, name, total, to) = match change {
+        CategoryChange::Relabel => return relabel(false),
+        CategoryChange::Move { plan, name, total } => (plan, name, total, None),
+        CategoryChange::Graduate { to, plan, name, total } => (plan, name, total, Some(to)),
+    };
+    // Refused whatever the operator agrees to: these are not a cost to accept
+    // but a move that would damage something that is not this torrent.
+    if let Some((reason, why)) = plan.refusal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": why, "reason": reason, "plan": plan.summary()})),
+        )
+            .into_response();
+    }
+    let (hl_files, hl_bytes) = plan.hardlinked();
+    if hl_files > 0 && !allow {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "moving would break hardlinks",
+                "reason": "hardlinks",
+                "hardlinked_files": hl_files,
+                "hardlinked_bytes": hl_bytes,
+                "plan": plan.summary(),
+            })),
+        )
+            .into_response();
+    }
+    if let Some(free) = crate::jobs::free_space_near(&plan.new_root) {
+        if free < plan.copy_bytes() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "not enough free space at the target",
+                    "reason": "space",
+                    "plan": plan.summary(),
+                })),
+            )
+                .into_response();
+        }
+    }
+    let save_path = plan.new_root.to_string_lossy().to_string();
+    let (kind, queued) = match &to {
+        None => ("move_data", crate::jobsrun::queue_move(
+            state, &hash, &name, &engine, &category, &save_path, allow, total)),
+        Some(to) => ("graduate", crate::jobsrun::queue_graduation_allowing(
+            state, &hash, &name, &engine, to, &category, &save_path, allow, total)),
+    };
+    match queued {
+        Some(job) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"status": "moving", "job": job, "kind": kind, "plan": plan.summary()})),
+        )
+            .into_response(),
+        None => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "a move is already queued or running for this torrent"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn set_torrent_category(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    post_category(&state, &info_hash, &query, &body, "hoard").await
+}
+
+async fn set_race_torrent_category(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    post_category(&state, &info_hash, &query, &body, "race").await
+}
 
 torrent_write!(set_torrent_tags, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
     // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
@@ -5965,17 +6147,6 @@ torrent_write!(set_torrent_tags, "hoard", "torrent not found", |_ih: &str| serde
 // The race-side twins of the two label writers. Identical bodies; what
 // differs is the engine they resolve in when the caller names none, which is
 // the engine their route spells.
-torrent_write!(set_race_torrent_category, "race", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, engine: &str| {
-    // The body is {"category": "..."} on the native API.
-    let category = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("category").and_then(|c| c.as_str()).map(str::to_string))
-        .unwrap_or_default();
-    let store = state.store.lock().unwrap();
-    // The engine was already a parameter here, ignored as `_engine`, so the
-    // native API relabelled every copy of a torrent it was given one of.
-    let _ = store.set_category_in(hash, engine, &category);
-});
 torrent_write!(set_race_torrent_tags, "race", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
     // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
     // here: the caller sends the state it wants, not a delta.
@@ -7123,7 +7294,7 @@ async fn qbit_torrents_info(
 // ---------------------------------------------------------------------------
 
 /// Find a torrent in any engine, returning it with the engine it belongs to.
-fn find_torrent(
+pub(crate) fn find_torrent(
     state: &AppState,
     info_hash: &str,
 ) -> Option<(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)> {
@@ -11082,20 +11253,52 @@ async fn delete_wireguard_config(
     Json(serde_json::json!({"removed": name})).into_response()
 }
 
-/// Where a torrent would move to. Refuses without the target category rather
-/// than guessing one.
+/// What a "Move to category" would do, without doing it.
+///
+/// `?category=` names the target; `?engine=` the copy (default: the first
+/// found). `kind` is relabel, move_data or graduate, and the plan says how
+/// many bytes are copied rather than renamed, and which files would lose a
+/// hardlink -- the numbers the UI needs to ask before it acts.
 async fn move_preview(
     State(state): State<AppState>,
-    Path(_info_hash): Path<String>,
+    Path(info_hash): Path<String>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "category required"})))
-        .into_response()
+    let category = query_param(&query, "category").unwrap_or_default();
+    if category.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "category required"})))
+            .into_response();
+    }
+    let hash = info_hash.to_lowercase();
+    let engine = {
+        let want = engine_param(&query, "");
+        if want.is_empty() {
+            match find_torrent(&state, &hash) {
+                Some((e, _)) => e,
+                None => return not_found(),
+            }
+        } else {
+            want
+        }
+    };
+    match category_change(&state, &engine, &hash, &category) {
+        Err(r) => r,
+        Ok(CategoryChange::Relabel) => Json(serde_json::json!({
+            "kind": "relabel", "engine": engine, "target_engine": engine,
+        }))
+        .into_response(),
+        Ok(CategoryChange::Move { plan, .. }) => Json(serde_json::json!({
+            "kind": "move_data", "engine": engine, "target_engine": engine, "plan": plan.summary(),
+        }))
+        .into_response(),
+        Ok(CategoryChange::Graduate { to, plan, .. }) => Json(serde_json::json!({
+            "kind": "graduate", "engine": engine, "target_engine": to, "plan": plan.summary(),
+        }))
+        .into_response(),
+    }
 }
 
 /// Race lifecycle events, by time window or by torrent.
@@ -11718,6 +11921,8 @@ pub fn router(state: AppState) -> Router {
         // Workflows carry their own routes, so this file does not grow another
         // six handlers. Merged before with_state so they share it.
         .merge(crate::rulesapi::routes())
+        // The agent endpoint, same reasoning: its own file, the same state.
+        .merge(crate::mcp::routes())
         .with_state(state)
         // gzip, as 3.x does on this stream. Hydration is ~250 MB of JSON at
         // 300k torrents: a browser will not sit through that uncompressed, and

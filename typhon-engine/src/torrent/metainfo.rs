@@ -17,6 +17,26 @@ fn decode_path_str(bytes: &[u8]) -> String {
     }
 }
 
+/// A file path from the metainfo, relative to the save path: only plain names.
+fn check_contained(rel: &std::path::Path) -> Result<(), String> {
+    use std::path::Component;
+    if rel.as_os_str().is_empty() {
+        return Err("unsafe path in torrent: a file has no name".into());
+    }
+    for c in rel.components() {
+        match c {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "unsafe path in torrent: {:?} would be written outside the download folder",
+                    rel.display().to_string()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_torrent_file(path: &str) -> Result<TorrentMeta, String> {
     let data = std::fs::read(path).map_err(|e| format!("read {}: {}", path, e))?;
     parse_torrent_bytes(&data)
@@ -87,6 +107,17 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         let path = PathBuf::from(&name);
         (vec![FileEntry { path, offset: 0, length }], length, false)
     };
+
+    // Every file must stay inside the torrent's folder. The names come from
+    // whoever made the .torrent, and joined onto a save path, `..` climbs out
+    // of it and an absolute component replaces it outright: a torrent naming
+    // `../../etc/cron.d/x` would be downloaded THERE. Refused rather than
+    // rewritten -- a legitimate torrent never contains either, and a silently
+    // renamed file is one the other seeders' layout no longer matches.
+    for f in &files {
+        let rel = if multi_file { std::path::Path::new(&name).join(&f.path) } else { f.path.clone() };
+        check_contained(&rel)?;
+    }
 
     // Trackers
     let mut trackers = Vec::new();
@@ -399,6 +430,69 @@ fn decode_dict(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A torrent from its name and file list, lengths computed.
+    fn with_paths(name: &str, files: &[&[&str]]) -> Vec<u8> {
+        let mut info = Vec::new();
+        if files.is_empty() {
+            info.extend_from_slice(b"d6:lengthi1e");
+        } else {
+            info.extend_from_slice(b"d5:filesl");
+            for parts in files {
+                info.extend_from_slice(b"d6:lengthi1e4:pathl");
+                for p in *parts {
+                    info.extend_from_slice(format!("{}:{p}", p.len()).as_bytes());
+                }
+                info.extend_from_slice(b"ee");
+            }
+            info.push(b'e');
+        }
+        info.extend_from_slice(format!("4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[7u8; 20]);
+        info.push(b'e');
+        let mut b = b"d4:info".to_vec();
+        b.extend_from_slice(&info);
+        b.push(b'e');
+        b
+    }
+
+    fn refused(bytes: &[u8]) -> String {
+        match parse_torrent_bytes(bytes) {
+            Ok(m) => panic!("accepted a torrent that escapes its folder: {:?}", m.files),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn a_file_path_that_climbs_out_is_refused() {
+        let e = refused(&with_paths("show", &[&["..", "..", "etc", "cron.d", "x"]]));
+        assert!(e.contains("unsafe path"), "{e}");
+        refused(&with_paths("show", &[&["ok.bin"], &["sub", "..", "..", "x"]]));
+    }
+
+    #[test]
+    fn an_absolute_component_is_refused() {
+        refused(&with_paths("show", &[&["/etc", "passwd"]]));
+        refused(&with_paths("show", &[&["a/../../x"]]));
+    }
+
+    #[test]
+    fn a_name_that_climbs_out_is_refused() {
+        refused(&with_paths("..", &[]));
+        refused(&with_paths("../x.bin", &[]));
+        refused(&with_paths("..", &[&["a.bin"]]));
+        refused(&with_paths("/abs", &[]));
+    }
+
+    #[test]
+    fn ordinary_nested_paths_still_parse() {
+        let m = parse_torrent_bytes(&with_paths("Show S01", &[&["e01.mkv"], &["Extras", "making of.mkv"]]))
+            .expect("a normal torrent");
+        assert_eq!(m.files.len(), 2);
+        parse_torrent_bytes(&with_paths("file..name.v2.bin", &[])).expect("dots inside a name are fine");
+        parse_torrent_bytes(&with_paths("show", &[&[".hidden"]])).expect("a dotfile is a plain name");
+    }
 
     /// Smallest legal single-file torrent, with `n` piece hashes. Info keys
     /// stay in the bencode-required sorted order: length, name, piece length,

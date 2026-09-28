@@ -48,7 +48,21 @@ CREATE TABLE IF NOT EXISTS bench_samples (
     race_session_uploaded INTEGER DEFAULT 0, global_uploaded INTEGER DEFAULT 0,
     global_downloaded INTEGER DEFAULT 0, race_announce_rate REAL DEFAULT 0,
     hoard_announce_rate REAL DEFAULT 0, race_announce_fail_rate REAL DEFAULT 0,
-    hoard_announce_fail_rate REAL DEFAULT 0);
+    hoard_announce_fail_rate REAL DEFAULT 0,
+    race_announce_needed REAL DEFAULT 0,
+    race_announce_late REAL DEFAULT 0,
+    race_announce_lag_p50 REAL DEFAULT 0,
+    race_announce_lag_p90 REAL DEFAULT 0,
+    race_announce_concurrency REAL DEFAULT 0,
+    race_announce_latency_ms REAL DEFAULT 0,
+    race_announce_throttled_pct REAL DEFAULT 0,
+    hoard_announce_needed REAL DEFAULT 0,
+    hoard_announce_late REAL DEFAULT 0,
+    hoard_announce_lag_p50 REAL DEFAULT 0,
+    hoard_announce_lag_p90 REAL DEFAULT 0,
+    hoard_announce_concurrency REAL DEFAULT 0,
+    hoard_announce_latency_ms REAL DEFAULT 0,
+    hoard_announce_throttled_pct REAL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_bench_ts ON bench_samples(ts);
 CREATE TABLE IF NOT EXISTS tracker_samples (
     ts REAL NOT NULL, engine TEXT NOT NULL, tracker TEXT NOT NULL,
@@ -75,7 +89,30 @@ pub const BENCH_COLUMNS: &str = "ts, race_upload_rate, race_download_rate, race_
      arc_ghost_hits_per_sec, race_uploading, race_avg_share, open_fds, \
      hoard_session_uploaded, race_session_uploaded, global_uploaded, \
      global_downloaded, race_announce_rate, hoard_announce_rate, \
-     race_announce_fail_rate, hoard_announce_fail_rate";
+     race_announce_fail_rate, hoard_announce_fail_rate, \
+     race_announce_needed, race_announce_late, race_announce_lag_p50, race_announce_lag_p90, race_announce_concurrency, race_announce_latency_ms, \
+     hoard_announce_needed, hoard_announce_late, hoard_announce_lag_p50, hoard_announce_lag_p90, hoard_announce_concurrency, hoard_announce_latency_ms, \
+     race_announce_throttled_pct, hoard_announce_throttled_pct";
+
+/// Columns added to `bench_samples` after databases already existed in the
+/// field. `CREATE TABLE IF NOT EXISTS` does not touch a table that is there,
+/// so an existing bench.db would lack them and every insert naming them would
+/// fail -- the sampler would stop recording anything at all.
+const ADDED_COLUMNS: &[&str] = &["race_announce_needed", "race_announce_late", "race_announce_lag_p50", "race_announce_lag_p90", "race_announce_concurrency", "race_announce_latency_ms", "race_announce_throttled_pct", "hoard_announce_needed", "hoard_announce_late", "hoard_announce_lag_p50", "hoard_announce_lag_p90", "hoard_announce_concurrency", "hoard_announce_latency_ms", "hoard_announce_throttled_pct"];
+
+fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
+    let have: std::collections::HashSet<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(bench_samples)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    for c in ADDED_COLUMNS {
+        if !have.contains(*c) {
+            conn.execute_batch(&format!("ALTER TABLE bench_samples ADD COLUMN {c} REAL DEFAULT 0"))?;
+        }
+    }
+    Ok(())
+}
 
 /// One recorded moment in a torrent's life.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -318,6 +355,7 @@ impl BenchDb {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
         conn.execute_batch(SCHEMA)?;
+        add_missing_columns(&conn)?;
         Ok(Self { conn })
     }
 
@@ -822,6 +860,32 @@ pub type Shared = Arc<Mutex<BenchDb>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bench.db written by an older release lacks the announce-health
+    /// columns. Opening it must add them, or the first insert fails and the
+    /// sampler records nothing from then on.
+    #[test]
+    fn an_old_database_gains_the_new_columns() {
+        let dir = std::env::temp_dir().join(format!("hydra-benchdb-migrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bench.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            // The table exactly as 4.2 created it: every column but the new ones.
+            let old: Vec<String> = BENCH_COLUMNS
+                .split(',')
+                .map(|c| c.trim())
+                .filter(|c| !ADDED_COLUMNS.contains(c))
+                .map(|c| if c == "ts" { "ts REAL NOT NULL".to_string() } else { format!("{c} REAL DEFAULT 0") })
+                .collect();
+            c.execute_batch(&format!("CREATE TABLE bench_samples ({})", old.join(", "))).unwrap();
+        }
+        let db = BenchDb::open(&path).expect("opens and migrates");
+        db.record_sample(&serde_json::json!({"ts": 1.0, "hoard_announce_late": 42.0})).expect("insert with new columns");
+        let v = db.samples_in_range(0.0, 2.0).unwrap();
+        assert_eq!(v[0]["hoard_announce_late"], 42);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn ev(hash: &str, kind: &str, ts: f64) -> RaceEvent {
         RaceEvent {

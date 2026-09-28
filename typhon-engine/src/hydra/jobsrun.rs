@@ -28,6 +28,21 @@ pub fn queue_graduation(
     save_path: &str,
     total_bytes: i64,
 ) -> Option<String> {
+    queue_graduation_allowing(state, hash, name, from_engine, to_engine, to_category, save_path, false, total_bytes)
+}
+
+/// `queue_graduation`, for an operator who agreed to break hardlinks.
+pub fn queue_graduation_allowing(
+    state: &AppState,
+    hash: &str,
+    name: &str,
+    from_engine: &str,
+    to_engine: &str,
+    to_category: &str,
+    save_path: &str,
+    allow_breaking_hardlinks: bool,
+    total_bytes: i64,
+) -> Option<String> {
     // `name` and `target` are the two keys the Jobs tab reads (jobName() and
     // the Destination column). Without them a row says "graduate" against a
     // bare hash and an empty destination -- true, and useless to look at.
@@ -38,13 +53,14 @@ pub fn queue_graduation(
         "to_engine": to_engine,
         "to_category": to_category,
         "save_path": save_path,
+        "allow_breaking_hardlinks": allow_breaking_hardlinks,
     })
     .to_string();
     let store = match state.store.lock() {
         Ok(s) => s,
         Err(e) => e.into_inner(),
     };
-    if store.job_pending_for("graduate", hash) {
+    if store.job_pending_for("graduate", hash) || store.job_pending_for("move_data", hash) {
         return None;
     }
     store.create_job("graduate", hash, &params, total_bytes).ok()
@@ -102,9 +118,10 @@ pub fn spawn(state: AppState) {
     });
 }
 
-fn run_job(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
+pub(crate) fn run_job(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     match job.kind.as_str() {
         "graduate" => graduate(state, job),
+        "move_data" => move_data(state, job),
         other => Err(format!("unknown job type {other}")),
     }
 }
@@ -120,6 +137,7 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let to = p.get("to_engine").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let category = p.get("to_category").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let dest_root = p.get("save_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let allow = p.get("allow_breaking_hardlinks").and_then(|v| v.as_bool()).unwrap_or(false);
     if to.is_empty() || dest_root.is_empty() {
         return Err("graduation needs a target engine and a save path".into());
     }
@@ -164,7 +182,7 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             continue;
         }
         let size = std::fs::metadata(from_path).map(|m| m.len()).unwrap_or(0) as i64;
-        crate::jobs::run_move(from_path, to_path)
+        crate::jobs::run_move_allowing(from_path, to_path, allow)
             .map_err(|e| format!("moving {}: {e}", from_path.display()))?;
         done += size;
         let store = match state.store.lock() {
@@ -235,4 +253,448 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     tracing::info!(hash = %hash, from = %from, to = %to, moved_bytes = done, seed_secs = seeded,
                    "graduated");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Moving a torrent's data inside its engine
+// ---------------------------------------------------------------------------
+
+/// One file of a planned move.
+#[derive(Debug, Clone)]
+pub struct MoveFile {
+    pub from: std::path::PathBuf,
+    pub to: std::path::PathBuf,
+    pub size: u64,
+    /// On disk at the source. A file never downloaded has nothing to move.
+    pub present: bool,
+    /// Same filesystem: a rename, instant, and a hardlink survives it.
+    pub rename: bool,
+    /// Needs a copy AND has another name on disk: the copy breaks the link.
+    pub hardlinked: bool,
+}
+
+/// Everything a move will do, worked out before anything is touched.
+#[derive(Debug, Clone)]
+pub struct MovePlan {
+    pub old_root: std::path::PathBuf,
+    pub new_root: std::path::PathBuf,
+    pub files: Vec<MoveFile>,
+    /// A path from the metainfo that is not a plain relative path (`..`, an
+    /// absolute component). Joined onto a root it points OUTSIDE it, so a
+    /// move would rename or delete a file that is not this torrent's.
+    pub unsafe_path: Option<String>,
+    /// Another torrent reads one of these same files. Renaming it away would
+    /// leave that torrent serving bytes that are no longer there.
+    pub shared_with: Vec<String>,
+}
+
+impl MovePlan {
+    pub fn is_noop(&self) -> bool {
+        self.old_root == self.new_root
+    }
+    /// Why this move must not run at all, whatever the operator agrees to.
+    pub fn refusal(&self) -> Option<(&'static str, String)> {
+        if let Some(p) = &self.unsafe_path {
+            return Some(("unsafe_path", format!("the torrent names a file outside its folder ({p}); refusing to move it")));
+        }
+        if !self.shared_with.is_empty() {
+            return Some(("shared", format!(
+                "{} other torrent(s) read the same files ({}); moving them would leave those serving nothing",
+                self.shared_with.len(),
+                self.shared_with.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        None
+    }
+    fn present(&self) -> impl Iterator<Item = &MoveFile> {
+        self.files.iter().filter(|f| f.present)
+    }
+    pub fn copy_bytes(&self) -> u64 {
+        self.present().filter(|f| !f.rename).map(|f| f.size).sum()
+    }
+    pub fn hardlinked(&self) -> (usize, u64) {
+        let h: Vec<&MoveFile> = self.present().filter(|f| f.hardlinked).collect();
+        (h.len(), h.iter().map(|f| f.size).sum())
+    }
+    /// What the preview route and a refusal both show.
+    pub fn summary(&self) -> serde_json::Value {
+        let (hl_files, hl_bytes) = self.hardlinked();
+        let free = crate::jobs::free_space_near(&self.new_root);
+        let copy = self.copy_bytes();
+        serde_json::json!({
+            "from": self.old_root.display().to_string(),
+            "to": self.new_root.display().to_string(),
+            "files": self.files.len(),
+            "bytes": self.files.iter().map(|f| f.size).sum::<u64>(),
+            "missing_files": self.files.iter().filter(|f| !f.present).count(),
+            "rename_files": self.present().filter(|f| f.rename).count(),
+            "copy_files": self.present().filter(|f| !f.rename).count(),
+            "copy_bytes": copy,
+            "hardlinked_files": hl_files,
+            "hardlinked_bytes": hl_bytes,
+            "free_bytes": free,
+            "enough_space": free.map(|f| f >= copy).unwrap_or(true),
+            "unsafe_path": self.unsafe_path,
+            "shared_with": self.shared_with,
+        })
+    }
+}
+
+/// The paths of `t`'s files relative to its root, as the engine builds them.
+fn rel_paths(t: &typhon_engine::torrent::meta::TorrentState) -> Vec<std::path::PathBuf> {
+    let multi = t.meta.multi_file;
+    t.meta
+        .files
+        .iter()
+        .map(|f| {
+            if multi {
+                std::path::Path::new(&t.meta.name).join(&f.path)
+            } else {
+                f.path.clone()
+            }
+        })
+        .collect()
+}
+
+/// Only plain names: no `..`, no root, no prefix, no `.`.
+fn is_plain_relative(p: &std::path::Path) -> bool {
+    p.components().count() > 0
+        && p.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Plan moving `t`'s files to `new_root`, and find the torrents of any engine
+/// that read one of the same files.
+///
+/// Every operation of a move is PER FILE, on the files this torrent names:
+/// nothing is copied or deleted by directory. A single file sitting directly
+/// in a category folder among other torrents' files moves alone; the folder,
+/// and everything else in it, stays.
+pub fn plan_move_checked(
+    state: &AppState,
+    t: &typhon_engine::torrent::meta::TorrentState,
+    new_root: &std::path::Path,
+) -> MovePlan {
+    let mut plan = plan_move(t, new_root);
+    if plan.unsafe_path.is_some() {
+        return plan;
+    }
+    let mine: std::collections::HashSet<std::path::PathBuf> =
+        plan.files.iter().map(|f| f.from.clone()).collect();
+    let root = &plan.old_root;
+    for engine in state.engines.engines().iter() {
+        for other in engine.manager.all() {
+            if other.meta.info_hash == t.meta.info_hash {
+                continue;
+            }
+            // Only a torrent whose root is on the same branch can name the
+            // same files: a prefix test first, the file list only then.
+            // Read in place: this runs over every torrent of every engine
+            // (900k on the reference node), and a PathBuf clone each is an
+            // allocation per torrent for the 99.99% that fail the test.
+            let r = {
+                let r = other.save_path.read();
+                if !(root.starts_with(&*r) || r.starts_with(root)) {
+                    continue;
+                }
+                r.clone()
+            };
+            if rel_paths(&other).iter().any(|p| mine.contains(&r.join(p))) {
+                let h = typhon_engine::torrent::hex_encode(&other.meta.info_hash);
+                if !plan.shared_with.contains(&h) {
+                    plan.shared_with.push(h);
+                }
+            }
+        }
+    }
+    plan
+}
+
+/// Plan moving `t`'s files from where it reads them to `new_root`.
+pub fn plan_move(
+    t: &typhon_engine::torrent::meta::TorrentState,
+    new_root: &std::path::Path,
+) -> MovePlan {
+    let old_root = t.save_path.read().clone();
+    let unsafe_path = rel_paths(t)
+        .into_iter()
+        .find(|p| !is_plain_relative(p))
+        .map(|p| p.display().to_string());
+    let multi = t.meta.multi_file;
+    let name = t.meta.name.clone();
+    let files = t
+        .meta
+        .files
+        .iter()
+        .map(|f| {
+            let rel: std::path::PathBuf = if multi {
+                std::path::Path::new(&name).join(&f.path)
+            } else {
+                f.path.clone()
+            };
+            let from = old_root.join(&rel);
+            let to = new_root.join(&rel);
+            let meta = std::fs::metadata(&from).ok();
+            let present = meta.is_some();
+            let rename = present && crate::jobs::same_filesystem(&from, &to);
+            let hardlinked = present && !rename && crate::jobs::link_count(&from) > 1;
+            MoveFile {
+                size: meta.map(|m| m.len()).unwrap_or(f.length),
+                from,
+                to,
+                present,
+                rename,
+                hardlinked,
+            }
+        })
+        .collect();
+    MovePlan { old_root, new_root: new_root.to_path_buf(), files, unsafe_path, shared_with: Vec::new() }
+}
+
+/// Queue moving a torrent's data to `save_path` without leaving its engine.
+pub fn queue_move(
+    state: &AppState,
+    hash: &str,
+    name: &str,
+    engine: &str,
+    category: &str,
+    save_path: &str,
+    allow_breaking_hardlinks: bool,
+    total_bytes: i64,
+) -> Option<String> {
+    let params = serde_json::json!({
+        "name": name,
+        "target": save_path,
+        "engine": engine,
+        "category": category,
+        "save_path": save_path,
+        "allow_breaking_hardlinks": allow_breaking_hardlinks,
+    })
+    .to_string();
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    // One move at a time per torrent, whichever kind: a graduation and a move
+    // of the same files racing each other is how both end up half-done.
+    if store.job_pending_for("move_data", hash) || store.job_pending_for("graduate", hash) {
+        return None;
+    }
+    store.create_job("move_data", hash, &params, total_bytes).ok()
+}
+
+/// Put a torrent back where it was after a move that could not finish.
+///
+/// Undo the renames, drop the copies, re-add at the old root. Every step is
+/// attempted even if one fails: a partial undo still leaves less to repair by
+/// hand than none.
+fn roll_back(
+    engine: &crate::engines::Engine,
+    metainfo: &[u8],
+    old_root: &std::path::Path,
+    paused: bool,
+    renamed: &[(std::path::PathBuf, std::path::PathBuf)],
+    copied: &[std::path::PathBuf],
+) -> String {
+    let mut problems = Vec::new();
+    for (from, to) in renamed.iter().rev() {
+        if let Err(e) = std::fs::rename(to, from) {
+            problems.push(format!("could not put {} back: {e}", from.display()));
+        }
+    }
+    for c in copied {
+        let _ = std::fs::remove_file(c);
+    }
+    if let Err(e) = engine.manager.add_torrent_bytes(metainfo, &old_root.to_string_lossy(), paused, true) {
+        problems.push(format!("could not re-add it at {}: {e}", old_root.display()));
+    }
+    if problems.is_empty() {
+        "rolled back: the torrent is where it was".into()
+    } else {
+        format!("ROLLBACK INCOMPLETE: {}", problems.join("; "))
+    }
+}
+
+/// Move a torrent's data to another directory of the SAME engine.
+///
+/// The Go daemon did this for "Move to category"; the Rust port answered the
+/// same request with a relabel and a 200, so for weeks a move changed the
+/// label and left every byte where it was.
+///
+/// Order matters, and it is chosen so the torrent never serves bytes that are
+/// not there:
+///  1. files on ANOTHER filesystem are copied while the torrent keeps seeding
+///     from the originals -- that is the long part, and nothing stops for it;
+///  2. the torrent leaves the engine (data kept), same-filesystem files are
+///     renamed, and it is re-added at the new root without a recheck;
+///  3. only then are the originals of the copied files deleted.
+/// A failure in 1 deletes the copies; a failure in 2 undoes the renames and
+/// re-adds the torrent where it was. Nothing is ever deleted before the new
+/// copy is the one being served.
+fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
+    let p: serde_json::Value = serde_json::from_str(&job.params).map_err(|e| e.to_string())?;
+    let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let (engine_id, category, save_path) = (s("engine"), s("category"), s("save_path"));
+    let allow = p.get("allow_breaking_hardlinks").and_then(|v| v.as_bool()).unwrap_or(false);
+    if engine_id.is_empty() || save_path.is_empty() {
+        return Err("a move needs an engine and a save path".into());
+    }
+    let hash = job.info_hash.clone();
+    let engine = state.engines.get(&engine_id).ok_or("the engine is gone")?;
+    let ih = typhon_engine::torrent::hex_decode(&hash)?;
+    let t = engine.manager.get(&ih).ok_or("the engine no longer holds it")?;
+    let plan = plan_move_checked(state, &t, std::path::Path::new(&save_path));
+    if let Some((_, why)) = plan.refusal() {
+        return Err(format!("{why}; nothing was moved"));
+    }
+
+    let set_labels = |root: Option<&str>| {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        if let Some(r) = root {
+            let _ = store.set_save_path(&hash, r);
+        }
+        if !category.is_empty() {
+            let _ = store.set_category_in(&hash, &engine_id, &category);
+        }
+    };
+    if plan.is_noop() {
+        set_labels(None);
+        return Ok(());
+    }
+    // Checked again here, not only when the request came in: a file can gain
+    // a second name between the two, and the answer given then is stale now.
+    let (hl, _) = plan.hardlinked();
+    if hl > 0 && !allow {
+        return Err(format!(
+            "{hl} file(s) are hardlinked elsewhere and the target is on another filesystem; \
+             nothing was moved (allow_breaking_hardlinks was not given)"
+        ));
+    }
+    let need = plan.copy_bytes();
+    if let Some(free) = crate::jobs::free_space_near(&plan.new_root) {
+        if free < need {
+            return Err(format!("{need} bytes to copy, {free} free on the target; nothing was moved"));
+        }
+    }
+    // Without the metainfo nothing could re-add the torrent: find out now,
+    // while stopping is still optional.
+    let metainfo = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.torrent_blob(&hash).ok().flatten()
+    }
+    .ok_or("no metainfo in the store to re-add it with; nothing was moved")?;
+
+    let progress = |done: i64| {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        let _ = store.job_progress(&job.id, done);
+    };
+
+    // 1. Copies, while it seeds.
+    let mut copied: Vec<std::path::PathBuf> = Vec::new();
+    let mut done: i64 = 0;
+    for f in plan.files.iter().filter(|f| f.present && !f.rename) {
+        if let Err(e) = crate::jobs::copy_only(&f.from, &f.to) {
+            for c in &copied {
+                let _ = std::fs::remove_file(c);
+            }
+            let _ = std::fs::remove_file(&f.to);
+            return Err(format!("copying {}: {e}; the copies were removed, nothing moved", f.from.display()));
+        }
+        copied.push(f.to.clone());
+        done += f.size as i64;
+        progress(done);
+    }
+
+    // 2. Stop, rename, re-add.
+    let now = typhon_engine::torrent::meta::now_secs();
+    let seeded = t.seed_time_now(now);
+    let paused = t.is_paused.load(std::sync::atomic::Ordering::Relaxed);
+    drop(t);
+    if let Err(e) = engine.manager.remove_torrent(&ih, true) {
+        for c in &copied {
+            let _ = std::fs::remove_file(c);
+        }
+        return Err(format!("the engine refused to release it: {e}; nothing moved"));
+    }
+    engine.announce_cache.forget(&hash);
+
+    let mut renamed: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for f in plan.files.iter().filter(|f| f.present && f.rename) {
+        let r = f
+            .to
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|_| std::fs::rename(&f.from, &f.to));
+        if let Err(e) = r {
+            let undo = roll_back(engine, &metainfo, &plan.old_root, paused, &renamed, &copied);
+            return Err(format!("renaming {}: {e}; {undo}", f.from.display()));
+        }
+        renamed.push((f.from.clone(), f.to.clone()));
+        done += f.size as i64;
+        progress(done);
+    }
+
+    let new_root = plan.new_root.to_string_lossy().to_string();
+    match engine.manager.add_torrent_bytes(&metainfo, &new_root, paused, true) {
+        Ok((added, _)) if added == ih => {}
+        Ok((added, _)) => {
+            let _ = engine.manager.remove_torrent(&added, true);
+            let undo = roll_back(engine, &metainfo, &plan.old_root, paused, &renamed, &copied);
+            return Err(format!(
+                "the metainfo for {hash} describes {} instead; {undo}",
+                typhon_engine::torrent::hex_encode(&added)
+            ));
+        }
+        Err(e) => {
+            let undo = roll_back(engine, &metainfo, &plan.old_root, paused, &renamed, &copied);
+            return Err(format!("the engine refused it at {new_root}: {e}; {undo}"));
+        }
+    }
+    if let Some(nt) = engine.manager.get(&ih) {
+        nt.seed_secs.store(seeded, std::sync::atomic::Ordering::Relaxed);
+        nt.fold_seed_time(typhon_engine::torrent::meta::now_secs());
+    }
+    set_labels(Some(&new_root));
+
+    // 3. The originals of what was copied. The torrent reads the new ones now.
+    for f in plan.files.iter().filter(|f| f.present && !f.rename) {
+        if let Err(e) = std::fs::remove_file(&f.from) {
+            tracing::warn!(file = %f.from.display(), error = %e, "moved, but the original could not be removed");
+        }
+    }
+    prune_empty_dirs(&plan);
+    tracing::info!(hash = %hash, engine = %engine_id, from = %plan.old_root.display(),
+                   to = %new_root, copied_bytes = need, "moved");
+    Ok(())
+}
+
+/// Remove the directories the move emptied, deepest first, never the old root
+/// itself: that is a category directory other torrents may share.
+fn prune_empty_dirs(plan: &MovePlan) {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for f in &plan.files {
+        let mut cur = f.from.parent();
+        while let Some(d) = cur {
+            if d == plan.old_root || !d.starts_with(&plan.old_root) {
+                break;
+            }
+            if !dirs.iter().any(|x| x == d) {
+                dirs.push(d.to_path_buf());
+            }
+            cur = d.parent();
+        }
+    }
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    for d in dirs {
+        let _ = std::fs::remove_dir(&d);
+    }
 }
