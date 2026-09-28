@@ -59,8 +59,26 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   of the other engine's kind graduates the torrent there. `move-preview`,
   which answered 400 to everything, now says what a move would do.
 - The agent endpoint gained `move_to_category`.
+- **IOWait and ARC misses were recorded as 0 since the Rust port.** The
+  bench sampler wrote the columns but never read `/proc/stat` or the ZFS ARC
+  counters; both are measured again, over each sample's interval.
 
 ### Changed
+- **Announces are paced per tracker, by how fast each one answers.** The pool
+  of announce workers had a fixed size, too small for a million torrents and
+  blind to which tracker was slow. Each tracker now gets its own limit on
+  requests in flight, learnt the way TCP Vegas learns a link: it rises while
+  the tracker answers at its usual speed and work is waiting, and falls when
+  answers slow down, when it refuses or times out, or when a rise bought no
+  more answers than before. A saturated tracker is held at the point where it
+  answers as fast as it can without queueing us; one slow tracker no longer
+  holds up the others' announces. On a bench tracker capped at 350 answers a
+  second, the limit settles near 200 in flight at the tracker's normal 0.5 s,
+  where sizing the pool from demand alone climbed past 1,700 and pushed its
+  answers to 2.8 s for the same throughput.
+- **The bench shows announces as figures**: announces a second against the
+  rate the catalogue needs, how many torrents are late and by how much, and
+  workers in flight against the current limit. The announce lag chart is gone.
 - **Counts are grouped by thousands**, in the interface's language: 945 775 in
   French, 945,775 in English, instead of 945775. Header, overview, filter
   chips, the list's status line and the records card.

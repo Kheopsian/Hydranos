@@ -1,3 +1,6 @@
+// The bench sample is one `json!` object of ~60 keys; the macro recurses once
+// per key and the default limit of 128 no longer covers it.
+#![recursion_limit = "256"]
 // ⚠ Windows only: without this the daemon is a console program, and
 // double-clicking it opens a black window that closes when it does. The 3.x
 // package had no such window and this build regressed it. `windows` means "no

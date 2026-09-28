@@ -56,13 +56,15 @@ CREATE TABLE IF NOT EXISTS bench_samples (
     race_announce_concurrency REAL DEFAULT 0,
     race_announce_latency_ms REAL DEFAULT 0,
     race_announce_throttled_pct REAL DEFAULT 0,
+    race_announce_in_flight REAL DEFAULT 0,
     hoard_announce_needed REAL DEFAULT 0,
     hoard_announce_late REAL DEFAULT 0,
     hoard_announce_lag_p50 REAL DEFAULT 0,
     hoard_announce_lag_p90 REAL DEFAULT 0,
     hoard_announce_concurrency REAL DEFAULT 0,
     hoard_announce_latency_ms REAL DEFAULT 0,
-    hoard_announce_throttled_pct REAL DEFAULT 0);
+    hoard_announce_throttled_pct REAL DEFAULT 0,
+    hoard_announce_in_flight REAL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_bench_ts ON bench_samples(ts);
 CREATE TABLE IF NOT EXISTS tracker_samples (
     ts REAL NOT NULL, engine TEXT NOT NULL, tracker TEXT NOT NULL,
@@ -92,13 +94,14 @@ pub const BENCH_COLUMNS: &str = "ts, race_upload_rate, race_download_rate, race_
      race_announce_fail_rate, hoard_announce_fail_rate, \
      race_announce_needed, race_announce_late, race_announce_lag_p50, race_announce_lag_p90, race_announce_concurrency, race_announce_latency_ms, \
      hoard_announce_needed, hoard_announce_late, hoard_announce_lag_p50, hoard_announce_lag_p90, hoard_announce_concurrency, hoard_announce_latency_ms, \
-     race_announce_throttled_pct, hoard_announce_throttled_pct";
+     race_announce_throttled_pct, hoard_announce_throttled_pct, \
+     race_announce_in_flight, hoard_announce_in_flight";
 
 /// Columns added to `bench_samples` after databases already existed in the
 /// field. `CREATE TABLE IF NOT EXISTS` does not touch a table that is there,
 /// so an existing bench.db would lack them and every insert naming them would
 /// fail -- the sampler would stop recording anything at all.
-const ADDED_COLUMNS: &[&str] = &["race_announce_needed", "race_announce_late", "race_announce_lag_p50", "race_announce_lag_p90", "race_announce_concurrency", "race_announce_latency_ms", "race_announce_throttled_pct", "hoard_announce_needed", "hoard_announce_late", "hoard_announce_lag_p50", "hoard_announce_lag_p90", "hoard_announce_concurrency", "hoard_announce_latency_ms", "hoard_announce_throttled_pct"];
+const ADDED_COLUMNS: &[&str] = &["race_announce_needed", "race_announce_late", "race_announce_lag_p50", "race_announce_lag_p90", "race_announce_concurrency", "race_announce_latency_ms", "race_announce_throttled_pct", "race_announce_in_flight", "hoard_announce_needed", "hoard_announce_late", "hoard_announce_lag_p50", "hoard_announce_lag_p90", "hoard_announce_concurrency", "hoard_announce_latency_ms", "hoard_announce_throttled_pct", "hoard_announce_in_flight"];
 
 fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
     let have: std::collections::HashSet<String> = {
