@@ -115,7 +115,7 @@ fn arc_interval(text: &str, ts: f64, prev: &mut Option<([f64; 5], f64)>, out: &m
     *prev = Some((now, ts));
 }
 
-pub fn spawn(engines: Arc<EngineHost>, bench: Shared, store: Arc<std::sync::Mutex<Store>>) {
+pub fn spawn(engines: Arc<EngineHost>, bench: Shared, store: Arc<crate::store::StoreLock>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(INTERVAL);
         // A sampler that fell behind must not then burst: the graph would show
@@ -135,7 +135,7 @@ pub fn spawn(engines: Arc<EngineHost>, bench: Shared, store: Arc<std::sync::Mute
 fn sample_once(
     engines: &Arc<EngineHost>,
     bench: &Shared,
-    store: &Arc<std::sync::Mutex<Store>>,
+    store: &Arc<crate::store::StoreLock>,
     previous: &mut Previous,
     system: &mut SystemPrev,
 ) -> anyhow::Result<()> {

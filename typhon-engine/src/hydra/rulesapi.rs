@@ -616,7 +616,7 @@ pub fn routes() -> axum::Router<AppState> {
 }
 
 /// Kept so the module owns its Arc import even when the runner changes shape.
-pub type Shared = Arc<std::sync::Mutex<crate::store::Store>>;
+pub type Shared = Arc<crate::store::StoreLock>;
 
 #[cfg(test)]
 mod tests {
