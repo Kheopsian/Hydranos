@@ -64,6 +64,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   many it re-measured (`rechecked`) and how many no longer qualified
   (`no_longer_true`). Until the index has measured a torrent, no hardlink
   condition matches it.
+- **A workflow pass held the store's writer for twenty seconds and more.**
+  Gathering the facts ran on the shared connection and made one `statvfs` per
+  distinct save path -- 915,000 of them in a library where every torrent has
+  its own folder -- whether or not the rule read `free_space`. Every add, tag
+  and pause waited behind it. The facts are now read on the read-only
+  connection, free space is measured only for a rule that asks for it, and a
+  scheduled pass is marked as run when it starts: a pass that overran its tick
+  used to be started again every minute on top of itself.
 - **Every restart told the trackers of each stopped torrent that it had
   stopped.** Putting the operator's pauses back at boot went through the same
   call as pressing Stop, which owes the trackers a departure, so each restart

@@ -119,12 +119,15 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
         // resolving a million torrents' paths is seconds, not something to
         // redo every two thousand torrents.
         let snapshot = store.read().ok().map(|s| {
-            (rulesrun::catalogue(&engines, &s), s.link_index_meta().unwrap_or_default())
+            (rulesrun::stored_facts(&engines, &s), s.link_index_meta().unwrap_or_default())
         });
-        let Some((cat, meta)) = snapshot else {
+        let Some((stored, meta)) = snapshot else {
             std::thread::sleep(IDLE);
             continue;
         };
+        // Paths are built after the connection is released.
+        let cat = rulesrun::catalogue_from(&engines, &stored);
+        drop(stored);
         PROGRESS.catalogue.store(cat.len() as i64, Ordering::Relaxed);
 
         let gone = orphans(&cat, &meta);
