@@ -45,6 +45,7 @@ mod row;
 mod speedtest;
 mod dedup;
 mod export;
+mod selection;
 mod store;
 mod tomledit;
 mod trackeredit;

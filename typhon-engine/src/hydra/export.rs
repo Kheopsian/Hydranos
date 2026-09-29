@@ -22,12 +22,6 @@ use crate::store::{ExportRow, StoreLock};
 /// never held long, large enough that a million hashes is 2 000 trips.
 pub const BATCH: usize = 500;
 
-/// A request body big enough for a million hashes, url-encoded and comma
-/// separated (43 bytes each), with room to spare. The router's default is
-/// 2 MiB, which is ~48 000 hashes: a Ctrl+A on a large library would be
-/// refused before the handler ever ran.
-pub const BODY_MAX: usize = 96 << 20;
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
     Zip,
