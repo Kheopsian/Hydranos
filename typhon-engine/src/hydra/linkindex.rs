@@ -25,7 +25,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use crate::platform::FileId;
 
@@ -130,6 +129,61 @@ pub fn guard_verdict(fresh: &LinkFacts, cached: &LinkFacts) -> Result<(), String
         ));
     }
     Ok(())
+}
+
+/// Bytes one file takes in a stored measurement: a presence flag, then
+/// volume, index, links and size as little-endian u64.
+const PACKED_FILE: usize = 33;
+
+/// One torrent's measurement, in file order, as the store keeps it.
+///
+/// A BLOB per torrent rather than a row per file: a million torrents are some
+/// three million files, and a row each would mean three million keys to write
+/// and to read back for every pass. The paths are NOT stored -- they are
+/// derived from the torrent's own metadata and its save path, the same way the
+/// measurement was taken, so a stored row is only valid against the save path
+/// it was measured under (the store keeps that beside it).
+pub fn pack(stats: &[Option<FileId>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(stats.len() * PACKED_FILE);
+    for st in stats {
+        match st {
+            Some(id) => {
+                out.push(1);
+                for v in [id.volume, id.index, id.links, id.size] {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            None => out.extend_from_slice(&[0u8; PACKED_FILE]),
+        }
+    }
+    out
+}
+
+/// The reverse of `pack`. `None` for a blob that is not a whole number of
+/// files: a truncated measurement is treated as no measurement, never as a
+/// shorter torrent whose missing tail would read as "no names of ours".
+pub fn unpack(blob: &[u8]) -> Option<Vec<Option<FileId>>> {
+    if blob.len() % PACKED_FILE != 0 {
+        return None;
+    }
+    let word = |c: &[u8], i: usize| u64::from_le_bytes(c[1 + i * 8..9 + i * 8].try_into().unwrap());
+    Some(
+        blob.chunks_exact(PACKED_FILE)
+            .map(|c| {
+                (c[0] == 1).then(|| FileId {
+                    volume: word(c, 0),
+                    index: word(c, 1),
+                    links: word(c, 2),
+                    size: word(c, 3),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Files of a measurement that could not be read.
+pub fn missing_files(stats: &[Option<FileId>]) -> usize {
+    stats.iter().filter(|s| s.is_none()).count()
 }
 
 #[cfg(test)]
@@ -294,90 +348,23 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_serves_one_scan_and_rebuilds_after_the_ttl() {
-        let c = Cache::default();
-        let mut built = 0;
-        let mut build = |n: &mut i32| {
-            *n += 1;
-            let mut m = HashMap::new();
-            m.insert("x".to_string(), LinkFacts::default());
-            m
-        };
-        c.get_or_build(1_000, || build(&mut built));
-        c.get_or_build(1_000 + TTL_SECS - 1, || build(&mut built));
-        assert_eq!(built, 1, "inside the TTL the scan is not redone");
-        c.get_or_build(1_000 + TTL_SECS, || build(&mut built));
-        assert_eq!(built, 2, "at the TTL it is");
-    }
-
-    /// While the store mutex was held across the scan it serialised racers for
-    /// free. The scan holds no lock now, so single-flight has to be explicit:
-    /// two passes whose TTL expires together must not stat the whole catalogue
-    /// twice at once.
-    #[test]
-    fn two_passes_racing_an_expired_cache_scan_once() {
-        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
-
-        let c = Arc::new(Cache::default());
-        let builds = Arc::new(AtomicUsize::new(0));
-        let entered = Arc::new(AtomicUsize::new(0));
-
-        let (c1, b1, e1) = (c.clone(), builds.clone(), entered.clone());
-        let first = std::thread::spawn(move || {
-            c1.get_or_build(0, || {
-                b1.fetch_add(1, Ordering::SeqCst);
-                e1.fetch_add(1, Ordering::SeqCst);
-                // Stand in for the stat pass, long enough for the racer to arrive.
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                let mut m = HashMap::new();
-                m.insert("x".to_string(), LinkFacts::default());
-                m
-            })
-        });
-
-        // Only start racing once the first thread is demonstrably inside build().
-        while entered.load(Ordering::SeqCst) == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-
-        let (c2, b2) = (c.clone(), builds.clone());
-        let second = std::thread::spawn(move || {
-            c2.get_or_build(0, || {
-                b2.fetch_add(1, Ordering::SeqCst);
-                HashMap::new()
-            })
-        });
-
-        let a = first.join().expect("first");
-        let b = second.join().expect("second");
-
-        assert_eq!(
-            builds.load(Ordering::SeqCst),
-            1,
-            "the racer must wait for the scan in flight, not launch a second one"
-        );
-        assert_eq!(a, b, "and it must be handed the scan that actually ran");
-        assert!(b.contains_key("x"));
+    fn a_measurement_comes_back_from_the_store_as_it_went_in() {
+        let stats = vec![st(7, 3, 4096), None, st(u64::MAX, 1, 0)];
+        let blob = pack(&stats);
+        assert_eq!(blob.len(), 3 * PACKED_FILE);
+        assert_eq!(unpack(&blob), Some(stats.clone()));
+        assert_eq!(missing_files(&stats), 1);
+        assert_eq!(unpack(&[]), Some(Vec::new()), "a torrent with no file is still a measurement");
     }
 
     #[test]
-    fn invalidating_forces_the_next_caller_to_measure() {
-        let c = Cache::default();
-        let mut built = 0;
-        c.get_or_build(0, || {
-            built += 1;
-            HashMap::new()
-        });
-        c.invalidate();
-        c.get_or_build(1, || {
-            built += 1;
-            HashMap::new()
-        });
-        assert_eq!(built, 2);
-        assert_eq!(c.age(5), Some(4));
+    fn a_truncated_measurement_is_no_measurement() {
+        let mut blob = pack(&[st(1, 1, 1), st(2, 1, 1)]);
+        blob.pop();
+        assert_eq!(unpack(&blob), None);
     }
 
-    /// The guard that stands between an hour-old scan and `delete`.
+    /// The guard that stands between a stored measurement and `delete`.
     #[test]
     fn a_recheck_sees_a_name_added_since_the_scan() {
         let dir = std::env::temp_dir().join(format!("hydranos-recheck-{}", std::process::id()));
@@ -428,82 +415,6 @@ mod tests {
             got["a"].external_links, 1,
             "two names on a one-link inode is incoherent, so keep"
         );
-    }
-}
-
-/// How long a scan's answers stay usable.
-///
-/// The scan is one `stat` per file in the catalogue: minutes on a large one.
-/// Redoing it every pass would mean a workflow on a fifteen-minute interval
-/// spending most of its life in `stat`. An hour is chosen against what the
-/// number actually measures -- hardlinks appear when the media library imports
-/// something, which is not a per-minute event.
-pub const TTL_SECS: i64 = 3600;
-
-/// The last scan, kept so consecutive passes share it.
-///
-/// ⚠️ Cached facts are fine for tagging and fine for a preview. They are NOT
-/// fine for `delete`: between the scan and the action, a cross-seed can add a
-/// name, and acting on an hour-old `external_links == 0` would remove a file
-/// somebody just started using. `recheck` below is what the delete path calls.
-pub struct Cache {
-    inner: Mutex<Option<(i64, HashMap<String, LinkFacts>)>>,
-    /// Held only by a thread that is actually scanning. Separate from `inner`
-    /// on purpose: a reader with a warm cache must never queue behind a scan.
-    building: Mutex<()>,
-}
-
-impl Default for Cache {
-    fn default() -> Self {
-        Self {
-            inner: Mutex::new(None),
-            building: Mutex::new(()),
-        }
-    }
-}
-
-impl Cache {
-    /// The cached scan if it is younger than the TTL, otherwise `build()`.
-    ///
-    /// `build` runs OUTSIDE `inner` on purpose: it stats every file in the
-    /// catalogue, and holding the read lock across that would stall every
-    /// other workflow for the whole scan.
-    ///
-    /// ⚠️ But it runs UNDER `building`, which is single-flight. While the
-    /// store mutex was held across the scan it serialised racers for free;
-    /// now that the scan touches no lock, two passes expiring together would
-    /// stat the whole catalogue twice AT THE SAME TIME -- the one moment the
-    /// disk can least afford it. The second waiter re-checks `inner` after
-    /// acquiring `building` and finds the fresh scan the first one just
-    /// stored, so it pays a wait instead of a duplicate scan.
-    pub fn get_or_build<F>(&self, now: i64, build: F) -> HashMap<String, LinkFacts>
-    where
-        F: FnOnce() -> HashMap<String, LinkFacts>,
-    {
-        if let Some((at, map)) = self.inner.lock().unwrap().as_ref() {
-            if now - at < TTL_SECS {
-                return map.clone();
-            }
-        }
-        let _flight = self.building.lock().unwrap();
-        // Re-check: a racer may have built while this thread queued.
-        if let Some((at, map)) = self.inner.lock().unwrap().as_ref() {
-            if now - at < TTL_SECS {
-                return map.clone();
-            }
-        }
-        let fresh = build();
-        *self.inner.lock().unwrap() = Some((now, fresh.clone()));
-        fresh
-    }
-
-    pub fn age(&self, now: i64) -> Option<i64> {
-        self.inner.lock().unwrap().as_ref().map(|(at, _)| now - at)
-    }
-
-    /// Drop the scan, so the next caller measures again.
-    pub fn invalidate(&self) {
-        *self.inner.lock().unwrap() = None;
     }
 }
 

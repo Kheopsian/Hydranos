@@ -9613,6 +9613,30 @@ async function updateWorkflows() {
         body.innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`;
     }
     loadWorkflowActivity();
+    loadLinkIndexStatus();
+}
+
+// Hardlink conditions read an index a background thread keeps; a rule on them
+// only sees the torrents it has measured, so say how far it has got.
+async function loadLinkIndexStatus() {
+    const el = document.getElementById("wf-links");
+    if (!el) return;
+    try {
+        const d = await api("/api/workflows/links");
+        const parts = [];
+        const pct = d.catalogue ? Math.floor(100 * d.measured / d.catalogue) : 0;
+        parts.push(`Hardlink index: ${fmtInt(d.measured)} of ${fmtInt(d.catalogue)} torrents measured (${pct}%). ` +
+                   `Hardlink conditions only match measured torrents.`);
+        if (d.data_missing) parts.push(`${fmtInt(d.data_missing)} with their files missing`);
+        if (d.partly_missing) parts.push(`${fmtInt(d.partly_missing)} with some files missing`);
+        const sw = d.sweep || {};
+        if (sw.total && sw.done < sw.total) {
+            parts.push(`measuring ${fmtInt(sw.done)} / ${fmtInt(sw.total)} (${fmtInt(sw.files_per_sec)} files/s)`);
+        }
+        el.textContent = parts.join(" · ");
+    } catch (e) {
+        el.textContent = "";
+    }
 }
 
 async function loadWorkflowActivity() {

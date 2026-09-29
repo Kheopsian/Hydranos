@@ -679,6 +679,32 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// Put back a stop decided before this process started.
+    ///
+    /// ⚠️ Not `stop_torrent`, whose BEP 3 departure is right for a stop someone
+    /// makes NOW and wrong here: the trackers were told when the torrent was
+    /// stopped, or never heard of it at all -- a tracker that refuses our
+    /// client, for one. Sending `stopped` again on every boot put this client
+    /// in front of such a tracker once per torrent per restart.
+    ///
+    /// The departure is still owed if this process has already announced the
+    /// torrent (the stagger start can get there first): that announce said
+    /// "started", and the tracker has to hear the opposite.
+    pub fn restore_stopped(&self, info_hash: &InfoHash) -> Result<(), String> {
+        let t = self.get(info_hash).ok_or("torrent not found")?;
+        let announced = t.last_announce_at.load(Ordering::Relaxed) > 0;
+        self.stop_torrent(info_hash)?;
+        if !announced {
+            let _ = t.pending_announce_event.compare_exchange(
+                crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
+                crate::torrent::meta::ANNOUNCE_EVENT_NONE,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+        Ok(())
+    }
+
     pub fn stop_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         // Closed BEFORE the pause flag goes up, so the interval that just
@@ -1884,6 +1910,35 @@ mod lifecycle_tests {
     /// ⭐ Stopping a torrent owes its trackers a departure. Without it the stop
     /// is silent and every tracker keeps us in the swarm until the entry goes
     /// stale, handing our address to leechers we will not answer.
+    /// A stop restored at boot owes nothing to trackers that were never told
+    /// "started" by this process -- and still owes it once they were.
+    #[test]
+    fn a_stop_restored_at_boot_departs_only_if_this_process_announced() {
+        let (mgr, root) = manager("restore");
+        let quiet = add(&mgr, &root, "quiet");
+        let spoken = add(&mgr, &root, "spoken");
+        for ih in [&quiet, &spoken] {
+            mgr.get(ih).unwrap().pending_announce_event.store(0, Ordering::Relaxed);
+        }
+        mgr.get(&spoken).unwrap().last_announce_at.store(1_700_000_000, Ordering::Relaxed);
+
+        mgr.restore_stopped(&quiet).expect("restored");
+        mgr.restore_stopped(&spoken).expect("restored");
+
+        let q = mgr.get(&quiet).unwrap();
+        assert!(q.is_paused.load(Ordering::Relaxed), "the stop itself is restored");
+        assert_eq!(
+            q.pending_announce_event.load(Ordering::Relaxed),
+            crate::torrent::meta::ANNOUNCE_EVENT_NONE,
+            "no departure for a torrent this process never announced"
+        );
+        assert_eq!(
+            mgr.get(&spoken).unwrap().pending_announce_event.load(Ordering::Relaxed),
+            ANNOUNCE_EVENT_STOPPED,
+            "this process said started, so the tracker must hear stopped"
+        );
+    }
+
     #[test]
     fn stopping_pauses_the_torrent_and_owes_the_trackers_a_departure() {
         let (mgr, root) = manager("stop");

@@ -67,6 +67,42 @@ pub struct Node {
     pub added_at: i64,
 }
 
+/// One torrent's hardlink measurement, as the link scanner writes it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LinkRow {
+    pub info_hash: String,
+    pub session: String,
+    /// The save path the files were resolved under. A row measured under
+    /// another one describes other files, and is ignored.
+    pub save_path: String,
+    pub measured_at: i64,
+    pub files: i64,
+    pub missing: i64,
+    /// `linkindex::pack` of the per-file measurement, in file order.
+    pub stats: Vec<u8>,
+}
+
+/// What the scanner needs to know about a row to decide whether it is due,
+/// without reading its measurement.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LinkRowMeta {
+    pub save_path: String,
+    pub measured_at: i64,
+    pub files: i64,
+}
+
+/// How far the link index has got, for the status line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct LinkIndexCounts {
+    pub measured: i64,
+    pub files: i64,
+    /// Torrents none of whose files could be read.
+    pub data_missing: i64,
+    /// Torrents some, but not all, of whose files could be read.
+    pub partly_missing: i64,
+    pub oldest: i64,
+}
+
 /// The store's half of a torrent's facts, for a workflow pass.
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowFacts {
@@ -525,6 +561,7 @@ impl Store {
         self.ensure_enrol_table()?;
         self.ensure_workflows_table()?;
         self.ensure_content_index()?;
+        self.ensure_link_index()?;
         // After the tables exist, and before anything reads them.
         self.migrate_composite_key()?;
         Ok(())
@@ -2161,6 +2198,128 @@ impl Store {
         Ok(())
     }
 
+    /// The link index: what the background scanner measured of each torrent's
+    /// files, so a workflow pass reads its hardlink facts instead of stat-ing
+    /// the whole catalogue itself.
+    ///
+    /// ⭐ One row per torrent copy, the files packed in a BLOB. At a million
+    /// torrents a row per file would be three million keys to rewrite and read
+    /// back; the paths themselves are not stored, since they follow from the
+    /// torrent's metadata and `save_path`. Additive and invisible to an older
+    /// build, like every table added since 4.0.
+    fn ensure_link_index(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS link_index (
+                 info_hash TEXT NOT NULL,
+                 session TEXT NOT NULL,
+                 save_path TEXT NOT NULL,
+                 measured_at INTEGER NOT NULL,
+                 files INTEGER NOT NULL,
+                 missing INTEGER NOT NULL,
+                 stats BLOB NOT NULL,
+                 PRIMARY KEY (info_hash, session));",
+        )?;
+        Ok(())
+    }
+
+    /// Every row's bookkeeping, without the measurements: what the scanner
+    /// reads to decide what is due.
+    pub fn link_index_meta(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<(String, String), LinkRowMeta>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT info_hash, session, save_path, measured_at, files FROM link_index")?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                LinkRowMeta {
+                    save_path: r.get(2)?,
+                    measured_at: r.get(3)?,
+                    files: r.get(4)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every row's measurement, keyed by (info_hash, session), with the save
+    /// path it was taken under.
+    pub fn link_index_stats(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<(String, String), (String, Vec<u8>)>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT info_hash, session, save_path, stats FROM link_index")?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                (r.get::<_, String>(2)?, r.get::<_, Vec<u8>>(3)?),
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Write a batch of measurements in one transaction.
+    pub fn put_link_rows(&self, rows: &[LinkRow]) -> anyhow::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut q = tx.prepare(
+                "INSERT OR REPLACE INTO link_index
+                     (info_hash, session, save_path, measured_at, files, missing, stats)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            )?;
+            for r in rows {
+                q.execute(rusqlite::params![
+                    r.info_hash,
+                    r.session,
+                    r.save_path,
+                    r.measured_at,
+                    r.files,
+                    r.missing,
+                    r.stats
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forget the rows of torrents that are no longer held.
+    pub fn drop_link_rows(&self, keys: &[(String, String)]) -> anyhow::Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0;
+        {
+            let mut q =
+                tx.prepare("DELETE FROM link_index WHERE info_hash = ?1 AND session = ?2")?;
+            for (h, s) in keys {
+                n += q.execute(rusqlite::params![h, s])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    pub fn link_index_counts(&self) -> anyhow::Result<LinkIndexCounts> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(files),0),
+                    COALESCE(SUM(files > 0 AND missing = files),0),
+                    COALESCE(SUM(missing > 0 AND missing < files),0),
+                    COALESCE(MIN(measured_at),0)
+               FROM link_index",
+            [],
+            |r| {
+                Ok(LinkIndexCounts {
+                    measured: r.get(0)?,
+                    files: r.get(1)?,
+                    data_missing: r.get(2)?,
+                    partly_missing: r.get(3)?,
+                    oldest: r.get(4)?,
+                })
+            },
+        )?)
+    }
+
     /// Where a torrent's data is meant to live, as the store recorded it.
     pub fn save_path_of(&self, info_hash: &str) -> Option<String> {
         self.conn
@@ -3735,5 +3894,69 @@ mod resolve_tests {
             .unwrap();
         let plan = plan.join(" | ");
         assert!(plan.contains("SEARCH") && plan.contains("info_hash>?"), "{plan}");
+    }
+}
+
+#[cfg(test)]
+mod link_index_tests {
+    use super::*;
+
+    fn store() -> Store {
+        let s = Store::open_in_memory().unwrap();
+        s.ensure_link_index().unwrap();
+        s
+    }
+
+    fn row(hash: &str, session: &str, measured_at: i64, files: i64, missing: i64) -> LinkRow {
+        LinkRow {
+            info_hash: hash.into(),
+            session: session.into(),
+            save_path: "/data/x".into(),
+            measured_at,
+            files,
+            missing,
+            stats: vec![7; files as usize],
+        }
+    }
+
+    #[test]
+    fn a_measurement_is_stored_per_copy_and_replaced_not_duplicated() {
+        let s = store();
+        s.put_link_rows(&[row("a", "hoard", 10, 2, 0), row("a", "race", 11, 2, 0)]).unwrap();
+        s.put_link_rows(&[row("a", "hoard", 20, 3, 1)]).unwrap();
+        let meta = s.link_index_meta().unwrap();
+        assert_eq!(meta.len(), 2, "one row per (hash, session)");
+        assert_eq!(meta[&("a".into(), "hoard".into())].measured_at, 20);
+        assert_eq!(meta[&("a".into(), "hoard".into())].files, 3);
+        let stats = s.link_index_stats().unwrap();
+        assert_eq!(stats[&("a".into(), "race".into())], ("/data/x".to_string(), vec![7, 7]));
+    }
+
+    #[test]
+    fn the_counts_tell_missing_from_partly_missing() {
+        let s = store();
+        s.put_link_rows(&[
+            row("whole", "hoard", 30, 2, 0),
+            row("gone", "hoard", 10, 2, 2),
+            row("holes", "hoard", 20, 3, 1),
+            row("empty", "hoard", 40, 0, 0),
+        ])
+        .unwrap();
+        let c = s.link_index_counts().unwrap();
+        assert_eq!(c.measured, 4);
+        assert_eq!(c.files, 7);
+        assert_eq!(c.data_missing, 1, "only the torrent with nothing readable");
+        assert_eq!(c.partly_missing, 1);
+        assert_eq!(c.oldest, 10);
+    }
+
+    #[test]
+    fn dropped_rows_are_gone_and_only_those() {
+        let s = store();
+        s.put_link_rows(&[row("a", "hoard", 1, 1, 0), row("b", "hoard", 1, 1, 0)]).unwrap();
+        assert_eq!(s.drop_link_rows(&[("a".into(), "hoard".into()), ("zz".into(), "hoard".into())]).unwrap(), 1);
+        let meta = s.link_index_meta().unwrap();
+        assert!(meta.contains_key(&("b".into(), "hoard".into())));
+        assert_eq!(meta.len(), 1);
     }
 }
