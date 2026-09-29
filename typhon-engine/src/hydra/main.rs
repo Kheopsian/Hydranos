@@ -411,7 +411,25 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
 
     // Shared before the state is built: the reconcile task needs the same
     // handle the handlers use, not a second connection to the same file.
-    let shared_store = Arc::new(std::sync::Mutex::new(store));
+    // In WAL, a read-only connection beside the shared one lets the long
+    // reads through without holding any write up; cf `StoreLock`.
+    let wal = store.journal_mode() == "wal";
+    let reader = if wal {
+        match store::Store::open(&store_path, true) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!("no read connection, reads share the writer's: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if wal {
+        store::spawn_checkpointer(&store_path);
+    }
+    tracing::info!(wal, read_connection = reader.is_some(), "store open");
+    let shared_store = Arc::new(store::StoreLock::with_reader(store, reader));
     workers::spawn_store_reconcile(engine_host.clone(), shared_store.clone());
 
     // Index anything added by a build that did not know about the content

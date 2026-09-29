@@ -498,7 +498,7 @@ pub fn log(store: &Store, w: &Workflow, m: &Match, action: &str, outcome: &str, 
 /// touching five hundred torrents must not hold the database while it does.
 pub fn apply(
     host: &EngineHost,
-    store: &Arc<std::sync::Mutex<Store>>,
+    store: &Arc<crate::store::StoreLock>,
     w: &Workflow,
     m: &Match,
     pause_hook: &dyn Fn(&str, &str, bool),

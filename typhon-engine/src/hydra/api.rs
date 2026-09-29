@@ -250,7 +250,7 @@ pub struct AppState {
     /// The engines, in this process. Handlers read their state directly.
     pub engines: Arc<crate::engines::EngineHost>,
     /// The durable store, shared with 3.x and opened on the same file.
-    pub store: Arc<std::sync::Mutex<crate::store::Store>>,
+    pub store: Arc<crate::store::StoreLock>,
     /// Last known public addresses, (v4, v6). Empty until a lookup succeeds.
     pub public_ip: PublicIp,
     /// Last per-engine exit measurement, and when it was taken.
@@ -2488,7 +2488,7 @@ fn engine_rows(state: &AppState, engine_id: &str) -> Vec<serde_json::Value> {
 
     // One query for the whole session, not one per torrent.
     let facts = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.read().unwrap();
         store.facts_by_session(engine_id).unwrap_or_default()
     };
 
@@ -2698,7 +2698,7 @@ async fn engine_page_value(
     let facts_done = started.elapsed();
     let pinned: std::collections::HashSet<String> =
         if state_filter == "__pinned__" || want_facets {
-            let store = state.store.lock().unwrap();
+            let store = state.store.read().unwrap();
             store.pinned(engine_id).unwrap_or_default().into_iter().collect()
         } else {
             Default::default()
@@ -3063,7 +3063,7 @@ async fn engine_page_value(
         .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
         .collect();
     let rich = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.read().unwrap();
         store.facts_for_hashes(&page_hashes, engine_id).unwrap_or_default()
     };
     let empty_facts = crate::row::StoreFacts::default();
@@ -3633,7 +3633,7 @@ async fn get_tags(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let tags = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.read().unwrap();
         store.tags_of_session("hoard").unwrap_or_default()
     };
     Json(tags).into_response()
@@ -4023,7 +4023,7 @@ async fn get_hoard_pinned(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let pinned = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.read().unwrap();
         store.pinned("hoard").unwrap_or_default()
     };
     Json(serde_json::json!({"pinned": pinned})).into_response()
@@ -5079,7 +5079,7 @@ async fn stream_events(
             // cache here would have grown with the catalogue -- the exact thing
             // this release exists to remove.
             let facts = {
-                let store = state.store.lock().unwrap();
+                let store = state.store.read().unwrap();
                 store.facts_by_session(&engine.id).unwrap_or_default()
             };
             let torrents = engine.manager.all();
@@ -7322,7 +7322,7 @@ fn engine_qbit_rows(
 
     // One query for the whole session, not one per torrent.
     let facts = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.read().unwrap();
         store.facts_by_session(engine_id).unwrap_or_default()
     };
 
@@ -7803,7 +7803,7 @@ async fn qbit_torrent_properties(
 
     let raw = typhon_engine::rpc::dispatch::torrent_to_json(&torrent);
     let facts = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.read().unwrap();
         store.facts_by_session(&engine_id).unwrap_or_default()
     };
     let empty = crate::row::StoreFacts::default();
@@ -9325,7 +9325,7 @@ fn detail_payload(
 ) -> serde_json::Value {
     let raw = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
     let facts = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.read().unwrap();
         store.facts_by_session(engine_id).unwrap_or_default()
     };
     let empty = crate::row::StoreFacts::default();
@@ -11785,7 +11785,7 @@ async fn get_engine_pinned_by_id(
         Err(refusal) => return refusal,
     };
     let pinned = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.read().unwrap();
         store.pinned(&id).unwrap_or_default()
     };
     Json(serde_json::json!({"pinned": pinned})).into_response()
@@ -12593,7 +12593,7 @@ mod tests {
                 &Config::default(),
                 std::path::Path::new("/tmp/hydra-test-engines"),
             )),
-            store: Arc::new(std::sync::Mutex::new(
+            store: Arc::new(crate::store::StoreLock::new(
                 crate::store::Store::open_in_memory().unwrap(),
             )),
             public_ip: Arc::new(tokio::sync::Mutex::new((String::new(), String::new()))),
@@ -12923,7 +12923,7 @@ pub(crate) mod testing {
         // store without them answers "no such table" to routes that look fine.
         let store = crate::store::Store::open_in_memory().expect("in-memory store");
         store.ensure_schema().expect("full schema");
-        let store = Arc::new(std::sync::Mutex::new(store));
+        let store = Arc::new(crate::store::StoreLock::new(store));
 
         let state = AppState {
             imports: Default::default(),
