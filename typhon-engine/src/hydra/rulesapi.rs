@@ -358,8 +358,8 @@ pub async fn preview(
 }
 
 /// Facts for every engine this node runs.
-fn gather_all(state: &AppState) -> Vec<rules::Facts> {
-    gather_all_with(state, &std::collections::HashMap::new())
+fn gather_all(state: &AppState, want_free_space: bool) -> Vec<rules::Facts> {
+    gather_all_with(state, &std::collections::HashMap::new(), want_free_space)
 }
 
 /// What one pass decided, and the link facts it decided on.
@@ -388,7 +388,7 @@ struct Decision {
 /// before anything is done to it.
 fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
     if !rules::needs_link_scan(&w.when) {
-        let facts = gather_all(state);
+        let facts = gather_all(state, rules::uses_field(&w.when, "free_space"));
         let (matches, report) = rulesrun::evaluate(w, &facts)?;
         return Ok(Decision {
             matches,
@@ -401,15 +401,18 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
 
     // On the read connection: a pass must not hold the writer while it reads
     // a million rows.
-    let (cat, mut entries, origin) = {
+    let (stored, rows) = {
         let store = state.store.read().map_err(|_| "store lock")?;
-        let cat = rulesrun::catalogue(&state.engines, &store);
+        let stored = rulesrun::stored_facts(&state.engines, &store);
         let rows = store.link_index_stats().map_err(|e| e.to_string())?;
-        let (entries, origin) = rulesrun::entries_from_store(&cat, &rows);
-        (cat, entries, origin)
+        (stored, rows)
     };
+    let cat = rulesrun::catalogue_from(&state.engines, &stored);
+    drop(stored);
+    let (mut entries, origin) = rulesrun::entries_from_store(&cat, &rows);
+    drop(rows);
     let links = crate::linkindex::compute(&entries);
-    let mut facts = gather_all_with(state, &links);
+    let mut facts = gather_all_with(state, &links, rules::uses_field(&w.when, "free_space"));
     let (first, _) = rulesrun::evaluate(w, &facts)?;
 
     let want: std::collections::HashSet<String> =
@@ -450,6 +453,7 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
 fn gather_all_with(
     state: &AppState,
     links: &std::collections::HashMap<String, crate::linkindex::LinkFacts>,
+    want_free_space: bool,
 ) -> Vec<rules::Facts> {
     let ids: Vec<String> = state
         .engines
@@ -457,10 +461,13 @@ fn gather_all_with(
         .iter()
         .map(|e| e.id.clone())
         .collect();
-    let store = state.store.lock().unwrap();
+    // ⚠️ The READ connection. This only reads, and it walks the whole
+    // catalogue: on the writer it held every add, tag and pause for twenty
+    // seconds and more at a million torrents.
+    let store = state.store.read().unwrap();
     let mut out = Vec::new();
     for id in ids {
-        out.extend(rulesrun::gather(&state.engines, &store, &id, links));
+        out.extend(rulesrun::gather(&state.engines, &store, &id, links, want_free_space));
     }
     out
 }
@@ -691,6 +698,13 @@ pub fn spawn(state: AppState) {
                     tracing::warn!(workflow = %stored.name, "workflow body will not parse, skipped");
                     continue;
                 };
+                // Claimed BEFORE it runs. Marked only at the end, a pass that
+                // takes longer than the tick -- or never reaches the end --
+                // stays due, and the timer starts it again every minute on top
+                // of the one still running.
+                if let Ok(store) = state.store.lock() {
+                    let _ = store.mark_workflow_run(&w.id, now);
+                }
                 let st = state.clone();
                 let name = w.name.clone();
                 let Ok(report) = tokio::task::spawn_blocking(move || run_one(&st, &w, false)).await else {
