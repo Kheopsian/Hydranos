@@ -200,6 +200,19 @@ pub fn gather(
         .collect()
 }
 
+/// The save path the ENGINE reads the files from.
+///
+/// ⚠️ Not the store's `save_path`, which is not always the same thing: for the
+/// Internet Archive items the store records the item's own folder
+/// (`…/internet-archive/<item>`) while the engine holds its parent and adds the
+/// torrent's name, like every multi-file torrent. Resolving from the store's
+/// value put the name in twice, and 17 000 torrents that were seeding normally
+/// were reported as having lost their files. The engine's path is the one that
+/// actually serves the bytes, so it is the one to measure.
+pub fn engine_save_path(t: &typhon_engine::torrent::meta::TorrentState) -> String {
+    t.save_path.read().to_string_lossy().into_owned()
+}
+
 /// Where one torrent's files live on disk.
 ///
 /// The layout rule `dedup::Layout::on_disk` encodes: a multi-file torrent puts
@@ -264,9 +277,11 @@ pub fn catalogue_from(
         };
         for t in engine.manager.all() {
             let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
-            let Some(save_path) = stored.get(&hash).map(|s| s.save_path.clone()) else {
+            // A copy the store does not know is not part of any pass.
+            if !stored.contains_key(&hash) {
                 continue;
-            };
+            }
+            let save_path = engine_save_path(&t);
             if save_path.is_empty() {
                 continue;
             }
@@ -501,7 +516,6 @@ pub fn is_due(w: &crate::store::StoredWorkflow, now: i64) -> bool {
 /// this guards the one whose cost is irreversible.
 pub fn link_guard(
     host: &EngineHost,
-    store: &Store,
     m: &Match,
     cached: &LinkFacts,
 ) -> Result<(), String> {
@@ -516,12 +530,7 @@ pub fn link_guard(
     else {
         return Err("torrent is no longer in the engine".into());
     };
-    let save_path = store
-        .workflow_facts(&m.engine)
-        .unwrap_or_default()
-        .get(&m.info_hash)
-        .map(|s| s.save_path.clone())
-        .unwrap_or_default();
+    let save_path = engine_save_path(&t);
     if save_path.is_empty() {
         return Err("no save path to check the links against".into());
     }
@@ -616,9 +625,9 @@ pub fn apply(
                 }
                 // A rule that decided on link facts has to decide again, now:
                 // the numbers it used may be up to an hour old.
+                // No store lock: the guard reads the engine and the disk only.
                 if let Some(cached) = link_facts {
-                    let store = store.lock().map_err(|_| "store lock")?;
-                    link_guard(host, &store, m, cached)?;
+                    link_guard(host, m, cached)?;
                 }
                 // Through the hook, which is the route a human click takes:
                 // calling `manager.remove_torrent` and dropping the row here
