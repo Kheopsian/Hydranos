@@ -817,5 +817,22 @@
   "A private tracker's .torrent carries your passkey in its announce URL: whoever gets the file can announce as you.\n\nRemoving the trackers leaves the info hash unchanged.": "Le .torrent d'un tracker privé contient votre passkey dans son URL d'annonce : quiconque reçoit le fichier peut annoncer en votre nom.\n\nRetirer les trackers ne change pas l'info hash.",
   "Keep trackers": "Garder les trackers",
   "Remove trackers": "Retirer les trackers",
-  "Export failed": "Échec de l'export"
+  "Export failed": "Échec de l'export",
+  "Could not count the torrents this filter matches.": "Impossible de compter les torrents de ce filtre.",
+  "The filter now matches {n} torrents, not {m}. Apply to all {n}?": "Le filtre correspond maintenant à {n} torrents, pas {m}. Appliquer aux {n} ?",
+  "{label}: {done} / {total}": "{label} : {done} / {total}",
+  "{n} done": "{n} faits",
+  "{n} moving in the background": "{n} en déplacement en arrière-plan",
+  "{n} already complete": "{n} déjà complets",
+  "{n} not applied": "{n} non appliqués",
+  "{n} not applicable": "{n} non concernés",
+  "{n} not on this node": "{n} absents de ce nœud",
+  "{n} waiting for your answer": "{n} en attente de votre réponse",
+  "cancelled": "annulé",
+  "nothing to do": "rien à faire",
+  "Edit tags": "Modifier les tags",
+  "Remove {n} torrents?": "Retirer {n} torrents ?",
+  "Remove {n} torrents and delete their files?": "Retirer {n} torrents et supprimer leurs fichiers ?",
+  "Force download": "Forcer le téléchargement",
+  "Stop forcing": "Ne plus forcer"
 }
