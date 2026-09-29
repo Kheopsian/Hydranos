@@ -72,6 +72,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   connection, free space is measured only for a rule that asks for it, and a
   scheduled pass is marked as run when it starts: a pass that overran its tick
   used to be started again every minute on top of itself.
+- **17,000 Internet Archive torrents read as having lost their files.** A
+  torrent's files were resolved from the store's save path, which for those
+  items is already the item's own folder, so the name went in twice. They are
+  now resolved from the engine's save path -- the one that serves the bytes --
+  for the link index, a pass and the delete guard alike. Their hardlink facts
+  were wrong in the same way since 4.2.0.
 - **Every restart told the trackers of each stopped torrent that it had
   stopped.** Putting the operator's pauses back at boot went through the same
   call as pressing Stop, which owes the trackers a departure, so each restart
