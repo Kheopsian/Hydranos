@@ -388,16 +388,19 @@ pub fn spawn_health_scan(
 
 /// Copy each torrent's seed counter from the engine into the store.
 ///
-/// The engine owns the number -- it is the only thing that knows when a
-/// torrent is actually seeding -- but the UI row and the workflow facts are
-/// both built from `torrents.seeding_time` in the store. Without this the
-/// counter is correct and invisible.
+/// The engine owns the number and persists it itself (`seed_secs` in its
+/// state.db). Everything that DECIDES on it -- workflows, graduation purges,
+/// obligations -- reads the engine's live value, and so does the UI row. The
+/// store's `torrents.seeding_time` is only the row's fallback for a torrent no
+/// engine holds any more, where the last copied figure is all there is.
 ///
-/// Hourly, and only for the torrents whose value CHANGED since the last pass.
-/// A 48-hour obligation does not need second precision, and rewriting 300k
-/// rows every five minutes to move a number by 300 would cost more than the
-/// question is worth. The lag is at most an hour, and it lags BEHIND the true
-/// value, so an obligation is never reported satisfied before it is.
+/// ⚠ Daily, in small transactions, well spaced. This ran hourly in chunks of
+/// 2 000, starting two minutes after boot: at a million torrents a pass was
+/// ~500 transactions of 17 MB of rollback journal each, the store's lock held
+/// 1.45 s of every 1.5 s for twelve minutes of every hour, and every store
+/// operation in that window -- an add, a tag, a category, a list page --
+/// waited ~0.6 s behind it. A hundred tags took a minute. For a fallback
+/// figure, a day of lag costs nothing.
 pub fn spawn_seed_time_sync(
     manager: Arc<TorrentManager>,
     store: Arc<std::sync::Mutex<crate::store::Store>>,
@@ -405,9 +408,9 @@ pub fn spawn_seed_time_sync(
 ) {
     tokio::spawn(async move {
         let mut last: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        // After the engines have loaded, so the first pass sees restored
-        // counters rather than a catalogue of zeros.
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        // Not at boot: the first pass rewrites every row (nothing is known of
+        // the last one), and a restart is when the store is busiest.
+        tokio::time::sleep(SEED_SYNC_FIRST).await;
         loop {
             let now = typhon_engine::torrent::meta::now_secs();
             let mut rows: Vec<(String, i64)> = Vec::new();
@@ -424,7 +427,7 @@ pub fn spawn_seed_time_sync(
             // every route that touches the store hangs behind it. /health kept
             // answering in under a millisecond while /api/status timed out --
             // measured on production, and invisible on a 31-torrent bench.
-            const CHUNK: usize = 2000;
+            const CHUNK: usize = 250;
             let mut wrote_total = 0usize;
             let mut failed = false;
             for chunk in rows.chunks(CHUNK) {
@@ -448,16 +451,21 @@ pub fn spawn_seed_time_sync(
                         break;
                     }
                 }
-                // Hands the lock to whoever is waiting before taking it again.
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                // Hands the lock to whoever is waiting before taking it again,
+                // long enough that the others get most of the time.
+                tokio::time::sleep(SEED_SYNC_YIELD).await;
             }
             if wrote_total > 0 && !failed {
                 tracing::info!(engine = %engine_id, rows = wrote_total, "seed time synced");
             }
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            tokio::time::sleep(SEED_SYNC_EVERY).await;
         }
     });
 }
+
+const SEED_SYNC_FIRST: Duration = Duration::from_secs(3600);
+const SEED_SYNC_EVERY: Duration = Duration::from_secs(24 * 3600);
+const SEED_SYNC_YIELD: Duration = Duration::from_millis(250);
 
 /// Delete from a graduation TARGET what has finished paying its seeding time.
 ///

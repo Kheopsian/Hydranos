@@ -356,6 +356,21 @@ fn rel_paths(t: &typhon_engine::torrent::meta::TorrentState) -> Vec<std::path::P
         .collect()
 }
 
+/// The first component every one of `t`'s paths starts with, relative to its
+/// save path: its name for a multi-file torrent, its file for a single one.
+/// None when that is not one thing (a multi-file torrent with no name).
+fn top_entry(t: &typhon_engine::torrent::meta::TorrentState) -> Option<&std::ffi::OsStr> {
+    if t.meta.multi_file {
+        if t.meta.name.is_empty() {
+            None
+        } else {
+            std::path::Path::new(&t.meta.name).components().next().map(|c| c.as_os_str())
+        }
+    } else {
+        t.meta.files.first().and_then(|f| f.path.components().next()).map(|c| c.as_os_str())
+    }
+}
+
 /// Only plain names: no `..`, no root, no prefix, no `.`.
 fn is_plain_relative(p: &std::path::Path) -> bool {
     p.components().count() > 0
@@ -381,6 +396,7 @@ pub fn plan_move_checked(
     let mine: std::collections::HashSet<std::path::PathBuf> =
         plan.files.iter().map(|f| f.from.clone()).collect();
     let root = &plan.old_root;
+    let my_top = top_entry(t);
     for engine in state.engines.engines().iter() {
         for other in engine.manager.all() {
             if other.meta.info_hash == t.meta.info_hash {
@@ -395,6 +411,19 @@ pub fn plan_move_checked(
                 let r = other.save_path.read();
                 if !(root.starts_with(&*r) || r.starts_with(root)) {
                     continue;
+                }
+                // ⭐ Same folder, different top-level entry: no file can be
+                // shared, since every path of each starts with its own entry.
+                // Checked without building the other's file list -- a whole
+                // category shares one folder (Calewood: 800k torrents), so the
+                // folder test above lets nearly everything through, and the
+                // file lists cost ~1 s per move at a million torrents.
+                if *r == *root {
+                    if let (Some(a), Some(b)) = (my_top, top_entry(&other)) {
+                        if a != b {
+                            continue;
+                        }
+                    }
                 }
                 r.clone()
             };
