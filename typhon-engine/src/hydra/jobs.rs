@@ -178,7 +178,7 @@ pub fn free_space_near(path: &Path) -> Option<u64> {
 /// A job left `running` in the table has no task behind it any more: the
 /// process that owned it is gone. Picking them back up is the only reason the
 /// state is in the database rather than in memory.
-pub fn resume_interrupted(store: Arc<std::sync::Mutex<crate::store::Store>>) {
+pub fn resume_interrupted(store: Arc<crate::store::StoreLock>) {
     let rows = match store.lock().unwrap().list_jobs(500) {
         Ok(r) => r,
         Err(e) => {

@@ -61,7 +61,7 @@ pub fn spawn_download_slots(
     manager: Arc<TorrentManager>,
     cache: Arc<Cache>,
     max_slots: i64,
-    store: Arc<std::sync::Mutex<crate::store::Store>>,
+    store: Arc<crate::store::StoreLock>,
     engine_id: String,
 ) {
     if max_slots <= 0 {
@@ -403,7 +403,7 @@ pub fn spawn_health_scan(
 /// figure, a day of lag costs nothing.
 pub fn spawn_seed_time_sync(
     manager: Arc<TorrentManager>,
-    store: Arc<std::sync::Mutex<crate::store::Store>>,
+    store: Arc<crate::store::StoreLock>,
     engine_id: String,
 ) {
     tokio::spawn(async move {
@@ -1062,7 +1062,7 @@ mod reconcile_tests {
 
 pub fn spawn_store_reconcile(
     engines: Arc<crate::engines::EngineHost>,
-    store: Arc<std::sync::Mutex<crate::store::Store>>,
+    store: Arc<crate::store::StoreLock>,
 ) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));

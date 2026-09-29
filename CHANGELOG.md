@@ -59,6 +59,23 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   of the other engine's kind graduates the torrent there. `move-preview`,
   which answered 400 to everything, now says what a move would do.
 - The agent endpoint gained `move_to_category`.
+- **Every tag, pause or category change scanned the whole library.** The
+  route resolved its torrent with `info_hash LIKE ? || '%'`, which SQLite
+  cannot answer from an index: a million rows read, under the store's lock,
+  for each write -- 0.2 to 0.4 s apiece, so a hundred tags took twenty
+  seconds and held up everything else meanwhile. A hash or a hash prefix is
+  now looked up as a range on the index: 179 ms to 0.02 ms on the production
+  copy, and the same hundred tags in a tenth of a second.
+- **The store runs in WAL.** A write costs 0.08 ms instead of 1.4, and a long
+  read no longer holds writers up (p99 1.2 s to 0.07 s, measured on a copy of
+  production). Long reads -- the tag list, a page's rows, pins -- go through a
+  read-only connection of their own, and the WAL is checkpointed once a
+  second on another. `synchronous=NORMAL`: a power cut can cost the last few
+  seconds of changes, never the file. A store on a network share, which
+  cannot hold a WAL, keeps the rollback journal.
+- **A store lock held longer than 200 ms is logged with the line that took
+  it**, so the next slow path names itself instead of being hunted from the
+  outside.
 - **Every store operation waited ~0.6 s for twelve minutes of every hour.**
   The copy of each torrent's seeding time into the store ran hourly (and two
   minutes after boot) in transactions of 2 000 rows: at a million torrents
