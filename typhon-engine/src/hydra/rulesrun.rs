@@ -215,16 +215,23 @@ pub fn torrent_files(
     }
 }
 
-/// What the scan intends to stat: every torrent's files, resolved, no syscall.
+/// One torrent copy as the link index sees it: where it lives and the files
+/// it resolves to there. No syscall has happened yet.
+#[derive(Debug, Clone)]
+pub struct CatalogueEntry {
+    pub info_hash: String,
+    pub session: String,
+    pub save_path: String,
+    pub paths: Vec<std::path::PathBuf>,
+}
+
+/// Every torrent copy this node holds, with its files resolved.
 ///
-/// ⚠️⚠️ Split from the stat pass for one reason, and it is not tidiness. This
-/// half needs the store; the other half is minutes of `stat` on a large
-/// catalogue, and its cost depends on how warm the ARC happens to be, so it
-/// cannot be bounded in advance. Holding the store mutex across it would
-/// freeze every other request for as long as the disk felt like taking. Build
-/// the plan under the lock, drop it, then touch the filesystem.
-pub fn plan_scan(host: &EngineHost, store: &Store) -> Vec<(String, Vec<std::path::PathBuf>)> {
-    let mut plan = Vec::new();
+/// ⚠️ Pure bookkeeping, no `stat`: this half needs the store (for the save
+/// paths), the other half is disk wait whose cost cannot be bounded. Build
+/// this under the lock, drop it, then touch the filesystem.
+pub fn catalogue(host: &EngineHost, store: &Store) -> Vec<CatalogueEntry> {
+    let mut out = Vec::new();
     for engine in host.engines().iter() {
         let stored = store.workflow_facts(&engine.id).unwrap_or_default();
         for t in engine.manager.all() {
@@ -235,47 +242,79 @@ pub fn plan_scan(host: &EngineHost, store: &Store) -> Vec<(String, Vec<std::path
             if save_path.is_empty() {
                 continue;
             }
-            plan.push((hash, torrent_files(&t, &save_path)));
+            let paths = torrent_files(&t, &save_path);
+            out.push(CatalogueEntry { info_hash: hash, session: engine.id.clone(), save_path, paths });
         }
     }
-    plan
+    out
 }
 
-/// The stat pass. No lock held, no engine touched: just the filesystem.
+/// The catalogue as the store last measured it, ready for `linkindex::compute`.
 ///
-/// ⭐ Global across engines on purpose. `owned` must count every name we hold,
-/// and a file held by hoard AND race is two of ours. A per-engine index would
-/// see one name, invent an external holder, and the arithmetic would be wrong
-/// in the direction that keeps rubbish forever -- or, with the engines the
-/// other way round, deletes a live file.
+/// ⭐ A copy with no row, a row taken under another save path, or a row whose
+/// file count no longer matches, is left OUT -- not answered with zeros. Its
+/// facts then read `NEVER`, so no rule can match a torrent nobody has looked
+/// at yet. Leaving it out also drops its names from `owned`, which can only
+/// raise another torrent's `external_links`: the direction that keeps files.
+///
+/// Returns, beside the entries, the index in `cat` each one came from: a pass
+/// that re-measures a candidate writes it back to the store under that copy.
+pub fn entries_from_store(
+    cat: &[CatalogueEntry],
+    rows: &std::collections::HashMap<(String, String), (String, Vec<u8>)>,
+) -> (Vec<linkindex::Entry>, Vec<usize>) {
+    let mut out = Vec::with_capacity(rows.len().min(cat.len()));
+    let mut origin = Vec::with_capacity(out.capacity());
+    for (i, c) in cat.iter().enumerate() {
+        let Some((save_path, blob)) = rows.get(&(c.info_hash.clone(), c.session.clone())) else {
+            continue;
+        };
+        if *save_path != c.save_path {
+            continue;
+        }
+        let Some(stats) = linkindex::unpack(blob) else { continue };
+        if stats.len() != c.paths.len() {
+            continue;
+        }
+        out.push((c.info_hash.clone(), c.paths.iter().cloned().zip(stats).collect()));
+        origin.push(i);
+    }
+    (out, origin)
+}
+
+/// The store row for one measured copy.
+pub fn link_row(c: &CatalogueEntry, stats: &[Option<crate::platform::FileId>], now: i64) -> crate::store::LinkRow {
+    crate::store::LinkRow {
+        info_hash: c.info_hash.clone(),
+        session: c.session.clone(),
+        save_path: c.save_path.clone(),
+        measured_at: now,
+        files: stats.len() as i64,
+        missing: linkindex::missing_files(stats) as i64,
+        stats: linkindex::pack(stats),
+    }
+}
+
 /// How many threads stat at once.
 ///
 /// ⭐ Measured, not guessed: on the 293k catalogue the scanning thread spent
 /// **98% of its life inside `statx`** at ~43 ms a call -- pure disk wait on
-/// cold ZFS metadata, near-zero CPU. One thread therefore bought 23 files a
-/// second and a full scan would have taken some 36 hours, outliving its own
-/// one-hour cache. Threads here buy overlap in the disk queue, so the count is
-/// set against the storage and not against the CPU.
+/// cold ZFS metadata, near-zero CPU. Threads here buy overlap in the disk
+/// queue, so the count is set against the storage and not against the CPU.
 ///
-/// ⚠️ Not unbounded. These are real `statx` on the pool that is also serving
-/// torrents at a few hundred MB/s, and a deep random-metadata queue is felt by
-/// everything else on the array.
-fn scan_threads() -> usize {
+/// ⚠️ Not unbounded, and lower than when the scan ran on demand: these are
+/// real `statx` on the pool that is also serving torrents, around the clock
+/// now that the index is kept by a background thread.
+pub fn scan_threads() -> usize {
     std::env::var("HYDRANOS_LINK_SCAN_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(32)
+        .unwrap_or(16)
         .min(256)
 }
 
-/// The stat pass. No lock held, no engine touched: just the filesystem.
-///
-/// ⭐ Global across engines on purpose. `owned` must count every name we hold,
-/// and a file held by hoard AND race is two of ours. A per-engine index would
-/// see one name, invent an external holder, and the arithmetic would be wrong
-/// in the direction that keeps rubbish forever -- or, with the engines the
-/// other way round, deletes a live file.
+/// Stat every file of a plan, in parallel. No lock held, no engine touched.
 ///
 /// ## Why the work is pulled and not divided
 ///
@@ -286,28 +325,17 @@ fn scan_threads() -> usize {
 /// cursor and take the next torrent when they finish one; the lock is held for
 /// the length of an iterator step, against a work item that costs tens of
 /// milliseconds.
-pub fn run_scan(plan: Vec<(String, Vec<std::path::PathBuf>)>) -> HashMapFacts {
-    run_scan_with(plan, scan_threads())
-}
-
-/// The scan, with the thread count passed in so a test can pin it. ⚠️ Reading
-/// the environment inside would make the parallel/sequential comparison below
-/// depend on a global that every other test shares.
-pub fn run_scan_with(
+///
+/// The result comes back in plan order: a measurement whose shape depends on
+/// thread scheduling is one nobody can reproduce from a log.
+pub fn stat_plan_with(
     plan: Vec<(String, Vec<std::path::PathBuf>)>,
     threads: usize,
-) -> HashMapFacts {
-    let started = std::time::Instant::now();
+) -> Vec<linkindex::Entry> {
     let planned = plan.len();
     let threads = threads.max(1).min(planned.max(1));
-
-    // Indices ride along so the result can be put back in plan order: the
-    // counting below does not care, but a scan whose output depends on thread
-    // scheduling is one nobody can reproduce from a log.
     let queue = std::sync::Mutex::new(plan.into_iter().enumerate());
     let mut numbered: Vec<(usize, linkindex::Entry)> = Vec::with_capacity(planned);
-    let mut files = 0usize;
-    let mut unreadable = 0usize;
 
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
@@ -315,7 +343,6 @@ pub fn run_scan_with(
                 let queue = &queue;
                 scope.spawn(move || {
                     let mut mine: Vec<(usize, linkindex::Entry)> = Vec::new();
-                    let (mut files, mut unreadable) = (0usize, 0usize);
                     loop {
                         // Locked only to hand out the next item, never across
                         // the syscalls that follow.
@@ -324,17 +351,13 @@ pub fn run_scan_with(
                         let stats = paths
                             .into_iter()
                             .map(|p| {
-                                files += 1;
                                 let id = crate::platform::file_id(&p);
-                                if id.is_none() {
-                                    unreadable += 1;
-                                }
                                 (p, id)
                             })
                             .collect();
                         mine.push((i, (hash, stats)));
                     }
-                    (mine, files, unreadable)
+                    mine
                 })
             })
             .collect();
@@ -343,30 +366,30 @@ pub fn run_scan_with(
             // A panicking scan must not be silently half a scan: `compute`
             // would read the missing torrents as having no names of ours and
             // call somebody else's hardlinks external.
-            let (mine, f, u) = w.join().expect("link scan thread panicked");
-            numbered.extend(mine);
-            files += f;
-            unreadable += u;
+            numbered.extend(w.join().expect("link scan thread panicked"));
         }
     });
 
     numbered.sort_unstable_by_key(|(i, _)| *i);
-    let entries: Vec<linkindex::Entry> = numbered.into_iter().map(|(_, e)| e).collect();
+    numbered.into_iter().map(|(_, e)| e).collect()
+}
 
-    let out = linkindex::compute(&entries);
-    // Logged rather than predicted: the cost rides on the ARC, so the only
-    // honest number is the one the last run actually took.
-    let secs = started.elapsed().as_secs_f64();
-    tracing::info!(
-        torrents = out.len(),
-        files,
-        unreadable,
-        threads,
-        secs,
-        files_per_sec = if secs > 0.0 { files as f64 / secs } else { 0.0 },
-        "link scan complete"
-    );
-    out
+/// Put freshly measured link facts on the candidates, and only on them.
+///
+/// The other torrents were not re-measured; changing their facts now would let
+/// a torrent nobody just looked at into the pass.
+pub fn patch_link_facts(
+    facts: &mut [Facts],
+    links: &HashMapFacts,
+    want: &std::collections::HashSet<String>,
+) {
+    for f in facts.iter_mut().filter(|f| want.contains(&f.info_hash)) {
+        let l = links.get(&f.info_hash);
+        f.link_count = l.map(|x| x.link_count as f64).unwrap_or(rules::NEVER);
+        f.external_links = l.map(|x| x.external_links as f64).unwrap_or(rules::NEVER);
+        f.freeable_bytes = l.map(|x| x.freeable_bytes as f64).unwrap_or(rules::NEVER);
+        f.data_missing = l.is_some_and(|x| x.data_missing);
+    }
 }
 
 pub type HashMapFacts = std::collections::HashMap<String, LinkFacts>;
@@ -665,6 +688,125 @@ mod tests {
     }
     use super::*;
     use crate::rules::{Cond, Node, Op};
+
+    /// The measurement and the arithmetic in one call, as the scanner and a
+    /// pass chain them.
+    fn run_scan_with(plan: Vec<(String, Vec<std::path::PathBuf>)>, threads: usize) -> HashMapFacts {
+        linkindex::compute(&stat_plan_with(plan, threads))
+    }
+
+    fn cat(hash: &str, session: &str, save_path: &str, paths: &[&str]) -> CatalogueEntry {
+        CatalogueEntry {
+            info_hash: hash.into(),
+            session: session.into(),
+            save_path: save_path.into(),
+            paths: paths.iter().map(std::path::PathBuf::from).collect(),
+        }
+    }
+
+    fn fid(index: u64, links: u64) -> Option<crate::platform::FileId> {
+        Some(crate::platform::FileId { volume: 1, index, links, size: 10 })
+    }
+
+    /// Only a row that describes the files the torrent has NOW is used.
+    #[test]
+    fn a_stale_or_absent_measurement_leaves_the_torrent_unmeasured() {
+        let catalogue = vec![
+            cat("fresh", "hoard", "/d", &["/d/a"]),
+            cat("moved", "hoard", "/new", &["/new/b"]),
+            cat("regrown", "hoard", "/d", &["/d/c1", "/d/c2"]),
+            cat("never", "hoard", "/d", &["/d/n"]),
+            cat("fresh", "race", "/r", &["/r/a"]),
+        ];
+        let mut rows = std::collections::HashMap::new();
+        rows.insert(("fresh".to_string(), "hoard".to_string()), ("/d".to_string(), linkindex::pack(&[fid(1, 1)])));
+        rows.insert(("moved".to_string(), "hoard".to_string()), ("/old".to_string(), linkindex::pack(&[fid(2, 1)])));
+        rows.insert(("regrown".to_string(), "hoard".to_string()), ("/d".to_string(), linkindex::pack(&[fid(3, 1)])));
+        let (got, origin) = entries_from_store(&catalogue, &rows);
+        assert_eq!(origin, vec![0], "and it says where it came from");
+        let hashes: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(hashes, vec!["fresh"], "moved, regrown, never and the race copy have no valid row");
+        assert_eq!(got[0].1, vec![(std::path::PathBuf::from("/d/a"), fid(1, 1))]);
+    }
+
+    /// ⭐ The reason candidates are measured again: the library hardlinked one
+    /// of them after the index saw it. The pass must drop it, and must not
+    /// pick up a torrent that was never re-measured in its place.
+    #[test]
+    fn a_candidate_the_fresh_measurement_contradicts_drops_out() {
+        let lf = |ext: u64| LinkFacts { external_links: ext, link_count: ext + 1, freeable_bytes: 0, data_missing: false };
+        let mut facts = facts(3);
+        let h: Vec<String> = facts.iter().map(|f| f.info_hash.clone()).collect();
+        let mut indexed = HashMapFacts::new();
+        indexed.insert(h[0].clone(), lf(0));
+        indexed.insert(h[1].clone(), lf(0));
+        indexed.insert(h[2].clone(), lf(1));
+        let want_all: std::collections::HashSet<String> = h.iter().cloned().collect();
+        patch_link_facts(&mut facts, &indexed, &want_all);
+
+        let mut w = wf(vec![Action::AddTags { tags: vec!["noHL".into()] }], 500);
+        w.when = Node::Cond(Cond { field: "external_links".into(), op: Op::Eq, value: "0".into() });
+        let (first, _) = evaluate(&w, &facts).unwrap();
+        assert_eq!(first.len(), 2);
+
+        // Fresh: torrent 0 gained an outside name; torrent 2 LOST its outside
+        // name but was not a candidate, so it must not be let in.
+        let want: std::collections::HashSet<String> = first.iter().map(|m| m.info_hash.clone()).collect();
+        let mut fresh = HashMapFacts::new();
+        fresh.insert(h[0].clone(), lf(1));
+        fresh.insert(h[1].clone(), lf(0));
+        fresh.insert(h[2].clone(), lf(0));
+        patch_link_facts(&mut facts, &fresh, &want);
+        let (second, _) = evaluate(&w, &facts).unwrap();
+        let got: Vec<&str> = second.iter().map(|m| m.info_hash.as_str()).collect();
+        assert_eq!(got, vec![h[1].as_str()]);
+    }
+
+    /// The whole road a fact now travels: stat, pack into the store's BLOB,
+    /// unpack, count. Real files and a real outside hardlink, so a mistake in
+    /// the encoding cannot hide behind a mock.
+    #[test]
+    fn facts_read_back_from_the_store_are_the_facts_the_scan_measured() {
+        let root = std::env::temp_dir().join(format!("hyd-linkstore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ours = root.join("ours.bin");
+        let lib = root.join("lib.bin");
+        let cross = root.join("cross.bin");
+        for p in [&ours, &lib] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        std::fs::hard_link(&ours, &cross).unwrap(); // a cross-seed of ours
+        let outside = root.join("library-copy.mkv");
+        std::fs::hard_link(&lib, &outside).unwrap(); // the media library
+
+        let s = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        let catalogue = vec![
+            cat("ours", "hoard", &s(&root), &[&s(&ours)]),
+            cat("cross", "hoard", &s(&root), &[&s(&cross)]),
+            cat("lib", "hoard", &s(&root), &[&s(&lib)]),
+            cat("gone", "hoard", &s(&root), &[&s(&root.join("gone.bin"))]),
+        ];
+        let plan = catalogue.iter().map(|c| (c.info_hash.clone(), c.paths.clone())).collect();
+        let measured = stat_plan_with(plan, 4);
+        let direct = linkindex::compute(&measured);
+
+        let mut rows = std::collections::HashMap::new();
+        for (c, (_, files)) in catalogue.iter().zip(&measured) {
+            let stats: Vec<_> = files.iter().map(|(_, st)| *st).collect();
+            rows.insert((c.info_hash.clone(), c.session.clone()), (c.save_path.clone(), linkindex::pack(&stats)));
+        }
+        let stored = linkindex::compute(&entries_from_store(&catalogue, &rows).0);
+
+        assert_eq!(direct.len(), stored.len(), "every measured torrent comes back");
+        for (h, f) in &direct {
+            assert_eq!(stored.get(h), Some(f), "{h} read back differently");
+        }
+        assert_eq!(stored["ours"].external_links, 0, "a cross-seed of ours is not an outsider");
+        assert_eq!(stored["lib"].external_links, 1, "the library holds a name");
+        assert!(stored["gone"].data_missing);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn facts(n: usize) -> Vec<Facts> {
         (0..n)

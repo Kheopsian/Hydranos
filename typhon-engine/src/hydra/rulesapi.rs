@@ -326,10 +326,10 @@ pub async fn preview(
         Err(e) => return bad(e),
     };
 
-    let links = link_map(&state, rules::needs_link_scan(&w.when));
-    let facts = gather_all_with(&state, &links);
-    let (matches, report) = match rulesrun::evaluate(&w, &facts) {
-        Ok(x) => x,
+    let decided = tokio::task::spawn_blocking(move || decide(&state, &w)).await;
+    let Decision { matches, report, rechecked, no_longer, .. } = match decided {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => return bad(e),
         Err(e) => return bad(e),
     };
     let sample: Vec<serde_json::Value> = matches
@@ -350,40 +350,100 @@ pub async fn preview(
         "skipped": report.skipped,
         "capped": report.capped,
         "freed_bytes": report.freed_bytes,
+        "rechecked": rechecked,
+        "no_longer_true": no_longer,
         "sample": sample,
     }))
     .into_response()
 }
-
-/// The one scan shared by every workflow pass on this node.
-static LINK_CACHE: std::sync::LazyLock<crate::linkindex::Cache> =
-    std::sync::LazyLock::new(crate::linkindex::Cache::default);
 
 /// Facts for every engine this node runs.
 fn gather_all(state: &AppState) -> Vec<rules::Facts> {
     gather_all_with(state, &std::collections::HashMap::new())
 }
 
-/// The scan, or an empty map when no rule asked for it.
+/// What one pass decided, and the link facts it decided on.
+struct Decision {
+    matches: Vec<rulesrun::Match>,
+    report: rulesrun::PassReport,
+    /// Returned rather than kept private: the delete guard has to check
+    /// against the very measurement the pass decided on.
+    links: std::collections::HashMap<String, crate::linkindex::LinkFacts>,
+    /// Candidates measured again before acting, and those of them the fresh
+    /// measurement no longer justified.
+    rechecked: usize,
+    no_longer: usize,
+}
+
+/// Decide what a workflow would do. The single path the timer, the run
+/// button and the preview all take.
 ///
-/// Returned rather than kept private, because the delete guard has to check
-/// against the very counting the pass decided on.
-fn link_map(
-    state: &AppState,
-    want: bool,
-) -> std::collections::HashMap<String, crate::linkindex::LinkFacts> {
-    if !want {
-        return std::collections::HashMap::new();
+/// ⭐ A rule on hardlinks reads the LINK INDEX, which the background scanner
+/// keeps (`linkscan`), and never stats the catalogue itself: at a million
+/// torrents that was millions of `statx` on the request that asked, and a
+/// dry-run that answered after the person had given up. Then the torrents it
+/// would act on -- a few hundred at most, `cap` bounds them -- are measured
+/// again NOW, written back, and the rule is evaluated once more on that. A
+/// candidate whose files changed since the index saw them drops out here,
+/// before anything is done to it.
+fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
+    if !rules::needs_link_scan(&w.when) {
+        let facts = gather_all(state);
+        let (matches, report) = rulesrun::evaluate(w, &facts)?;
+        return Ok(Decision {
+            matches,
+            report,
+            links: Default::default(),
+            rechecked: 0,
+            no_longer: 0,
+        });
     }
-    LINK_CACHE.get_or_build(crate::store::now_secs(), || {
-        // ⚠️ The lock lives and dies inside this block. What follows it is
-        // minutes of `stat` whose cost depends on the ARC, and holding the
-        // store across that would freeze the daemon for the duration.
-        let plan = {
-            let store = state.store.lock().unwrap();
-            rulesrun::plan_scan(&state.engines, &store)
-        };
-        rulesrun::run_scan(plan)
+
+    // On the read connection: a pass must not hold the writer while it reads
+    // a million rows.
+    let (cat, mut entries, origin) = {
+        let store = state.store.read().map_err(|_| "store lock")?;
+        let cat = rulesrun::catalogue(&state.engines, &store);
+        let rows = store.link_index_stats().map_err(|e| e.to_string())?;
+        let (entries, origin) = rulesrun::entries_from_store(&cat, &rows);
+        (cat, entries, origin)
+    };
+    let links = crate::linkindex::compute(&entries);
+    let mut facts = gather_all_with(state, &links);
+    let (first, _) = rulesrun::evaluate(w, &facts)?;
+
+    let want: std::collections::HashSet<String> =
+        first.iter().map(|m| m.info_hash.clone()).collect();
+    let picked: Vec<usize> = (0..entries.len()).filter(|&i| want.contains(&entries[i].0)).collect();
+    let plan = picked
+        .iter()
+        .map(|&i| (entries[i].0.clone(), entries[i].1.iter().map(|(p, _)| p.clone()).collect()))
+        .collect();
+    let fresh = rulesrun::stat_plan_with(plan, rulesrun::scan_threads());
+    let now = crate::store::now_secs();
+    let mut rows = Vec::with_capacity(picked.len());
+    for (&i, e) in picked.iter().zip(fresh) {
+        let stats: Vec<_> = e.1.iter().map(|(_, st)| *st).collect();
+        rows.push(rulesrun::link_row(&cat[origin[i]], &stats, now));
+        entries[i] = e;
+    }
+    if !rows.is_empty() {
+        let store = state.store.lock().map_err(|_| "store lock")?;
+        store.put_link_rows(&rows).map_err(|e| e.to_string())?;
+    }
+
+    // Only the candidates' facts change: the others were not re-measured, and
+    // letting them in now would act on what nobody just looked at.
+    let links = crate::linkindex::compute(&entries);
+    rulesrun::patch_link_facts(&mut facts, &links, &want);
+    let (second, report) = rulesrun::evaluate(w, &facts)?;
+    let matches: Vec<_> = second.into_iter().filter(|m| want.contains(&m.info_hash)).collect();
+    Ok(Decision {
+        no_longer: first.len().saturating_sub(matches.len()),
+        rechecked: picked.len(),
+        matches,
+        report,
+        links,
     })
 }
 
@@ -432,18 +492,18 @@ pub async fn run_now(
         Ok(w) => w,
         Err(e) => return bad(e),
     };
-    let report = run_one(&state, &w, dry);
-    Json(report).into_response()
+    // Off the async runtime: a pass reads the link index and stats its
+    // candidates, which is disk wait a request thread must not sit in.
+    match tokio::task::spawn_blocking(move || run_one(&state, &w, dry)).await {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => bad(e),
+    }
 }
 
 /// One pass of one workflow. The single path both the timer and the button use.
 pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
-    // One scan for the whole run: the pass decides on it, and the delete guard
-    // re-measures against it.
-    let links = link_map(state, rules::needs_link_scan(&w.when));
-    let facts = gather_all_with(state, &links);
-    let (matches, mut report) = match rulesrun::evaluate(w, &facts) {
-        Ok(x) => x,
+    let Decision { matches, mut report, links, rechecked, no_longer } = match decide(state, w) {
+        Ok(d) => d,
         Err(e) => {
             return serde_json::json!({"error": e});
         }
@@ -467,6 +527,8 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
             "would_apply": matches.len(),
             "skipped": report.skipped,
             "capped": report.capped,
+            "rechecked": rechecked,
+            "no_longer_true": no_longer,
         });
     }
 
@@ -529,7 +591,46 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
         "skipped": report.skipped,
         "failed": report.failed,
         "capped": report.capped,
+        "rechecked": rechecked,
+        "no_longer_true": no_longer,
     })
+}
+
+/// Where the link index stands: how much of the catalogue it has measured,
+/// how old the oldest measurement is, and how many torrents it found with
+/// their files gone.
+pub async fn links_status(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    if !crate::api::authorised(&state, &headers, &query) {
+        return refuse();
+    }
+    let counts = {
+        let store = state.store.read().unwrap();
+        store.link_index_counts().unwrap_or_default()
+    };
+    use std::sync::atomic::Ordering::Relaxed;
+    let p = &crate::linkscan::PROGRESS;
+    Json(serde_json::json!({
+        "catalogue": p.catalogue.load(Relaxed),
+        "measured": counts.measured,
+        "files": counts.files,
+        "data_missing": counts.data_missing,
+        "partly_missing": counts.partly_missing,
+        "oldest_measurement": counts.oldest,
+        "refresh_secs": crate::linkscan::REFRESH_SECS,
+        "sweep": {
+            "total": p.sweep_total.load(Relaxed),
+            "done": p.sweep_done.load(Relaxed),
+            "started": p.sweep_started.load(Relaxed),
+            "last_batch_at": p.last_batch_at.load(Relaxed),
+            "files_per_sec": p.files_per_sec.load(Relaxed),
+        },
+    }))
+    .into_response()
 }
 
 pub async fn activity(
@@ -590,13 +691,18 @@ pub fn spawn(state: AppState) {
                     tracing::warn!(workflow = %stored.name, "workflow body will not parse, skipped");
                     continue;
                 };
-                let report = run_one(&state, &w, false);
+                let st = state.clone();
+                let name = w.name.clone();
+                let Ok(report) = tokio::task::spawn_blocking(move || run_one(&st, &w, false)).await else {
+                    tracing::warn!(workflow = %name, "workflow pass panicked");
+                    continue;
+                };
                 // Silence when nothing happened: a scheduled rule that matches
                 // nothing is the normal case and must not fill the log.
                 if report.get("applied").and_then(|v| v.as_u64()).unwrap_or(0) > 0
                     || report.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) > 0
                 {
-                    tracing::info!(workflow = %w.name, report = %report, "workflow ran");
+                    tracing::info!(workflow = %name, report = %report, "workflow ran");
                 }
             }
         }
@@ -611,6 +717,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/workflows/fields", get(fields))
         .route("/api/workflows/preview", post(preview))
         .route("/api/workflows/activity", get(activity))
+        .route("/api/workflows/links", get(links_status))
         .route("/api/workflows/:id/run", post(run_now))
         .route("/api/workflows/:id", delete(remove))
 }

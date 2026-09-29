@@ -36,6 +36,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - **`[mcp] allow_destructive`**, off by default. It lists and allows
   `delete_torrents` and `purge_race`; while it is off the agent is not even
   shown them, and calling them anyway is refused.
+- **A hardlink index, kept in the background.** A thread walks the catalogue at
+  its own pace -- never-measured torrents first, then anything older than a day
+  -- and stores each torrent's files as it found them (`link_index`). A
+  restart resumes where it stopped. The Workflows tab says how far it has got,
+  and how many torrents it found with their files missing: those used to show
+  only when a peer asked for a piece we could not serve.
+  `HYDRANOS_LINK_SCAN_THREADS` (16 by default) bounds how hard it leans on the
+  disk; `GET /api/workflows/links` reports its progress.
 
 ### Security
 - **A .torrent could name files outside its download folder.** File paths
@@ -46,6 +54,22 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   900,000-torrent library was affected by the change.
 
 ### Fixed
+- **A dry-run on a hardlink rule never answered at a million torrents.** A
+  rule on `external_links`, `link_count`, `freeable_bytes` or `data_missing`
+  stat'ed every file of the catalogue on the request that asked -- millions of
+  `statx`, long after the button had given up. A pass now reads the index
+  above, measures again only the torrents it is about to act on, and evaluates
+  the rule once more on that: a candidate whose files gained a link since the
+  index saw them drops out before anything is done to it. The result says how
+  many it re-measured (`rechecked`) and how many no longer qualified
+  (`no_longer_true`). Until the index has measured a torrent, no hardlink
+  condition matches it.
+- **Every restart told the trackers of each stopped torrent that it had
+  stopped.** Putting the operator's pauses back at boot went through the same
+  call as pressing Stop, which owes the trackers a departure, so each restart
+  sent one per stopped torrent -- including to a tracker that refuses this
+  client, which logged it every time. A pause restored at boot now departs only
+  if this process had already announced the torrent.
 - **"Move to category" moved nothing.** Since the Rust port the category route
   read only the category name: `move_files` was ignored, the answer was a 200,
   and the page showed the torrent as moved while every byte stayed where it
