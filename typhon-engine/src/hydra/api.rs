@@ -7299,7 +7299,7 @@ fn engine_qbit_rows(
     // except that one, which still takes the walk below.
     if let Some(wanted) = category.filter(|c| *c != engine_id) {
         let facts = {
-            let store = state.store.lock().unwrap();
+            let store = state.store.read().unwrap();
             store.facts_in_category(engine_id, wanted).unwrap_or_default()
         };
         for (hash, torrent_facts) in facts.iter() {
