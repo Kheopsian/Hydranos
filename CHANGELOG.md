@@ -117,6 +117,17 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   second, the limit settles near 200 in flight at the tracker's normal 0.5 s,
   where sizing the pool from demand alone climbed past 1,700 and pushed its
   answers to 2.8 s for the same throughput.
+- **A search no longer shakes the list.** While typing, the rows on screen
+  step back (dimmed) until the new page lands, then fade in. A filter chip
+  whose count a search takes to zero stays where it was, struck through,
+  instead of disappearing: the chip rows keep their height, so the table no
+  longer jumps under the cursor, and every filter keeps its place. And the
+  list is no longer refiltered with half a typed word against the previous
+  page -- that briefly showed 41 results for a search that had 85 000.
+- **Three more long reads moved off the shared store connection**: the
+  qBittorrent-API category listing, the download-slot manager's paused set,
+  and the store reconcile's row list (its deletes still go through the shared
+  one). Each held every write for half a second to a second.
 - **The torrent list answers in a fifth of a second at a million torrents,
   where it took three to five.** Every page, search or filter re-read the
   category, tags and pause flag of the whole library from the database -- a

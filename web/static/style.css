@@ -3810,3 +3810,18 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     gap: 6px;
     margin-top: 6px;
 }
+
+/* The list while a new search is on its way: the rows on screen are no longer
+   the answer, so they step back instead of standing there as if they were. */
+#hoard-tbody { transition: opacity 150ms ease; }
+#hoard-tbody.pending { opacity: .45; }
+/* And the new page fades in rather than replacing the old one in one frame. */
+#hoard-tbody.fresh { animation: hoard-fresh 120ms ease-out; }
+@keyframes hoard-fresh { from { opacity: .45; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+    #hoard-tbody, #hoard-tbody.fresh { transition: none; animation: none; }
+}
+
+/* A chip whose count a search took to zero: still there and in its place, so
+   nothing moves, but plainly gone -- struck through and faded. */
+#hoard-facets .chip.chip-orphan:not(.active):not(.excluded) { opacity: .35; text-decoration: line-through; }
