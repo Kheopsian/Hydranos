@@ -2470,10 +2470,12 @@ async function _showTagPicker(ev) {
     if (ev) ev.stopPropagation();
     const anchor = ev && ev.currentTarget;
     const hoardOnly = [..._selected.entries()].filter(([, v]) => _selMode(v) === "hoard");
-    if (hoardOnly.length === 0) return;
+    const n = _selAll ? _selCount() : hoardOnly.length;
+    if (n === 0) return;
     let known = [];
     try { known = await api("/api/tags"); } catch (e) { known = []; }
-    const firstRow = _hoardAllTorrents.find(t => t.info_hash === hoardOnly[0][0]);
+    // The ticks show the first row's tags; over a filter there is no first row.
+    const firstRow = _selAll ? null : _hoardAllTorrents.find(t => t.info_hash === _selHash(hoardOnly[0][1]));
     const cur = new Set((firstRow && firstRow.tags) || []);
     const esch = s => String(s).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
     const rows = known.map(t => {
@@ -2481,7 +2483,7 @@ async function _showTagPicker(ev) {
         const on = cur.has(t);
         return `<div class="ctx-item" onclick="_toggleTagSelected('${jsT}', ${on ? "false" : "true"})">${on ? "✓ " : " "}${esch(t)}</div>`;
     }).join("");
-    const label = tp(hoardOnly.length, "Edit tags, {n} torrent", "Edit tags, {n} torrents");
+    const label = tp(n, "Edit tags, {n} torrent", "Edit tags, {n} torrents");
     _openCtxSubmenu(
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
@@ -2491,26 +2493,25 @@ async function _showTagPicker(ev) {
 }
 
 async function _applyTagOp(tags, op) {
-    const entries = [..._selected.entries()].filter(([, v]) => _selMode(v) === "hoard");
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        try {
-            await fetch(`/api/hoard/torrents/${hash}/tags`, {
-                method: "POST",
-                headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
-                body: JSON.stringify({ tags, op }),
-            });
-            const row = _hoardAllTorrents.find(t => t.info_hash === hash);
-            if (row) {
-                const set = new Set(row.tags || []);
-                if (op === "add") tags.forEach(t => set.add(t));
-                else tags.forEach(t => set.delete(t));
-                row.tags = [...set];
-            }
-        } catch (e) { console.error("tag op failed", hash, e); }
+    const explicit = !_selAll;
+    const hashes = [..._selected.values()].filter(v => _selMode(v) === "hoard").map(v => _selHash(v));
+    const j = await _runSelection("tags", { tags, op }, t("Edit tags"));
+    if (!j) return;
+    if (explicit && !j.failed) {
+        for (const hash of hashes) {
+            const row = _hoardAllTorrents.find(x => x.info_hash === hash);
+            if (!row) continue;
+            const set = new Set(row.tags || []);
+            if (op === "add") tags.forEach(x => set.add(x));
+            else tags.forEach(x => set.delete(x));
+            row.tags = [...set];
+        }
+        renderHoardTable();
+        _renderHoardCounts();
+    } else {
+        fetchHoardPage(true);
     }
-    renderHoardTable();
-    _renderHoardCounts();
+    if (j.failed) _reportSelection(t("Edit tags"), j);
 }
 
 function _toggleTagSelected(tag, add) {
@@ -2628,6 +2629,14 @@ function _hoardPageQuery() {
     q.set("facets", "1");
     q.set("sort", _hoardSortCol);
     q.set("order", _hoardSortAsc ? "asc" : "desc");
+    _hoardFilterParams(q);
+    return q.toString();
+}
+
+// The list's filter parameters, and only those: the page adds its paging and
+// sorting, a Ctrl+A selection keeps exactly this. One definition for both, so
+// the set acted on is the set shown.
+function _hoardFilterParams(q) {
     const search = document.getElementById("hoard-search")?.value || "";
     if (search) q.set("search", search);
     if (_hoardCatInc.length) q.set("category", _hoardCatInc.join(","));
@@ -2639,11 +2648,21 @@ function _hoardPageQuery() {
     if (_hoardErrInc.length) q.set("error_class", _hoardErrInc.join(","));
     if (_hoardErrExc.length) q.set("error_class_not", _hoardErrExc.join(","));
     if (_hoardStateFilter) q.set("state", _hoardStateFilter);
-    return q.toString();
+    return q;
+}
+
+function _hoardFilterQuery() {
+    return _hoardFilterParams(new URLSearchParams()).toString();
 }
 
 async function fetchHoardPage(force) {
     const qs = _hoardPageQuery();
+    // A Ctrl+A means the filter it was typed on. Once the filter changes, it
+    // would silently mean a different set: drop it instead.
+    if (_selAll && _selAll.filter !== _hoardFilterQuery()) {
+        _selAll = null;
+        _updateRowHighlights();
+    }
     // Never ask twice for the SAME thing at once. Two entry points fire at
     // startup and both force; without this they raced each other for the
     // store and each took twice as long as one would have.
@@ -3043,6 +3062,33 @@ function closeHoardDetail() {
 // node and by an agent at once, and an action has to reach the one clicked.
 const _selected = new Map();
 
+// A Ctrl+A is kept as the FILTER it was typed on, plus the rows the operator
+// then took out -- never as the hashes it matches. The daemon resolves it with
+// the function that answers the list (selection.rs), so a million-torrent
+// selection costs the page one number instead of 43 MB each way. Null when the
+// selection is rows picked by hand, which live in `_selected`.
+let _selAll = null;   // { filter, view, count, exclude: Map<selKey, item> }
+
+function _selCount() {
+    return _selAll ? Math.max(0, _selAll.count - _selAll.exclude.size) : _selected.size;
+}
+function _clearSelection() {
+    _selAll = null;
+    _selected.clear();
+}
+function _isKeySelected(key, row) {
+    if (_selAll) return (!row || row.dataset.mode === "hoard") && !_selAll.exclude.has(key);
+    return _selected.has(key);
+}
+// What every selection action sends: the rows, or the filter and its exceptions
+// with the count the operator saw (the daemon refuses a filter that grew).
+function _selectionPayload() {
+    if (_selAll) {
+        return { filter: _selAll.filter, view: _selAll.view, exclude: [..._selAll.exclude.values()], expect: _selAll.count };
+    }
+    return { items: [..._selected.values()].map(v => ({ hash: _selHash(v), agent: _selAgent(v), mode: _selMode(v) || "" })) };
+}
+
 function _selMode(v) { return (v && v.mode !== undefined) ? v.mode : v; }
 // _isLocalAgent mirrors isLocalAgentName on the server: this node answers to
 // the bare "local" and to every "local-" name. The list rows carry their real
@@ -3380,27 +3426,93 @@ function _hoardMatches(t, search, skip) {
 // torrent (409) since a pin only buys a download slot.
 async function _pinSelected(on) {
     _hideCtxMenu();
-    const entries = [..._selected.entries()];
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        const mode = _selMode(sel);
-        if (mode !== "hoard") continue;
-        try {
-            const res = await fetch(`/api/hoard/torrents/${hash}/${on ? "pin" : "unpin"}`, {
-                method: "POST",
-                headers: { "X-Api-Key": API_KEY },
-            });
-            if (res.ok) {
-                if (on) _hoardPinned.add(hash); else _hoardPinned.delete(hash);
-            } else if (res.status === 409) {
-                console.warn("Cannot force a complete torrent", hash);
-            }
-        } catch (err) {
-            console.error("Failed to pin", hash, err);
-        }
-    }
+    const j = await _runSelection(on ? "pin" : "unpin", {}, on ? t("Force download") : t("Stop forcing"));
+    if (!j) return;
+    await _refreshHoardPins();
     renderHoardTable();
     _renderHoardCounts();
+    _reportSelection(on ? t("Force download") : t("Stop forcing"), j);
+}
+
+// ── Selection actions ─────────────────────────────────────────────────────
+//
+// Every action on the selection is ONE request to the daemon, which resolves
+// the selection (rows, or a filter and its exceptions) and runs the action as
+// a background job, torrent by torrent through the same route this page used
+// to call once per row. The page only follows the job.
+
+// Start `action` on the selection (or on `selection` when given) and wait for
+// it. Returns the finished job, or null if it never started.
+async function _runSelection(action, params, label, selection) {
+    const body = { selection: selection || _selectionPayload(), params: params || {} };
+    for (;;) {
+        let r, j = null;
+        try {
+            r = await fetch(`/api/selection/${action}`, {
+                method: "POST",
+                headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            try { j = await r.json(); } catch (_) { j = null; }
+        } catch (err) {
+            hydraNotify(label || action, err.message || String(err));
+            return null;
+        }
+        // The filter matches more than the operator was told: ask again with
+        // the new number rather than act on torrents nobody confirmed.
+        if (r.status === 409 && j && j.reason === "grew") {
+            const ok = await hydraConfirm(t("The filter now matches {n} torrents, not {m}. Apply to all {n}?",
+                { n: fmtInt(j.count), m: fmtInt(j.expected) }));
+            if (!ok) return null;
+            body.selection.expect = j.count;
+            if (_selAll && !selection) _selAll.count = j.count;
+            continue;
+        }
+        if (!r.ok || !j || !j.job) {
+            hydraNotify(label || action, (j && j.error) || ("HTTP " + r.status));
+            return null;
+        }
+        return _followSelectionJob(j.job, label || action);
+    }
+}
+
+async function _followSelectionJob(id, label) {
+    let delay = 200, misses = 0;
+    for (;;) {
+        await new Promise(res => setTimeout(res, delay));
+        delay = Math.min(1500, Math.round(delay * 1.5));
+        let j;
+        try { j = await api(`/api/selection/jobs/${encodeURIComponent(id)}`); misses = 0; }
+        catch (e) {
+            // A daemon restart forgets its jobs: stop following rather than spin.
+            if (++misses >= 5) return null;
+            continue;
+        }
+        if (j.finished) return j;
+        if (j.total > 50) {
+            _flashStatus(t("{label}: {done} / {total}", { label: label, done: fmtInt(j.done), total: fmtInt(j.total) }));
+        }
+    }
+}
+
+// Say what a finished job did, in one line; open a dialog only for failures.
+function _reportSelection(label, j) {
+    const c = j.tally || {};
+    const parts = [];
+    const say = (k, msg) => { if (c[k]) parts.push(t(msg, { n: fmtInt(c[k]) })); };
+    say("ok", "{n} done");
+    say("moving", "{n} moving in the background");
+    say("sent", "{n} sent to agents");
+    say("complete", "{n} already complete");
+    say("not_applied", "{n} not applied");
+    say("skipped", "{n} not applicable");
+    say("not_here", "{n} not on this node");
+    say("needs_consent", "{n} waiting for your answer");
+    if (j.failed) parts.push(t("{n} failed", { n: fmtInt(j.failed) }));
+    if (j.cancelled) parts.push(t("cancelled"));
+    const line = label + ": " + (parts.join(" \u00b7 ") || t("nothing to do"));
+    if (j.failed) hydraNotify(line + "\n\n" + (j.errors || []).join("\n"));
+    else _flashStatus(line);
 }
 
 // Ctrl+A selects everything the current filters match -- not just the rows on
@@ -3408,43 +3520,24 @@ async function _pinSelected(on) {
 // "all" off the DOM would silently mean "the first 500", which is exactly the
 // bulk-action trap this avoids.
 async function _selectAllFiltered() {
-    // The selection universe is every torrent the FILTER matches, which is no
-    // longer what this page holds -- it holds 500 of them. Ask the server for
-    // the hashes alone: rows for 300k would undo the paging this replaced.
-    const q = new URLSearchParams({ fields: "hash" });
-    const search = document.getElementById("hoard-search")?.value || "";
-    if (search) q.set("search", search);
-    if (_hoardCatInc.length) q.set("category", _hoardCatInc.join(","));
-    if (_hoardCatExc.length) q.set("category_not", _hoardCatExc.join(","));
-    if (_hoardTagInc.length) q.set("tag", _hoardTagInc.join(","));
-    if (_hoardTagExc.length) q.set("tag_not", _hoardTagExc.join(","));
-    if (_hoardTrackerInc.length) q.set("tracker", _hoardTrackerInc.join(","));
-    if (_hoardTrackerExc.length) q.set("tracker_not", _hoardTrackerExc.join(","));
-    if (_hoardErrInc.length) q.set("error_class", _hoardErrInc.join(","));
-    if (_hoardErrExc.length) q.set("error_class_not", _hoardErrExc.join(","));
-    if (_hoardStateFilter) q.set("state", _hoardStateFilter);
-
-    let copies = null;
+    // Only the COUNT comes back: the daemon resolves the filter itself when an
+    // action runs, with the function that answers this very page.
+    const filter = _hoardFilterQuery();
+    let count = null;
     try {
-        const d = await api("/api/hoard/page?" + q.toString());
-        // `copies` carries the engine each hash was found in. `hashes` is the
-        // flat 3.x shape, kept for a node with a single hoard engine, where the
-        // two say the same thing.
-        if (Array.isArray(d && d.copies)) copies = d.copies;
-        else if (Array.isArray(d && d.hashes)) copies = d.hashes.map(h => ({ hash: h, agent: "local-hoard" }));
-    } catch (e) { copies = null; }
-    // Fall back to what is on screen rather than selecting nothing: a Ctrl+A
-    // that silently no-ops is worse than one that selects the visible page.
-    if (!copies) copies = _hoardFiltered.map(t => ({ hash: t.info_hash, agent: t.agent || "local-hoard" }));
-    if (!copies.length) return;
-
-    _selected.clear();
-    for (const c of copies) {
-        _selected.set(_selKeyOf(c.hash, c.agent), { hash: c.hash, mode: "hoard", agent: c.agent });
+        const d = await api("/api/hoard/page?" + (filter ? filter + "&" : "") + "limit=1");
+        if (d && typeof d.filtered === "number") count = d.filtered;
+    } catch (e) { count = null; }
+    if (count === null) {
+        hydraNotify(t("Could not count the torrents this filter matches."));
+        return;
     }
+    if (!count) return;
+    _clearSelection();
+    _selAll = { filter: filter, view: "hoard", count: count, exclude: new Map() };
     _anchorHash = null;
     _updateRowHighlights();
-    _flashSelectionCount(_selected.size);
+    _flashSelectionCount(_selCount());
 }
 
 // The highlight only shows on rendered rows, so say out loud how many are
@@ -3488,7 +3581,7 @@ function handleRowClick(e, hash, mode) {
             const lo = Math.min(aIdx, bIdx);
             const hi = Math.max(aIdx, bIdx);
             // Keep only the range selection (like Windows Explorer)
-            _selected.clear();
+            _clearSelection();
             for (let i = lo; i <= hi; i++) {
                 _selected.set(_rowSelKey(rows[i]), _selEntry(rows[i]));
             }
@@ -3497,13 +3590,17 @@ function handleRowClick(e, hash, mode) {
         return;
     }
     if (e.ctrlKey || e.metaKey) {
-        if (_selected.has(key)) _selected.delete(key);
+        if (_selAll) {
+            // Over a Ctrl+A, a Ctrl+click takes a row out, or puts it back.
+            if (_selAll.exclude.has(key)) _selAll.exclude.delete(key);
+            else _selAll.exclude.set(key, { hash: entry.hash, agent: entry.agent, mode: entry.mode || "" });
+        } else if (_selected.has(key)) _selected.delete(key);
         else _selected.set(key, entry);
         _anchorHash = key;
         _updateRowHighlights();
         return;
     }
-    _selected.clear();
+    _clearSelection();
     _selected.set(key, entry);
     _anchorHash = key;
     _updateRowHighlights();
@@ -3517,8 +3614,8 @@ function handleRowContextMenu(e, hash, mode) {
     e.preventDefault();
     const row = e.target.closest(".t-row");
     const key = row ? _rowSelKey(row) : _selKeyOf(hash, "local");
-    if (!_selected.has(key)) {
-        _selected.clear();
+    if (!_isKeySelected(key, row)) {
+        _clearSelection();
         _selected.set(key, row ? _selEntry(row) : { hash: hash, mode: mode, agent: "local" });
         _updateRowHighlights();
     }
@@ -3527,20 +3624,23 @@ function handleRowContextMenu(e, hash, mode) {
 
 function _updateRowHighlights() {
     document.querySelectorAll(".t-row").forEach(row => {
-        row.classList.toggle("row-selected", _selected.has(_rowSelKey(row)));
+        row.classList.toggle("row-selected", _isKeySelected(_rowSelKey(row), row));
     });
 }
 
 function _showCtxMenu(x, y) {
     const menu = document.getElementById("ctx-menu");
-    const count = _selected.size;
+    const count = _selCount();
+    // Over a filter, the rows are not in the page: offer every action and let
+    // the daemon skip what does not apply to a given torrent.
+    const bulk = !!_selAll;
     document.getElementById("ctx-label").textContent =
         tp(count, "{n} torrent selected", "{n} torrents selected");
     // Changing category works on both engines now: the category carries the
     // engine its torrents belong in, so setting one on a race torrent is how
     // it is handed to the hoard, and moving the files is a background job
     // either way. It used to be hoard-only, and the item was hidden here.
-    const anyHoard = [..._selected.entries()].some(([, v]) => _selMode(v) === "hoard");
+    const anyHoard = bulk || [..._selected.entries()].some(([, v]) => _selMode(v) === "hoard");
     const catItem = document.getElementById("ctx-change-category");
     if (catItem) catItem.style.display = "";
     const catMoveItem = document.getElementById("ctx-change-category-move");
@@ -3558,13 +3658,13 @@ function _showCtxMenu(x, y) {
     });
     const pinItem = document.getElementById("ctx-pin");
     const unpinItem = document.getElementById("ctx-unpin");
-    if (pinItem) pinItem.style.display = incomplete.some(h => !_hoardPinned.has(h)) ? "" : "none";
-    if (unpinItem) unpinItem.style.display = hoardSel.some(h => _hoardPinned.has(h)) ? "" : "none";
+    if (pinItem) pinItem.style.display = bulk || incomplete.some(h => !_hoardPinned.has(h)) ? "" : "none";
+    if (unpinItem) unpinItem.style.display = bulk || hoardSel.some(h => _hoardPinned.has(h)) ? "" : "none";
     // Offer whichever of Pause/Resume the selection can actually act on. A
     // mixed selection gets both.
     const intents = [..._selected.values()].map(v => _isUserPaused(_selHash(v)));
-    const anyPaused = intents.some(v => v === true || v === null);
-    const anyRunning = intents.some(v => v === false || v === null);
+    const anyPaused = bulk || intents.some(v => v === true || v === null);
+    const anyRunning = bulk || intents.some(v => v === false || v === null);
     const pItem = document.getElementById("ctx-pause");
     if (pItem) pItem.style.display = anyRunning ? "" : "none";
     const rItem = document.getElementById("ctx-resume");
@@ -3644,7 +3744,7 @@ async function _refreshCtxNodes() {
 async function _showEnginePicker(ev, then) {
     if (ev) ev.stopPropagation();
     const anchor = ev && ev.currentTarget;
-    if (_selected.size === 0) return;
+    if (_selCount() === 0) return;
 
     let nodes = [], locals = [];
     try { nodes = await api("/api/nodes"); } catch (e) { nodes = []; }
@@ -3664,6 +3764,8 @@ async function _showEnginePicker(ev, then) {
     // time either repairs a piece. Shown and explained rather than hidden --
     // "why can I copy to another machine but not to the engine next door" is
     // exactly the question this menu should answer.
+    // Over a filter the rows are not in the page: treat it as this node's, and
+    // the daemon skips any copy that turns out to live elsewhere.
     const sources = new Set([..._selected.values()].map(v => _selAgent(v)));
     // Local destinations only make sense for a selection that is HERE. Moving a
     // remote row to a local engine would act on this node's own copy -- which
@@ -3739,7 +3841,7 @@ async function _showEnginePicker(ev, then) {
     if (!items) items = `<div class="ctx-label">${t("Nowhere else to send it.")}</div>`;
 
     const verb = then === "remove" ? t("Move to engine") : t("Duplicate to engine");
-    const label = verb + ": " + tp(_selected.size, "{n} torrent", "{n} torrents");
+    const label = verb + ": " + tp(_selCount(), "{n} torrent", "{n} torrents");
     _openCtxSubmenu(
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
@@ -3752,59 +3854,25 @@ async function _showEnginePicker(ev, then) {
 /// holds the data. Nothing is relayed through the API -- the bytes arrive over
 /// BitTorrent, hash-checked piece by piece like any other transfer.
 async function _fetchFromNode(nodeName, fromEngine, engine) {
-    const entries = [..._selected.entries()];
     _hideCtxMenu();
-    let ok = 0;
-    const errors = [];
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        const row = (_hoardAllTorrents || []).find(x => x.info_hash === hash);
-        try {
-            await api("/api/nodes/" + encodeURIComponent(nodeName) + "/fetch", {
-                method: "POST",
-                body: JSON.stringify({
-                    info_hash: hash,
-                    engine: engine,
-                    from_engine: fromEngine,
-                    category: (row && row.category) || "",
-                }),
-            });
-            ok++;
-        } catch (e) {
-            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
-        }
-    }
-    hydraNotify(t("Bring here"), errors.length
-        ? t("Fetched {ok} into \"{target}\", {failed} failure(s).",
-            { ok: ok, target: "local-" + engine, failed: errors.length }) + "\n\n" + errors.join("\n")
-        : t("Fetching {ok} into \"{target}\" from \"{node}\".",
-            { ok: ok, target: "local-" + engine, node: nodeName }));
+    const j = await _runSelection("node-fetch", { node: nodeName, from_engine: fromEngine, engine: engine }, t("Bring here"));
+    if (!j) return;
+    const ok = (j.tally && j.tally.ok) || 0;
+    hydraNotify(t("Bring here"), j.failed
+        ? t("Fetched {ok} into \"{target}\", {failed} failure(s).", { ok: ok, target: "local-" + engine, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n")
+        : t("Fetching {ok} into \"{target}\" from \"{node}\".", { ok: ok, target: "local-" + engine, node: nodeName }));
     fetchHoardPage(true);
 }
 
 /// Move a torrent between two engines of the node that already holds it.
 async function _moveOnNode(nodeName, engine) {
-    const entries = [..._selected.entries()];
     _hideCtxMenu();
-    let ok = 0;
-    const errors = [];
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        try {
-            await api("/api/nodes/" + encodeURIComponent(nodeName) + "/move-engine", {
-                method: "POST",
-                body: JSON.stringify({ info_hash: hash, engine: engine }),
-            });
-            ok++;
-        } catch (e) {
-            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
-        }
-    }
-    hydraNotify(t("Move to engine"), errors.length
-        ? t("Moved {ok} to \"{target}\", {failed} failure(s).",
-            { ok: ok, target: nodeName + "-" + engine, failed: errors.length }) + "\n\n" + errors.join("\n")
-        : t("Moved {ok} to \"{target}\". The files did not move.",
-            { ok: ok, target: nodeName + "-" + engine }));
+    const j = await _runSelection("node-move", { node: nodeName, engine: engine }, t("Move to engine"));
+    if (!j) return;
+    const ok = (j.tally && j.tally.ok) || 0;
+    hydraNotify(t("Move to engine"), j.failed
+        ? t("Moved {ok} to \"{target}\", {failed} failure(s).", { ok: ok, target: nodeName + "-" + engine, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n")
+        : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: nodeName + "-" + engine }));
     fetchHoardPage(true);
 }
 
@@ -3813,27 +3881,13 @@ async function _moveOnNode(nodeName, engine) {
 /// No transfer and no second copy on disk. The daemon adds it in seed mode,
 /// because the data is there and already verified.
 async function _copyToLocalEngine(engine) {
-    const entries = [..._selected.entries()];
     _hideCtxMenu();
-    let ok = 0;
-    const errors = [];
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        try {
-            await api("/api/torrents/" + encodeURIComponent(hash) + "/copy", {
-                method: "POST",
-                body: JSON.stringify({ engine: engine }),
-            });
-            ok++;
-        } catch (e) {
-            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
-        }
-    }
-    hydraNotify(t("Duplicate to engine"), errors.length
-        ? t("Seeding {ok} more from \"{target}\", {failed} failure(s).",
-            { ok: ok, target: "local-" + engine, failed: errors.length }) + "\n\n" + errors.join("\n")
-        : t("Seeding {ok} more from \"{target}\". Same files, second identity in the swarm.",
-            { ok: ok, target: "local-" + engine }));
+    const j = await _runSelection("copy", { engine: engine }, t("Duplicate to engine"));
+    if (!j) return;
+    const ok = (j.tally && j.tally.ok) || 0;
+    hydraNotify(t("Duplicate to engine"), j.failed
+        ? t("Seeding {ok} more from \"{target}\", {failed} failure(s).", { ok: ok, target: "local-" + engine, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n")
+        : t("Seeding {ok} more from \"{target}\". Same files, second identity in the swarm.", { ok: ok, target: "local-" + engine }));
     fetchHoardPage(true);
     updateRaceTorrents();
 }
@@ -3845,33 +3899,13 @@ async function _copyToLocalEngine(engine) {
 /// request over the network would copy bytes that are already in the right
 /// place.
 async function _moveToLocalEngine(engine) {
-    const entries = [..._selected.entries()];
     _hideCtxMenu();
-    let moved = 0;
-    const errors = [];
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        try {
-            // The row that was clicked, so the right copy moves.
-            const from = encodeURIComponent(_selAgent(sel));
-            await api("/api/torrents/" + encodeURIComponent(hash) + "/engine?agent=" + from, {
-                method: "POST",
-                body: JSON.stringify({ engine: engine }),
-            });
-            moved++;
-        } catch (e) {
-            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
-        }
-    }
-    if (errors.length) {
-        hydraNotify(t("Move to engine"),
-            t("Moved {ok} to \"{target}\", {failed} failure(s).",
-                { ok: moved, target: "local-" + engine, failed: errors.length }) + "\n\n" + errors.join("\n"));
-    } else {
-        hydraNotify(t("Move to engine"),
-            t("Moved {ok} to \"{target}\". The files did not move.",
-                { ok: moved, target: "local-" + engine }));
-    }
+    const j = await _runSelection("move-engine", { engine: engine }, t("Move to engine"));
+    if (!j) return;
+    const ok = (j.tally && j.tally.ok) || 0;
+    hydraNotify(t("Move to engine"), j.failed
+        ? t("Moved {ok} to \"{target}\", {failed} failure(s).", { ok: ok, target: "local-" + engine, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n")
+        : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: "local-" + engine }));
     _scheduleHoardRender();
     fetchHoardPage(true);
 }
@@ -3883,37 +3917,17 @@ async function _moveToLocalEngine(engine) {
 /// only then drops the local copy, and it fails safe -- a timeout or a restart
 /// leaves both copies, which is a duplicate to clean up rather than data gone.
 async function _sendToEngineSelected(nodeName, engine, then) {
-    const entries = [..._selected.entries()];
     _hideCtxMenu();
-
-    let sent = 0;
-    const errors = [];
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        // The torrent's category travels with it: the far side routes by
-        // category, and one it does not know would land it in the wrong tier.
-        const row = (_hoardAllTorrents || []).find(x => x.info_hash === hash)
-                 || (_raceTorrents || []).find(x => x.info_hash === hash);
-        try {
-            await api("/api/nodes/" + encodeURIComponent(nodeName) + "/handoff", {
-                method: "POST",
-                body: JSON.stringify({
-                    info_hash: hash,
-                    engine: engine,
-                    category: (row && row.category) || "",
-                    then: then,
-                }),
-            });
-            sent++;
-        } catch (e) {
-            errors.push(`${hash.slice(0, 8)}: ${e.message || e}`);
-        }
-    }
+    // The daemon reads each torrent's category from its store: the far side
+    // routes by category, and one it does not know would land it in the wrong tier.
+    const j = await _runSelection("handoff", { node: nodeName, engine: engine, then: then }, t("Send to engine"));
+    if (!j) return;
+    const sent = (j.tally && j.tally.ok) || 0;
     const target = nodeName + "-" + engine;
-    if (errors.length) {
+    if (j.failed) {
         hydraNotify(t("Send to engine"),
             t("Sent {ok} to \"{target}\", {failed} failure(s).",
-                { ok: sent, target: target, failed: errors.length }) + "\n\n" + errors.join("\n"));
+                { ok: sent, target: target, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n"));
     } else if (then === "remove") {
         hydraNotify(t("Send to engine"),
             t("Sent {ok} to \"{target}\". The local copy goes once the far side reports complete.",
@@ -4014,7 +4028,7 @@ function _openCtxSubmenu(html, anchor) {
 async function _showCategoryPicker(ev, move) {
     if (ev) ev.stopPropagation();
     const anchor = ev && ev.currentTarget;
-    if (_selected.size === 0) return;
+    if (_selCount() === 0) return;
     let cats = [];
     try {
         cats = await api("/api/categories");
@@ -4032,7 +4046,7 @@ async function _showCategoryPicker(ev, move) {
         return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\', ${move ? "true" : "false"})" title="${esc(safePath)}">${safeName}</div>`;
     }).join("");
     const verb = move ? t("Move to category") : t("Set category (no move)");
-    const label = verb + ": " + tp(_selected.size, "{n} torrent", "{n} torrents");
+    const label = verb + ": " + tp(_selCount(), "{n} torrent", "{n} torrents");
     _openCtxSubmenu(
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
@@ -4040,112 +4054,55 @@ async function _showCategoryPicker(ev, move) {
 }
 
 async function _changeCategorySelected(catName, move) {
-    const entries = [..._selected.entries()];
     _hideCtxMenu();
+    const label = move ? t("Move to category") : t("Set category (no move)");
+    // The daemon addresses each torrent on the engine that holds it and works
+    // out the rest: relabel, hand over to the other engine, or move the payload.
+    const params = { category: catName, move_files: !!move, allow_breaking_hardlinks: false };
+    const j = await _runSelection("category", params, label);
+    if (!j) return;
+    let ok = (j.tally && j.tally.ok) || 0;
+    let moving = (j.tally && j.tally.moving) || 0;
+    let failed = j.failed || 0;
+    const errors = [...(j.errors || [])];
 
-    // Each torrent is addressed on the engine that currently holds it. The
-    // endpoint works out the rest: relabel, hand over to the other engine, or
-    // move the payload, depending on what the target category asks for.
-    const post = (hash, mode, allowBreakingHardlinks) =>
-        fetch(`/api/${mode}/torrents/${hash}/category`, {
-            method: "POST",
-            headers: {
-                "X-Api-Key": API_KEY,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-                category: catName,
-                move_files: !!move,
-                allow_breaking_hardlinks: !!allowBreakingHardlinks,
-            }),
-        });
-
-    let okCount = 0;
-    let movingCount = 0;
-    // Only a 200 means the category is already what the row should show. A 202
-    // is a job that has not moved a byte yet and can still fail, so painting
-    // the row now would state a result that does not exist.
-    const relabelled = [];
-    const errors = [];
-    const needConsent = [];
-
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        const mode = _selMode(sel);
-        try {
-            const r = await post(hash, mode, false);
-            let j = null;
-            try { j = await r.json(); } catch (_) { /* empty body */ }
-            if (r.status === 409 && j && j.reason === "hardlinks") {
-                // Not a failure: a question. Collected and asked once below,
-                // rather than one prompt per torrent.
-                needConsent.push({ hash, mode, files: j.hardlinked_files || 0, bytes: j.hardlinked_bytes || 0 });
-                continue;
-            }
-            if (!r.ok) {
-                errors.push(`${hash.slice(0, 8)}: ${(j && j.error) || ("HTTP " + r.status)}`);
-                continue;
-            }
-            if (r.status === 202) { movingCount++; } else { okCount++; relabelled.push(hash); }
-        } catch (err) {
-            errors.push(`${hash.slice(0, 8)}: ${err.message}`);
-        }
-    }
-
-    if (needConsent.length > 0) {
-        const files = needConsent.reduce((n, x) => n + x.files, 0);
-        const bytes = needConsent.reduce((n, x) => n + x.bytes, 0);
-        const question = tp(needConsent.length,
+    // Torrents whose files are hardlinked elsewhere are not failures but a
+    // question, asked once for all of them.
+    const consent = j.consent || { items: [] };
+    if (consent.items && consent.items.length) {
+        const question = tp(consent.items.length,
             "{n} torrent cannot move without breaking hardlinks.",
-            "{n} torrents cannot move without breaking hardlinks.", { n: needConsent.length })
+            "{n} torrents cannot move without breaking hardlinks.", { n: consent.items.length })
             + "\n\n"
             + t("{files} file(s), {size}, are hardlinked elsewhere (usually the Sonarr or Radarr library). The target is on another filesystem, so copying them leaves a second full copy on disk.",
-                { files: files, size: formatBytes(bytes) })
+                { files: consent.files, size: formatBytes(consent.bytes) })
             + "\n\n" + t("Move them anyway?");
         if (await hydraConfirm(question)) {
-            for (const { hash, mode } of needConsent) {
-                try {
-                    const r = await post(hash, mode, true);
-                    if (!r.ok) {
-                        let j = null;
-                        try { j = await r.json(); } catch (_) { /* empty body */ }
-                        errors.push(`${hash.slice(0, 8)}: ${(j && j.error) || ("HTTP " + r.status)}`);
-                    } else if (r.status === 202) {
-                        movingCount++;
-                    } else {
-                        okCount++;
-                        relabelled.push(hash);
-                    }
-                } catch (err) {
-                    errors.push(`${hash.slice(0, 8)}: ${err.message}`);
-                }
+            const again = await _runSelection("category", Object.assign({}, params, { allow_breaking_hardlinks: true }),
+                label, { items: consent.items });
+            if (again) {
+                ok += (again.tally && again.tally.ok) || 0;
+                moving += (again.tally && again.tally.moving) || 0;
+                failed += again.failed || 0;
+                errors.push(...(again.errors || []));
             }
         }
     }
 
-    if (errors.length > 0) {
-        hydraNotify(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: okCount + movingCount, failed: errors.length }) + "\n\n" + errors.join("\n"));
-    } else if (movingCount > 0) {
+    if (failed > 0) {
+        hydraNotify(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: ok + moving, failed: failed }) + "\n\n" + errors.join("\n"));
+    } else if (moving > 0) {
         // A move runs in the background and can take hours, so say so rather
         // than leaving the row looking like nothing happened.
-        hydraNotify(tp(movingCount,
+        hydraNotify(tp(moving,
             "Moving {n} torrent to \"{cat}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.",
             "Moving {n} torrents to \"{cat}\" in the background. They keep seeding while their data is copied; follow them in Jobs.",
-            { n: movingCount, cat: catName }));
+            { n: moving, cat: catName }));
     }
-
-    // Optimistic, but only for the rows that really were relabelled (HTTP 200).
-    // A row whose payload is being moved in the background keeps its current
-    // category until the job has actually finished: the move can fail hours
-    // later, and a row repainted at click time would have been lying the whole
-    // time. Race rows are rendered from freshly fetched data and need no nudge.
-    if (Array.isArray(_hoardAllTorrents)) {
-        for (const hash of relabelled) {
-            const t = _hoardAllTorrents.find(x => x.info_hash === hash);
-            if (t) t.category = catName;
-        }
-    }
-    try { if (typeof _scheduleHoardRender === "function") _scheduleHoardRender(); } catch (_) {}
+    // A row whose payload is being moved keeps its category until the move
+    // has finished, so the page is refetched rather than repainted.
+    fetchHoardPage(true);
+    updateRaceTorrents();
 }
 
 document.addEventListener("click", e => {
@@ -4155,7 +4112,7 @@ document.addEventListener("click", e => {
 document.addEventListener("keydown", e => {
     if (e.key === "Escape") {
         _hideCtxMenu();
-        _selected.clear();
+        _clearSelection();
         _updateRowHighlights();
         closeDetail();
         closeHoardDetail();
@@ -4170,7 +4127,7 @@ document.addEventListener("click", e => {
         e.target.closest("#ctx-submenu") ||
         e.target.closest(".modal-overlay")) return;
     _hideCtxMenu();
-    _selected.clear();
+    _clearSelection();
     _updateRowHighlights();
     closeDetail();
     closeHoardDetail();
@@ -4186,46 +4143,14 @@ document.addEventListener("click", e => {
 // reannounce on 2026-09-12. Reading the outcome is the point.
 async function _reannounceSelected() {
     _hideCtxMenu();
-    const entries = [..._selected.entries()];
-    if (!entries.length) return;
-    const tally = { ok: 0, in_flight: 0, cooldown: 0, queued: 0, failed: 0, sent: 0 };
-    // One at a time is what made a 540-row press take minutes and feel dead. A
-    // small window keeps the UI answering without turning the tracker-facing
-    // announce rate into a burst -- the scheduler still paces the announces.
-    const CONCURRENCY = 8;
-    let next = 0;
-    async function worker() {
-        while (next < entries.length) {
-            const [, sel] = entries[next++];
-            const hash = _selHash(sel);
-            try {
-                if (!_isLocalAgent(_selAgent(sel))) {
-                    await _agentAction(_selAgent(sel), _selMode(sel), "reannounce", hash);
-                    tally.sent++;
-                    continue;
-                }
-                const r = await fetch(`/api/torrents/${hash}/reannounce`, {
-                    method: "POST",
-                    headers: { "X-Api-Key": API_KEY },
-                });
-                let body = null;
-                try { body = await r.json(); } catch (e) { body = null; }
-                const status = (body && body.status) || (r.ok ? "ok" : "failed");
-                if (status === "ok") tally.ok++;
-                else if (status === "in_flight") tally.in_flight++;
-                else if (status === "cooldown") tally.cooldown++;
-                else if (status === "queued") tally.queued++;
-                else tally.failed++;
-            } catch (err) {
-                tally.failed++;
-                console.error("Failed to reannounce", hash, err);
-            }
-        }
-    }
-    await Promise.all(
-        Array.from({ length: Math.min(CONCURRENCY, entries.length) }, worker)
-    );
-    _flashStatus(_reannounceSummary(tally));
+    if (!_selCount()) return;
+    const j = await _runSelection("reannounce", {}, t("Reannounce"));
+    if (!j) return;
+    const c = j.tally || {};
+    _flashStatus(_reannounceSummary({
+        ok: c.ok || 0, in_flight: c.in_flight || 0, cooldown: c.cooldown || 0,
+        queued: c.queued || 0, failed: j.failed || 0, sent: c.sent || 0,
+    }));
 }
 
 // One line the operator can act on. "412 reannounced, 127 refused (cooldown)"
@@ -4317,130 +4242,50 @@ function _markLocallyStopped(hashes, stopped) {
 // Stop or start the selection. This writes the user's intent: it outlives a
 // restart and no scheduler will undo it.
 //
-// ⚠⚠ THE SELECTION TRAVELS AS HASHES. ALWAYS.
+// A Ctrl+A travels as its FILTER, and the daemon resolves it (selection.rs).
 //
-// It used to travel as the FILTER that produced it past 500 rows, to avoid
-// "a multi-megabyte way of saying the ones I am looking at". The daemon never
-// implemented that filter: it parsed the body into a struct with no such field,
-// serde dropped the key, and the empty `hashes` that remained meant THE WHOLE
-// ENGINE. On 2026-09-16 a start aimed at 70k calewood torrents started all 293k.
-//
-// Hashes are 41 bytes each; 70k of them is ~2.9 MB, sent in chunks of 2000 --
-// perfectly ordinary, and it exercises the one path that has always worked.
-// The saving was never worth a second definition of "the ones I am looking at"
-// living on the other side of the wire.
-const BULK_CHUNK = 2000;
+// ⚠⚠ It did once before, and on 2026-09-16 a start aimed at 70k calewood
+// torrents started all 293k: the endpoint had no `filter` field, serde dropped
+// it, and the empty hash list left behind meant the whole engine. What changed
+// is the daemon side, not the idea: every body refuses a key it does not know,
+// an empty selection is a refusal, the filter is resolved by the function that
+// answers the list, and it carries the count the operator confirmed -- a
+// filter that grew since is refused with the new number, and asked again.
 const BULK_CONFIRM_THRESHOLD = 500;
 
 async function _pauseSelected(paused) {
     _hideCtxMenu();
     const action = paused ? "stop" : "start";
+    const n = _selCount();
 
-    // Confirm anything big enough to be hard to undo. This prompt used to live
-    // in the filter branch only, so removing that branch would have removed the
-    // last thing standing between a stray click and 70k torrents.
-    if (_selected.size > BULK_CONFIRM_THRESHOLD) {
+    // Confirm anything big enough to be hard to undo.
+    if (n > BULK_CONFIRM_THRESHOLD) {
         if (!await hydraConfirm(action === "stop"
-            ? t("Stop {n} torrents?", { n: _selected.size })
-            : t("Start {n} torrents?", { n: _selected.size }))) return;
+            ? t("Stop {n} torrents?", { n: fmtInt(n) })
+            : t("Start {n} torrents?", { n: fmtInt(n) }))) return;
     }
-
-    // Grouped by the ENGINE the row actually sits in, not by its mode. The same
-    // torrent may be seeded by hoard and by vpn1 at once, and pausing the row
-    // the operator clicked must not pause the other.
-    const byEngine = {};
-    const remote = [];
-    for (const sel of _selected.values()) {
-        const hash = _selHash(sel);
-        const mode = _selMode(sel);
-        const agent = _selAgent(sel);
-        if (!_isLocalAgent(agent)) { remote.push({ hash, mode, agent }); continue; }
-        const engine = agent.startsWith("local-") ? agent.slice("local-".length) : mode;
-        (byEngine[engine] = byEngine[engine] || []).push(hash);
-    }
-    // The bulk endpoint below is this node's own; an agent's copy would
-    // otherwise be silently skipped, or worse, applied to the local twin.
-    for (const r of remote) {
-        try {
-            await _agentAction(r.agent, r.mode, paused ? "pause" : "resume", r.hash);
-        } catch (err) {
-            console.error("Failed to " + action + " on " + r.agent, r.hash, err);
-        }
-    }
-    for (const engine of Object.keys(byEngine)) {
-        const hashes = byEngine[engine];
-        if (!hashes.length) continue;
-        // hoard and race keep their literal routes, which 3.x published; any
-        // other engine goes through the one that names it.
-        const url = (engine === "hoard" || engine === "race")
-            ? `/api/${engine}/pause`
-            : `/api/engines/${encodeURIComponent(engine)}/pause`;
-        // Chunked: one request per 2000 hashes. The daemon holds the store lock
-        // for the duration of a batch, so a single 70k-hash call would freeze
-        // every other request for the whole write instead of letting them
-        // interleave between chunks.
-        let done = 0;
-        // Only the chunks the daemon confirmed are repainted. Marking the whole
-        // selection would put the table back in the state this fix exists to
-        // prevent: rows claiming one thing while the engine does another.
-        const confirmed = [];
-        for (let i = 0; i < hashes.length; i += BULK_CHUNK) {
-            const chunk = hashes.slice(i, i + BULK_CHUNK);
-            try {
-                const r = await fetch(url, {
-                    method: "POST",
-                    headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
-                    body: JSON.stringify({ hashes: chunk, paused }),
-                });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                const j = await r.json().catch(() => null);
-                // A chunk that applied fewer rows than it sent is worth saying
-                // out loud: that is how a half-applied bulk used to pass for a
-                // clean one.
-                if (j && typeof j.applied === "number") done += j.applied;
-                confirmed.push(...chunk);
-            } catch (err) {
-                console.error(`Failed to ${action} ${engine} (chunk at ${i})`, err);
-                hydraNotify(t("Failed to {action} some torrents in {engine} -- see the console.", { action, engine }));
-                break;
-            }
-        }
-        if (engine === "hoard") _markLocallyStopped(confirmed, paused);
-        if (done !== hashes.length) {
-            console.warn(`bulk ${action} ${engine}: applied ${done}, selected ${hashes.length}`);
-            hydraNotify(t("Applied to {applied} of {shown} torrents.", { applied: done, shown: hashes.length }));
-        }
-    }
+    const explicit = !_selAll;
+    const hoard = [..._selected.values()].filter(v => _selMode(v) === "hoard").map(v => _selHash(v));
+    const j = await _runSelection(action, {}, paused ? t("Stop") : t("Start"));
+    if (!j) return;
+    // Rows repaint from what the daemon confirmed: a clean run marks the rows
+    // in hand, anything else refetches rather than claim a state it may not have.
+    if (explicit && !j.failed && !(j.tally && j.tally.not_applied)) _markLocallyStopped(hoard, paused);
+    else fetchHoardPage(true);
+    if (j.failed || (j.tally && j.tally.not_applied)) _reportSelection(paused ? t("Stop") : t("Start"), j);
     updateHoardStats();
 }
 
-// `_currentHoardFilter()` lived here until 2026-09-16. It built "the filter the
-// daemon expects" -- and the daemon expected no such thing: `BulkBody` had no
-// `filter` field, so every call it fed was silently read as "the whole engine".
-// Removed rather than fixed: the selection now travels as hashes, which means
-// there is no second definition of the filtered set to drift out of step.
+// `_currentHoardFilter()` lived here until 2026-09-16 and fed a filter to an
+// endpoint that silently dropped it. The filter is back, built by
+// `_hoardFilterParams` -- the same function that builds the page's query -- and
+// sent to `/api/selection/*`, which refuses what it does not understand.
 
 async function _recheckSelected() {
     _hideCtxMenu();
-    const entries = [..._selected.entries()];
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        const mode = _selMode(sel);
-        if (mode !== "hoard") continue;
-        const agent = _selAgent(sel);
-        try {
-            if (!_isLocalAgent(agent)) {
-                await _agentAction(agent, mode, "verify", hash);
-                continue;
-            }
-            await fetch(`/api/hoard/torrents/${hash}/verify`, {
-                method: "POST",
-                headers: { "X-Api-Key": API_KEY },
-            });
-        } catch (err) {
-            console.error("Failed to recheck", hash, err);
-        }
-    }
+    const j = await _runSelection("recheck", {}, t("Recheck"));
+    if (!j) return;
+    _reportSelection(t("Recheck"), j);
     updateHoardStats();
 }
 
@@ -4451,8 +4296,7 @@ async function _recheckSelected() {
 // zip -- tens of GB on a Ctrl+A over a large library -- in memory first.
 async function _exportSelected(format) {
     _hideCtxMenu();
-    const hashes = [...new Set([..._selected.values()].map(v => _selHash(v)))];
-    if (!hashes.length) return;
+    if (!_selCount()) return;
     let strip = false;
     if (format === "zip") {
         const choice = await hydraDialog(
@@ -4481,7 +4325,7 @@ async function _exportSelected(format) {
         form.appendChild(i);
     };
     field("format", format);
-    field("hashes", hashes.join(","));
+    field("selection", JSON.stringify(_selectionPayload()));
     if (strip) field("strip_trackers", "1");
     document.body.appendChild(form);
     form.submit();
@@ -4502,22 +4346,21 @@ function _exportLoaded(frame) {
 
 async function _removeSelected(deleteFiles) {
     _hideCtxMenu();
-    const entries = [..._selected.entries()];
-    _selected.clear();
-    _updateRowHighlights();
-    for (const [, sel] of entries) {
-        const hash = _selHash(sel);
-        try {
-            await fetch(`/api/torrents/${hash}?delete_files=${deleteFiles}&agent=${encodeURIComponent(_selAgent(sel))}`, {
-                method: "DELETE",
-                headers: { "X-Api-Key": API_KEY },
-            });
-            if (selectedTorrent === hash) closeDetail();
-            if (selectedHoardTorrent === hash) closeHoardDetail();
-        } catch (err) {
-            console.error("Failed to remove", hash, err);
-        }
+    const n = _selCount();
+    if (n > BULK_CONFIRM_THRESHOLD) {
+        if (!await hydraConfirm(deleteFiles
+            ? t("Remove {n} torrents and delete their files?", { n: fmtInt(n) })
+            : t("Remove {n} torrents?", { n: fmtInt(n) }), undefined, t("Remove"), true)) return;
     }
+    const hashes = new Set([..._selected.values()].map(v => _selHash(v)));
+    const j = await _runSelection("remove", { delete_files: !!deleteFiles }, t("Remove torrent"));
+    _clearSelection();
+    _updateRowHighlights();
+    if (!j) return;
+    if (hashes.has(selectedTorrent)) closeDetail();
+    if (hashes.has(selectedHoardTorrent)) closeHoardDetail();
+    if (j.failed) _reportSelection(t("Remove torrent"), j);
+    fetchHoardPage(true);
     updateRaceTorrents();
     updateHoardStats();
     updateOverview();

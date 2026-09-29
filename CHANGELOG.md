@@ -54,8 +54,27 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   the info hash; a file that cannot be rewritten is left out rather than
   shipped with its passkey. The CSV names tracker hosts, never their URLs.
   Hashes this node does not hold are listed in `missing.txt`.
-  `POST /api/torrents/export` (form: `hashes`, `format=zip|txt|csv`,
-  `strip_trackers=1`).
+  `POST /api/torrents/export` (form: `selection`, `format=zip|txt|csv`,
+  `strip_trackers=1`; `hashes` still accepted for scripts).
+- **Every action on a selection takes a filter.** `POST /api/selection/:action`
+  (`stop`, `start`, `pin`, `unpin`, `tags`, `category`, `reannounce`,
+  `recheck`, `remove`, `copy`, `move-engine`, `handoff`, `node-fetch`,
+  `node-move`) takes `{selection, params}`, where the selection is either rows
+  (`items`) or the list's filter with exceptions (`filter`, `exclude`,
+  `expect`). The daemon resolves the filter with the function that answers the
+  list page, runs the action as a background job, and
+  `GET /api/selection/jobs/:id` follows it (`POST .../cancel` stops it).
+  Ctrl+A no longer downloads every matching hash into the page -- a million of
+  them was 43 MB each way -- it keeps the filter, and Ctrl+click takes rows out
+  of it. Changing the filter drops the selection rather than let it quietly
+  mean another set.
+  Built against what happened on 2026-09-16, when a filter the bulk route did
+  not implement was dropped and 293k torrents started instead of 70k: every
+  body refuses a key it does not know, an unknown filter parameter is a 400
+  that names it, an empty selection is a refusal (`filter: ""` is the only way
+  to say "the whole list"), and a filter must carry `expect`, the count the
+  operator confirmed -- one that now matches more is refused with the new
+  count and asked again.
 
 ### Security
 - **A .torrent could name files outside its download folder.** File paths

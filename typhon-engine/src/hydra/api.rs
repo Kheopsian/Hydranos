@@ -7514,6 +7514,11 @@ async fn get_torrent_file(
 /// `txt` (one hash per line) or `csv`. `strip_trackers=1` removes the announce
 /// URLs from every `.torrent` in the zip, passkeys with them.
 ///
+/// The selection is the `selection` field, the same JSON every selection
+/// action takes (`selection::Selection`: rows, or a filter with exceptions),
+/// resolved by the same function. `hashes` (comma separated) is kept for
+/// scripts that already have their list.
+///
 /// A form POST rather than JSON over fetch: the browser saves a form's answer
 /// straight to disk as it arrives, where fetch would hold the whole archive --
 /// tens of gigabytes for a Ctrl+A on a large library -- in memory first.
@@ -7534,9 +7539,29 @@ async fn post_torrent_export(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "format must be zip, txt or csv"})))
             .into_response();
     };
-    let hashes = crate::export::clean_hashes(&split_list(form.get("hashes").map(String::as_str).unwrap_or("")));
+    let raw: Vec<String> = match (form.get("selection"), form.get("hashes")) {
+        (Some(_), Some(_)) => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "send `selection` or `hashes`, not both"})))
+                .into_response()
+        }
+        (Some(sel), None) => {
+            let sel: crate::selection::Selection = match serde_json::from_str(sel) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("selection: {e}")})))
+                        .into_response()
+                }
+            };
+            match crate::selection::resolve(&state, &sel).await {
+                Ok(targets) => targets.into_iter().map(|t| t.hash).collect(),
+                Err(r) => return r.into_response(),
+            }
+        }
+        (None, h) => split_list(h.map(String::as_str).unwrap_or("")),
+    };
+    let hashes = crate::export::clean_hashes(&raw);
     if hashes.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "no info hash in `hashes`"})))
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "the selection names no torrent"})))
             .into_response();
     }
     let strip = matches!(form.get("strip_trackers").map(String::as_str), Some("1" | "true" | "on"));
@@ -12029,11 +12054,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/race/torrents/:info_hash", get(get_race_torrent))
         .route("/api/torrents", axum::routing::post(post_torrent_add))
         .route("/api/torrents/upload", axum::routing::post(post_torrent_upload))
-        .route(
-            "/api/torrents/export",
-            axum::routing::post(post_torrent_export)
-                .layer(axum::extract::DefaultBodyLimit::max(crate::export::BODY_MAX)),
-        )
+        .route("/api/torrents/export", axum::routing::post(post_torrent_export))
         .route("/api/torrents/:info_hash", axum::routing::delete(delete_torrent))
         .route("/api/race/torrents/:info_hash/purge", axum::routing::post(purge_race_torrent))
         .route("/api/import/transmission/preview", axum::routing::post(post_transmission_preview))
@@ -12170,6 +12191,8 @@ pub fn router(state: AppState) -> Router {
         // Workflows carry their own routes, so this file does not grow another
         // six handlers. Merged before with_state so they share it.
         .merge(crate::rulesapi::routes())
+        // Every action on a selection, by rows or by filter.
+        .merge(crate::selection::routes())
         // The agent endpoint, same reasoning: its own file, the same state.
         .merge(crate::mcp::routes())
         .with_state(state)
@@ -17288,26 +17311,47 @@ mod export_route_tests {
         }
     }
 
-    /// ⭐ Through the real router: its default body limit is 2 MiB, about
-    /// 48 000 hashes. A Ctrl+A on a large library is far past that, and the
-    /// refusal would come from the extractor, before the handler ran.
+    /// ⭐ A Ctrl+A travels as its FILTER, through the real router: the daemon
+    /// resolves it, the browser never holds the hashes. An unknown filter key
+    /// and a filter that grew past the confirmed count are refused before a
+    /// byte of the download is sent.
     #[tokio::test]
-    async fn a_selection_far_past_the_default_body_limit_is_accepted() {
+    async fn an_export_by_filter_is_resolved_by_the_daemon() {
         use tower::ServiceExt;
-        let (s, _, _) = populated("export-big");
-        let hashes: Vec<String> = (0..100_000u32).map(|i| format!("{i:040x}")).collect();
-        let payload = format!("format=txt&hashes={}", hashes.join("%2C"));
-        assert!(payload.len() > 4 << 20);
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/api/torrents/export")
-            .header("X-API-Key", KEY)
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(axum::body::Body::from(payload))
+        let (s, hash, _) = populated("export-filter");
+        let post = |sel: serde_json::Value| {
+            let payload = format!("format=txt&selection={}", enc_form(&sel.to_string()));
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/torrents/export")
+                .header("X-API-Key", KEY)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(payload))
+                .unwrap()
+        };
+        let resp = super::router(s.state.clone())
+            .oneshot(post(serde_json::json!({"filter": "", "expect": 1})))
+            .await
             .unwrap();
-        let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let text = String::from_utf8(body(resp).await).unwrap();
-        assert_eq!(text.lines().count(), 100_000);
+        assert_eq!(String::from_utf8(body(resp).await).unwrap(), format!("{hash}\n"));
+
+        let resp = super::router(s.state.clone())
+            .oneshot(post(serde_json::json!({"filter": "limit=1", "expect": 1})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = super::router(s.state.clone())
+            .oneshot(post(serde_json::json!({"filter": "", "expect": 0})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "one torrent, none confirmed");
+    }
+
+    fn enc_form(s: &str) -> String {
+        s.bytes()
+            .map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") })
+            .collect()
     }
 }
