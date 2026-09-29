@@ -809,5 +809,13 @@
   "✓ reachable": "✓ joignable",
   "✗ unreachable: {err}": "✗ injoignable : {err}",
   "Errors (1h)": "Erreurs (1 h)",
-  "Filters": "Filtres"
+  "Filters": "Filtres",
+  "Download .torrent files (.zip)": "Télécharger les .torrent (.zip)",
+  "Download hash list (.txt)": "Télécharger la liste des hash (.txt)",
+  "Download as CSV": "Télécharger en CSV",
+  "Download .torrent files": "Télécharger les .torrent",
+  "A private tracker's .torrent carries your passkey in its announce URL: whoever gets the file can announce as you.\n\nRemoving the trackers leaves the info hash unchanged.": "Le .torrent d'un tracker privé contient votre passkey dans son URL d'annonce : quiconque reçoit le fichier peut annoncer en votre nom.\n\nRetirer les trackers ne change pas l'info hash.",
+  "Keep trackers": "Garder les trackers",
+  "Remove trackers": "Retirer les trackers",
+  "Export failed": "Échec de l'export"
 }

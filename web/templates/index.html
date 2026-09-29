@@ -1436,6 +1436,13 @@
             <div class="ctx-item" id="ctx-node-move" onclick="_showEnginePicker(event,'remove')">Move to engine &rsaquo;</div>
         </div>
         <div class="ctx-separator"></div>
+        <div class="ctx-group" id="ctx-grp-export">
+            <div class="ctx-group-title">Export</div>
+            <div class="ctx-item" onclick="_exportSelected('zip')">Download .torrent files (.zip)</div>
+            <div class="ctx-item" onclick="_exportSelected('txt')">Download hash list (.txt)</div>
+            <div class="ctx-item" onclick="_exportSelected('csv')">Download as CSV</div>
+        </div>
+        <div class="ctx-separator"></div>
         <div class="ctx-group" id="ctx-grp-remove">
             <div class="ctx-group-title">Remove</div>
             <div class="ctx-item" onclick="_removeSelected(false)">Remove torrent</div>
@@ -1444,6 +1451,10 @@
     </div>
 
     <div id="ctx-submenu" class="ctx-menu" style="display:none"></div>
+
+    <!-- Where an export's form posts. A download never loads here; an error
+         answer does, and _exportLoaded shows it. -->
+    <iframe name="hydra-dl" id="hydra-dl" style="display:none" onload="window._exportLoaded && _exportLoaded(this)"></iframe>
 
     <!-- Generic dialog. Native alert()/confirm() are not ours: they cannot be
          styled, they block the page, and an alert offers no way out but OK. -->
@@ -1456,6 +1467,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.38"></script>
+    <script src="/static/app.js?v=1.6.39"></script>
 </body>
 </html>

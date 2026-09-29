@@ -3200,6 +3200,7 @@ dependencies = [
  "bcrypt",
  "bytes",
  "console-subscriber",
+ "crc32fast",
  "criterion",
  "dashmap",
  "flate2",
