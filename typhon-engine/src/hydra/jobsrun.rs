@@ -356,6 +356,13 @@ fn rel_paths(t: &typhon_engine::torrent::meta::TorrentState) -> Vec<std::path::P
         .collect()
 }
 
+/// Above this many torrents the shared-file scan is split across threads.
+#[cfg(not(test))]
+const SHARED_SCAN_PARALLEL_FROM: usize = 20_000;
+/// Zero under test, so the move tests go through the slices and their merge.
+#[cfg(test)]
+const SHARED_SCAN_PARALLEL_FROM: usize = 0;
+
 /// The first component every one of `t`'s paths starts with, relative to its
 /// save path: its name for a multi-file torrent, its file for a single one.
 /// None when that is not one thing (a multi-file torrent with no name).
@@ -397,41 +404,68 @@ pub fn plan_move_checked(
         plan.files.iter().map(|f| f.from.clone()).collect();
     let root = &plan.old_root;
     let my_top = top_entry(t);
-    for engine in state.engines.engines().iter() {
-        for other in engine.manager.all() {
-            if other.meta.info_hash == t.meta.info_hash {
-                continue;
+    // Whether `other` reads one of the files this move would take away.
+    let shares = |other: &typhon_engine::torrent::meta::TorrentState| -> bool {
+        if other.meta.info_hash == t.meta.info_hash {
+            return false;
+        }
+        // Only a torrent whose root is on the same branch can name the
+        // same files: a prefix test first, the file list only then.
+        // Read in place: a PathBuf clone per torrent would be an allocation
+        // for the 99.99% that fail the test.
+        let r = {
+            let r = other.save_path.read();
+            if !(root.starts_with(&*r) || r.starts_with(root)) {
+                return false;
             }
-            // Only a torrent whose root is on the same branch can name the
-            // same files: a prefix test first, the file list only then.
-            // Read in place: this runs over every torrent of every engine
-            // (900k on the reference node), and a PathBuf clone each is an
-            // allocation per torrent for the 99.99% that fail the test.
-            let r = {
-                let r = other.save_path.read();
-                if !(root.starts_with(&*r) || r.starts_with(root)) {
-                    continue;
-                }
-                // ⭐ Same folder, different top-level entry: no file can be
-                // shared, since every path of each starts with its own entry.
-                // Checked without building the other's file list -- a whole
-                // category shares one folder (Calewood: 800k torrents), so the
-                // folder test above lets nearly everything through, and the
-                // file lists cost ~1 s per move at a million torrents.
-                if *r == *root {
-                    if let (Some(a), Some(b)) = (my_top, top_entry(&other)) {
-                        if a != b {
-                            continue;
-                        }
+            // Same folder, different top-level entry: no file can be
+            // shared, since every path of each starts with its own entry.
+            // A whole category can share one folder, and there the folder
+            // test lets nearly everything through.
+            if *r == *root {
+                if let (Some(a), Some(b)) = (my_top, top_entry(other)) {
+                    if a != b {
+                        return false;
                     }
                 }
-                r.clone()
-            };
-            if rel_paths(&other).iter().any(|p| mine.contains(&r.join(p))) {
-                let h = typhon_engine::torrent::hex_encode(&other.meta.info_hash);
-                if !plan.shared_with.contains(&h) {
-                    plan.shared_with.push(h);
-                }
+            }
+            r.clone()
+        };
+        rel_paths(other).iter().any(|p| mine.contains(&r.join(p)))
+    };
+    // Over every torrent of every engine, in slices on their own threads: the
+    // prefix test alone is a second per move at a million torrents, and a
+    // move of a hundred torrents runs it a hundred times.
+    for engine in state.engines.engines().iter() {
+        let all = engine.manager.all();
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, 16);
+        let found: Vec<Vec<String>> = if threads == 1 || all.len() < SHARED_SCAN_PARALLEL_FROM {
+            vec![all.iter().filter(|o| shares(o)).map(|o| typhon_engine::torrent::hex_encode(&o.meta.info_hash)).collect()]
+        } else {
+            let per = all.len().div_ceil(threads).max(1);
+            std::thread::scope(|sc| {
+                let shares = &shares;
+                let handles: Vec<_> = all
+                    .chunks(per)
+                    .map(|slice| {
+                        sc.spawn(move || {
+                            slice
+                                .iter()
+                                .filter(|o| shares(o))
+                                .map(|o| typhon_engine::torrent::hex_encode(&o.meta.info_hash))
+                                .collect::<Vec<String>>()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().expect("shared-file scan slice")).collect()
+            })
+        };
+        for h in found.into_iter().flatten() {
+            if !plan.shared_with.contains(&h) {
+                plan.shared_with.push(h);
             }
         }
     }
