@@ -59,6 +59,21 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   of the other engine's kind graduates the torrent there. `move-preview`,
   which answered 400 to everything, now says what a move would do.
 - The agent endpoint gained `move_to_category`.
+- **Every store operation waited ~0.6 s for twelve minutes of every hour.**
+  The copy of each torrent's seeding time into the store ran hourly (and two
+  minutes after boot) in transactions of 2 000 rows: at a million torrents
+  that is twelve minutes of the store's lock held almost without a break, and
+  every add, tag, category change or list page in that window queued behind
+  it -- a hundred tags took a minute. Nothing that decides on seeding time
+  reads that copy (workflows, purges and the list use the engine's live
+  value; the engine persists its own); it is only the row's fallback for a
+  torrent no engine holds. It now runs daily, starting an hour after boot, in
+  transactions of 250 rows with the lock handed back between them.
+- **Moving a torrent to another category spent a second looking for shared
+  files.** Before a move, every torrent of every engine is checked for a file
+  in common, and a whole category lives in one folder, so almost all of them
+  had their file list rebuilt. Two torrents in the same folder can only share
+  a file if their top-level entry has the same name; that is checked first.
 - **A tracker answering 429 was paused for ten minutes, silently.** The
   breaker that spares a dead tracker counted "too many requests" as a failure:
   five of them set the tracker aside for ten minutes, and every torrent due in
