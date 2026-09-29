@@ -75,7 +75,7 @@ pub fn spawn_download_slots(
             tokio::time::sleep(DOWNLOAD_SLOT_INTERVAL).await;
             // Read once per pass, not once per torrent: this is a ceiling of a
             // few dozen slots against a catalogue of hundreds of thousands.
-            let paused: std::collections::HashSet<String> = match store.lock() {
+            let paused: std::collections::HashSet<String> = match store.read() {
                 Ok(store) => store
                     .paused_hashes(&engine_id)
                     .unwrap_or_default()
@@ -1085,8 +1085,12 @@ pub fn spawn_store_reconcile(
                     tracing::warn!(engine = %engine.id, "store reconcile: no torrent, skipping");
                     continue;
                 }
-                let store = store.lock().unwrap();
-                let known = match store.all_hashes(&engine.id) {
+                // Listed on the read connection -- a million rows, and it used
+                // to hold every write for a second -- and dropped through the
+                // shared one, below: the read connection cannot write, and a
+                // delete sent there fails without a word.
+                let listed = store.read().unwrap().all_hashes(&engine.id);
+                let known = match listed {
                     Ok(h) => h,
                     Err(e) => {
                         tracing::warn!(engine = %engine.id, error = %e, "store reconcile: cannot list");
@@ -1115,9 +1119,12 @@ pub fn spawn_store_reconcile(
                 };
 
                 let mut dropped = 0usize;
-                for hash in doomed {
-                    if store.delete_torrent(&hash).unwrap_or(false) {
-                        dropped += 1;
+                if !doomed.is_empty() {
+                    let store = store.lock().unwrap();
+                    for hash in doomed {
+                        if store.delete_torrent(&hash).unwrap_or(false) {
+                            dropped += 1;
+                        }
                     }
                 }
                 if dropped > 0 {
