@@ -58,6 +58,8 @@ bcrypt = "0.15"
 # read the release archive of either platform. sha1 is already here for info
 # hashes and is NOT the same algorithm.
 sha2 = "0.10"
+# Streaming zip export (hydra/export.rs). Already in the tree through `zip`.
+crc32fast = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"

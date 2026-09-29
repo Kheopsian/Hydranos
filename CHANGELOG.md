@@ -44,6 +44,18 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   only when a peer asked for a piece we could not serve.
   `HYDRANOS_LINK_SCAN_THREADS` (16 by default) bounds how hard it leans on the
   disk; `GET /api/workflows/links` reports its progress.
+- **Export a selection.** Right-click → Export: the selected torrents'
+  `.torrent` files as a zip, their info hashes as a text file, or a CSV (hash,
+  name, size, category, tags, tracker hosts, added date, save path). Works on
+  a Ctrl+A over the whole library: the zip is streamed as it is built, with
+  ZIP64 past 65 535 files or 4 GiB, and the store is read in batches on the
+  read-only connection. Choosing "Remove trackers" drops `announce` and
+  `announce-list` from every `.torrent`, passkeys with them, without touching
+  the info hash; a file that cannot be rewritten is left out rather than
+  shipped with its passkey. The CSV names tracker hosts, never their URLs.
+  Hashes this node does not hold are listed in `missing.txt`.
+  `POST /api/torrents/export` (form: `hashes`, `format=zip|txt|csv`,
+  `strip_trackers=1`).
 
 ### Security
 - **A .torrent could name files outside its download folder.** File paths

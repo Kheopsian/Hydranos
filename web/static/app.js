@@ -4444,6 +4444,62 @@ async function _recheckSelected() {
     updateHoardStats();
 }
 
+// Download the selection: its .torrent files as a zip, its hashes, or a CSV.
+//
+// A real form POST into a hidden iframe, not fetch(): the browser writes a
+// form's answer to disk as it streams, where fetch() would hold the whole
+// zip -- tens of GB on a Ctrl+A over a large library -- in memory first.
+async function _exportSelected(format) {
+    _hideCtxMenu();
+    const hashes = [...new Set([..._selected.values()].map(v => _selHash(v)))];
+    if (!hashes.length) return;
+    let strip = false;
+    if (format === "zip") {
+        const choice = await hydraDialog(
+            t("Download .torrent files"),
+            t("A private tracker's .torrent carries your passkey in its announce URL: whoever gets the file can announce as you.\n\nRemoving the trackers leaves the info hash unchanged."),
+            [
+                { label: t("Keep trackers"), value: "keep", kind: "keep" },
+                { label: t("Remove trackers"), value: "strip", kind: "keep" },
+                { label: t("Cancel"), value: null, kind: "cancel" },
+            ]);
+        if (!choice) return;
+        strip = choice === "strip";
+    }
+    const form = document.createElement("form");
+    form.method = "POST";
+    // The key goes in the query because a form cannot set a header; a
+    // logged-in page carries its session cookie and needs neither.
+    form.action = "/api/torrents/export" + (API_KEY ? "?apikey=" + encodeURIComponent(API_KEY) : "");
+    form.target = "hydra-dl";
+    form.style.display = "none";
+    const field = (name, value) => {
+        const i = document.createElement("input");
+        i.type = "hidden";
+        i.name = name;
+        i.value = value;
+        form.appendChild(i);
+    };
+    field("format", format);
+    field("hashes", hashes.join(","));
+    if (strip) field("strip_trackers", "1");
+    document.body.appendChild(form);
+    form.submit();
+    form.remove();
+}
+
+// A download never loads into the iframe; a refusal does. Show it rather than
+// let the click do nothing.
+function _exportLoaded(frame) {
+    let text = "";
+    try { text = (frame.contentDocument && frame.contentDocument.body && frame.contentDocument.body.textContent) || ""; }
+    catch (e) { return; }
+    if (!text.trim()) return;
+    let msg = text.trim();
+    try { msg = JSON.parse(msg).error || msg; } catch (e) { /* not JSON: show as is */ }
+    hydraNotify(t("Export failed"), msg);
+}
+
 async function _removeSelected(deleteFiles) {
     _hideCtxMenu();
     const entries = [..._selected.entries()];
