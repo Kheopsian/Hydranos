@@ -70,6 +70,7 @@ mod raceevents;
 mod reconnect;
 mod config;
 mod linkindex;
+mod linkscan;
 mod rules;
 mod rulesrun;
 mod rulesapi;
@@ -471,9 +472,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // not carry the intent. Without this a restart silently resumed everything
     // the operator had stopped.
     //
-    // `stop_torrent` rather than a flag, because the stagger start may already
-    // have started some of them -- it runs from a task spawned moments ago. It
-    // is idempotent and self-correcting either way.
+    // A stop rather than a flag, because the stagger start may already have
+    // started some of them -- it runs from a task spawned moments ago. It is
+    // idempotent and self-correcting either way.
     for engine in engine_host.engines() {
         let hashes = match shared_store.lock() {
             Ok(store) => store.paused_hashes(&engine.id).unwrap_or_default(),
@@ -482,7 +483,11 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         let mut restored = 0usize;
         for hash in &hashes {
             if let Some(info_hash) = store::hex20(hash) {
-                if engine.manager.stop_torrent(&info_hash).is_ok() {
+                // `restore_stopped`, not `stop_torrent`: the latter owes the
+                // trackers a departure, and re-sending one for every stopped
+                // torrent on every boot is how a tracker that refuses this
+                // client kept seeing it.
+                if engine.manager.restore_stopped(&info_hash).is_ok() {
                     restored += 1;
                 }
             }
@@ -663,6 +668,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // It waits two minutes of its own so it never fires against a catalogue
     // that is still loading.
     rulesapi::spawn(state.clone());
+    // Keeps the hardlink index the workflows read, instead of each pass
+    // stat-ing the whole catalogue itself.
+    linkscan::spawn(state.engines.clone(), state.store.clone());
 
     // Taken before the router consumes the state: `flush_on_shutdown` needs the
     // engines, and by then `state` has been moved.
