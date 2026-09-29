@@ -296,6 +296,15 @@ pub const FIELDS: &[(&str, Kind)] = &[
 /// The scan is one `stat` per file in the catalogue. Worth it when a rule uses
 /// it, pure waste every fifteen minutes when none does -- and no workflow uses
 /// it by default, so the common case must stay free.
+/// Does any condition of this tree read `field`?
+pub fn uses_field(n: &Node, field: &str) -> bool {
+    match n {
+        Node::All { of } | Node::Any { of } => of.iter().any(|c| uses_field(c, field)),
+        Node::Not { of } => uses_field(of, field),
+        Node::Cond(c) => c.field == field,
+    }
+}
+
 pub fn needs_link_scan(n: &Node) -> bool {
     match n {
         Node::All { of } | Node::Any { of } => of.iter().any(needs_link_scan),
@@ -562,6 +571,19 @@ pub fn already_satisfied(action: &Action, f: &Facts) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pass pays for `free_space` -- a `statvfs` per save path -- only when
+    /// a condition reads it, however deep in the tree.
+    #[test]
+    fn a_field_is_found_wherever_the_tree_puts_it() {
+        let c = |f: &str| Node::Cond(Cond { field: f.into(), op: Op::Eq, value: "0".into() });
+        let tree = Node::All {
+            of: vec![c("external_links"), Node::Any { of: vec![c("category"), Node::Not { of: Box::new(c("free_space")) }] }],
+        };
+        assert!(uses_field(&tree, "free_space"));
+        assert!(uses_field(&tree, "external_links"));
+        assert!(!uses_field(&Node::All { of: vec![c("external_links"), c("category")] }, "free_space"));
+    }
 
     fn facts() -> Facts {
         Facts {

@@ -50,11 +50,19 @@ pub struct PassReport {
 /// One store query for the whole session -- an index-only scan -- joined to the
 /// engine's live map in memory. The alternative, a lookup per torrent, is
 /// 300 000 queries.
+///
+/// ⚠️ `want_free_space` is not an optimisation to take lightly. It is one
+/// `statvfs` per distinct save path, and a library where every torrent has its
+/// own folder has as many save paths as torrents: 915 000 of them in
+/// production, which kept this function -- then under the store's writer lock
+/// -- busy for over twenty seconds a pass. A rule that does not read the field
+/// does not pay for it.
 pub fn gather(
     host: &EngineHost,
     store: &Store,
     engine_id: &str,
     links: &std::collections::HashMap<String, LinkFacts>,
+    want_free_space: bool,
 ) -> Vec<Facts> {
     let Some(engine) = host.engines().iter().find(|e| e.id == engine_id) else {
         return Vec::new();
@@ -84,7 +92,7 @@ pub fn gather(
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_default();
-            let free_space = if s.save_path.is_empty() {
+            let free_space = if s.save_path.is_empty() || !want_free_space {
                 rules::NEVER
             } else {
                 *free_by_path.entry(s.save_path.clone()).or_insert_with(|| {
@@ -230,10 +238,30 @@ pub struct CatalogueEntry {
 /// ⚠️ Pure bookkeeping, no `stat`: this half needs the store (for the save
 /// paths), the other half is disk wait whose cost cannot be bounded. Build
 /// this under the lock, drop it, then touch the filesystem.
-pub fn catalogue(host: &EngineHost, store: &Store) -> Vec<CatalogueEntry> {
+/// The store's half of the catalogue, per engine: the only part that needs a
+/// store connection. Take it, let the connection go, then `catalogue_from`.
+pub fn stored_facts(
+    host: &EngineHost,
+    store: &Store,
+) -> Vec<(String, std::collections::HashMap<String, crate::store::WorkflowFacts>)> {
+    host.engines()
+        .iter()
+        .map(|e| (e.id.clone(), store.workflow_facts(&e.id).unwrap_or_default()))
+        .collect()
+}
+
+/// Resolve every copy's files from the engines' metadata. No store, no
+/// syscall: at a million torrents this is seconds of path building, which no
+/// connection has to wait for.
+pub fn catalogue_from(
+    host: &EngineHost,
+    facts: &[(String, std::collections::HashMap<String, crate::store::WorkflowFacts>)],
+) -> Vec<CatalogueEntry> {
     let mut out = Vec::new();
     for engine in host.engines().iter() {
-        let stored = store.workflow_facts(&engine.id).unwrap_or_default();
+        let Some((_, stored)) = facts.iter().find(|(id, _)| *id == engine.id) else {
+            continue;
+        };
         for t in engine.manager.all() {
             let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
             let Some(save_path) = stored.get(&hash).map(|s| s.save_path.clone()) else {
