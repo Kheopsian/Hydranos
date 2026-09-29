@@ -71,9 +71,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   transactions of 250 rows with the lock handed back between them.
 - **Moving a torrent to another category spent a second looking for shared
   files.** Before a move, every torrent of every engine is checked for a file
-  in common, and a whole category lives in one folder, so almost all of them
-  had their file list rebuilt. Two torrents in the same folder can only share
-  a file if their top-level entry has the same name; that is checked first.
+  in common: a million path comparisons per torrent moved. Two torrents in
+  the same folder can only share a file if their top-level entry has the same
+  name, which is checked before any file list is built, and the scan runs in
+  slices across threads.
 - **A tracker answering 429 was paused for ten minutes, silently.** The
   breaker that spares a dead tracker counted "too many requests" as a failure:
   five of them set the tracker aside for ten minutes, and every torrent due in
