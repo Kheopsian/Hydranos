@@ -147,6 +147,17 @@ pub struct ActivityEntry {
     pub detail: String,
 }
 
+/// One torrent as an export sees it: its `.torrent` and what the store adds.
+#[derive(Debug, Clone, Default)]
+pub struct ExportRow {
+    pub info_hash: String,
+    pub torrent: Vec<u8>,
+    pub category: String,
+    pub tags: Vec<String>,
+    pub save_path: String,
+    pub added_time: f64,
+}
+
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -810,6 +821,41 @@ impl Store {
             Some(r) => Ok(Some(r.get(0)?)),
             None => Ok(None),
         }
+    }
+
+    /// What an export needs for a batch of hashes, one row per hash.
+    ///
+    /// A hash held by two sessions (race and hoard) carries the same
+    /// `.torrent`; the first row read wins. Hashes the store does not hold are
+    /// simply absent from the answer -- the caller knows which it asked for.
+    pub fn export_rows(&self, hashes: &[String]) -> anyhow::Result<Vec<ExportRow>> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; hashes.len()].join(",");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT info_hash, torrent, category, tags, save_path, added_time
+             FROM torrents WHERE info_hash IN ({marks})"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(hashes.iter()), |r| {
+            Ok(ExportRow {
+                info_hash: r.get(0)?,
+                torrent: r.get(1)?,
+                category: r.get(2)?,
+                tags: split_tags(&r.get::<_, String>(3)?),
+                save_path: r.get(4)?,
+                added_time: r.get(5)?,
+            })
+        })?;
+        let mut out: Vec<ExportRow> = Vec::with_capacity(hashes.len());
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            let row = row?;
+            if seen.insert(row.info_hash.clone()) {
+                out.push(row);
+            }
+        }
+        Ok(out)
     }
 
     /// One-time enrolment tokens.

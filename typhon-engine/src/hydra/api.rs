@@ -7510,6 +7510,78 @@ async fn get_torrent_file(
     }
 }
 
+/// Download a selection: `format=zip` (the `.torrent` files, default),
+/// `txt` (one hash per line) or `csv`. `strip_trackers=1` removes the announce
+/// URLs from every `.torrent` in the zip, passkeys with them.
+///
+/// A form POST rather than JSON over fetch: the browser saves a form's answer
+/// straight to disk as it arrives, where fetch would hold the whole archive --
+/// tens of gigabytes for a Ctrl+A on a large library -- in memory first.
+///
+/// The work runs on a blocking thread and reaches the client through a
+/// bounded channel, so the archive is never whole anywhere. A failure after
+/// the headers are sent aborts the body instead of ending it: a truncated
+/// download must look failed, not like a smaller zip.
+async fn post_torrent_export(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    Form(form): Form<Fields>,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let Some(format) = crate::export::Format::parse(form.get("format").map(String::as_str).unwrap_or("")) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "format must be zip, txt or csv"})))
+            .into_response();
+    };
+    let hashes = crate::export::clean_hashes(&split_list(form.get("hashes").map(String::as_str).unwrap_or("")));
+    if hashes.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "no info hash in `hashes`"})))
+            .into_response();
+    }
+    let strip = matches!(form.get("strip_trackers").map(String::as_str), Some("1" | "true" | "on"));
+
+    let file_name = format.file_name(hashes.len());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::export::Chunk>(16);
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let asked = hashes.len();
+        let mut w = crate::export::ChanWriter::new(tx.clone());
+        match crate::export::run(&store, &hashes, format, strip, &mut w) {
+            Ok(s) => tracing::info!(
+                ?format, asked, written = s.written, missing = s.missing, strip,
+                secs = started.elapsed().as_secs_f32(), "export complete"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                tracing::info!(?format, asked, "export abandoned by the client")
+            }
+            Err(e) => {
+                tracing::warn!(?format, asked, error = %e, "export failed");
+                let _ = tx.blocking_send(Err(e));
+            }
+        }
+    });
+    let stream = async_stream::stream! {
+        while let Some(chunk) = rx.recv().await {
+            yield chunk;
+        }
+    };
+    Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, format.content_type())
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{file_name}\""),
+        )
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        // Keeps the router's gzip layer off: it skips a response that already
+        // names its encoding. Gzipping a zip of SHA-1 digests would cost a core
+        // for a few percent, and make the transfer CPU-bound.
+        .header(axum::http::header::CONTENT_ENCODING, "identity")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
 /// Tell a torrent about peers it has not been given by a tracker.
 ///
 /// This is the piece a cross-node handoff needs: the receiving Hydra adds the
@@ -11957,6 +12029,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/race/torrents/:info_hash", get(get_race_torrent))
         .route("/api/torrents", axum::routing::post(post_torrent_add))
         .route("/api/torrents/upload", axum::routing::post(post_torrent_upload))
+        .route(
+            "/api/torrents/export",
+            axum::routing::post(post_torrent_export)
+                .layer(axum::extract::DefaultBodyLimit::max(crate::export::BODY_MAX)),
+        )
         .route("/api/torrents/:info_hash", axum::routing::delete(delete_torrent))
         .route("/api/race/torrents/:info_hash/purge", axum::routing::post(purge_race_torrent))
         .route("/api/import/transmission/preview", axum::routing::post(post_transmission_preview))
@@ -17112,5 +17189,125 @@ mod engine_refusal_tests {
                 "{name}: the refusal must name the engine asked for, said {err:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod export_route_tests {
+    use super::testing::*;
+    use super::*;
+    use std::io::Read;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let url = "https://t.example/PASSKEY/announce";
+        format!(
+            "d8:announce{}:{url}4:infod6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:{}ee",
+            url.len(),
+            name.len(),
+            "A".repeat(20)
+        )
+        .into_bytes()
+    }
+
+    fn populated(tag: &str) -> (TestState, String, Vec<u8>) {
+        let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let bytes = torrent_bytes("alpha");
+        let (hash, _) = add_torrent_bytes(&s.state, &bytes, "", "/tmp", "", true, true, "hoard").expect("added");
+        (s, hash, bytes)
+    }
+
+    fn form(pairs: &[(&str, &str)]) -> axum::extract::Form<Fields> {
+        axum::extract::Form(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    async fn body(resp: Response) -> Vec<u8> {
+        axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body").to_vec()
+    }
+
+    #[tokio::test]
+    async fn an_export_refuses_a_caller_with_no_key() {
+        let (s, hash, _) = populated("export-auth");
+        let resp = super::post_torrent_export(
+            State(s.state.clone()),
+            RawQuery(None),
+            HeaderMap::new(),
+            form(&[("hashes", &hash)]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_zip_export_downloads_the_stored_torrent() {
+        let (s, hash, bytes) = populated("export-zip");
+        let resp = super::post_torrent_export(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form(&[("hashes", &hash), ("format", "zip")]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let h = resp.headers();
+        assert_eq!(h.get("content-type").unwrap(), "application/zip");
+        assert_eq!(h.get("content-encoding").unwrap(), "identity", "the gzip layer must stay off");
+        assert!(h.get("content-disposition").unwrap().to_str().unwrap().starts_with("attachment;"));
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
+        assert_eq!(z.len(), 1);
+        let mut got = Vec::new();
+        z.by_index(0).unwrap().read_to_end(&mut got).unwrap();
+        assert_eq!(got, bytes, "the .torrent as it was added, byte for byte");
+    }
+
+    #[tokio::test]
+    async fn stripping_trackers_keeps_the_passkey_out_of_the_zip() {
+        let (s, hash, _) = populated("export-strip");
+        let resp = super::post_torrent_export(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form(&[("hashes", &hash), ("strip_trackers", "1")]),
+        )
+        .await;
+        let zip = body(resp).await;
+        assert!(!zip.windows(7).any(|w| w == b"PASSKEY"));
+    }
+
+    #[tokio::test]
+    async fn a_bad_format_or_no_hash_is_refused_before_anything_is_sent() {
+        let (s, hash, _) = populated("export-bad");
+        for (pairs, why) in [
+            (vec![("hashes", hash.as_str()), ("format", "tar")], "unknown format"),
+            (vec![("hashes", "not-a-hash")], "no usable hash"),
+            (vec![], "no hashes at all"),
+        ] {
+            let resp = super::post_torrent_export(State(s.state.clone()), RawQuery(None), keyed(KEY), form(&pairs)).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{why}");
+        }
+    }
+
+    /// ⭐ Through the real router: its default body limit is 2 MiB, about
+    /// 48 000 hashes. A Ctrl+A on a large library is far past that, and the
+    /// refusal would come from the extractor, before the handler ran.
+    #[tokio::test]
+    async fn a_selection_far_past_the_default_body_limit_is_accepted() {
+        use tower::ServiceExt;
+        let (s, _, _) = populated("export-big");
+        let hashes: Vec<String> = (0..100_000u32).map(|i| format!("{i:040x}")).collect();
+        let payload = format!("format=txt&hashes={}", hashes.join("%2C"));
+        assert!(payload.len() > 4 << 20);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/torrents/export")
+            .header("X-API-Key", KEY)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(payload))
+            .unwrap();
+        let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let text = String::from_utf8(body(resp).await).unwrap();
+        assert_eq!(text.lines().count(), 100_000);
     }
 }

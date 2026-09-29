@@ -24,6 +24,8 @@ Auth = `X-API-Key`.
   - `create_subfolder` (bool, **absent = défaut daemon `create_torrent_folder`**) : met la charge dans son propre sous-dossier. Sans effet sur un multi-file, qui porte déjà son dossier ; hoard seulement (race est un répertoire de staging plat).
   - `skip_recheck` (bool, défaut `false`) : ajoute en seed mode. ⚠️ **L'add est REFUSÉ** si un fichier déclaré manque ou n'a pas la bonne taille sous `<engine save_path>/<info.name si multi-file>/<chemin BEP-3>` — le seed mode ne retombe PAS sur un téléchargement.
 - `GET /api/torrents/add-defaults` — `{"create_subfolder":bool,"skip_recheck":false}`, ce que le formulaire d'ajout pré-coche.
+- `POST /api/torrents/export` — télécharge une sélection. Form urlencoded : `hashes` (séparés par `,` ou `|`, jusqu'à ~2 M), `format=zip|txt|csv` (défaut `zip`), `strip_trackers=1` (zip : retire `announce`/`announce-list`, info hash inchangé). Réponse en flux (`Content-Disposition: attachment`) ; zip = un `.torrent` par hash + `missing.txt` pour les hash absents de ce nœud ; `txt` ne lit pas le store (la sélection telle quelle) ; CSV = hôtes des trackers, jamais les URL. 400 si format inconnu ou aucun hash valide.
+- `GET /api/torrents/:info_hash/torrent` — le `.torrent` d'origine d'un torrent.
 - `DELETE /api/torrents/:info_hash` — **retire des DEUX moteurs** (≠ purge race-only).
 - `POST /api/torrents/:info_hash/reannounce`
 - `POST /api/torrents/:info_hash/add-tracker` — ajoute UN tracker. ⚠️ Jusqu'à cette version la route répondait 200 **sans rien faire** (no-op dans les deux moteurs) ; elle passe désormais par le même chemin que `POST /trackers` avec `op=add`.

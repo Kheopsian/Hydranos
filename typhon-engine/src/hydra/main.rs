@@ -44,6 +44,7 @@ mod qbitrow;
 mod row;
 mod speedtest;
 mod dedup;
+mod export;
 mod store;
 mod tomledit;
 mod trackeredit;
