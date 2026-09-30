@@ -2810,11 +2810,9 @@ footer {
 }
 
 
-/* Category placement (multi-agent) */
-.cat-placement { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+/* A row of the removed-agents list: name, address, Restore. */
 .cat-agent-row { display: flex; align-items: center; gap: 10px; }
 .cat-agent-lbl { min-width: 130px; display: inline-flex; align-items: center; gap: 6px; }
-.cat-agent-path { flex: 1; }
 
 
 /* Resizable torrent table columns: drag handle on each header's right edge. */

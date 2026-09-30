@@ -4885,6 +4885,8 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
 // ─── Categories ─────────────────────────────────────────
 
 let _editingCategory = null;
+// The stored entry being edited, sent back under the fields the form sets.
+let _editingCategoryStored = null;
 // Markup of the rows currently in the categories table. The table is rebuilt on
 // a timer, so without this every refresh replaced identical HTML and the screen
 // flickered for nothing.
@@ -4914,8 +4916,6 @@ async function updateCategories() {
                 <td><strong>${esc(incoCat(cat.name))}</strong></td>
                 <td><span class="mode-tag mode-${cat.mode}">${cat.mode}</span></td>
                 <td class="mono" style="font-size:12px">${esc(incoPath(cat.save_path))}</td>
-                <td>${((cat.placement && cat.placement.length) ? cat.placement : ["local"]).map(esc).join(", ")}</td>
-                <td>${esc(cat.strategy || "all")}</td>
                 <td>${cat.graduate_to ? '\u2192 ' + esc(incoCat(cat.graduate_to)) : '<span style="color:var(--text-muted)">\u2014</span>'}</td>
                 <td>
                     <button class="btn-small" onclick="editCategory('${cat.name}')">Edit</button>
@@ -4937,8 +4937,6 @@ async function updateCategories() {
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td class="mono" style="font-size:12px;color:var(--text-muted)">no longer configured, still on ${o.torrents} torrent${o.torrents > 1 ? "s" : ""}</td>
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
-                    <td><span style="color:var(--text-muted)">\u2014</span></td>
-                    <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td>
                         <button class="btn-small" onclick="adoptCategory(${i})">${t("Adopt")}</button>
                         <button class="btn-small btn-danger" onclick="deleteCategory('${o.name}')">Delete</button>
@@ -4946,7 +4944,7 @@ async function updateCategories() {
                 </tr>`).join("");
 
         const html = (catRows + orphanRows) ||
-            '<tr><td colspan="7" class="empty">No categories</td></tr>';
+            '<tr><td colspan="5" class="empty">No categories</td></tr>';
         if (html !== _lastCategoryRows) {
             tbody.innerHTML = html;
             _lastCategoryRows = html;
@@ -4978,28 +4976,21 @@ async function showCategoryForm(name = null) {
     document.getElementById("cat-name").value = name || "";
     document.getElementById("cat-mode").value = "race";
     document.getElementById("cat-save-path").value = "";
-    document.getElementById("cat-strategy").value = "all";
-    document.getElementById("cat-min-free").value = "";
     document.getElementById("cat-result").style.display = "none";
     document.getElementById("category-form").style.display = "block";
 
     let allCats = [];
     try { allCats = (await api("/api/categories")) || []; } catch (e) { console.error("load categories", e); }
     let cat = name ? (allCats.find(c => c.name === name) || null) : null;
+    _editingCategoryStored = cat;
     if (cat) {
         document.getElementById("cat-mode").value = cat.mode;
         document.getElementById("cat-save-path").value = cat.save_path;
-        document.getElementById("cat-strategy").value = cat.strategy || "all";
-        // Stored in bytes, shown in GiB: nobody types a reserve in bytes.
-        document.getElementById("cat-min-free").value = cat.min_free_bytes
-            ? Math.round(cat.min_free_bytes / (1024 * 1024 * 1024))
-            : "";
     }
     _populateGraduateSelect(allCats, cat ? cat.graduate_to : "", name);
     const tr = document.getElementById("cat-transit");
     if (tr) tr.checked = !!(cat && cat.transit);
     _catModeChanged();
-    await _renderCatPlacement(cat);
 }
 function _populateGraduateSelect(cats, current, selfName) {
     const sel = document.getElementById("cat-graduate-to");
@@ -5019,32 +5010,13 @@ function _catModeChanged() {
     if (tw) tw.style.display = race ? "none" : "";
 }
 
-// _renderCatPlacement fills #cat-placement with one checkbox + save-path input
-// per known agent, pre-selecting the editing category's placement/agents.
-async function _renderCatPlacement(cat) {
-    const box = document.getElementById("cat-placement");
-    let agents = [];
-    try { agents = await api("/api/agents"); } catch (e) { agents = [{ name: "local" }]; }
-    if (!agents || !agents.length) agents = [{ name: "local" }];
-    const placement = (cat && cat.placement) ? cat.placement : (cat ? [] : ["local"]);
-    const perAgent = (cat && cat.agents) ? cat.agents : {};
-    box.innerHTML = agents.map(a => {
-        const checked = placement.includes(a.name) ? " checked" : "";
-        const path = esc(perAgent[a.name] || "");
-        const online = a.online === false ? ' <span class="sr-desc">(offline)</span>' : "";
-        return `<div class="cat-agent-row">
-            <label class="cat-agent-lbl"><input type="checkbox" class="cat-agent-cb" value="${esc(a.name)}"${checked}> ${esc(a.name)}</label>${online}
-            <input type="text" class="cat-agent-path" data-agent="${esc(a.name)}" placeholder="save path on ${esc(a.name)} (blank = flat)" value="${path}" autocomplete="off">
-        </div>`;
-    }).join("");
-}
-
 function hideCategoryForm() {
     document.getElementById("category-form").style.display = "none";
     const dd = document.getElementById("fs-dropdown");
     if (dd) dd.style.display = "none";
     _fsBrowsedPath = null;
     _editingCategory = null;
+    _editingCategoryStored = null;
 }
 
 // ─── Filesystem Dropdown ─────────────────────────────────
@@ -5231,18 +5203,14 @@ async function saveCategory() {
     }
 
     try {
-        const placement = [...document.querySelectorAll(".cat-agent-cb:checked")].map(c => c.value);
-        const agents = {};
-        document.querySelectorAll(".cat-agent-path").forEach(inp => {
-            const v = inp.value.trim();
-            if (v) agents[inp.dataset.agent] = v;
-        });
-        const strategy = document.getElementById("cat-strategy").value;
-        const minFreeGiB = parseFloat(document.getElementById("cat-min-free").value) || 0;
-        const min_free_bytes = Math.max(0, Math.round(minFreeGiB * 1024 * 1024 * 1024));
         const graduate_to = mode === "race" ? (document.getElementById("cat-graduate-to").value || "") : "";
         const transit = mode === "hoard" && document.getElementById("cat-transit").checked;
-        const payload = { name, save_path, mode, placement, agents, strategy, graduate_to, transit, min_free_bytes };
+        // A PUT replaces the whole entry, so what this form does not show is
+        // sent back as it was stored: the 3.x routing fields (placement,
+        // agents, strategy, min_free_bytes) that nothing reads any more
+        // survive an edit rather than being wiped by one.
+        const payload = Object.assign({}, _editingCategory ? _editingCategoryStored : null,
+            { name, save_path, mode, graduate_to, transit });
         if (_editingCategory) {
             await api(`/api/categories/${encodeURIComponent(_editingCategory)}`, {
                 method: "PUT",
@@ -7314,7 +7282,7 @@ function showAgentForm(name = null, addr = "") {
     document.getElementById("ag-tlsca").value = "";
     document.getElementById("ag-result").style.display = "none";
     // Editing only ever applies to a dialled node: a local engine's identity is
-    // its id, and renaming it would orphan every placement naming it.
+    // its id, and renaming it would orphan every torrent row naming it.
     const kind = document.getElementById("ag-kind");
     if (kind) { kind.value = "remote"; kind.disabled = !!name; }
     agentKindChanged();
@@ -7337,10 +7305,10 @@ function agentKindChanged() {
     const hint = document.getElementById("ag-name-hint");
     if (hint) {
         // Say the resulting agent name outright: the engine id is what the user
-        // types, but the name a category has to reference is the prefixed one.
+        // types, but the name every screen shows is the prefixed one.
         hint.textContent = local
             ? t("agent id — it will be listed as local-<id>")
-            : t("how this node is referenced in a placement");
+            : t("the name this node is shown under in Move to engine");
     }
     const testBtn = document.getElementById("ag-test-btn");
     if (testBtn) testBtn.style.display = local ? "none" : ""; // nothing to dial
@@ -8049,8 +8017,7 @@ async function clearTrackerPasskey() {
 // stopped making in 3.138.0.
 
 async function deleteEngine(id){
-    // Named as the agent, because that is the row the button sits in and the
-    // name every category placement refers to.
+    // Named as the agent, because that is the row the button sits in.
     if(!await hydraConfirm(t("Delete engine {id}? It stops seeding right away.", { id: id }))) return;
     hydraNotify(t("Stopping engine {id}...", { id: id }));
     try{

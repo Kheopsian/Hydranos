@@ -1825,6 +1825,12 @@ struct Category {
     /// because draining it is the MOVE, not the later deletion.
     #[serde(default, skip_serializing_if = "is_false")]
     transit: bool,
+    /// ⚠ The four fields below are 3.x multi-agent routing, and NOTHING reads
+    /// them: `placement()` routes on `mode` alone. They are kept so a stored
+    /// document round-trips unchanged, and they are no longer offered in the
+    /// interface, which for all of 4.x let an operator set a strategy, a
+    /// reserve and per-agent paths that changed nothing. A torrent reaches a
+    /// given engine by `engine=` at add, or Move to engine afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agents: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
