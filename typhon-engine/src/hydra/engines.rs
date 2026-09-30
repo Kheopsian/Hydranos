@@ -246,7 +246,14 @@ impl EngineHost {
                     // Without this the engine seeds, listens and connects, and
                     // every tracker forgets the whole catalogue within one
                     // announce interval.
-                    let peer_id = engine_cfg.peer_id();
+                    // The id the listeners present in every handshake, so the
+                    // peer a tracker lists is the peer that connects. The
+                    // config draws it once; asking again returns the same.
+                    let peer_id = engine_cfg
+                        .resolved_bindings()
+                        .first()
+                        .map(|b| b.peer_id)
+                        .unwrap_or_else(|| engine_cfg.peer_id());
                     let policy: crate::announce::PolicyHandle =
                         std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(
                             crate::announce::policy_from_config(

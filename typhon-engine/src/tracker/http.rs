@@ -62,6 +62,70 @@ pub struct AnnounceResponse {
     pub complete: u32,
     pub incomplete: u32,
     pub failure: Option<String>,
+    /// BEP 3 `tracker id`: a token the tracker wants echoed back as
+    /// `trackerid=` on every later announce to it. None when it sent none.
+    pub tracker_id: Option<String>,
+    /// `warning message`: the tracker accepted the announce but has something
+    /// to say. Not an error -- the peers and the interval still count.
+    pub warning: Option<String>,
+}
+
+/// How long a tracker asked us to stay away, when it said so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryHint {
+    /// `retry in` minutes (BEP 31) or an HTTP `Retry-After` in seconds.
+    After(std::time::Duration),
+    /// BEP 31 `retry in: "never"`: do not announce to this tracker again.
+    Never,
+}
+
+/// Longest wait a tracker can impose through a hint. A day is already far
+/// past any interval a tracker uses; a larger number is a unit mistake on the
+/// tracker's side and would park the torrent for good.
+const MAX_RETRY_HINT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// The retry hint carried by an announce error, if any.
+///
+/// Errors cross the crate boundary as strings -- the runner classifies them,
+/// redacts them and shows them -- so the hint travels inside the message as a
+/// bracketed marker this function is the only reader of.
+pub fn retry_hint(err: &str) -> Option<RetryHint> {
+    if err.contains("[retry-in never]") {
+        return Some(RetryHint::Never);
+    }
+    for (tag, unit) in [("[retry-in ", 60u64), ("[retry-after ", 1u64)] {
+        if let Some(i) = err.find(tag) {
+            let rest = &err[i + tag.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u64>() {
+                let d = std::time::Duration::from_secs(n.saturating_mul(unit));
+                return Some(RetryHint::After(d.min(MAX_RETRY_HINT)));
+            }
+        }
+    }
+    None
+}
+
+/// The `key` announce parameter for a peer id.
+///
+/// `key` lets a tracker recognise a peer whose address changed, which only
+/// works if nobody else can produce it. Hashing the peer id alone would make
+/// it public: every peer we connect to reads our peer id in the handshake. So
+/// the hash is salted with a secret drawn once per process -- stable for the
+/// whole session, unguessable from anything we put on the wire.
+pub fn announce_key(peer_id: &[u8]) -> String {
+    static SALT: OnceLock<u64> = OnceLock::new();
+    key_with_salt(*SALT.get_or_init(rand::random::<u64>), peer_id)
+}
+
+fn key_with_salt(salt: u64, peer_id: &[u8]) -> String {
+    // FNV-1a, 32 bits. Opaque, stable, and cheap; secrecy comes from the salt.
+    let mut h: u32 = 0x811c_9dc5;
+    for b in salt.to_le_bytes().iter().chain(peer_id.iter()) {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{h:08x}")
 }
 
 /// Perform an HTTP tracker announce.
@@ -89,7 +153,8 @@ pub async fn announce(
         downloaded={}&\
         left={}&\
         compact=1&\
-        numwant={}\
+        numwant={}&\
+        key={}\
         {}",
         tracker_url,
         sep,
@@ -108,6 +173,7 @@ pub async fn announce(
         // port staying reachable; if the port forward breaks, upload stops dead
         // rather than degrading.
         if left == 0 { 0 } else { 200 },
+        announce_key(peer_id),
         if event.is_empty() { String::new() } else { format!("&event={}", event) },
     );
 
@@ -130,12 +196,7 @@ pub async fn announce(
         .map_err(|e| format!("http request: {}", fmt_err_chain(&e)))?;
 
     if !resp.status().is_success() {
-        let st = resp.status();
-        // Capture up to 200 chars of body so tracker-provided failure reasons
-        // on non-2xx (403 banned, 502 cloudflare, etc.) reach the user.
-        let body = resp.text().await.unwrap_or_default();
-        let snip: String = body.chars().take(200).collect();
-        return Err(format!("http {}: {}", st, snip.trim()));
+        return Err(http_error(resp).await);
     }
 
     let body = resp.bytes().await
@@ -149,16 +210,29 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
     let value = bencode_decode(data)?;
     let dict = value.as_dict().ok_or("response not a dict")?;
 
-    // Check for failure
+    // BEP 3: a `failure reason` means the announce failed, whatever else the
+    // dictionary holds -- and whatever type the value has. A tracker that
+    // sends it as an integer or raw bytes is still refusing us.
     if let Some(reason) = dict.get("failure reason") {
-        if let Some(msg) = reason.as_string() {
-            return Err(format!("tracker: {}", msg));
-        }
+        let msg = text_of(reason).unwrap_or_else(|| "(unreadable failure reason)".into());
+        // BEP 31: a refusal may say when to come back, or never to.
+        let hint = match dict.get("retry in") {
+            Some(v) if v.as_int().is_some() => {
+                format!(" [retry-in {}m]", v.as_int().unwrap_or(0).max(0))
+            }
+            Some(v) if text_of(v).as_deref() == Some("never") => " [retry-in never]".to_string(),
+            _ => String::new(),
+        };
+        return Err(format!("tracker: {}{}", msg, hint));
     }
 
-    let interval = dict.get("interval")
-        .and_then(|v| v.as_int())
-        .unwrap_or(1800) as u32;
+    // `interval` is the tracker's; we only refuse values that cannot be one.
+    // Zero or negative is no interval at all, and a negative integer cast to
+    // u32 would have become a four-billion-second wait.
+    let interval = match dict.get("interval").and_then(|v| v.as_int()) {
+        Some(n) if n > 0 => n.min(MAX_INTERVAL) as u32,
+        _ => DEFAULT_INTERVAL,
+    };
 
     // Bencode spells it with a space. A tracker that omits it leaves us with
     // zero, which means "no floor stated" and not "no floor".
@@ -166,15 +240,22 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
         .get("min interval")
         .and_then(|v| v.as_int())
         .unwrap_or(0)
-        .max(0) as u32;
+        .clamp(0, MAX_INTERVAL) as u32;
 
-    let complete = dict.get("complete")
-        .and_then(|v| v.as_int())
-        .unwrap_or(0) as u32;
+    // Counts are displayed, never trusted for anything else; a negative one is
+    // a tracker bug and reads as zero rather than wrapping to four billion.
+    let count = |k: &str| dict.get(k).and_then(|v| v.as_int()).unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
+    let complete = count("complete");
+    let incomplete = count("incomplete");
 
-    let incomplete = dict.get("incomplete")
-        .and_then(|v| v.as_int())
-        .unwrap_or(0) as u32;
+    let tracker_id = dict
+        .get("tracker id")
+        .and_then(text_of)
+        .filter(|s| !s.is_empty());
+    let warning = dict
+        .get("warning message")
+        .and_then(text_of)
+        .filter(|s| !s.is_empty());
 
     // Parse compact peers (6 bytes each: 4 IP + 2 port)
     let mut peers = Vec::new();
@@ -185,7 +266,11 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
                 if chunk.len() == 6 {
                     let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
                     let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-                    peers.push(SocketAddr::new(IpAddr::V4(ip), port));
+                    // Port 0 is not a listening peer; dialling it is a
+                    // connection attempt to nothing.
+                    if port != 0 {
+                        peers.push(SocketAddr::new(IpAddr::V4(ip), port));
+                    }
                 }
             }
         } else if let Some(peer_list) = peers_val.as_list() {
@@ -193,7 +278,12 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
             for p in peer_list {
                 if let Some(pd) = p.as_dict() {
                     let ip_str = pd.get("ip").and_then(|v| v.as_string()).unwrap_or("");
-                    let port = pd.get("port").and_then(|v| v.as_int()).unwrap_or(0) as u16;
+                    // A port outside 1..=65535 is malformed; `as u16` would
+                    // have wrapped it into somebody else's port.
+                    let port = match pd.get("port").and_then(|v| v.as_int()) {
+                        Some(p) if (1..=65535).contains(&p) => p as u16,
+                        _ => continue,
+                    };
                     if let Ok(ip) = ip_str.parse::<IpAddr>() {
                         peers.push(SocketAddr::new(ip, port));
                     }
@@ -212,7 +302,9 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
                     ip_bytes.copy_from_slice(&chunk[0..16]);
                     let ip = std::net::Ipv6Addr::from(ip_bytes);
                     let port = u16::from_be_bytes([chunk[16], chunk[17]]);
-                    peers.push(SocketAddr::new(IpAddr::V6(ip), port));
+                    if port != 0 {
+                        peers.push(SocketAddr::new(IpAddr::V6(ip), port));
+                    }
                 }
             }
         }
@@ -225,7 +317,26 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
         complete,
         incomplete,
         failure: None,
+        tracker_id,
+        warning,
     })
+}
+
+/// What a tracker says when it does not answer `interval`: libtorrent's and
+/// qBittorrent's default.
+const DEFAULT_INTERVAL: u32 = 1800;
+/// A week. Above that the number is a unit mistake, not an interval.
+const MAX_INTERVAL: i64 = 7 * 24 * 3600;
+
+/// A bencoded value read as text, whether a UTF-8 string or raw bytes.
+fn text_of(v: &BencodeValue) -> Option<String> {
+    if let Some(s) = v.as_string() {
+        return Some(s.to_string());
+    }
+    if let Some(b) = v.as_bytes() {
+        return Some(String::from_utf8_lossy(b).into_owned());
+    }
+    v.as_int().map(|n| n.to_string())
 }
 
 /// One announce over HTTP, with the transport this module already knows about:
@@ -330,6 +441,15 @@ fn merge_announce(
                     a.peers.push(p);
                 }
             }
+            if a.tracker_id.is_none() {
+                a.tracker_id = b.tracker_id;
+            }
+            if a.warning.is_none() {
+                a.warning = b.warning;
+            }
+            // The stricter floor of the two: both answers speak for the same
+            // tracker, and honouring the shorter one would undercut the other.
+            a.min_interval = a.min_interval.max(b.min_interval);
             Ok(a)
         }
         (Ok(a), Err(_)) => Ok(a),
@@ -356,17 +476,33 @@ pub async fn send_announce(
     return merge_announce(a, b);
 }
 
+/// The error for a non-2xx answer.
+///
+/// Up to 200 characters of body: a tracker's own reason for a 403 or a 502 is
+/// the only thing that tells an operator whether they are banned or merely
+/// behind a broken CDN. A `Retry-After` in seconds (RFC 9110) is carried as a
+/// marker, so the runner waits as long as the tracker asked rather than as
+/// long as it guesses.
+async fn http_error(resp: reqwest::Response) -> String {
+    let st = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let body = resp.text().await.unwrap_or_default();
+    let snip: String = body.chars().take(200).collect();
+    match retry_after {
+        Some(secs) => format!("http {}: {} [retry-after {}s]", st, snip.trim(), secs),
+        None => format!("http {}: {}", st, snip.trim()),
+    }
+}
+
 /// Parse one tracker answer. Shared by both families.
 async fn finish_announce(resp: reqwest::Response) -> Result<AnnounceResponse, String> {
 
     if !resp.status().is_success() {
-        let st = resp.status();
-        // Up to 200 characters of body: a tracker's own reason for a 403 or a
-        // 502 is the only thing that tells an operator whether they are banned
-        // or merely behind a broken CDN.
-        let body = resp.text().await.unwrap_or_default();
-        let snip: String = body.chars().take(200).collect();
-        return Err(format!("http {}: {}", st, snip.trim()));
+        return Err(http_error(resp).await);
     }
 
     let body = resp
@@ -567,5 +703,112 @@ mod announce_wire_tests {
     fn an_empty_body_is_a_parse_error() {
         assert!(parse_announce_response(b"").is_err());
         assert!(parse_announce_response(b"not bencode").is_err());
+    }
+
+    /// BEP 3: a `tracker id` is kept so it can be echoed back as `trackerid=`.
+    #[test]
+    fn a_tracker_id_is_kept() {
+        let body = b"d8:intervali1800e5:peers0:10:tracker id6:abc123e";
+        let resp = parse_announce_response(body).expect("valid");
+        assert_eq!(resp.tracker_id.as_deref(), Some("abc123"));
+        let none = parse_announce_response(b"d8:intervali1800e5:peers0:e").unwrap();
+        assert_eq!(none.tracker_id, None, "absent is absent, not empty");
+    }
+
+    /// A `warning message` is an accepted announce with something to say:
+    /// the peers and the interval still count.
+    #[test]
+    fn a_warning_is_carried_and_the_answer_still_counts() {
+        let msg = "client is outdated";
+        let body = format!("d8:intervali900e5:peers0:15:warning message{}:{}e", msg.len(), msg);
+        let resp = parse_announce_response(body.as_bytes()).expect("a warning is not a failure");
+        assert_eq!(resp.warning.as_deref(), Some(msg));
+        assert_eq!(resp.interval, 900);
+    }
+
+    /// BEP 31: a refusal can say when to come back, in minutes, or never.
+    #[test]
+    fn bep31_retry_in_is_read_from_a_refusal() {
+        let err = parse_announce_response(b"d14:failure reason4:busy8:retry ini5ee").unwrap_err();
+        assert_eq!(retry_hint(&err), Some(RetryHint::After(std::time::Duration::from_secs(300))), "{err}");
+        let never = parse_announce_response(b"d14:failure reason6:banned8:retry in5:nevere").unwrap_err();
+        assert_eq!(retry_hint(&never), Some(RetryHint::Never), "{never}");
+        let plain = parse_announce_response(b"d14:failure reason4:nopee").unwrap_err();
+        assert_eq!(retry_hint(&plain), None, "no hint, no invented wait");
+    }
+
+    /// A hint is capped: a tracker that means minutes and writes seconds must
+    /// not park a torrent for months.
+    #[test]
+    fn a_retry_hint_is_capped_at_a_day() {
+        assert_eq!(
+            retry_hint("tracker: x [retry-in 999999999m]"),
+            Some(RetryHint::After(MAX_RETRY_HINT))
+        );
+        assert_eq!(
+            retry_hint("http 429: slow down [retry-after 120s]"),
+            Some(RetryHint::After(std::time::Duration::from_secs(120)))
+        );
+    }
+
+    /// A `failure reason` that is not a string is still a refusal.
+    #[test]
+    fn a_failure_reason_of_any_type_is_a_refusal() {
+        assert!(parse_announce_response(b"d14:failure reasoni42e8:intervali1800ee").is_err());
+    }
+
+    /// Values that cannot be what they claim: a negative interval is no
+    /// interval, a negative count is zero -- never a wrapped u32.
+    #[test]
+    fn impossible_values_are_not_wrapped_into_huge_ones() {
+        let body = b"d8:completei-3e10:incompletei-1e8:intervali-60e12:min intervali-5e5:peers0:e";
+        let resp = parse_announce_response(body).expect("parses");
+        assert_eq!(resp.interval, 1800, "a negative interval falls back to the default");
+        assert_eq!(resp.min_interval, 0);
+        assert_eq!((resp.complete, resp.incomplete), (0, 0));
+    }
+
+    /// A peer on port 0 is not listening; the dictionary form's out-of-range
+    /// port must not wrap onto somebody else's.
+    #[test]
+    fn a_peer_on_an_impossible_port_is_dropped() {
+        let compact = b"d8:intervali1800e5:peers12:\x0a\x00\x00\x01\x00\x00\x0a\x00\x00\x02\x1a\xe1e";
+        let resp = parse_announce_response(compact).unwrap();
+        assert_eq!(resp.peers.len(), 1, "{:?}", resp.peers);
+        assert_eq!(resp.peers[0].port(), 6881);
+        let dict = b"d8:intervali1800e5:peersld2:ip8:10.0.0.14:porti70000eed2:ip8:10.0.0.24:porti6881eeee";
+        let resp = parse_announce_response(dict).unwrap();
+        assert_eq!(resp.peers, vec!["10.0.0.2:6881".parse().unwrap()]);
+    }
+
+    /// `key` is stable for the process and cannot be computed from the peer id
+    /// alone -- every peer sees our peer id in the handshake.
+    #[test]
+    fn the_key_is_stable_and_not_derivable_from_the_peer_id() {
+        let pid = b"-HY4240-abcdefghijkl";
+        assert_eq!(announce_key(pid), announce_key(pid), "stable for the session");
+        assert_ne!(key_with_salt(1, pid), key_with_salt(2, pid), "the salt changes it");
+        let k = announce_key(pid);
+        assert_eq!(k.len(), 8);
+        assert!(k.chars().all(|c| c.is_ascii_hexdigit()), "{k}");
+    }
+
+    /// Both family answers speak for one tracker: the stricter floor and the
+    /// tracker id survive the merge.
+    #[test]
+    fn the_merge_keeps_the_stricter_floor_and_the_tracker_id() {
+        let mk = |min: u32, id: Option<&str>| AnnounceResponse {
+            interval: 1800,
+            min_interval: min,
+            peers: vec![],
+            complete: 0,
+            incomplete: 0,
+            failure: None,
+            tracker_id: id.map(String::from),
+            warning: None,
+        };
+        let m = merge_announce(Ok(mk(60, None)), Ok(mk(300, Some("t")))).unwrap();
+        assert_eq!(m.min_interval, 300);
+        assert_eq!(m.tracker_id.as_deref(), Some("t"));
     }
 }

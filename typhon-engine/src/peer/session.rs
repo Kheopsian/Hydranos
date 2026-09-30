@@ -20,6 +20,19 @@
 /// Read live rather than reusing the `is_seeding` snapshot taken when the
 /// session opened: a torrent that completed since then is a seeder too, and
 /// keeping its useless connections is exactly what we are trying to stop.
+/// Whether a peer may hand us other peers on this torrent -- PEX, or a BEP 55
+/// `connect` naming somebody to dial.
+///
+/// ⭐ BEP 27: a private torrent takes peers from its tracker and from nowhere
+/// else. Not advertising `ut_pex` / `ut_holepunch` in our handshake is not
+/// enough, because nothing stops a peer from SENDING the message anyway, and
+/// a `connect` was acted on -- we dialled an address a peer chose, on a
+/// torrent whose tracker is the only permitted source. The guard sits on what
+/// we RECEIVE, where the leak actually is.
+pub fn peer_sources_allowed(torrent: &crate::torrent::meta::TorrentState) -> bool {
+    torrent.meta.allows_peer_discovery() && torrent.policy().pex()
+}
+
 fn we_are_complete(t: &std::sync::Arc<crate::torrent::meta::TorrentState>) -> bool {
     t.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8
 }
@@ -491,7 +504,7 @@ pub async fn run(
                                         }
                                     }
                                 } else if ext_id == crate::peer::holepunch::OUR_UT_HOLEPUNCH_ID
-                                    && torrent.policy().pex()
+                                    && peer_sources_allowed(&torrent)
                                 {
                                     use crate::peer::holepunch::{Error as PunchError, Punch};
                                     match Punch::decode(&payload) {
@@ -554,7 +567,7 @@ pub async fn run(
                                         }
                                         None => {}
                                     }
-                                } else if ext_id == OUR_UT_PEX_ID && torrent.policy().pex() {
+                                } else if ext_id == OUR_UT_PEX_ID && peer_sources_allowed(&torrent) {
                                     let new_peers = extension::parse_pex(&payload, torrent.policy());
                                     if !new_peers.is_empty() {
                                         torrent.pex_peers_discovered.fetch_add(

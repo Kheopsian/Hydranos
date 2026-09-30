@@ -293,6 +293,51 @@ pub const ANNOUNCE_EVENT_COMPLETED: u8 = 1;
 /// BEP 3 `event=stopped`: the user stopped this torrent and the trackers
 /// should drop us from the swarm rather than wait for the entry to go stale.
 pub const ANNOUNCE_EVENT_STOPPED: u8 = 2;
+// The two are BITS, not a state: a download can finish and be stopped before
+// the runner gets to it, and both are owed. Set with `fetch_or`, never
+// `store`, or the second transition erases the first.
+
+/// What one tracker has been told about this torrent, this session.
+///
+/// BEP 3's events are per tracker, not per torrent: `started` opens a session
+/// with a tracker, `completed` and `stopped` are said to a tracker that heard
+/// `started`. A torrent that fails over from one tracker to another, or has a
+/// tracker added while it runs, owes each of them its own sequence. Keeping
+/// one flag per torrent is how a second tracker came to hear a periodic
+/// announce, or `completed`, without ever having heard `started`.
+///
+/// Kept small on purpose -- there is one per tracker per torrent, and a node
+/// holds a million torrents.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackerSlot {
+    /// FNV-1a of the tracker URL as listed on the torrent.
+    pub key: u64,
+    /// This tracker has acknowledged `started` in the current session.
+    pub started: bool,
+    /// `completed` is owed to this tracker, which saw us leeching.
+    pub completed_owed: bool,
+    /// `stopped` is owed to this tracker, which saw us `started`.
+    pub stopped_owed: bool,
+    /// BEP 31 `retry in: never`: not to be announced to again this session.
+    pub disabled: bool,
+    /// Unix seconds of the last answer from this tracker, 0 = never.
+    pub last_ok: i64,
+    /// Unix seconds before which this tracker must not be asked again:
+    /// `min interval`, BEP 31 `retry in`, or an HTTP `Retry-After`.
+    pub not_before: i64,
+    /// BEP 3 `tracker id`, echoed back as `trackerid=`.
+    pub tracker_id: Option<Box<str>>,
+}
+
+/// The key a tracker URL is filed under in the announce book.
+pub fn tracker_key(url: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in url.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
 
 pub struct TorrentState {
     /// Parsed straight from the .torrent. `meta.trackers` is the SEED for
@@ -360,6 +405,20 @@ pub struct TorrentState {
     /// which lives in the `hydra` binary and cannot be called from here. The
     /// runner clears it as it sends, so the event goes out once and once only.
     pub pending_announce_event: AtomicU8,
+    /// Per-tracker announce state for the current session. Empty until the
+    /// first announce; see `TrackerSlot`.
+    pub announce_book: Mutex<Vec<TrackerSlot>>,
+    /// `total_uploaded` / `total_downloaded` when the current session began.
+    ///
+    /// BEP 3 reports the bytes moved since the client sent `started` -- the
+    /// session -- and every mainstream client restarts the count there. The
+    /// totals are lifetime figures persisted across restarts; reporting them
+    /// raw told a tracker, on every boot, that a peer announcing `started` had
+    /// already uploaded hundreds of gigabytes. That is the exact signature
+    /// tracker anti-cheat looks for, and a tracker crediting the first report
+    /// of a new peer would have counted it all again.
+    pub session_base_up: AtomicU64,
+    pub session_base_down: AtomicU64,
     /// Seconds spent seeding, folded in at every state change and at the
     /// periodic sweep. See `fold_seed_time`.
     pub seed_secs: AtomicI64,
@@ -496,6 +555,71 @@ impl TorrentState {
 }
 
 impl TorrentState {
+    /// Open a new announce session: the counters reported to trackers start
+    /// from zero again, and every tracker is owed a fresh `started`.
+    ///
+    /// Called when a session genuinely begins -- the torrent was loaded by
+    /// this process, or resumed after a stop. Not on a periodic announce, and
+    /// not on a recheck: those are the same session.
+    pub fn begin_announce_session(&self) {
+        self.session_base_up.store(self.total_uploaded.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.session_base_down.store(self.total_downloaded.load(Ordering::Relaxed), Ordering::Relaxed);
+        if let Ok(mut book) = self.announce_book.lock() {
+            for slot in book.iter_mut() {
+                slot.started = false;
+                slot.completed_owed = false;
+                slot.stopped_owed = false;
+                // The floor paced the session that ended.
+                slot.not_before = 0;
+                slot.tracker_id = None;
+            }
+        }
+    }
+
+    /// BEP 3 `uploaded`: bytes sent to peers since the session began.
+    pub fn session_uploaded(&self) -> u64 {
+        self.total_uploaded
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.session_base_up.load(Ordering::Relaxed))
+    }
+
+    /// BEP 3 `downloaded`: verified bytes received since the session began.
+    pub fn session_downloaded(&self) -> u64 {
+        self.total_downloaded
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.session_base_down.load(Ordering::Relaxed))
+    }
+
+    /// BEP 3 `left`: bytes this client still needs, from the pieces it holds.
+    ///
+    /// Not `total_size - downloaded`. The traffic counter knows nothing of data
+    /// that was already on disk -- a resumed download, a partial cross-seed --
+    /// so the subtraction announced a torrent at 90 % as one at 0 %. The piece
+    /// map is the fact; a seed holds everything by definition.
+    pub fn bytes_left(&self) -> u64 {
+        if self.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8 {
+            return 0;
+        }
+        let Some(picker) = self.picker.get() else {
+            // No piece map: either a seed (handled above) or a torrent whose
+            // state is not known yet. Claiming to need all of it is the answer
+            // that never tells a tracker we have data we do not.
+            return self.meta.total_size;
+        };
+        let Ok(p) = picker.lock() else { return self.meta.total_size };
+        let n = self.meta.num_pieces();
+        if n == 0 {
+            return 0;
+        }
+        // O(1): every piece is `piece_length` long except possibly the last.
+        let plen = self.meta.piece_length as u64;
+        let mut have = p.num_have() as u64 * plen;
+        if p.has_piece(n - 1) {
+            have = have.saturating_sub(plen - self.meta.piece_size(n - 1) as u64);
+        }
+        self.meta.total_size.saturating_sub(have)
+    }
+
     /// The PEX / IPv6 policy this torrent runs under.
     /// Signal that this torrent finished downloading. Cheap and non-blocking,
     /// and a no-op for a torrent with no engine behind it.
@@ -703,6 +827,9 @@ impl TorrentState {
             blob_source: std::sync::OnceLock::new(),
             is_paused: AtomicBool::new(false),
             pending_announce_event: AtomicU8::new(ANNOUNCE_EVENT_NONE),
+            announce_book: Mutex::new(Vec::new()),
+            session_base_up: AtomicU64::new(0),
+            session_base_down: AtomicU64::new(0),
             seed_secs: AtomicI64::new(0),
             seed_since: AtomicI64::new(0),
             serving_suspended: AtomicBool::new(false),
@@ -1192,5 +1319,59 @@ mod error_recovery_tests {
              on the first piece instead of the third"
         );
         assert!(!t.serving_suspended.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod announce_session_tests {
+    use super::*;
+
+    /// A single-file torrent of `total` bytes. Bencode lengths computed.
+    fn meta(total: u64, piece: u32) -> TorrentMeta {
+        let n = ((total + piece as u64 - 1) / piece as u64) as usize;
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi{total}e4:name1:x12:piece lengthi{piece}e6:pieces{}:", n * 20).as_bytes());
+        info.extend(std::iter::repeat(0xAB).take(n * 20));
+        info.push(b'e');
+        let mut out = b"d8:announce20:http://t.example/ann4:info".to_vec();
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        crate::torrent::metainfo::parse_torrent_bytes(&out).expect("fixture parses")
+    }
+
+    /// `left` comes from the pieces held, not from the traffic counter: data
+    /// already on disk was never downloaded by us, and still is not needed.
+    #[test]
+    fn left_counts_the_pieces_we_do_not_hold() {
+        // Three pieces of 16 KiB and a short last one of 1 000 bytes.
+        let total = 3 * 16384 + 1000;
+        let t = TorrentState::new_with_times(meta(total, 16384), "/tmp".into(), false, Some(1), Some(0), true);
+        assert_eq!(t.bytes_left(), total, "nothing held, everything left");
+        {
+            let p = t.picker.get().unwrap();
+            let mut p = p.lock().unwrap();
+            p.set_have(0);
+            p.set_have(3);
+        }
+        assert_eq!(t.bytes_left(), 2 * 16384, "the short last piece counts at its real size");
+        t.total_downloaded.store(0, Ordering::Relaxed);
+        assert_eq!(t.bytes_left(), 2 * 16384, "the traffic counter is irrelevant");
+        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        assert_eq!(t.bytes_left(), 0, "a seed needs nothing");
+    }
+
+    #[test]
+    fn the_session_counters_never_go_negative() {
+        let t = TorrentState::new_with_times(meta(16384, 16384), "/tmp".into(), true, Some(1), Some(0), false);
+        t.total_uploaded.store(100, Ordering::Relaxed);
+        t.begin_announce_session();
+        t.total_uploaded.store(50, Ordering::Relaxed);
+        assert_eq!(t.session_uploaded(), 0, "a counter that moved back reads zero, never wraps");
+    }
+
+    #[test]
+    fn tracker_keys_are_stable_and_distinct() {
+        assert_eq!(tracker_key("https://a/announce"), tracker_key("https://a/announce"));
+        assert_ne!(tracker_key("https://a/announce"), tracker_key("https://b/announce"));
     }
 }

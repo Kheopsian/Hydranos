@@ -245,3 +245,96 @@ fn an_interested_peer_is_recorded_as_interested() {
         }
     });
 }
+
+/// A session with the extension protocol on, as production runs it.
+fn start_extended(torrent: Arc<TorrentState>, ours: TcpStream, theirs: TcpStream)
+    -> Framed<CryptoStream, BtCodec>
+{
+    let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+    tokio::spawn(session::run(
+        framed(ours),
+        addr,
+        torrent,
+        Arc::new(DiskManager::new(16)),
+        OUR_ID,
+        THEIR_ID,
+        false,
+        true,
+        true,  // BEP 10 negotiated
+        None,
+        16171, // a listen port: the extension handshake is on
+    ));
+    framed(theirs)
+}
+
+fn private_seed(num_pieces: u32) -> Arc<TorrentState> {
+    let mut m = meta(num_pieces);
+    m.private = true;
+    let t = Arc::new(TorrentState::new(m, PathBuf::from("/tmp"), true));
+    t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+    t
+}
+
+/// Send one PEX message naming a public peer, and report how many peers the
+/// torrent says it learned from PEX.
+async fn pex_learned(torrent: Arc<TorrentState>) -> u64 {
+    use typhon_engine::peer::extension::{build_pex_message, OUR_UT_PEX_ID};
+    let (ours, theirs) = pair().await;
+    let mut peer = start_extended(torrent.clone(), ours, theirs);
+    wait_for(&mut peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+    let added: SocketAddr = "93.184.216.34:6881".parse().unwrap();
+    peer.send(Message::Extended {
+        ext_id: OUR_UT_PEX_ID,
+        payload: bytes::Bytes::from(build_pex_message(&[added], &[])),
+    })
+    .await
+    .expect("sent");
+    // A keepalive behind it: once the session has read that, it has read the
+    // PEX message too -- messages on one connection are handled in order.
+    peer.send(Message::KeepAlive).await.expect("sent");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    torrent.pex_peers_discovered.load(Ordering::Relaxed)
+}
+
+/// ⭐⭐ BEP 27: a private torrent learns nothing from PEX, even from a peer
+/// that sends it unasked. The public control proves the probe can see a
+/// learned peer at all -- a probe that always reads zero proves nothing.
+#[test]
+fn bep27_a_private_torrent_learns_no_peer_from_pex_even_unasked() {
+    rt().block_on(async {
+        assert!(pex_learned(seeding(8)).await > 0, "control: a public torrent does learn from PEX");
+        assert_eq!(pex_learned(private_seed(8)).await, 0, "a private torrent takes peers from its tracker only");
+    });
+}
+
+/// ⭐⭐ BEP 27 / BEP 55: a hole-punch `connect` names a peer to dial. On a
+/// private torrent that is a peer from outside the tracker, and it is not
+/// dialled. The public control shows the same message IS acted on there.
+#[test]
+fn bep27_a_private_torrent_dials_no_peer_a_hole_punch_names() {
+    use typhon_engine::peer::holepunch::{Punch, OUR_UT_HOLEPUNCH_ID};
+    use typhon_engine::tracker::{DIAL_ENQUEUED, DIAL_ENQUEUE_DROPPED};
+    fn dials() -> u64 {
+        DIAL_ENQUEUED.load(Ordering::Relaxed) + DIAL_ENQUEUE_DROPPED.load(Ordering::Relaxed)
+    }
+    async fn punched(torrent: Arc<TorrentState>) -> u64 {
+        let (ours, theirs) = pair().await;
+        let mut peer = start_extended(torrent, ours, theirs);
+        wait_for(&mut peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+        let before = dials();
+        let target: SocketAddr = "93.184.216.34:6881".parse().unwrap();
+        peer.send(Message::Extended {
+            ext_id: OUR_UT_HOLEPUNCH_ID,
+            payload: bytes::Bytes::from(Punch::Connect(target).encode()),
+        })
+        .await
+        .expect("sent");
+        peer.send(Message::KeepAlive).await.expect("sent");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        dials() - before
+    }
+    rt().block_on(async {
+        assert!(punched(seeding(8)).await > 0, "control: a public torrent acts on the connect");
+        assert_eq!(punched(private_seed(8)).await, 0, "a private torrent dials nobody a peer names");
+    });
+}
