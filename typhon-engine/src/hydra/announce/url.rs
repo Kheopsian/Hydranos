@@ -87,6 +87,12 @@ pub fn key_for(peer_id: &str) -> String {
     typhon_engine::tracker::http::announce_key(peer_id.as_bytes())
 }
 
+/// How many peers to ask for. Shared by the HTTP URL and the UDP packet, so the
+/// two transports cannot ask for different things.
+pub fn numwant(left: i64, override_: Option<u32>) -> u32 {
+    override_.unwrap_or(if left == 0 { 0 } else { 200 })
+}
+
 /// The full announce URL, or None when the info hash is not 40 hex characters.
 pub fn build(a: &Announce) -> Option<String> {
     let (base, query) = match a.tracker_url.split_once('?') {
@@ -117,7 +123,7 @@ pub fn build(a: &Announce) -> Option<String> {
     // A complete torrent asks for no peers: we are reachable and leechers dial
     // us. Asking for 200 anyway would make the tracker do work for a list we
     // would throw away.
-    let numwant = a.numwant_override.unwrap_or(if a.left == 0 { 0 } else { 200 });
+    let numwant = numwant(a.left, a.numwant_override);
     url.push_str("&compact=1&numwant=");
     url.push_str(&numwant.to_string());
     url.push_str("&key=");

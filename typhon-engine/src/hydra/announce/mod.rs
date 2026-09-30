@@ -51,6 +51,8 @@ pub fn refresh_policies(config: &Config, engines: &[crate::engines::Engine]) -> 
             old.public_ip.clone(),
         );
         next.user_agent = old.user_agent.clone();
+        // From the engine's section, read at start like its DHT switch.
+        next.skip_udp = old.skip_udp;
         *slot = Arc::new(next);
         done += 1;
     }
@@ -75,6 +77,8 @@ pub fn policy_from_config(config: &Config, peer_id: String, public_ip: String) -
         // should see in its access log.
         user_agent: typhon_engine::config::user_agent(),
         public_ip,
+        // Per engine, set by whoever builds the engine's policy.
+        skip_udp: false,
     }
 }
 

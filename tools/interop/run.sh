@@ -4,7 +4,7 @@
 #   tools/interop/run.sh
 #
 # Starts, on a throwaway Docker network:
-#   - opentracker, the most deployed public tracker;
+#   - opentracker, the most deployed public tracker, over HTTP and UDP;
 #   - Torrust Tracker in PRIVATE mode (keys, REST API);
 #   - qBittorrent (libtorrent), the client most swarms are made of;
 # runs the `interop_*` tests against them, and removes everything it started,
@@ -93,6 +93,7 @@ docker run --rm --network "$net" \
     -w /build/typhon-engine \
     -e RUSTFLAGS="--cfg tokio_unstable" \
     -e HYDRANOS_INTEROP_OPENTRACKER="http://$ot:6969/announce" \
+    -e HYDRANOS_INTEROP_OPENTRACKER_UDP="udp://$ot:6969/announce" \
     -e HYDRANOS_INTEROP_TORRUST="http://$tr:7070/announce" \
     -e HYDRANOS_INTEROP_TORRUST_API="http://$tr:1212" \
     -e HYDRANOS_INTEROP_TORRUST_TOKEN="$token" \

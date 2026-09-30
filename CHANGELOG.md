@@ -24,6 +24,19 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **UDP trackers (BEP 15, with BEP 41).** A `udp://` tracker in a torrent or
+  a magnet is now announced to; it used to be handed to the HTTP client and
+  fail on every pass. The packet carries what the HTTP URL would have --
+  counters, event, port, numwant, `key`, `ip=` -- built in the same call, and
+  the URL's path and query (a passkey in `/announce/<key>` included) travel
+  as URLData. One socket per address family for every announce, a `connect`
+  per tracker per minute rather than per announce, and a reply is taken only
+  from the address it was asked of. Proven against a real opentracker in
+  `tools/interop/run.sh`. On by default; `enable_udp_trackers = false` in
+  `[race]` or `[hoard]` leaves them alone for that engine. Never sent while
+  `TYPHON_ANNOUNCE_PROXY` is set: the proxy carries TCP, and a UDP announce
+  beside it would show the tracker the address it hides. The tracker editor
+  accepts `udp://host:port/...` and refuses one without a port.
 - **Workflows can run when a download completes.** A workflow now has a
   trigger: *on a timer* (every workflow so far, unchanged) or *when a download
   completes* -- once per torrent, at the moment its last piece verifies and
