@@ -2694,6 +2694,16 @@ footer {
     gap: 12px;
 }
 .trk-edit-box { width: 640px; max-width: 92vw; }
+.trk-err-box { width: 720px; max-width: 94vw; }
+.trk-err-body { max-height: 60vh; overflow-y: auto; margin: 8px 0 4px; }
+.trk-err-class { padding: 10px 0; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.trk-err-class:first-child { border-top: none; }
+.trk-err-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.trk-err-head .btn-small { margin-left: auto; }
+.trk-err-msg { margin: 6px 0 0 4px; }
+.trk-err-msg code { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+.trk-err-link { color: inherit; text-decoration: underline dotted; cursor: pointer; }
+.trk-err-link:hover { color: var(--text-primary, #fff); }
 .trk-edit-hint { color: var(--text-muted); font-size: 12px; margin: 4px 0 10px; }
 .trk-edit-text {
     width: 100%;

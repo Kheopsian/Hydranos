@@ -541,7 +541,15 @@ pub(super) async fn announce_one(
                         if kind == "timeout" {
                             timed_out = true;
                         }
-                        cache.count_failed_kind(&host, kind);
+                        // The tracker's own words go with the count: "other x10"
+                        // is not something an operator can act on, the message is.
+                        cache.count_failed_message(
+                            &host,
+                            kind,
+                            &redact(&e).to_string(),
+                            &job.info_hash,
+                            &event.to_string(),
+                        );
                         // At warn, not debug: a breaker that says a tracker
                         // "stopped answering" without saying why sends an
                         // operator to look at their network for a bug that is
