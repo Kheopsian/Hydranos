@@ -30,6 +30,11 @@ pub struct Match {
     /// Actions still worth doing: the ones it is already satisfying are
     /// dropped here, so `applied` counts changes rather than passes.
     pub actions: Vec<Action>,
+    /// What a webhook action posts, built from the facts the rule matched
+    /// on. None when the workflow has no webhook: most do not, and a pass
+    /// over a million torrents need not build a document per match.
+    #[serde(skip)]
+    pub payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -490,12 +495,19 @@ pub fn evaluate(w: &Workflow, facts: &[Facts]) -> Result<(Vec<Match>, PassReport
         }
         report.matched += 1;
 
-        let todo: Vec<Action> = w
+        let mut todo: Vec<Action> = w
             .then
             .iter()
-            .filter(|a| !rules::already_satisfied(a, f))
+            .filter(|a| !a.is_webhook() && !rules::already_satisfied(a, f))
             .cloned()
             .collect();
+        // A webhook is never "already done". On a timer it goes out in the
+        // pass where something else changes the torrent -- after which that
+        // something converges and the webhook stops. On an event it goes out
+        // every time: the event itself happens once.
+        if !todo.is_empty() || w.trigger == rules::Trigger::Completed {
+            todo.extend(w.then.iter().filter(|a| a.is_webhook()).cloned());
+        }
         if todo.is_empty() {
             report.skipped += 1;
             continue;
@@ -514,10 +526,92 @@ pub fn evaluate(w: &Workflow, facts: &[Facts]) -> Result<(Vec<Match>, PassReport
             name: f.name.clone(),
             engine: f.engine.clone(),
             total_size: f.total_size,
+            payload: if todo.iter().any(Action::is_webhook) { Some(webhook_payload(w, f)) } else { None },
             actions: todo,
         });
     }
     Ok((out, report))
+}
+
+/// The document a webhook receives.
+///
+/// Our fields under `torrent`, plus the same one-line summary under the three
+/// names the common receivers read -- `content` (Discord), `text` (Slack,
+/// Mattermost), `message` (Gotify) -- so pointing a workflow at one of them
+/// works with nothing in between.
+pub fn webhook_payload(w: &Workflow, f: &Facts) -> serde_json::Value {
+    let event = match w.trigger {
+        rules::Trigger::Completed => "completed",
+        rules::Trigger::Schedule => "matched",
+    };
+    let gib = f.total_size / (1024.0 * 1024.0 * 1024.0);
+    let line = match w.trigger {
+        rules::Trigger::Completed => format!("{} finished downloading ({gib:.2} GiB)", f.name),
+        rules::Trigger::Schedule => format!("{}: {} ({gib:.2} GiB)", w.name, f.name),
+    };
+    let num = |x: f64| if x.is_finite() { serde_json::json!(x) } else { serde_json::Value::Null };
+    serde_json::json!({
+        "event": event,
+        "workflow": w.name,
+        "at": crate::store::now_secs(),
+        "content": line,
+        "text": line,
+        "message": line,
+        "torrent": {
+            "info_hash": f.info_hash,
+            "name": f.name,
+            "category": f.category,
+            "tags": f.tags,
+            "engine": f.engine,
+            "save_path": f.save_path,
+            "state": f.state,
+            "tracker": f.tracker_host,
+            "size": num(f.total_size),
+            "progress": num(f.progress),
+            "ratio": num(f.ratio),
+            "uploaded": num(f.total_uploaded),
+            "downloaded": num(f.total_downloaded),
+            "seeding_time": num(f.seeding_time),
+        },
+    })
+}
+
+/// POST one webhook, with two more tries on a failure.
+///
+/// ⚠️ The URL is never in the error: a Discord webhook URL IS its secret, and
+/// errors go to the activity log that the whole UI can read.
+pub fn send_webhook(url: &str, payload: &serde_json::Value) -> Result<(), String> {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent(typhon_engine::config::user_agent())
+            .build()
+            .unwrap_or_default()
+    });
+    let mut last = String::new();
+    for (attempt, wait) in [0u64, 2, 5].into_iter().enumerate() {
+        if wait > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(wait));
+        }
+        match client.post(url).json(payload).send() {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            // A 4xx will not get better by asking again: the URL or the body
+            // is wrong. Only a 5xx or no answer is retried.
+            Ok(r) if r.status().is_client_error() => {
+                return Err(format!("webhook: HTTP {}", r.status().as_u16()));
+            }
+            Ok(r) => last = format!("webhook: HTTP {} after {} tries", r.status().as_u16(), attempt + 1),
+            Err(e) => {
+                last = format!(
+                    "webhook: {} after {} tries",
+                    if e.is_timeout() { "timed out" } else if e.is_connect() { "could not connect" } else { "request failed" },
+                    attempt + 1
+                )
+            }
+        }
+    }
+    Err(last)
 }
 
 /// Is this workflow due to run?
@@ -669,6 +763,10 @@ pub fn apply(
                 // deleted torrents quietly erased everything they had ever
                 // uploaded from the all-time totals.
                 delete_hook(&m.engine, &m.info_hash, *with_files)?;
+            }
+            Action::Webhook { url } => {
+                let payload = m.payload.clone().unwrap_or(serde_json::Value::Null);
+                send_webhook(url, &payload)?;
             }
         }
     }
@@ -935,6 +1033,41 @@ mod tests {
         assert_eq!(report.matched, 3, "they all match the condition");
         assert_eq!(report.skipped, 3, "and are all already where they belong");
         assert!(matches.is_empty(), "so nothing is left to do");
+    }
+
+    /// ⭐ On a timer, the webhook rides on the action that changes the
+    /// torrent: sent in the pass that tags it, never again once it is tagged.
+    #[test]
+    fn a_scheduled_webhook_goes_out_once_with_the_change_that_converges() {
+        let hook = Action::Webhook { url: "https://hooks.example/x".into() };
+        let w = wf(vec![Action::AddTags { tags: vec!["told".into()] }, hook.clone()], 500);
+        let mut f = facts(1);
+        let (m, _) = evaluate(&w, &f).unwrap();
+        assert_eq!(m[0].actions, vec![Action::AddTags { tags: vec!["told".into()] }, hook]);
+        let p = m[0].payload.as_ref().expect("a payload for a webhook");
+        assert_eq!(p["torrent"]["name"], "t0");
+        assert_eq!(p["event"], "matched");
+        assert!(p["content"].as_str().unwrap().contains("t0"), "Discord reads `content`");
+
+        f[0].tags.push("told".into());
+        let (m, r) = evaluate(&w, &f).unwrap();
+        assert!(m.is_empty(), "tagged: nothing left, the webhook included");
+        assert_eq!(r.skipped, 1);
+    }
+
+    /// On a completion the webhook goes out even when the other actions
+    /// have nothing to change: the event itself happens once.
+    #[test]
+    fn a_completion_webhook_goes_out_even_if_nothing_else_changes() {
+        let hook = Action::Webhook { url: "https://hooks.example/x".into() };
+        let mut w = wf(vec![Action::SetCategory { to: "in-progress".into() }, hook.clone()], 500);
+        w.trigger = rules::Trigger::Completed;
+        let (m, _) = evaluate(&w, &facts(1)).unwrap();
+        assert_eq!(m[0].actions, vec![hook], "already in the category, still told");
+        assert_eq!(m[0].payload.as_ref().unwrap()["event"], "completed");
+        // And no payload is built where no webhook asks for one.
+        let plain = wf(vec![Action::SetCategory { to: "done".into() }], 500);
+        assert!(evaluate(&plain, &facts(1)).unwrap().0[0].payload.is_none());
     }
 
     /// The cap is what stops a mistyped rule touching the whole catalogue in
