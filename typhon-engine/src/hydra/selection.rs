@@ -699,10 +699,12 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
     }
 }
 
-/// Rows per store transaction in a set-based write. One transaction of 50 000
-/// rows holds the store for a fraction of a second; a million is twenty of
-/// them, with every other writer let through in between.
-pub const BULK_TX: usize = 50_000;
+/// Rows per store transaction in a set-based write, the store's lock released
+/// between two. Measured on the bench with the writer's 64 MB page cache:
+/// 50 000 rows held the lock 0.6 s, 5 000 rows 0.27 s end to end in the
+/// sqlite shell; 10 000 keeps each hold near the 200 ms the store already
+/// warns about, and a million rows is a hundred of them.
+pub const BULK_TX: usize = 10_000;
 
 /// The store edit a set-based action makes, owned so it can cross into
 /// `spawn_blocking`.
