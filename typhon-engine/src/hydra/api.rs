@@ -1898,6 +1898,11 @@ async fn get_categories(
 ///
 /// Same two sources the listing route reads, in the same order: the store's
 /// document first, the file beside it as a fallback.
+/// The names of the categories that exist.
+pub(crate) fn category_names(state: &AppState) -> Vec<String> {
+    categories_map(state).into_keys().collect()
+}
+
 fn categories_map(state: &AppState) -> std::collections::BTreeMap<String, Category> {
     let cfg = state.cfg();
     let raw = {
@@ -12375,6 +12380,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::rulesapi::routes())
         .merge(crate::magnets::routes())
         .merge(crate::ipfilter::routes())
+        .merge(crate::watch::routes())
         // Every action on a selection, by rows or by filter.
         .merge(crate::selection::routes())
         // The agent endpoint, same reasoning: its own file, the same state.
@@ -13247,6 +13253,17 @@ pub(crate) mod testing {
         }
         serde_json::from_slice(&bytes)
             .unwrap_or_else(|e| panic!("body is not JSON: {:?} ({e})", String::from_utf8_lossy(&bytes)))
+    }
+
+    /// A category, written where the category routes write it.
+    pub(crate) fn put_category(state: &AppState, name: &str, mode: &str, save_path: &str) {
+        let mut all = categories_map(state);
+        all.insert(
+            name.to_string(),
+            Category { name: name.to_string(), save_path: save_path.to_string(), mode: mode.to_string(), ..Default::default() },
+        );
+        let doc = serde_json::to_string(&all).unwrap();
+        state.store.lock().unwrap().put_meta("categories", &doc).unwrap();
     }
 
     /// Headers carrying an API key.
