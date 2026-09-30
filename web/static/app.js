@@ -6270,6 +6270,64 @@ async function banPeer(ip) {
     try { await _ban(ip, t("banned from the peer list")); } catch (e) { alert(e.message); }
 }
 
+// ─── Watched folders ───────────────────────────────────
+
+let _watchCats = [];
+
+function _watchRow(f, st) {
+    const opts = _watchCats.map(c => `<option value="${esc(c)}" ${c === f.category ? "selected" : ""}>${esc(c)}</option>`).join("");
+    let status = "";
+    if (st) {
+        if (st.error) status = `<span style="color:var(--danger)">${esc(st.error)}</span>`;
+        else status = esc(`${t("added")} ${fmtInt(st.added || 0)} · ${t("refused")} ${fmtInt(st.refused || 0)}`)
+            + (st.last_refusal ? `<br><span class="sr-desc">${esc(st.last_refusal)}</span>` : "");
+    }
+    return `<tr class="watch-row">
+        <td><input type="text" class="sr-input w-path" value="${esc(f.path || "")}" placeholder="/data/watch/books"></td>
+        <td><select class="sr-input w-cat">${opts}</select></td>
+        <td><input type="checkbox" class="w-paused" ${f.paused ? "checked" : ""}></td>
+        <td><input type="checkbox" class="w-on" ${f.enabled !== false ? "checked" : ""}></td>
+        <td>${status}</td>
+        <td><button class="btn-cancel" onclick="this.closest('tr').remove()">${esc(t("Remove"))}</button></td>
+    </tr>`;
+}
+
+async function loadWatch() {
+    const body = document.getElementById("watch-rows");
+    if (!body) return;
+    try {
+        const cats = await api("/api/categories");
+        _watchCats = (cats || []).map(c => c.name);
+        const d = await api("/api/watch");
+        body.innerHTML = (d.folders || []).map(r => _watchRow(r.folder, r.status)).join("");
+    } catch (e) {
+        body.innerHTML = `<tr><td>${esc(e.message)}</td></tr>`;
+    }
+}
+
+function addWatchRow() {
+    document.getElementById("watch-rows").insertAdjacentHTML("beforeend", _watchRow({ enabled: true }, null));
+}
+
+async function saveWatch() {
+    const out = document.getElementById("watch-result");
+    const list = [...document.querySelectorAll("#watch-rows .watch-row")].map(r => ({
+        path: r.querySelector(".w-path").value.trim(),
+        category: r.querySelector(".w-cat").value,
+        paused: r.querySelector(".w-paused").checked,
+        enabled: r.querySelector(".w-on").checked,
+    })).filter(f => f.path);
+    try {
+        await api("/api/watch", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(list) });
+        out.textContent = t("Saved.");
+        out.className = "result-msg success";
+        loadWatch();
+    } catch (e) {
+        out.textContent = e.message;
+        out.className = "result-msg error";
+    }
+}
+
 // Magnets waiting for metadata. Hidden while there are none: an empty table
 // under the add form reads as something missing.
 async function updateMagnets() {
@@ -6328,7 +6386,7 @@ document.querySelectorAll(".tab").forEach(tab => {
         if (t === "categories") await updateCategories();
         if (t === "benchmark") await updateBenchmark();
         if (t === "add") await updateMagnets();
-        if (t === "config") loadIpFilter();
+        if (t === "config") { loadIpFilter(); loadWatch(); }
     });
 });
 

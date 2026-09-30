@@ -981,6 +981,21 @@
                     <div id="ipf-result" class="result-msg" style="margin-top:8px"></div>
                 </div>
             </div>
+            <div class="card">
+                <h3>Watched folders</h3>
+                <div class="card-body">
+                    <p class="sr-desc" style="margin:0 0 10px">A .torrent or .magnet file dropped in one of these folders is added in the folder's category, which decides the engine and the save path. Checked every 10 seconds; a file is read once it has stopped changing. Added files move to <code>added/</code>; a refused one is renamed <code>.invalid</code> with a <code>.txt</code> saying why. Nothing is deleted.</p>
+                    <table class="data-table">
+                        <thead><tr><th>Folder</th><th>Category</th><th>Add stopped</th><th>On</th><th>Status</th><th></th></tr></thead>
+                        <tbody id="watch-rows"></tbody>
+                    </table>
+                    <div style="margin-top:8px">
+                        <button class="btn-small" onclick="addWatchRow()">+ Folder</button>
+                        <button class="btn-small btn-accent" onclick="saveWatch()">Save</button>
+                    </div>
+                    <div id="watch-result" class="result-msg" style="margin-top:8px"></div>
+                </div>
+            </div>
             <!-- Personalisation. This browser only, applied instantly, saved to
                  localStorage: nothing here is a daemon setting, so nothing here
                  needs a restart or shows up in the dirty-settings count. -->
@@ -1504,6 +1519,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.49"></script>
+    <script src="/static/app.js?v=1.6.50"></script>
 </body>
 </html>
