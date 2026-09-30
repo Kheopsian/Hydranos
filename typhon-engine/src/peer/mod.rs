@@ -550,6 +550,12 @@ async fn handle_incoming(
     use crate::wire::codec::BtCodec;
     use crate::crypto::stream::CryptoStream;
 
+    // Before anything costs: no handshake, no MSE, no log line per attempt
+    // from a range somebody filtered precisely because it knocks a lot.
+    if crate::ipfilter::blocked(addr.ip()) {
+        crate::ipfilter::BLOCKED_IN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
     info!("[peer] incoming {} from {}", stream.kind(), addr);
     if !crate::tracker::is_self_ip(addr.ip()) {
         INBOUND_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

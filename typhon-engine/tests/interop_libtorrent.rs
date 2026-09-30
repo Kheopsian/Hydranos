@@ -477,3 +477,86 @@ async fn interop_hydranos_resolves_a_magnet_from_libtorrent() {
     assert_eq!(got, ih, "the dict libtorrent sent is the torrent's");
     q.delete(&hash).await;
 }
+
+/// ⭐ The IP filter against a real peer, three ways: a libtorrent already
+/// connected is cut off when it becomes blocked, it cannot connect back in,
+/// and we do not dial it out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs qBittorrent: tools/interop/run.sh"]
+async fn interop_a_blocked_libtorrent_is_cut_off_and_kept_out() {
+    let tag = "ipfilter";
+    let data = content(91);
+    let name = format!("filtered-{tag}.bin");
+    let torrent = build_torrent(&name, &data, false);
+    let hash = info_hash_hex(&torrent);
+    let q = Qbit::new();
+
+    // We seed, qBittorrent downloads: a connection to cut.
+    let us = engine(tag, torrent.clone());
+    std::fs::write(us.root.join("data").join(&name), &data).unwrap();
+    let (ih, _) = us.mgr.add_torrent_bytes(&torrent, &us.root.join("data").to_string_lossy(), false, true).unwrap();
+    let port = 16911;
+    wait_listening(&listen(&us, port, peer_id())).await;
+    let peer_env = env("HYDRANOS_INTEROP_QBIT_PEER");
+    let qaddr: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&peer_env.as_str()).unwrap().next().unwrap();
+    let me = SocketAddr::new(our_address_towards(&peer_env), port);
+    q.add(&torrent, &format!("{}/qbit-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Slowed to 32 KiB/s, so the connection is still downloading when the
+    // ban lands: finished, libtorrent would close a seed-to-seed link itself
+    // and the test would prove nothing.
+    q.http
+        .post(format!("{}/api/v2/torrents/setDownloadLimit", q.base))
+        .form(&[("hashes", hash.as_str()), ("limit", "32768")])
+        .send()
+        .await
+        .unwrap();
+    q.add_peer(&hash, me).await;
+    let t = us.mgr.get(&ih).unwrap();
+    for _ in 0..200 {
+        if t.peers_connected.load(Ordering::Relaxed) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(t.peers_connected.load(Ordering::Relaxed) > 0, "libtorrent is connected before the ban");
+
+    // 1. Cut off: blocked while connected, woken, gone.
+    use typhon_engine::ipfilter as f;
+    f::install(Some(f::IpFilter::parse(&qaddr.ip().to_string()).0));
+    assert!(us.mgr.wake_filtered_peers() > 0, "its session is woken");
+    for _ in 0..100 {
+        if t.peers_connected.load(Ordering::Relaxed) == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(t.peers_connected.load(Ordering::Relaxed), 0, "the blocked peer is disconnected");
+    assert!(f::DROPPED.load(Ordering::Relaxed) >= 1);
+
+    // 2. Kept out: a fresh copy on its side -- libtorrent backs off a peer
+    // that dropped it, a new torrent has no such memory -- told about us.
+    let before_in = f::BLOCKED_IN.load(Ordering::Relaxed);
+    q.delete(&hash).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    q.add(&torrent, &format!("{}/qbit-{tag}-2", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    q.add_peer(&hash, me).await;
+    for _ in 0..100 {
+        if f::BLOCKED_IN.load(Ordering::Relaxed) > before_in {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(f::BLOCKED_IN.load(Ordering::Relaxed) > before_in, "its inbound attempt is refused");
+    assert_eq!(t.peers_connected.load(Ordering::Relaxed), 0);
+
+    // 3. Not dialled: we do not open a connection to it either.
+    let before_out = f::BLOCKED_OUT.load(Ordering::Relaxed);
+    typhon_engine::tracker::dial_peer(qaddr, t.clone(), us.disk.clone(), peer_id(), None, port, &Egress::default()).await;
+    assert!(f::BLOCKED_OUT.load(Ordering::Relaxed) > before_out, "the dial is refused before connecting");
+    assert_eq!(t.peers_connected.load(Ordering::Relaxed), 0);
+
+    f::install(None);
+    q.delete(&hash).await;
+}

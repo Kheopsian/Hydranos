@@ -165,6 +165,24 @@ impl TorrentManager {
         }
     }
 
+    /// Wake every session whose peer the IP filter now blocks, so it ends now
+    /// rather than at its next message -- which for an idle seed-to-seed
+    /// connection is minutes away. Through each peer's own `Notify`: waking
+    /// through one shared one would make 67k sessions contend on it for
+    /// every message they handle. Returns how many were woken.
+    pub fn wake_filtered_peers(&self) -> usize {
+        let mut n = 0;
+        for t in self.all() {
+            for p in t.peer_stats.iter() {
+                if crate::ipfilter::blocked(p.key().ip()) {
+                    p.value().punch_wake.notify_one();
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// Install the "a download just finished" listener. Once.
     pub fn set_completion_hook(&self, hook: Arc<dyn Fn(InfoHash) + Send + Sync>) {
         let _ = self.completion_hook.set(hook);

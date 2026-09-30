@@ -209,8 +209,20 @@ pub async fn run(
     // disabled and never registers a timer at all.
     let choke_poll = tokio::time::sleep(CHOKE_TICK);
     tokio::pin!(choke_poll);
+    // The filter generation this session last checked its peer against.
+    let mut filter_gen = crate::ipfilter::generation();
 
     loop {
+        // A ban has to reach the peers already connected, not only the next
+        // ones. Re-checked once per change of the list, never per message.
+        let g = crate::ipfilter::generation();
+        if g != filter_gen {
+            filter_gen = g;
+            if crate::ipfilter::blocked(addr.ip()) {
+                crate::ipfilter::DROPPED.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+        }
         // A flag that gated only NEW handshakes would leave the long-lived
         // encrypted sessions in place for hours — they are exactly the
         // persistent peers — so a measurement block would never reach a clean

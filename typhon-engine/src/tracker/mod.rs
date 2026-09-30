@@ -584,6 +584,12 @@ pub(crate) async fn open_peer(
     // MSE is kept as a FALLBACK for the minority that *require* encryption,
     // so connectivity is never lost. TYPHON_NO_MSE=1 also skips the MSE
     // fallback (pure-plaintext bench).
+    // Every outbound connection comes through here -- tracker, DHT and PEX
+    // peers, holepunch, metadata fetches -- so one check covers them all.
+    if crate::ipfilter::blocked(addr.ip()) {
+        crate::ipfilter::BLOCKED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
+        return None;
+    }
     let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false)
         || policy.block_mse();
     // TCP plaintext (preferred)
