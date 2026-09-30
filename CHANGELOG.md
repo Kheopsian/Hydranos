@@ -76,12 +76,17 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   operator confirmed -- one that now matches more is refused with the new
   count and asked again.
 - **Stop, start, pin, tags and relabelling a selection are one write, not one
-  request per torrent.** The rows go to the store in transactions of 50 000,
-  and the list's cached facts are updated by the write itself, so the next
+  request per torrent.** The rows go to the store in transactions of 10 000,
+  the lock released between two, and the list's cached facts are updated by
+  the write itself, so the next
   list request has nothing left to re-read under the store's lock (15 000
   tagged rows used to cost it 210 ms; past 100 000 it re-read the whole
   library). Moving files, rechecking, reannouncing, removing and handing
   torrents to another node still go one by one: each is real work.
+- **The store's writer keeps 64 MB of page cache instead of SQLite's 2 MB.**
+  A flag change moves an entry in the covering index the list reads, and with
+  2 MB those pages came back from the kernel every few rows: 50 000 paused
+  flags took 1.69 s, 0.59 s with the larger cache.
 
 ### Fixed (unreleased features)
 - **Removing a tag from a selection set that tag instead.** The page sent
