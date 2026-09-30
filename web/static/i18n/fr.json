@@ -839,5 +839,13 @@
   "Once per download, when its last piece is verified: the moment its trackers are told it completed. A torrent added with its data already on disk, or rechecked whole, never fires it. Leave no condition to act on every download.": "Une fois par téléchargement, quand sa dernière pièce est vérifiée : au moment où ses trackers apprennent qu'il est terminé. Un torrent ajouté avec ses données déjà sur disque, ou revérifié complet, ne le déclenche jamais. Sans condition, il agit sur chaque téléchargement.",
   "{n} downloads under way: {m} would be acted on when they complete, {s} already as asked": "{n} téléchargements en cours : {m} seraient traités à leur fin, {s} déjà comme demandé",
   "call a webhook": "appeler un webhook",
-  "POSTs the torrent as JSON; Discord, Slack and Gotify read it as is. On a timer, it goes out when another action changes the torrent.": "Envoie le torrent en JSON (POST) ; Discord, Slack et Gotify le lisent tel quel. À intervalle, il part quand une autre action modifie le torrent."
+  "POSTs the torrent as JSON; Discord, Slack and Gotify read it as is. On a timer, it goes out when another action changes the torrent.": "Envoie le torrent en JSON (POST) ; Discord, Slack et Gotify le lisent tel quel. À intervalle, il part quand une autre action modifie le torrent.",
+  "Magnet link": "Lien magnet",
+  "Magnets": "Magnets",
+  "Waiting for their metadata from the swarm. Each appears in the list once it arrives; one nobody answers is retried a few times, then kept here with the reason.": "En attente de leurs métadonnées auprès de l'essaim. Chacun apparaît dans la liste dès qu'elles arrivent ; un magnet sans réponse est réessayé quelques fois, puis gardé ici avec la raison.",
+  "Magnet accepted: fetching its metadata. It appears in the list once it arrives.": "Magnet accepté : récupération des métadonnées. Il apparaîtra dans la liste dès qu'elles arrivent.",
+  "failed": "échec",
+  "waiting to retry": "nouvel essai prévu",
+  "fetching metadata...": "récupération des métadonnées...",
+  "Retry": "Réessayer"
 }

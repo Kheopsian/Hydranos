@@ -1238,7 +1238,7 @@
                     </div>
 
                     <div class="form-group" id="magnet-group">
-                        <label for="magnet-uri">Magnet URI (race only)</label>
+                        <label for="magnet-uri">Magnet link</label>
                         <input type="text" id="magnet-uri" placeholder="magnet:?xt=urn:btih:...">
                     </div>
 
@@ -1284,6 +1284,14 @@
                     <button type="submit" class="btn-primary" id="add-btn">Add Torrent</button>
                     <div id="add-result" class="result-msg"></div>
                 </form>
+                <div id="magnets-card" style="display:none; margin-top:20px">
+                    <h3 style="margin:0 0 6px">Magnets</h3>
+                    <p class="sr-desc" style="margin:0 0 8px">Waiting for their metadata from the swarm. Each appears in the list once it arrives; one nobody answers is retried a few times, then kept here with the reason.</p>
+                    <table class="data-table">
+                        <thead><tr><th>Name</th><th>Engine</th><th>State</th><th></th></tr></thead>
+                        <tbody id="magnets-list"></tbody>
+                    </table>
+                </div>
             </div>
 
             <aside class="add-preview-col">
@@ -1468,6 +1476,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.47"></script>
+    <script src="/static/app.js?v=1.6.48"></script>
 </body>
 </html>

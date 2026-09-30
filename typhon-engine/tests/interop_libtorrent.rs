@@ -417,3 +417,63 @@ async fn interop_libtorrent_downloads_a_private_torrent_from_hydranos() {
     Qbit::new().set_prefs(r#"{"encryption":0}"#).await;
     libtorrent_downloads_from_us("private", true, 0x5555_5555).await;
 }
+
+/// ⭐ A magnet resolved against libtorrent: we know only the info hash and
+/// qBittorrent's address, fetch the info dict over BEP 9, and it hashes to
+/// the magnet's info hash -- the step a magnet add stands on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs qBittorrent: tools/interop/run.sh"]
+async fn interop_hydranos_resolves_a_magnet_from_libtorrent() {
+    let tag = "magnet";
+    let data = content(77);
+    let name = format!("magnet-{tag}.bin");
+    let torrent = build_torrent(&name, &data, false);
+    let hash = info_hash_hex(&torrent);
+    let q = Qbit::new();
+    let shared = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qseed-{tag}"));
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join(&name), &data).unwrap();
+    q.add(&torrent, &format!("{}/qseed-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    q.wait_complete(&hash, "qBittorrent's own recheck").await;
+
+    // An engine that has never seen the torrent: no blob, no .torrent.
+    let us = engine(tag, Vec::new());
+    let peer: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&env("HYDRANOS_INTEROP_QBIT_PEER").as_str())
+        .unwrap()
+        .next()
+        .unwrap();
+    let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+    let cfg: typhon_engine::config::EngineConfig = serde_json::from_str("{}").unwrap();
+    // libtorrent refuses connections to a torrent it is still checking. A
+    // resolution asks again every few seconds within its budget; and a
+    // resolution that fails is started again, as `magnets::drive` does.
+    let mut dict = None;
+    let mut last = String::new();
+    'attempts: for _ in 0..15 {
+        assert!(us.mgr.magnet().start(ih, Vec::new(), vec![peer], &cfg, None, None), "a resolution starts");
+        for _ in 0..400 {
+            match us.mgr.magnet().state_of(&ih) {
+                Some(typhon_engine::magnet::JobState::Done(d)) => {
+                    dict = Some(d);
+                    break 'attempts;
+                }
+                Some(typhon_engine::magnet::JobState::Failed(e)) => {
+                    last = e;
+                    us.mgr.magnet().forget(&ih);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue 'attempts;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    }
+    if dict.is_none() {
+        let b = &cfg.resolved_bindings()[0];
+        let direct = typhon_engine::peer::metadata::fetch_from_peer(peer, ih, b.peer_id, None, b.advertised_port, b.egress.clone()).await;
+        eprintln!("[interop] magnet: last failure {last:?}; asked directly: {:?}; qBittorrent says {}", direct.map(|d| d.len()), q.info(&hash).await);
+    }
+    let dict = dict.expect("the metadata arrived within a minute");
+    let got: [u8; 20] = Sha1::digest(&dict).into();
+    assert_eq!(got, ih, "the dict libtorrent sent is the torrent's");
+    q.delete(&hash).await;
+}
