@@ -74,7 +74,45 @@ CREATE TABLE IF NOT EXISTS tracker_samples (
 CREATE INDEX IF NOT EXISTS idx_tracker_samples_ts ON tracker_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_tracker_samples_trk_ts ON tracker_samples(tracker, ts);
 DROP INDEX IF EXISTS idx_tracker_samples_trk;
+CREATE TABLE IF NOT EXISTS bench_meta (key TEXT PRIMARY KEY, value REAL);
 ";
+
+/// Tracker samples younger than this stay as recorded; older ones are folded
+/// into one row per `TRACKER_BUCKET_SECS` per (engine, tracker).
+pub const TRACKER_RAW_KEEP_SECS: f64 = 48.0 * 3600.0;
+pub const TRACKER_BUCKET_SECS: f64 = 300.0;
+/// History folded per call. Six hours of 30 s samples on ~20 series is ~15k
+/// rows; the first pass on a node with months of 5 s samples reads ~75k.
+const TRACKER_COMPACT_SLICE_SECS: f64 = 6.0 * 3600.0;
+const TRACKER_COMPACTED_KEY: &str = "tracker_samples_compacted_until";
+
+/// The points a tracker chart is drawn from, at most: a wider window is
+/// averaged into buckets rather than shipped whole (17k rows and 3 MB for one
+/// day of one tracker at 5 s).
+pub const TRACKER_CHART_POINTS: f64 = 300.0;
+
+/// The bucket a tracker window is averaged over.
+///
+/// Whole multiples of 30 s, the sampling interval; and whole multiples of the
+/// compacted bucket once the window reaches into compacted history, or one
+/// bucket in two would be empty there.
+pub fn tracker_bucket_secs(start: f64, end: f64, now: f64) -> f64 {
+    let span = (end - start).max(0.0);
+    let mut b = ((span / TRACKER_CHART_POINTS) / 30.0).ceil().max(1.0) * 30.0;
+    if start < now - TRACKER_RAW_KEEP_SECS {
+        b = (b / TRACKER_BUCKET_SECS).ceil().max(1.0) * TRACKER_BUCKET_SECS;
+    }
+    b
+}
+
+const TRACKER_RANGE_SQL: &str = "
+    SELECT CAST(ts / ?4 AS INTEGER) * ?4 AS b, engine, tracker,
+           AVG(upload_rate), AVG(download_rate), AVG(peers), AVG(active),
+           AVG(torrents), MAX(cum_uploaded), MAX(cum_downloaded)
+      FROM tracker_samples
+     WHERE tracker = ?1 AND ts >= ?2 AND ts <= ?3
+     GROUP BY b, engine
+     ORDER BY b, engine";
 
 /// The columns of `bench_samples`, in the order the graphs read them.
 ///
@@ -352,12 +390,35 @@ pub struct BenchDb {
     conn: Connection,
 }
 
+/// Put bench.db in WAL mode, unless it lives on a network share.
+///
+/// In the rollback journal a reader holds the whole file: the records pass and
+/// the chart reads, on their own read-only handles, made the sampler's commit
+/// wait behind them -- with the writer's mutex held, so every other reader of
+/// that mutex queued too. Same reasoning and same exception as the store, cf
+/// `Store::prefer_wal`.
+fn prefer_wal(conn: &Connection, path: &Path) {
+    if path.parent().map_or(false, crate::platform::is_network_fs) {
+        return;
+    }
+    match conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0)) {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {
+            if let Err(e) = conn.execute_batch("PRAGMA synchronous=NORMAL;") {
+                tracing::warn!("bench.db in WAL but not tuned: {e}");
+            }
+        }
+        Ok(mode) => tracing::warn!(mode = %mode, "bench.db stays in its journal mode"),
+        Err(e) => tracing::warn!("bench.db stays in its journal mode: {e}"),
+    }
+}
+
 impl BenchDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
+        prefer_wal(&conn, path);
         conn.execute_batch(SCHEMA)?;
         add_missing_columns(&conn)?;
         Ok(Self { conn })
@@ -488,25 +549,107 @@ impl BenchDb {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Append one per-tracker sample.
-    pub fn record_tracker_sample(
+    /// Append one tracker pass, in one transaction.
+    ///
+    /// One commit per row was ~20 fsyncs every pass in the rollback journal,
+    /// each taken with the writer's mutex held.
+    pub fn record_tracker_samples(
         &self,
         ts: f64,
-        engine: &str,
-        tracker: &str,
-        peers: f64,
-        active: f64,
-        torrents: f64,
-        cum_uploaded: i64,
-        cum_downloaded: i64,
+        rows: &[crate::benchsampler::TrackerRow],
     ) -> anyhow::Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO tracker_samples
+                     (ts, engine, tracker, upload_rate, download_rate, peers, active,
+                      torrents, cum_uploaded, cum_downloaded)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            )?;
+            for r in rows {
+                stmt.execute(rusqlite::params![
+                    ts, r.engine, r.tracker, r.upload_rate as f64, r.download_rate as f64,
+                    r.peers as f64, r.active as f64, r.torrents as f64,
+                    r.cum_uploaded, r.cum_downloaded,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Fold one slice of tracker history older than `TRACKER_RAW_KEEP_SECS`
+    /// into 5-minute rows. Returns whether older history is still waiting.
+    ///
+    /// Gauges are averaged over the bucket, cumulative counters take its
+    /// maximum (they only grow), and the row is stamped at the bucket start.
+    /// Everything before the stored watermark is already folded, so a slice is
+    /// never folded twice, and the swap is one transaction: a crash leaves
+    /// either the raw rows or their fold, never both and never neither.
+    ///
+    /// Bounded to one slice per call because the first pass after upgrading
+    /// meets two months of 5 s samples (14M rows on the production node), and
+    /// this runs with the writer's mutex held.
+    pub fn compact_tracker_samples(&self, now: f64) -> anyhow::Result<bool> {
+        let cutoff = ((now - TRACKER_RAW_KEEP_SECS) / TRACKER_BUCKET_SECS).floor()
+            * TRACKER_BUCKET_SECS;
+        let mark: Option<f64> = self
+            .conn
+            .query_row(
+                "SELECT value FROM bench_meta WHERE key = ?1",
+                [TRACKER_COMPACTED_KEY],
+                |r| r.get(0),
+            )
+            .ok();
+        let from = match mark {
+            Some(m) => m,
+            None => {
+                let oldest: Option<f64> = self
+                    .conn
+                    .query_row("SELECT MIN(ts) FROM tracker_samples", [], |r| r.get(0))?;
+                match oldest {
+                    Some(t) => (t / TRACKER_BUCKET_SECS).floor() * TRACKER_BUCKET_SECS,
+                    None => cutoff,
+                }
+            }
+        };
+        if from >= cutoff {
+            if mark.is_none() {
+                self.set_compacted_until(&self.conn, cutoff)?;
+            }
+            return Ok(false);
+        }
+        let to = (from + TRACKER_COMPACT_SLICE_SECS).min(cutoff);
+
+        let tx = self.conn.unchecked_transaction()?;
+        let last_raw: i64 =
+            tx.query_row("SELECT IFNULL(MAX(rowid), 0) FROM tracker_samples", [], |r| r.get(0))?;
+        tx.execute(
             "INSERT INTO tracker_samples
                  (ts, engine, tracker, upload_rate, download_rate, peers, active,
                   torrents, cum_uploaded, cum_downloaded)
-             VALUES (?1,?2,?3,0,0,?4,?5,?6,?7,?8)",
-            rusqlite::params![ts, engine, tracker, peers, active, torrents,
-                              cum_uploaded, cum_downloaded],
+             SELECT CAST(ts / ?3 AS INTEGER) * ?3, engine, tracker,
+                    AVG(upload_rate), AVG(download_rate), AVG(peers), AVG(active),
+                    AVG(torrents), MAX(cum_uploaded), MAX(cum_downloaded)
+               FROM tracker_samples
+              WHERE ts >= ?1 AND ts < ?2
+              GROUP BY 1, engine, tracker",
+            rusqlite::params![from, to, TRACKER_BUCKET_SECS],
+        )?;
+        tx.execute(
+            "DELETE FROM tracker_samples WHERE ts >= ?1 AND ts < ?2 AND rowid <= ?3",
+            rusqlite::params![from, to, last_raw],
+        )?;
+        self.set_compacted_until(&tx, to)?;
+        tx.commit()?;
+        Ok(to < cutoff)
+    }
+
+    fn set_compacted_until(&self, conn: &Connection, ts: f64) -> anyhow::Result<()> {
+        conn.execute(
+            "INSERT INTO bench_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![TRACKER_COMPACTED_KEY, ts],
         )?;
         Ok(())
     }
@@ -525,7 +668,8 @@ impl BenchDb {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// One tracker's samples between two instants, oldest first.
+    /// One tracker's samples between two instants, averaged per `bucket`
+    /// seconds and stamped at the bucket start, oldest first.
     ///
     /// Served by the `(tracker, ts)` index. With `tracker` alone the window was
     /// filtered row by row over the tracker's whole history: 1.5M rows read to
@@ -535,15 +679,10 @@ impl BenchDb {
         tracker: &str,
         start: f64,
         end: f64,
+        bucket: f64,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT ts, engine, tracker, upload_rate, download_rate, peers, active,
-                    torrents, cum_uploaded, cum_downloaded
-               FROM tracker_samples
-              WHERE tracker = ?1 AND ts >= ?2 AND ts <= ?3
-              ORDER BY ts",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![tracker, start, end], |row| {
+        let mut stmt = self.conn.prepare(TRACKER_RANGE_SQL)?;
+        let rows = stmt.query_map(rusqlite::params![tracker, start, end, bucket.max(1.0)], |row| {
             Ok(tracker_row_json(row))
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -1174,13 +1313,29 @@ mod sample_tests {
         assert!(d.samples_in_range(500.0, 10.0).unwrap().is_empty());
     }
 
+    fn trow(engine: &str, tracker: &str, upload_rate: i64, cum_uploaded: i64) -> crate::benchsampler::TrackerRow {
+        crate::benchsampler::TrackerRow {
+            engine: engine.into(),
+            tracker: tracker.into(),
+            upload_rate,
+            peers: 5,
+            active: 3,
+            torrents: 40,
+            cum_uploaded,
+            cum_downloaded: 100,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn a_tracker_sample_round_trips() {
         let d = db();
-        d.record_tracker_sample(100.0, "race", "tracker.example", 5.0, 3.0, 40.0, 900, 100)
-            .unwrap();
-        let got = d.tracker_samples_in_range("tracker.example", 0.0, 1000.0).unwrap();
+        d.record_tracker_samples(100.0, &[trow("race", "tracker.example", 700, 900)]).unwrap();
+        let got = d.tracker_samples_in_range("tracker.example", 0.0, 1000.0, 30.0).unwrap();
         assert_eq!(got.len(), 1, "got {got:?}");
+        assert_eq!(got[0]["upload_rate"], 700, "the rate is stored, not a constant 0: {got:?}");
+        assert_eq!(got[0]["cum_uploaded"], 900);
+        assert_eq!(got[0]["peers"], 5);
     }
 
     /// ⭐ Two engines announcing to the SAME tracker are two series. Collapsing
@@ -1188,12 +1343,98 @@ mod sample_tests {
     #[test]
     fn two_engines_on_one_tracker_stay_two_series() {
         let d = db();
-        d.record_tracker_sample(100.0, "race", "tracker.example", 5.0, 3.0, 40.0, 900, 100)
-            .unwrap();
-        d.record_tracker_sample(100.0, "hoard", "tracker.example", 7.0, 4.0, 50.0, 800, 200)
-            .unwrap();
-        let got = d.tracker_samples_in_range("tracker.example", 0.0, 1000.0).unwrap();
+        d.record_tracker_samples(
+            100.0,
+            &[trow("race", "tracker.example", 1, 900), trow("hoard", "tracker.example", 2, 800)],
+        )
+        .unwrap();
+        let got = d.tracker_samples_in_range("tracker.example", 0.0, 1000.0, 30.0).unwrap();
         assert_eq!(got.len(), 2, "got {got:?}");
+    }
+
+    /// A day of one tracker is 300 points, not the 17k rows it was recorded
+    /// as: gauges averaged over the bucket, counters at their highest.
+    #[test]
+    fn a_window_is_averaged_into_buckets_stamped_at_their_start() {
+        let d = db();
+        for (i, rate) in [100, 200, 300, 400].iter().enumerate() {
+            d.record_tracker_samples(600.0 + 30.0 * i as f64, &[trow("hoard", "t.example", *rate, 1000 + i as i64)])
+                .unwrap();
+        }
+        let got = d.tracker_samples_in_range("t.example", 0.0, 10_000.0, 60.0).unwrap();
+        assert_eq!(got.len(), 2, "four 30 s samples in two 60 s buckets: {got:?}");
+        assert_eq!(got[0]["ts"], 600);
+        assert_eq!(got[0]["upload_rate"], 150);
+        assert_eq!(got[0]["cum_uploaded"], 1001);
+        assert_eq!(got[1]["ts"], 660);
+        assert_eq!(got[1]["upload_rate"], 350);
+    }
+
+    #[test]
+    fn a_chart_asks_for_a_bounded_number_of_points() {
+        let now = 10_000_000.0;
+        // One hour of recent samples: every 30 s sample, nothing averaged.
+        assert_eq!(super::tracker_bucket_secs(now - 3600.0, now, now), 30.0);
+        // One day: ~300 points.
+        let day = super::tracker_bucket_secs(now - 86_400.0, now, now);
+        assert_eq!(day, 300.0);
+        assert!(86_400.0 / day <= super::TRACKER_CHART_POINTS);
+        // Reaching into compacted history: a whole number of 5-minute rows per
+        // bucket, or one bucket in two would be empty.
+        let back = super::tracker_bucket_secs(now - 3.0 * 86_400.0, now - 2.9 * 86_400.0, now);
+        assert_eq!(back % super::TRACKER_BUCKET_SECS, 0.0, "got {back}");
+    }
+
+    /// History past the raw window is folded to 5-minute rows, the recent
+    /// samples are left alone, and a second pass changes nothing.
+    #[test]
+    fn old_tracker_history_is_folded_once_and_recent_samples_kept() {
+        let d = db();
+        let now = 1_000_000.0 * super::TRACKER_BUCKET_SECS;
+        let old = now - super::TRACKER_RAW_KEEP_SECS - 3600.0;
+        // Ten 30 s samples in one old 5-minute bucket, rising counters.
+        for i in 0..10 {
+            d.record_tracker_samples(old + 30.0 * i as f64, &[trow("hoard", "t.example", 100 * i, 1000 + i)])
+                .unwrap();
+        }
+        d.record_tracker_samples(now - 60.0, &[trow("hoard", "t.example", 7, 5000)]).unwrap();
+
+        while d.compact_tracker_samples(now).unwrap() {}
+        let count = |d: &BenchDb| -> i64 {
+            d.conn.query_row("SELECT COUNT(*) FROM tracker_samples", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count(&d), 2, "one folded row and the recent sample");
+        let got = d.tracker_samples_in_range("t.example", 0.0, now, 1.0).unwrap();
+        assert_eq!(got[0]["ts"], old as i64, "stamped at the bucket start");
+        assert_eq!(got[0]["upload_rate"], 450, "the mean of 0..900");
+        assert_eq!(got[0]["cum_uploaded"], 1009, "the counter's highest, never an average");
+        assert_eq!(got[1]["upload_rate"], 7, "recent samples stay as recorded");
+
+        // Nothing left to fold: another pass is a no-op.
+        assert!(!d.compact_tracker_samples(now).unwrap());
+        assert_eq!(count(&d), 2);
+        // An hour later, the old bucket is not folded a second time.
+        assert!(!d.compact_tracker_samples(now + 3600.0).unwrap());
+        assert_eq!(count(&d), 2);
+    }
+
+    /// Two months of history are folded a slice per call, so no single call
+    /// holds the writer for the whole catch-up.
+    #[test]
+    fn a_long_backlog_is_folded_a_slice_at_a_time() {
+        let d = db();
+        let now = 1_000_000.0 * super::TRACKER_BUCKET_SECS;
+        let start = now - 30.0 * 86_400.0;
+        let mut t = start;
+        while t < now - super::TRACKER_RAW_KEEP_SECS {
+            d.record_tracker_samples(t, &[trow("hoard", "t.example", 1, 1)]).unwrap();
+            t += 3600.0;
+        }
+        let mut calls = 0;
+        while d.compact_tracker_samples(now).unwrap() {
+            calls += 1;
+        }
+        assert!(calls > 50, "28 days in 6 h slices is over a hundred calls, got {calls}");
     }
 
     #[test]
@@ -1210,12 +1451,9 @@ mod sample_tests {
         let d = db();
         let plan: Vec<String> = d
             .conn
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT ts FROM tracker_samples
-                  WHERE tracker = ?1 AND ts >= ?2 AND ts <= ?3 ORDER BY ts",
-            )
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", super::TRACKER_RANGE_SQL))
             .unwrap()
-            .query_map(rusqlite::params!["t.example", 0.0, 1.0], |r| r.get::<_, String>(3))
+            .query_map(rusqlite::params!["t.example", 0.0, 1.0, 30.0], |r| r.get::<_, String>(3))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -1223,10 +1461,19 @@ mod sample_tests {
             plan.iter().any(|p| p.contains("(tracker=? AND ts>? AND ts<?)")),
             "the window must be an index range, got {plan:?}"
         );
-        assert!(
-            !plan.iter().any(|p| p.contains("TEMP B-TREE")),
-            "the index already returns the window in time order, got {plan:?}"
-        );
+    }
+
+    /// A file on local disk is put in WAL, so the chart's read-only handle and
+    /// the sampler's commits stop waiting on each other.
+    #[test]
+    fn bench_db_opens_in_wal() {
+        let dir = std::env::temp_dir().join(format!("benchwal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = BenchDb::open(&dir.join("bench.db")).unwrap();
+        let mode: String = d.conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The Records card must render on a library that has done nothing yet.

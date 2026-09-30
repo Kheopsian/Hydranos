@@ -60,6 +60,104 @@ pub fn latest_system() -> System {
     LATEST_SYSTEM.lock().map(|g| *g).unwrap_or_default()
 }
 
+/// Per-tracker rows are taken every sixth tick, 30 s: a pass reads every
+/// torrent, and the chart they feed spans hours.
+const TRACKER_EVERY: u64 = 6;
+
+/// One (engine, tracker) row of the Trackers tab, live and as stored.
+///
+/// Fields in alphabetical order: that is the order 3.x published them in.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct TrackerRow {
+    /// Torrents with at least one peer connected.
+    pub active: i64,
+    pub cum_downloaded: i64,
+    pub cum_uploaded: i64,
+    pub download_rate: i64,
+    pub engine: String,
+    pub peers: i64,
+    pub torrents: i64,
+    pub tracker: String,
+    pub ts: i64,
+    pub upload_rate: i64,
+}
+
+static LATEST_TRACKERS: std::sync::Mutex<Option<Vec<TrackerRow>>> = std::sync::Mutex::new(None);
+
+/// The rows of the last tracker pass, or `None` before the first one.
+pub fn latest_trackers() -> Option<Vec<TrackerRow>> {
+    LATEST_TRACKERS.lock().ok().and_then(|g| g.clone())
+}
+
+/// Per-tracker figures across every loaded torrent, plus the stored baseline.
+///
+/// The stored counters are what each tracker accounted for before the running
+/// engines started (and what removed torrents carried away); the live torrents
+/// are added on top, and the torrent count comes from them alone. Reporting the
+/// stored figure alone froze the Trackers tab at the last restart.
+///
+/// Reads four atomics and the tracker list of each torrent, never the JSON row:
+/// building `torrent_to_json` for each one cost 8 s over a million torrents.
+pub fn tracker_totals(engines: &EngineHost, store: &crate::store::StoreLock, ts: i64) -> Vec<TrackerRow> {
+    let mut rows: std::collections::BTreeMap<(String, String), TrackerRow> =
+        std::collections::BTreeMap::new();
+    {
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
+        for (engine, tracker, ul, dl) in store.tracker_counters().unwrap_or_default() {
+            rows.insert(
+                (engine.clone(), tracker.clone()),
+                TrackerRow { cum_uploaded: ul, cum_downloaded: dl, engine, tracker, ..Default::default() },
+            );
+        }
+    }
+
+    for engine in engines.engines() {
+        let mut live: std::collections::HashMap<String, TrackerRow> = std::collections::HashMap::new();
+        for torrent in engine.manager.all().iter() {
+            let trackers = torrent.live_trackers.read();
+            // The host baked into the torrent, NOT a result of announcing:
+            // live_trackers is filled when the torrent is built. So a torrent
+            // that has never announced still counts under its own tracker, and
+            // this bucket holds only the ones carrying no announce URL at all.
+            let host = trackers
+                .iter()
+                .flatten()
+                .next()
+                .map(|u| typhon_engine::rpc::dispatch::tracker_host_str(u))
+                .filter(|h| !h.is_empty())
+                .unwrap_or("(no tracker)");
+            let row = match live.get_mut(host) {
+                Some(row) => row,
+                None => live.entry(host.to_string()).or_default(),
+            };
+            let peers = torrent.peers_connected.load(Ordering::Relaxed) as i64;
+            row.cum_uploaded += torrent.total_uploaded.load(Ordering::Relaxed) as i64;
+            row.cum_downloaded += torrent.total_downloaded.load(Ordering::Relaxed) as i64;
+            row.upload_rate += torrent.upload_rate.get() as i64;
+            row.download_rate += torrent.download_rate.get() as i64;
+            row.peers += peers;
+            row.active += (peers > 0) as i64;
+            row.torrents += 1;
+        }
+        for (host, part) in live {
+            let row = rows.entry((engine.id.clone(), host.clone())).or_insert_with(|| TrackerRow {
+                engine: engine.id.clone(),
+                tracker: host,
+                ..Default::default()
+            });
+            row.cum_uploaded += part.cum_uploaded;
+            row.cum_downloaded += part.cum_downloaded;
+            row.upload_rate += part.upload_rate;
+            row.download_rate += part.download_rate;
+            row.peers += part.peers;
+            row.active += part.active;
+            row.torrents += part.torrents;
+        }
+    }
+
+    rows.into_values().map(|r| TrackerRow { ts, ..r }).collect()
+}
+
 /// Share of all CPU time spent waiting on I/O since the previous call, from
 /// the host-wide `cpu` line of /proc/stat.
 fn iowait_pct(stat: &str, prev: &mut Option<(u64, u64)>) -> f64 {
@@ -123,10 +221,28 @@ pub fn spawn(engines: Arc<EngineHost>, bench: Shared, store: Arc<crate::store::S
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut previous: Previous = std::collections::HashMap::new();
         let mut system = SystemPrev::default();
+        let mut n: u64 = 0;
         loop {
             tick.tick().await;
             if let Err(e) = sample_once(&engines, &bench, &store, &mut previous, &mut system) {
                 tracing::warn!("bench sample failed: {e}");
+            }
+            if n % TRACKER_EVERY == 0 {
+                if let Err(e) = sample_trackers(&engines, &bench, &store) {
+                    tracing::warn!("tracker sample failed: {e}");
+                }
+            }
+            n += 1;
+            // Older samples are folded into 5-minute rows a bounded slice at a
+            // time, so catching up on months of history never holds the writer
+            // for more than one slice.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let db = bench.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = db.compact_tracker_samples(now) {
+                tracing::warn!("tracker sample compaction failed: {e}");
             }
         }
     });
@@ -281,24 +397,38 @@ fn sample_once(
 
     let db = bench.lock().unwrap_or_else(|e| e.into_inner());
     db.record_sample(&sample)?;
-
-    // Per-tracker rows, from the announce cache: it is the only place that
-    // knows which tracker a torrent actually talks to.
-    for engine in engines.engines() {
-        for (host, (torrents, _age)) in engine.announce_cache.per_tracker() {
-            db.record_tracker_sample(
-                ts,
-                &engine.id,
-                &host,
-                0.0,
-                0.0,
-                torrents as f64,
-                0,
-                0,
-            )?;
-        }
-    }
     Ok(())
+}
+
+/// One tracker pass: published for the live table, then stored for the chart.
+///
+/// ⚠ From the Rust port (2026-09-07) until this pass existed, the rows were
+/// written from the announce cache with every rate, peer and byte count at a
+/// constant 0: the chart was flat and read as "this tracker moves nothing".
+fn sample_trackers(
+    engines: &Arc<EngineHost>,
+    bench: &Shared,
+    store: &Arc<crate::store::StoreLock>,
+) -> anyhow::Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // The pass reads every torrent, and none of it under the bench lock. Its
+    // cost grows with the catalogue, so it says when it stops being cheap.
+    let started = std::time::Instant::now();
+    let rows = tracker_totals(engines, store, ts);
+    let took = started.elapsed();
+    if took > Duration::from_secs(1) {
+        tracing::warn!(ms = took.as_millis() as u64, "tracker pass is slow");
+    } else {
+        tracing::debug!(ms = took.as_millis() as u64, "tracker pass");
+    }
+    if let Ok(mut g) = LATEST_TRACKERS.lock() {
+        *g = Some(rows.clone());
+    }
+    let db = bench.lock().unwrap_or_else(|e| e.into_inner());
+    db.record_tracker_samples(ts as f64, &rows)
 }
 
 fn open_fd_count() -> f64 {
