@@ -3835,3 +3835,7 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 /* A chip whose count a search took to zero: still there and in its place, so
    nothing moves, but plainly gone -- struck through and faded. */
 #hoard-facets .chip.chip-orphan:not(.active):not(.excluded) { opacity: .35; text-decoration: line-through; }
+
+/* The optional Save Path column: a path is long and its end is the part that
+   differs, so it keeps one line and shows the whole of it on hover. */
+#hoard-table td.col-path, #race-table td.col-path { font-family: monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px; }

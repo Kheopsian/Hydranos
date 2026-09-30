@@ -834,5 +834,12 @@
   "Remove {n} torrents and delete their files?": "Retirer {n} torrents et supprimer leurs fichiers ?",
   "Force download": "Forcer le téléchargement",
   "Stop forcing": "Ne plus forcer",
-  "{n} already so": "{n} déjà dans cet état"
+  "{n} already so": "{n} déjà dans cet état",
+  "Set location…": "Déplacer vers un dossier…",
+  "Set location": "Déplacer vers un dossier",
+  "Absolute path of the folder to move the data to. The category does not change. A torrent with several files keeps its own folder inside this one.": "Chemin absolu du dossier où déplacer les données. La catégorie ne change pas. Un torrent à plusieurs fichiers garde son propre dossier à l'intérieur de celui-ci.",
+  "Location set to \"{path}\": {ok} OK, {failed} failure(s).": "Déplacement vers « {path} » : {ok} OK, {failed} échec(s).",
+  "Moving {n} torrent to \"{path}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.": "Déplacement de {n} torrent vers « {path} » en arrière-plan. Il continue de partager pendant la copie de ses données ; suivi dans Jobs.",
+  "Moving {n} torrents to \"{path}\" in the background. They keep seeding while their data is copied; follow them in Jobs.": "Déplacement de {n} torrents vers « {path} » en arrière-plan. Ils continuent de partager pendant la copie de leurs données ; suivi dans Jobs.",
+  "Move": "Déplacer"
 }

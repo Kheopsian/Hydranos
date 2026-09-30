@@ -6234,6 +6234,25 @@ async fn post_category(state: &AppState, info_hash: &str, query: &str, body: &st
         CategoryChange::Move { plan, name, total } => (plan, name, total, None),
         CategoryChange::Graduate { to, plan, name, total } => (plan, name, total, Some(to)),
     };
+    queue_data_move(state, &hash, &engine, &category, plan, &name, total, to, allow)
+}
+
+/// Check a planned move and queue it: 202 and a job, or 409 with the reason.
+///
+/// `to` names another engine for a graduation, `None` keeps the torrent where
+/// it is. An empty `category` leaves the label alone.
+#[allow(clippy::too_many_arguments)]
+fn queue_data_move(
+    state: &AppState,
+    hash: &str,
+    engine: &str,
+    category: &str,
+    plan: crate::jobsrun::MovePlan,
+    name: &str,
+    total: i64,
+    to: Option<String>,
+    allow: bool,
+) -> Response {
     // Refused whatever the operator agrees to: these are not a cost to accept
     // but a move that would damage something that is not this torrent.
     if let Some((reason, why)) = plan.refusal() {
@@ -6273,9 +6292,9 @@ async fn post_category(state: &AppState, info_hash: &str, query: &str, body: &st
     let save_path = plan.new_root.to_string_lossy().to_string();
     let (kind, queued) = match &to {
         None => ("move_data", crate::jobsrun::queue_move(
-            state, &hash, &name, &engine, &category, &save_path, allow, total)),
+            state, hash, name, engine, category, &save_path, allow, total)),
         Some(to) => ("graduate", crate::jobsrun::queue_graduation_allowing(
-            state, &hash, &name, &engine, to, &category, &save_path, allow, total)),
+            state, hash, name, engine, to, category, &save_path, allow, total)),
     };
     match queued {
         Some(job) => (
@@ -6313,6 +6332,82 @@ async fn set_race_torrent_category(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     post_category(&state, &info_hash, &query, &body, "race").await
+}
+
+/// A save path an operator typed, or why it cannot be one.
+///
+/// Absolute, and made of plain names only: a `..` would let the folder the
+/// move checks be a different one from the folder the files land in.
+fn location_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("a location is required".into());
+    }
+    let p = std::path::Path::new(raw);
+    if !p.is_absolute() {
+        return Err(format!("{raw:?} is not an absolute path"));
+    }
+    use std::path::Component::*;
+    if !p.components().all(|c| matches!(c, Prefix(_) | RootDir | Normal(_))) {
+        return Err(format!("{raw:?} must not contain `.` or `..`"));
+    }
+    // Rebuilt from its components, which drops a trailing separator: the
+    // store would otherwise hold `/data/tv/` next to `/data/tv` for one folder.
+    Ok(p.components().collect())
+}
+
+/// `POST /api/{hoard,race}/torrents/:hash/location`.
+///
+/// `{"location": "/abs/path"}` moves the data to that folder and leaves the
+/// category alone -- what a category move does, minus the category. Same
+/// answers: 200 `moved: false` when the data is already there, 202 and a job
+/// when bytes have to move, 409 with `reason` when the move is refused or,
+/// for `hardlinks`, needs `"allow_breaking_hardlinks": true`.
+async fn post_location(state: &AppState, info_hash: &str, query: &str, body: &str, fallback: &str) -> Response {
+    let engine = engine_param(query, fallback);
+    let hash = match resolve_in_hoard(state, &engine, info_hash, "torrent not found") {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let allow = v.get("allow_breaking_hardlinks").and_then(|b| b.as_bool()).unwrap_or(false);
+    let location = match location_path(v.get("location").and_then(|c| c.as_str()).unwrap_or("")) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let Some(torrent) = find_copy(state, &engine, &hash) else {
+        return not_found();
+    };
+    let plan = crate::jobsrun::plan_move_checked(state, &torrent, &location);
+    if plan.is_noop() {
+        return Json(serde_json::json!({"status": "ok", "moved": false})).into_response();
+    }
+    let (name, total) = (torrent.meta.name.clone(), torrent.meta.total_size as i64);
+    queue_data_move(state, &hash, &engine, "", plan, &name, total, None, allow)
+}
+
+async fn set_torrent_location(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    post_location(&state, &info_hash, &query, &body, "hoard").await
+}
+
+async fn set_race_torrent_location(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    post_location(&state, &info_hash, &query, &body, "race").await
 }
 
 torrent_write!(set_torrent_tags, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
@@ -12193,6 +12288,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hoard/torrents/:info_hash/category", axum::routing::post(set_torrent_category))
         .route("/api/hoard/torrents/:info_hash/tags", axum::routing::post(set_torrent_tags))
         .route("/api/race/torrents/:info_hash/category", axum::routing::post(set_race_torrent_category))
+        .route("/api/hoard/torrents/:info_hash/location", axum::routing::post(set_torrent_location))
+        .route("/api/race/torrents/:info_hash/location", axum::routing::post(set_race_torrent_location))
         .route("/api/race/torrents/:info_hash/tags", axum::routing::post(set_race_torrent_tags))
         .route("/api/categories", axum::routing::post(category_create))
         .route("/api/announce/ip-modes", get(get_ip_modes).post(set_announce_ip_mode))
