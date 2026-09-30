@@ -79,6 +79,7 @@ and `interop`).
 | 11 | Peer exchange (`ut_pex`) | Implemented. Never for a private torrent, sent or received |
 | 12 | Multitracker metadata (tiers) | Implemented |
 | 15 | UDP tracker protocol | Implemented. Switchable per engine (`enable_udp_trackers`, on by default); never sent while announces are proxied |
+| 47 | Padding files | Implemented: a pad file is alignment in the stream, never a file on disk |
 | 41 | UDP tracker URL extension | Implemented: the tracker URL's path and query, passkey included, travel as URLData |
 | 19 | WebSeed (`url-list`) | Implemented |
 | 20 | Peer id conventions | Implemented |
@@ -86,6 +87,7 @@ and `interop`).
 | 27 | Private torrents | Implemented, on what we send *and* on what we receive |
 | 31 | Tracker returns `retry in` | Implemented |
 | 48 | Scrape | **Not implemented**: we never scrape |
+| 52 | BitTorrent v2 | Implemented for `.torrent` files: v2-only (SHA-256 merkle checks, truncated SHA-256 as the identity) and hybrid (checked through its v1 hashes). A magnet with only a v2 hash is refused by name |
 | 55 | Hole punching (`ut_holepunch`) | Implemented. Never for a private torrent |
 | — | MSE/PE encrypted connections | Implemented, both directions |
 
@@ -275,7 +277,7 @@ state:
 |---|---|---|---|
 | opentracker | `lednerb/opentracker-docker` (digest in the script) | `started` as leecher, `completed` → one snatch, `stopped` → gone, resume → back as a seed with no second snatch -- over HTTP, and the same life over UDP (BEP 15); a cross-seed never counts as a snatch; `min interval` holds | its scrape |
 | Torrust Tracker, private mode | `torrust/tracker` (digest in the script) | our exact peer id; `started` with zero counters despite a 900 GB lifetime total; the session's upload; nothing sent inside `min interval`, and a forced re-announce heard; `stopped` removes us; the snatch counted once; no key → refused, and the refusal reaches the operator | its REST API peer table |
-| qBittorrent / libtorrent | 5.2.3 / 2.0.14 | libtorrent downloads a torrent from us, and we download one from it; MSE both ways with libtorrent *requiring* encryption; a private torrent transfers; a magnet is resolved from it over BEP 9, knowing only the info hash | libtorrent's own piece check; our hash check and our bytes on disk |
+| qBittorrent / libtorrent | 5.2.3 / 2.0.14 | v2 and hybrid torrents made by libtorrent's own creator: our info hash is its `infohash_v2` (truncated) / `infohash_v1`, we download each from it and it downloads the v2 one from us, no pad file ever on disk; libtorrent downloads a torrent from us, and we download one from it; MSE both ways with libtorrent *requiring* encryption; a private torrent transfers; a magnet is resolved from it over BEP 9, knowing only the info hash | libtorrent's own piece check; our hash check and our bytes on disk |
 
 Test sources: `typhon-engine/src/hydra/announce/interop.rs` (trackers) and
 `typhon-engine/tests/interop_libtorrent.rs` (peers).
@@ -361,6 +363,9 @@ interoperability suite, which needs Docker.
 | A connection id is dropped after a failure rather than trusted again | BEP 15 | `a_silent_tracker_times_out_and_forgets_the_id` |
 | A reply is only accepted from the address the request went to | — | `a_reply_from_another_address_is_not_delivered` |
 | An error reply is a refusal, filed like a `failure reason` | BEP 15 | `an_error_reply_is_the_trackers_refusal_in_its_words` |
+| A pad file is a gap in the stream, never a file | BEP 47 | `a_pad_file_is_a_gap_not_a_file` |
+| A v2 torrent: files on piece boundaries, merkle-checked pieces, truncated SHA-256 identity | BEP 52 | `a_v2_torrent_reads_and_every_piece_checks`, `the_tree_is_built_as_bep_52_says` |
+| A piece layer that does not hash to its pieces root is refused | BEP 52 | `a_tampered_piece_layer_is_refused` |
 | A `udp://` tracker typed by hand needs a port | BEP 15 | `a_udp_tracker_is_accepted_with_a_port_and_refused_without` |
 | Switched off for an engine, a UDP tracker is not contacted at all | — | `a_udp_tracker_is_left_alone_when_the_engine_says_so` |
 

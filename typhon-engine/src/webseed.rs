@@ -246,6 +246,16 @@ fn span_file_ranges(
     reqs
 }
 
+/// Where in the stream each of `span_file_ranges`' requests starts.
+fn span_file_starts(meta: &TorrentMeta, first: u32, last: u32) -> Vec<u64> {
+    let (span_start, span_end) = span_byte_range(meta, first, last);
+    meta.files
+        .iter()
+        .filter(|f| f.length > 0 && f.offset < span_end && f.offset + f.length > span_start)
+        .map(|f| span_start.max(f.offset))
+        .collect()
+}
+
 /// Assemble a run of contiguous pieces from the HTTP mirror.
 ///
 /// The span is a window over the concatenated file stream, so it can straddle
@@ -274,9 +284,19 @@ async fn fetch_span(
     .collect()
     .await;
 
-    let mut out: Vec<u8> = Vec::with_capacity(want as usize);
-    for c in chunks {
-        out.extend_from_slice(&c?);
+    // Laid out at their place in the stream rather than appended: between two
+    // files there may be alignment padding (BEP 47, v2) that no mirror
+    // serves and that reads as zeros.
+    let starts: Vec<u64> = span_file_starts(meta, first, last);
+    let mut out: Vec<u8> = vec![0u8; want as usize];
+    for (c, at) in chunks.into_iter().zip(starts) {
+        let c = c?;
+        let from = (at - span_start) as usize;
+        let to = from + c.len();
+        if to > out.len() {
+            return Err(format!("pieces {first}..={last}: a file range overran the span"));
+        }
+        out[from..to].copy_from_slice(&c);
     }
 
     if out.len() as u64 != want {
@@ -719,6 +739,20 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Alignment padding between two files (BEP 47, v2): the mirror is asked
+    /// for the two files only, and each lands at its place in the stream.
+    #[test]
+    fn a_padded_span_asks_for_the_files_and_places_them() {
+        let mut m = meta(true, "set", vec![("a.bin", 100), ("b.bin", 50)]);
+        m.files[1].offset = 16384; // a.bin, then padding to the next piece
+        m.total_size = 16384 + 50;
+        m.num_pieces = 2;
+        let reqs = span_file_ranges(&m, "http://m/", 0, 1);
+        assert_eq!(reqs.iter().map(|r| (r.1, r.2)).collect::<Vec<_>>(), vec![(0, 99), (0, 49)]);
+        assert_eq!(span_file_starts(&m, 0, 1), vec![0, 16384]);
+        assert_eq!(span_byte_range(&m, 0, 1), (0, 16384 + 50));
+    }
+
     fn meta(multi: bool, name: &str, files: Vec<(&str, u64)>) -> TorrentMeta {
         let mut offset = 0u64;
         let files = files
@@ -745,6 +779,7 @@ mod tests {
             private: false,
             multi_file: multi,
             info_dict_len: 0,
+            v2: false,
         }
     }
 

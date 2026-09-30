@@ -60,6 +60,11 @@ pub struct TorrentMeta {
     /// from the .torrent on demand, because holding them for every torrent
     /// would cost far more RAM than serving them is worth.
     pub info_dict_len: u32,
+    /// A v2-only torrent (BEP 52): pieces are checked against SHA-256 merkle
+    /// hashes, and `info_hash` is the truncated SHA-256 of the info dict. A
+    /// hybrid is `false` -- it is checked through its v1 hashes, which cover
+    /// every byte.
+    pub v2: bool,
 }
 
 impl TorrentMeta {
@@ -73,6 +78,11 @@ impl TorrentMeta {
         remaining.min(self.piece_length as u64) as u32
     }
 
+    /// The file ranges a block of a piece is made of, in order.
+    ///
+    /// A stretch of the stream that no file covers is alignment padding --
+    /// BEP 47 pad files, or the gap after each file of a v2 torrent -- and
+    /// comes back as a `pad` op: zeros on read, nothing on write, no file.
     pub fn map_block(&self, piece: u32, offset: u32, length: u32) -> Vec<FileOp> {
         let abs_offset = piece as u64 * self.piece_length as u64 + offset as u64;
         let mut remaining = length as u64;
@@ -84,7 +94,13 @@ impl TorrentMeta {
                 continue;
             }
             if pos < f.offset {
-                pos = f.offset;
+                let gap = (f.offset - pos).min(remaining);
+                ops.push(FileOp { path: PathBuf::new(), file_offset: 0, length: gap as u32, pad: true });
+                pos += gap;
+                remaining -= gap;
+                if remaining == 0 {
+                    break;
+                }
             }
             let file_start = pos - f.offset;
             let available = f.length - file_start;
@@ -93,6 +109,7 @@ impl TorrentMeta {
                 path: f.path.clone(),
                 file_offset: file_start,
                 length: to_read as u32,
+                pad: false,
             });
             pos += to_read;
             remaining -= to_read;
@@ -102,11 +119,33 @@ impl TorrentMeta {
     }
 }
 
+/// A piece's expected content: a SHA-1 (v1, hybrids) or a merkle root (v2).
+#[derive(Debug, Clone)]
+pub enum PieceCheck {
+    V1([u8; 20]),
+    V2(crate::torrent::merkle::PieceCheck),
+}
+
+impl PieceCheck {
+    pub fn matches(&self, piece: &[u8]) -> bool {
+        match self {
+            PieceCheck::V1(want) => {
+                use sha1::{Digest, Sha1};
+                let got: [u8; 20] = Sha1::digest(piece).into();
+                got == *want
+            }
+            PieceCheck::V2(c) => c.matches(piece),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct FileOp {
     pub path: PathBuf,
     pub file_offset: u64,
     pub length: u32,
+    /// Alignment padding: zeros, backed by no file.
+    pub pad: bool,
 }
 
 /// Per-peer stats. Each peer task holds an Arc<PeerStats> directly
@@ -452,6 +491,9 @@ pub struct TorrentState {
     /// Behind an `Arc` so a verification already in flight keeps the table it
     /// is reading even if another thread releases it mid-check.
     piece_hashes: Mutex<Option<Arc<Vec<[u8; 20]>>>>,
+    /// The same, for a v2 torrent: a merkle hash per piece. Loaded and
+    /// released on the same terms.
+    v2_checks: Mutex<Option<Arc<Vec<crate::torrent::merkle::PieceCheck>>>>,
 
     // Download mode
     pub picker: OnceLock<Arc<Mutex<PiecePicker>>>,
@@ -772,6 +814,50 @@ impl TorrentState {
             Err(poisoned) => poisoned.into_inner(),
         };
         *slot = None;
+        drop(slot);
+        let mut v2 = match self.v2_checks.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *v2 = None;
+    }
+
+    /// Whether a whole piece -- alignment padding included, as `map_block`
+    /// reads it -- is the piece the metainfo describes. None when it cannot
+    /// be told: no metainfo to check against, which a caller must treat as a
+    /// refusal, never as a pass.
+    pub fn verify_piece(&self, piece: u32, data: &[u8]) -> Option<bool> {
+        Some(self.piece_check(piece)?.matches(data))
+    }
+
+    /// What a piece is checked against, owned: taken here, where the table is
+    /// loaded, and applied wherever the hashing runs (a blocking thread).
+    pub fn piece_check(&self, piece: u32) -> Option<PieceCheck> {
+        if !self.meta.v2 {
+            return self.piece_hash(piece).map(PieceCheck::V1);
+        }
+        let table = {
+            let mut slot = match self.v2_checks.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if slot.is_none() {
+                let bytes = self.metainfo_bytes()?;
+                match crate::torrent::metainfo::v2_piece_table(&bytes) {
+                    Ok(t) if t.len() as u32 == self.meta.num_pieces => *slot = Some(Arc::new(t)),
+                    Ok(t) => {
+                        tracing::error!(info_hash = %self.info_hash_hex(), "v2 piece table has {} entries, {} pieces expected; refusing to verify", t.len(), self.meta.num_pieces);
+                        return None;
+                    }
+                    Err(e) => {
+                        tracing::error!(info_hash = %self.info_hash_hex(), "v2 piece table: {e}; refusing to verify");
+                        return None;
+                    }
+                }
+            }
+            slot.clone()?
+        };
+        table.get(piece as usize).cloned().map(PieceCheck::V2)
     }
 
 
@@ -843,6 +929,7 @@ impl TorrentState {
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
+            v2_checks: Mutex::new(None),
             picker,
             have_tx: RwLock::new(None),
             upload_rate: RateTracker::new(),
@@ -1271,6 +1358,7 @@ mod error_recovery_tests {
                 private: false,
                 multi_file: false,
                 info_dict_len: 0,
+                v2: false,
             },
             PathBuf::from("/tmp"),
             false,
