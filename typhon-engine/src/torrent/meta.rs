@@ -322,9 +322,17 @@ pub struct TrackerSlot {
     pub disabled: bool,
     /// Unix seconds of the last answer from this tracker, 0 = never.
     pub last_ok: i64,
-    /// Unix seconds before which this tracker must not be asked again:
-    /// `min interval`, BEP 31 `retry in`, or an HTTP `Retry-After`.
+    /// Unix seconds before which this tracker must not be asked again on
+    /// our own initiative: its `min interval`. A re-announce a person forces
+    /// may cross it, as qBittorrent's does.
     pub not_before: i64,
+    /// Unix seconds before which this tracker must not be asked AT ALL: it
+    /// said so itself, with BEP 31 `retry in` or an HTTP `Retry-After`.
+    /// Nothing crosses it, forced or not.
+    pub hint_until: i64,
+    /// Refusals in a row from a tracker that has not registered this torrent
+    /// yet -- the count a race's registration retries are bounded by.
+    pub refusals: u8,
     /// BEP 3 `tracker id`, echoed back as `trackerid=`.
     pub tracker_id: Option<Box<str>>,
 }

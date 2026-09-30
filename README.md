@@ -60,8 +60,10 @@ their state rather than ours. Both run on every push. In short:
   that saw us leech, retried if one is down) and `stopped`; a cross-seed is
   never a snatch.
 - **Your floors hold.** `min interval`, BEP 31 `retry in` and `Retry-After` are
-  obeyed per tracker, manual re-announces included; BEP 12 tier order is
-  respected; `tracker id` is echoed back.
+  obeyed per tracker, races included. Only a re-announce a person forces
+  crosses `min interval`, as qBittorrent's does. An unregistered race is
+  retried like autobrr does it (7 s, 50 times). BEP 12 tier order is
+  respected, and `tracker id` is echoed back.
 - **One identity.** Peer id `-HY####-`, the same to every tracker and every
   peer, `User-Agent: Hydranos/<version>`, a stable secret `key`. No client
   spoofing.

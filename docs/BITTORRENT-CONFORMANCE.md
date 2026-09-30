@@ -120,7 +120,7 @@ A periodic announce carries **no `event` key at all**, not an empty one.
 | `retry in` (BEP 31) | Read from a refusal: that many minutes before this tracker is asked again, or `never` for the rest of the session. |
 | `warning message` | The announce counted; the warning is logged for the operator. |
 | `interval` | Honoured as the delay before the next announce. A value of zero or below falls back to 1800 s. |
-| `min interval` | A hard floor per tracker. Nothing crosses it: not the periodic announce, not a manual re-announce, not a race. Only a `completed` or a `stopped` event does, because each is sent once. |
+| `min interval` | A floor per tracker. The periodic schedule, races and internal re-announces never cross it. Two things do, as in qBittorrent: a `completed` or `stopped` event, each sent once, and a re-announce a person forces (the button or the API), at most once a minute per torrent. |
 | `tracker id` | Kept for the session and echoed back as `trackerid=`. |
 | `complete` / `incomplete` | Recorded and displayed as the swarm counts. A negative count reads as zero. |
 | `peers` (byte string) | Compact, 6 bytes per peer (BEP 23). A truncated last entry is dropped, the others kept; port 0 is dropped. |
@@ -166,10 +166,24 @@ session (`TrackerSlot`), and derives every event from it:
 
 - **One announce per torrent per interval**, at the cadence the tracker sets.
   The scheduler never re-announces a torrent less than 60 seconds after the
-  previous time: a shorter wait is replaced by the 30-minute default. A manual
-  re-announce is refused within 60 seconds of the previous one.
-- **`min interval` is enforced per tracker on top of that**, including for
-  races and manual re-announces. A floored tracker costs no request.
+  previous time: a shorter wait is replaced by the 30-minute default. The one
+  exception is a race's registration retry, below. A manual re-announce is
+  refused within 60 seconds of the previous one.
+- **`min interval` is enforced per tracker on top of that**, races included. A
+  floored tracker costs no request. A re-announce a person forces crosses it,
+  exactly as qBittorrent's "Force reannounce" does: libtorrent's
+  `ignore_min_interval`, which is also what autobrr and every tool driving
+  qBittorrent's API get. A tracker's own `retry in` or `Retry-After` is never
+  crossed, forced or not.
+- **A race retries a tracker that has not registered it yet.** The `.torrent`
+  often reaches the client before the tracker has finished taking the upload,
+  and the tracker answers with a `failure reason` ("unregistered torrent").
+  While a race still downloading gets only such refusals, it re-announces every
+  7 seconds, 50 times at most, and stops at the first tracker that registers
+  it. This is autobrr's reannounce action with its defaults, which trackers
+  already see from every racing qBittorrent. No `min interval` is crossed,
+  because a tracker that refuses a torrent has set none for it. A 429, a
+  timeout or a tracker that does not answer at all is never retried this way.
 - **Tier order is respected** (BEP 12). The first tracker in the tier list that
   answers ends the attempt; the next tier is only for failure. The exception is
   a race, a torrent being downloaded now, which announces to every tracker it
@@ -178,8 +192,9 @@ session (`TrackerSlot`), and derives every event from it:
   spread over one default interval, so that every torrent does not fall due at
   the same instant.
 - **A circuit breaker per tracker host** stops announcing to a tracker that has
-  stopped answering: 5 failures open it for 10 minutes. An HTTP 429 counts as
-  an answer; the scheduler slows down for that tracker instead.
+  stopped answering: 5 failures open it for 10 minutes. An HTTP 429 or a
+  `failure reason` counts as an answer, because the tracker is up. On a 429
+  the scheduler slows down for that tracker instead.
 - **A seeding torrent sends `numwant=0`.** It is reachable and has nothing to
   dial. It asks for 50 on its first announce to a tracker and on one announce
   in 64 afterwards, to check that the tracker hands out our address; a seed
@@ -258,7 +273,7 @@ state:
 | Counterpart | Version | What is checked | Read back from |
 |---|---|---|---|
 | opentracker | `lednerb/opentracker-docker` (digest in the script) | `started` as leecher, `completed` → one snatch, `stopped` → gone, resume → back as a seed with no second snatch; a cross-seed never counts as a snatch; `min interval` holds | its scrape |
-| Torrust Tracker, private mode | `torrust/tracker` (digest in the script) | our exact peer id; `started` with zero counters despite a 900 GB lifetime total; the session's upload; nothing sent inside `min interval`; `stopped` removes us; the snatch counted once; no key → refused, and the refusal reaches the operator | its REST API peer table |
+| Torrust Tracker, private mode | `torrust/tracker` (digest in the script) | our exact peer id; `started` with zero counters despite a 900 GB lifetime total; the session's upload; nothing sent inside `min interval`, and a forced re-announce heard; `stopped` removes us; the snatch counted once; no key → refused, and the refusal reaches the operator | its REST API peer table |
 | qBittorrent / libtorrent | 5.2.3 / 2.0.14 | libtorrent downloads a torrent from us, and we download one from it; MSE both ways with libtorrent *requiring* encryption; a private torrent transfers | libtorrent's own piece check; our hash check and our bytes on disk |
 
 Test sources: `typhon-engine/src/hydra/announce/interop.rs` (trackers) and
@@ -324,7 +339,10 @@ interoperability suite, which needs Docker.
 |---|---|---|
 | `min interval` is read | BEP 3 | `bep3_the_min_interval_floor_is_read`, `the_min_interval_the_tracker_states_is_read` |
 | An absent `min interval` is not a floor of zero | BEP 3 | `bep3_an_absent_min_interval_is_not_a_floor_of_zero` |
-| `min interval` is a hard floor | BEP 3 | `min_interval_is_a_hard_floor`, `min_interval_holds_back_bumps_and_races_alike` |
+| `min interval` is a floor for the schedule, races and internal re-announces | BEP 3 | `min_interval_is_a_hard_floor`, `min_interval_holds_back_bumps_and_races_alike` |
+| A re-announce a person forces crosses it, like qBittorrent's; a tracker's `retry in`/`Retry-After` is never crossed | — | `a_forced_reannounce_crosses_min_interval_but_not_a_retry_hint`, `a_forced_reannounce_crosses_min_interval_like_qbittorrent`, `a_person_s_bump_is_forced_and_an_internal_one_is_not` |
+| A race the tracker has not registered is retried every 7 s, 50 times at most | — | `an_unregistered_race_is_retried_in_seconds`, `registration_retries_are_bounded_and_end_on_registration`, `only_a_registration_retry_may_wait_under_a_minute` |
+| A tracker that does not answer is not retried in seconds | — | `a_tracker_that_does_not_answer_is_not_retried_in_seconds` |
 | Events are not held by the floor | BEP 3 | `events_are_not_held_by_the_floor` |
 | `retry in` minutes, and `never` | BEP 31 | `bep31_retry_in_is_read_from_a_refusal`, `bep31_retry_in_is_obeyed`, `bep31_never_means_never` |
 | HTTP `Retry-After` is obeyed | RFC 9110 | `retry_after_is_obeyed` |
@@ -489,7 +507,8 @@ that failed was fixed, and the tests that caught them are the ones above.
 | An event was consumed before it was sent | A tracker that was down lost the `completed`, and with it the snatch | Fixed: retried |
 | A stop overwrote an owed `completed` | Finished-then-stopped lost the snatch | Fixed |
 | A resume sent no `started` | The tracker had dropped us at `stopped` and saw a periodic announce from an unknown peer | Fixed |
-| `min interval` did not hold back manual re-announces or races | A floor the tracker stated could be crossed | Fixed: enforced per tracker |
+| `min interval` did not hold back races | A floor the tracker stated could be crossed on our own initiative | Fixed: enforced per tracker. A re-announce a person forces crosses it, as qBittorrent's does |
+| A race refused as "unregistered" was retried 30 minutes later, and five refusals opened the breaker | Races lost to clients running autobrr's 7-second reannounce | Fixed: autobrr's cadence (7 s, 50 times), and a refusal counts as the answer it is |
 | `left` was `size − downloaded` | Data already on disk was reported as missing; a 90 % torrent announced as 0 % | Fixed: from the piece map |
 | `tracker id` was ignored | BEP 3 asks for it to be echoed back | Fixed |
 | BEP 31 `retry in` and HTTP `Retry-After` were ignored | A tracker asking for quiet was asked again on schedule | Fixed |

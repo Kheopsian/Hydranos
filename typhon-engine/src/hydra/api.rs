@@ -8955,6 +8955,8 @@ async fn reannounce_one(
         .try_send(crate::announce::scheduler::BumpReq {
             info_hash: info_hash.to_lowercase(),
             reply: Some(reply_tx),
+            // A person pressed it: past `min interval`, like qBittorrent.
+            forced: true,
         })
         .is_err()
     {
@@ -11271,6 +11273,7 @@ async fn qbit_reannounce(
             match bump.try_send(crate::announce::scheduler::BumpReq {
                 info_hash: hash.to_lowercase(),
                 reply: None,
+                forced: true,
             }) {
                 Ok(()) => bumped += 1,
                 Err(_) => queue_full += 1,
