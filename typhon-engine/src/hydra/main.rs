@@ -670,6 +670,10 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // It waits two minutes of its own so it never fires against a catalogue
     // that is still loading.
     rulesapi::spawn(state.clone());
+    // Event workflows: run the moment a download finishes, not on the clock.
+    if let Some(rx) = state.engines.take_completions() {
+        rulesapi::spawn_events(state.clone(), rx);
+    }
     // Keeps the hardlink index the workflows read, instead of each pass
     // stat-ing the whole catalogue itself.
     linkscan::spawn(state.engines.clone(), state.store.clone());

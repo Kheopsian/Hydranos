@@ -129,6 +129,17 @@ pub struct StoredWorkflow {
     pub last_run: i64,
 }
 
+/// Something that happened to a torrent, waiting for the event workflows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowEvent {
+    pub id: i64,
+    pub at: i64,
+    /// `completed` for now: the only event there is.
+    pub event: String,
+    pub session: String,
+    pub info_hash: String,
+}
+
 /// One line of what a workflow did, or refused to do.
 ///
 /// The failures matter more than the successes: "why did my rule not fire" is
@@ -687,9 +698,78 @@ impl Store {
                  outcome TEXT NOT NULL DEFAULT '',
                  detail TEXT NOT NULL DEFAULT '');
              CREATE INDEX IF NOT EXISTS idx_workflow_activity_at
-                 ON workflow_activity(at DESC);",
+                 ON workflow_activity(at DESC);
+             CREATE TABLE IF NOT EXISTS workflow_events (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 at INTEGER NOT NULL,
+                 event TEXT NOT NULL,
+                 session TEXT NOT NULL,
+                 info_hash TEXT NOT NULL);",
         )?;
         Ok(())
+    }
+
+    /// Write down that something happened, before anything acts on it.
+    ///
+    /// ⭐ The event exists once, in memory, at the moment a download finishes.
+    /// A restart, a crash or a busy store between that moment and the
+    /// workflow running would lose it for good -- there is no second
+    /// completion to wait for. A row survives all three; it is deleted only
+    /// once the workflows have seen it.
+    pub fn push_workflow_event(&self, event: &str, session: &str, info_hash: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO workflow_events (at, event, session, info_hash) VALUES (?1,?2,?3,?4)",
+            rusqlite::params![now_secs(), event, session, info_hash],
+        )?;
+        Ok(())
+    }
+
+    /// The oldest waiting events first: they happened first.
+    pub fn workflow_events(&self, limit: i64) -> anyhow::Result<Vec<WorkflowEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, at, event, session, info_hash FROM workflow_events ORDER BY id LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], |r| {
+            Ok(WorkflowEvent {
+                id: r.get(0)?,
+                at: r.get(1)?,
+                event: r.get(2)?,
+                session: r.get(3)?,
+                info_hash: r.get(4)?,
+            })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn drop_workflow_event(&self, id: i64) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM workflow_events WHERE id = ?1", rusqlite::params![id])?;
+        Ok(())
+    }
+
+    /// `workflow_facts` for one copy: the event path, where reading the whole
+    /// session to answer about one torrent would be a million rows for one.
+    pub fn workflow_facts_of(&self, session: &str, info_hash: &str) -> anyhow::Result<Option<WorkflowFacts>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT category, save_path, added_time, completed_time, seeding_time, tags, paused
+                 FROM torrents WHERE session = ?1 AND info_hash = ?2",
+                rusqlite::params![session, info_hash],
+                |r| {
+                    Ok(WorkflowFacts {
+                        category: r.get(0)?,
+                        save_path: r.get(1)?,
+                        added_time: r.get(2)?,
+                        completed_time: r.get(3)?,
+                        seeding_time: r.get(4)?,
+                        tags: split_tags(&r.get::<_, String>(5)?),
+                        paused: r.get::<_, i64>(6)? != 0,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Everything the store knows about one session's torrents, for a pass.

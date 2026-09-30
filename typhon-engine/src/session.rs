@@ -277,10 +277,7 @@ pub async fn start(
         let tm_done = mgr.clone();
         tokio::spawn(async move {
             while let Some(ih) = rx.recv().await {
-                tm_done.persist_completed(&ih);
-                // `completed` is how a tracker records the snatch: say it now,
-                // not at the next scheduled announce half an hour away.
-                tm_done.announce_soon(&ih);
+                tm_done.on_completed(&ih);
             }
         });
     }

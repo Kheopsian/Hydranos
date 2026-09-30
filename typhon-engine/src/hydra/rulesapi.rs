@@ -38,6 +38,9 @@ fn to_json(s: &crate::store::StoredWorkflow) -> serde_json::Value {
         "name": s.name,
         "enabled": s.enabled,
         "position": s.position,
+        // Absent from a body saved before events existed: those all ran on
+        // a timer, and say so.
+        "trigger": body.get("trigger").cloned().unwrap_or_else(|| serde_json::json!("schedule")),
         "interval_secs": s.interval_secs,
         "last_run": s.last_run,
         "when": body.get("when").cloned().unwrap_or(serde_json::Value::Null),
@@ -226,6 +229,23 @@ fn op_label(op: &str, kind: rules::Kind) -> String {
     .to_string()
 }
 
+/// A fresh workflow id.
+///
+/// ⚠️ It used to be `wf<seconds>`, and the store's primary key does not
+/// "enforce" anything on an upsert: two workflows created in the same second
+/// got the same id, and the second silently REPLACED the first. A script
+/// creating a few rules in a row kept only the last. Nanoseconds plus a
+/// process counter cannot meet twice.
+fn new_workflow_id() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("wf{nanos:x}{n:x}")
+}
+
 /// Parse and validate a workflow from a request body.
 fn parse(body: &str) -> Result<Workflow, String> {
     let mut w: Workflow = serde_json::from_str(body).map_err(|e| e.to_string())?;
@@ -233,9 +253,7 @@ fn parse(body: &str) -> Result<Workflow, String> {
         return Err("a workflow needs a name".into());
     }
     if w.id.trim().is_empty() {
-        // Time-based and unique enough for a handful of rules; the store's
-        // primary key is what actually enforces it.
-        w.id = format!("wf{}", crate::store::now_secs());
+        w.id = new_workflow_id();
     }
     w.interval_secs = w.interval_secs.max(rules::MIN_INTERVAL_SECS);
     if w.cap == 0 {
@@ -326,6 +344,14 @@ pub async fn preview(
         Err(e) => return bad(e),
     };
 
+    if w.trigger == rules::Trigger::Completed {
+        return match tokio::task::spawn_blocking(move || preview_completion(&state, &w)).await {
+            Ok(Ok(v)) => Json(v).into_response(),
+            Ok(Err(e)) => bad(e),
+            Err(e) => bad(e),
+        };
+    }
+
     let decided = tokio::task::spawn_blocking(move || decide(&state, &w)).await;
     let Decision { matches, report, rechecked, no_longer, .. } = match decided {
         Ok(Ok(d)) => d,
@@ -355,6 +381,37 @@ pub async fn preview(
         "sample": sample,
     }))
     .into_response()
+}
+
+/// What a completion workflow would do to the downloads under way now.
+///
+/// The catalogue as it stands is the wrong sample: a torrent that finished
+/// last month never fires the event again. The torrents that WILL fire it are
+/// the ones still downloading, so the preview is run on those -- the filter
+/// and the convergence check exactly as the event will run them, minus the
+/// cap, which an event of one torrent never reaches.
+fn preview_completion(state: &AppState, w: &Workflow) -> Result<serde_json::Value, String> {
+    let mut facts = gather_all(state, rules::uses_field(&w.when, "free_space"));
+    facts.retain(|f| f.progress < 100.0);
+    let unbounded = Workflow { cap: usize::MAX, ..w.clone() };
+    let (matches, report) = rulesrun::evaluate(&unbounded, &facts)?;
+    let sample: Vec<serde_json::Value> = matches
+        .iter()
+        .take(200)
+        .map(|m| serde_json::json!({"info_hash": m.info_hash, "name": m.name, "engine": m.engine, "total_size": m.total_size}))
+        .collect();
+    Ok(serde_json::json!({
+        "trigger": "completed",
+        "downloading": facts.len(),
+        "matched": report.matched,
+        "would_apply": matches.len(),
+        "skipped": report.skipped,
+        "capped": false,
+        "freed_bytes": report.freed_bytes,
+        "rechecked": 0,
+        "no_longer_true": 0,
+        "sample": sample,
+    }))
 }
 
 /// Facts for every engine this node runs.
@@ -499,6 +556,12 @@ pub async fn run_now(
         Ok(w) => w,
         Err(e) => return bad(e),
     };
+    if w.trigger != rules::Trigger::Schedule {
+        // Running it "now" would mean inventing the event, and the only
+        // honest candidates -- torrents that finished at some point -- are
+        // exactly what an event workflow exists NOT to act on.
+        return bad("this workflow runs when a download completes; use Preview to see which downloads it would act on");
+    }
     // Off the async runtime: a pass reads the link index and stats its
     // candidates, which is disk wait a request thread must not sit in.
     match tokio::task::spawn_blocking(move || run_one(&state, &w, dry)).await {
@@ -539,6 +602,34 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
         });
     }
 
+    apply_matches(state, w, &matches, &links, &mut report);
+
+    {
+        let store = state.store.lock().unwrap();
+        let _ = store.mark_workflow_run(&w.id, crate::store::now_secs());
+    }
+    serde_json::json!({
+        "matched": report.matched,
+        "applied": report.applied,
+        "skipped": report.skipped,
+        "failed": report.failed,
+        "capped": report.capped,
+        "rechecked": rechecked,
+        "no_longer_true": no_longer,
+    })
+}
+
+/// Phase two for a set of matches: carry each out, log each outcome.
+///
+/// The one place actions are done, whether a timer, a button or an event
+/// decided on them.
+fn apply_matches(
+    state: &AppState,
+    w: &Workflow,
+    matches: &[rulesrun::Match],
+    links: &std::collections::HashMap<String, crate::linkindex::LinkFacts>,
+    report: &mut rulesrun::PassReport,
+) {
     // The pause hook takes the same route a human click does, so a workflow
     // cannot pause more or less thoroughly than a person can.
     let hook = |engine: &str, hash: &str, paused: bool| {
@@ -551,7 +642,7 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
             .map(|_| ())
     };
 
-    for m in &matches {
+    for m in matches {
         let action_name = m
             .actions
             .iter()
@@ -587,20 +678,6 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
             }
         }
     }
-
-    {
-        let store = state.store.lock().unwrap();
-        let _ = store.mark_workflow_run(&w.id, crate::store::now_secs());
-    }
-    serde_json::json!({
-        "matched": report.matched,
-        "applied": report.applied,
-        "skipped": report.skipped,
-        "failed": report.failed,
-        "capped": report.capped,
-        "rechecked": rechecked,
-        "no_longer_true": no_longer,
-    })
 }
 
 /// Where the link index stands: how much of the catalogue it has measured,
@@ -693,11 +770,22 @@ pub fn spawn(state: AppState) {
                     .filter(|w| rulesrun::is_due(w, now))
                     .collect()
             };
+            // Whatever the completion listener could not finish: events
+            // written before a restart, or left waiting for their engine.
+            {
+                let st = state.clone();
+                let _ = tokio::task::spawn_blocking(move || run_events(&st)).await;
+            }
             for stored in due {
                 let Ok(w) = serde_json::from_str::<Workflow>(&stored.body) else {
                     tracing::warn!(workflow = %stored.name, "workflow body will not parse, skipped");
                     continue;
                 };
+                // An event workflow is due whenever its event happens, never
+                // on the clock.
+                if w.trigger != rules::Trigger::Schedule {
+                    continue;
+                }
                 // Claimed BEFORE it runs. Marked only at the end, a pass that
                 // takes longer than the tick -- or never reaches the end --
                 // stays due, and the timer starts it again every minute on top
@@ -721,6 +809,108 @@ pub fn spawn(state: AppState) {
             }
         }
     });
+}
+
+/// How long an event waits for its torrent to show up in its engine.
+///
+/// It is normally there already -- the engine is what raised the event. The
+/// wait is for a restart, where the rows are read back before the catalogue
+/// is loaded. An hour is far past any load, and short enough that a torrent
+/// removed in the meantime does not keep a row alive.
+const EVENT_PATIENCE_SECS: i64 = 3600;
+
+/// One at a time. The listener and the timer both drain the queue, and two
+/// drains reading the same rows would run the same completion twice.
+static EVENT_DRAIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Listen for finished downloads, write each down, then run the event
+/// workflows on it.
+///
+/// Written to the store FIRST: once the row exists, a crash, a restart or a
+/// failed pass loses nothing -- the timer picks it back up within a minute.
+pub fn spawn_events(
+    state: AppState,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<(String, [u8; 20])>,
+) {
+    tokio::spawn(async move {
+        while let Some(first) = rx.recv().await {
+            // A race finishing a burst of torrents is one store write, not
+            // one per torrent.
+            let mut batch = vec![first];
+            while let Ok(more) = rx.try_recv() {
+                batch.push(more);
+            }
+            let st = state.clone();
+            let _ = tokio::task::spawn_blocking(move || record_completions(&st, &batch)).await;
+        }
+    });
+}
+
+/// Write finished downloads down, then run the event workflows on them.
+pub fn record_completions(state: &AppState, batch: &[(String, [u8; 20])]) {
+    {
+        let Ok(store) = state.store.lock() else { return };
+        for (session, ih) in batch {
+            let hash: String = ih.iter().map(|b| format!("{b:02x}")).collect();
+            if let Err(e) = store.push_workflow_event("completed", session, &hash) {
+                tracing::warn!(error = %e, info_hash = %hash, "completion could not be recorded for workflows");
+            }
+        }
+    }
+    run_events(state);
+}
+
+/// Run the event workflows on every waiting event. Returns how many events
+/// were dealt with (and removed).
+pub fn run_events(state: &AppState) -> usize {
+    let _one = EVENT_DRAIN.lock().unwrap_or_else(|p| p.into_inner());
+    let (events, workflows) = {
+        let Ok(store) = state.store.lock() else { return 0 };
+        let events = store.workflow_events(1000).unwrap_or_default();
+        if events.is_empty() {
+            return 0;
+        }
+        let workflows: Vec<Workflow> = store
+            .workflows()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| serde_json::from_str::<Workflow>(&s.body).ok())
+            .filter(|w| w.trigger == rules::Trigger::Completed)
+            .collect();
+        (events, workflows)
+    };
+    let now = crate::store::now_secs();
+    let mut done = 0;
+    for ev in events {
+        // No workflow to hand it to, or an event nothing here handles: the
+        // row is cleared all the same, or it would wait forever.
+        let facts =if ev.event == "completed" && !workflows.is_empty() {
+            let Ok(store) = state.store.read() else { break };
+            let f = rulesrun::gather_one(&state.engines, &store, &ev.session, &ev.info_hash);
+            if f.is_none() && now - ev.at < EVENT_PATIENCE_SECS {
+                continue;
+            }
+            f
+        } else {
+            None
+        };
+        if let Some(f) = facts {
+            for w in &workflows {
+                match rulesrun::evaluate(w, std::slice::from_ref(&f)) {
+                    Ok((matches, mut report)) => {
+                        apply_matches(state, w, &matches, &Default::default(), &mut report)
+                    }
+                    Err(e) => tracing::warn!(workflow = %w.name, error = %e, "event workflow will not compile, skipped"),
+                }
+            }
+        }
+        if let Ok(store) = state.store.lock() {
+            let _ = store.drop_workflow_event(ev.id);
+        }
+        done += 1;
+    }
+    done
 }
 
 /// Mount the workflow routes.
@@ -859,6 +1049,15 @@ mod tests {
         let w = parse(&wf_json("ratio reached")).expect("a valid workflow");
         assert!(!w.id.trim().is_empty(), "an id was generated");
         assert!(w.id.starts_with("wf"));
+    }
+
+    /// Two workflows created back to back are two workflows. With a
+    /// seconds-based id the second replaced the first on save.
+    #[test]
+    fn two_workflows_created_in_the_same_second_get_different_ids() {
+        let a = parse(&wf_json("one")).unwrap();
+        let b = parse(&wf_json("two")).unwrap();
+        assert_ne!(a.id, b.id);
     }
 
     /// An interval below the floor would have the runner scan the whole
@@ -1134,5 +1333,192 @@ mod handler_tests {
         .to_string();
         let err = parse(&body).expect_err("an actionless workflow is refused");
         assert!(err.contains("action"), "the reason names the problem: {err}");
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use crate::api::testing::{body_json, keyed, state_from, TestState};
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xCDu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let mut out = Vec::new();
+        out.extend_from_slice(b"d4:info");
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// A download under way: added, not seeded, nothing on disk.
+    fn add(s: &TestState, name: &str) -> String {
+        crate::api::add_torrent_bytes(&s.state, &torrent_bytes(name), "", "/tmp", "", true, false, "hoard")
+            .unwrap_or_else(|e| panic!("add {name}: {e}"))
+            .0
+    }
+
+    async fn save_wf(s: &TestState, trigger: &str, tag: &str) -> String {
+        // A timer with no condition is refused (the whole catalogue); one that
+        // would match anything still has to say so.
+        let when = if trigger == "completed" {
+            serde_json::json!({"kind": "all", "of": []})
+        } else {
+            serde_json::json!({"kind": "all", "of": [{"kind": "cond", "field": "ratio", "op": "ge", "value": "0"}]})
+        };
+        let body = serde_json::json!({
+            "id": "", "name": format!("{trigger} {tag}"), "enabled": true, "trigger": trigger,
+            "when": when,
+            "then": [{"type": "add_tags", "tags": [tag]}],
+        });
+        let r = save(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let status = r.status();
+        let v = body_json(r).await;
+        assert!(status.is_success(), "saved: {v}");
+        v["id"].as_str().unwrap().to_string()
+    }
+
+    fn tags(s: &TestState, hash: &str) -> Vec<String> {
+        s.state.store.lock().unwrap().tags_of(hash)
+    }
+
+    fn waiting(s: &TestState) -> usize {
+        s.state.store.lock().unwrap().workflow_events(100).unwrap().len()
+    }
+
+    /// ⭐ The whole road: the engine says a download finished, through the
+    /// hook `EngineHost` installs; the completion workflow acts on that
+    /// torrent, the scheduled one does not, and the event is gone after.
+    #[tokio::test]
+    async fn a_finished_download_runs_the_completion_workflows_once() {
+        let s = st("wf-ev-road");
+        let hash = add(&s, "finished");
+        let other = add(&s, "stilldl");
+        save_wf(&s, "completed", "done").await;
+        save_wf(&s, "schedule", "timer").await;
+
+        let mut rx = s.state.engines.take_completions().expect("the stream is there to take");
+        let ih = crate::store::hex20(&hash).unwrap();
+        let engine = s.state.engines.engines().iter().find(|e| e.id == "hoard").unwrap();
+        engine.manager.on_completed(&ih);
+        let got = rx.try_recv().expect("the hook reported the completion");
+        assert_eq!(got, ("hoard".to_string(), ih));
+
+        record_completions(&s.state, &[got]);
+        assert_eq!(tags(&s, &hash), vec!["done".to_string()], "only the completion workflow ran");
+        assert!(tags(&s, &other).is_empty(), "a torrent that did not finish is untouched");
+        assert_eq!(waiting(&s), 0, "the event is dealt with and removed");
+
+        let act = s.state.store.lock().unwrap().workflow_activity(10).unwrap();
+        assert_eq!(act.len(), 1);
+        assert_eq!((act[0].action.as_str(), act[0].outcome.as_str()), ("add_tags", "applied"));
+
+        // Nothing is left to replay: another drain does nothing.
+        assert_eq!(run_events(&s.state), 0);
+        assert_eq!(s.state.store.lock().unwrap().workflow_activity(10).unwrap().len(), 1);
+    }
+
+    /// With no completion workflow the queue must not grow: every event is
+    /// cleared, not kept for a workflow that may never exist.
+    #[tokio::test]
+    async fn without_a_completion_workflow_events_are_cleared() {
+        let s = st("wf-ev-none");
+        let hash = add(&s, "lonely");
+        save_wf(&s, "schedule", "timer").await;
+        record_completions(&s.state, &[("hoard".into(), crate::store::hex20(&hash).unwrap())]);
+        assert_eq!(waiting(&s), 0);
+        assert!(tags(&s, &hash).is_empty());
+    }
+
+    /// A completion the engine cannot place yet -- read back after a restart,
+    /// before the catalogue is loaded -- waits rather than being thrown away.
+    #[tokio::test]
+    async fn an_event_for_a_torrent_not_loaded_yet_waits() {
+        let s = st("wf-ev-wait");
+        save_wf(&s, "completed", "done").await;
+        record_completions(&s.state, &[("hoard".into(), [0x42; 20])]);
+        assert_eq!(waiting(&s), 1, "kept for the next drain");
+    }
+
+    /// A disabled completion workflow is the same as none.
+    #[tokio::test]
+    async fn a_disabled_completion_workflow_does_nothing() {
+        let s = st("wf-ev-off");
+        let hash = add(&s, "offwf");
+        let id = save_wf(&s, "completed", "done").await;
+        {
+            let store = s.state.store.lock().unwrap();
+            let mut w = store.workflow(&id).unwrap().unwrap();
+            w.enabled = false;
+            store.put_workflow(&w).unwrap();
+        }
+        record_completions(&s.state, &[("hoard".into(), crate::store::hex20(&hash).unwrap())]);
+        assert!(tags(&s, &hash).is_empty());
+        assert_eq!(waiting(&s), 0);
+    }
+
+    /// "Run now" on a completion workflow would have to invent the event.
+    #[tokio::test]
+    async fn a_completion_workflow_cannot_be_run_by_hand() {
+        let s = st("wf-ev-run");
+        add(&s, "x");
+        let id = save_wf(&s, "completed", "done").await;
+        let r = run_now(State(s.state.clone()), Path(id), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Its preview is the downloads under way -- the torrents that WILL fire
+    /// it -- and says so, rather than the catalogue that already finished.
+    #[tokio::test]
+    async fn a_completion_preview_looks_at_the_downloads_under_way() {
+        let s = st("wf-ev-preview");
+        add(&s, "a");
+        add(&s, "b");
+        let body = serde_json::json!({
+            "id": "", "name": "p", "trigger": "completed",
+            "when": {"kind": "all", "of": []},
+            "then": [{"type": "add_tags", "tags": ["done"]}],
+        });
+        let r = preview(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let v = body_json(r).await;
+        assert_eq!(v["trigger"], "completed");
+        assert_eq!(v["downloading"], 2);
+        assert_eq!(v["would_apply"], 2);
+    }
+
+    /// The listing says which trigger a workflow has, and one saved before
+    /// triggers existed reads as the timer it always was.
+    #[tokio::test]
+    async fn the_listing_carries_the_trigger() {
+        let s = st("wf-ev-list");
+        save_wf(&s, "completed", "done").await;
+        let rows = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert_eq!(rows[0]["trigger"], "completed");
+
+        let old = crate::store::StoredWorkflow {
+            id: "old".into(),
+            name: "old".into(),
+            body: r#"{"name":"old","when":{"kind":"cond","field":"ratio","op":"ge","value":"2"},"then":[{"type":"pause"}]}"#.into(),
+            enabled: false,
+            position: 9,
+            interval_secs: 900,
+            last_run: 0,
+        };
+        s.state.store.lock().unwrap().put_workflow(&old).unwrap();
+        let rows = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let old = rows.as_array().unwrap().iter().find(|r| r["id"] == "old").unwrap();
+        assert_eq!(old["trigger"], "schedule");
     }
 }
