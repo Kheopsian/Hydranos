@@ -38,4 +38,4 @@ tools/paritydiff/__pycache__/
 
 # Left behind by `cargo test`: the store opens a database beside the
 # crate root when a test builds a manager without one of its own.
-typhon-engine/hydra.db
+typhon-engine/hydra.db*

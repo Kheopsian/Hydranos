@@ -147,6 +147,22 @@ mod tests {
         assert!(rendered.contains("<html") || rendered.contains("<!DOCTYPE"));
     }
 
+    /// The category form offers only what routing reads. For all of 4.x it
+    /// offered a strategy, a free-space reserve and per-agent placement that
+    /// `placement()` never looked at: settings that saved and did nothing. A
+    /// routing field comes back here together with the code that honours it.
+    #[test]
+    fn the_category_form_offers_no_routing_the_engine_ignores() {
+        for dead in ["cat-strategy", "cat-min-free", "cat-placement", "least_torrents", "fill_then_next"] {
+            assert!(!INDEX_HTML.contains(dead), "index.html offers `{dead}` again");
+        }
+        let (js, _) = lookup("app.js").expect("app.js");
+        let js = String::from_utf8_lossy(&js);
+        for dead in ["cat-strategy", "cat-min-free", ".cat-agent-cb", "_renderCatPlacement"] {
+            assert!(!js.contains(dead), "app.js reads `{dead}` again");
+        }
+    }
+
     #[test]
     fn every_asset_the_page_needs_is_present() {
         for name in ["app.js", "i18n.js", "style.css"] {
