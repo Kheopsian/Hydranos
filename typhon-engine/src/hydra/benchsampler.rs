@@ -63,6 +63,10 @@ pub fn latest_system() -> System {
 /// Per-tracker rows are taken every sixth tick, 30 s: a pass reads every
 /// torrent, and the chart they feed spans hours.
 const TRACKER_EVERY: u64 = 6;
+/// A pass slower than this is worth a warning: several times the 1.0-1.6 s it
+/// takes over the 1.1M torrents of the production node, and a sixth of the
+/// interval, past which passes start being skipped.
+const TRACKER_PASS_SLOW: Duration = Duration::from_secs(5);
 
 /// One (engine, tracker) row of the Trackers tab, live and as stored.
 ///
@@ -222,15 +226,26 @@ pub fn spawn(engines: Arc<EngineHost>, bench: Shared, store: Arc<crate::store::S
         let mut previous: Previous = std::collections::HashMap::new();
         let mut system = SystemPrev::default();
         let mut n: u64 = 0;
+        let tracker_pass_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             tick.tick().await;
             if let Err(e) = sample_once(&engines, &bench, &store, &mut previous, &mut system) {
                 tracing::warn!("bench sample failed: {e}");
             }
-            if n % TRACKER_EVERY == 0 {
-                if let Err(e) = sample_trackers(&engines, &bench, &store) {
-                    tracing::warn!("tracker sample failed: {e}");
-                }
+            // On a blocking thread of its own: the pass reads every torrent,
+            // ~1.2 s on 1.1M in production, and run here it held one of the
+            // runtime's workers for all of it. Not awaited, so the 5 s samples
+            // keep their spacing; never two at once, so a slow pass is skipped
+            // rather than stacked.
+            if n % TRACKER_EVERY == 0 && !tracker_pass_running.swap(true, Ordering::AcqRel) {
+                let (engines, bench, store) = (engines.clone(), bench.clone(), store.clone());
+                let running = tracker_pass_running.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = sample_trackers(&engines, &bench, &store) {
+                        tracing::warn!("tracker sample failed: {e}");
+                    }
+                    running.store(false, Ordering::Release);
+                });
             }
             n += 1;
             // Older samples are folded into 5-minute rows a bounded slice at a
@@ -415,11 +430,14 @@ fn sample_trackers(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     // The pass reads every torrent, and none of it under the bench lock. Its
-    // cost grows with the catalogue, so it says when it stops being cheap.
+    // cost grows with the catalogue, so it says when it stops being cheap --
+    // measured against what it costs normally, not against a round number:
+    // 1.0-1.6 s on 1.1M torrents is the steady state, and a warning every
+    // 30 s for that is noise that hides the one that matters.
     let started = std::time::Instant::now();
     let rows = tracker_totals(engines, store, ts);
     let took = started.elapsed();
-    if took > Duration::from_secs(1) {
+    if took > TRACKER_PASS_SLOW {
         tracing::warn!(ms = took.as_millis() as u64, "tracker pass is slow");
     } else {
         tracing::debug!(ms = took.as_millis() as u64, "tracker pass");
