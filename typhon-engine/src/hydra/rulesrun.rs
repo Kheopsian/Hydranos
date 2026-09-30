@@ -81,123 +81,157 @@ pub fn gather(
         .map(|t| {
             let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
             let s = stored.get(&hash).cloned().unwrap_or_default();
-
-            // ⚠️ NEVER, not zero, when no scan ran. Zero is a measurement, and
-            // `external_links == 0` means "safe to delete" -- defaulting to it
-            // would arm every deletion rule against the whole catalogue before
-            // a single file had been looked at.
-            let l = links.get(&hash);
-            let tracker_err = t
-                .last_announce_error
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
             let free_space = if s.save_path.is_empty() || !want_free_space {
                 rules::NEVER
             } else {
-                *free_by_path.entry(s.save_path.clone()).or_insert_with(|| {
-                    crate::platform::free_space(std::path::Path::new(&s.save_path))
-                        .map(|b| b as f64)
-                        .unwrap_or(rules::NEVER)
-                })
+                *free_by_path
+                    .entry(s.save_path.clone())
+                    .or_insert_with(|| free_space_at(&s.save_path))
             };
-            let downloaded = t.total_downloaded.load(Ordering::Relaxed) as f64;
-            let uploaded = t.total_uploaded.load(Ordering::Relaxed) as f64;
-            let size = t.meta.total_size as f64;
-            let completed = t.completed_time.load(Ordering::Relaxed);
-
-            Facts {
-                info_hash: hash,
-                name: t.meta.name.clone(),
-                category: s.category,
-                tags: s.tags,
-                engine: engine_id.to_string(),
-                save_path: s.save_path,
-                // The engine's flag is the effective state; the store's is the
-                // operator's intent. A condition on `user_paused` means the
-                // intent, which is what a person clicked.
-                user_paused: s.paused,
-                multi_file: t.meta.files.len() > 1,
-
-                progress: if size > 0.0 {
-                    (downloaded / size * 100.0).min(100.0)
-                } else {
-                    0.0
-                },
-                ratio: if downloaded > 0.0 {
-                    uploaded / downloaded
-                } else {
-                    0.0
-                },
-                total_size: size,
-                total_uploaded: uploaded,
-                total_downloaded: downloaded,
-                // The engine accumulates this; the store column never gets
-                // written, which is why the field used to be withheld.
-                seeding_time: t.seed_time_now(now as i64) as f64,
-                added_age: if s.added_time > 0.0 {
-                    now - s.added_time
-                } else {
-                    rules::NEVER
-                },
-                // ⚠️ NEVER, not zero. A torrent that has not completed has no
-                // completion age, and any finite stand-in would satisfy
-                // "completed less than a day ago". See rules::NEVER.
-                completed_age: if completed > 0 {
-                    now - completed as f64
-                } else {
-                    rules::NEVER
-                },
-                // ⚠️ Everything below used to fall through `..Default::default()`
-                // and read 0 or "" for every torrent in the catalogue, while
-                // being offered in the field picker. `num_peers == 0` matched
-                // EVERYTHING; a condition on a tracker matched nothing.
-                // ⚠️ The ENGINE's state is not the state anyone sees. It says
-                // "paused" for any halt and cannot tell a scheduler hold from a
-                // user pressing stop, so `derive_state` folds in the intent --
-                // and the list does the same. Reporting the raw one here would
-                // make `state == stopped` match torrents the UI shows as
-                // queued, which is a view contradicting another.
-                state: crate::row::derive_state_static(
-                    typhon_engine::rpc::dispatch::state_str(
-                        t.status.load(Ordering::Relaxed),
-                        t.is_paused.load(Ordering::Relaxed),
-                    ),
-                    s.paused,
-                )
-                .to_string(),
-                tracker_host: t
-                    .live_trackers
-                    .read()
-                    .iter()
-                    .flatten()
-                    .next()
-                    .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u))
-                    .unwrap_or_default(),
-                tracker_error: !tracker_err.is_empty(),
-                tracker_error_msg: tracker_err,
-                torrent_error: t.status.load(Ordering::Relaxed)
-                    == typhon_engine::torrent::meta::TorrentStatus::Error as u8,
-                upload_rate: t.upload_rate.get() as f64,
-                download_rate: t.download_rate.get() as f64,
-                num_peers: t.peers_connected.load(Ordering::Relaxed) as f64,
-                num_seeds: t.scrape_seeders.load(Ordering::Relaxed) as f64,
-                swarm_seeds: t.scrape_seeders.load(Ordering::Relaxed) as f64,
-                swarm_leechers: t.scrape_leechers.load(Ordering::Relaxed) as f64,
-                free_space,
-                link_count: l.map(|x| x.link_count as f64).unwrap_or(rules::NEVER),
-                external_links: l.map(|x| x.external_links as f64).unwrap_or(rules::NEVER),
-                freeable_bytes: l.map(|x| x.freeable_bytes as f64).unwrap_or(rules::NEVER),
-                data_missing: l.is_some_and(|x| x.data_missing),
-                // ⚠️⚠️ NO `..Default::default()` here, deliberately. It is what
-                // let thirteen fields read 0 or "" for every torrent while the
-                // picker offered them: `num_peers == 0` matched EVERYTHING, a
-                // tracker condition matched nothing, and nothing complained.
-                // Listing every field makes the compiler refuse a new one that
-                // nobody taught this function to measure.
-            }
+            let l = links.get(&hash);
+            facts_of(&t, hash, s, engine_id, l, free_space, now)
         })
         .collect()
+}
+
+fn free_space_at(save_path: &str) -> f64 {
+    crate::platform::free_space(std::path::Path::new(save_path))
+        .map(|b| b as f64)
+        .unwrap_or(rules::NEVER)
+}
+
+/// The facts of ONE torrent, for an event.
+///
+/// ⚠️ Not `gather` filtered down: that reads the store row of every torrent
+/// in the session, a million of them, to answer about one that just finished.
+/// This is one engine lookup and one indexed row. `None` when either side has
+/// never heard of the torrent.
+pub fn gather_one(host: &EngineHost, store: &Store, engine_id: &str, info_hash: &str) -> Option<Facts> {
+    let engine = host.engines().iter().find(|e| e.id == engine_id)?;
+    let t = engine.manager.get(&crate::store::hex20(info_hash)?)?;
+    let s = store.workflow_facts_of(engine_id, info_hash).ok().flatten()?;
+    let free_space = if s.save_path.is_empty() { rules::NEVER } else { free_space_at(&s.save_path) };
+    let now = crate::store::now_secs() as f64;
+    // No link facts: an event workflow may not ask for them (see
+    // `CompileError::LinkFieldOnEvent`), so NEVER is the honest answer.
+    Some(facts_of(&t, info_hash.to_string(), s, engine_id, None, free_space, now))
+}
+
+/// One torrent's facts, from the engine's live state and the store's row.
+/// The single place a `Facts` is built, so a pass and an event read the same.
+fn facts_of(
+    t: &typhon_engine::torrent::meta::TorrentState,
+    hash: String,
+    s: crate::store::WorkflowFacts,
+    engine_id: &str,
+    l: Option<&LinkFacts>,
+    free_space: f64,
+    now: f64,
+) -> Facts {
+    let tracker_err = t
+        .last_announce_error
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let downloaded = t.total_downloaded.load(Ordering::Relaxed) as f64;
+    let uploaded = t.total_uploaded.load(Ordering::Relaxed) as f64;
+    let size = t.meta.total_size as f64;
+    let completed = t.completed_time.load(Ordering::Relaxed);
+
+    Facts {
+        info_hash: hash,
+        name: t.meta.name.clone(),
+        category: s.category,
+        tags: s.tags,
+        engine: engine_id.to_string(),
+        save_path: s.save_path,
+        // The engine's flag is the effective state; the store's is the
+        // operator's intent. A condition on `user_paused` means the
+        // intent, which is what a person clicked.
+        user_paused: s.paused,
+        multi_file: t.meta.files.len() > 1,
+
+        progress: if size > 0.0 {
+            (downloaded / size * 100.0).min(100.0)
+        } else {
+            0.0
+        },
+        ratio: if downloaded > 0.0 {
+            uploaded / downloaded
+        } else {
+            0.0
+        },
+        total_size: size,
+        total_uploaded: uploaded,
+        total_downloaded: downloaded,
+        // The engine accumulates this; the store column never gets
+        // written, which is why the field used to be withheld.
+        seeding_time: t.seed_time_now(now as i64) as f64,
+        added_age: if s.added_time > 0.0 {
+            now - s.added_time
+        } else {
+            rules::NEVER
+        },
+        // ⚠️ NEVER, not zero. A torrent that has not completed has no
+        // completion age, and any finite stand-in would satisfy
+        // "completed less than a day ago". See rules::NEVER.
+        completed_age: if completed > 0 {
+            now - completed as f64
+        } else {
+            rules::NEVER
+        },
+        // ⚠️ Everything below used to fall through `..Default::default()`
+        // and read 0 or "" for every torrent in the catalogue, while
+        // being offered in the field picker. `num_peers == 0` matched
+        // EVERYTHING; a condition on a tracker matched nothing.
+        // ⚠️ The ENGINE's state is not the state anyone sees. It says
+        // "paused" for any halt and cannot tell a scheduler hold from a
+        // user pressing stop, so `derive_state` folds in the intent --
+        // and the list does the same. Reporting the raw one here would
+        // make `state == stopped` match torrents the UI shows as
+        // queued, which is a view contradicting another.
+        state: crate::row::derive_state_static(
+            typhon_engine::rpc::dispatch::state_str(
+                t.status.load(Ordering::Relaxed),
+                t.is_paused.load(Ordering::Relaxed),
+            ),
+            s.paused,
+        )
+        .to_string(),
+        tracker_host: t
+            .live_trackers
+            .read()
+            .iter()
+            .flatten()
+            .next()
+            .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u))
+            .unwrap_or_default(),
+        tracker_error: !tracker_err.is_empty(),
+        tracker_error_msg: tracker_err,
+        torrent_error: t.status.load(Ordering::Relaxed)
+            == typhon_engine::torrent::meta::TorrentStatus::Error as u8,
+        upload_rate: t.upload_rate.get() as f64,
+        download_rate: t.download_rate.get() as f64,
+        num_peers: t.peers_connected.load(Ordering::Relaxed) as f64,
+        num_seeds: t.scrape_seeders.load(Ordering::Relaxed) as f64,
+        swarm_seeds: t.scrape_seeders.load(Ordering::Relaxed) as f64,
+        swarm_leechers: t.scrape_leechers.load(Ordering::Relaxed) as f64,
+        free_space,
+        // ⚠️ NEVER, not zero, when no scan ran. Zero is a measurement, and
+        // `external_links == 0` means "safe to delete" -- defaulting to it
+        // would arm every deletion rule against the whole catalogue before
+        // a single file had been looked at.
+        link_count: l.map(|x| x.link_count as f64).unwrap_or(rules::NEVER),
+        external_links: l.map(|x| x.external_links as f64).unwrap_or(rules::NEVER),
+        freeable_bytes: l.map(|x| x.freeable_bytes as f64).unwrap_or(rules::NEVER),
+        data_missing: l.is_some_and(|x| x.data_missing),
+        // ⚠️⚠️ NO `..Default::default()` here, deliberately. It is what
+        // let thirteen fields read 0 or "" for every torrent while the
+        // picker offered them: `num_peers == 0` matched EVERYTHING, a
+        // tracker condition matched nothing, and nothing complained.
+        // Listing every field makes the compiler refuse a new one that
+        // nobody taught this function to measure.
+    }
 }
 
 /// The save path the ENGINE reads the files from.
@@ -866,6 +900,7 @@ mod tests {
             name: "test".into(),
             enabled: true,
             position: 0,
+            trigger: rules::Trigger::Schedule,
             interval_secs: rules::DEFAULT_INTERVAL_SECS,
             when: Node::Cond(Cond {
                 field: "progress".into(),
