@@ -51,6 +51,12 @@ fn primary_proxy() -> Option<&'static reqwest::Proxy> {
         .as_ref()
 }
 
+/// Whether announces go through `TYPHON_ANNOUNCE_PROXY`. A UDP announce
+/// cannot, and must not go out beside it.
+pub(crate) fn announces_proxied() -> bool {
+    primary_proxy().is_some()
+}
+
 #[derive(Debug)]
 pub struct AnnounceResponse {
     pub interval: u32,
@@ -324,9 +330,9 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
 
 /// What a tracker says when it does not answer `interval`: libtorrent's and
 /// qBittorrent's default.
-const DEFAULT_INTERVAL: u32 = 1800;
+pub(crate) const DEFAULT_INTERVAL: u32 = 1800;
 /// A week. Above that the number is a unit mistake, not an interval.
-const MAX_INTERVAL: i64 = 7 * 24 * 3600;
+pub(crate) const MAX_INTERVAL: i64 = 7 * 24 * 3600;
 
 /// A bencoded value read as text, whether a UTF-8 string or raw bytes.
 fn text_of(v: &BencodeValue) -> Option<String> {
@@ -430,7 +436,7 @@ async fn send_announce_family(
 /// answer is the base and v6 only contributes peers the v4 list did not carry.
 /// One family failing is not a failure: an A-only tracker has no v6 to reach
 /// and a AAAA-only one has no v4, and both are normal.
-fn merge_announce(
+pub(crate) fn merge_announce(
     v4: Result<AnnounceResponse, String>,
     v6: Result<AnnounceResponse, String>,
 ) -> Result<AnnounceResponse, String> {

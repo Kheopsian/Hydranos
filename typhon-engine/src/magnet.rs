@@ -184,23 +184,28 @@ async fn discover(
     }
 
     for url in trackers {
-        // Only HTTP(S) for now -- Typhon has no UDP tracker client yet, so
-        // udp:// entries in a magnet are skipped and the DHT covers them.
-        if !url.starts_with("http://") && !url.starts_with("https://") {
+        let asked = if crate::tracker::udp::is_udp(url) {
+            // Most public magnets list only UDP trackers.
+            let a = crate::tracker::udp::UdpAnnounce {
+                tracker: url.clone(),
+                info_hash,
+                peer_id: *peer_id,
+                downloaded: 0,
+                left: UNKNOWN_LEFT,
+                uploaded: 0,
+                event: crate::tracker::udp::event_code("started"),
+                ip: 0,
+                key: u32::from_str_radix(&crate::tracker::http::announce_key(peer_id), 16).unwrap_or(0),
+                num_want: 200,
+                port,
+            };
+            crate::tracker::udp::send_announce(&a, crate::tracker::http::IpMode::Auto).await
+        } else if url.starts_with("http://") || url.starts_with("https://") {
+            crate::tracker::http::announce(url, &info_hash, peer_id, port, 0, 0, UNKNOWN_LEFT, "started").await
+        } else {
             continue;
-        }
-        match crate::tracker::http::announce(
-            url,
-            &info_hash,
-            peer_id,
-            port,
-            0,
-            0,
-            UNKNOWN_LEFT,
-            "started",
-        )
-        .await
-        {
+        };
+        match asked {
             Ok(resp) => {
                 if let Some(f) = resp.failure {
                     debug!("[magnet] tracker {} refused: {}", url, f);

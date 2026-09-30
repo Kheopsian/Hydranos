@@ -353,6 +353,11 @@ pub(super) async fn announce_one(
     let mut tier_done = false;
     for tier in &tiers {
         for tracker_url in tier {
+            // Switched off for this engine: not contacted, not counted, not an
+            // error. Skipped before the book so it owes and records nothing.
+            if policy.skip_udp && typhon_engine::tracker::udp::is_udp(tracker_url) {
+                continue;
+            }
             let host = override_host(tracker_url);
             // At most two sends to one tracker in one pass, and the second
             // only ever an event: `completed` then `stopped`, for a download
@@ -399,7 +404,10 @@ pub(super) async fn announce_one(
                 ) else {
                     break;
                 };
-                let result = typhon_engine::tracker::http::send_announce(&req.url, &req.user_agent, req.ip_mode).await;
+                let result = match &req.udp {
+                    Some(u) => typhon_engine::tracker::udp::send_announce(u, req.ip_mode).await,
+                    None => typhon_engine::tracker::http::send_announce(&req.url, &req.user_agent, req.ip_mode).await,
+                };
                 {
                     let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
                     book::record(book::slot_mut(&mut book, tracker_url), event, &result, typhon_engine::torrent::meta::now_secs());
@@ -1748,6 +1756,73 @@ mod announce_one_tests {
         let (policy, breaker, cache) = parts();
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert_eq!(t.queries().len(), 1, "the edited list is the list");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A UDP tracker in a test: answers `connect`, records every announce and
+    /// answers it with the given interval.
+    async fn udp_tracker(interval: u32) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let p = buf[..n].to_vec();
+                let tx = p[12..16].to_vec();
+                let mut r = Vec::new();
+                if n == 16 {
+                    r.extend_from_slice(&0u32.to_be_bytes());
+                    r.extend_from_slice(&tx);
+                    r.extend_from_slice(&7u64.to_be_bytes());
+                } else {
+                    log.lock().unwrap().push(p);
+                    r.extend_from_slice(&1u32.to_be_bytes());
+                    r.extend_from_slice(&tx);
+                    r.extend_from_slice(&interval.to_be_bytes());
+                    r.extend_from_slice(&0u32.to_be_bytes());
+                    r.extend_from_slice(&5u32.to_be_bytes());
+                }
+                let _ = sock.send_to(&r, from).await;
+            }
+        });
+        (format!("udp://127.0.0.1:{port}/announce"), seen)
+    }
+
+    /// ⭐ A `udp://` tracker in a torrent is announced to over BEP 15, with the
+    /// values the HTTP URL would have carried: the torrent, our port, the
+    /// `started` it is owed. And the tracker's answer counts like an HTTP one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_udp_tracker_is_announced_to_over_bep_15() {
+        let (url, seen) = udp_tracker(1234).await;
+        let (mgr, root) = manager("udp");
+        let hash = add(&mgr, "udpone", &url);
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "one announce");
+        let p = &got[0];
+        assert_eq!(typhon_engine::torrent::hex_encode(&p[16..36].try_into().unwrap()), hash);
+        assert_eq!(&p[80..84], &2u32.to_be_bytes(), "started");
+        assert_eq!(&p[96..98], &16371u16.to_be_bytes(), "our listen port");
+        assert_eq!(&p[98..], &[&[0x2u8, 9][..], b"/announce"].concat()[..], "the path, as BEP 41 URL data");
+        assert_eq!(cache.get(&hash).map(|e| e.complete), Some(5), "the swarm count is recorded like an HTTP one");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Switched off for the engine, a UDP tracker is not contacted at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_udp_tracker_is_left_alone_when_the_engine_says_so() {
+        let (url, seen) = udp_tracker(1234).await;
+        let (mgr, root) = manager("udpoff");
+        let hash = add(&mgr, "udpoff", &url);
+        let (mut policy, breaker, cache) = parts();
+        policy.skip_udp = true;
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(seen.lock().unwrap().is_empty(), "not a single packet");
         let _ = std::fs::remove_dir_all(root);
     }
 }

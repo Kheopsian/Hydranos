@@ -31,6 +31,12 @@ pub struct Daemon {
     pub update_check_disabled: bool,
 }
 
+impl Session {
+    pub fn udp_trackers(&self) -> bool {
+        self.enable_udp_trackers.unwrap_or(true)
+    }
+}
+
 /// One engine's section of the config ([race] or [hoard]).
 ///
 /// Only the keys the ported surface reads are typed. The rest stays in the file
@@ -51,6 +57,12 @@ pub struct Session {
     pub enable_pex: bool,
     #[serde(default)]
     pub enable_webseed: bool,
+    /// Announce to `udp://` trackers (BEP 15). Absent means yes: a tracker a
+    /// torrent lists is one it expects to hear from. An Option rather than a
+    /// bool with a serde default, because a missing `[race]`/`[hoard]` table
+    /// is built by `Default`, which would have said no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_udp_trackers: Option<bool>,
     #[serde(default)]
     pub aio_threads: Option<usize>,
     #[serde(default)]

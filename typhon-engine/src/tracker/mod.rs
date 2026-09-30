@@ -1,5 +1,6 @@
 pub mod dial_limiter;
 pub mod http;
+pub mod udp;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicI64, Ordering as AtomicOrdering};

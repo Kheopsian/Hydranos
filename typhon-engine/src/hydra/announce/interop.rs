@@ -176,6 +176,32 @@ async fn interop_opentracker_records_arrival_snatch_departure_and_return() {
     assert_eq!(scrape(&url, &hash).await, (1, 0, 1), "back as a seed, and no second snatch");
 }
 
+/// ⭐⭐ The same life over BEP 15. Announced over UDP, read back through the
+/// HTTP scrape: one tracker, one swarm, whichever transport told it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs opentracker: tools/interop/run.sh"]
+async fn interop_opentracker_over_udp_records_arrival_snatch_departure_and_return() {
+    let udp = env("HYDRANOS_INTEROP_OPENTRACKER_UDP");
+    let http = env("HYDRANOS_INTEROP_OPENTRACKER");
+    let fx = fixture("ot-udp");
+    let (hash, st) = add(&fx, "ot-udp-life", &udp, false);
+
+    announce(&fx, &hash, Mode::Race).await;
+    assert_eq!(scrape(&http, &hash).await, (0, 1, 0), "one leecher after `started`");
+
+    finish(&st);
+    announce(&fx, &hash, Mode::Race).await;
+    assert_eq!(scrape(&http, &hash).await, (1, 0, 1), "a seed, and one snatch, after `completed`");
+
+    fx.mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+    announce(&fx, &hash, Mode::Race).await;
+    assert_eq!(scrape(&http, &hash).await, (0, 0, 1), "gone after `stopped`; the snatch stays");
+
+    fx.mgr.start_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+    announce(&fx, &hash, Mode::Race).await;
+    assert_eq!(scrape(&http, &hash).await, (1, 0, 1), "back as a seed, and no second snatch");
+}
+
 /// A torrent added complete is a seed from its first announce and is never
 /// counted as a snatch -- a cross-seed must not inflate the tracker's count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

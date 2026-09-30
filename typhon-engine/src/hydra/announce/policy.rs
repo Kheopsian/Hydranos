@@ -25,6 +25,10 @@ pub struct Policy {
     /// families, as libtorrent does. A tracker that overwrites instead of
     /// merging the two addresses should be pinned to one family here.
     pub ip_modes: BTreeMap<String, String>,
+    /// Leave `udp://` trackers alone. Off by default: a tracker the torrent
+    /// lists is a tracker it expects to be told about. Named for what it
+    /// does when set, so `Policy::default()` cannot turn UDP off by accident.
+    pub skip_udp: bool,
 }
 
 /// The passkey this tracker should be given, if it is not the one already in
@@ -78,6 +82,10 @@ pub struct Request {
     pub user_agent: String,
     /// Which families to announce from for this tracker.
     pub ip_mode: typhon_engine::tracker::http::IpMode,
+    /// Set for a `udp://` tracker: the same announce as `url`, as BEP 15
+    /// carries it. Built from the same inputs in the same call, so the two
+    /// transports cannot disagree about what the tracker is told.
+    pub udp: Option<typhon_engine::tracker::udp::UdpAnnounce>,
 }
 
 /// The peer id this policy sends. One identity, the same to every tracker and
@@ -129,9 +137,49 @@ pub fn prepare(
         tracker_id,
     };
     let primary = url::build(&a)?;
+    let udp = if typhon_engine::tracker::udp::is_udp(&url_with_key) {
+        Some(udp_request(&a, &url_with_key)?)
+    } else {
+        None
+    };
 
     let ip_mode = ip_mode_for(policy, tracker_url);
-    Some(Request { url: primary, user_agent, ip_mode })
+    Some(Request { url: primary, user_agent, ip_mode, udp })
+}
+
+/// The BEP 15 form of one announce.
+///
+/// Counters below zero cannot be sent as the unsigned fields BEP 15 has and
+/// are sent as zero, as a negative is already a bug upstream. `ip` is IPv4
+/// only; an IPv6 `ip=` has no field and the tracker uses the source address.
+fn udp_request(a: &Announce, tracker: &str) -> Option<typhon_engine::tracker::udp::UdpAnnounce> {
+    let hex = a.info_hash.as_bytes();
+    if hex.len() != 40 {
+        return None;
+    }
+    let mut info_hash = [0u8; 20];
+    for (i, pair) in hex.chunks(2).enumerate() {
+        info_hash[i] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    let mut peer_id = [0u8; 20];
+    let pid = a.peer_id.as_bytes();
+    let n = pid.len().min(20);
+    peer_id[..n].copy_from_slice(&pid[..n]);
+    Some(typhon_engine::tracker::udp::UdpAnnounce {
+        tracker: tracker.to_string(),
+        info_hash,
+        peer_id,
+        downloaded: a.downloaded.max(0) as u64,
+        left: a.left.max(0) as u64,
+        uploaded: a.uploaded.max(0) as u64,
+        event: typhon_engine::tracker::udp::event_code(a.event),
+        ip: a.public_ip.parse::<std::net::Ipv4Addr>().map(u32::from).unwrap_or(0),
+        // The HTTP `key`, read back as the 32 bits it is: one key per peer,
+        // whichever transport carries it.
+        key: u32::from_str_radix(&url::key_for(a.peer_id), 16).unwrap_or(0),
+        num_want: url::numwant(a.left, a.numwant_override) as i32,
+        port: a.port,
+    })
 }
 
 #[cfg(test)]
@@ -173,6 +221,31 @@ mod tests {
         };
         p.passkeys.insert("tr4ker.net".into(), "NEWKEY".into());
         p
+    }
+
+    /// ⭐ One announce, two transports, one set of values: the UDP packet
+    /// says what the HTTP URL says -- counters, event, port, numwant, key,
+    /// `ip=` -- and the passkey rewrite reaches the BEP 41 path too.
+    #[test]
+    fn a_udp_tracker_is_told_what_the_http_url_says() {
+        let mut p = policy();
+        p.public_ip = "203.0.113.9".into();
+        let r = prepare(&p, "udp://tr4ker.net:6969/announce/OLDKEY", &"ab".repeat(20), 16172, 30, 20, 10, "completed", None, None)
+            .expect("prepared");
+        let u = r.udp.expect("a UDP request for a udp:// tracker");
+        assert_eq!(u.tracker, "udp://tr4ker.net:6969/announce/NEWKEY", "the passkey is rewritten here too");
+        assert_eq!(u.info_hash, [0xAB; 20]);
+        assert_eq!(&u.peer_id, b"-TY0001-abcdefghijkl");
+        assert_eq!((u.uploaded, u.downloaded, u.left), (30, 20, 10));
+        assert_eq!(u.event, 1, "completed");
+        assert_eq!(u.port, 16172);
+        assert_eq!(u.num_want, 200, "still leeching: asks for peers, as the URL does");
+        assert!(r.url.contains("&numwant=200"));
+        assert_eq!(u.ip, u32::from(std::net::Ipv4Addr::new(203, 0, 113, 9)));
+        assert_eq!(format!("{:08x}", u.key), url::key_for(&p.peer_id), "the same key as &key=");
+
+        let http = prepare(&p, "https://tr4ker.net/announce/OLDKEY", &"ab".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
+        assert!(http.udp.is_none(), "an HTTP tracker gets no UDP request");
     }
 
     #[test]
