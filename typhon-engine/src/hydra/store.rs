@@ -530,6 +530,15 @@ impl Store {
             store.ensure_schema()?;
             store.track_changes();
             store.prefer_wal(path);
+            // 64 MB of page cache for the writer, against SQLite's 2 MB
+            // default. A flag change moves an entry in `idx_torrents_cover`
+            // (it carries paused, tags and category), and with 2 MB those
+            // index pages are read back from the OS for every few rows:
+            // measured on the bench, 50 000 paused flags took 1.69 s, 1.47 s
+            // of it in the kernel; with 64 MB, 0.59 s.
+            if let Err(e) = store.conn.execute_batch("PRAGMA cache_size=-65536;") {
+                tracing::warn!("store page cache left at the default: {e}");
+            }
         }
         Ok(store)
     }
