@@ -99,6 +99,10 @@ pub struct TorrentManager {
     /// cannot be named from here; unset, events wait for the next scheduled
     /// announce, which is how every test and a trackerless engine run.
     announce_hook: std::sync::OnceLock<Arc<dyn Fn(InfoHash) + Send + Sync>>,
+    /// Told when a torrent finishes DOWNLOADING -- the moment its trackers are
+    /// owed `completed`, and no other. Set by the binary, whose workflows run
+    /// on it; unset, a completion is persisted and announced and that is all.
+    completion_hook: std::sync::OnceLock<Arc<dyn Fn(InfoHash) + Send + Sync>>,
     /// Durable per-torrent state. `None` only if SQLite could not be opened at
     /// all, in which case everything falls back to the legacy JSON directory
     /// so a broken database degrades into the old behaviour instead of losing
@@ -158,6 +162,29 @@ impl TorrentManager {
     pub fn announce_soon(&self, info_hash: &InfoHash) {
         if let Some(hook) = self.announce_hook.get() {
             hook(*info_hash);
+        }
+    }
+
+    /// Install the "a download just finished" listener. Once.
+    pub fn set_completion_hook(&self, hook: Arc<dyn Fn(InfoHash) + Send + Sync>) {
+        let _ = self.completion_hook.set(hook);
+    }
+
+    /// A download finished: write it down, tell the trackers, tell whoever
+    /// listens.
+    ///
+    /// ⚠️ Only the download path gets here (`notify_completed`, when the last
+    /// piece verifies). A recheck that finds the data whole, or an add with
+    /// the data already on disk, never does: the torrent was complete before,
+    /// nothing was downloaded, and neither a tracker nor a workflow is owed a
+    /// completion for it.
+    pub fn on_completed(&self, ih: &InfoHash) {
+        self.persist_completed(ih);
+        // `completed` is how a tracker records the snatch: say it now, not at
+        // the next scheduled announce half an hour away.
+        self.announce_soon(ih);
+        if let Some(hook) = self.completion_hook.get() {
+            hook(*ih);
         }
     }
 
@@ -286,6 +313,7 @@ impl TorrentManager {
             completed_rx: std::sync::Mutex::new(Some(completed_rx)),
             limiter: Default::default(),
             announce_hook: std::sync::OnceLock::new(),
+            completion_hook: std::sync::OnceLock::new(),
             state_db,
             last_saved: DashMap::new(),
             mirror_json,
@@ -2054,6 +2082,26 @@ mod lifecycle_tests {
         assert_eq!(asked.load(Ordering::Relaxed), 1);
         mgr.start_torrent(&ih).expect("resumed");
         assert_eq!(asked.load(Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A finished download reaches the completion listener, once, with its
+    /// own hash -- and still asks for the `completed` announce it always did.
+    #[test]
+    fn a_finished_download_is_announced_and_reaches_the_completion_hook() {
+        let (mgr, root) = manager("donehook");
+        let ih = add(&mgr, &root, "finished");
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let h = heard.clone();
+        mgr.set_completion_hook(Arc::new(move |got| h.lock().unwrap().push(got)));
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        mgr.set_announce_hook(Arc::new(move |_ih| {
+            a.fetch_add(1, Ordering::Relaxed);
+        }));
+        mgr.on_completed(&ih);
+        assert_eq!(*heard.lock().unwrap(), vec![ih]);
+        assert_eq!(asked.load(Ordering::Relaxed), 1, "the tracker is still told");
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -90,6 +90,9 @@ pub struct EngineHost {
     engines: Vec<Engine>,
     /// Scopes the startup gate has released. Empty until somebody asks.
     released: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Finished downloads, every engine's, tagged with the engine. Taken once,
+    /// by the event workflows.
+    completions: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(String, [u8; 20])>>>,
 }
 
 impl EngineHost {
@@ -102,6 +105,11 @@ impl EngineHost {
     /// and must not be an error.
     pub fn offline(config: &Config, config_dir: &std::path::Path) -> Self {
         let mut engines = Vec::new();
+        // Hooked here, before any engine is on the network, rather than once
+        // the workflows start: a download that finished in between would have
+        // told nobody. Unbounded, and cheap: the receiver buffers whatever
+        // arrives before it is taken.
+        let (completed_tx, completed_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Whatever this node hosts, not a fixed race and hoard: an install
         // can run one engine per tunnel, each presenting as its own agent.
@@ -184,6 +192,13 @@ impl EngineHost {
 
             let loaded = manager.load_resume_data();
             tracing::info!(engine = id, torrents = loaded, "engine state loaded");
+            {
+                let tx: tokio::sync::mpsc::UnboundedSender<(String, [u8; 20])> = completed_tx.clone();
+                let engine_id = id.to_string();
+                manager.set_completion_hook(Arc::new(move |ih| {
+                    let _ = tx.send((engine_id.clone(), ih));
+                }));
+            }
 
             engines.push(Engine {
                 id: id.to_string(),
@@ -203,7 +218,16 @@ impl EngineHost {
             });
         }
 
-        Self { engines, released: std::sync::Mutex::new(Default::default()) }
+        Self {
+            engines,
+            released: std::sync::Mutex::new(Default::default()),
+            completions: std::sync::Mutex::new(Some(completed_rx)),
+        }
+    }
+
+    /// The finished-download stream, for the one listener that acts on it.
+    pub fn take_completions(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<(String, [u8; 20])>> {
+        self.completions.lock().ok()?.take()
     }
 
     /// Build the engines and put them on the network.

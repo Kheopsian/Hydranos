@@ -831,5 +831,11 @@
   "Moving {n} torrent to \"{path}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.": "Déplacement de {n} torrent vers « {path} » en arrière-plan. Il continue de partager pendant la copie de ses données ; suivi dans Jobs.",
   "Moving {n} torrents to \"{path}\" in the background. They keep seeding while their data is copied; follow them in Jobs.": "Déplacement de {n} torrents vers « {path} » en arrière-plan. Ils continuent de partager pendant la copie de leurs données ; suivi dans Jobs.",
   "Move": "Déplacer",
-  "the name this node is shown under in Move to engine": "le nom sous lequel ce nœud apparaît dans « Déplacer vers le moteur »"
+  "the name this node is shown under in Move to engine": "le nom sous lequel ce nœud apparaît dans « Déplacer vers le moteur »",
+  "Runs": "Se lance",
+  "on a timer": "à intervalle régulier",
+  "when a download completes": "quand un téléchargement se termine",
+  "on completion": "à la fin du téléchargement",
+  "Once per download, when its last piece is verified: the moment its trackers are told it completed. A torrent added with its data already on disk, or rechecked whole, never fires it. Leave no condition to act on every download.": "Une fois par téléchargement, quand sa dernière pièce est vérifiée : au moment où ses trackers apprennent qu'il est terminé. Un torrent ajouté avec ses données déjà sur disque, ou revérifié complet, ne le déclenche jamais. Sans condition, il agit sur chaque téléchargement.",
+  "{n} downloads under way: {m} would be acted on when they complete, {s} already as asked": "{n} téléchargements en cours : {m} seraient traités à leur fin, {s} déjà comme demandé"
 }

@@ -24,6 +24,18 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **Workflows can run when a download completes.** A workflow now has a
+  trigger: *on a timer* (every workflow so far, unchanged) or *when a download
+  completes* -- once per torrent, at the moment its last piece verifies and
+  its trackers are told `completed`. A torrent added with its data already on
+  disk, or rechecked whole, never fires it, and enabling such a workflow does
+  nothing to the torrents that finished before. With no condition it acts on
+  every download that completes. The event is written to the store before
+  anything acts on it (`workflow_events`), so a restart between the two loses
+  nothing. Preview shows the downloads under way it would act on; there is no
+  *Run now*, which would have to invent the event. Hardlink conditions are
+  refused on it: the index has not measured a torrent that finished a second
+  ago. API: `"trigger": "schedule" | "completed"` in the workflow body.
 - **Set location: move a torrent's data to any folder, category unchanged**
   (#4, and the save-path half of #15). Right-click → *Set location…* asks for
   an absolute path, pre-filled with the current one for a single torrent.
@@ -134,6 +146,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   900,000-torrent library was affected by the change.
 
 ### Fixed
+- **Two workflows created in the same second are two workflows.** A new
+  workflow's id was `wf<seconds>`, and saving is an upsert: the second one
+  took the first one's id and replaced it, silently. A script creating a few
+  rules in a row kept only the last. Ids are now unique per creation.
 - **Per-tracker stats read only what they show.** The table built the
   full JSON row of every torrent to read three fields from it (8 s on a
   million torrents), and the chart's day of samples was filtered out of the

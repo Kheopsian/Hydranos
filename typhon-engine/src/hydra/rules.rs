@@ -158,6 +158,27 @@ pub const DEFAULT_CAP: usize = 500;
 pub const MIN_INTERVAL_SECS: i64 = 60;
 pub const DEFAULT_INTERVAL_SECS: i64 = 900;
 
+/// What sets a workflow off.
+///
+/// ⭐ Two different things, not two speeds of one. A scheduled workflow asks
+/// "which torrents are like this NOW?" and converges on the answer. An event
+/// workflow asks "what just HAPPENED to this torrent?", and the answer exists
+/// once. "When a download finishes" cannot be written as a condition: the
+/// nearest one, `completed_age < 15m`, also matches after a restart, after a
+/// recheck, or on a torrent that was never downloaded at all -- and matches
+/// again on the next pass unless something remembers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    /// On a timer, against the whole catalogue.
+    #[default]
+    Schedule,
+    /// Once, when a torrent finishes downloading: the moment its trackers are
+    /// told `completed`. A torrent added with its data already there, or
+    /// rechecked whole, never finished downloading and never fires this.
+    Completed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
     #[serde(default)]
@@ -169,6 +190,11 @@ pub struct Workflow {
     pub enabled: bool,
     #[serde(default)]
     pub position: i64,
+    /// Absent in every workflow saved before events existed, which were all
+    /// scheduled: the default keeps them exactly what they were.
+    #[serde(default)]
+    pub trigger: Trigger,
+    /// Scheduled workflows only. An event workflow keeps it but never reads it.
     #[serde(default = "default_interval")]
     pub interval_secs: i64,
     pub when: Node,
@@ -197,6 +223,10 @@ pub enum CompileError {
     /// question of whether the tag was written before the files went away.
     DeleteNotAlone,
     NoActions,
+    /// A hardlink condition on an event workflow. Those facts come from the
+    /// background index, which has not seen a torrent that finished a second
+    /// ago: the condition would read NEVER and quietly never match.
+    LinkFieldOnEvent(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -212,6 +242,10 @@ impl std::fmt::Display for CompileError {
                 write!(f, "delete cannot be combined with another action")
             }
             CompileError::NoActions => write!(f, "a workflow with no action would do nothing"),
+            CompileError::LinkFieldOnEvent(x) => write!(
+                f,
+                "{x:?} cannot be used when a download completes: the hardlink index has not measured the torrent yet"
+            ),
         }
     }
 }
@@ -291,11 +325,6 @@ pub const FIELDS: &[(&str, Kind)] = &[
     ("data_missing", Kind::Bool),
 ];
 
-/// Does this condition tree ask anything that needs the link scan?
-///
-/// The scan is one `stat` per file in the catalogue. Worth it when a rule uses
-/// it, pure waste every fifteen minutes when none does -- and no workflow uses
-/// it by default, so the common case must stay free.
 /// Does any condition of this tree read `field`?
 pub fn uses_field(n: &Node, field: &str) -> bool {
     match n {
@@ -305,15 +334,16 @@ pub fn uses_field(n: &Node, field: &str) -> bool {
     }
 }
 
+/// The fields read from the hardlink index rather than from the torrent.
+pub const LINK_FIELDS: &[&str] = &["link_count", "external_links", "freeable_bytes", "data_missing"];
+
+/// Does this condition tree ask anything that needs the link scan?
+///
+/// The scan is one `stat` per file in the catalogue. Worth it when a rule uses
+/// it, pure waste every fifteen minutes when none does -- and no workflow uses
+/// it by default, so the common case must stay free.
 pub fn needs_link_scan(n: &Node) -> bool {
-    match n {
-        Node::All { of } | Node::Any { of } => of.iter().any(needs_link_scan),
-        Node::Not { of } => needs_link_scan(of),
-        Node::Cond(c) => matches!(
-            c.field.as_str(),
-            "link_count" | "external_links" | "freeable_bytes" | "data_missing"
-        ),
-    }
+    LINK_FIELDS.iter().any(|f| uses_field(n, f))
 }
 
 pub fn kind_of(field: &str) -> Option<Kind> {
@@ -547,6 +577,17 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
     if w.then.iter().any(Action::is_delete) && w.then.len() > 1 {
         return Err(CompileError::DeleteNotAlone);
     }
+    if w.trigger == Trigger::Completed {
+        if let Some(f) = LINK_FIELDS.iter().find(|f| uses_field(&w.when, f)) {
+            return Err(CompileError::LinkFieldOnEvent(f.to_string()));
+        }
+        // No condition is a real rule here: "every download that finishes".
+        // On a schedule the same empty tree is the whole catalogue, which is
+        // why it stays refused there.
+        if matches!(&w.when, Node::All { of } | Node::Any { of } if of.is_empty()) {
+            return Ok(Box::new(|_: &Facts| true));
+        }
+    }
     compile(&w.when)
 }
 
@@ -741,6 +782,7 @@ mod tests {
             name: "x".into(),
             enabled: false,
             position: 0,
+            trigger: Trigger::Schedule,
             interval_secs: DEFAULT_INTERVAL_SECS,
             when: cond("ratio", Op::Ge, "2"),
             then: vec![Action::Delete { with_files: true }, Action::Pause],
@@ -762,6 +804,61 @@ mod tests {
             ..base
         };
         assert_eq!(compile_workflow(&none).err(), Some(CompileError::NoActions));
+    }
+
+    fn on_completion(when: Node) -> Workflow {
+        Workflow {
+            id: String::new(),
+            name: "x".into(),
+            enabled: true,
+            position: 0,
+            trigger: Trigger::Completed,
+            interval_secs: DEFAULT_INTERVAL_SECS,
+            when,
+            then: vec![Action::AddTags { tags: vec!["done".into()] }],
+            cap: DEFAULT_CAP,
+        }
+    }
+
+    /// "Every download that finishes" is a rule when an event sets it off,
+    /// and the whole catalogue when a timer does. Same tree, two answers.
+    #[test]
+    fn no_condition_means_every_completion_but_never_the_whole_catalogue() {
+        let every = on_completion(Node::All { of: vec![] });
+        let matcher = compile_workflow(&every).expect("an event needs no condition");
+        assert!(matcher(&facts()));
+
+        let scheduled = Workflow { trigger: Trigger::Schedule, ..every };
+        assert_eq!(compile_workflow(&scheduled).err(), Some(CompileError::Empty));
+    }
+
+    /// A hardlink condition on a torrent that finished a second ago reads
+    /// NEVER and never matches: refused when saved, not discovered later.
+    #[test]
+    fn a_hardlink_condition_is_refused_on_a_completion() {
+        let w = on_completion(Node::All { of: vec![cond("external_links", Op::Eq, "0")] });
+        assert_eq!(
+            compile_workflow(&w).err(),
+            Some(CompileError::LinkFieldOnEvent("external_links".into()))
+        );
+        let scheduled = Workflow { trigger: Trigger::Schedule, ..w };
+        assert!(compile_workflow(&scheduled).is_ok(), "a timer reads the index, which is fine");
+    }
+
+    /// Every workflow saved before triggers existed ran on a timer, and has to
+    /// go on doing exactly that.
+    #[test]
+    fn a_workflow_saved_without_a_trigger_stays_scheduled() {
+        let w: Workflow = serde_json::from_str(
+            r#"{"name":"old","when":{"kind":"cond","field":"ratio","op":"ge","value":"2"},"then":[{"type":"pause"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(w.trigger, Trigger::Schedule);
+        let w: Workflow = serde_json::from_str(
+            r#"{"name":"new","trigger":"completed","when":{"kind":"all","of":[]},"then":[{"type":"pause"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(w.trigger, Trigger::Completed);
     }
 
     /// Without this a workflow rewrites the same tag every fifteen minutes and

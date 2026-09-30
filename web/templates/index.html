@@ -763,10 +763,10 @@
                 <button class="btn-small" onclick="newWorkflow()">+ New workflow</button>
             </div>
             <p class="sr-desc" style="margin:0 0 16px">
-                Conditions in, actions out, checked on a timer. What people otherwise write as a
-                script: file a torrent under another category once it finishes, seed for two days
-                then stop. A new workflow starts disabled, and Preview shows what it would do
-                before it is allowed to do anything.
+                Conditions in, actions out, checked on a timer or run the moment a download
+                completes. What people otherwise write as a script: file a torrent under another
+                category once it finishes, seed for two days then stop. A new workflow starts
+                disabled, and Preview shows what it would do before it is allowed to do anything.
             </p>
 
             <div id="wf-form" class="card" style="display:none; margin-bottom:16px">
@@ -777,16 +777,28 @@
                             <input type="text" id="wf-name" placeholder="Seed two days then stop" autocomplete="off">
                         </div>
                         <div class="form-group">
+                            <label>Runs</label>
+                            <select id="wf-trigger" onchange="_wfSyncTrigger()">
+                                <option value="schedule">on a timer</option>
+                                <option value="completed">when a download completes</option>
+                            </select>
+                        </div>
+                        <div class="form-group wf-schedule-only">
                             <label>Runs every <span class="sr-desc">seconds, minimum 60</span></label>
                             <input type="number" id="wf-interval" value="900" min="60" autocomplete="off">
                         </div>
-                        <div class="form-group">
+                        <div class="form-group wf-schedule-only">
                             <label>At most <span class="sr-desc">torrents per pass</span></label>
                             <input type="number" id="wf-cap" value="500" min="1" autocomplete="off">
                         </div>
                     </div>
 
                     <h3 style="margin:16px 0 6px">When</h3>
+                    <p class="sr-desc wf-completed-only" style="margin:0 0 6px; display:none">
+                        Once per download, when its last piece is verified: the moment its trackers
+                        are told it completed. A torrent added with its data already on disk, or
+                        rechecked whole, never fires it. Leave no condition to act on every download.
+                    </p>
                     <div id="wf-conds"></div>
 
                     <h3 style="margin:16px 0 6px">Then</h3>
@@ -1456,6 +1468,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.44"></script>
+    <script src="/static/app.js?v=1.6.45"></script>
 </body>
 </html>
