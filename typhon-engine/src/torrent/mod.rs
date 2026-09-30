@@ -2105,6 +2105,55 @@ mod lifecycle_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// ⭐ A recheck that finds the data whole is not a completion. Nothing was
+    /// downloaded: no `completed` for the trackers, nothing on the channel the
+    /// completion workflows listen to. Real data, a real hash, the real
+    /// recheck -- and a witness that the channel does carry a completion, so
+    /// the silence is the recheck's and not a dead receiver's.
+    #[tokio::test]
+    async fn a_recheck_that_finds_the_data_whole_is_not_a_completion() {
+        let (mgr, root) = manager("recheckwhole");
+        let mut completions = mgr.take_completion_receiver().expect("receiver");
+        let data: Vec<u8> = (0..16384u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(root.join("data").join("whole"), &data).unwrap();
+        let mut hasher = Sha1::new();
+        hasher.update(&data);
+        let mut info = Vec::new();
+        info.extend_from_slice(b"d6:lengthi16384e4:name5:whole12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&hasher.finalize());
+        info.push(b'e');
+        let mut bytes = b"d4:info".to_vec();
+        bytes.extend_from_slice(&info);
+        bytes.push(b'e');
+        // The hashes a recheck compares against come from the store's copy of
+        // the metainfo, never from memory: stand one in.
+        let blob = bytes.clone();
+        mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
+        let save = root.join("data").to_string_lossy().into_owned();
+        let ih = mgr.add_torrent_bytes(&bytes, &save, false, false).expect("added").0;
+        let t = mgr.get(&ih).unwrap();
+
+        mgr.recheck(&ih).expect("recheck starts");
+        for _ in 0..200 {
+            if t.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Seeding as u8, "verified whole");
+        assert!(completions.try_recv().is_err(), "a recheck is not a completion");
+        assert_eq!(
+            t.pending_announce_event.load(Ordering::Relaxed) & crate::torrent::meta::ANNOUNCE_EVENT_COMPLETED,
+            0,
+            "and the trackers are not told `completed`"
+        );
+
+        // The witness: the download path's call does reach the receiver.
+        t.notify_completed();
+        assert_eq!(completions.try_recv().ok(), Some(ih));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn stopping_pauses_the_torrent_and_owes_the_trackers_a_departure() {
         let (mgr, root) = manager("stop");

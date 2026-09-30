@@ -759,56 +759,62 @@ pub fn spawn(state: AppState) {
         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let now = crate::store::now_secs();
-            let due: Vec<crate::store::StoredWorkflow> = {
-                let store = state.store.lock().unwrap();
-                let _ = store.prune_workflow_activity(now - 7 * 86400);
-                store
-                    .workflows()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|w| rulesrun::is_due(w, now))
-                    .collect()
-            };
-            // Whatever the completion listener could not finish: events
-            // written before a restart, or left waiting for their engine.
-            {
-                let st = state.clone();
-                let _ = tokio::task::spawn_blocking(move || run_events(&st)).await;
-            }
-            for stored in due {
-                let Ok(w) = serde_json::from_str::<Workflow>(&stored.body) else {
-                    tracing::warn!(workflow = %stored.name, "workflow body will not parse, skipped");
-                    continue;
-                };
-                // An event workflow is due whenever its event happens, never
-                // on the clock.
-                if w.trigger != rules::Trigger::Schedule {
-                    continue;
-                }
-                // Claimed BEFORE it runs. Marked only at the end, a pass that
-                // takes longer than the tick -- or never reaches the end --
-                // stays due, and the timer starts it again every minute on top
-                // of the one still running.
-                if let Ok(store) = state.store.lock() {
-                    let _ = store.mark_workflow_run(&w.id, now);
-                }
-                let st = state.clone();
-                let name = w.name.clone();
-                let Ok(report) = tokio::task::spawn_blocking(move || run_one(&st, &w, false)).await else {
-                    tracing::warn!(workflow = %name, "workflow pass panicked");
-                    continue;
-                };
-                // Silence when nothing happened: a scheduled rule that matches
-                // nothing is the normal case and must not fill the log.
-                if report.get("applied").and_then(|v| v.as_u64()).unwrap_or(0) > 0
-                    || report.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) > 0
-                {
-                    tracing::info!(workflow = %name, report = %report, "workflow ran");
-                }
-            }
+            tick(&state, crate::store::now_secs()).await;
         }
     });
+}
+
+/// One tick of the timer: the waiting events, then the scheduled workflows
+/// that are due. Apart from the loop so a test can run exactly what a tick
+/// runs, at the time it chooses.
+async fn tick(state: &AppState, now: i64) {
+    let due: Vec<crate::store::StoredWorkflow> = {
+        let store = state.store.lock().unwrap();
+        let _ = store.prune_workflow_activity(now - 7 * 86400);
+        store
+            .workflows()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|w| rulesrun::is_due(w, now))
+            .collect()
+    };
+    // Whatever the completion listener could not finish: events
+    // written before a restart, or left waiting for their engine.
+    {
+        let st = state.clone();
+        let _ = tokio::task::spawn_blocking(move || run_events_at(&st, now)).await;
+    }
+    for stored in due {
+        let Ok(w) = serde_json::from_str::<Workflow>(&stored.body) else {
+            tracing::warn!(workflow = %stored.name, "workflow body will not parse, skipped");
+            continue;
+        };
+        // An event workflow is due whenever its event happens, never
+        // on the clock.
+        if w.trigger != rules::Trigger::Schedule {
+            continue;
+        }
+        // Claimed BEFORE it runs. Marked only at the end, a pass that
+        // takes longer than the tick -- or never reaches the end --
+        // stays due, and the timer starts it again every minute on top
+        // of the one still running.
+        if let Ok(store) = state.store.lock() {
+            let _ = store.mark_workflow_run(&w.id, now);
+        }
+        let st = state.clone();
+        let name = w.name.clone();
+        let Ok(report) = tokio::task::spawn_blocking(move || run_one(&st, &w, false)).await else {
+            tracing::warn!(workflow = %name, "workflow pass panicked");
+            continue;
+        };
+        // Silence when nothing happened: a scheduled rule that matches
+        // nothing is the normal case and must not fill the log.
+        if report.get("applied").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+            || report.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+        {
+            tracing::info!(workflow = %name, report = %report, "workflow ran");
+        }
+    }
 }
 
 /// How long an event waits for its torrent to show up in its engine.
@@ -863,6 +869,11 @@ pub fn record_completions(state: &AppState, batch: &[(String, [u8; 20])]) {
 /// Run the event workflows on every waiting event. Returns how many events
 /// were dealt with (and removed).
 pub fn run_events(state: &AppState) -> usize {
+    run_events_at(state, crate::store::now_secs())
+}
+
+/// `run_events` as of `now`, which decides how long an event has waited.
+fn run_events_at(state: &AppState, now: i64) -> usize {
     let _one = EVENT_DRAIN.lock().unwrap_or_else(|p| p.into_inner());
     let (events, workflows) = {
         let Ok(store) = state.store.lock() else { return 0 };
@@ -880,7 +891,6 @@ pub fn run_events(state: &AppState) -> usize {
             .collect();
         (events, workflows)
     };
-    let now = crate::store::now_secs();
     let mut done = 0;
     for ev in events {
         // No workflow to hand it to, or an event nothing here handles: the
@@ -1450,6 +1460,39 @@ mod event_tests {
         save_wf(&s, "completed", "done").await;
         record_completions(&s.state, &[("hoard".into(), [0x42; 20])]);
         assert_eq!(waiting(&s), 1, "kept for the next drain");
+    }
+
+    /// An event whose torrent never shows up is not kept forever: an hour,
+    /// then it goes. Before the hour it waits, however many drains pass.
+    #[tokio::test]
+    async fn an_event_that_never_finds_its_torrent_is_dropped_after_an_hour() {
+        let s = st("wf-ev-expire");
+        save_wf(&s, "completed", "done").await;
+        record_completions(&s.state, &[("hoard".into(), [0x42; 20])]);
+        let now = crate::store::now_secs();
+        assert_eq!(run_events_at(&s.state, now + EVENT_PATIENCE_SECS - 60), 0, "still inside the hour");
+        assert_eq!(waiting(&s), 1);
+        assert_eq!(run_events_at(&s.state, now + EVENT_PATIENCE_SECS + 1), 1, "past it: dealt with");
+        assert_eq!(waiting(&s), 0);
+        assert!(
+            s.state.store.lock().unwrap().workflow_activity(10).unwrap().is_empty(),
+            "and nothing was done in its name"
+        );
+    }
+
+    /// ⭐ A restart between the completion and the workflow: the row is in
+    /// the store, no listener will ever hear of it again. The timer's tick is
+    /// what picks it up.
+    #[tokio::test]
+    async fn the_timer_picks_up_an_event_left_by_a_restart() {
+        let s = st("wf-ev-tick");
+        let hash = add(&s, "restarted");
+        save_wf(&s, "completed", "done").await;
+        // Written by the previous process, which stopped before acting on it.
+        s.state.store.lock().unwrap().push_workflow_event("completed", "hoard", &hash).unwrap();
+        tick(&s.state, crate::store::now_secs()).await;
+        assert_eq!(tags(&s, &hash), vec!["done".to_string()]);
+        assert_eq!(waiting(&s), 0);
     }
 
     /// A disabled completion workflow is the same as none.
