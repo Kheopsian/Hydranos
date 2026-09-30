@@ -24,6 +24,18 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **Workflows can call a webhook.** A new action POSTs the torrent as JSON
+  (`event`, `workflow`, and `torrent`: hash, name, category, tags, engine,
+  save path, state, tracker, size, progress, ratio, bytes, seeding time),
+  with the same one-line summary under `content`, `text` and `message` so
+  Discord, Slack/Mattermost and Gotify read it as is. On *when a download
+  completes* it goes out once per download. On a timer it has to come with
+  another action and goes out in the pass where that action changes the
+  torrent -- so a "tag it `told`, then call" rule tells once, not every
+  fifteen minutes; a webhook alone on a timer is refused. A 5xx or no answer
+  is tried three times, a 4xx once; the URL never appears in the activity
+  log, since for Discord it is the secret. No "run a command" action, on
+  purpose: a leaked API key must not become a shell.
 - **UDP trackers (BEP 15, with BEP 41).** A `udp://` tracker in a torrent or
   a magnet is now announced to; it used to be handed to the HTTP client and
   fail on every pass. The packet carries what the HTTP URL would have --
