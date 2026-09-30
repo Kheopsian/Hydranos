@@ -1304,6 +1304,58 @@ async fn set_announce_mute(
     .into_response()
 }
 
+/// What one tracker said over the last hour, per engine and class: the counts
+/// `/api/announce/health` shows, plus the distinct messages behind them.
+///
+/// Asked for on a click, not polled: the Trackers tab reads the counts every
+/// few seconds and has no use for the words until someone asks what they were.
+async fn get_announce_errors(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let host = query_param(&query, "host").unwrap_or_default();
+    let mut engines = Vec::new();
+    for id in ["hoard", "race"] {
+        let Some(engine) = state.engines.get(id) else { continue };
+        let classes: Vec<serde_json::Value> = engine
+            .announce_cache
+            .error_samples(&host)
+            .into_iter()
+            .map(|(class, count, samples)| {
+                let samples: Vec<serde_json::Value> = samples
+                    .iter()
+                    .map(|s| {
+                        let name = typhon_engine::torrent::hex_decode(&s.info_hash)
+                            .ok()
+                            .and_then(|ih| engine.manager.get(&ih))
+                            .map(|t| t.meta.name.clone())
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "message": s.message,
+                            "count": s.count,
+                            "ago_mins": s.ago_mins,
+                            "event": s.event,
+                            "info_hash": s.info_hash,
+                            "name": name,
+                            // The torrent list files errors under its own
+                            // classes; this is the one that finds this message.
+                            "list_class": crate::errclass::classify(&s.message),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({"class": class, "count": count, "samples": samples})
+            })
+            .collect();
+        if !classes.is_empty() {
+            engines.push(serde_json::json!({"engine": id, "classes": classes}));
+        }
+    }
+    Json(serde_json::json!({"host": host, "engines": engines})).into_response()
+}
+
 async fn get_announce_health(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -12145,6 +12197,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/categories", axum::routing::post(category_create))
         .route("/api/announce/ip-modes", get(get_ip_modes).post(set_announce_ip_mode))
         .route("/api/announce/health", get(get_announce_health))
+        .route("/api/announce/errors", get(get_announce_errors))
         .route("/api/announce/policy", get(get_live_announce_policy))
         .route("/api/announce/mute", axum::routing::post(set_announce_mute))
         .route("/api/announce/hidden", axum::routing::post(set_announce_hidden))
@@ -15947,6 +16000,36 @@ mod populated_tests {
         assert_eq!(of("race").torrents, 2, "got {rows:?}");
         assert_eq!(of("hoard").torrents, 2, "got {rows:?}");
         assert!(rows.iter().all(|r| r.ts == 42));
+    }
+
+    /// A click on a tracker's errors gets the tracker's own words, the torrent
+    /// they were about by name, and the list class that finds its siblings.
+    #[tokio::test]
+    async fn a_trackers_errors_come_back_with_their_messages() {
+        let (s, hashes) = populated("pop-annerrors");
+        let hoard = s.state.engines.get("hoard").expect("hoard");
+        hoard.announce_cache.count_failed_message(
+            "tracker.example",
+            "unknown_torrent",
+            "Unregistered torrent",
+            &hashes[2],
+            "",
+        );
+        let body = body_json(
+            super::get_announce_errors(
+                State(s.state.clone()),
+                RawQuery(Some("host=tracker.example".into())),
+                keyed(KEY),
+            )
+            .await,
+        )
+        .await;
+        let class = &body["engines"][0]["classes"][0];
+        assert_eq!(body["engines"][0]["engine"], "hoard", "got {body}");
+        assert_eq!(class["class"], "unknown_torrent");
+        assert_eq!(class["samples"][0]["message"], "Unregistered torrent");
+        assert_eq!(class["samples"][0]["name"], "charlie", "named, not just hashed: {body}");
+        assert_eq!(class["samples"][0]["list_class"], "dead");
     }
 
     /// ⭐⭐ A reannounce with no announce runner behind it answers **503**, out

@@ -7684,7 +7684,7 @@ async function updateTrackers() {
             const rowTip = SEV[sev]
                 ? esc(incoTracker(r.host) + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
-            return `<tr title="${rowTip}"><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(incoMsg(r.last_error) || "")}">${err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
+            return `<tr title="${rowTip}"><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(incoMsg(r.last_error) || "")}">${counts.length ? `<a href="#" class="trk-err-link" onclick="showTrackerErrors('${esc(r.host)}');return false">${err}</a>` : err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
         }).join("");
         updateTabBadges();
         if (_thtml === _trackersSig) return;
@@ -7692,6 +7692,101 @@ async function updateTrackers() {
         tbody.innerHTML = _thtml;
     } catch (e) { console.error("Failed to update trackers:", e); }
 }
+// --- A tracker's errors, in its own words (Trackers tab) ---
+//
+// The table says "other x10"; this says what the tracker wrote, about which
+// torrent, and opens the list on the torrents it concerns. Fetched on the
+// click, never polled: the counts refresh every few seconds, the words are
+// only wanted when someone asks.
+let _trkErrHost = "";
+
+async function showTrackerErrors(host) {
+    _trkErrHost = host;
+    const modal = document.getElementById("trk-err-modal");
+    const body = document.getElementById("trk-err-body");
+    document.getElementById("trk-err-title").textContent = t("Errors in the last hour") + ": " + incoTracker(host);
+    body.innerHTML = `<p class="sr-desc">${esc(t("Loading..."))}</p>`;
+    modal.style.display = "";
+    modal.onclick = e => { if (e.target === modal) closeTrackerErrors(); };
+    let data;
+    try {
+        data = await api("/api/announce/errors?host=" + encodeURIComponent(host));
+    } catch (e) {
+        body.innerHTML = `<p class="trk-edit-msg">${esc(t("Could not load the errors") + ": " + e)}</p>`;
+        return;
+    }
+    if (_trkErrHost !== host) return;
+    // Hoard above race: the engine that seeds all the time is the one that
+    // matters day to day.
+    const engines = ((data && data.engines) || [])
+        .sort((a, b) => (a.engine === "hoard" ? -1 : 1) - (b.engine === "hoard" ? -1 : 1));
+    if (!engines.length) {
+        body.innerHTML = `<p class="sr-desc">${esc(t("No error left in the last hour."))}</p>`;
+        return;
+    }
+    let html = "";
+    engines.forEach(eng => {
+        (eng.classes || []).forEach(c => {
+            const tag = eng.engine === "hoard"
+                ? '<span class="mode-tag mode-hoard">hoard</span>'
+                : '<span class="mode-tag mode-race">race</span>';
+            // The list files errors under its own classes; the samples say
+            // which of them finds these torrents.
+            const listClasses = [...new Set((c.samples || []).map(s => s.list_class).filter(Boolean))];
+            const show = eng.engine === "hoard" && listClasses.length
+                ? `<button class="btn-small" onclick="showTrackerErrorTorrents('${esc(host)}','${esc(listClasses.join(","))}')">${esc(t("Show the torrents"))}</button>`
+                : "";
+            html += `<div class="trk-err-class"><div class="trk-err-head">${tag} <strong>${esc(c.class)}</strong> <span class="sr-desc">x${c.count}</span> ${show}</div>`;
+            (c.samples || []).forEach(sm => {
+                const when = sm.ago_mins > 0 ? t("{n} min ago").replace("{n}", sm.ago_mins) : t("just now");
+                const who = sm.name ? incoName(sm.name) : (sm.info_hash || "").slice(0, 12);
+                const meta = [
+                    "x" + sm.count,
+                    when,
+                    sm.event ? "event=" + sm.event : "",
+                    who,
+                ].filter(Boolean).join(", ");
+                html += `<div class="trk-err-msg"><code>${esc(incoMsg(sm.message))}</code>`
+                    + `<div class="sr-desc" title="${esc(sm.info_hash || "")}">${esc(meta)}</div></div>`;
+            });
+            html += "</div>";
+        });
+    });
+    body.innerHTML = html;
+}
+
+function closeTrackerErrors() {
+    _trkErrHost = "";
+    document.getElementById("trk-err-modal").style.display = "none";
+}
+
+// The whole gesture, not half of it: the Hoard list opens already narrowed to
+// this tracker and these errors, every other filter cleared so nothing hides
+// part of them.
+function showTrackerErrorTorrents(host, listClasses) {
+    closeTrackerErrors();
+    _hoardCatInc = []; _hoardCatExc = [];
+    _hoardTagInc = []; _hoardTagExc = [];
+    _hoardTrackerInc = [host]; _hoardTrackerExc = [];
+    _hoardErrInc = listClasses.split(",").filter(Boolean); _hoardErrExc = [];
+    _hoardStateFilter = "";
+    const box = document.getElementById("hoard-search");
+    if (box) box.value = "";
+    document.querySelectorAll(".chip-state").forEach(c => {
+        c.classList.toggle("active", c.dataset.state === "");
+    });
+    _paintChips(".chip-cat", "cat", _hoardCatInc, _hoardCatExc);
+    _paintChips(".chip-tag", "tag", _hoardTagInc, _hoardTagExc);
+    _paintChips(".chip-tracker", "tracker", _hoardTrackerInc, _hoardTrackerExc);
+    _paintChips(".chip-err", "err", _hoardErrInc, _hoardErrExc);
+    activateTab("hoard");
+    fetchHoardPage(true);
+}
+
+document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && _trkErrHost) closeTrackerErrors();
+});
+
 // --- Per-tracker bench stats (Trackers tab) ---
 let _trkStatsChart = null;
 let _trackersSig = "";

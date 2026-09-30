@@ -24,6 +24,13 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **A tracker's errors open on a click, in its own words.** The Trackers tab
+  counted "other x10" with no way to see what "other" was. Each class now
+  keeps the last few distinct messages of the hour (the same words with other
+  numbers count as one), with the torrent and the event of the latest one;
+  the dialog lists them and opens the Hoard list on that tracker and those
+  errors. `GET /api/announce/errors?host=` serves them. Messages are redacted
+  before they are kept, as in the log.
 - **An interoperability suite, `tools/interop/run.sh`, run in CI.** The client
   against software somebody else wrote: opentracker and Torrust in private
   mode read back what they understood of our announces, and qBittorrent

@@ -92,9 +92,69 @@ fn now_min() -> u64 {
 #[derive(Default, Debug)]
 struct Window {
     buckets: std::collections::VecDeque<(u64, u64)>,
+    /// The distinct messages behind the count, most recent last. A class says
+    /// which gesture an error calls for; only the tracker's own words say what
+    /// "other" was, or which torrent it refused.
+    samples: Vec<ErrorSample>,
+}
+
+/// Distinct messages kept per (host, class). Enough to tell two causes apart,
+/// few enough that a tracker failing 26 000 times an hour costs five strings.
+const SAMPLES_PER_CLASS: usize = 5;
+/// A message is cut here: the operator needs its gist, and a tracker is free to
+/// answer with a whole HTML page.
+const SAMPLE_MAX_CHARS: usize = 300;
+
+/// One distinct error message seen inside the window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErrorSample {
+    /// Already redacted by the caller: a raw announce error embeds the URL,
+    /// and the URL carries the passkey.
+    pub message: String,
+    /// How many failures carried this message since it was first kept.
+    pub count: u64,
+    /// Minutes since the last one.
+    pub ago_mins: u64,
+    /// The torrent the last one was about, hex.
+    pub info_hash: String,
+    /// The announce event it was sent with ("started", "" for a regular one).
+    pub event: String,
+    last_min: u64,
+}
+
+/// Two messages that differ only in their numbers are one message: "retry in
+/// 37s" and "retry in 41s" would otherwise take every slot.
+fn same_message(a: &str, b: &str) -> bool {
+    let strip = |s: &str| s.chars().filter(|c| !c.is_ascii_digit()).collect::<String>();
+    a.len().abs_diff(b.len()) <= 8 && strip(a) == strip(b)
 }
 
 impl Window {
+    fn note(&mut self, now: u64, message: &str, info_hash: &str, event: &str) {
+        let message: String = message.chars().take(SAMPLE_MAX_CHARS).collect();
+        if let Some(i) = self.samples.iter().position(|s| same_message(&s.message, &message)) {
+            let mut s = self.samples.remove(i);
+            s.count += 1;
+            s.last_min = now;
+            s.message = message;
+            s.info_hash = info_hash.to_string();
+            s.event = event.to_string();
+            self.samples.push(s);
+            return;
+        }
+        if self.samples.len() >= SAMPLES_PER_CLASS {
+            self.samples.remove(0);
+        }
+        self.samples.push(ErrorSample {
+            message,
+            count: 1,
+            ago_mins: 0,
+            info_hash: info_hash.to_string(),
+            event: event.to_string(),
+            last_min: now,
+        });
+    }
+
     fn cutoff(now: u64) -> u64 {
         now.saturating_sub(WINDOW_MINS - 1)
     }
@@ -112,6 +172,7 @@ impl Window {
         while self.buckets.front().is_some_and(|(m, _)| *m < cutoff) {
             self.buckets.pop_front();
         }
+        self.samples.retain(|s| s.last_min >= cutoff);
     }
 
     /// What is still inside the window. Expiry is applied on read too, so a
@@ -172,14 +233,39 @@ impl Cache {
         self.count_failed_kind_at(host, class, now_min());
     }
 
+    /// Record a failure under its class, keeping what the tracker said.
+    /// `message` must already be redacted.
+    pub fn count_failed_message(
+        &self,
+        host: &str,
+        class: &str,
+        message: &str,
+        info_hash: &str,
+        event: &str,
+    ) {
+        self.count_failed();
+        self.count_failed_message_at(host, class, Some((message, info_hash, event)), now_min());
+    }
+
     /// The clock is a parameter so the window can be tested without sleeping
     /// for an hour.
     fn count_failed_kind_at(&self, host: &str, class: &str, now: u64) {
+        self.count_failed_message_at(host, class, None, now);
+    }
+
+    fn count_failed_message_at(
+        &self,
+        host: &str,
+        class: &str,
+        sample: Option<(&str, &str, &str)>,
+        now: u64,
+    ) {
         let mut errors = self.errors.write().unwrap();
-        errors
-            .entry((host.to_string(), class.to_string()))
-            .or_default()
-            .add(now);
+        let w = errors.entry((host.to_string(), class.to_string())).or_default();
+        w.add(now);
+        if let Some((message, info_hash, event)) = sample {
+            w.note(now, message, info_hash, event);
+        }
         // Drop what has aged out entirely, so a host that recovered stops
         // costing a map entry -- and, more importantly, stops being named by
         // `error_breakdown`, which is what paints its row red.
@@ -194,6 +280,38 @@ impl Cache {
     /// which is the whole bug this window replaced.
     pub fn error_breakdown(&self) -> HashMap<String, Vec<(String, u64)>> {
         self.error_breakdown_at(now_min())
+    }
+
+    /// One host's failures over the last hour: (class, count, the distinct
+    /// messages behind it, most recent first), most frequent class first.
+    pub fn error_samples(&self, host: &str) -> Vec<(String, u64, Vec<ErrorSample>)> {
+        self.error_samples_at(host, now_min())
+    }
+
+    fn error_samples_at(&self, host: &str, now: u64) -> Vec<(String, u64, Vec<ErrorSample>)> {
+        let cutoff = Window::cutoff(now);
+        let mut out: Vec<(String, u64, Vec<ErrorSample>)> = self
+            .errors
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|((h, _), _)| h == host)
+            .filter_map(|((_, class), w)| {
+                let n = w.total(now);
+                (n > 0).then(|| {
+                    let samples = w
+                        .samples
+                        .iter()
+                        .rev()
+                        .filter(|s| s.last_min >= cutoff)
+                        .map(|s| ErrorSample { ago_mins: now.saturating_sub(s.last_min), ..s.clone() })
+                        .collect();
+                    (class.clone(), n, samples)
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out
     }
 
     fn error_breakdown_at(&self, now: u64) -> HashMap<String, Vec<(String, u64)>> {
@@ -424,6 +542,49 @@ mod tests {
         assert_eq!(c.outcomes().1, 0, "counted by count_failed, not by the window");
         c.count_failed_kind("t", "timeout");
         assert_eq!(c.outcomes().1, 1, "the lifetime counter still only grows");
+    }
+
+    /// "other x10" says nothing; the message does. The words are kept with the
+    /// count, the same words with other numbers are one message, and the most
+    /// recent comes first.
+    #[test]
+    fn the_messages_behind_a_count_are_kept_once_each() {
+        let c = Cache::default();
+        let s = Some(("HTTP 429: retry in 37s", "aa", "started"));
+        c.count_failed_message_at("t", "rate_limited", s, 10);
+        c.count_failed_message_at("t", "rate_limited", Some(("HTTP 429: retry in 41s", "bb", "")), 12);
+        c.count_failed_message_at("t", "rate_limited", Some(("banned client", "cc", "")), 13);
+        let got = c.error_samples_at("t", 15);
+        assert_eq!(got.len(), 1);
+        let (class, n, samples) = &got[0];
+        assert_eq!((class.as_str(), *n), ("rate_limited", 3));
+        assert_eq!(samples.len(), 2, "two messages, not three: {samples:?}");
+        assert_eq!(samples[0].message, "banned client", "most recent first");
+        assert_eq!(samples[1].message, "HTTP 429: retry in 41s", "the latest wording is shown");
+        assert_eq!(samples[1].count, 2);
+        assert_eq!(samples[1].info_hash, "bb", "the torrent of the latest one");
+        assert_eq!(samples[1].ago_mins, 3);
+        assert!(c.error_samples_at("other.host", 15).is_empty());
+    }
+
+    /// A tracker failing all hour costs a handful of strings, not one per
+    /// failure, and a message that aged out of the window goes with it.
+    #[test]
+    fn samples_are_bounded_and_expire_with_the_window() {
+        let c = Cache::default();
+        for i in 0..20 {
+            let msg = format!("error kind {}", ["a", "b", "c", "d", "e", "f", "g"][i % 7]);
+            c.count_failed_message_at("t", "other", Some((&msg, "aa", "")), 0);
+        }
+        let got = c.error_samples_at("t", 0);
+        assert_eq!(got[0].2.len(), SAMPLES_PER_CLASS);
+        c.count_failed_message_at("t", "other", Some(("fresh", "bb", "")), 100);
+        let got = c.error_samples_at("t", 100);
+        assert_eq!(got[0].1, 1, "the count is the window's");
+        assert_eq!(got[0].2.len(), 1, "only the message inside the window: {:?}", got[0].2);
+        let long = "x".repeat(5000);
+        c.count_failed_message_at("t", "other", Some((&long, "cc", "")), 100);
+        assert!(c.error_samples_at("t", 100)[0].2[0].message.chars().count() <= SAMPLE_MAX_CHARS);
     }
 
     /// A host that never failed was never in the map, and a window that is
