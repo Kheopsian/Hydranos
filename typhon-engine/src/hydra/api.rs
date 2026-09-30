@@ -4445,21 +4445,12 @@ async fn get_fs_browse(
     Json(serde_json::json!({"dirs": dirs, "path": path})).into_response()
 }
 
-/// Cumulative per-tracker transfer, one row per (engine, tracker).
-#[derive(serde::Serialize)]
-struct TrackerStat {
-    active: i64,
-    cum_downloaded: i64,
-    cum_uploaded: i64,
-    download_rate: i64,
-    engine: String,
-    peers: i64,
-    torrents: i64,
-    tracker: String,
-    ts: i64,
-    upload_rate: i64,
-}
-
+/// Per-tracker figures, one row per (engine, tracker), as the sampler's last
+/// tracker pass computed them.
+///
+/// Served from memory: computing them here read every torrent on every poll of
+/// the Trackers tab. Before the first pass -- the first seconds after a start --
+/// or on a node that runs no sampler, the handler computes them once itself.
 async fn get_tracker_stats_current(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -4467,70 +4458,19 @@ async fn get_tracker_stats_current(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-
-    // Stored counters are the BASELINE -- what each tracker accounted for
-    // before the running engines started. The live contribution of the torrents
-    // currently loaded is added on top, and the torrent count comes from them
-    // too. Reporting the stored figure alone makes the Trackers tab freeze at
-    // the last restart, which is exactly when an operator looks at it.
-    let mut totals: std::collections::BTreeMap<(String, String), (i64, i64, i64)> =
-        std::collections::BTreeMap::new();
-
-    {
-        let store = state.store.lock().unwrap();
-        for (engine, tracker, ul, dl) in store.tracker_counters().unwrap_or_default() {
-            totals.insert((engine, tracker), (ul, dl, 0));
-        }
+    if let Some(rows) = crate::benchsampler::latest_trackers() {
+        return Json(rows).into_response();
     }
-
-    // Three fields read straight off each torrent. This loop used to build the
-    // full `torrent_to_json` row for every torrent to pick those three out of
-    // it: 8 s per call over the million torrents of the production node.
-    for engine in state.engines.engines() {
-        for torrent in engine.manager.all().iter() {
-            // The host baked into the torrent, NOT a result of announcing:
-            // live_trackers is filled when the torrent is built. So a torrent
-            // that has never announced still counts under its own tracker, and
-            // this bucket holds only the ones carrying no announce URL at all.
-            // The name says that; "(none)" invited the other reading.
-            let host = torrent
-                .live_trackers
-                .read()
-                .iter()
-                .flatten()
-                .next()
-                .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u))
-                .filter(|h| !h.is_empty())
-                .unwrap_or_else(|| "(no tracker)".to_string());
-            let entry = totals.entry((engine.id.clone(), host)).or_insert((0, 0, 0));
-            entry.0 += torrent.total_uploaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
-            entry.1 += torrent.total_downloaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
-            entry.2 += 1;
-        }
-    }
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-
-    let rows: Vec<TrackerStat> = totals
-        .into_iter()
-        .map(|((engine, tracker), (ul, dl, torrents))| TrackerStat {
-            active: 0,
-            cum_downloaded: dl,
-            cum_uploaded: ul,
-            download_rate: 0,
-            engine,
-            peers: 0,
-            torrents,
-            tracker,
-            ts: now,
-            upload_rate: 0,
-        })
-        .collect();
+    let (engines, store) = (state.engines.clone(), state.store.clone());
+    let rows = tokio::task::spawn_blocking(move || {
+        crate::benchsampler::tracker_totals(&engines, &store, now)
+    })
+    .await
+    .unwrap_or_default();
     Json(rows).into_response()
 }
 
@@ -4600,7 +4540,11 @@ async fn get_bench_range(
     }
 }
 
-/// One tracker's samples over a window.
+/// One tracker's samples over a window, averaged into at most
+/// `TRACKER_CHART_POINTS` buckets.
+///
+/// Read on a handle of its own, off the writer's mutex: in WAL the read neither
+/// waits for the sampler nor makes it wait.
 async fn get_tracker_stats_range(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -4608,17 +4552,28 @@ async fn get_tracker_stats_range(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(bench) = state.bench.as_ref() else {
+    if state.bench.is_none() {
         return Json(serde_json::json!([])).into_response();
-    };
-    let db = match bench.lock() {
-        Ok(db) => db,
-        Err(e) => e.into_inner(),
-    };
+    }
     let tracker = query_param(&query, "tracker").unwrap_or_default();
     let (start, end) = range_params(&query);
-    match db.tracker_samples_in_range(&tracker, start, end) {
-        Ok(rows) => Json(rows).into_response(),
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let bucket = crate::benchdb::tracker_bucket_secs(start, end, now);
+    let path = state.bench_path.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        crate::benchdb::BenchDb::open_read_only(&path)?
+            .tracker_samples_in_range(&tracker, start, end, bucket)
+    })
+    .await;
+    match rows {
+        Ok(Ok(rows)) => Json(rows).into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("tracker range query failed: {e}");
+            Json(serde_json::json!([])).into_response()
+        }
         Err(e) => {
             tracing::warn!("tracker range query failed: {e}");
             Json(serde_json::json!([])).into_response()
@@ -15976,6 +15931,22 @@ mod populated_tests {
                 .await;
         let text = body.to_string();
         assert!(text.contains("tracker.example"), "got {body}");
+    }
+
+    /// The per-tracker pass counts each engine's torrents under the host baked
+    /// into them, one row per (engine, tracker), stamped with the pass time.
+    #[tokio::test]
+    async fn the_tracker_pass_counts_each_engine_under_its_host() {
+        let (s, _h) = populated("pop-trackerpass");
+        let rows = crate::benchsampler::tracker_totals(&s.state.engines, &s.state.store, 42);
+        let of = |engine: &str| {
+            rows.iter()
+                .find(|r| r.engine == engine && r.tracker == "tracker.example")
+                .unwrap_or_else(|| panic!("no {engine} row in {rows:?}"))
+        };
+        assert_eq!(of("race").torrents, 2, "got {rows:?}");
+        assert_eq!(of("hoard").torrents, 2, "got {rows:?}");
+        assert!(rows.iter().all(|r| r.ts == 42));
     }
 
     /// ⭐⭐ A reannounce with no announce runner behind it answers **503**, out
