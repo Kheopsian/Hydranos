@@ -108,6 +108,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   and has no `op`: "remove X" left every selected torrent tagged X and nothing
   else. The selection now honours `op`; the single route keeps its documented
   replace semantics.
+- **The per-tracker pass no longer holds a runtime worker.** It reads every
+  torrent, 1.0-1.6 s on 1.1M, and ran inside the sampler's task; it now runs
+  on a blocking thread, never two at once. It warned at 1 s, so every pass
+  logged `tracker pass is slow`: the warning is now for 5 s.
 
 ### Security
 - **A .torrent could name files outside its download folder.** File paths
