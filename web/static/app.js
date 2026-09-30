@@ -7739,20 +7739,31 @@ async function showTrackerErrors(host) {
             html += `<div class="trk-err-class"><div class="trk-err-head">${tag} <strong>${esc(c.class)}</strong> <span class="sr-desc">x${c.count}</span> ${show}</div>`;
             (c.samples || []).forEach(sm => {
                 const when = sm.ago_mins > 0 ? t("{n} min ago").replace("{n}", sm.ago_mins) : t("just now");
-                const who = sm.name ? incoName(sm.name) : (sm.info_hash || "").slice(0, 12);
+                const who = incoName(sm);
                 const meta = [
                     "x" + sm.count,
                     when,
                     sm.event ? "event=" + sm.event : "",
                     who,
                 ].filter(Boolean).join(", ");
-                html += `<div class="trk-err-msg"><code>${esc(incoMsg(sm.message))}</code>`
+                html += `<div class="trk-err-msg"><code>${esc(incoMsg(_oneHalfIfSame(sm.message)))}</code>`
                     + `<div class="sr-desc" title="${esc(sm.info_hash || "")}">${esc(meta)}</div></div>`;
             });
             html += "</div>";
         });
     });
     body.innerHTML = html;
+}
+
+// A dual-stack announce reports both legs, and most of the time they failed
+// the same way: the same sentence twice is read as two errors.
+function _oneHalfIfSame(m) {
+    const p = String(m || "").split(" | ");
+    if (p.length === 2 && p[0].startsWith("v4: ") && p[1].startsWith("v6: ")
+        && p[0].slice(4) === p[1].slice(4)) {
+        return "v4 + v6: " + p[0].slice(4);
+    }
+    return m;
 }
 
 function closeTrackerErrors() {
