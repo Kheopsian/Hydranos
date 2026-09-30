@@ -24,6 +24,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **Watched folders.** A `.torrent` -- or a `.magnet` file holding a link --
+  dropped in a watched folder is added in the folder's category, which
+  decides the engine and the save path; optionally stopped. Scanned every
+  10 s rather than through inotify, which sees nothing written over SMB,
+  NFS or Unraid's `/mnt/user`; a file is read once its size and mtime held
+  over two scans, so a copy in progress is never read half-written. An added
+  file moves to `added/`, a refused one is renamed `.invalid` with a `.txt`
+  giving the reason; a torrent already in the client counts as added.
+  Nothing is deleted. Set in the Config tab (`GET/PUT /api/watch`), each
+  folder checked when saved: absolute, existing, with an existing category.
 - **An IP filter.** Addresses no connection is made with: an inbound one is
   refused before the handshake, an outbound dial before the TCP connect,
   and a peer already connected is dropped the moment it becomes blocked --
