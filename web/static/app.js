@@ -4053,14 +4053,13 @@ async function _showCategoryPicker(ev, move) {
         `<div class="ctx-scroll">${items}</div>`, anchor);
 }
 
-async function _changeCategorySelected(catName, move) {
-    _hideCtxMenu();
-    const label = move ? t("Move to category") : t("Set category (no move)");
-    // The daemon addresses each torrent on the engine that holds it and works
-    // out the rest: relabel, hand over to the other engine, or move the payload.
-    const params = { category: catName, move_files: !!move, allow_breaking_hardlinks: false };
-    const j = await _runSelection("category", params, label);
-    if (!j) return;
+// _runMoveSelection runs a selection action that may move data (`category`,
+// `location`) and asks, once for all of them, about the torrents whose move
+// would break hardlinks. Resolves to the combined {ok, moving, failed, errors},
+// or null when the selection could not start.
+async function _runMoveSelection(action, params, label) {
+    const j = await _runSelection(action, params, label);
+    if (!j) return null;
     let ok = (j.tally && j.tally.ok) || 0;
     let moving = (j.tally && j.tally.moving) || 0;
     let failed = j.failed || 0;
@@ -4078,7 +4077,7 @@ async function _changeCategorySelected(catName, move) {
                 { files: consent.files, size: formatBytes(consent.bytes) })
             + "\n\n" + t("Move them anyway?");
         if (await hydraConfirm(question)) {
-            const again = await _runSelection("category", Object.assign({}, params, { allow_breaking_hardlinks: true }),
+            const again = await _runSelection(action, Object.assign({}, params, { allow_breaking_hardlinks: true }),
                 label, { items: consent.items });
             if (again) {
                 ok += (again.tally && again.tally.ok) || 0;
@@ -4088,6 +4087,18 @@ async function _changeCategorySelected(catName, move) {
             }
         }
     }
+    return { ok, moving, failed, errors };
+}
+
+async function _changeCategorySelected(catName, move) {
+    _hideCtxMenu();
+    const label = move ? t("Move to category") : t("Set category (no move)");
+    // The daemon addresses each torrent on the engine that holds it and works
+    // out the rest: relabel, hand over to the other engine, or move the payload.
+    const params = { category: catName, move_files: !!move, allow_breaking_hardlinks: false };
+    const r = await _runMoveSelection("category", params, label);
+    if (!r) return;
+    const { ok, moving, failed, errors } = r;
 
     if (failed > 0) {
         hydraNotify(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: ok + moving, failed: failed }) + "\n\n" + errors.join("\n"));
@@ -4101,6 +4112,45 @@ async function _changeCategorySelected(catName, move) {
     }
     // A row whose payload is being moved keeps its category until the move
     // has finished, so the page is refetched rather than repainted.
+    fetchHoardPage(true);
+    updateRaceTorrents();
+}
+
+// Move the selection's data to a folder the operator types, category left as
+// it is: a category per destination folder is what this saves (GitHub #4).
+async function _setLocationSelected() {
+    _hideCtxMenu();
+    const count = _selCount();
+    if (count === 0) return;
+    // One torrent: start from where it is now, the usual edit being a folder
+    // next to it. Several: they need not share a folder, so nothing to offer.
+    let current = "";
+    if (!_selAll && count === 1) {
+        const v = [..._selected.values()][0];
+        const h = _selHash(v);
+        const rows = _selMode(v) === "race" ? _raceTorrents : _hoardAllTorrents;
+        const row = (rows || []).find(x => x.info_hash === h);
+        if (row) current = row.save_path || "";
+    }
+    const label = t("Set location");
+    const location = await hydraPrompt(
+        label + ": " + tp(count, "{n} torrent", "{n} torrents"),
+        t("Absolute path of the folder to move the data to. The category does not change. A torrent with several files keeps its own folder inside this one."),
+        current, t("Move"));
+    if (location === null) return;
+    const target = location.trim();
+    if (!target || target === current.replace(/\/+$/, "")) return;
+    const r = await _runMoveSelection("location", { location: target, allow_breaking_hardlinks: false }, label);
+    if (!r) return;
+    const { ok, moving, failed, errors } = r;
+    if (failed > 0) {
+        hydraNotify(t("Location set to \"{path}\": {ok} OK, {failed} failure(s).", { path: target, ok: ok + moving, failed: failed }) + "\n\n" + errors.join("\n"));
+    } else if (moving > 0) {
+        hydraNotify(tp(moving,
+            "Moving {n} torrent to \"{path}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.",
+            "Moving {n} torrents to \"{path}\" in the background. They keep seeding while their data is copied; follow them in Jobs.",
+            { n: moving, path: target }));
+    }
     fetchHoardPage(true);
     updateRaceTorrents();
 }
@@ -8192,6 +8242,10 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
 // header and every row are rendered from this list in the user's saved order,
 // so dragging a header reorders the whole column and hiding one drops it. Both
 // are persisted per-table in localStorage (hydra_colcfg_<table>).
+//
+// `hidden: true` marks an optional column: off until the operator turns it on
+// from the column menu, including for a saved config that predates it -- a new
+// column must not widen every existing table on upgrade.
 const TABLE_COLS = {
     "hoard-table": [
         { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash))}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
@@ -8205,6 +8259,7 @@ const TABLE_COLS = {
         { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(incoTracker(t.tracker_host) || "-")}</td>` },
         { id: "category", label: "Category", sort: "category", render: t => `<td>${esc(incoCat(t.category))}</td>` },
+        { id: "save_path", label: "Save Path", sort: null, hidden: true, render: t => `<td class="col-path" title="${esc(t.save_path || "")}">${esc(t.save_path || "-")}</td>` },
         { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "-"}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
@@ -8224,6 +8279,7 @@ const TABLE_COLS = {
         { id: "upload_rate", label: "Up", sort: "upload_rate", mobile: true, render: t => `<td>${formatSpeed(t.upload_rate)}</td>` },
         { id: "ratio", label: "Ratio", sort: "ratio", render: t => `<td>${displayRatio(t).toFixed(2)}</td>` },
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(incoTracker(t.tracker_host) || "-")}</td>` },
+        { id: "save_path", label: "Save Path", sort: null, hidden: true, render: t => `<td class="col-path" title="${esc(t.save_path || "")}">${esc(t.save_path || "-")}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
         // "Location", not "Agent": the value is `local-<engine>` for a row held here
@@ -8239,11 +8295,16 @@ function _colCfg(tableId) {
     const ids = TABLE_COLS[tableId].map(c => c.id);
     let cfg = null;
     try { cfg = JSON.parse(localStorage.getItem("hydra_colcfg_" + tableId) || "null"); } catch (_) { }
-    if (!cfg || !Array.isArray(cfg.order)) cfg = { order: ids.slice(), hidden: [] };
+    const optional = TABLE_COLS[tableId].filter(c => c.hidden).map(c => c.id);
+    if (!cfg || !Array.isArray(cfg.order)) cfg = { order: [], hidden: optional.slice() };
     const known = new Set(ids);
     cfg.order = cfg.order.filter(id => known.has(id));
-    ids.forEach(id => { if (!cfg.order.includes(id)) cfg.order.push(id); });
     cfg.hidden = Array.isArray(cfg.hidden) ? cfg.hidden.filter(id => known.has(id)) : [];
+    ids.forEach(id => {
+        if (cfg.order.includes(id)) return;
+        cfg.order.push(id);
+        if (optional.includes(id) && !cfg.hidden.includes(id)) cfg.hidden.push(id);
+    });
     return cfg;
 }
 function _colSaveCfg(tableId, cfg) { localStorage.setItem("hydra_colcfg_" + tableId, JSON.stringify(cfg)); }
@@ -9184,6 +9245,26 @@ function hydraConfirm(title, body, okLabel, danger) {
         { label: okLabel || t("Confirm"), value: true, kind: danger ? "delete" : "keep" },
         { label: t("Cancel"), value: false, kind: "cancel" },
     ]).then(v => v === true);
+}
+
+// hydraPrompt asks for one line of text. Resolves to the text, or null when
+// the dialog is cancelled or dismissed.
+function hydraPrompt(title, body, value, okLabel) {
+    const shown = hydraDialog(title, body, [
+        { label: okLabel || t("OK"), value: true, kind: "keep" },
+        { label: t("Cancel"), value: false, kind: "cancel" },
+    ]);
+    // hydraDialog has drawn the body by now; the field goes under the text.
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = value || "";
+    input.spellcheck = false;
+    input.style.cssText = "display:block;width:100%;box-sizing:border-box;margin-top:10px;font-family:monospace";
+    input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); _hydraModalClose(true); } });
+    document.getElementById("hydra-modal-body").appendChild(input);
+    input.focus();
+    input.select();
+    return shown.then(v => v === true ? input.value : null);
 }
 
 // _agentAction runs one action on a torrent that lives on an agent. Local rows

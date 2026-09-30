@@ -254,6 +254,7 @@ pub enum Action {
     Pin(bool),
     Tags { tags: Vec<String>, op: String },
     Category { category: String, move_files: bool, allow_breaking_hardlinks: bool },
+    Location { location: String, allow_breaking_hardlinks: bool },
     Reannounce,
     Recheck,
     Remove { delete_files: bool },
@@ -278,6 +279,14 @@ struct NoParams {}
 struct TagParams {
     tags: Vec<String>,
     op: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocationParams {
+    location: String,
+    #[serde(default)]
+    allow_breaking_hardlinks: bool,
 }
 
 #[derive(Deserialize)]
@@ -355,6 +364,13 @@ impl Action {
                     move_files: c.move_files,
                     allow_breaking_hardlinks: c.allow_breaking_hardlinks,
                 }
+            }
+            "location" => {
+                let l: LocationParams = params(p)?;
+                if l.location.trim().is_empty() {
+                    return Err(Refusal::bad("params.location is empty"));
+                }
+                Action::Location { location: l.location, allow_breaking_hardlinks: l.allow_breaking_hardlinks }
             }
             "reannounce" => {
                 params::<NoParams>(p)?;
@@ -585,19 +601,21 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
     match action {
         Action::Pause(_) => unreachable!("set-based"),
         Action::Pin(_) | Action::Tags { .. } => unreachable!("set-based"),
-        Action::Category { category, move_files, allow_breaking_hardlinks } => {
+        Action::Category { .. } | Action::Location { .. } => {
             let mode = if t.mode == "race" { "race" } else { "hoard" };
-            let (s, v) = c
-                .call(
-                    Method::POST,
-                    &format!("/api/{mode}/torrents/{h}/category"),
-                    Some(json!({
-                        "category": category,
-                        "move_files": move_files,
-                        "allow_breaking_hardlinks": allow_breaking_hardlinks,
-                    })),
-                )
-                .await;
+            let (route, body) = match action {
+                Action::Category { category, move_files, allow_breaking_hardlinks } => ("category", json!({
+                    "category": category,
+                    "move_files": move_files,
+                    "allow_breaking_hardlinks": allow_breaking_hardlinks,
+                })),
+                Action::Location { location, allow_breaking_hardlinks } => ("location", json!({
+                    "location": location,
+                    "allow_breaking_hardlinks": allow_breaking_hardlinks,
+                })),
+                _ => unreachable!("matched above"),
+            };
+            let (s, v) = c.call(Method::POST, &format!("/api/{mode}/torrents/{h}/{route}"), Some(body)).await;
             if s == StatusCode::CONFLICT && v.get("reason").and_then(Value::as_str) == Some("hardlinks") {
                 let files = v.get("hardlinked_files").and_then(Value::as_u64).unwrap_or(0);
                 let bytes = v.get("hardlinked_bytes").and_then(Value::as_u64).unwrap_or(0);
@@ -1159,6 +1177,21 @@ mod tests {
         assert_eq!(page["filtered"], 3, "the relabel shows at once");
         let page = crate::api::fleet_page(&s.state, "hoard", "fields=hash&state=stopped").await;
         assert_eq!(page["filtered"], 2);
+    }
+
+    /// A location is queued per torrent through the single-torrent route, and
+    /// an empty one is refused before any torrent is touched.
+    #[tokio::test]
+    async fn a_location_is_queued_per_torrent_and_an_empty_one_refused() {
+        let (s, h) = library("sel-location");
+        let to = std::env::temp_dir().join(format!("hydra-sel-location-{}", std::process::id()));
+        let (st, _) = start(&s, "location", json!({"selection": {"items": [{"hash": h[0]}]}, "params": {"location": " "}})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, v) = start(&s, "location", json!({"selection": {"items": [{"hash": h[0]}, {"hash": h[1]}]},
+                                                   "params": {"location": to.to_string_lossy()}})).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+        let j = wait(&s, v["job"].as_str().unwrap()).await;
+        assert_eq!(j["tally"]["moving"], 2, "{j}");
     }
 
     #[tokio::test]
