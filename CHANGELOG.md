@@ -283,6 +283,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   counters; both are measured again, over each sample's interval.
 
 ### Changed
+- **The category form no longer offers routing it never applied.** Strategy
+  (`all`, `least_torrents`, `most_free_space`, `least_load`, `fill_then_next`),
+  Free space reserve and Placement & per-agent save path were saved and then
+  ignored by every 4.x release: a category routes on its mode alone. They are
+  gone from the form and the categories table; a stored value is kept as it
+  was, including across an edit, and the API still accepts the fields. To put
+  a torrent on a given engine: `engine=` when adding, *Move to engine* after.
+  The wiki's *Categories & Routing* page said the opposite and is corrected.
 - **Announces are paced per tracker, by how fast each one answers.** The pool
   of announce workers had a fixed size, too small for a million torrents and
   blind to which tracker was slow. Each tracker now gets its own limit on
