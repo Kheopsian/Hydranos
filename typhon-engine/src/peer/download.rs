@@ -331,7 +331,7 @@ pub async fn commit_piece(
                     .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 // BEP 3: a tracker only learns a download finished if we say
                 // so. Private trackers count snatches from this event.
-                torrent.pending_announce_event.store(
+                torrent.pending_announce_event.fetch_or(
                     crate::torrent::meta::ANNOUNCE_EVENT_COMPLETED,
                     Ordering::Relaxed,
                 );

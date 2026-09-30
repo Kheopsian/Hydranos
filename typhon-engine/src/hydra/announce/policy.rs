@@ -11,12 +11,6 @@ use std::collections::BTreeMap;
 use super::overrides::{longest_override_key, override_host};
 use super::url::{self, Announce};
 
-/// A client to impersonate for one tracker: the eight-byte peer id prefix and
-/// the User-Agent that goes with it.
-///
-/// Some trackers keep a client whitelist. Claiming a whitelisted client is how
-/// 3.x got announces accepted, and the two halves must agree -- a qBittorrent
-/// peer id with a Hydra User-Agent is a mismatch a tracker can spot.
 /// Everything the announcer knows about how to talk to trackers.
 #[derive(Debug, Default, Clone)]
 pub struct Policy {
@@ -86,22 +80,6 @@ pub struct Request {
     pub ip_mode: typhon_engine::tracker::http::IpMode,
 }
 
-/// Build the announce for one torrent on one tracker.
-/// The eight-byte peer-id prefix this torrent must present in the BT
-/// handshake, or `None` when the binding's own will do.
-///
-/// The FIRST tracker decides. A torrent announcing to several private trackers
-/// cannot show a different client to each of them -- they share one swarm, and
-/// its peers compare notes. An operator who lists several will have overridden
-/// all of them anyway; taking the first is the only choice that is stable.
-///
-/// `None` for a torrent with no tracker override, which is every public one:
-/// DHT and PEX hand over peers with nobody vouching for them and nobody
-/// checking, so there is nothing to stay consistent with.
-///
-/// The spoof replaces only the eight-byte prefix, so the random tail -- which
-/// differs per binding -- survives. That is what keeps two engines of the same
-/// node distinguishable, and the self-connection guard working.
 /// The peer id this policy sends. One identity, the same to every tracker and
 /// to every peer.
 ///
@@ -127,6 +105,7 @@ pub fn prepare(
     left: i64,
     event: &str,
     numwant_override: Option<u32>,
+    tracker_id: Option<&str>,
 ) -> Option<Request> {
     let url_with_key = match passkey_for(policy, tracker_url) {
         Some(k) => apply_passkey(tracker_url, k),
@@ -147,6 +126,7 @@ pub fn prepare(
         event,
         public_ip: &policy.public_ip,
         numwant_override,
+        tracker_id,
     };
     let primary = url::build(&a)?;
 
@@ -227,7 +207,7 @@ mod tests {
     #[test]
     fn every_tracker_gets_the_same_identity() {
         let p = policy();
-        let r = prepare(&p, "https://mam.example/announce/K", &"ab".repeat(20), 16171, 0, 0, 0, "", None)
+        let r = prepare(&p, "https://mam.example/announce/K", &"ab".repeat(20), 16171, 0, 0, 0, "", None, None)
             .unwrap();
         assert!(r.url.contains("peer_id=-TY0001-abcdefghijkl"), "{}", r.url);
         assert_eq!(r.user_agent, "Hydra/4.0.0", "no tracker gets told anything else");
@@ -236,7 +216,7 @@ mod tests {
     #[test]
     fn an_ordinary_tracker_keeps_our_identity() {
         let p = policy();
-        let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 1, 2, 3, "started", None)
+        let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 1, 2, 3, "started", None, None)
             .unwrap();
         assert!(r.url.starts_with("https://tr4ker.net/announce/NEWKEY?"), "{}", r.url);
         assert!(r.url.contains("peer_id=-TY0001-abcdefghijkl"));

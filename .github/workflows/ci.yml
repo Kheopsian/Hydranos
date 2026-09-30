@@ -69,7 +69,22 @@ jobs:
       - name: Parse the entrypoint
         run: sh -n entrypoint.sh
       - name: Shellcheck
-        run: shellcheck -s sh entrypoint.sh
+        run: |
+          shellcheck -s sh entrypoint.sh
+          shellcheck tools/interop/run.sh
+
+  # The conformance suite in `rust` checks the client against OUR reading of
+  # the BEPs, on trackers we wrote for the purpose. This checks it against
+  # software somebody else wrote: opentracker, Torrust in private mode, and
+  # qBittorrent/libtorrent moving real pieces both ways, encrypted and not.
+  # What each test asserts is read back from the other side's own state.
+  # See docs/BITTORRENT-CONFORMANCE.md, "Interoperability".
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: opentracker, Torrust (private) and libtorrent
+        run: tools/interop/run.sh
 
   # The one check that needs a real kernel: bringing a WireGuard tunnel up and
   # proving the host's own routing is untouched by it.

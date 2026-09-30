@@ -24,6 +24,13 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **An interoperability suite, `tools/interop/run.sh`, run in CI.** The client
+  against software somebody else wrote: opentracker and Torrust in private
+  mode read back what they understood of our announces, and qBittorrent
+  (libtorrent 2.0.14) moves real pieces with us both ways, with encryption
+  required and on a private torrent. `docs/BITTORRENT-CONFORMANCE.md` is
+  rewritten around it, and a test now fails if the document names a test that
+  does not exist.
 - **`POST /mcp`: Hydranos speaks the Model Context Protocol.** An agent
   (Claude Code, or any MCP client) connects with the API key -- as `X-Api-Key`
   or `Authorization: Bearer` -- and gets tools instead of two hundred routes to
@@ -104,6 +111,40 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   900,000-torrent library was affected by the change.
 
 ### Fixed
+- **Trackers are told the session's counters, not the lifetime totals.**
+  `uploaded` and `downloaded` were the totals persisted across restarts, so
+  every boot sent `started` claiming the torrent's whole history -- the
+  signature tracker anti-cheat looks for, and a double count on a tracker that
+  credits a new peer's first report. They now count from zero at `started`, as
+  every mainstream client does; the lifetime totals stay ours.
+- **BEP 3 events are kept per tracker.** A fail-over tracker, or one added
+  while the torrent runs, hears `started` before anything else; `completed`
+  reaches every tracker that saw us leeching and is retried when one is down
+  (it used to be spent on the first tracker, and lost on a failure); a stop no
+  longer erases an owed `completed`; a resume opens a new session with
+  `started`. Events go out when they happen instead of at the next scheduled
+  announce.
+- **`min interval` holds for everything but the events themselves**, manual
+  re-announces and races included, per tracker. BEP 31 `retry in` (minutes or
+  `never`) and an HTTP `Retry-After` are obeyed; `tracker id` is echoed back
+  as `trackerid`; a `failure reason` of any type is a refusal; a negative
+  `interval` or count no longer wraps into a huge one.
+- **`left` comes from the pieces held**, not from `size - downloaded`: data
+  already on disk is no longer reported as missing.
+- **One peer id per engine.** The tracker was told one and every peer
+  handshake carried another, drawn separately. `key` is now salted with a
+  per-process secret: an unsalted hash of the peer id could be computed by any
+  peer that read it in a handshake.
+- **The announce User-Agent is `Hydranos/<version>`**, like every other
+  request the client makes. It said `Hydra/<version>`.
+- **Private torrents ignore peers a peer names unasked.** A PEX message or a
+  hole-punch `connect` received on a private torrent was acted on even though
+  we never advertised either: a peer could make us dial an address that did
+  not come from the tracker (BEP 27).
+- **The announcer uses the edited tracker list**, not the one the `.torrent`
+  carried when it was added. A torrent whose data vanished leaves its swarms
+  with `stopped` instead of announcing as a seed, and nothing is announced
+  while a torrent is being checked.
 - **A dry-run on a hardlink rule never answered at a million torrents.** A
   rule on `external_links`, `link_count`, `freeable_bytes` or `data_missing`
   stat'ed every file of the catalogue on the request that asked -- millions of

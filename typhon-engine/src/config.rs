@@ -152,6 +152,16 @@ pub struct EngineConfig {
     /// with its own peer_id. See `Binding` doc above for design context.
     #[serde(default)]
     pub bindings: Vec<Binding>,
+    /// The peer id this engine presents, drawn once and then kept.
+    ///
+    /// `peer_id()` used to draw a fresh random tail on every call, and it is
+    /// called from several places at startup -- the listener, the PROXY v2
+    /// listener, the announcer. A tracker was therefore told one peer id and
+    /// every peer handshake carried another, so "the peer the tracker lists"
+    /// and "the peer that connects" could never be matched up. One engine, one
+    /// identity: drawn on first use, identical for every caller after that.
+    #[serde(skip)]
+    session_peer_id: std::sync::OnceLock<[u8; 20]>,
 }
 
 fn default_true() -> bool { true }
@@ -224,6 +234,48 @@ pub fn peer_fingerprint_for(version: &str) -> String {
 }
 
 #[cfg(test)]
+mod peer_id_tests {
+    use super::EngineConfig;
+
+    fn config() -> EngineConfig {
+        serde_json::from_str("{}").expect("an empty config deserialises")
+    }
+
+    /// ⭐ The tracker and the swarm must see the SAME peer id. `peer_id()` was
+    /// a fresh draw per call, and the listener and the announcer each made
+    /// their own call, so the id a tracker listed was never the one that
+    /// connected.
+    #[test]
+    fn every_caller_gets_the_same_peer_id() {
+        let c = config();
+        let first = c.peer_id();
+        assert_eq!(c.peer_id(), first, "a second call must not draw again");
+        assert_eq!(c.clone().peer_id(), first, "a clone carries the identity with it");
+        let legacy = c.resolved_bindings();
+        assert!(!legacy.is_empty());
+        for b in &legacy {
+            assert_eq!(b.peer_id, first, "every listener presents the announced id");
+        }
+    }
+
+    /// Two engines in one process are two peers: the self-connection guard
+    /// and the trackers both tell them apart by the random tail.
+    #[test]
+    fn two_engines_have_two_identities() {
+        assert_ne!(config().peer_id(), config().peer_id());
+    }
+
+    /// BEP 20 shape: the eight-byte fingerprint, then twelve printable bytes.
+    #[test]
+    fn the_peer_id_is_the_fingerprint_then_twelve_alphanumerics() {
+        let c = config();
+        let id = c.peer_id();
+        assert_eq!(&id[..8], c.peer_fingerprint.as_bytes());
+        assert!(id[8..].iter().all(|b| b.is_ascii_alphanumeric()), "{:?}", &id[8..]);
+    }
+}
+
+#[cfg(test)]
 mod fingerprint_tests {
     use super::peer_fingerprint_for;
 
@@ -273,7 +325,13 @@ impl EngineConfig {
         Ok(config)
     }
 
+    /// This engine's peer id: the fingerprint, then twelve random characters
+    /// drawn once per process. Every caller gets the same twenty bytes.
     pub fn peer_id(&self) -> [u8; 20] {
+        *self.session_peer_id.get_or_init(|| self.draw_peer_id())
+    }
+
+    fn draw_peer_id(&self) -> [u8; 20] {
         let prefix = self.peer_fingerprint.as_bytes();
         let mut id = [0u8; 20];
         let copy_len = prefix.len().min(8);

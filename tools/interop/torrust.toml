@@ -1,0 +1,40 @@
+# Torrust Tracker in PRIVATE mode, for the interoperability suite.
+#
+# Private mode is the shape of every tracker that will judge Hydranos: an
+# announce is refused without a valid key in the URL, and the REST API lists
+# each registered peer with the counters it reported -- which is what the
+# suite reads back to check what the client actually said.
+[metadata]
+app = "torrust-tracker"
+purpose = "configuration"
+schema_version = "3.0.0"
+
+[logging]
+trace_filter = "info"
+
+[core]
+listed = false
+private = true
+
+[core.database]
+driver = "sqlite3"
+path = "/tmp/torrust-interop.db"
+
+[core.announce_policy]
+interval = 1800
+interval_min = 900
+
+[core.tracker_policy]
+persistent_torrent_completed_stat = false
+
+[[http_trackers]]
+bind_address = "0.0.0.0:7070"
+
+[http_api]
+bind_address = "0.0.0.0:1212"
+
+[http_api.access_tokens]
+admin = "interop-admin-token"
+
+[health_check_api]
+bind_address = "0.0.0.0:1313"

@@ -8,6 +8,9 @@
 //! running, the engines seed, listen and connect, and every tracker forgets
 //! about all of it within an announce interval.
 
+pub mod book;
+#[cfg(test)]
+mod interop;
 pub mod breaker;
 pub mod cache;
 pub mod overrides;
@@ -63,9 +66,14 @@ pub fn policy_from_config(config: &Config, peer_id: String, public_ip: String) -
         passkeys: config.announce_passkeys.clone(),
         ip_modes: config.announce_ip_modes.clone(),
         peer_id,
-        // The User-Agent carries the version, as 3.x did: a tracker operator
-        // asking "which client is this" gets an answer.
-        user_agent: format!("Hydra/{}", crate::api::HYDRANOS_VERSION),
+        // The User-Agent carries the product and the version, and it is the
+        // SAME string the engine uses everywhere else: a tracker operator
+        // asking "which client is this" gets one answer, the one that matches
+        // the `-HY` peer id. It said "Hydra/..." here while the rest of the
+        // client said "Hydranos/..." -- and "Hydra" is also the name of a
+        // well-known password brute-forcer, which is the last thing a tracker
+        // should see in its access log.
+        user_agent: typhon_engine::config::user_agent(),
         public_ip,
     }
 }
@@ -143,6 +151,15 @@ mod tests {
         config.announce_passkeys.insert("tr4ker.net".into(), "KEY".into());
         let p = policy_from_config(&config, "-TY0001-abcdefghijkl".into(), String::new());
         assert_eq!(p.passkeys.get("tr4ker.net").map(String::as_str), Some("KEY"));
-        assert!(p.user_agent.starts_with("Hydra/"));
+    }
+
+    /// ⭐ One product name on the wire. The announce said `Hydra/<v>` while
+    /// every other request said `Hydranos/<v>`.
+    #[test]
+    fn trackers_see_the_same_user_agent_as_everything_else() {
+        typhon_engine::config::set_version(crate::api::HYDRANOS_VERSION);
+        let p = policy_from_config(&Config::default(), String::new(), String::new());
+        assert_eq!(p.user_agent, format!("Hydranos/{}", crate::api::HYDRANOS_VERSION));
+        assert_eq!(p.user_agent, typhon_engine::config::user_agent());
     }
 }

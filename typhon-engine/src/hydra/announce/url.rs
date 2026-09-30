@@ -29,6 +29,9 @@ pub struct Announce<'a> {
     /// also cannot tell us whether the tracker is handing OUR address out.
     /// Once in a while we ask for a small list and look for ourselves in it.
     pub numwant_override: Option<u32>,
+    /// BEP 3 `trackerid`: what this tracker handed us as `tracker id` earlier
+    /// in the session, echoed back on every later announce to it.
+    pub tracker_id: Option<&'a str>,
 }
 
 /// The twenty bytes of an info hash, percent-encoded.
@@ -76,22 +79,12 @@ pub fn query_escape(s: &str) -> String {
 /// uTorrent all send one, and a tracker that loses track of a peer on every
 /// address change counts it twice.
 ///
-/// Derived from the random suffix of our peer id rather than stored on the
-/// side, and that is the whole point: the suffix is the one part of our
-/// identity that a per-tracker client spoof does NOT replace, and that a
-/// policy reload does not regenerate. A key that changed whenever the version
-/// did would be worse than no key at all -- it would tell the tracker that
-/// every announce comes from a new peer.
+/// Stable for the whole process and secret: it is salted with a value drawn
+/// at startup, because a key computable from the peer id -- which every peer
+/// reads in our handshake -- would let anyone who connected to us announce as
+/// us. See `typhon_engine::tracker::http::announce_key`.
 pub fn key_for(peer_id: &str) -> String {
-    let suffix = if peer_id.len() >= 20 { &peer_id[8..] } else { peer_id };
-    // FNV-1a, 32 bits. Not a security primitive and does not need to be: this
-    // only has to be stable for us and opaque to everyone else.
-    let mut h: u32 = 0x811c_9dc5;
-    for b in suffix.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    format!("{h:08x}")
+    typhon_engine::tracker::http::announce_key(peer_id.as_bytes())
 }
 
 /// The full announce URL, or None when the info hash is not 40 hex characters.
@@ -137,6 +130,10 @@ pub fn build(a: &Announce) -> Option<String> {
         url.push_str("&ip=");
         url.push_str(&query_escape(a.public_ip));
     }
+    if let Some(id) = a.tracker_id.filter(|s| !s.is_empty()) {
+        url.push_str("&trackerid=");
+        url.push_str(&query_escape(id));
+    }
     Some(url)
 }
 
@@ -175,6 +172,7 @@ mod tests {
             event: "",
             public_ip: "",
             numwant_override: None,
+            tracker_id: None,
         };
         let u = build(&a).unwrap();
         assert!(u.contains("&numwant=0"), "a complete torrent wants no peers: {u}");
@@ -195,6 +193,7 @@ mod tests {
             event: "started",
             public_ip: "203.0.113.7",
             numwant_override: None,
+            tracker_id: None,
         };
         let u = build(&a).unwrap();
         assert!(u.starts_with("https://tr4ker.net/announce?passkey=SECRET&info_hash="));
@@ -234,6 +233,7 @@ mod bep_rules {
             event: "",
             public_ip: "",
             numwant_override: None,
+            tracker_id: None,
         }
     }
 
@@ -496,6 +496,29 @@ mod bep_rules {
         let url = build(&a).unwrap();
         assert_eq!(value_of(&url, "passkey").as_deref(), Some("SECRET"));
         assert!(url.starts_with("https://tracker.example.net/announce?passkey=SECRET&info_hash="));
+    }
+
+    /// BEP 3: a `tracker id` the tracker handed out is echoed back as
+    /// `trackerid`, and nothing is sent when it handed none.
+    #[test]
+    fn bep3_a_tracker_id_is_echoed_back() {
+        assert!(!build(&seeding()).unwrap().contains("trackerid"));
+        let a = Announce { tracker_id: Some("abc 1"), ..seeding() };
+        assert_eq!(value_of(&build(&a).unwrap(), "trackerid").as_deref(), Some("abc+1"));
+    }
+
+    /// The key must not be derivable from the peer id: peers read our peer id
+    /// in every handshake. Same peer id, same process: same key.
+    #[test]
+    fn convention_the_key_is_not_a_function_of_the_public_peer_id_alone() {
+        let key = value_of(&build(&seeding()).unwrap(), "key").unwrap();
+        // The old derivation: FNV-1a of the peer id suffix, unsalted.
+        let mut h: u32 = 0x811c_9dc5;
+        for b in seeding().peer_id[8..].bytes() {
+            h ^= b as u32;
+            h = h.wrapping_mul(0x0100_0193);
+        }
+        assert_ne!(key, format!("{h:08x}"), "anyone holding our peer id could compute that");
     }
 
     /// An info hash that is not forty hex characters produces no URL at all,

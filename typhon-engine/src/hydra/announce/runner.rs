@@ -6,9 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use typhon_engine::torrent::meta::TorrentStatus;
+use typhon_engine::torrent::meta::{TorrentStatus, ANNOUNCE_EVENT_NONE, ANNOUNCE_EVENT_STOPPED};
 use typhon_engine::torrent::TorrentManager;
 
+use super::book;
 use super::breaker::Breaker;
 use super::cache::{Cache, Entry, Verify};
 use super::overrides::override_host;
@@ -63,6 +64,8 @@ fn proves_alive(kind: &str) -> bool {
 }
 
 const VERIFY_EVERY: u64 = 64;
+/// How soon to look again at a torrent whose data is being checked.
+const CHECKING_RETRY: Duration = Duration::from_secs(60);
 /// How many peers a self-check asks for. Small enough that a tracker returning
 /// fewer than this proves the list was not truncated.
 const VERIFY_NUMWANT: u32 = 50;
@@ -119,7 +122,8 @@ impl Catalogue for EngineCatalogue {
             .filter(|t| {
                 !t.is_paused.load(std::sync::atomic::Ordering::Relaxed)
                     || t.pending_announce_event.load(std::sync::atomic::Ordering::Relaxed)
-                        == typhon_engine::torrent::meta::ANNOUNCE_EVENT_STOPPED
+                        & typhon_engine::torrent::meta::ANNOUNCE_EVENT_STOPPED
+                        != 0
             })
             .map(|t| hex(&t.info_hash))
             .collect()
@@ -152,6 +156,7 @@ pub fn start(
     admission: Arc<scheduler::Admission>,
 ) -> tokio::sync::mpsc::Sender<scheduler::BumpReq> {
     let catalogue = Arc::new(EngineCatalogue { manager: manager.clone() });
+    let hook_manager = manager.clone();
     // One breaker for the engine, not one per torrent: an outage belongs to the
     // host, and every torrent listing it has to learn from the same evidence.
     let breaker = Arc::new(Breaker::default());
@@ -172,6 +177,17 @@ pub fn start(
     // Small on purpose: this carries hand-pressed buttons, not traffic. A full
     // queue means something is looping and must be refused, not buffered.
     let (bump_tx, bump_rx) = tokio::sync::mpsc::channel::<scheduler::BumpReq>(64);
+    // An owed event -- `completed`, `stopped`, a resumed torrent's `started`
+    // -- goes out now, not at the next scheduled announce, which for a seed
+    // is half an hour away. Through the bump queue, and `try_send`: a bulk
+    // stop of fifty thousand torrents must not become fifty thousand queued
+    // announces; what does not fit goes out with the catalogue refill.
+    {
+        let tx = bump_tx.clone();
+        hook_manager.set_announce_hook(Arc::new(move |ih: [u8; 20]| {
+            let _ = tx.try_send(scheduler::BumpReq { info_hash: hex(&ih), reply: None });
+        }));
+    }
     tokio::spawn(async move {
         scheduler::run(catalogue, announce, bump_rx, admission).await;
     });
@@ -210,22 +226,6 @@ fn seed_numwant(verify: Option<&Verify>, sampled: bool) -> Option<u32> {
     }
 }
 
-/// Which BEP 3 event this announce carries.
-///
-/// An owed event outranks `started`: a torrent that finishes or is stopped
-/// inside its very first announce cycle has more to tell the tracker than that
-/// it arrived. Everything else is a periodic announce, which BEP 3 wants
-/// carrying no event key at all -- not an empty one.
-fn event_for(owed: u8, first: bool) -> &'static str {
-    use typhon_engine::torrent::meta::{ANNOUNCE_EVENT_COMPLETED, ANNOUNCE_EVENT_STOPPED};
-    match owed {
-        ANNOUNCE_EVENT_COMPLETED => "completed",
-        ANNOUNCE_EVENT_STOPPED => "stopped",
-        _ if first => "started",
-        _ => "",
-    }
-}
-
 /// When to come back, given what this announce learned.
 ///
 /// Pulled out of `announce_one` so it can be tested: reaching it through the
@@ -261,7 +261,7 @@ fn next_announce_in(
     }
 }
 
-async fn announce_one(
+pub(super) async fn announce_one(
     manager: &Arc<TorrentManager>,
     policy: &Policy,
     breaker: &Breaker,
@@ -281,225 +281,262 @@ async fn announce_one(
     };
 
     use std::sync::atomic::Ordering;
-    let uploaded = torrent.total_uploaded.load(Ordering::Relaxed) as i64;
-    let downloaded = torrent.total_downloaded.load(Ordering::Relaxed) as i64;
-    // `left` is what we still NEED, not what this client happened to download.
-    // A torrent seeded from data already on disk -- an inject, a cross-seed, one
-    // of our own uploads -- never downloaded a byte through Hydra, so deriving
-    // left from the traffic counter announced it as a 0%-complete leecher: the
-    // tracker stopped counting it as a seed, and numwant jumped to 200. A
-    // seeding torrent is complete by definition, the same rule row.rs applies
-    // to progress.
-    let left = if torrent.status.load(Ordering::Relaxed)
-        == TorrentStatus::Seeding as u8
-    {
-        0
-    } else {
-        (torrent.meta.total_size as i64 - downloaded).max(0)
-    };
-    // Filtering the catalogue is not enough: a bump puts one torrent at the head
-    // of the queue directly, so a forced reannounce reached a paused torrent and
-    // told a tracker we are a peer for something we will not serve. The guard
-    // belongs here, the one place every announce funnels through -- a paused
-    // torrent announces to nobody, whoever asked. Reported as `gone` because
-    // that is what it is to the scheduler: the catalogue already filters paused
-    // torrents, so resuming one puts it back on the next refill.
-    // Read before the pause check, because a torrent that owes a departure is
-    // paused by definition and would otherwise be dropped here without ever
-    // telling its trackers.
-    use typhon_engine::torrent::meta::{ANNOUNCE_EVENT_NONE, ANNOUNCE_EVENT_STOPPED};
-    let owed = torrent.pending_announce_event.load(Ordering::Relaxed);
-
-    if torrent.is_paused.load(Ordering::Relaxed) && owed != ANNOUNCE_EVENT_STOPPED {
-        return gone;
+    let status = torrent.status.load(Ordering::Relaxed);
+    // Nothing is said while the data is being checked: `left` is not known
+    // until the check ends, and every client stays quiet until then. Back in a
+    // minute; an event raised meanwhile is still owed and still waiting.
+    if status == TorrentStatus::Checking as u8 {
+        return Outcome { next_in: CHECKING_RETRY, gone: false, ..gone };
     }
+    // A torrent whose data is gone cannot serve a single piece. Announcing it
+    // hands its address to leechers it will refuse; it leaves the swarm the
+    // way a stopped one does, and comes back with `started` once a recheck
+    // finds the data.
+    let silent = torrent.is_paused.load(Ordering::Relaxed) || status == TorrentStatus::Error as u8;
 
-    // Taken only now that it is certain to be sent: clearing it above would
-    // lose the event for a torrent that turned out to be paused.
-    let owed = torrent
-        .pending_announce_event
-        .swap(ANNOUNCE_EVENT_NONE, Ordering::Relaxed);
+    // BEP 3's counters are the SESSION's: bytes moved since `started`. The
+    // lifetime totals are ours and stay ours -- see `begin_announce_session`.
+    let uploaded = torrent.session_uploaded() as i64;
+    let downloaded = torrent.session_downloaded() as i64;
+    // `left` is what we still NEED, from the pieces we hold -- not what this
+    // client happened to download. Data already on disk (an inject, a
+    // cross-seed, a resumed download) was never downloaded by us and is not
+    // needed either; deriving left from the traffic counter announced such a
+    // torrent as a 0 %-complete leecher.
+    let left = torrent.bytes_left() as i64;
 
-    // "started" is only right the first time a tracker hears about a torrent.
-    // Sending it on every announce makes a tracker reset its view of us, and
-    // some read it as a client that restarts in a loop. An owed event outranks
-    // it: a torrent that completes on its very first announce cycle has more
-    // to say than that it arrived.
-    let event = event_for(owed, job.first);
+    // The engine's raised events, filed onto the trackers they are owed to.
+    // Taken in the same breath: from here on the book is the only record.
+    let mut raised = torrent.pending_announce_event.swap(ANNOUNCE_EVENT_NONE, Ordering::Relaxed);
+    if status == TorrentStatus::Error as u8 {
+        raised |= ANNOUNCE_EVENT_STOPPED;
+    }
+    let owes_something = {
+        let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+        book::file_owed(&mut book, raised, silent);
+        book.iter().any(|s| s.stopped_owed || (s.completed_owed && s.started))
+    };
+    // A paused torrent announces to nobody -- including when a forced
+    // re-announce targets it directly -- except to take back a `started` it
+    // gave. Reported as `gone`: the catalogue refill puts it back on resume.
+    if silent && !owes_something {
+        return if status == TorrentStatus::Error as u8 {
+            Outcome { next_in: Duration::from_secs(30 * 60), gone: false, ..gone }
+        } else {
+            gone
+        };
+    }
 
     // Sampled self-check. Only on a torrent that is already seeding: a leecher
     // asks for peers anyway, so its answer says nothing about numwant.
     let verify_this = left == 0
         && VERIFY_TICK.fetch_add(1, Ordering::Relaxed) % VERIFY_EVERY == 0;
 
+    // The list actually announced to: the operator can edit it at runtime,
+    // and `meta.trackers` is only what the .torrent said when it was added.
+    let tiers: Vec<Vec<String>> = torrent.live_trackers.read().clone();
+
     let mut interval = Duration::from_secs(30 * 60);
     let mut announced_at_all = false;
     // Any tracker answered 429: reported to the scheduler's concurrency control.
     let mut throttled = false;
     let mut timed_out = false;
-    for tier in &torrent.meta.trackers {
-        let mut tier_answered = false;
+    // Hoard: the first tier that has us ends the pass for periodic announces.
+    // Owed events still reach every tracker they are owed to.
+    let mut tier_done = false;
+    for tier in &tiers {
         for tracker_url in tier {
             let host = override_host(tracker_url);
-            if !breaker.allows(&host, std::time::Instant::now()) {
-                continue;
-            }
-            // Per tracker, not per torrent: we can be visible to one and not to
-            // another -- an IPv6-only tracker on a v4-only host, say.
-            let numwant_this = if left == 0 {
-                seed_numwant(cache.verify_for(&host).as_ref(), verify_this)
-            } else {
-                None
-            };
-            let Some(req) = policy::prepare(
-                policy,
-                tracker_url,
-                &job.info_hash,
-                port,
-                uploaded,
-                downloaded,
-                left,
-                event,
-                numwant_this,
-            ) else {
-                continue;
-            };
-            match typhon_engine::tracker::http::send_announce(&req.url, &req.user_agent, req.ip_mode).await {
-                Ok(resp) => {
-                    breaker.record(&host, true, std::time::Instant::now());
-                    cache.count_ok();
-                    if resp.interval > 0 {
-                        interval = Duration::from_secs(resp.interval as u64);
-                    }
-                    // `min interval` is a floor, not a suggestion. It exists so
-                    // a tracker can refuse to be asked again too soon whatever
-                    // the client thinks -- so it wins over `interval` when the
-                    // two disagree, rather than being averaged with it.
-                    let floor = Duration::from_secs(resp.min_interval as u64);
-                    if resp.min_interval > 0 && interval < floor {
-                        interval = floor;
-                    }
-                    // The swarm counts only exist here. Nothing else in the
-                    // process can tell how many seeders a parked torrent has.
-                    cache.record(
-                        &job.info_hash,
-                        Entry {
-                            complete: resp.complete as i64,
-                            incomplete: resp.incomplete as i64,
-                            tracker: tracker_url.clone(),
-                            at: std::time::Instant::now(),
-                            interval,
-                        },
-                    );
-                    // Publish the answer onto the torrent itself.
-                    //
-                    // These atomics are what every reader in the process
-                    // consults -- the detail panel, the list rows, the qBit
-                    // shim -- and until 4.4.5 nothing ever wrote them. They
-                    // were filled by the Go front, which owned the announce
-                    // loop; 4.0.0 moved that loop here and recorded the answer
-                    // only in `cache`, which no reader consults. The result was
-                    // a node reporting 0 seeders, 0 leechers and "never
-                    // announced" for all 300k torrents while announcing
-                    // normally, with no error anywhere.
-                    {
-                        use std::sync::atomic::Ordering;
-                        torrent.scrape_seeders.store(resp.complete as u32, Ordering::Relaxed);
-                        torrent.scrape_leechers.store(resp.incomplete as u32, Ordering::Relaxed);
-                        let now_unix = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        torrent.last_announce_at.store(now_unix, Ordering::Relaxed);
-                        torrent
-                            .next_announce_at
-                            .store(now_unix + interval.as_secs() as i64, Ordering::Relaxed);
-                        torrent.last_announce_ok.store(true, Ordering::Relaxed);
-                        if let Ok(mut g) = torrent.last_announce_error.lock() {
-                            g.clear();
-                        }
-                        if let Ok(mut g) = torrent.current_tracker.lock() {
-                            *g = host.clone();
+            // At most two sends to one tracker in one pass, and the second
+            // only ever an event: `completed` then `stopped`, for a download
+            // finished and stopped in one breath. Never an event followed by
+            // a periodic announce -- that is two requests where one is due.
+            for pass in 0..2 {
+                let now = typhon_engine::torrent::meta::now_secs();
+                let (step, tracker_id) = {
+                    let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+                    let slot = book::slot_mut(&mut book, tracker_url);
+                    let st = book::step(slot, now, tier_done && mode == Mode::Hoard, silent);
+                    if let book::Step::Skip(why) = st {
+                        if mode == Mode::Hoard && book::holds_us(slot, why) {
+                            tier_done = true;
                         }
                     }
-                    if verify_this {
-                        // Our own listen port is the marker: the tracker hands
-                        // back addresses, and only ours carries this port on
-                        // this swarm. Family tells us which half survived.
-                        let mut v4 = false;
-                        let mut v6 = false;
-                        for peer in &resp.peers {
-                            if peer.port() == port {
-                                match peer.ip() {
-                                    std::net::IpAddr::V4(_) => v4 = true,
-                                    std::net::IpAddr::V6(_) => v6 = true,
-                                }
-                            }
+                    (st, slot.tracker_id.as_deref().map(String::from))
+                };
+                let event = match step {
+                    book::Step::Send(ev) if pass == 0 || ev == "completed" || ev == "stopped" => ev,
+                    _ => break,
+                };
+                if !breaker.allows(&host, std::time::Instant::now()) {
+                    break;
+                }
+                // Per tracker, not per torrent: we can be visible to one and
+                // not to another -- an IPv6-only tracker on a v4-only host, say.
+                let numwant_this = if left == 0 && event != "stopped" {
+                    seed_numwant(cache.verify_for(&host).as_ref(), verify_this)
+                } else {
+                    None
+                };
+                let Some(req) = policy::prepare(
+                    policy,
+                    tracker_url,
+                    &job.info_hash,
+                    port,
+                    uploaded,
+                    downloaded,
+                    left,
+                    event,
+                    numwant_this,
+                    tracker_id.as_deref(),
+                ) else {
+                    break;
+                };
+                let result = typhon_engine::tracker::http::send_announce(&req.url, &req.user_agent, req.ip_mode).await;
+                {
+                    let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+                    book::record(book::slot_mut(&mut book, tracker_url), event, &result, typhon_engine::torrent::meta::now_secs());
+                }
+                match result {
+                    Ok(resp) => {
+                        breaker.record(&host, true, std::time::Instant::now());
+                        cache.count_ok();
+                        if let Some(w) = &resp.warning {
+                            // Accepted, with a remark. Worth an operator's eye,
+                            // not an error: the announce counted.
+                            tracing::info!(tracker = %host, warning = %w, "tracker warning");
                         }
-                        let swarm = resp.complete as i64 + resp.incomplete as i64;
-                        cache.record_verify(
-                            &host,
-                            Verify {
+                        if event == "stopped" {
+                            // A departure answers nothing we act on: no peers
+                            // to dial, no swarm counts for a torrent that is
+                            // leaving, no interval to wait for.
+                            continue;
+                        }
+                        if resp.interval > 0 {
+                            interval = Duration::from_secs(resp.interval as u64);
+                        }
+                        // `min interval` is a floor, not a suggestion. It exists
+                        // so a tracker can refuse to be asked again too soon
+                        // whatever the client thinks -- so it wins over
+                        // `interval` when the two disagree.
+                        let floor = Duration::from_secs(resp.min_interval as u64);
+                        if resp.min_interval > 0 && interval < floor {
+                            interval = floor;
+                        }
+                        // The swarm counts only exist here. Nothing else in the
+                        // process can tell how many seeders a parked torrent has.
+                        cache.record(
+                            &job.info_hash,
+                            Entry {
+                                complete: resp.complete as i64,
+                                incomplete: resp.incomplete as i64,
+                                tracker: tracker_url.clone(),
                                 at: std::time::Instant::now(),
-                                v4,
-                                v6,
-                                // Fewer peers returned than asked for means the
-                                // tracker gave us everything it had.
-                                conclusive: (resp.peers.len() as u32) < VERIFY_NUMWANT,
-                                swarm,
+                                interval,
                             },
                         );
+                        // Publish the answer onto the torrent itself.
+                        //
+                        // These atomics are what every reader in the process
+                        // consults -- the detail panel, the list rows, the qBit
+                        // shim -- and until 4.4.5 nothing ever wrote them. They
+                        // were filled by the Go front, which owned the announce
+                        // loop; 4.0.0 moved that loop here and recorded the
+                        // answer only in `cache`, which no reader consults. The
+                        // result was a node reporting 0 seeders, 0 leechers and
+                        // "never announced" for all 300k torrents while
+                        // announcing normally, with no error anywhere.
+                        {
+                            torrent.scrape_seeders.store(resp.complete, Ordering::Relaxed);
+                            torrent.scrape_leechers.store(resp.incomplete, Ordering::Relaxed);
+                            let now_unix = typhon_engine::torrent::meta::now_secs();
+                            torrent.last_announce_at.store(now_unix, Ordering::Relaxed);
+                            torrent
+                                .next_announce_at
+                                .store(now_unix + interval.as_secs() as i64, Ordering::Relaxed);
+                            torrent.last_announce_ok.store(true, Ordering::Relaxed);
+                            if let Ok(mut g) = torrent.last_announce_error.lock() {
+                                g.clear();
+                            }
+                            if let Ok(mut g) = torrent.current_tracker.lock() {
+                                *g = host.clone();
+                            }
+                        }
+                        if verify_this {
+                            // Our own listen port is the marker: the tracker
+                            // hands back addresses, and only ours carries this
+                            // port on this swarm. Family tells us which half
+                            // survived.
+                            let mut v4 = false;
+                            let mut v6 = false;
+                            for peer in &resp.peers {
+                                if peer.port() == port {
+                                    match peer.ip() {
+                                        std::net::IpAddr::V4(_) => v4 = true,
+                                        std::net::IpAddr::V6(_) => v6 = true,
+                                    }
+                                }
+                            }
+                            let swarm = resp.complete as i64 + resp.incomplete as i64;
+                            cache.record_verify(
+                                &host,
+                                Verify {
+                                    at: std::time::Instant::now(),
+                                    v4,
+                                    v6,
+                                    // Fewer peers returned than asked for means
+                                    // the tracker gave us everything it had.
+                                    conclusive: (resp.peers.len() as u32) < VERIFY_NUMWANT,
+                                    swarm,
+                                },
+                            );
+                        }
+                        announced_at_all = true;
+                        // The peers a tracker returns are only worth asking for
+                        // if something dials them. The engine's queue is where
+                        // the DHT puts its finds too, so they share one dial
+                        // budget.
+                        for peer in &resp.peers {
+                            typhon_engine::tracker::enqueue_dial(*peer, torrent.clone());
+                        }
+                        // Hoard: this tier has us. A race stays in every swarm
+                        // it belongs to: a cross-seeded torrent announced only
+                        // to its first tracker is absent from the others,
+                        // which is where its peers are.
+                        if mode == Mode::Hoard {
+                            tier_done = true;
+                        }
                     }
-                    announced_at_all = true;
-                    // The peers a tracker returns are only worth asking for if
-                    // something dials them. The engine's queue is where the DHT
-                    // puts its finds too, so they share one dial budget.
-                    for peer in &resp.peers {
-                        typhon_engine::tracker::enqueue_dial(*peer, torrent.clone());
-                    }
-                    tier_answered = true;
-                    // A race stays in every swarm it belongs to: a cross-seeded
-                    // torrent announced only to its first tracker is absent
-                    // from the others, which is where its peers are.
-                    if mode == Mode::Hoard {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let kind = classify(&redact(&e));
-                    // A 429 is an answer, not an outage: the tracker is up and
-                    // asking us to slow down, which the scheduler does, per
-                    // tracker. Counted as a failure here, five of them paused
-                    // the host for ten minutes, and every torrent due in that
-                    // time was pushed back half an hour without a request, a
-                    // failure or a minute of lateness to show for it. Calewood
-                    // on 2026-09-28: announced one second in every ten minutes,
-                    // 1 150 announces in an hour for 789 000 torrents.
-                    breaker.record(&host, proves_alive(kind), std::time::Instant::now());
-                    if kind == "rate_limited" {
-                        throttled = true;
-                    }
-                    if kind == "timeout" {
-                        timed_out = true;
-                    }
-                    cache.count_failed_kind(&host, kind);
-                    // At warn, not debug: a breaker that says a tracker
-                    // "stopped answering" without saying why sends an operator
-                    // to look at their network for a bug that is here. The
-                    // host, never the URL -- a tracker URL carries the passkey
-                    // in its path, and logs get pasted into issues.
-                    // ⚠ The error is redacted, not printed. reqwest embeds the
-                    // whole URL in its message, and a tracker URL carries the
-                    // passkey in its path -- logging it verbatim puts an
-                    // account credential in a file people paste into issues.
-                    tracing::warn!(tracker = %host, error = %redact(&e), "announce failed");
-                    // Same reason as the success path: the panel's "last error"
-                    // column read an atomic nobody wrote, so every tracker
-                    // showed "Success" while the log filled with refusals.
-                    // Redacted here too -- the raw error embeds the announce
-                    // URL, and that URL carries the passkey.
-                    {
-                        use std::sync::atomic::Ordering;
+                    Err(e) => {
+                        let kind = classify(&redact(&e));
+                        // A 429 is an answer, not an outage: the tracker is up
+                        // and asking us to slow down, which the scheduler does,
+                        // per tracker. Counted as a failure here, five of them
+                        // paused the host for ten minutes, and every torrent
+                        // due in that time was pushed back half an hour without
+                        // a request, a failure or a minute of lateness to show
+                        // for it. Calewood on 2026-09-28: announced one second
+                        // in every ten minutes, 1 150 announces in an hour for
+                        // 789 000 torrents.
+                        breaker.record(&host, proves_alive(kind), std::time::Instant::now());
+                        if kind == "rate_limited" {
+                            throttled = true;
+                        }
+                        if kind == "timeout" {
+                            timed_out = true;
+                        }
+                        cache.count_failed_kind(&host, kind);
+                        // At warn, not debug: a breaker that says a tracker
+                        // "stopped answering" without saying why sends an
+                        // operator to look at their network for a bug that is
+                        // here. The host, never the URL -- a tracker URL
+                        // carries the passkey in its path, and logs get pasted
+                        // into issues.
+                        tracing::warn!(tracker = %host, event = %event, error = %redact(&e), "announce failed");
+                        // Same reason as the success path: the panel's "last
+                        // error" column read an atomic nobody wrote, so every
+                        // tracker showed "Success" while the log filled with
+                        // refusals. Redacted here too.
                         torrent.last_announce_ok.store(false, Ordering::Relaxed);
                         if let Ok(mut g) = torrent.last_announce_error.lock() {
                             *g = redact(&e).to_string();
@@ -507,13 +544,25 @@ async fn announce_one(
                         if let Ok(mut g) = torrent.current_tracker.lock() {
                             *g = host.clone();
                         }
+                        break;
                     }
+                }
+                // Only an event can be followed by a second send in one pass.
+                if event.is_empty() || event == "started" {
+                    break;
                 }
             }
         }
-        if tier_answered && mode == Mode::Hoard {
-            break;
-        }
+    }
+
+    if silent {
+        // The departures are out (or attempted, once). Nothing else to say
+        // until the torrent runs again; the catalogue drops it on refill.
+        return if status == TorrentStatus::Error as u8 {
+            Outcome { next_in: Duration::from_secs(30 * 60), gone: false, throttled, timed_out, ..gone }
+        } else {
+            Outcome { throttled, timed_out, ..gone }
+        };
     }
 
     if announced_at_all {
@@ -521,7 +570,7 @@ async fn announce_one(
         // answered. Derived from the intention instead, every torrent would
         // look compliant the instant a setting was saved -- which is the
         // failure mode where nothing contradicts itself.
-        let sent = policy::announced_peer_id(policy, &torrent.meta.trackers);
+        let sent = policy::announced_peer_id(policy, &tiers);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -548,13 +597,17 @@ async fn announce_one(
     // process: every torrent is `job.first` again after a restart, and a race
     // added two hours ago has no business re-entering a burst because the
     // daemon was restarted.
+    //
+    // Whatever the phase wants, no tracker is asked inside its `min interval`:
+    // the book skips a floored tracker, so a fast phase against a tracker that
+    // states a floor costs no request at all.
     let fast_window_open = {
         let added = torrent.added_time;
         // An unknown or absurd added_time (0, or in the future) must not grant
         // an unbounded burst: treat it as outside the window.
         added > 0 && typhon_engine::torrent::meta::now_secs().saturating_sub(added) < RACE_FAST_FOR.as_secs() as i64
     };
-    let next_in = next_announce_in(
+    let mut next_in = next_announce_in(
         mode,
         interval,
         left,
@@ -562,6 +615,14 @@ async fn announce_one(
         fast_window_open,
         announced_at_all && torrent.total_uploaded.load(Ordering::Relaxed) > 0,
     );
+    // Coming back before any tracker will accept us is a wasted wake-up.
+    {
+        let book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+        let open = book::earliest_open(&book, typhon_engine::torrent::meta::now_secs());
+        if open > next_in {
+            next_in = open;
+        }
+    }
 
     Outcome { info_hash: job.info_hash, next_in, gone: false, throttled, timed_out }
 }
@@ -621,12 +682,6 @@ mod tests {
         assert!(!b.allows("dead.example", now), "a tracker that does not answer is still spared");
     }
 
-    use super::*;
-
-    /// ⭐ A tracker URL carries the passkey in its path. reqwest puts the
-    /// whole URL in its error message, so printing that message verbatim
-    /// publishes an account credential into the logs.
-    #[test]
     /// ⭐ THE FAST PHASE MUST END. `RACE_FAST_FOR` was declared, documented as
     /// "every 5 seconds for the first minute", and never read: what ran was 5s
     /// for as long as the torrent had not uploaded. A race downloading for half
@@ -682,6 +737,13 @@ mod tests {
         );
     }
 
+    /// ⭐ A tracker URL carries the passkey in its path. reqwest puts the
+    /// whole URL in its error message, so printing that message verbatim
+    /// publishes an account credential into the logs.
+    ///
+    /// (This test had lost its `#[test]` attribute to a neighbour and had not
+    /// run in a long time; it passes, which is the good news.)
+    #[test]
     fn an_error_message_never_carries_the_url() {
         let raw = "http request: error sending request for url \
                    (https://tk.tr4ker.net/announce/SECRETKEY?info_hash=%AB): timed out";
@@ -702,43 +764,6 @@ mod tests {
         assert_eq!(parse_hex(&hex(&raw)), Some(raw));
         assert_eq!(parse_hex("short"), None);
         assert_eq!(parse_hex(&"zz".repeat(20)), None);
-    }
-}
-
-#[cfg(test)]
-mod event_rules {
-    use super::event_for;
-    use typhon_engine::torrent::meta::{
-        ANNOUNCE_EVENT_COMPLETED, ANNOUNCE_EVENT_NONE, ANNOUNCE_EVENT_STOPPED,
-    };
-
-    /// BEP 3: the first announce for a torrent says `started`, and only it.
-    #[test]
-    fn the_first_announce_is_the_only_started_one() {
-        assert_eq!(event_for(ANNOUNCE_EVENT_NONE, true), "started");
-        assert_eq!(event_for(ANNOUNCE_EVENT_NONE, false), "");
-    }
-
-    /// BEP 3: a finished download is reported. Private trackers count snatches
-    /// from this event and from nothing else.
-    #[test]
-    fn a_finished_download_reports_completed() {
-        assert_eq!(event_for(ANNOUNCE_EVENT_COMPLETED, false), "completed");
-    }
-
-    /// BEP 3: a stopped torrent tells its trackers to drop it, rather than
-    /// leaving them to time the entry out.
-    #[test]
-    fn a_stopped_torrent_reports_stopped() {
-        assert_eq!(event_for(ANNOUNCE_EVENT_STOPPED, false), "stopped");
-    }
-
-    /// An owed event wins over `started`: a torrent can complete within its
-    /// first announce interval, and "it arrived" is the less useful of the two.
-    #[test]
-    fn an_owed_event_outranks_the_first_announce() {
-        assert_eq!(event_for(ANNOUNCE_EVENT_COMPLETED, true), "completed");
-        assert_eq!(event_for(ANNOUNCE_EVENT_STOPPED, true), "stopped");
     }
 }
 
@@ -881,24 +906,6 @@ mod classify_tests {
     fn a_message_with_no_url_is_left_alone() {
         assert_eq!(redact("operation timed out"), "operation timed out");
         assert_eq!(redact(""), "");
-    }
-
-    /// ⭐ An owed event OUTRANKS `started`: a torrent that finishes or is
-    /// stopped inside its first announce cycle has more to tell the tracker
-    /// than that it arrived.
-    #[test]
-    fn an_owed_event_outranks_started() {
-        use typhon_engine::torrent::meta::{ANNOUNCE_EVENT_COMPLETED, ANNOUNCE_EVENT_STOPPED};
-        assert_eq!(event_for(ANNOUNCE_EVENT_COMPLETED, true), "completed");
-        assert_eq!(event_for(ANNOUNCE_EVENT_STOPPED, true), "stopped");
-    }
-
-    /// ⭐ A periodic announce carries NO event key at all -- not an empty one.
-    /// BEP 3 is explicit, and some trackers refuse `event=`.
-    #[test]
-    fn a_periodic_announce_carries_no_event() {
-        assert_eq!(event_for(0, false), "", "no event, which the caller omits");
-        assert_eq!(event_for(0, true), "started", "the first one announces itself");
     }
 
     #[test]
@@ -1288,13 +1295,13 @@ mod announce_one_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// ⭐ ...except when it owes a `stopped` event. A torrent stopped by hand is
-    /// paused BY DEFINITION, and dropping it here would lose the one announce
-    /// that tells its trackers we are leaving.
+    /// A paused torrent that owes `stopped` to a tracker that never heard
+    /// `started` from it sends nothing: there is no session to take back.
+    /// (A departure after a `started` is `the_wire_sequence_of_a_whole_session`.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_paused_torrent_that_owes_a_stopped_event_still_announces_it() {
+    async fn a_stop_owed_to_nobody_sends_nothing() {
         use typhon_engine::torrent::meta::ANNOUNCE_EVENT_STOPPED;
-        let t = fake_tracker(OK_BODY, 200).await;
+        let t = recording_tracker(OPEN_BODY).await;
         let (mgr, root) = manager("paused-stop");
         let hash = add(&mgr, "iota", &t.url);
         {
@@ -1303,16 +1310,9 @@ mod announce_one_tests {
             st.pending_announce_event.store(ANNOUNCE_EVENT_STOPPED, std::sync::atomic::Ordering::Relaxed);
         }
         let (policy, breaker, cache) = parts();
-
-        let out = announce_one(
-            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: false },
-        )
-        .await;
-        assert!(
-            !out.gone,
-            "the goodbye announce must go out even though the torrent is paused"
-        );
+        let out = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert!(out.gone);
+        assert!(t.queries().is_empty(), "got {:?}", t.queries());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1334,6 +1334,318 @@ mod announce_one_tests {
         )
         .await;
         assert!(!out.gone);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -----------------------------------------------------------------------
+    // Whole-session scenarios against a tracker that records what it receives.
+    //
+    // Each one drives the real `announce_one` -- book, policy, URL builder,
+    // HTTP client -- and asserts on the queries that ARRIVED, never on what
+    // our own builder meant to send.
+    // -----------------------------------------------------------------------
+
+    struct Recording {
+        url: String,
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+        _stop: tokio::sync::oneshot::Sender<()>,
+    }
+
+    impl Recording {
+        fn queries(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+        fn last(&self) -> String {
+            self.queries().last().cloned().expect("the tracker received an announce")
+        }
+    }
+
+    /// `d8:intervali1800e5:peers0:e` -- no `min interval`, so no floor.
+    const OPEN_BODY: &[u8] = b"d8:intervali1800e5:peers0:e";
+
+    async fn recording_tracker(body: &'static [u8]) -> Recording {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s2 = seen.clone();
+        let app = axum::Router::new().route(
+            "/announce",
+            axum::routing::get(move |axum::extract::RawQuery(q): axum::extract::RawQuery| {
+                let s3 = s2.clone();
+                async move {
+                    s3.lock().unwrap().push(q.unwrap_or_default());
+                    body.to_vec()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        Recording { url: format!("http://{addr}/announce"), seen, _stop: tx }
+    }
+
+    fn param(q: &str, name: &str) -> Option<String> {
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            (k == name).then(|| v.to_string())
+        })
+    }
+
+    fn state(mgr: &Arc<TorrentManager>, hash: &str) -> Arc<typhon_engine::torrent::meta::TorrentState> {
+        mgr.get(&typhon_engine::torrent::hex_decode(hash).unwrap()).unwrap()
+    }
+
+    async fn run(
+        mgr: &Arc<TorrentManager>,
+        policy: &Policy,
+        breaker: &Breaker,
+        cache: &Cache,
+        mode: Mode,
+        hash: &str,
+    ) -> Outcome {
+        announce_one(mgr, policy, breaker, cache, 16371, mode, Job { info_hash: hash.to_string(), first: false }).await
+    }
+
+    /// ⭐⭐⭐ The whole life of a torrent, as the tracker sees it:
+    /// `started` with zero counters, periodic announces with no event and the
+    /// session's upload, `stopped` on pause, silence while paused, and a new
+    /// session -- `started`, counters from zero -- on resume.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_wire_sequence_of_a_whole_session() {
+        use std::sync::atomic::Ordering;
+        let t = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("session");
+        let hash = add(&mgr, "sess", &t.url);
+        let (policy, breaker, cache) = parts();
+
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let q = t.last();
+        assert_eq!(param(&q, "event").as_deref(), Some("started"), "{q}");
+        assert_eq!(param(&q, "uploaded").as_deref(), Some("0"));
+        assert_eq!(param(&q, "left").as_deref(), Some("0"));
+        assert!(param(&q, "key").is_some());
+
+        state(&mgr, &hash).total_uploaded.fetch_add(5000, Ordering::Relaxed);
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let q = t.last();
+        assert_eq!(param(&q, "event"), None, "a periodic announce has no event key: {q}");
+        assert_eq!(param(&q, "uploaded").as_deref(), Some("5000"));
+
+        mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+        let out = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let q = t.last();
+        assert_eq!(param(&q, "event").as_deref(), Some("stopped"), "{q}");
+        assert_eq!(param(&q, "uploaded").as_deref(), Some("5000"), "the departure carries the final count");
+        assert!(out.gone, "a stopped torrent leaves the schedule once it said so");
+
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(t.queries().len(), 3, "silence while paused");
+
+        mgr.start_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let q = t.last();
+        assert_eq!(param(&q, "event").as_deref(), Some("started"), "a resume is a new session: {q}");
+        assert_eq!(param(&q, "uploaded").as_deref(), Some("0"), "with counters from zero");
+        assert_eq!(t.queries().len(), 4);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ After a restart the tracker hears `started` with ZERO counters, not
+    /// the lifetime total: a `started` claiming half a terabyte is what
+    /// anti-cheat flags, and what a naive tracker credits twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_session_never_reports_the_lifetime_total() {
+        use std::sync::atomic::Ordering;
+        let t = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("lifetime");
+        let hash = add(&mgr, "life", &t.url);
+        let st = state(&mgr, &hash);
+        st.total_uploaded.store(500_000_000_000, Ordering::Relaxed);
+        st.total_downloaded.store(16384, Ordering::Relaxed);
+        st.begin_announce_session(); // what loading the resume data does
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let q = t.last();
+        assert_eq!(param(&q, "event").as_deref(), Some("started"));
+        assert_eq!(param(&q, "uploaded").as_deref(), Some("0"), "{q}");
+        assert_eq!(param(&q, "downloaded").as_deref(), Some("0"), "{q}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ `min interval` holds back every kind of announce: the periodic one,
+    /// a forced re-announce, and a race in its fast phase. Nothing reaches the
+    /// tracker before the floor it stated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn min_interval_holds_back_bumps_and_races_alike() {
+        const FLOOR: &[u8] = b"d8:intervali1800e12:min intervali900e5:peers0:e";
+        let t = recording_tracker(FLOOR).await;
+        let (mgr, root) = manager("floor");
+        let hash = add(&mgr, "floor", &t.url);
+        let (policy, breaker, cache) = parts();
+
+        run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        assert_eq!(t.queries().len(), 1);
+        let hoard = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let race = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        assert_eq!(t.queries().len(), 1, "inside the floor nothing is sent, whoever asks");
+        assert!(race.next_in >= Duration::from_secs(890), "a race waits for the floor too: {:?}", race.next_in);
+        assert!(hoard.next_in >= Duration::from_secs(890), "{:?}", hoard.next_in);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ `completed` reaches every tracker that saw us leeching -- a race
+    /// announces to all of them -- and carries `left=0`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_reaches_every_tracker_that_saw_us_leeching() {
+        use std::sync::atomic::Ordering;
+        use typhon_engine::torrent::meta::{TorrentStatus, ANNOUNCE_EVENT_COMPLETED};
+        let a = recording_tracker(OPEN_BODY).await;
+        let b = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("completed");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("leech", &a.url), "/tmp", false, false)
+            .expect("parses");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        let st = state(&mgr, &hash);
+        *st.live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
+        st.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        let (policy, breaker, cache) = parts();
+
+        run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        for t in [&a, &b] {
+            let q = t.last();
+            assert_eq!(param(&q, "event").as_deref(), Some("started"));
+            assert_eq!(param(&q, "left").as_deref(), Some("16384"), "a leecher needs its bytes: {q}");
+        }
+
+        st.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        st.pending_announce_event.fetch_or(ANNOUNCE_EVENT_COMPLETED, Ordering::Relaxed);
+        run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        for t in [&a, &b] {
+            let q = t.last();
+            assert_eq!(param(&q, "event").as_deref(), Some("completed"), "{q}");
+            assert_eq!(param(&q, "left").as_deref(), Some("0"));
+        }
+        run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        assert_eq!(param(&a.last(), "event"), None, "completed is said once");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// BEP 12 in hoard mode: the first tier that answers has us; the next
+    /// tier is not announced to at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hoard_stops_at_the_first_tier_that_answers() {
+        let a = recording_tracker(OPEN_BODY).await;
+        let b = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("tiers");
+        let hash = add(&mgr, "tier", &a.url);
+        *state(&mgr, &hash).live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(a.queries().len(), 2);
+        assert!(b.queries().is_empty(), "the backup tier is for failure, not for every announce");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A fail-over tracker hears `started` first. It used to hear a
+    /// periodic announce from a peer it had never registered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_fail_over_tracker_hears_started_first() {
+        let b = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("failover");
+        let hash = add(&mgr, "fail", &b.url);
+        *state(&mgr, &hash).live_trackers.write() =
+            vec![vec!["http://127.0.0.1:1/announce".into()], vec![b.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(param(&b.last(), "event").as_deref(), Some("started"));
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(param(&b.last(), "event"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// BEP 3: a `tracker id` comes back as `trackerid` on the next announce.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tracker_id_is_echoed_on_the_next_announce() {
+        const WITH_ID: &[u8] = b"d8:intervali1800e5:peers0:10:tracker id5:T-123e";
+        let t = recording_tracker(WITH_ID).await;
+        let (mgr, root) = manager("trackerid");
+        let hash = add(&mgr, "tid", &t.url);
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(param(&t.last(), "trackerid"), None, "nothing to echo on the first one");
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(param(&t.last(), "trackerid").as_deref(), Some("T-123"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// BEP 31: `retry in: never` retires the tracker for the session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bep31_never_means_never() {
+        const NEVER: &[u8] = b"d14:failure reason14:client refused8:retry in5:nevere";
+        let t = recording_tracker(NEVER).await;
+        let (mgr, root) = manager("never");
+        let hash = add(&mgr, "never", &t.url);
+        let (policy, breaker, cache) = parts();
+        for _ in 0..3 {
+            run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        }
+        assert_eq!(t.queries().len(), 1, "asked once, told never, never asked again");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Nothing is said while the data is being checked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_torrent_being_checked_says_nothing() {
+        use typhon_engine::torrent::meta::TorrentStatus;
+        let t = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("checking");
+        let hash = add(&mgr, "chk", &t.url);
+        state(&mgr, &hash).status.store(TorrentStatus::Checking as u8, std::sync::atomic::Ordering::Relaxed);
+        let (policy, breaker, cache) = parts();
+        let out = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert!(t.queries().is_empty());
+        assert!(!out.gone, "it is looked at again once the check is over");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A torrent whose data vanished cannot serve a piece: it leaves the swarm
+    /// with `stopped` and stays silent until a recheck brings it back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_torrent_whose_data_is_gone_leaves_the_swarm() {
+        let t = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("error");
+        let hash = add(&mgr, "err", &t.url);
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        state(&mgr, &hash).mark_error("No such file or directory");
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(param(&t.last(), "event").as_deref(), Some("stopped"));
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(t.queries().len(), 2, "silent until the data is back");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The list announced to is the live one: a tracker edited at runtime is
+    /// what the next announce reaches, not what the .torrent said.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_edited_tracker_list_is_the_one_announced_to() {
+        let t = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("edited");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("edit", "http://127.0.0.1:1/announce"), "/tmp", false, true)
+            .expect("parses");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        *state(&mgr, &hash).live_trackers.write() = vec![vec![t.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(t.queries().len(), 1, "the edited list is the list");
         let _ = std::fs::remove_dir_all(root);
     }
 }
