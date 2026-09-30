@@ -147,6 +147,17 @@ pub struct ActivityEntry {
     pub detail: String,
 }
 
+/// One edit applied to many copies at once, cf `Store::bulk_edit`.
+#[derive(Debug, Clone, Copy)]
+pub enum BulkEdit<'a> {
+    Paused(bool),
+    /// Pinning holds a download slot in ONE engine, so it is per copy;
+    /// unpinning clears every copy, as the single-torrent route does.
+    Pinned(bool),
+    Category(&'a str),
+    Tags { tags: &'a [String], add: bool },
+}
+
 /// One torrent as an export sees it: its `.torrent` and what the store adds.
 #[derive(Debug, Clone, Default)]
 pub struct ExportRow {
@@ -275,7 +286,13 @@ impl SlimFacts {
 
     /// One row of the torrents table as the list pass sees it.
     fn fact_of(&mut self, category: String, tags_raw: &str, paused: i64) -> SlimFact {
-        let category_id = if category.is_empty() {
+        let category_id = self.intern_category(category);
+        let tag_bits = self.tag_bits_of(split_tags(tags_raw));
+        SlimFact { category_id, tag_bits, user_paused: paused != 0 }
+    }
+
+    fn intern_category(&mut self, category: String) -> u16 {
+        if category.is_empty() {
             0
         } else if let Some(id) = self.cat_ids.get(&category) {
             *id
@@ -284,10 +301,12 @@ impl SlimFacts {
             self.categories.push(category.clone());
             self.cat_ids.insert(category, id);
             id
-        };
+        }
+    }
 
+    fn tag_bits_of(&mut self, tags: Vec<String>) -> u64 {
         let mut tag_bits: u64 = 0;
-        for tag in split_tags(tags_raw) {
+        for tag in tags {
             let id = if let Some(id) = self.tag_ids.get(&tag) {
                 *id
             } else {
@@ -304,7 +323,7 @@ impl SlimFacts {
             };
             tag_bits |= 1u64 << id;
         }
-        SlimFact { category_id, tag_bits, user_paused: paused != 0 }
+        tag_bits
     }
 
     pub fn get(&self, hash: &[u8; 20]) -> SlimFact {
@@ -856,6 +875,141 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Apply one edit to every `(info_hash, session)` in `targets`, in ONE
+    /// transaction, and bring the list facts up to date in place.
+    ///
+    /// The per-torrent routes each commit on their own and leave the list to
+    /// re-read every row they touched on its next request, under this same
+    /// lock: 15 000 tagged rows cost the next list 210 ms, and past 100 000
+    /// the list reads the whole library again (1.1 s at a million). Here the
+    /// new values are known, so the cached facts are patched directly and the
+    /// rows this call marked dirty are dropped from the queue.
+    ///
+    /// Returns the number of rows that changed. Callers bound `targets` (cf
+    /// `selection::BULK_TX`) so one call never holds the store for long.
+    pub fn bulk_edit(&mut self, targets: &[(String, String)], edit: BulkEdit) -> anyhow::Result<usize> {
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        let mark: i64 = if self.tracks_changes {
+            self.conn.query_row("SELECT coalesce(max(rowid), 0) FROM temp.slim_dirty", [], |r| r.get(0))?
+        } else {
+            0
+        };
+        // The new tag list of each row that changed, for the facts below.
+        let mut new_tags: Vec<(usize, Vec<String>)> = Vec::new();
+        let mut changed = 0usize;
+        {
+            let tx = self.conn.unchecked_transaction()?;
+            match edit {
+                BulkEdit::Paused(p) => {
+                    let mut st = tx.prepare_cached(
+                        "UPDATE torrents SET paused = ?3 WHERE info_hash = ?1 AND session = ?2 AND paused != ?3",
+                    )?;
+                    for (h, s) in targets {
+                        changed += st.execute(rusqlite::params![h, s, i64::from(p)])?;
+                    }
+                }
+                BulkEdit::Pinned(true) => {
+                    let mut st = tx.prepare_cached(
+                        "UPDATE torrents SET pinned = 1 WHERE info_hash = ?1 AND session = ?2 AND pinned != 1",
+                    )?;
+                    for (h, s) in targets {
+                        changed += st.execute(rusqlite::params![h, s])?;
+                    }
+                }
+                BulkEdit::Pinned(false) => {
+                    let mut st =
+                        tx.prepare_cached("UPDATE torrents SET pinned = 0 WHERE info_hash = ?1 AND pinned != 0")?;
+                    for (h, _) in targets {
+                        changed += st.execute(rusqlite::params![h])?;
+                    }
+                }
+                BulkEdit::Category(c) => {
+                    let mut st = tx.prepare_cached(
+                        "UPDATE torrents SET category = ?3 WHERE info_hash = ?1 AND session = ?2 AND category != ?3",
+                    )?;
+                    for (h, s) in targets {
+                        changed += st.execute(rusqlite::params![h, s, c])?;
+                    }
+                }
+                BulkEdit::Tags { tags, add } => {
+                    if add {
+                        let mut reg = tx.prepare_cached("INSERT OR IGNORE INTO tag_registry (name) VALUES (?1)")?;
+                        for t in tags {
+                            reg.execute([t])?;
+                        }
+                    }
+                    let mut get =
+                        tx.prepare_cached("SELECT tags FROM torrents WHERE info_hash = ?1 AND session = ?2")?;
+                    let mut put =
+                        tx.prepare_cached("UPDATE torrents SET tags = ?3 WHERE info_hash = ?1 AND session = ?2")?;
+                    for (i, (h, s)) in targets.iter().enumerate() {
+                        let raw: Option<String> = get
+                            .query_row(rusqlite::params![h, s], |r| r.get(0))
+                            .map(Some)
+                            .or_else(|e| match e {
+                                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                                e => Err(e),
+                            })?;
+                        let Some(raw) = raw else { continue };
+                        let mut list = split_tags(&raw);
+                        let before = list.clone();
+                        if add {
+                            for t in tags {
+                                if !list.contains(t) {
+                                    list.push(t.clone());
+                                }
+                            }
+                        } else {
+                            list.retain(|x| !tags.contains(x));
+                        }
+                        if list != before {
+                            changed += put.execute(rusqlite::params![h, s, list.join(",")])?;
+                            new_tags.push((i, list));
+                        }
+                    }
+                }
+            }
+            tx.commit()?;
+        }
+
+        if self.tracks_changes {
+            self.conn.execute("DELETE FROM temp.slim_dirty WHERE rowid > ?1", [mark])?;
+            // Patch the cached facts of every session this call wrote to.
+            let tags_by_target: std::collections::HashMap<usize, Vec<String>> = new_tags.into_iter().collect();
+            let sessions: std::collections::HashSet<&str> = targets.iter().map(|(_, s)| s.as_str()).collect();
+            for session in sessions {
+                let Some(cached) = self.slim.get_mut(session) else { continue };
+                let facts = std::sync::Arc::make_mut(cached);
+                for (i, (h, s)) in targets.iter().enumerate() {
+                    if s != session {
+                        continue;
+                    }
+                    let Some(key) = hex20(h) else { continue };
+                    let Some(mut fact) = facts.by_hash.get(&key).copied() else { continue };
+                    match edit {
+                        BulkEdit::Paused(p) => fact.user_paused = p,
+                        BulkEdit::Pinned(_) => continue,
+                        BulkEdit::Category(c) => fact.category_id = facts.intern_category(c.to_string()),
+                        BulkEdit::Tags { .. } => match tags_by_target.get(&i) {
+                            Some(list) => fact.tag_bits = facts.tag_bits_of(list.clone()),
+                            None => continue,
+                        },
+                    }
+                    facts.by_hash.insert(key, fact);
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Rows waiting in the list's re-read queue, for tests.
+    #[cfg(test)]
+    pub fn dirty_count_for_tests(&self) -> i64 {
+        self.conn.query_row("SELECT count(*) FROM temp.slim_dirty", [], |r| r.get(0)).unwrap_or(-1)
     }
 
     /// One-time enrolment tokens.
