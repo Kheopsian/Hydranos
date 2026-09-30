@@ -824,7 +824,6 @@
   "{n} done": "{n} faits",
   "{n} moving in the background": "{n} en déplacement en arrière-plan",
   "{n} already complete": "{n} déjà complets",
-  "{n} not applied": "{n} non appliqués",
   "{n} not applicable": "{n} non concernés",
   "{n} not on this node": "{n} absents de ce nœud",
   "{n} waiting for your answer": "{n} en attente de votre réponse",
@@ -834,5 +833,6 @@
   "Remove {n} torrents?": "Retirer {n} torrents ?",
   "Remove {n} torrents and delete their files?": "Retirer {n} torrents et supprimer leurs fichiers ?",
   "Force download": "Forcer le téléchargement",
-  "Stop forcing": "Ne plus forcer"
+  "Stop forcing": "Ne plus forcer",
+  "{n} already so": "{n} déjà dans cet état"
 }

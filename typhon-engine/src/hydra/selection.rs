@@ -54,10 +54,6 @@ pub const FILTER_KEYS: &[&str] = &[
     "state",
 ];
 
-/// Hashes per call to a bulk route: the same chunk the browser used, so one
-/// batch never holds the store longer than it did.
-const BULK_CHUNK: usize = 2000;
-
 /// Errors kept per job. The count is exact; the list is for reading.
 const ERRORS_KEPT: usize = 100;
 
@@ -587,24 +583,8 @@ fn category_of(state: &AppState, hash: &str) -> String {
 async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outcome {
     let h = t.hash.as_str();
     match action {
-        Action::Pause(_) => unreachable!("batched"),
-        Action::Pin(on) => {
-            if t.mode != "hoard" || !t.is_local() {
-                return Outcome::skip("skipped");
-            }
-            let (s, v) = c.call(Method::POST, &format!("/api/hoard/torrents/{h}/{}", if *on { "pin" } else { "unpin" }), None).await;
-            match s {
-                s if s.is_success() => Outcome::ok("ok"),
-                StatusCode::CONFLICT => Outcome::ok("complete"),
-                s => Outcome::failed(h, error_of(s, &v)),
-            }
-        }
-        Action::Tags { tags, op } => {
-            if t.mode != "hoard" {
-                return Outcome::skip("skipped");
-            }
-            c.simple(Method::POST, &format!("/api/hoard/torrents/{h}/tags"), Some(json!({"tags": tags, "op": op})), h, "ok").await
-        }
+        Action::Pause(_) => unreachable!("set-based"),
+        Action::Pin(_) | Action::Tags { .. } => unreachable!("set-based"),
         Action::Category { category, move_files, allow_breaking_hardlinks } => {
             let mode = if t.mode == "race" { "race" } else { "hoard" };
             let (s, v) = c
@@ -719,56 +699,117 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
     }
 }
 
-/// Stop or start: local copies through the bulk route of their engine, in
-/// chunks; copies on other nodes one at a time through the agent relay.
-async fn pause(c: &Caller, job: &Shared, paused: bool, targets: &[Target]) {
-    let mut by_engine: BTreeMap<String, Vec<&Target>> = BTreeMap::new();
-    for t in targets {
-        if t.is_local() {
-            by_engine.entry(t.engine()).or_default().push(t);
-        } else {
-            if cancelled(job) {
-                return;
-            }
-            let o = agent_action(c, t, if paused { "pause" } else { "resume" }).await;
-            record(job, 1, o);
+/// Rows per store transaction in a set-based write. One transaction of 50 000
+/// rows holds the store for a fraction of a second; a million is twenty of
+/// them, with every other writer let through in between.
+pub const BULK_TX: usize = 50_000;
+
+/// The store edit a set-based action makes, owned so it can cross into
+/// `spawn_blocking`.
+#[derive(Clone)]
+enum SetEdit {
+    Paused(bool),
+    Pinned(bool),
+    Category(String),
+    Tags { tags: Vec<String>, add: bool },
+}
+
+impl SetEdit {
+    /// The actions that are nothing but a write to the store (and, for a
+    /// pause, a flag in the engine): these never go torrent by torrent.
+    fn of(action: &Action) -> Option<SetEdit> {
+        match action {
+            Action::Pause(p) => Some(SetEdit::Paused(*p)),
+            Action::Pin(on) => Some(SetEdit::Pinned(*on)),
+            Action::Tags { tags, op } => Some(SetEdit::Tags {
+                tags: tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+                add: op == "add",
+            }),
+            // A relabel only. Moving files is real work per torrent, and a
+            // category of the OTHER mode hands the torrent over: both stay on
+            // the per-torrent route, which decides between them.
+            Action::Category { category, move_files: false, .. } => Some(SetEdit::Category(category.clone())),
+            _ => None,
         }
     }
-    for (engine, ts) in by_engine {
-        let url = if engine == "hoard" || engine == "race" {
-            format!("/api/{engine}/pause")
-        } else {
-            format!("/api/engines/{}/pause", enc(&engine))
-        };
-        for chunk in ts.chunks(BULK_CHUNK) {
+
+    /// Whether this copy is one the edit applies to, as the single routes decide.
+    fn applies(&self, t: &Target) -> bool {
+        match self {
+            SetEdit::Pinned(_) | SetEdit::Tags { .. } => t.mode == "hoard",
+            SetEdit::Paused(_) | SetEdit::Category(_) => true,
+        }
+    }
+}
+
+/// A store-only action on the whole selection: a few transactions, not one
+/// request per torrent. Copies on other nodes go through the agent relay for
+/// a pause, and are reported as not here for the rest, as before.
+async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, targets: &[Target]) {
+    let mut local: Vec<(String, String)> = Vec::with_capacity(targets.len());
+    for t in targets {
+        if !edit.applies(t) {
+            record(job, 1, Outcome::skip("skipped"));
+        } else if t.is_local() {
+            local.push((t.hash.clone(), t.engine()));
+        } else if let SetEdit::Paused(p) = edit {
             if cancelled(job) {
                 return;
             }
-            let hashes: Vec<&str> = chunk.iter().map(|t| t.hash.as_str()).collect();
-            let (s, v) = c.call(Method::POST, &url, Some(json!({"hashes": hashes, "paused": paused}))).await;
-            if !s.is_success() {
-                let why = format!("{engine}: {}", error_of(s, &v));
-                record(job, chunk.len(), Outcome { key: "failed".into(), error: Some(why), consent: None });
-                continue;
+            let o = agent_action(c, t, if p { "pause" } else { "resume" }).await;
+            record(job, 1, o);
+        } else {
+            record(job, 1, Outcome::skip("not_here"));
+        }
+    }
+    for chunk in local.chunks(BULK_TX) {
+        if cancelled(job) {
+            return;
+        }
+        let (st, rows, e) = (state.clone(), chunk.to_vec(), edit.clone());
+        let res = tokio::task::spawn_blocking(move || {
+            let changed = {
+                let mut store = st.store.lock().unwrap_or_else(|p| p.into_inner());
+                let edit = match &e {
+                    SetEdit::Paused(p) => crate::store::BulkEdit::Paused(*p),
+                    SetEdit::Pinned(p) => crate::store::BulkEdit::Pinned(*p),
+                    SetEdit::Category(cat) => crate::store::BulkEdit::Category(cat),
+                    SetEdit::Tags { tags, add } => crate::store::BulkEdit::Tags { tags, add: *add },
+                };
+                store.bulk_edit(&rows, edit)
+            };
+            // The engines, after the store and outside its lock: stopping a
+            // torrent touches the engine and its announces, not the database.
+            // Every copy, changed or not -- a row already marked stopped says
+            // nothing about whether its engine agrees.
+            if let (Ok(_), SetEdit::Paused(p)) = (&changed, &e) {
+                for (h, engine) in &rows {
+                    crate::api::apply_pause_to_engine(&st, engine, h, *p);
+                }
             }
-            // A chunk that applied fewer than it sent says so: that is how a
-            // half-applied bulk used to pass for a clean one.
-            let applied = v.get("applied").and_then(Value::as_u64).map(|a| a as usize).unwrap_or(chunk.len()).min(chunk.len());
-            if applied > 0 {
-                record(job, applied, Outcome::ok("ok"));
+            changed
+        })
+        .await;
+        match res {
+            Ok(Ok(changed)) => {
+                if changed > 0 {
+                    record(job, changed, Outcome::ok("ok"));
+                }
+                if changed < chunk.len() {
+                    record(job, chunk.len() - changed, Outcome::ok("unchanged"));
+                }
             }
-            if applied < chunk.len() {
-                record(job, chunk.len() - applied, Outcome::ok("not_applied"));
-            }
+            Ok(Err(e)) => record(job, chunk.len(), Outcome { key: "failed".into(), error: Some(format!("store: {e}")), consent: None }),
+            Err(e) => record(job, chunk.len(), Outcome { key: "failed".into(), error: Some(format!("store: {e}")), consent: None }),
         }
     }
 }
 
 async fn run(state: AppState, job: Shared, action: Action, targets: Vec<Target>) {
     let caller = Caller { router: crate::api::router(state.clone()), key: state.cfg().daemon.api_key.clone() };
-    match &action {
-        Action::Pause(paused) => pause(&caller, &job, *paused, &targets).await,
-        _ => {
+    match SetEdit::of(&action) {
+        Some(edit) => set_based(&state, &caller, &job, edit, &targets).await,
+        None => {
             // In rounds of `n`, not a stream: a stream of futures borrowing
             // this frame is not `Send` in a way `tokio::spawn` can prove.
             let n = action.concurrency();
@@ -1025,7 +1066,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stop_by_filter_goes_through_the_bulk_route_and_reports_what_applied() {
+    async fn a_stop_by_filter_is_one_store_write_and_reports_what_applied() {
         let (s, h) = library("sel-stop");
         let (st, v) = start(&s, "stop", json!({"selection": {"filter": "category=series", "expect": 1}})).await;
         assert_eq!(st, StatusCode::ACCEPTED, "{v}");
@@ -1069,5 +1110,62 @@ mod tests {
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         let r = get_job_route(State(s.state.clone()), Path("x".into()), RawQuery(None), HeaderMap::new()).await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn dirty_rows(s: &TestState) -> i64 {
+        let store = s.state.store.lock().unwrap();
+        store.dirty_count_for_tests()
+    }
+
+    /// ⭐ The single-torrent tags route REPLACES the set (`{"tags": [...]}` is
+    /// the state wanted), and the page used to send it `{tags, op}`: removing
+    /// tag X from a selection SET X on every torrent instead. The selection
+    /// honours `op`.
+    #[tokio::test]
+    async fn removing_a_tag_removes_that_tag_and_keeps_the_others() {
+        let (s, h) = library("sel-untag");
+        for tag in ["a", "b"] {
+            let (_, v) = start(&s, "tags", json!({"selection": {"items": [{"hash": h[0]}]}, "params": {"tags": [tag], "op": "add"}})).await;
+            wait(&s, v["job"].as_str().unwrap()).await;
+        }
+        assert_eq!(tags_of(&s, &h[0]), vec!["a".to_string(), "b".to_string()]);
+        let (_, v) = start(&s, "tags", json!({"selection": {"items": [{"hash": h[0]}]}, "params": {"tags": ["a"], "op": "remove"}})).await;
+        let j = wait(&s, v["job"].as_str().unwrap()).await;
+        assert_eq!(j["tally"]["ok"], 1, "{j}");
+        assert_eq!(tags_of(&s, &h[0]), vec!["b".to_string()]);
+    }
+
+    /// The list's cached facts are patched by the write itself: nothing is
+    /// left for the next list request to read again under the store's lock,
+    /// and that request already sees the new state.
+    #[tokio::test]
+    async fn a_set_based_write_leaves_the_list_nothing_to_reread() {
+        let (s, h) = library("sel-facts");
+        // Warm the list's cache, as a page view would.
+        crate::api::fleet_page(&s.state, "hoard", "limit=1").await;
+        assert_eq!(dirty_rows(&s), 0);
+        let (_, v) = start(&s, "tags", json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {"tags": ["x"], "op": "add"}})).await;
+        wait(&s, v["job"].as_str().unwrap()).await;
+        let (_, v) = start(&s, "stop", json!({"selection": {"filter": "category=movies", "expect": 2}})).await;
+        wait(&s, v["job"].as_str().unwrap()).await;
+        let (_, v) = start(&s, "category", json!({"selection": {"items": [{"hash": h[2]}]}, "params": {"category": "movies"}})).await;
+        wait(&s, v["job"].as_str().unwrap()).await;
+        assert_eq!(dirty_rows(&s), 0, "the writes left rows for the list to re-read");
+        let page = crate::api::fleet_page(&s.state, "hoard", "fields=hash&tag=x").await;
+        assert_eq!(page["filtered"], 2);
+        let page = crate::api::fleet_page(&s.state, "hoard", "fields=hash&category=movies").await;
+        assert_eq!(page["filtered"], 3, "the relabel shows at once");
+        let page = crate::api::fleet_page(&s.state, "hoard", "fields=hash&state=stopped").await;
+        assert_eq!(page["filtered"], 2);
+    }
+
+    #[tokio::test]
+    async fn a_second_identical_write_is_reported_unchanged_not_done() {
+        let (s, _) = library("sel-unchanged");
+        for expected in ["ok", "unchanged"] {
+            let (_, v) = start(&s, "stop", json!({"selection": {"filter": "", "expect": 3}})).await;
+            let j = wait(&s, v["job"].as_str().unwrap()).await;
+            assert_eq!(j["tally"][expected], 3, "{j}");
+        }
     }
 }

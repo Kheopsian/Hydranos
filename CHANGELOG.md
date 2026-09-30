@@ -75,6 +75,20 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   to say "the whole list"), and a filter must carry `expect`, the count the
   operator confirmed -- one that now matches more is refused with the new
   count and asked again.
+- **Stop, start, pin, tags and relabelling a selection are one write, not one
+  request per torrent.** The rows go to the store in transactions of 50 000,
+  and the list's cached facts are updated by the write itself, so the next
+  list request has nothing left to re-read under the store's lock (15 000
+  tagged rows used to cost it 210 ms; past 100 000 it re-read the whole
+  library). Moving files, rechecking, reannouncing, removing and handing
+  torrents to another node still go one by one: each is real work.
+
+### Fixed (unreleased features)
+- **Removing a tag from a selection set that tag instead.** The page sent
+  `{tags, op}` to the single-torrent tags route, which replaces the whole set
+  and has no `op`: "remove X" left every selected torrent tagged X and nothing
+  else. The selection now honours `op`; the single route keeps its documented
+  replace semantics.
 
 ### Security
 - **A .torrent could name files outside its download folder.** File paths
