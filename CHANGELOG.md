@@ -111,6 +111,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   900,000-torrent library was affected by the change.
 
 ### Fixed
+- **Per-tracker stats read only what they show.** The table built the
+  full JSON row of every torrent to read three fields from it (8 s on a
+  million torrents), and the chart's day of samples was filtered out of the
+  tracker's whole history (2 s warm, 13 s cold on two months of samples).
+  `tracker_samples` is now indexed on `(tracker, ts)`; the first start after
+  upgrading builds that index once, about 15 s on such a database.
 - **Trackers are told the session's counters, not the lifetime totals.**
   `uploaded` and `downloaded` were the totals persisted across restarts, so
   every boot sent `started` claiming the torrent's whole history -- the

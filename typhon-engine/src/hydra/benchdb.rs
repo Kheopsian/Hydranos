@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS tracker_samples (
     peers REAL DEFAULT 0, active REAL DEFAULT 0, torrents REAL DEFAULT 0,
     cum_uploaded INTEGER DEFAULT 0, cum_downloaded INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_tracker_samples_ts ON tracker_samples(ts);
-CREATE INDEX IF NOT EXISTS idx_tracker_samples_trk ON tracker_samples(tracker);
+CREATE INDEX IF NOT EXISTS idx_tracker_samples_trk_ts ON tracker_samples(tracker, ts);
+DROP INDEX IF EXISTS idx_tracker_samples_trk;
 ";
 
 /// The columns of `bench_samples`, in the order the graphs read them.
@@ -525,6 +526,10 @@ impl BenchDb {
     }
 
     /// One tracker's samples between two instants, oldest first.
+    ///
+    /// Served by the `(tracker, ts)` index. With `tracker` alone the window was
+    /// filtered row by row over the tracker's whole history: 1.5M rows read to
+    /// return the 17k of a day on the production node, 2 s warm and 13 s cold.
     pub fn tracker_samples_in_range(
         &self,
         tracker: &str,
@@ -1195,6 +1200,33 @@ mod sample_tests {
     fn the_latest_tracker_samples_are_empty_on_a_fresh_database() {
         let d = db();
         assert!(d.tracker_samples_latest().unwrap().is_empty());
+    }
+
+    /// The chart asks for one day of one tracker. The index has to bound BOTH,
+    /// or SQLite walks the tracker's whole history to keep one day of it --
+    /// invisible on a test database, 13 s on two months of production samples.
+    #[test]
+    fn a_tracker_window_is_bounded_by_the_index_not_filtered_row_by_row() {
+        let d = db();
+        let plan: Vec<String> = d
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT ts FROM tracker_samples
+                  WHERE tracker = ?1 AND ts >= ?2 AND ts <= ?3 ORDER BY ts",
+            )
+            .unwrap()
+            .query_map(rusqlite::params!["t.example", 0.0, 1.0], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            plan.iter().any(|p| p.contains("(tracker=? AND ts>? AND ts<?)")),
+            "the window must be an index range, got {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|p| p.contains("TEMP B-TREE")),
+            "the index already returns the window in time order, got {plan:?}"
+        );
     }
 
     /// The Records card must render on a library that has done nothing yet.

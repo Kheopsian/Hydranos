@@ -4485,23 +4485,28 @@ async fn get_tracker_stats_current(
         }
     }
 
+    // Three fields read straight off each torrent. This loop used to build the
+    // full `torrent_to_json` row for every torrent to pick those three out of
+    // it: 8 s per call over the million torrents of the production node.
     for engine in state.engines.engines() {
         for torrent in engine.manager.all().iter() {
-            let row = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
             // The host baked into the torrent, NOT a result of announcing:
             // live_trackers is filled when the torrent is built. So a torrent
             // that has never announced still counts under its own tracker, and
             // this bucket holds only the ones carrying no announce URL at all.
             // The name says that; "(none)" invited the other reading.
-            let host = row
-                .get("tracker_host")
-                .and_then(|v| v.as_str())
+            let host = torrent
+                .live_trackers
+                .read()
+                .iter()
+                .flatten()
+                .next()
+                .map(|u| typhon_engine::rpc::dispatch::tracker_host_of(u))
                 .filter(|h| !h.is_empty())
-                .unwrap_or("(no tracker)")
-                .to_string();
+                .unwrap_or_else(|| "(no tracker)".to_string());
             let entry = totals.entry((engine.id.clone(), host)).or_insert((0, 0, 0));
-            entry.0 += row.get("total_upload").and_then(|v| v.as_i64()).unwrap_or(0);
-            entry.1 += row.get("total_download").and_then(|v| v.as_i64()).unwrap_or(0);
+            entry.0 += torrent.total_uploaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
+            entry.1 += torrent.total_downloaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
             entry.2 += 1;
         }
     }
