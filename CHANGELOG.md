@@ -24,6 +24,18 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **Set location: move a torrent's data to any folder, category unchanged**
+  (#4, and the save-path half of #15). Right-click → *Set location…* asks for
+  an absolute path, pre-filled with the current one for a single torrent.
+  Before, the only way to move data was a category, which meant one category
+  per destination folder. It is the same background job as *Change category
+  + move files* -- the torrent keeps seeding while cross-filesystem copies
+  run, hardlinks are asked about first, and a file another torrent reads is
+  never taken. API: `POST /api/{hoard,race}/torrents/:hash/location`
+  `{"location", "allow_breaking_hardlinks"}` and the selection action
+  `location`. A path that is relative or holds `.`/`..` is refused (400).
+- **An optional Save Path column** in the Hoard and Race tables (#2), off by
+  default: turn it on from the column menu (right-click a header).
 - **A tracker's errors open on a click, in its own words.** The Trackers tab
   counted "other x10" with no way to see what "other" was. Each class now
   keeps the last few distinct messages of the hour (the same words with other

@@ -1634,6 +1634,90 @@ mod tests {
     }
 
 
+    // --- moving data to a folder of one's choosing -------------------------
+
+    async fn set_loc(s: &TestState, hash: &str, body: Value) -> (StatusCode, Value) {
+        internal(&s.state, Method::POST, &format!("/api/hoard/torrents/{hash}/location"), Some(body)).await
+    }
+
+    /// The move a category does, to a folder no category names, and the
+    /// category is left as it was (GitHub #4).
+    #[tokio::test]
+    async fn a_location_moves_the_data_and_keeps_the_category() {
+        let s = st("loc-move");
+        let (src, dst) = (s.dir.join("src"), s.dir.join("tv").join("Some Show"));
+        let h = add_on_disk(&s, &src, "episode.bin");
+        make_category(&s, "books", &s.dir.join("books")).await;
+        let (st_, v) = set_cat(&s, &h, json!({"category": "books"})).await;
+        assert_eq!(st_, StatusCode::OK, "{v}");
+
+        let (st_, v) = set_loc(&s, &h, json!({"location": dst.to_string_lossy()})).await;
+        assert_eq!(st_, StatusCode::ACCEPTED, "{v}");
+        assert_eq!(v["kind"], "move_data");
+        let (st2, _) = set_loc(&s, &h, json!({"location": dst.to_string_lossy()})).await;
+        assert_eq!(st2, StatusCode::CONFLICT, "a second move while one is queued is refused");
+
+        run_next_job(&s).expect("the move");
+        assert!(dst.join("episode.bin").exists(), "the file is at the new location");
+        assert!(!src.join("episode.bin").exists(), "and no longer at the old one");
+        assert_eq!(root_of(&s, &h), dst, "the engine reads it from the new root");
+        let row = ok_call(&s, "find_torrents", json!({"search": "episode"})).await;
+        assert_eq!(row["rows"][0]["category"], "books", "the category did not change");
+        assert_eq!(row["rows"][0]["save_path"], dst.to_string_lossy().as_ref());
+    }
+
+    #[tokio::test]
+    async fn a_location_already_in_place_moves_nothing() {
+        let s = st("loc-noop");
+        let src = s.dir.join("src");
+        let h = add_on_disk(&s, &src, "here.bin");
+        // A trailing separator names the same folder.
+        let (st_, v) = set_loc(&s, &h, json!({"location": format!("{}/", src.display())})).await;
+        assert_eq!(st_, StatusCode::OK, "{v}");
+        assert_eq!(v["moved"], false);
+        assert!(src.join("here.bin").exists());
+        assert!(s.store.lock().unwrap().claim_next_job().is_none(), "no job was queued");
+    }
+
+    #[tokio::test]
+    async fn a_location_that_is_not_a_plain_absolute_path_is_refused() {
+        let s = st("loc-bad");
+        let src = s.dir.join("src");
+        let h = add_on_disk(&s, &src, "stay.bin");
+        let climbing = format!("{}/../elsewhere", src.display());
+        for bad in ["", "   ", "relative/dir", "./dir", climbing.as_str()] {
+            let (st_, v) = set_loc(&s, &h, json!({"location": bad})).await;
+            assert_eq!(st_, StatusCode::BAD_REQUEST, "{bad:?}: {v}");
+        }
+        let (st_, _) = set_loc(&s, &h, json!({})).await;
+        assert_eq!(st_, StatusCode::BAD_REQUEST, "no location at all");
+        assert!(src.join("stay.bin").exists());
+        assert_eq!(root_of(&s, &h), src);
+    }
+
+    /// The refusals of a category move hold for a location: a file another
+    /// torrent reads is not taken away from it.
+    #[tokio::test]
+    async fn a_location_does_not_take_a_shared_file() {
+        let s = st("loc-shared");
+        let (src, dst) = (s.dir.join("src"), s.dir.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("same.bin"), vec![0u8; 100]).unwrap();
+        let a = add_bytes(&s, &torrent_bytes("same.bin"), &src);
+        let b_bytes = {
+            let mut v = torrent_bytes("same.bin");
+            let i = v.len() - 3;
+            v[i] ^= 0xFF;
+            v
+        };
+        add_bytes(&s, &b_bytes, &src);
+        let (st_, v) = set_loc(&s, &a, json!({"location": dst.to_string_lossy()})).await;
+        assert_eq!(st_, StatusCode::CONFLICT, "{v}");
+        assert_eq!(v["reason"], "shared");
+        assert!(src.join("same.bin").exists());
+    }
+
+
     // --- moves: what is NOT this torrent's stays put ------------------------
 
     /// A torrent from a list of (path components, length). Lengths and piece
