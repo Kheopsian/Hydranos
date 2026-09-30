@@ -117,6 +117,20 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   tracker's whole history (2 s warm, 13 s cold on two months of samples).
   `tracker_samples` is now indexed on `(tracker, ts)`; the first start after
   upgrading builds that index once, about 15 s on such a database.
+- **Per-tracker stats show real rates, peers and active torrents.** Since
+  the Rust port they were stored and served as a constant 0, so the chart
+  was flat. The sampler now takes one pass over the torrents every 30 s; the
+  table is served from that pass instead of reading every torrent on each
+  poll, and the chart from the same figures.
+- **The tracker chart gets at most ~300 points per engine**, averaged over
+  buckets, instead of every sample: one day of one tracker was 17k rows and
+  3 MB. It reads on its own connection and no longer waits for the sampler.
+- **Tracker history older than 48 h is kept as 5-minute rows.** Existing
+  history is folded in the background after upgrading, 6 h of samples per
+  pass (0.3-0.45 s each): on two months of 5 s samples, 14.4M rows become
+  800k in about 20 minutes. The space is reused by later samples; a
+  `VACUUM` of `bench.db` returns it to the disk.
+- **`bench.db` is in WAL mode**, like the store, except on a network share.
 - **Trackers are told the session's counters, not the lifetime totals.**
   `uploaded` and `downloaded` were the totals persisted across restarts, so
   every boot sent `started` claiming the torrent's whole history -- the

@@ -754,8 +754,14 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
 /// "https://tk.tr4ker.net/announce/KEY" -> "tk.tr4ker.net". Lets the list view
 /// label each torrent with its (static) tracker without a per-torrent RPC.
 pub fn tracker_host_of(url: &str) -> String {
+    tracker_host_str(url).to_string()
+}
+
+/// `tracker_host_of` without the copy, for loops over the whole catalogue that
+/// only look the host up.
+pub fn tracker_host_str(url: &str) -> &str {
     let s = url.split("://").nth(1).unwrap_or(url);
-    s.split(|c| c == '/' || c == ':').next().unwrap_or("").to_string()
+    s.split(|c| c == '/' || c == ':').next().unwrap_or("")
 }
 
 pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
