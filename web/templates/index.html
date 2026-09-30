@@ -333,6 +333,7 @@
                                 <th>Downloaded</th>
                                 <th>Uploaded</th>
                                 <th>Flags</th>
+                                <th></th>
                             </tr>
                         </thead>
                         <tbody id="detail-peers-tbody">
@@ -560,7 +561,7 @@
                     <table id="h-detail-peers-table">
                         <thead><tr>
                             <th>IP</th><th>Client</th><th>Progress</th>
-                            <th>Down</th><th>Up</th><th>Downloaded</th><th>Uploaded</th><th>Flags</th>
+                            <th>Down</th><th>Up</th><th>Downloaded</th><th>Uploaded</th><th>Flags</th><th></th>
                         </tr></thead>
                         <tbody id="h-detail-peers-tbody"></tbody>
                     </table>
@@ -951,6 +952,33 @@
                         <div class="sr-field"><input type="password" id="newpass-input" class="sr-input" placeholder="New password (min 6)"><button class="btn-small btn-accent" onclick="changePassword()" style="margin-left:6px">Change</button></div>
                     </div>
                     <div id="newpass-result" class="result-msg" style="margin-top:8px"></div>
+                </div>
+            </div>
+            <div class="card">
+                <h3>IP filter</h3>
+                <div class="card-body">
+                    <p class="sr-desc" style="margin:0 0 10px">Addresses no connection is made with, in or out; a peer already connected is dropped when it becomes blocked. Block lists come from a file on this node or a URL (PeerGuardian P2P, eMule .dat or CIDR, gzip or zip); bans are addresses you named, and apply even with the lists off.</p>
+                    <div class="settings-row">
+                        <div class="sr-label"><span class="sr-key">Use block lists</span></div>
+                        <div class="sr-field"><input type="checkbox" id="ipf-enabled"></div>
+                    </div>
+                    <div class="settings-row">
+                        <div class="sr-label"><span class="sr-key">Lists</span><span class="sr-desc">One per line: an absolute path or an http(s) URL.</span></div>
+                        <div class="sr-field"><textarea id="ipf-sources" class="sr-input" rows="3" style="width:100%" placeholder="https://example.org/level1.gz"></textarea></div>
+                    </div>
+                    <div class="settings-row">
+                        <div class="sr-label"><span class="sr-key">Reload every</span><span class="sr-desc">hours</span></div>
+                        <div class="sr-field"><input type="number" id="ipf-refresh" class="sr-input" min="1" value="24"><button class="btn-small btn-accent" onclick="saveIpFilter()" style="margin-left:6px">Save and load</button></div>
+                    </div>
+                    <div id="ipf-status" class="sr-desc" style="margin:8px 0"></div>
+                    <h4 style="margin:12px 0 6px">Bans</h4>
+                    <div style="display:flex;gap:6px;margin-bottom:6px">
+                        <input type="text" id="ipf-ban-ip" class="sr-input" placeholder="203.0.113.7, 203.0.113.0/24 or a-b">
+                        <input type="text" id="ipf-ban-reason" class="sr-input" placeholder="reason (optional)">
+                        <button class="btn-small" onclick="addBan()">Ban</button>
+                    </div>
+                    <table class="data-table"><tbody id="ipf-bans"></tbody></table>
+                    <div id="ipf-result" class="result-msg" style="margin-top:8px"></div>
                 </div>
             </div>
             <!-- Personalisation. This browser only, applied instantly, saved to
@@ -1476,6 +1504,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.48"></script>
+    <script src="/static/app.js?v=1.6.49"></script>
 </body>
 </html>

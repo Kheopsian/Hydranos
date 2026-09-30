@@ -24,6 +24,18 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **An IP filter.** Addresses no connection is made with: an inbound one is
+  refused before the handshake, an outbound dial before the TCP connect,
+  and a peer already connected is dropped the moment it becomes blocked --
+  its session is woken through its own notifier, so an idle seed-to-seed
+  link goes too, and 67k sessions do not contend on a shared one. Block
+  lists from a file or a URL, in PeerGuardian P2P, eMule `.dat` (levels 128+
+  let through) or CIDR form, gzip or zip, reloaded every `refresh_hours` and
+  at once when changed; a list that fails to load keeps its last copy. Bans
+  by hand -- from the Config tab, or the new Ban button on a peer row --
+  apply even with the lists off. `GET/PUT /api/ipfilter`,
+  `POST/DELETE /api/ipfilter/bans`, `POST /api/ipfilter/reload`. Proven
+  against libtorrent: cut off, kept out, not dialled.
 - **Magnet links.** Accepted by the Add tab (both engines), by
   `POST /api/torrents` (`magnet_uri`, answered 202), by the qBittorrent API's
   `urls` field -- which is how autobrr, Sonarr and Radarr send them -- and by

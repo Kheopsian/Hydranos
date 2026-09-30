@@ -2155,6 +2155,7 @@ async function refreshDetail() {
                     <td>${formatBytes(p.total_download)}</td>
                     <td>${formatBytes(p.total_upload)}</td>
                     <td>${flags || "-"}</td>
+                    <td><button class="btn-small" title="${esc(t("Ban this address: disconnected now, refused from now on"))}" onclick="banPeer('${esc(p.ip)}')">${esc(t("Ban"))}</button></td>
                 </tr>`;
             }).join("");
         } else {
@@ -4469,6 +4470,7 @@ async function refreshHoardDetail() {
                     <td>${formatBytes(p.total_download)}</td>
                     <td>${formatBytes(p.total_upload)}</td>
                     <td>${flags || "-"}</td>
+                    <td><button class="btn-small" title="${esc(t("Ban this address: disconnected now, refused from now on"))}" onclick="banPeer('${esc(p.ip)}')">${esc(t("Ban"))}</button></td>
                 </tr>`;
             }).join("");
         } else {
@@ -6198,6 +6200,76 @@ async function updateUptime() {
 // SSE (status_snapshot, hoard_stats_snapshot), this loop only handles the
 // per-tab heavy fetches and /health.
 let _polling = false;
+// ─── IP filter ─────────────────────────────────────────
+
+async function loadIpFilter() {
+    let d;
+    try { d = await api("/api/ipfilter"); } catch (e) { return; }
+    const s = d.settings || {};
+    document.getElementById("ipf-enabled").checked = !!s.enabled;
+    document.getElementById("ipf-sources").value = (s.sources || []).join("\n");
+    document.getElementById("ipf-refresh").value = s.refresh_hours || 24;
+    const src = (d.sources || []).map(x => x.error
+        ? `${x.source}: ${x.error}`
+        : `${x.source}: ${fmtInt(x.ranges)} ${t("ranges")}${x.unreadable ? `, ${fmtInt(x.unreadable)} ${t("unreadable lines")}` : ""}`);
+    document.getElementById("ipf-status").innerHTML =
+        esc(`${fmtInt(d.ranges)} ${t("ranges filtered")} · ${t("refused in")} ${fmtInt(d.blocked_in)} · ${t("refused out")} ${fmtInt(d.blocked_out)} · ${t("disconnected")} ${fmtInt(d.dropped)}`)
+        + (src.length ? "<br>" + src.map(esc).join("<br>") : "");
+    document.getElementById("ipf-bans").innerHTML = (d.bans || []).map(b => `<tr>
+        <td>${esc(b.ip)}</td><td class="sr-desc">${esc(b.reason || "")}</td>
+        <td>${esc(new Date(b.added_at * 1000).toLocaleString())}</td>
+        <td><button class="btn-cancel" onclick="removeBan('${esc(b.ip)}')">${esc(t("Remove"))}</button></td></tr>`).join("")
+        || `<tr><td class="sr-desc">${esc(t("No ban."))}</td></tr>`;
+}
+
+async function saveIpFilter() {
+    const out = document.getElementById("ipf-result");
+    const body = {
+        enabled: document.getElementById("ipf-enabled").checked,
+        sources: document.getElementById("ipf-sources").value.split("\n").map(x => x.trim()).filter(Boolean),
+        refresh_hours: parseInt(document.getElementById("ipf-refresh").value, 10) || 24,
+    };
+    out.textContent = t("Loading the lists...");
+    out.className = "result-msg success";
+    try {
+        await api("/api/ipfilter", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        out.textContent = t("Saved.");
+    } catch (e) {
+        out.textContent = e.message;
+        out.className = "result-msg error";
+    }
+    loadIpFilter();
+}
+
+async function _ban(ip, reason) {
+    await api("/api/ipfilter/bans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ip, reason }) });
+}
+
+async function addBan() {
+    const out = document.getElementById("ipf-result");
+    try {
+        await _ban(document.getElementById("ipf-ban-ip").value.trim(), document.getElementById("ipf-ban-reason").value.trim());
+        document.getElementById("ipf-ban-ip").value = "";
+        document.getElementById("ipf-ban-reason").value = "";
+        out.className = "result-msg";
+    } catch (e) {
+        out.textContent = e.message;
+        out.className = "result-msg error";
+    }
+    loadIpFilter();
+}
+
+async function removeBan(ip) {
+    await api("/api/ipfilter/bans", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ip }) });
+    loadIpFilter();
+}
+
+// From a peer row: the raw address, never the masked one on screen.
+async function banPeer(ip) {
+    if (!confirm(t("Ban {ip}? It is disconnected now and refused from now on.").replace("{ip}", ip))) return;
+    try { await _ban(ip, t("banned from the peer list")); } catch (e) { alert(e.message); }
+}
+
 // Magnets waiting for metadata. Hidden while there are none: an empty table
 // under the add form reads as something missing.
 async function updateMagnets() {
@@ -6256,6 +6328,7 @@ document.querySelectorAll(".tab").forEach(tab => {
         if (t === "categories") await updateCategories();
         if (t === "benchmark") await updateBenchmark();
         if (t === "add") await updateMagnets();
+        if (t === "config") loadIpFilter();
     });
 });
 
