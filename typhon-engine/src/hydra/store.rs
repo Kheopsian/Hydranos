@@ -719,6 +719,13 @@ impl Store {
                  detail TEXT NOT NULL DEFAULT '');
              CREATE INDEX IF NOT EXISTS idx_workflow_activity_at
                  ON workflow_activity(at DESC);
+             CREATE TABLE IF NOT EXISTS app_settings (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS ip_bans (
+                 ip TEXT PRIMARY KEY,
+                 reason TEXT NOT NULL DEFAULT '',
+                 added_at INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS magnets (
                  info_hash TEXT PRIMARY KEY,
                  uri TEXT NOT NULL,
@@ -741,6 +748,44 @@ impl Store {
                  info_hash TEXT NOT NULL);",
         )?;
         Ok(())
+    }
+
+    /// A setting the UI writes (JSON). Kept here rather than in the TOML,
+    /// whose editor refuses keys the file does not already have: a feature
+    /// added in a release would be unreachable on every existing install.
+    pub fn setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM app_settings WHERE key = ?1", rusqlite::params![key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn put_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn put_ban(&self, ip: &str, reason: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ip_bans (ip, reason, added_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![ip, reason, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// `(ip or range, reason, added_at)`.
+    pub fn bans(&self) -> anyhow::Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare("SELECT ip, reason, added_at FROM ip_bans ORDER BY added_at")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn delete_ban(&self, ip: &str) -> anyhow::Result<bool> {
+        Ok(self.conn.execute("DELETE FROM ip_bans WHERE ip = ?1", rusqlite::params![ip])? > 0)
     }
 
     pub fn put_magnet(&self, m: &MagnetRow) -> anyhow::Result<()> {

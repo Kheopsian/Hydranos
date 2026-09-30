@@ -77,6 +77,7 @@ mod rules;
 mod rulesrun;
 mod rulesapi;
 mod magnets;
+mod ipfilter;
 mod mcp;
 mod session;
 
@@ -678,6 +679,8 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Magnets waiting for their metadata, including the ones a restart
     // interrupted: their requests are in the store.
     magnets::spawn(state.clone());
+    // Block lists and bans, before the engines take their first peers.
+    ipfilter::spawn(state.clone());
     // Keeps the hardlink index the workflows read, instead of each pass
     // stat-ing the whole catalogue itself.
     linkscan::spawn(state.engines.clone(), state.store.clone());

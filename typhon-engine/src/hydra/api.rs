@@ -12374,6 +12374,7 @@ pub fn router(state: AppState) -> Router {
         // six handlers. Merged before with_state so they share it.
         .merge(crate::rulesapi::routes())
         .merge(crate::magnets::routes())
+        .merge(crate::ipfilter::routes())
         // Every action on a selection, by rows or by filter.
         .merge(crate::selection::routes())
         // The agent endpoint, same reasoning: its own file, the same state.
