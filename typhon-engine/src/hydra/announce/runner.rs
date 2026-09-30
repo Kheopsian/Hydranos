@@ -185,7 +185,7 @@ pub fn start(
     {
         let tx = bump_tx.clone();
         hook_manager.set_announce_hook(Arc::new(move |ih: [u8; 20]| {
-            let _ = tx.try_send(scheduler::BumpReq { info_hash: hex(&ih), reply: None });
+            let _ = tx.try_send(scheduler::BumpReq { info_hash: hex(&ih), reply: None, forced: false });
         }));
     }
     tokio::spawn(async move {
@@ -270,7 +270,14 @@ pub(super) async fn announce_one(
     mode: Mode,
     job: Job,
 ) -> Outcome {
-    let gone = Outcome { info_hash: job.info_hash.clone(), next_in: Duration::ZERO, gone: true, throttled: false, timed_out: false };
+    let gone = Outcome {
+        info_hash: job.info_hash.clone(),
+        next_in: Duration::ZERO,
+        gone: true,
+        throttled: false,
+        timed_out: false,
+        registration_retry: false,
+    };
 
     let Some(hash) = parse_hex(&job.info_hash) else {
         return gone;
@@ -356,7 +363,7 @@ pub(super) async fn announce_one(
                 let (step, tracker_id) = {
                     let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
                     let slot = book::slot_mut(&mut book, tracker_url);
-                    let st = book::step(slot, now, tier_done && mode == Mode::Hoard, silent);
+                    let st = book::step(slot, now, tier_done && mode == Mode::Hoard, silent, job.forced);
                     if let book::Step::Skip(why) = st {
                         if mode == Mode::Hoard && book::holds_us(slot, why) {
                             tier_done = true;
@@ -518,7 +525,16 @@ pub(super) async fn announce_one(
                         // for it. Calewood on 2026-09-28: announced one second
                         // in every ten minutes, 1 150 announces in an hour for
                         // 789 000 torrents.
-                        breaker.record(&host, proves_alive(kind), std::time::Instant::now());
+                        // A `failure reason` is an answer too: the tracker is
+                        // up and saying no. Counted as an outage, five
+                        // "unregistered torrent" in a row -- 35 seconds of a
+                        // race's registration retries -- would set the whole
+                        // host aside for ten minutes.
+                        breaker.record(
+                            &host,
+                            proves_alive(kind) || book::is_refusal(&e),
+                            std::time::Instant::now(),
+                        );
                         if kind == "rate_limited" {
                             throttled = true;
                         }
@@ -615,6 +631,25 @@ pub(super) async fn announce_one(
         fast_window_open,
         announced_at_all && torrent.total_uploaded.load(Ordering::Relaxed) > 0,
     );
+    // A race the tracker has not registered yet: the .torrent reached us
+    // before the tracker finished taking the upload, and it answers
+    // "unregistered torrent". Retried every 7 seconds, 50 times at most --
+    // exactly what autobrr's reannounce does for every racing qBittorrent,
+    // so it is traffic trackers already expect. No `min interval` is crossed:
+    // a tracker that refuses a torrent has not set one for it. Not on a
+    // 429 or a timeout -- those are a tracker asking for less, not more.
+    let registration_retry = mode == Mode::Race
+        && left > 0
+        && !announced_at_all
+        && !throttled
+        && !timed_out
+        && {
+            let book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+            book::registration_pending(&book)
+        };
+    if registration_retry {
+        next_in = book::REGISTRATION_RETRY;
+    }
     // Coming back before any tracker will accept us is a wasted wake-up.
     {
         let book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
@@ -624,7 +659,7 @@ pub(super) async fn announce_one(
         }
     }
 
-    Outcome { info_hash: job.info_hash, next_in, gone: false, throttled, timed_out }
+    Outcome { info_hash: job.info_hash, next_in, gone: false, throttled, timed_out, registration_retry }
 }
 
 /// An error message with any URL taken out of it.
@@ -1093,7 +1128,7 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: "a".repeat(40), first: true },
+            Job { info_hash: "a".repeat(40), first: true, forced: false },
         )
         .await;
         assert!(out.gone, "an unknown hash must be reported as gone");
@@ -1117,7 +1152,7 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true },
+            Job { info_hash: hash.clone(), first: true, forced: false },
         )
         .await;
 
@@ -1147,7 +1182,7 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true },
+            Job { info_hash: hash.clone(), first: true, forced: false },
         )
         .await;
 
@@ -1176,7 +1211,7 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true },
+            Job { info_hash: hash.clone(), first: true, forced: false },
         )
         .await;
         assert!(!out.gone);
@@ -1200,7 +1235,7 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true },
+            Job { info_hash: hash.clone(), first: true, forced: false },
         )
         .await;
         assert!(!out.gone);
@@ -1220,12 +1255,12 @@ mod announce_one_tests {
 
         let race = announce_one(
             &mgr, &policy, &breaker, &cache, 16371, Mode::Race,
-            Job { info_hash: hash.clone(), first: true },
+            Job { info_hash: hash.clone(), first: true, forced: false },
         )
         .await;
         let hoard = announce_one(
             &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: false },
+            Job { info_hash: hash.clone(), first: false, forced: false },
         )
         .await;
 
@@ -1260,7 +1295,7 @@ mod announce_one_tests {
 
         let out = announce_one(
             &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true },
+            Job { info_hash: hash.clone(), first: true, forced: false },
         )
         .await;
         assert!(!out.gone, "a broken tracker does not make the torrent gone");
@@ -1288,7 +1323,7 @@ mod announce_one_tests {
 
         let out = announce_one(
             &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true },
+            Job { info_hash: hash.clone(), first: true, forced: false },
         )
         .await;
         assert!(out.gone, "a paused torrent is dropped from the schedule, not announced");
@@ -1330,7 +1365,7 @@ mod announce_one_tests {
 
         let out = announce_one(
             &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true },
+            Job { info_hash: hash.clone(), first: true, forced: false },
         )
         .await;
         assert!(!out.gone);
@@ -1408,7 +1443,7 @@ mod announce_one_tests {
         mode: Mode,
         hash: &str,
     ) -> Outcome {
-        announce_one(mgr, policy, breaker, cache, 16371, mode, Job { info_hash: hash.to_string(), first: false }).await
+        announce_one(mgr, policy, breaker, cache, 16371, mode, Job { info_hash: hash.to_string(), first: false, forced: false }).await
     }
 
     /// ⭐⭐⭐ The whole life of a torrent, as the tracker sees it:
@@ -1495,6 +1530,65 @@ mod announce_one_tests {
         assert_eq!(t.queries().len(), 1, "inside the floor nothing is sent, whoever asks");
         assert!(race.next_in >= Duration::from_secs(890), "a race waits for the floor too: {:?}", race.next_in);
         assert!(hoard.next_in >= Duration::from_secs(890), "{:?}", hoard.next_in);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A person's re-announce crosses `min interval`, as qBittorrent's
+    /// "Force reannounce" does; the periodic schedule and a race do not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forced_reannounce_crosses_min_interval_like_qbittorrent() {
+        const FLOOR: &[u8] = b"d8:intervali1800e12:min intervali900e5:peers0:e";
+        let t = recording_tracker(FLOOR).await;
+        let (mgr, root) = manager("forced");
+        let hash = add(&mgr, "forced", &t.url);
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        assert_eq!(t.queries().len(), 1, "not forced: the floor holds");
+        announce_one(
+            &mgr, &policy, &breaker, &cache, 16371, Mode::Race,
+            Job { info_hash: hash.clone(), first: false, forced: true },
+        )
+        .await;
+        assert_eq!(t.queries().len(), 2, "forced: past min interval");
+        assert_eq!(param(&t.last(), "event"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ A race whose tracker has not registered the torrent yet comes back
+    /// in 7 seconds, as autobrr's reannounce does -- and a hoard, or a race
+    /// that is already seeding, does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unregistered_race_is_retried_in_seconds() {
+        use std::sync::atomic::Ordering;
+        use typhon_engine::torrent::meta::TorrentStatus;
+        const UNREG: &[u8] = b"d14:failure reason20:unregistered torrente";
+        let t = recording_tracker(UNREG).await;
+        let (mgr, root) = manager("unreg");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("unreg", &t.url), "/tmp", false, false)
+            .expect("parses");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        let st = state(&mgr, &hash);
+        *st.live_trackers.write() = vec![vec![t.url.clone()]];
+        st.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        let (policy, breaker, cache) = parts();
+
+        let race = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        assert!(race.registration_retry);
+        assert_eq!(race.next_in, book::REGISTRATION_RETRY);
+        for _ in 0..10 {
+            let again = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+            assert!(again.registration_retry, "still refused, still retried");
+        }
+        assert_eq!(t.queries().len(), 11, "a refusal is an answer: the breaker stays closed");
+
+        let hoard = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert!(!hoard.registration_retry, "a hoard is not racing");
+
+        st.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        let seed = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
+        assert!(!seed.registration_retry, "nothing left to download, nothing to hurry");
         let _ = std::fs::remove_dir_all(root);
     }
 

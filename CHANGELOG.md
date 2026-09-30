@@ -124,11 +124,17 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   longer erases an owed `completed`; a resume opens a new session with
   `started`. Events go out when they happen instead of at the next scheduled
   announce.
-- **`min interval` holds for everything but the events themselves**, manual
-  re-announces and races included, per tracker. BEP 31 `retry in` (minutes or
+- **`min interval` holds per tracker, races included.** A re-announce a
+  person forces (the button, the API, the qBittorrent shim) crosses it, as
+  qBittorrent's "Force reannounce" does; a tracker's own `retry in` or
+  `Retry-After` is never crossed. BEP 31 `retry in` (minutes or
   `never`) and an HTTP `Retry-After` are obeyed; `tracker id` is echoed back
   as `trackerid`; a `failure reason` of any type is a refusal; a negative
   `interval` or count no longer wraps into a huge one.
+- **A race the tracker has not registered yet is retried every 7 seconds**,
+  50 times at most, until a tracker registers it: autobrr's reannounce, done
+  by the engine. It was retried half an hour later. A `failure reason` also
+  no longer counts toward the circuit breaker, because the tracker answered.
 - **`left` comes from the pieces held**, not from `size - downloaded`: data
   already on disk is no longer reported as missing.
 - **One peer id per engine.** The tracker was told one and every peer

@@ -96,7 +96,7 @@ fn add(fx: &Fixture, name: &str, tracker: &str, seed: bool) -> (String, Arc<Torr
 async fn announce(fx: &Fixture, hash: &str, mode: Mode) {
     announce_one(
         &fx.mgr, &fx.policy, &fx.breaker, &fx.cache, 16371, mode,
-        Job { info_hash: hash.to_string(), first: false },
+        Job { info_hash: hash.to_string(), first: false, forced: false },
     )
     .await;
 }
@@ -281,6 +281,14 @@ async fn interop_torrust_private_tracker_stores_exactly_what_we_report() {
 
     announce(&fx, &hash, Mode::Race).await;
     assert_eq!(t.torrent(&hash).await["peers"][0]["updated"], stamp, "inside min interval, the tracker hears nothing");
+
+    // A person's forced re-announce crosses it, as qBittorrent's does.
+    announce_one(
+        &fx.mgr, &fx.policy, &fx.breaker, &fx.cache, 16371, Mode::Hoard,
+        Job { info_hash: hash.clone(), first: false, forced: true },
+    )
+    .await;
+    assert_ne!(t.torrent(&hash).await["peers"][0]["updated"], stamp, "forced: the tracker hears it");
 
     fx.mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
     announce(&fx, &hash, Mode::Hoard).await;

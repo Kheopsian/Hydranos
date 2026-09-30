@@ -30,7 +30,7 @@ pub enum Step {
 pub enum Why {
     /// BEP 31 `retry in: never`.
     Disabled,
-    /// Inside `min interval`, `retry in` or `Retry-After`.
+    /// Inside `min interval` (unless forced), `retry in` or `Retry-After`.
     Floor,
     /// Hoard: an earlier tracker of the tier list already has us.
     TierDone,
@@ -73,10 +73,12 @@ pub fn file_owed(book: &mut [TrackerSlot], owed: u8, paused: bool) {
 ///   finished and stopped in one breath still counts as a snatch;
 /// - a paused torrent says nothing else;
 /// - in hoard mode, a tracker behind one that already has us is left alone;
-/// - `min interval` (and BEP 31 / `Retry-After`) is a floor nothing crosses;
+/// - BEP 31 `retry in` and `Retry-After` are a floor nothing crosses;
+/// - `min interval` is one that only a re-announce a person forced crosses,
+///   as qBittorrent's "Force reannounce" does (`ignore_min_interval`);
 /// - the first announce of a session is `started`, every later one carries
 ///   no event at all.
-pub fn step(slot: &TrackerSlot, now: i64, tier_done: bool, paused: bool) -> Step {
+pub fn step(slot: &TrackerSlot, now: i64, tier_done: bool, paused: bool, forced: bool) -> Step {
     if slot.disabled {
         return Step::Skip(Why::Disabled);
     }
@@ -92,7 +94,7 @@ pub fn step(slot: &TrackerSlot, now: i64, tier_done: bool, paused: bool) -> Step
     if tier_done {
         return Step::Skip(Why::TierDone);
     }
-    if now < slot.not_before {
+    if now < slot.hint_until || (!forced && now < slot.not_before) {
         return Step::Skip(Why::Floor);
     }
     if !slot.started {
@@ -106,6 +108,7 @@ pub fn record(slot: &mut TrackerSlot, event: &str, result: &Result<AnnounceRespo
     match result {
         Ok(resp) => {
             slot.last_ok = now;
+            slot.refusals = 0;
             slot.not_before = now + resp.min_interval as i64;
             if let Some(id) = &resp.tracker_id {
                 slot.tracker_id = Some(id.as_str().into());
@@ -129,9 +132,12 @@ pub fn record(slot: &mut TrackerSlot, event: &str, result: &Result<AnnounceRespo
         }
         Err(e) => {
             match retry_hint(e) {
-                Some(RetryHint::After(d)) => slot.not_before = now + d.as_secs() as i64,
+                Some(RetryHint::After(d)) => slot.hint_until = now + d.as_secs() as i64,
                 Some(RetryHint::Never) => slot.disabled = true,
                 None => {}
+            }
+            if !slot.started && is_refusal(e) {
+                slot.refusals = slot.refusals.saturating_add(1);
             }
             // A departure is attempted once, as every client does: a tracker
             // that is down when we leave times the entry out on its own, and
@@ -145,6 +151,29 @@ pub fn record(slot: &mut TrackerSlot, event: &str, result: &Result<AnnounceRespo
             }
         }
     }
+}
+
+/// The tracker answered, and the answer was no (`failure reason`) -- as
+/// opposed to not answering at all. Before a torrent is registered this is
+/// the "unregistered torrent" a race retries through.
+pub fn is_refusal(err: &str) -> bool {
+    err.contains("tracker: ")
+}
+
+/// How many times a race retries a tracker that has not registered the
+/// torrent yet, and how often: autobrr's defaults, which trackers already see
+/// from every racing qBittorrent.
+pub const REGISTRATION_ATTEMPTS: u8 = 50;
+pub const REGISTRATION_RETRY: Duration = Duration::from_secs(7);
+
+/// Whether a race should come back in seconds: some tracker is still refusing
+/// a torrent it has not registered, it has not refused too many times, and
+/// no tracker has registered us (then peers arrive by themselves).
+pub fn registration_pending(book: &[TrackerSlot]) -> bool {
+    !book.iter().any(|s| s.started)
+        && book
+            .iter()
+            .any(|s| !s.disabled && s.refusals > 0 && s.refusals < REGISTRATION_ATTEMPTS)
 }
 
 /// Whether a skipped tracker still counts as "the tier has us" in hoard mode.
@@ -161,7 +190,7 @@ pub fn holds_us(slot: &TrackerSlot, why: Why) -> bool {
 pub fn earliest_open(book: &[TrackerSlot], now: i64) -> Duration {
     book.iter()
         .filter(|s| !s.disabled)
-        .map(|s| (s.not_before - now).max(0) as u64)
+        .map(|s| (s.not_before.max(s.hint_until) - now).max(0) as u64)
         .min()
         .map(Duration::from_secs)
         .unwrap_or(Duration::ZERO)
@@ -195,9 +224,9 @@ mod tests {
     #[test]
     fn a_session_opens_with_started_and_continues_without_an_event() {
         let mut s = TrackerSlot::default();
-        assert_eq!(step(&s, 100, false, false), Step::Send("started"));
+        assert_eq!(step(&s, 100, false, false, false), Step::Send("started"));
         record(&mut s, "started", &ok(0, None), 100);
-        assert_eq!(step(&s, 200, false, false), Step::Send(""));
+        assert_eq!(step(&s, 200, false, false, false), Step::Send(""));
     }
 
     /// A `started` the tracker never acknowledged is sent again, not assumed.
@@ -205,7 +234,7 @@ mod tests {
     fn an_unanswered_started_is_sent_again() {
         let mut s = TrackerSlot::default();
         record(&mut s, "started", &Err("http request: connect refused".into()), 100);
-        assert_eq!(step(&s, 200, false, false), Step::Send("started"));
+        assert_eq!(step(&s, 200, false, false, false), Step::Send("started"));
     }
 
     /// ⭐ `completed` goes to every tracker that saw us leeching -- not only
@@ -215,7 +244,7 @@ mod tests {
         let mut book = vec![started(), TrackerSlot { key: 2, started: true, ..Default::default() }];
         file_owed(&mut book, ANNOUNCE_EVENT_COMPLETED, false);
         for s in &book {
-            assert_eq!(step(s, 0, true, false), Step::Send("completed"), "tier or not");
+            assert_eq!(step(s, 0, true, false, false), Step::Send("completed"), "tier or not");
         }
     }
 
@@ -226,7 +255,7 @@ mod tests {
     fn a_tracker_that_never_heard_started_is_not_told_completed() {
         let mut book = vec![TrackerSlot { key: 3, ..Default::default() }];
         file_owed(&mut book, ANNOUNCE_EVENT_COMPLETED, false);
-        assert_eq!(step(&book[0], 0, false, false), Step::Send("started"));
+        assert_eq!(step(&book[0], 0, false, false, false), Step::Send("started"));
     }
 
     /// ⭐ A `completed` that meets a tracker that is down stays owed. It used
@@ -236,9 +265,9 @@ mod tests {
         let mut s = started();
         s.completed_owed = true;
         record(&mut s, "completed", &Err("http request: timed out".into()), 10);
-        assert_eq!(step(&s, 20, false, false), Step::Send("completed"));
+        assert_eq!(step(&s, 20, false, false, false), Step::Send("completed"));
         record(&mut s, "completed", &ok(0, None), 20);
-        assert_eq!(step(&s, 30, false, false), Step::Send(""));
+        assert_eq!(step(&s, 30, false, false, false), Step::Send(""));
     }
 
     /// A stop is owed to every tracker that heard `started`, and only to them.
@@ -246,8 +275,8 @@ mod tests {
     fn stopped_is_owed_to_the_trackers_that_had_us() {
         let mut book = vec![started(), TrackerSlot { key: 9, ..Default::default() }];
         file_owed(&mut book, ANNOUNCE_EVENT_STOPPED, true);
-        assert_eq!(step(&book[0], 0, true, true), Step::Send("stopped"));
-        assert_eq!(step(&book[1], 0, false, true), Step::Skip(Why::Quiet), "never told started, nothing to take back");
+        assert_eq!(step(&book[0], 0, true, true, false), Step::Send("stopped"));
+        assert_eq!(step(&book[1], 0, false, true, false), Step::Skip(Why::Quiet), "never told started, nothing to take back");
     }
 
     /// Finished and stopped in one breath: the snatch first, then the
@@ -258,11 +287,11 @@ mod tests {
         let mut book = vec![s.clone()];
         file_owed(&mut book, ANNOUNCE_EVENT_COMPLETED | ANNOUNCE_EVENT_STOPPED, true);
         s = book.remove(0);
-        assert_eq!(step(&s, 0, false, true), Step::Send("completed"));
+        assert_eq!(step(&s, 0, false, true, false), Step::Send("completed"));
         record(&mut s, "completed", &ok(0, None), 0);
-        assert_eq!(step(&s, 0, false, true), Step::Send("stopped"));
+        assert_eq!(step(&s, 0, false, true, false), Step::Send("stopped"));
         record(&mut s, "stopped", &ok(0, None), 0);
-        assert_eq!(step(&s, 0, false, true), Step::Skip(Why::Quiet));
+        assert_eq!(step(&s, 0, false, true, false), Step::Skip(Why::Quiet));
     }
 
     /// A departure is attempted once whatever the answer: retrying it would
@@ -272,7 +301,7 @@ mod tests {
         let mut s = started();
         s.stopped_owed = true;
         record(&mut s, "stopped", &Err("http request: timed out".into()), 0);
-        assert_eq!(step(&s, 10, false, true), Step::Skip(Why::Quiet));
+        assert_eq!(step(&s, 10, false, true, false), Step::Skip(Why::Quiet));
         assert!(!s.started);
     }
 
@@ -292,7 +321,7 @@ mod tests {
         let mut s = started();
         s.stopped_owed = true;
         record(&mut s, "stopped", &ok(900, None), 0);
-        assert_eq!(step(&s, 10, false, false), Step::Send("started"));
+        assert_eq!(step(&s, 10, false, false, false), Step::Send("started"));
     }
 
     // --- floors ------------------------------------------------------------
@@ -303,8 +332,52 @@ mod tests {
     fn min_interval_is_a_hard_floor() {
         let mut s = TrackerSlot::default();
         record(&mut s, "started", &ok(300, None), 1000);
-        assert_eq!(step(&s, 1299, false, false), Step::Skip(Why::Floor));
-        assert_eq!(step(&s, 1300, false, false), Step::Send(""));
+        assert_eq!(step(&s, 1299, false, false, false), Step::Skip(Why::Floor));
+        assert_eq!(step(&s, 1300, false, false, false), Step::Send(""));
+    }
+
+    /// ⭐ A re-announce a person forces crosses `min interval`, as qBittorrent's
+    /// does -- but never a floor the tracker asked for with `retry in` or
+    /// `Retry-After`.
+    #[test]
+    fn a_forced_reannounce_crosses_min_interval_but_not_a_retry_hint() {
+        let mut s = TrackerSlot::default();
+        record(&mut s, "started", &ok(900, None), 1000);
+        assert_eq!(step(&s, 1001, false, false, false), Step::Skip(Why::Floor));
+        assert_eq!(step(&s, 1001, false, false, true), Step::Send(""), "forced: past min interval");
+        record(&mut s, "", &Err("http 429 Too Many Requests: slow [retry-after 120s]".into()), 1001);
+        assert_eq!(step(&s, 1002, false, false, true), Step::Skip(Why::Floor), "the tracker's own request holds");
+        assert_eq!(step(&s, 1121, false, false, true), Step::Send(""));
+    }
+
+    /// A race retries a tracker that refuses an unregistered torrent, 50 times
+    /// at most, and stops as soon as any tracker registers it.
+    #[test]
+    fn registration_retries_are_bounded_and_end_on_registration() {
+        let refused = || Err::<AnnounceResponse, String>("tracker: Unregistered torrent".into());
+        let mut book = vec![TrackerSlot::default()];
+        assert!(!registration_pending(&book), "nothing refused yet");
+        record(&mut book[0], "started", &refused(), 0);
+        assert!(registration_pending(&book));
+        for i in 1..REGISTRATION_ATTEMPTS as i64 {
+            record(&mut book[0], "started", &refused(), i);
+        }
+        assert!(!registration_pending(&book), "fifty refusals, then the ordinary schedule");
+
+        let mut book = vec![TrackerSlot::default()];
+        record(&mut book[0], "started", &refused(), 0);
+        record(&mut book[0], "started", &ok(0, None), 7);
+        assert!(!registration_pending(&book), "registered: the swarm finds us");
+        assert_eq!(book[0].refusals, 0);
+    }
+
+    /// Not answering is not refusing: a tracker that is down is the breaker's
+    /// business, not something to hammer every 7 seconds.
+    #[test]
+    fn a_tracker_that_does_not_answer_is_not_retried_in_seconds() {
+        let mut book = vec![TrackerSlot::default()];
+        record(&mut book[0], "started", &Err("http request: connect refused".into()), 0);
+        assert!(!registration_pending(&book));
     }
 
     /// Events are exempt: `completed` and `stopped` are one-shot, and every
@@ -314,21 +387,23 @@ mod tests {
         let mut s = started();
         s.not_before = 10_000;
         s.completed_owed = true;
-        assert_eq!(step(&s, 0, false, false), Step::Send("completed"));
+        assert_eq!(step(&s, 0, false, false, false), Step::Send("completed"));
         s.completed_owed = false;
         s.stopped_owed = true;
-        assert_eq!(step(&s, 0, false, true), Step::Send("stopped"));
+        assert_eq!(step(&s, 0, false, true, false), Step::Send("stopped"));
     }
 
     /// BEP 31: `retry in` minutes sets the floor, `never` retires the tracker.
     #[test]
     fn bep31_retry_in_is_obeyed() {
+        // (and a forced re-announce does not cross it either: see
+        // a_forced_reannounce_crosses_min_interval_but_not_a_retry_hint)
         let mut s = TrackerSlot::default();
         record(&mut s, "started", &Err("tracker: busy [retry-in 5m]".into()), 1000);
-        assert_eq!(step(&s, 1299, false, false), Step::Skip(Why::Floor));
-        assert_eq!(step(&s, 1300, false, false), Step::Send("started"));
+        assert_eq!(step(&s, 1299, false, false, false), Step::Skip(Why::Floor));
+        assert_eq!(step(&s, 1300, false, false, false), Step::Send("started"));
         record(&mut s, "started", &Err("tracker: banned client [retry-in never]".into()), 1300);
-        assert_eq!(step(&s, 99_999, false, false), Step::Skip(Why::Disabled));
+        assert_eq!(step(&s, 99_999, false, false, false), Step::Skip(Why::Disabled));
     }
 
     /// An HTTP `Retry-After` is the same floor, from the transport.
@@ -336,8 +411,8 @@ mod tests {
     fn retry_after_is_obeyed() {
         let mut s = started();
         record(&mut s, "", &Err("http 429 Too Many Requests: slow [retry-after 90s]".into()), 1000);
-        assert_eq!(step(&s, 1089, false, false), Step::Skip(Why::Floor));
-        assert_eq!(step(&s, 1090, false, false), Step::Send(""));
+        assert_eq!(step(&s, 1089, false, false, false), Step::Skip(Why::Floor));
+        assert_eq!(step(&s, 1090, false, false, false), Step::Send(""));
     }
 
     // --- tracker id and tiers ------------------------------------------------
@@ -362,7 +437,7 @@ mod tests {
     fn a_quiet_tracker_holds_its_tier_and_a_dead_one_does_not() {
         assert!(holds_us(&started(), Why::Floor));
         assert!(!holds_us(&TrackerSlot::default(), Why::Floor));
-        assert_eq!(step(&started(), 0, true, false), Step::Skip(Why::TierDone));
+        assert_eq!(step(&started(), 0, true, false, false), Step::Skip(Why::TierDone));
     }
 
     #[test]

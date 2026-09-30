@@ -82,6 +82,9 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// every second is either broken or hostile, and honouring it would be a
 /// self-inflicted flood.
 const MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// The shortest wait a registration retry may ask for, whatever the runner
+/// says: a guard against a bug turning the retry into a spin.
+const REGISTRATION_RETRY_FLOOR: Duration = Duration::from_secs(5);
 /// Let the engine finish loading its resume data before the first announce.
 const BOOT_DELAY: Duration = Duration::from_secs(5);
 /// Floor on how many torrents may JOIN the schedule per reconcile cycle.
@@ -153,6 +156,21 @@ const MAX_JITTER: Duration = Duration::from_secs(120);
 /// shortest honest gap between two announces of one torrent.
 const BUMP_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// How long a torrent waits after an announce, given what the runner asked.
+///
+/// Under a minute is not an honest gap between two announces of one torrent
+/// and falls back to the default -- except a registration retry, which is
+/// bounded by the runner and floored here.
+fn wait_after(outcome: &Outcome) -> Duration {
+    if outcome.registration_retry {
+        outcome.next_in.max(REGISTRATION_RETRY_FLOOR)
+    } else if outcome.next_in < MIN_INTERVAL {
+        DEFAULT_INTERVAL
+    } else {
+        outcome.next_in
+    }
+}
+
 /// What the scheduler actually did with one hand-pressed reannounce.
 ///
 /// Until 4.28.0 `bump_now` answered `bool` and the receive arm threw it away,
@@ -177,6 +195,12 @@ pub enum BumpOutcome {
 /// without inventing a receiver it will never read.
 pub struct BumpReq {
     pub info_hash: String,
+    /// A re-announce a person asked for (the button, the API). It is allowed
+    /// past each tracker's `min interval`, as qBittorrent's "Force reannounce"
+    /// is (libtorrent's `ignore_min_interval`). An internal bump -- an owed
+    /// event going out now -- is not forced: the event crosses the floor on its
+    /// own, and nothing else should.
+    pub forced: bool,
     pub reply: Option<oneshot::Sender<BumpOutcome>>,
 }
 
@@ -184,6 +208,8 @@ pub struct BumpReq {
 struct State {
     info_hash: String,
     first_announce: bool,
+    /// The next dispatch carries a forced bump. Cleared once it has.
+    forced_next: bool,
     in_flight: bool,
     /// Bumped every time this torrent is rescheduled out of band.
     ///
@@ -232,6 +258,8 @@ impl PartialOrd for Deadline {
 pub struct Job {
     pub info_hash: String,
     pub first: bool,
+    /// Asked for by a person: allowed past `min interval` (see `BumpReq`).
+    pub forced: bool,
 }
 
 /// What a worker reports back.
@@ -248,6 +276,12 @@ pub struct Outcome {
     /// load to take off it. A tracker ANSWERING with a failure (unregistered
     /// torrent, bad passkey) is not this -- it answered, and fast.
     pub timed_out: bool,
+    /// A race whose tracker has not registered the torrent yet, asking to be
+    /// retried in seconds. The one case allowed under `MIN_INTERVAL`: it is
+    /// what autobrr's reannounce does (every 7 s, 50 times at most), for a
+    /// torrent the tracker is still refusing -- so no `min interval` exists
+    /// to cross, and the attempts are bounded by the runner.
+    pub registration_retry: bool,
 }
 
 /// What the scheduler needs from the engine it serves.
@@ -412,11 +446,7 @@ where
                     continue;
                 }
                 state.first_announce = false;
-                let wait = if outcome.next_in < MIN_INTERVAL {
-                    DEFAULT_INTERVAL
-                } else {
-                    outcome.next_in
-                };
+                let wait = wait_after(&outcome);
                 // Spread the return too, or the group re-forms: everyone
                 // admitted together gets the same `wait` and comes due in the
                 // same millisecond, thirty minutes later, for ever. The offset
@@ -434,7 +464,7 @@ where
                 }));
             }
             Some(req) = bump_rx.recv() => {
-                let outcome = bump_now(&mut states, &mut heap, req.info_hash);
+                let outcome = bump_now(&mut states, &mut heap, req.info_hash, req.forced);
                 if let Some(reply) = req.reply {
                     // The caller may have given up waiting; that is its right
                     // and not an error here.
@@ -626,13 +656,18 @@ impl Pool {
                 if d.epoch != state.epoch || state.in_flight {
                     continue;
                 }
-                let job = Job { info_hash: d.info_hash.clone(), first: state.first_announce };
+                let job = Job {
+                    info_hash: d.info_hash.clone(),
+                    first: state.first_announce,
+                    forced: state.forced_next,
+                };
                 // try_send, not send: a full queue means the workers are
                 // behind, and blocking here would stop the scheduler from
                 // reading results -- which is what empties that queue.
                 match work_tx.try_send(job) {
                     Ok(()) => {
                         state.in_flight = true;
+                        state.forced_next = false;
                         t.in_flight += 1;
                         self.in_flight += 1;
                         self.holding.insert(d.info_hash, host.clone());
@@ -799,6 +834,7 @@ fn reconcile_now<C: Catalogue>(
             State {
                 info_hash: hash.clone(),
                 first_announce: true,
+                forced_next: false,
                 in_flight: false,
                 epoch: 0,
                 last_bump: None,
@@ -845,11 +881,13 @@ fn bump_now(
     states: &mut HashMap<String, State>,
     heap: &mut BinaryHeap<Reverse<Deadline>>,
     hash: String,
+    forced: bool,
 ) -> BumpOutcome {
     let now = Instant::now();
     let state = states.entry(hash.clone()).or_insert_with(|| State {
         info_hash: hash.clone(),
         first_announce: true,
+        forced_next: false,
         in_flight: false,
         epoch: 0,
         last_bump: None,
@@ -870,6 +908,7 @@ fn bump_now(
     // and will be dropped when it surfaces.
     state.epoch += 1;
     state.last_bump = Some(now);
+    state.forced_next |= forced;
     heap.push(Reverse(Deadline { at: now, info_hash: hash, epoch: state.epoch }));
     BumpOutcome::Bumped
 }
@@ -1063,6 +1102,7 @@ mod tests {
         State {
             info_hash: hash.into(),
             first_announce: false,
+            forced_next: false,
             in_flight: false,
             epoch: 0,
             last_bump: None,
@@ -1072,7 +1112,7 @@ mod tests {
     }
 
     fn answered(throttled: bool) -> Outcome {
-        Outcome { info_hash: "x".into(), next_in: DEFAULT_INTERVAL, gone: false, throttled, timed_out: false }
+        Outcome { info_hash: "x".into(), next_in: DEFAULT_INTERVAL, gone: false, throttled, timed_out: false, registration_retry: false }
     }
 
     /// Feed a tracker one cycle of `n` answers at `lat` seconds and step it.
@@ -1339,6 +1379,31 @@ mod tests {
         assert_eq!(measure(&states, &heap, &Pool::default(), now).late, 0, "dispatch takes a moment");
     }
 
+    /// A person's bump lifts `min interval`; an owed event's does not.
+    #[test]
+    fn a_person_s_bump_is_forced_and_an_internal_one_is_not() {
+        let (mut states, mut heap) = (HashMap::new(), BinaryHeap::new());
+        assert_eq!(bump_now(&mut states, &mut heap, "ev".into(), false), BumpOutcome::Bumped);
+        assert!(!states["ev"].forced_next, "an owed event is not a forced re-announce");
+        assert_eq!(bump_now(&mut states, &mut heap, "btn".into(), true), BumpOutcome::Bumped);
+        assert!(states["btn"].forced_next, "the button is");
+    }
+
+    /// Only a registration retry comes back in seconds; any other sub-minute
+    /// request still becomes the default, and the retry has its own floor.
+    #[test]
+    fn only_a_registration_retry_may_wait_under_a_minute() {
+        let o = |secs: u64, retry: bool| Outcome {
+            next_in: Duration::from_secs(secs),
+            registration_retry: retry,
+            ..answered(false)
+        };
+        assert_eq!(wait_after(&o(7, true)), Duration::from_secs(7));
+        assert_eq!(wait_after(&o(1, true)), REGISTRATION_RETRY_FLOOR, "never a spin");
+        assert_eq!(wait_after(&o(7, false)), DEFAULT_INTERVAL);
+        assert_eq!(wait_after(&o(900, false)), Duration::from_secs(900));
+    }
+
     /// ⭐ The whole point of the button: skip the queue.
     #[test]
     fn a_bump_goes_to_the_head_of_the_queue() {
@@ -1351,7 +1416,7 @@ mod tests {
         heap.push(Reverse(Deadline { at: now + DEFAULT_INTERVAL, info_hash: "a".into(), epoch: 0 }));
         heap.push(Reverse(Deadline { at: now + Duration::from_secs(60), info_hash: "b".into(), epoch: 0 }));
 
-        assert_eq!(bump_now(&mut states, &mut heap, "a".into()), BumpOutcome::Bumped);
+        assert_eq!(bump_now(&mut states, &mut heap, "a".into(), true), BumpOutcome::Bumped);
 
         let Reverse(head) = heap.peek().expect("a deadline");
         assert_eq!(head.info_hash, "a", "the bumped torrent must come out first");
@@ -1367,7 +1432,7 @@ mod tests {
         states.insert("a".to_string(), fresh("a"));
         heap.push(Reverse(Deadline { at: Instant::now(), info_hash: "a".into(), epoch: 0 }));
 
-        assert_eq!(bump_now(&mut states, &mut heap, "a".into()), BumpOutcome::Bumped);
+        assert_eq!(bump_now(&mut states, &mut heap, "a".into(), true), BumpOutcome::Bumped);
 
         let epoch = states["a"].epoch;
         assert_eq!(epoch, 1);
@@ -1384,13 +1449,13 @@ mod tests {
         states.insert("a".to_string(), fresh("a"));
 
         assert_eq!(
-            bump_now(&mut states, &mut heap, "a".into()),
+            bump_now(&mut states, &mut heap, "a".into(), true),
             BumpOutcome::Bumped,
             "first press works"
         );
         assert!(
             matches!(
-                bump_now(&mut states, &mut heap, "a".into()),
+                bump_now(&mut states, &mut heap, "a".into(), true),
                 BumpOutcome::Cooldown { .. }
             ),
             "second press is refused"
@@ -1407,8 +1472,8 @@ mod tests {
         let mut heap = BinaryHeap::new();
         states.insert("a".to_string(), fresh("a"));
 
-        assert_eq!(bump_now(&mut states, &mut heap, "a".into()), BumpOutcome::Bumped);
-        match bump_now(&mut states, &mut heap, "a".into()) {
+        assert_eq!(bump_now(&mut states, &mut heap, "a".into(), true), BumpOutcome::Bumped);
+        match bump_now(&mut states, &mut heap, "a".into(), true) {
             BumpOutcome::Cooldown { retry_in } => {
                 assert!(retry_in <= BUMP_COOLDOWN, "never longer than the cooldown");
                 assert!(!retry_in.is_zero(), "and a caller can be told when to retry");
@@ -1419,7 +1484,7 @@ mod tests {
         // A torrent already with a worker is refused for its own reason: the
         // announce being asked for is the one in progress.
         states.insert("b".to_string(), State { in_flight: true, ..fresh("b") });
-        assert_eq!(bump_now(&mut states, &mut heap, "b".into()), BumpOutcome::InFlight);
+        assert_eq!(bump_now(&mut states, &mut heap, "b".into(), true), BumpOutcome::InFlight);
     }
 
     /// A torrent still waiting its turn to join must be announceable by hand:
@@ -1430,7 +1495,7 @@ mod tests {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
 
-        assert_eq!(bump_now(&mut states, &mut heap, "new".into()), BumpOutcome::Bumped);
+        assert_eq!(bump_now(&mut states, &mut heap, "new".into(), true), BumpOutcome::Bumped);
 
         assert!(states.contains_key("new"), "admitted outside MIN_NEW_PER_CYCLE");
         assert!(states["new"].first_announce, "and it announces as a first announce");
