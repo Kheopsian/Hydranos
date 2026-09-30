@@ -94,6 +94,11 @@ pub struct TorrentManager {
     completed_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<InfoHash>>>,
     /// Dial ceilings and gauges for this engine.
     limiter: Arc<crate::tracker::dial_limiter::DialLimiter>,
+    /// Asks the announcer to announce one torrent now, because it owes its
+    /// trackers an event. Set by the announcer, which lives in the binary and
+    /// cannot be named from here; unset, events wait for the next scheduled
+    /// announce, which is how every test and a trackerless engine run.
+    announce_hook: std::sync::OnceLock<Arc<dyn Fn(InfoHash) + Send + Sync>>,
     /// Durable per-torrent state. `None` only if SQLite could not be opened at
     /// all, in which case everything falls back to the legacy JSON directory
     /// so a broken database degrades into the old behaviour instead of losing
@@ -139,6 +144,21 @@ impl TorrentManager {
     /// This engine's event stream.
     pub fn bus(&self) -> &crate::rpc::events::EventBus {
         &self.bus
+    }
+
+    /// Install the announcer's "announce this one now" entry point. Once.
+    pub fn set_announce_hook(&self, hook: Arc<dyn Fn(InfoHash) + Send + Sync>) {
+        let _ = self.announce_hook.set(hook);
+    }
+
+    /// This torrent owes its trackers an event (`completed`, `stopped`, a
+    /// fresh `started`): ask for it to go out now rather than at the next
+    /// scheduled announce, which for a seed can be half an hour away. A no-op
+    /// without an announcer.
+    pub fn announce_soon(&self, info_hash: &InfoHash) {
+        if let Some(hook) = self.announce_hook.get() {
+            hook(*info_hash);
+        }
     }
 
     /// Taken once, by the task that persists this engine's completions.
@@ -265,6 +285,7 @@ impl TorrentManager {
             completed_tx,
             completed_rx: std::sync::Mutex::new(Some(completed_rx)),
             limiter: Default::default(),
+            announce_hook: std::sync::OnceLock::new(),
             state_db,
             last_saved: DashMap::new(),
             mirror_json,
@@ -646,7 +667,19 @@ impl TorrentManager {
 
     pub fn start_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        t.is_paused.store(false, Ordering::Relaxed);
+        let was_paused = t.is_paused.swap(false, Ordering::Relaxed);
+        if was_paused {
+            // A resume opens a new announce session: the trackers dropped us
+            // at the stop (or are about to), so each one is owed `started`,
+            // with counters from zero. A departure not yet delivered is moot
+            // -- we are not leaving any more.
+            t.pending_announce_event.fetch_and(
+                !crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
+                Ordering::Relaxed,
+            );
+            t.begin_announce_session();
+            self.announce_soon(info_hash);
+        }
         // Opens the seeding interval if this start makes it a seed. Folding
         // before the status is read would close an interval that has not
         // begun, which is harmless; after, it opens the right one.
@@ -695,10 +728,8 @@ impl TorrentManager {
         let announced = t.last_announce_at.load(Ordering::Relaxed) > 0;
         self.stop_torrent(info_hash)?;
         if !announced {
-            let _ = t.pending_announce_event.compare_exchange(
-                crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
-                crate::torrent::meta::ANNOUNCE_EVENT_NONE,
-                Ordering::Relaxed,
+            t.pending_announce_event.fetch_and(
+                !crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
                 Ordering::Relaxed,
             );
         }
@@ -716,13 +747,16 @@ impl TorrentManager {
         // BEP 3: tell the trackers we are leaving. Without it a stop is silent
         // and every tracker keeps us in the swarm until the entry goes stale,
         // handing our address to leechers we will not answer.
-        t.pending_announce_event.store(
+        // `fetch_or`: a `completed` still owed must survive the stop -- the
+        // snatch happened, and the tracker hears both.
+        t.pending_announce_event.fetch_or(
             crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
             Ordering::Relaxed,
         );
         // A stopped torrent must not keep a get_peers recursion alive: the
         // stream loop only checks is_removed, which a stop does not set.
         self.untrack_in_dht(info_hash);
+        self.announce_soon(info_hash);
         Ok(())
     }
 
@@ -977,6 +1011,9 @@ impl TorrentManager {
             state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
             state.total_uploaded.store(rd.total_uploaded, Ordering::Relaxed);
             state.total_downloaded.store(rd.total_downloaded, Ordering::Relaxed);
+            // The lifetime totals are ours; what a tracker is told starts
+            // from zero with the session this boot opens.
+            state.begin_announce_session();
             // Restore verified-pieces bitfield FIRST so we don't re-DL 6+ GB
             // on every restart AND so an already-complete torrent is
             // recognised as a seed below. Pre-bitfield resume files have an
@@ -1939,6 +1976,87 @@ mod lifecycle_tests {
         );
     }
 
+    /// A download that finishes and is stopped before the announcer runs owes
+    /// BOTH: the snatch happened, and so did the departure. The events used to
+    /// be one value, and the stop overwrote the completion.
+    #[test]
+    fn a_stop_does_not_erase_an_owed_completion() {
+        let (mgr, root) = manager("stop-completed");
+        let ih = add(&mgr, &root, "done");
+        let t = mgr.get(&ih).unwrap();
+        t.pending_announce_event.store(
+            crate::torrent::meta::ANNOUNCE_EVENT_COMPLETED,
+            Ordering::Relaxed,
+        );
+        mgr.stop_torrent(&ih).expect("stopped");
+        let owed = t.pending_announce_event.load(Ordering::Relaxed);
+        assert_ne!(owed & crate::torrent::meta::ANNOUNCE_EVENT_COMPLETED, 0, "completion kept");
+        assert_ne!(owed & ANNOUNCE_EVENT_STOPPED, 0, "departure owed");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A resume is a new session with every tracker: `started` again, the
+    /// counters from zero, and no departure left over from the stop.
+    #[test]
+    fn a_resume_opens_a_new_announce_session() {
+        let (mgr, root) = manager("resume-new-session");
+        let ih = add(&mgr, &root, "again");
+        let t = mgr.get(&ih).unwrap();
+        t.total_uploaded.store(10_000, Ordering::Relaxed);
+        t.announce_book.lock().unwrap().push(crate::torrent::meta::TrackerSlot {
+            key: 1,
+            started: true,
+            ..Default::default()
+        });
+
+        mgr.stop_torrent(&ih).expect("stopped");
+        mgr.start_torrent(&ih).expect("resumed");
+
+        assert_eq!(
+            t.pending_announce_event.load(Ordering::Relaxed) & ANNOUNCE_EVENT_STOPPED,
+            0,
+            "we are not leaving any more"
+        );
+        assert_eq!(t.session_uploaded(), 0, "counters restart with the session");
+        assert!(
+            t.announce_book.lock().unwrap().iter().all(|s| !s.started),
+            "every tracker is owed a fresh started"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Starting a torrent that was never paused is not a new session: the
+    /// stagger start and the download slots call it on running torrents.
+    #[test]
+    fn starting_a_running_torrent_keeps_its_session() {
+        let (mgr, root) = manager("start-running");
+        let ih = add(&mgr, &root, "running");
+        mgr.start_torrent(&ih).expect("started");
+        let t = mgr.get(&ih).unwrap();
+        t.total_uploaded.store(7_000, Ordering::Relaxed);
+        mgr.start_torrent(&ih).expect("started again");
+        assert_eq!(t.session_uploaded(), 7_000, "same session, same counter");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The hook is how an owed event goes out now rather than at the next
+    /// scheduled announce: a stop and a resume each ask for one.
+    #[test]
+    fn a_stop_and_a_resume_each_ask_for_an_announce_now() {
+        let (mgr, root) = manager("hook");
+        let ih = add(&mgr, &root, "hooked");
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        mgr.set_announce_hook(Arc::new(move |_ih| {
+            a.fetch_add(1, Ordering::Relaxed);
+        }));
+        mgr.stop_torrent(&ih).expect("stopped");
+        assert_eq!(asked.load(Ordering::Relaxed), 1);
+        mgr.start_torrent(&ih).expect("resumed");
+        assert_eq!(asked.load(Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn stopping_pauses_the_torrent_and_owes_the_trackers_a_departure() {
         let (mgr, root) = manager("stop");
@@ -2473,6 +2591,41 @@ mod manager_tests {
         let loaded = again.load_resume_data();
         assert_eq!(loaded, 1, "the torrent came back");
         assert!(again.has(&ih), "and under the same hash");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ The lifetime counters survive a restart; what a tracker is told
+    /// does not. After a reload the session starts from zero -- a `started`
+    /// carrying last month's upload is the signature tracker anti-cheat looks
+    /// for, and a tracker crediting a new peer's first report would have
+    /// counted it all a second time.
+    #[test]
+    fn a_reload_keeps_the_lifetime_totals_and_reports_a_fresh_session() {
+        let (mgr, root) = manager("resume-session");
+        let ih = add(&mgr, "alpha");
+        {
+            let t = mgr.get(&ih).unwrap();
+            t.total_uploaded.store(500_000_000_000, Ordering::Relaxed);
+            t.total_downloaded.store(16_384, Ordering::Relaxed);
+        }
+        mgr.save_all_resume();
+        mgr.flush_all_resume();
+
+        let again = Arc::new(TorrentManager::new(
+            root.join("data").to_string_lossy().into_owned(),
+            root.join("resume").to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        again.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+        assert_eq!(again.load_resume_data(), 1);
+
+        let t = again.get(&ih).unwrap();
+        assert_eq!(t.total_uploaded.load(Ordering::Relaxed), 500_000_000_000, "the lifetime total is kept");
+        assert_eq!(t.session_uploaded(), 0, "a new session reports from zero");
+        assert_eq!(t.session_downloaded(), 0);
+        t.total_uploaded.fetch_add(4096, Ordering::Relaxed);
+        assert_eq!(t.session_uploaded(), 4096, "and counts what this session moves");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -49,20 +49,26 @@ adds that hash-check data already on disk instead of downloading over it.
 
 What Hydranos puts on the wire is documented, rule by rule, in
 **[`docs/BITTORRENT-CONFORMANCE.md`](docs/BITTORRENT-CONFORMANCE.md)**. Every
-claim there names the test that asserts it, and the suite runs offline in a few
-seconds against a real HTTP tracker on loopback, so it can be checked rather
-than believed. In short:
+claim there names the test that asserts it: the unit suite runs offline in
+seconds, and `tools/interop/run.sh` runs the client against opentracker,
+Torrust in private mode and qBittorrent/libtorrent, reading the verdict from
+their state rather than ours. Both run on every push. In short:
 
-- **One announce per torrent per interval**, at the cadence the tracker sets;
-  `min interval` is a floor, BEP 12 tier order is respected, and a circuit
-  breaker per host stops calling a tracker that has stopped answering.
-- **`started`, `completed` and `stopped` are sent, and so is `key`**, each
-  covered by a test.
+- **Session counters.** `uploaded`/`downloaded` count from `started`, never
+  the lifetime total; `left` comes from the pieces held.
+- **BEP 3 events per tracker.** `started`, `completed` (once, to every tracker
+  that saw us leech, retried if one is down) and `stopped`; a cross-seed is
+  never a snatch.
+- **Your floors hold.** `min interval`, BEP 31 `retry in` and `Retry-After` are
+  obeyed per tracker, manual re-announces included; BEP 12 tier order is
+  respected; `tracker id` is echoed back.
 - **One identity.** Peer id `-HY####-`, the same to every tracker and every
-  peer.
-- **Private torrents stay private** (BEP 27): no DHT, PEX or LSD.
-- **HTTP trackers only.** No scrape requests either: swarm counts come from
-  the announce response.
+  peer, `User-Agent: Hydranos/<version>`, a stable secret `key`. No client
+  spoofing.
+- **Private torrents stay private** (BEP 27): no DHT, PEX, hole punching or
+  LSD, and peers named by other peers are ignored.
+- **HTTP trackers only.** No UDP, and no scrape requests: swarm counts come
+  from the announce response.
 
 ---
 
