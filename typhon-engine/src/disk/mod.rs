@@ -217,31 +217,31 @@ impl DiskManager {
             }
         }
 
-        // A piece we cannot check is a piece we refuse, not one we accept.
-        let expected_hash = match torrent.piece_hash(piece) {
-            Some(h) => h,
-            None => return Err(format!(
-                "no piece hashes for {}; refusing to accept piece {}",
-                torrent.info_hash_hex(), piece
-            )),
-        };
         let ops = torrent.meta.map_block(piece, 0, data.len() as u32);
         let save_path = torrent.save_path.read().clone();
         let name = torrent.meta.name.clone();
         let multi_file = torrent.meta.multi_file;
 
+        // A piece we cannot check is a piece we refuse, not one we accept.
+        let check = match torrent.piece_check(piece) {
+            Some(c) => c,
+            None => return Err(format!(
+                "no piece hashes for {}; refusing to accept piece {}",
+                torrent.info_hash_hex(), piece
+            )),
+        };
+
         tokio::task::spawn_blocking(move || {
-            let mut hasher = Sha1::new();
-            hasher.update(&data);
-            let hash = hasher.finalize();
-            let mut computed = [0u8; 20];
-            computed.copy_from_slice(&hash);
-            if computed != expected_hash {
+            if !check.matches(&data) {
                 return Ok(false);
             }
-
             let mut data_offset = 0usize;
             for op in ops {
+                // Alignment padding: zeros no file holds.
+                if op.pad {
+                    data_offset += op.length as usize;
+                    continue;
+                }
                 let full_path = if multi_file {
                     save_path.join(&name).join(&op.path)
                 } else {
@@ -285,7 +285,7 @@ impl DiskManager {
             return None;
         }
         let op = &ops[0];
-        if op.length != length {
+        if op.length != length || op.pad {
             return None;
         }
         let save_path = torrent.save_path.read().clone();
@@ -432,6 +432,10 @@ async fn read_block_direct(
         let mut result = Vec::with_capacity(length as usize);
 
         for op in ops {
+            if op.pad {
+                result.resize(result.len() + op.length as usize, 0);
+                continue;
+            }
             let full_path = if multi_file {
                 save_path.join(&name).join(&op.path)
             } else {
@@ -532,6 +536,10 @@ pub async fn read_piece_for_check(torrent: &TorrentState, piece: u32) -> Option<
     tokio::task::spawn_blocking(move || {
         let mut result = Vec::with_capacity(plen as usize);
         for op in ops {
+            if op.pad {
+                result.resize(result.len() + op.length as usize, 0);
+                continue;
+            }
             let full_path = if multi_file {
                 save_path.join(&name).join(&op.path)
             } else {
