@@ -653,6 +653,7 @@ fn apply_matches(
                 rules::Action::AddTags { .. } => "add_tags",
                 rules::Action::RemoveTags { .. } => "remove_tags",
                 rules::Action::Delete { .. } => "delete",
+                rules::Action::Webhook { .. } => "webhook",
             })
             .collect::<Vec<_>>()
             .join("+");
@@ -1493,6 +1494,79 @@ mod event_tests {
         tick(&s.state, crate::store::now_secs()).await;
         assert_eq!(tags(&s, &hash), vec!["done".to_string()]);
         assert_eq!(waiting(&s), 0);
+    }
+
+    /// A receiver in a test: records each POST body and answers `status`.
+    async fn hook_receiver(status: u16) -> (String, std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = got.clone();
+        let app = axum::Router::new().route(
+            "/hook/SECRET",
+            axum::routing::post(move |body: String| {
+                let log = log.clone();
+                async move {
+                    log.lock().unwrap().push(serde_json::from_str(&body).unwrap_or(serde_json::Value::Null));
+                    axum::http::StatusCode::from_u16(status).unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}/hook/SECRET"), got)
+    }
+
+    async fn save_hook_wf(s: &TestState, url: &str) {
+        let body = serde_json::json!({
+            "id": "", "name": "tell me", "enabled": true, "trigger": "completed",
+            "when": {"kind": "all", "of": []},
+            "then": [{"type": "add_tags", "tags": ["done"]}, {"type": "webhook", "url": url}],
+        });
+        let r = save(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        assert!(r.status().is_success());
+    }
+
+    /// ⭐ A finished download reaches the webhook: one POST, with the torrent
+    /// and the line Discord shows, after the tag.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_download_is_posted_to_the_webhook() {
+        let s = st("wf-ev-hook");
+        let hash = add(&s, "hooked");
+        let (url, got) = hook_receiver(204).await;
+        save_hook_wf(&s, &url).await;
+        let st2 = s.state.clone();
+        let ih = crate::store::hex20(&hash).unwrap();
+        tokio::task::spawn_blocking(move || record_completions(&st2, &[("hoard".into(), ih)])).await.unwrap();
+
+        let posts = got.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1, "one call");
+        assert_eq!(posts[0]["event"], "completed");
+        assert_eq!(posts[0]["torrent"]["info_hash"], hash);
+        assert_eq!(posts[0]["torrent"]["tags"], serde_json::json!([]), "the facts the rule matched on, before its own tag");
+        assert!(posts[0]["content"].as_str().unwrap().contains("hooked"));
+        let act = s.state.store.lock().unwrap().workflow_activity(10).unwrap();
+        assert_eq!((act[0].action.as_str(), act[0].outcome.as_str()), ("add_tags+webhook", "applied"));
+    }
+
+    /// A receiver that refuses is a failed action, said in the activity log
+    /// -- and the log never shows the URL, which for Discord is the secret.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_webhook_is_a_failure_that_never_shows_its_url() {
+        let s = st("wf-ev-hook404");
+        let hash = add(&s, "refused");
+        let (url, got) = hook_receiver(404).await;
+        save_hook_wf(&s, &url).await;
+        let st2 = s.state.clone();
+        let ih = crate::store::hex20(&hash).unwrap();
+        tokio::task::spawn_blocking(move || record_completions(&st2, &[("hoard".into(), ih)])).await.unwrap();
+
+        assert_eq!(got.lock().unwrap().len(), 1, "a 4xx is not retried");
+        let act = s.state.store.lock().unwrap().workflow_activity(10).unwrap();
+        assert_eq!(act[0].outcome, "failed");
+        assert!(act[0].detail.contains("404"), "{}", act[0].detail);
+        assert!(!act[0].detail.contains("SECRET"), "the URL stays out of the log: {}", act[0].detail);
     }
 
     /// A disabled completion workflow is the same as none.

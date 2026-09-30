@@ -9987,6 +9987,7 @@ const WF_ACTIONS = [
     { type: "add_tags", label: "add tags" },
     { type: "remove_tags", label: "remove tags" },
     { type: "delete", label: "delete the torrent" },
+    { type: "webhook", label: "call a webhook" },
 ];
 
 /// The argument control for an action. One box captioned
@@ -10004,6 +10005,9 @@ function _wfArgControl(type, value) {
     if (type === "add_tags" || type === "remove_tags") {
         return `<input type="text" class="wf-a-arg" placeholder="tag, tag, tag" value="${esc(value || "")}" autocomplete="off">`;
     }
+    if (type === "webhook") {
+        return `<input type="url" class="wf-a-arg" placeholder="https://discord.com/api/webhooks/..." value="${esc(value || "")}" autocomplete="off">`;
+    }
     if (type === "delete") {
         // A checkbox, because this is a yes/no and the old box wanted the
         // literal string "with_files" -- anything else silently meant no.
@@ -10012,6 +10016,14 @@ function _wfArgControl(type, value) {
     // pause and resume take nothing. An empty box invites a value that would
     // be ignored.
     return `<span class="sr-desc wf-a-arg" data-none="1"></span>`;
+}
+
+// Said where it applies and nowhere else: under "pause" a note about delete
+// reads as a warning about pausing.
+function _wfActionNote(type) {
+    if (type === "delete") return t("delete must be the only action in a workflow");
+    if (type === "webhook") return t("POSTs the torrent as JSON; Discord, Slack and Gotify read it as is. On a timer, it goes out when another action changes the torrent.");
+    return "";
 }
 
 function syncActionRow(btn) {
@@ -10024,7 +10036,7 @@ function syncActionRow(btn) {
     const note = row.querySelector(".wf-a-note");
     // Only where it applies. Shown under "pause" it reads as a warning about
     // pausing.
-    if (note) note.textContent = type === "delete" ? t("delete must be the only action in a workflow") : "";
+    if (note) note.textContent = _wfActionNote(type);
 }
 
 function addActionRow(act) {
@@ -10039,12 +10051,13 @@ function addActionRow(act) {
         if (act.to) arg = act.to;
         else if (act.tags) arg = act.tags.join(",");
         else if (act.with_files) arg = "with_files";
+        else if (act.url) arg = act.url;
     }
     const type = act ? act.type : WF_ACTIONS[0].type;
     div.innerHTML = `
         <select class="wf-a-type" onchange="syncActionRow(this)">${opts}</select>
         ${_wfArgControl(type, arg)}
-        <span class="sr-desc wf-a-note">${type === "delete" ? esc(t("delete must be the only action in a workflow")) : ""}</span>
+        <span class="sr-desc wf-a-note">${esc(_wfActionNote(type))}</span>
         <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this action">Remove</button>`;
     wrap.appendChild(div);
 }
@@ -10057,6 +10070,7 @@ function _wfCollect() {
         if (type === "delete") return { type, with_files: !!(el && el.checked) };
         const arg = (el && el.value ? el.value : "").trim();
         if (type === "set_category") return { type, to: arg };
+        if (type === "webhook") return { type, url: arg };
         if (type === "add_tags" || type === "remove_tags") {
             return { type, tags: arg.split(",").map(s => s.trim()).filter(Boolean) };
         }

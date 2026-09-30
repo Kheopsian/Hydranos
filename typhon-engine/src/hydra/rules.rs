@@ -143,11 +143,18 @@ pub enum Action {
         #[serde(default)]
         with_files: bool,
     },
+    /// POST what happened to a URL: a Discord or Slack webhook, ntfy, n8n, a
+    /// script behind a small HTTP server. Never a command run here -- an API
+    /// key that leaks must not become a shell on this machine.
+    Webhook { url: String },
 }
 
 impl Action {
     pub fn is_delete(&self) -> bool {
         matches!(self, Action::Delete { .. })
+    }
+    pub fn is_webhook(&self) -> bool {
+        matches!(self, Action::Webhook { .. })
     }
 }
 
@@ -223,6 +230,11 @@ pub enum CompileError {
     /// question of whether the tag was written before the files went away.
     DeleteNotAlone,
     NoActions,
+    /// Not an http(s) URL.
+    BadWebhookUrl(String),
+    /// A webhook on a timer with nothing else to do: nothing would mark the
+    /// torrent as told, and it would be told again every pass.
+    WebhookAlone,
     /// A hardlink condition on an event workflow. Those facts come from the
     /// background index, which has not seen a torrent that finished a second
     /// ago: the condition would read NEVER and quietly never match.
@@ -242,6 +254,11 @@ impl std::fmt::Display for CompileError {
                 write!(f, "delete cannot be combined with another action")
             }
             CompileError::NoActions => write!(f, "a workflow with no action would do nothing"),
+            CompileError::BadWebhookUrl(u) => write!(f, "{u:?} is not an http:// or https:// URL"),
+            CompileError::WebhookAlone => write!(
+                f,
+                "on a timer, a webhook needs another action that changes the torrent (a tag, say), or it would be called again every pass"
+            ),
             CompileError::LinkFieldOnEvent(x) => write!(
                 f,
                 "{x:?} cannot be used when a download completes: the hardlink index has not measured the torrent yet"
@@ -577,6 +594,25 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
     if w.then.iter().any(Action::is_delete) && w.then.len() > 1 {
         return Err(CompileError::DeleteNotAlone);
     }
+    for a in &w.then {
+        if let Action::Webhook { url } = a {
+            let u = url.trim().to_ascii_lowercase();
+            let host = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or("");
+            if host.is_empty() || host.starts_with('/') {
+                return Err(CompileError::BadWebhookUrl(url.clone()));
+            }
+        }
+    }
+    // ⭐ A webhook is never "already done", so on a timer it fires for every
+    // match on every pass. It is sent in the pass where another action
+    // actually changes the torrent -- which then converges -- and that other
+    // action has to exist.
+    if w.trigger == Trigger::Schedule
+        && w.then.iter().any(Action::is_webhook)
+        && w.then.iter().all(Action::is_webhook)
+    {
+        return Err(CompileError::WebhookAlone);
+    }
     if w.trigger == Trigger::Completed {
         if let Some(f) = LINK_FIELDS.iter().find(|f| uses_field(&w.when, f)) {
             return Err(CompileError::LinkFieldOnEvent(f.to_string()));
@@ -606,6 +642,8 @@ pub fn already_satisfied(action: &Action, f: &Facts) -> bool {
         Action::RemoveTags { tags } => tags.iter().all(|t| !f.tags.contains(t)),
         // Deleting is never already done: the torrent is still here.
         Action::Delete { .. } => false,
+        // Nor is telling someone. When it is sent is decided by `evaluate`.
+        Action::Webhook { .. } => false,
     }
 }
 
@@ -843,6 +881,29 @@ mod tests {
         );
         let scheduled = Workflow { trigger: Trigger::Schedule, ..w };
         assert!(compile_workflow(&scheduled).is_ok(), "a timer reads the index, which is fine");
+    }
+
+    /// A webhook needs a real URL; on a timer it needs company that
+    /// converges, or it would be called every pass; on a completion it can
+    /// stand alone, the event happening once.
+    #[test]
+    fn a_webhook_is_refused_where_it_would_misfire() {
+        let hook = |u: &str| Action::Webhook { url: u.into() };
+        let mut w = on_completion(Node::All { of: vec![] });
+        w.then = vec![hook("https://hooks.example/x")];
+        assert!(compile_workflow(&w).is_ok(), "alone on a completion is fine");
+        w.then = vec![hook("ftp://hooks.example/x")];
+        assert_eq!(compile_workflow(&w).err(), Some(CompileError::BadWebhookUrl("ftp://hooks.example/x".into())));
+        w.then = vec![hook("https://")];
+        assert!(matches!(compile_workflow(&w).err(), Some(CompileError::BadWebhookUrl(_))));
+
+        let mut timer = Workflow { trigger: Trigger::Schedule, when: cond("ratio", Op::Ge, "2"), ..w.clone() };
+        timer.then = vec![hook("https://hooks.example/x")];
+        assert_eq!(compile_workflow(&timer).err(), Some(CompileError::WebhookAlone));
+        timer.then = vec![Action::AddTags { tags: vec!["told".into()] }, hook("https://hooks.example/x")];
+        assert!(compile_workflow(&timer).is_ok(), "with a tag that converges");
+        timer.then = vec![Action::Delete { with_files: false }, hook("https://hooks.example/x")];
+        assert_eq!(compile_workflow(&timer).err(), Some(CompileError::DeleteNotAlone));
     }
 
     /// Every workflow saved before triggers existed ran on a timer, and has to
