@@ -76,6 +76,7 @@ mod linkscan;
 mod rules;
 mod rulesrun;
 mod rulesapi;
+mod magnets;
 mod mcp;
 mod session;
 
@@ -674,6 +675,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     if let Some(rx) = state.engines.take_completions() {
         rulesapi::spawn_events(state.clone(), rx);
     }
+    // Magnets waiting for their metadata, including the ones a restart
+    // interrupted: their requests are in the store.
+    magnets::spawn(state.clone());
     // Keeps the hardlink index the workflows read, instead of each pass
     // stat-ing the whole catalogue itself.
     linkscan::spawn(state.engines.clone(), state.store.clone());

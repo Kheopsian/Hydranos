@@ -1217,8 +1217,7 @@ document.querySelectorAll(".mode-btn").forEach(btn => {
     btn.addEventListener("click", () => {
         document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
-        const isHoard = btn.dataset.mode === "hoard";
-        document.getElementById("magnet-group").style.display = isHoard ? "none" : "block";
+        // Both engines take magnets now; the group stays visible.
     });
 });
 
@@ -4838,7 +4837,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
 
             if (torrentPath) {
                 body.torrent_path = torrentPath;
-            } else if (magnetUri && mode === "race") {
+            } else if (magnetUri) {
                 body.magnet_uri = magnetUri;
             } else {
                 throw new Error(t("Provide a torrent path, magnet URI, or upload a file"));
@@ -4851,6 +4850,17 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
             });
         }
 
+        if (result && result.status === "resolving") {
+            // Accepted, not added: say so, and show where it is waiting.
+            resultEl.innerHTML = esc(t("Magnet accepted: fetching its metadata. It appears in the list once it arrives."));
+            resultEl.className = "result-msg success";
+            resultEl.style.display = "";
+            document.getElementById("magnet-uri").value = "";
+            btn.textContent = btn.dataset.label || t("Add Torrent");
+            btn.disabled = false;
+            updateMagnets();
+            return;
+        }
         const _fname = (fileInput.files && fileInput.files[0])
             ? fileInput.files[0].name.replace(/\.torrent$/i, "")
             : ((document.getElementById("torrent-path").value.split("/").pop() || "").replace(/\.torrent$/i, "") || (result.info_hash || "").slice(0, 16));
@@ -6188,6 +6198,38 @@ async function updateUptime() {
 // SSE (status_snapshot, hoard_stats_snapshot), this loop only handles the
 // per-tab heavy fetches and /health.
 let _polling = false;
+// Magnets waiting for metadata. Hidden while there are none: an empty table
+// under the add form reads as something missing.
+async function updateMagnets() {
+    const card = document.getElementById("magnets-card");
+    const body = document.getElementById("magnets-list");
+    if (!card || !body) return;
+    let rows = [];
+    try { rows = (await api("/api/magnets")).magnets || []; } catch (e) { return; }
+    card.style.display = rows.length ? "" : "none";
+    const now = Date.now() / 1000;
+    body.innerHTML = rows.map(m => {
+        let st;
+        if (m.state === "failed") st = `<span style="color:var(--danger)">${esc(t("failed"))}: ${esc(m.error)}</span>`;
+        else if (m.next_try > now) st = esc(t("waiting to retry")) + ` (${Math.ceil((m.next_try - now) / 60)} min) -- ${esc(m.error)}`;
+        else st = esc(t("fetching metadata..."));
+        const retry = m.state === "failed"
+            ? `<button class="btn-small" onclick="retryMagnet('${esc(m.info_hash)}')">${esc(t("Retry"))}</button>` : "";
+        return `<tr><td title="${esc(m.info_hash)}">${esc(m.name)}</td><td>${esc(m.engine)}</td><td>${st}</td>
+            <td>${retry}<button class="btn-cancel" onclick="removeMagnet('${esc(m.info_hash)}')">${esc(t("Remove"))}</button></td></tr>`;
+    }).join("");
+}
+
+async function retryMagnet(hash) {
+    await api(`/api/magnets/${encodeURIComponent(hash)}/retry`, { method: "POST" });
+    updateMagnets();
+}
+
+async function removeMagnet(hash) {
+    await api(`/api/magnets/${encodeURIComponent(hash)}`, { method: "DELETE" });
+    updateMagnets();
+}
+
 async function poll() {
     if (_polling) return;
     _polling = true;
@@ -6199,6 +6241,7 @@ async function poll() {
         if (activeTab === "categories") await updateCategories();
         if (activeTab === "benchmark") await updateBenchmark();
         if (activeTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
+        if (activeTab === "add") await updateMagnets();
     } finally {
         _polling = false;
     }
@@ -6212,6 +6255,7 @@ document.querySelectorAll(".tab").forEach(tab => {
         if (t === "hoard") await updateHoardStats();
         if (t === "categories") await updateCategories();
         if (t === "benchmark") await updateBenchmark();
+        if (t === "add") await updateMagnets();
     });
 });
 

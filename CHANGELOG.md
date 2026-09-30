@@ -24,6 +24,27 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **Magnet links.** Accepted by the Add tab (both engines), by
+  `POST /api/torrents` (`magnet_uri`, answered 202), by the qBittorrent API's
+  `urls` field -- which is how autobrr, Sonarr and Radarr send them -- and by
+  the MCP `add_torrent` tool. The request is kept in the store, so a restart
+  does not lose it; its metadata is fetched from the swarm (trackers,
+  including UDP ones, the DHT, `x.pe` peers, then BEP 9), checked against
+  the info hash, and the torrent is added as asked -- category, save path,
+  tags, paused -- with the magnet's trackers. One nobody answers is retried
+  after 1, 5 and 15 minutes, then listed as failed with the reason under the
+  Add form, where it can be retried or removed (`GET /api/magnets`,
+  `DELETE /api/magnets/:hash`, `POST /api/magnets/:hash/retry`). A magnet
+  with only a v2 hash is refused by name. The qBittorrent `urls` field also
+  takes `.torrent` URLs now. Proven against libtorrent in the interop suite.
+
+### Fixed
+- **Magnet resolution gave up after one round.** A peer still checking the
+  torrent (libtorrent refuses connections for a few seconds after an add) or
+  a tracker answering late made the whole resolution fail. It now keeps
+  asking within its two-minute budget, re-asking the trackers and the DHT
+  every 30 s -- not every round, which would announce `started` every few
+  seconds.
 - **Workflows can call a webhook.** A new action POSTs the torrent as JSON
   (`event`, `workflow`, and `torrent`: hash, name, category, tags, engine,
   save path, state, tracker, size, progress, ratio, bytes, seeding time),

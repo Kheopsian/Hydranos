@@ -84,6 +84,10 @@ pub struct Engine {
     /// What trackers last said about this engine's torrents. Written by the
     /// announcer, read by the trackers tab and the download slot manager.
     pub announce_cache: Arc<crate::announce::cache::Cache>,
+    /// The engine's network config, set when `connect` puts it on the
+    /// network. Magnet resolution dials from its bindings: an engine that is
+    /// not on the network has none, and no business dialling at all.
+    pub engine_config: std::sync::OnceLock<typhon_engine::config::EngineConfig>,
 }
 
 pub struct EngineHost {
@@ -215,6 +219,7 @@ impl EngineHost {
                 bump: std::sync::OnceLock::new(),
                 announce_policy: std::sync::OnceLock::new(),
                 admission: Default::default(),
+                engine_config: std::sync::OnceLock::new(),
             });
         }
 
@@ -259,6 +264,7 @@ impl EngineHost {
             let resume_dir = data_dir.join("resume");
             match engine_config(session, &data_dir, &resume_dir) {
                 Some(engine_cfg) => {
+                    let _ = engine.engine_config.set(engine_cfg.clone());
                     typhon_engine::session::start(
                         engine.manager.clone(),
                         engine.disk.clone(),
