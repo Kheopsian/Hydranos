@@ -79,8 +79,8 @@ and `interop`).
 | 11 | Peer exchange (`ut_pex`) | Implemented. Never for a private torrent, sent or received |
 | 12 | Multitracker metadata (tiers) | Implemented |
 | 15 | UDP tracker protocol | Implemented. Switchable per engine (`enable_udp_trackers`, on by default); never sent while announces are proxied |
-| 47 | Padding files | Implemented: a pad file is alignment in the stream, never a file on disk |
 | 41 | UDP tracker URL extension | Implemented: the tracker URL's path and query, passkey included, travel as URLData |
+| 47 | Padding files | Implemented: a pad file is alignment in the stream, never a file on disk |
 | 19 | WebSeed (`url-list`) | Implemented |
 | 20 | Peer id conventions | Implemented |
 | 23 | Compact peer lists | Implemented |
