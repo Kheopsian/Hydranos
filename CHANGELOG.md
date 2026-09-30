@@ -24,6 +24,20 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **BitTorrent v2 torrents (BEP 52).** A v2-only `.torrent` is added,
+  downloaded and seeded: each piece is checked against its SHA-256 merkle
+  hash, the piece layers are checked against each file's root before being
+  trusted, and the torrent is known everywhere -- trackers, peers, DHT, the
+  store -- by its SHA-256 truncated to 20 bytes, as BEP 52 says. A hybrid is
+  read as the v1 torrent it also is. Proven against libtorrent with torrents
+  its own creator made: same info hashes, transfers both ways.
+
+### Fixed
+- **Padding files (BEP 47) are no longer written to disk.** A hybrid torrent,
+  or any torrent with pad files, used to get real `.pad/N` files full of
+  zeros beside its data. Padding is now a gap in the stream -- read as
+  zeros, never written, never opened -- and web seeds place each file at its
+  offset around it.
 - **Watched folders.** A `.torrent` -- or a `.magnet` file holding a link --
   dropped in a watched folder is added in the folder's category, which
   decides the engine and the save path; optionally stopped. Scanned every

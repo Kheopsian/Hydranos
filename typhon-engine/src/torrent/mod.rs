@@ -1,5 +1,6 @@
 pub mod meta;
 pub mod metainfo;
+pub mod merkle;
 pub mod piece_picker;
 pub mod fastresume;
 pub mod statedb;
@@ -1688,12 +1689,8 @@ impl TorrentManager {
                     // No hash table -> we cannot say this piece is good. Leave
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
-                    let expected = t.piece_hash(piece)?;
-                    let mut hasher = Sha1::new();
-                    hasher.update(&data);
-                    let mut computed = [0u8; 20];
-                    computed.copy_from_slice(&hasher.finalize());
-                    if computed == expected { Some(piece) } else { None }
+                    // SHA-1 for v1 and hybrids, the merkle root for v2.
+                    if t.verify_piece(piece, &data)? { Some(piece) } else { None }
                 }
             })
             .buffer_unordered(width)

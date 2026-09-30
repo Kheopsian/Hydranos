@@ -53,6 +53,14 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
     let info = dict.get("info").ok_or("missing info dict")?
         .as_dict().ok_or("info is not a dict")?;
 
+    // BEP 52, v2 only: no v1 `pieces`, a `file tree` instead. A hybrid has
+    // both and is read below as the v1 torrent it also is -- its v1 hashes
+    // cover every byte, alignment padding included.
+    let is_v2 = info.get("meta version").and_then(|v| v.as_int()) == Some(2);
+    if is_v2 && info.get("pieces").is_none() {
+        return parse_v2(dict, &info, &info_raw);
+    }
+
     // Piece length
     let piece_length = info.get("piece length")
         .ok_or("missing piece length")?
@@ -95,7 +103,15 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
                 .filter_map(|p| p.as_bytes())
                 .map(decode_path_str)
                 .collect();
-            files.push(FileEntry { path, offset, length });
+            // BEP 47 padding: zeros that align the next file to a piece. Part
+            // of the stream -- the offsets and the v1 hashes count them --
+            // but never a file on disk. Kept as a gap between two files,
+            // which `map_block` reads as zeros and never writes.
+            let attr = fd.get("attr").and_then(|a| a.as_bytes()).unwrap_or(&[]);
+            let is_pad = attr.contains(&b'p') || path.starts_with(".pad");
+            if !is_pad {
+                files.push(FileEntry { path, offset, length });
+            }
             offset += length;
         }
         (files, offset, true)
@@ -175,7 +191,254 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         private,
         multi_file,
         info_dict_len: info_raw.len() as u32,
+        v2: false,
     })
+}
+
+/// Trackers and web seeds: the same keys, v1 or v2.
+fn trackers_and_seeds(dict: &BencodeDict) -> (Vec<Vec<String>>, Vec<String>) {
+    let mut trackers = Vec::new();
+    if let Some(tiers) = dict.get("announce-list").and_then(|v| v.as_list()) {
+        for tier in tiers {
+            if let Some(urls) = tier.as_list() {
+                let t: Vec<String> = urls.iter().filter_map(|u| u.as_string().map(|s| s.to_string())).collect();
+                if !t.is_empty() {
+                    trackers.push(t);
+                }
+            }
+        }
+    }
+    if trackers.is_empty() {
+        if let Some(url) = dict.get("announce").and_then(|a| a.as_string()) {
+            trackers.push(vec![url.to_string()]);
+        }
+    }
+    let mut url_list = Vec::new();
+    if let Some(ul) = dict.get("url-list") {
+        if let Some(s) = ul.as_string().filter(|s| !s.is_empty()) {
+            url_list.push(s.to_string());
+        } else if let Some(items) = ul.as_list() {
+            url_list.extend(items.iter().filter_map(|u| u.as_string()).filter(|s| !s.is_empty()).map(String::from));
+        }
+    }
+    (trackers, url_list)
+}
+
+/// One file of a v2 `file tree`, in tree order.
+struct V2File {
+    path: PathBuf,
+    length: u64,
+    root: Option<[u8; 32]>,
+}
+
+fn walk_file_tree(node: &BencodeValue, prefix: &std::path::Path, out: &mut Vec<V2File>) -> Result<(), String> {
+    let BencodeValue::Dict(entries) = node else {
+        return Err("file tree node is not a dict".into());
+    };
+    for (name, child) in entries {
+        let child_dict = child.as_dict().ok_or("file tree entry is not a dict")?;
+        let path = prefix.join(name);
+        match child_dict.get("") {
+            // A file: its properties under the empty key.
+            Some(leaf) => {
+                let leaf = leaf.as_dict().ok_or("file entry is not a dict")?;
+                let length = leaf.get("length").and_then(|l| l.as_int()).ok_or("file without length")?;
+                if length < 0 {
+                    return Err("negative file length".into());
+                }
+                let root = match leaf.get("pieces root").and_then(|r| r.as_bytes()) {
+                    Some(r) if r.len() == 32 => {
+                        let mut h = [0u8; 32];
+                        h.copy_from_slice(r);
+                        Some(h)
+                    }
+                    Some(_) => return Err("pieces root is not 32 bytes".into()),
+                    None if length > 0 => return Err("a non-empty file has no pieces root".into()),
+                    None => None,
+                };
+                out.push(V2File { path, length: length as u64, root });
+            }
+            None => walk_file_tree(child, &path, out)?,
+        }
+    }
+    Ok(())
+}
+
+fn v2_files(info: &BencodeDict) -> Result<Vec<V2File>, String> {
+    let tree = info.get("file tree").ok_or("v2 torrent without a file tree")?;
+    let mut files = Vec::new();
+    walk_file_tree(tree, std::path::Path::new(""), &mut files)?;
+    if files.is_empty() {
+        return Err("empty file tree".into());
+    }
+    Ok(files)
+}
+
+/// A v2-only torrent (BEP 52).
+///
+/// Its identity everywhere a 20-byte hash goes -- handshake, trackers, DHT,
+/// the store -- is the SHA-256 of the info dict, truncated to 20 bytes, as
+/// BEP 52 specifies. Every file starts on a piece boundary; the gap after a
+/// file's last byte is alignment, read as zeros and never stored, exactly as
+/// the pad files of a hybrid are.
+fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<TorrentMeta, String> {
+    use sha2::{Digest, Sha256};
+    let full: [u8; 32] = Sha256::digest(info_raw).into();
+    let mut info_hash = [0u8; 20];
+    info_hash.copy_from_slice(&full[..20]);
+
+    let piece_length = info.get("piece length").and_then(|v| v.as_int()).ok_or("missing piece length")?;
+    if piece_length < 16384 || (piece_length as u64).count_ones() != 1 || piece_length > u32::MAX as i64 {
+        return Err("a v2 piece length is a power of two of at least 16 KiB".into());
+    }
+    let pl = piece_length as u64;
+    let name = decode_path_str(info.get("name").and_then(|v| v.as_bytes()).ok_or("missing name")?);
+    let private = info.get("private").and_then(|v| v.as_int()) == Some(1);
+
+    let tree = v2_files(info)?;
+    // One file at the top of the tree is a single-file torrent: the file sits
+    // at the save path under its own name, as a v1 single-file one does.
+    let multi_file = !(tree.len() == 1 && tree[0].path.components().count() == 1);
+    let mut files = Vec::with_capacity(tree.len());
+    let mut pos = 0u64;
+    let mut end = 0u64;
+    for f in &tree {
+        files.push(FileEntry { path: f.path.clone(), offset: pos, length: f.length });
+        if f.length > 0 {
+            end = pos + f.length;
+            pos = end.div_ceil(pl) * pl;
+        }
+    }
+    for f in &files {
+        let rel = if multi_file { std::path::Path::new(&name).join(&f.path) } else { f.path.clone() };
+        check_contained(&rel)?;
+    }
+    let (trackers, url_list) = trackers_and_seeds(&dict);
+    Ok(TorrentMeta {
+        info_hash,
+        name,
+        num_pieces: end.div_ceil(pl) as u32,
+        piece_length: pl as u32,
+        total_size: end,
+        files,
+        trackers,
+        url_list,
+        private,
+        multi_file,
+        info_dict_len: info_raw.len() as u32,
+        v2: true,
+    })
+}
+
+/// Skip one bencoded value, returning where the next one starts.
+fn skip_value(data: &[u8], pos: usize) -> Result<usize, String> {
+    match data.get(pos) {
+        Some(b'd') | Some(b'l') => find_dict_end(data, pos),
+        Some(b'i') => {
+            let e = data[pos..].iter().position(|&b| b == b'e').ok_or("unterminated int")?;
+            Ok(pos + e + 1)
+        }
+        Some(b'0'..=b'9') => raw_string(data, pos).map(|(_, end)| end),
+        _ => Err("bad value".into()),
+    }
+}
+
+/// A bencoded string at `pos`: its bytes and where it ends.
+fn raw_string(data: &[u8], pos: usize) -> Result<(&[u8], usize), String> {
+    let c = data[pos..].iter().position(|&b| b == b':').ok_or("bad string")?;
+    let len: usize = std::str::from_utf8(&data[pos..pos + c]).map_err(|_| "bad string")?.parse().map_err(|_| "bad string")?;
+    let start = pos + c + 1;
+    let bytes = data.get(start..start + len).ok_or("string past the end")?;
+    Ok((bytes, start + len))
+}
+
+/// `piece layers`, read with its keys as the raw 32 bytes they are: the
+/// general decoder turns keys into text, and a SHA-256 is not text.
+fn piece_layers(data: &[u8]) -> Result<std::collections::HashMap<[u8; 32], Vec<u8>>, String> {
+    let mut out = std::collections::HashMap::new();
+    if data.first() != Some(&b'd') {
+        return Err("torrent is not a dict".into());
+    }
+    let mut i = 1;
+    while i < data.len() && data[i] != b'e' {
+        let (key, after) = raw_string(data, i)?;
+        if key == b"piece layers" {
+            if data.get(after) != Some(&b'd') {
+                return Err("piece layers is not a dict".into());
+            }
+            let mut j = after + 1;
+            while j < data.len() && data[j] != b'e' {
+                let (k, v_at) = raw_string(data, j)?;
+                let (v, next) = raw_string(data, v_at)?;
+                if k.len() == 32 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(k);
+                    out.insert(h, v.to_vec());
+                }
+                j = next;
+            }
+            return Ok(out);
+        }
+        i = skip_value(data, after)?;
+    }
+    Ok(out)
+}
+
+/// What each piece of a v2 torrent is checked against, in piece order.
+///
+/// A file of more than one piece takes its hashes from `piece layers`, which
+/// is checked against the file's `pieces root` first: the layers sit outside
+/// the info dict, so the info hash does not vouch for them -- the root does.
+pub fn v2_piece_table(data: &[u8]) -> Result<Vec<crate::torrent::merkle::PieceCheck>, String> {
+    use crate::torrent::merkle::{self, PieceCheck, BLOCK};
+    let value = bencode_decode(data)?;
+    let dict = value.as_dict().ok_or("torrent is not a dict")?;
+    let info = dict.get("info").and_then(|i| i.as_dict()).ok_or("missing info dict")?;
+    let pl = info.get("piece length").and_then(|v| v.as_int()).ok_or("missing piece length")? as u64;
+    let layers = piece_layers(data)?;
+    let per_piece = (pl / BLOCK as u64) as usize;
+    // The root of a subtree of zero leaves, one piece wide: what stands for
+    // the pieces past the end of a file when its layer is checked.
+    let mut pad = [0u8; 32];
+    let mut w = 1;
+    while w < per_piece {
+        pad = merkle_pair(&pad, &pad);
+        w *= 2;
+    }
+    let mut out = Vec::new();
+    for f in v2_files(&info)? {
+        let Some(root) = f.root else { continue };
+        let n = f.length.div_ceil(pl) as usize;
+        if f.length <= pl {
+            out.push(PieceCheck { hash: root, data_len: f.length as u32, leaves: merkle::small_file_leaves(f.length) as u32 });
+            continue;
+        }
+        let layer = layers.get(&root).ok_or_else(|| format!("no piece layer for {}", f.path.display()))?;
+        if layer.len() != n * 32 {
+            return Err(format!("the piece layer of {} has {} hashes, expected {n}", f.path.display(), layer.len() / 32));
+        }
+        let mut level: Vec<[u8; 32]> = layer.chunks(32).map(|c| c.try_into().unwrap()).collect();
+        level.resize(n.next_power_of_two(), pad);
+        while level.len() > 1 {
+            level = level.chunks(2).map(|p| merkle_pair(&p[0], &p[1])).collect();
+        }
+        if level[0] != root {
+            return Err(format!("the piece layer of {} does not hash to its pieces root", f.path.display()));
+        }
+        for (j, h) in layer.chunks(32).enumerate() {
+            let data_len = (f.length - j as u64 * pl).min(pl);
+            out.push(PieceCheck { hash: h.try_into().unwrap(), data_len: data_len as u32, leaves: per_piece as u32 });
+        }
+    }
+    Ok(out)
+}
+
+fn merkle_pair(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(a);
+    h.update(b);
+    h.finalize().into()
 }
 
 fn sha1_hash(data: &[u8]) -> InfoHash {
@@ -551,6 +814,154 @@ mod tests {
     fn missing_file_is_an_error_not_an_empty_table() {
         let err = piece_hashes_from_file("/nonexistent/nope.torrent").unwrap_err();
         assert!(err.contains("read"), "unexpected error: {}", err);
+    }
+
+    // --- BEP 47 / BEP 52 --------------------------------------------------
+
+    fn bstr(b: &[u8]) -> Vec<u8> {
+        let mut o = format!("{}:", b.len()).into_bytes();
+        o.extend_from_slice(b);
+        o
+    }
+
+    /// A hybrid-style v1 torrent with a pad file between its two files.
+    fn padded(pl: u64) -> Vec<u8> {
+        let mut info = b"d5:filesl".to_vec();
+        info.extend(b"d6:lengthi100e4:pathl5:a.bineed4:attr1:p6:lengthi");
+        info.extend(format!("{}e4:pathl4:.pad3:924ee", pl - 100).as_bytes());
+        info.extend(b"d6:lengthi10e4:pathl5:b.bineee");
+        info.extend(b"4:name3:set12:piece lengthi");
+        info.extend(format!("{pl}e6:pieces40:").as_bytes());
+        info.extend([1u8; 40]);
+        info.push(b'e');
+        let mut b = b"d4:info".to_vec();
+        b.extend(info);
+        b.push(b'e');
+        b
+    }
+
+    /// A pad file is part of the stream, never a file: the next file starts
+    /// after it, and nothing named `.pad` is in the list.
+    #[test]
+    fn a_pad_file_is_a_gap_not_a_file() {
+        let m = parse_torrent_bytes(&padded(16384)).unwrap();
+        assert_eq!(m.files.len(), 2);
+        assert_eq!((m.files[0].offset, m.files[1].offset), (0, 16384));
+        assert!(m.files.iter().all(|f| !f.path.starts_with(".pad")));
+        let ops = m.map_block(0, 0, 16384);
+        assert_eq!(ops.len(), 2);
+        assert!(!ops[0].pad && ops[0].length == 100);
+        assert!(ops[1].pad && ops[1].length == 16384 - 100, "the rest of piece 0 is padding");
+        let ops = m.map_block(1, 0, 10);
+        assert_eq!((ops.len(), ops[0].pad, ops[0].file_offset), (1, false, 0), "piece 1 is b.bin");
+    }
+
+    struct V2 {
+        torrent: Vec<u8>,
+        files: Vec<(String, Vec<u8>)>,
+    }
+
+    /// A v2-only torrent built by BEP 52's rules, piece layers included.
+    fn v2_torrent(pl: usize, files: &[(&str, usize)]) -> V2 {
+        use crate::torrent::merkle::{root, small_file_leaves, BLOCK};
+        let mut tree = b"d".to_vec();
+        let mut layers = Vec::new();
+        let mut out_files = Vec::new();
+        let mut sorted: Vec<_> = files.to_vec();
+        sorted.sort();
+        for (i, (name, len)) in sorted.iter().enumerate() {
+            let data: Vec<u8> = (0..*len).map(|j| ((j * 7 + i * 13) % 251) as u8).collect();
+            let per_piece = pl / BLOCK;
+            let (rt, layer) = if *len <= pl {
+                (root(&data, small_file_leaves(*len as u64)), None)
+            } else {
+                let pieces: Vec<[u8; 32]> = data.chunks(pl).map(|c| root(c, per_piece)).collect();
+                let total_leaves = (len.div_ceil(BLOCK)).next_power_of_two();
+                (root(&data, total_leaves), Some(pieces.concat()))
+            };
+            tree.extend(bstr(name.as_bytes()));
+            tree.extend(b"d0:d6:lengthi");
+            tree.extend(format!("{len}e").as_bytes());
+            tree.extend(bstr(b"pieces root"));
+            tree.extend(bstr(&rt));
+            tree.extend(b"ee");
+            if let Some(l) = layer {
+                layers.push((rt, l));
+            }
+            out_files.push((name.to_string(), data));
+        }
+        tree.push(b'e');
+        let mut info = b"d".to_vec();
+        info.extend(bstr(b"file tree"));
+        info.extend(tree);
+        info.extend(b"12:meta versioni2e4:name3:set12:piece lengthi");
+        info.extend(format!("{pl}ee").as_bytes());
+        layers.sort();
+        let mut t = b"d4:info".to_vec();
+        t.extend(info);
+        t.extend(bstr(b"piece layers"));
+        t.push(b'd');
+        for (k, v) in layers {
+            t.extend(bstr(&k));
+            t.extend(bstr(&v));
+        }
+        t.extend(b"ee");
+        V2 { torrent: t, files: out_files }
+    }
+
+    /// ⭐ Every piece of a v2 torrent is aligned to its file and checks
+    /// against its merkle hash; the identity is the truncated SHA-256.
+    #[test]
+    fn a_v2_torrent_reads_and_every_piece_checks() {
+        use sha2::{Digest, Sha256};
+        let pl = 65536;
+        let v = v2_torrent(pl, &[("a.bin", 100), ("b.bin", 3 * 16384 + 5), ("c.bin", 3 * pl + 1000)]);
+        let m = parse_torrent_bytes(&v.torrent).expect("v2 parses");
+        assert!(m.v2 && m.multi_file);
+        let info = find_info_raw(&v.torrent).unwrap();
+        assert_eq!(m.info_hash[..], Sha256::digest(&info)[..20], "the truncated SHA-256");
+        let offs: Vec<u64> = m.files.iter().map(|f| f.offset).collect();
+        assert_eq!(offs, vec![0, pl as u64, 2 * pl as u64], "each file on a piece boundary");
+        assert_eq!(m.num_pieces, 1 + 1 + 4);
+
+        let table = v2_piece_table(&v.torrent).expect("layers check out");
+        assert_eq!(table.len(), 6);
+        // Rebuild each piece as `map_block` lays it out and check it.
+        let mut stream = vec![0u8; m.total_size as usize];
+        for (f, (_, data)) in m.files.iter().zip(&v.files) {
+            stream[f.offset as usize..f.offset as usize + data.len()].copy_from_slice(data);
+        }
+        for p in 0..m.num_pieces {
+            let start = p as usize * pl;
+            let piece = &stream[start..start + m.piece_size(p) as usize];
+            assert!(table[p as usize].matches(piece), "piece {p}");
+        }
+        let mut bad = stream[..pl].to_vec();
+        bad[5] ^= 1;
+        assert!(!table[0].matches(&bad));
+    }
+
+    /// The piece layers are outside the info dict: one that does not hash
+    /// to its file's pieces root is refused, not trusted.
+    #[test]
+    fn a_tampered_piece_layer_is_refused() {
+        let v = v2_torrent(16384, &[("big.bin", 5 * 16384)]);
+        let mut t = v.torrent.clone();
+        let at = t.windows(12).position(|w| w == b"piece layers").unwrap();
+        let last = t.len() - 3;
+        assert!(at < last);
+        t[last] ^= 0xff;
+        assert!(v2_piece_table(&t).unwrap_err().contains("does not hash to its pieces root"));
+    }
+
+    #[test]
+    fn a_malformed_v2_torrent_is_refused() {
+        let v = v2_torrent(65536, &[("a.bin", 10)]);
+        let bad_pl = String::from_utf8_lossy(&v.torrent).replace("piece lengthi65536e", "piece lengthi65535e");
+        assert!(parse_torrent_bytes(bad_pl.as_bytes()).is_err(), "not a power of two");
+        let single = parse_torrent_bytes(&v.torrent).unwrap();
+        assert!(!single.multi_file, "one file at the top is a single-file torrent");
+        assert_eq!(single.files[0].path, std::path::PathBuf::from("a.bin"));
     }
 
     #[test]

@@ -411,6 +411,7 @@ mod tests {
             private: false,
             multi_file: false,
             info_dict_len: 0,
+            v2: false,
         }
     }
 
@@ -637,6 +638,7 @@ mod endgame_tests {
                 private: false,
                 multi_file: false,
                 info_dict_len: 0,
+                v2: false,
             },
             PathBuf::from("/tmp"),
             false,
@@ -668,6 +670,7 @@ mod endgame_tests {
                 private: false,
                 multi_file: false,
                 info_dict_len: 0,
+                v2: false,
             },
             PathBuf::from("/tmp"),
             false,
@@ -709,6 +712,7 @@ mod disk_failure_tests {
                 private: false,
                 multi_file: false,
                 info_dict_len: 0,
+                v2: false,
             },
             PathBuf::from("/tmp"),
             false,

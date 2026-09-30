@@ -560,3 +560,216 @@ async fn interop_a_blocked_libtorrent_is_cut_off_and_kept_out() {
     f::install(None);
     q.delete(&hash).await;
 }
+
+// --- BEP 52: v2 and hybrid torrents, made by libtorrent itself --------------
+
+/// A folder whose files hit every case of BEP 52's layout: smaller than a
+/// block, a few blocks, several pieces with a short last one, nested, empty.
+fn v2_payload(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mk = |n: usize, seed: u32| -> Vec<u8> {
+        let mut x = seed;
+        (0..n).map(|_| { x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); (x >> 24) as u8 }).collect()
+    };
+    let files = vec![
+        ("a/tiny.txt".to_string(), mk(100, 1)),
+        ("a/three-blocks.bin".to_string(), mk(3 * 16384 + 5, 2)),
+        ("big.bin".to_string(), mk(3 * 65536 + 1000, 3)),
+        ("z-last.bin".to_string(), mk(70_000, 4)),
+    ];
+    for (p, d) in &files {
+        let path = dir.join(p);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, d).unwrap();
+    }
+    files
+}
+
+impl Qbit {
+    /// qBittorrent's id for the torrent we know as `ours`, after checking
+    /// that libtorrent computes the same hash we do.
+    async fn id_of(&self, ours: &str, format: &str) -> String {
+        for _ in 0..100 {
+            let all: serde_json::Value = self.http.get(format!("{}/api/v2/torrents/info", self.base)).send().await.unwrap().json().await.unwrap();
+            for t in all.as_array().into_iter().flatten() {
+                let v1 = t["infohash_v1"].as_str().unwrap_or("");
+                let v2 = t["infohash_v2"].as_str().unwrap_or("");
+                let matches = match format {
+                    "hybrid" => v1 == ours,
+                    _ => v2.get(..40) == Some(ours),
+                };
+                if matches {
+                    return t["hash"].as_str().unwrap().to_string();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let all: serde_json::Value = self.http.get(format!("{}/api/v2/torrents/info", self.base)).send().await.unwrap().json().await.unwrap();
+        panic!("{format}: no torrent in qBittorrent has our hash {ours}: {all}");
+    }
+
+    /// A torrent made by qBittorrent's (libtorrent's) own torrent creator.
+    async fn create(&self, source: &str, format: &str) -> Vec<u8> {
+        let r: serde_json::Value = self
+            .http
+            .post(format!("{}/api/v2/torrentcreator/addTask", self.base))
+            .form(&[("sourcePath", source), ("format", format), ("pieceSize", "65536"), ("startSeeding", "false")])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .expect("torrentcreator/addTask answered JSON");
+        let id = r["taskID"].as_str().expect("a task id").to_string();
+        for _ in 0..300 {
+            let st: serde_json::Value = self
+                .http
+                .get(format!("{}/api/v2/torrentcreator/status?taskID={id}", self.base))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            match st[0]["status"].as_str() {
+                Some("Finished") => break,
+                Some("Failed") => panic!("qBittorrent could not create the torrent: {st}"),
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        let bytes = self
+            .http
+            .get(format!("{}/api/v2/torrentcreator/torrentFile?taskID={id}", self.base))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec();
+        let _ = self.http.post(format!("{}/api/v2/torrentcreator/deleteTask", self.base)).form(&[("taskID", id.as_str())]).send().await;
+        bytes
+    }
+}
+
+/// libtorrent seeds `format`; we download it into an empty folder and must
+/// end with the same files -- every piece having passed OUR check, merkle
+/// for v2, SHA-1 for the hybrid -- and no pad file on disk.
+async fn v2_download_from_libtorrent(format: &str) {
+    let tag = format!("v2dl-{format}");
+    let q = Qbit::new();
+    let shared = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qsrc-{tag}"));
+    let _ = std::fs::remove_dir_all(&shared);
+    let root = shared.join("bookset");
+    let files = v2_payload(&root);
+    let src_for_qbit = format!("{}/qsrc-{tag}/bookset", env("HYDRANOS_INTEROP_QBIT_SHARED"));
+    let torrent = q.create(&src_for_qbit, format).await;
+
+    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&torrent).expect("we read libtorrent's torrent");
+    assert_eq!(meta.v2, format == "v2", "{format}: read as v2 only when it is");
+    let hash = typhon_engine::torrent::hex_encode(&meta.info_hash);
+    q.add(&torrent, &format!("{}/qsrc-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    // Our 20 bytes against libtorrent's own: the v1 hash of a hybrid, the
+    // SHA-256 of a v2 truncated to 20 bytes. qBittorrent's API id is not
+    // always either, so the torrent is looked up and its hashes compared.
+    let qid = q.id_of(&hash, format).await;
+    q.wait_complete(&qid, &format!("{format}: qBittorrent seeding")).await;
+
+    let us = engine(&tag, torrent.clone());
+    let data = us.root.join("data");
+    let (ih, _) = us.mgr.add_torrent_bytes(&torrent, &data.to_string_lossy(), false, false).expect("we leech it");
+    let t = us.mgr.get(&ih).unwrap();
+    let peer: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&env("HYDRANOS_INTEROP_QBIT_PEER").as_str()).unwrap().next().unwrap();
+    let pid = peer_id();
+    let same = |root: &std::path::Path| files.iter().all(|(p, d)| std::fs::read(root.join("bookset").join(p)).ok().as_deref() == Some(d.as_slice()));
+    let mut done = false;
+    for tick in 0..600 {
+        if tick % 20 == 0 && t.peers_connected.load(Ordering::Relaxed) == 0 {
+            let (t, disk) = (t.clone(), us.disk.clone());
+            tokio::spawn(async move {
+                typhon_engine::tracker::dial_peer(peer, t, disk, pid, None, 16998, &Egress::default()).await;
+            });
+        }
+        if same(&data) && t.status.load(Ordering::Relaxed) == typhon_engine::torrent::meta::TorrentStatus::Seeding as u8 {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(done, "{format}: the files never matched (status {}, got {} bytes)", t.status.load(Ordering::Relaxed), t.total_downloaded.load(Ordering::Relaxed));
+    let pads: Vec<_> = walk(&data).into_iter().filter(|p| p.to_string_lossy().contains(".pad")).collect();
+    assert!(pads.is_empty(), "{format}: pad files written to disk: {pads:?}");
+    q.delete(&qid).await;
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            }
+            out.push(p);
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs qBittorrent: tools/interop/run.sh"]
+async fn interop_hydranos_downloads_a_v2_torrent_from_libtorrent() {
+    v2_download_from_libtorrent("v2").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs qBittorrent: tools/interop/run.sh"]
+async fn interop_hydranos_downloads_a_hybrid_torrent_from_libtorrent_without_pad_files() {
+    v2_download_from_libtorrent("hybrid").await;
+}
+
+/// ⭐ The other way: we seed a v2 torrent libtorrent made, libtorrent
+/// downloads it from us into an empty folder and checks every piece with its
+/// own merkle verification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs qBittorrent: tools/interop/run.sh"]
+async fn interop_libtorrent_downloads_a_v2_torrent_from_hydranos() {
+    let tag = "v2up";
+    let q = Qbit::new();
+    let shared = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qsrc-{tag}"));
+    let _ = std::fs::remove_dir_all(&shared);
+    let files = v2_payload(&shared.join("bookset"));
+    let torrent = q.create(&format!("{}/qsrc-{tag}/bookset", env("HYDRANOS_INTEROP_QBIT_SHARED")), "v2").await;
+    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&torrent).unwrap();
+    let ours = typhon_engine::torrent::hex_encode(&meta.info_hash);
+
+    // We seed from the folder the files are in, after checking them.
+    let us = engine(tag, torrent.clone());
+    let (ih, _) = us.mgr.add_torrent_bytes(&torrent, &shared.to_string_lossy(), false, false).unwrap();
+    us.mgr.recheck(&ih).unwrap();
+    let t = us.mgr.get(&ih).unwrap();
+    for _ in 0..200 {
+        if t.status.load(Ordering::Relaxed) == typhon_engine::torrent::meta::TorrentStatus::Seeding as u8 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        t.status.load(Ordering::Relaxed),
+        typhon_engine::torrent::meta::TorrentStatus::Seeding as u8,
+        "our merkle check accepts every piece of libtorrent's v2 torrent"
+    );
+    let port = 16922;
+    wait_listening(&listen(&us, port, peer_id())).await;
+    let peer = env("HYDRANOS_INTEROP_QBIT_PEER");
+    let me = SocketAddr::new(our_address_towards(&peer), port);
+    q.add(&torrent, &format!("{}/qdst-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    let hash = q.id_of(&ours, "v2").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    q.add_peer(&hash, me).await;
+    q.wait_complete(&hash, "libtorrent downloading our v2 torrent").await;
+    let dst = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qdst-{tag}")).join("bookset");
+    for (p, d) in &files {
+        assert_eq!(std::fs::read(dst.join(p)).ok().as_deref(), Some(d.as_slice()), "{p} as libtorrent wrote it");
+    }
+    q.delete(&hash).await;
+}

@@ -184,6 +184,7 @@ mod tests {
             private: false,
             multi_file: false,
             info_dict_len: 0,
+            v2: false,
         }
     }
 
