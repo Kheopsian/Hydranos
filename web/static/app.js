@@ -3504,7 +3504,7 @@ function _reportSelection(label, j) {
     say("moving", "{n} moving in the background");
     say("sent", "{n} sent to agents");
     say("complete", "{n} already complete");
-    say("not_applied", "{n} not applied");
+    say("unchanged", "{n} already so");
     say("skipped", "{n} not applicable");
     say("not_here", "{n} not on this node");
     say("needs_consent", "{n} waiting for your answer");
@@ -4270,9 +4270,9 @@ async function _pauseSelected(paused) {
     if (!j) return;
     // Rows repaint from what the daemon confirmed: a clean run marks the rows
     // in hand, anything else refetches rather than claim a state it may not have.
-    if (explicit && !j.failed && !(j.tally && j.tally.not_applied)) _markLocallyStopped(hoard, paused);
+    if (explicit && !j.failed) _markLocallyStopped(hoard, paused);
     else fetchHoardPage(true);
-    if (j.failed || (j.tally && j.tally.not_applied)) _reportSelection(paused ? t("Stop") : t("Start"), j);
+    _reportSelection(paused ? t("Stop") : t("Start"), j);
     updateHoardStats();
 }
 
