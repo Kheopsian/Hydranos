@@ -278,14 +278,16 @@ impl EngineHost {
                         .first()
                         .map(|b| b.peer_id)
                         .unwrap_or_else(|| engine_cfg.peer_id());
+                    let mut first = crate::announce::policy_from_config(
+                        config,
+                        String::from_utf8_lossy(&peer_id).into_owned(),
+                        String::new(),
+                    );
+                    // Per engine, from its own section: one engine can keep
+                    // to HTTP trackers while another announces everywhere.
+                    first.skip_udp = !session.udp_trackers();
                     let policy: crate::announce::PolicyHandle =
-                        std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(
-                            crate::announce::policy_from_config(
-                                config,
-                                String::from_utf8_lossy(&peer_id).into_owned(),
-                                String::new(),
-                            ),
-                        )));
+                        std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(first)));
                     let _ = engine.announce_policy.set(policy.clone());
                     let bump = crate::announce::runner::start(
                         engine.manager.clone(),

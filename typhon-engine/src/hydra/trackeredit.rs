@@ -15,26 +15,20 @@ pub fn normalise_url(raw: &str) -> Result<String, String> {
     }
     let Some((scheme, rest)) = url.split_once("://") else {
         return Err(format!(
-            "{url:?}: a tracker URL has to start with http:// or https://"
+            "{url:?}: a tracker URL has to start with http://, https:// or udp://"
         ));
     };
-    // BEP 15 is not implemented, so a `udp://` tracker can never be reached.
-    // Accepting one produced a tracker that failed on every announce until the
-    // circuit breaker gave up on it, and an error message that did not say why.
-    // Refusing it here is the difference between being told now and finding out
-    // from a red row an hour later.
-    //
-    // Only typed URLs are refused. A `udp://` tracker already inside a
-    // `.torrent` is left alone and simply never reached, which is what an
-    // unimplemented transport should look like.
-    if scheme == "udp" {
-        return Err(format!(
-            "{url:?}: UDP trackers are not supported, only http:// and https://"
-        ));
+    // A UDP tracker has no default port: one typed without it would be
+    // announced to nowhere, every pass, with an error that does not say why.
+    if scheme.eq_ignore_ascii_case("udp") {
+        if typhon_engine::tracker::udp::split_url(url).is_none() {
+            return Err(format!("{url:?}: a UDP tracker needs a host and a port, udp://host:port/announce"));
+        }
+        return Ok(url.to_string());
     }
     if !matches!(scheme, "http" | "https") {
         return Err(format!(
-            "{url:?}: a tracker URL has to start with http:// or https://"
+            "{url:?}: a tracker URL has to start with http://, https:// or udp://"
         ));
     }
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -245,16 +239,16 @@ mod tests {
         assert!(normalise_url("   ").is_err());
     }
 
-    /// BEP 15 is not implemented, so a `udp://` tracker cannot be reached.
-    /// Accepting one produced a tracker that failed every announce until the
-    /// breaker gave up, with an error that never said why -- the operator was
-    /// left to find out from a red row an hour later.
+    /// A UDP tracker is accepted -- with its port, which it cannot do
+    /// without: there is no default to fall back on.
     #[test]
-    fn a_udp_tracker_is_refused_with_the_reason() {
-        let err = normalise_url("udp://tracker.example:6969/announce")
-            .expect_err("UDP is not a transport this client has");
-        assert!(err.contains("not supported"), "{err}");
-        assert!(err.contains("http"), "and it says what IS supported: {err}");
+    fn a_udp_tracker_is_accepted_with_a_port_and_refused_without() {
+        assert_eq!(
+            normalise_url("udp://tracker.example:6969/announce").unwrap(),
+            "udp://tracker.example:6969/announce"
+        );
+        let err = normalise_url("udp://tracker.example/announce").expect_err("no port");
+        assert!(err.contains("port"), "{err}");
     }
 
     #[test]

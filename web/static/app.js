@@ -6650,6 +6650,7 @@ const _SETTINGS_DESC = {
     listen_interfaces: "Comma-separated ip:port bind list (multi-homing).",
     enable_ipv6: "Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX offer. Off = IPv4 only. Only enable it if this host has working IPv6, otherwise you announce an address nobody can reach.",
     enable_dht: "Find peers through the global DHT (BEP 5) on top of the trackers. Private torrents are never announced to it either way. Off, this engine bootstraps no DHT node at all and reaches nothing but its trackers.",
+    enable_udp_trackers: "Announce to udp:// trackers (BEP 15) as well as http(s):// ones. Most public torrents list only UDP trackers. Off, they are left alone -- not contacted, and not reported as failing. Takes effect at the next start of the engine.",
     enable_pex: "Trade peer lists with the peers already connected (BEP 11). Off, the engine stops advertising ut_pex and ignores any PEX message it still receives, so no address is learned from or given to the swarm.",
     listen_port_proxy_v2: "Extra listener expecting HAProxy PROXY-protocol v2 (real peer IP). 0 = off.",
     listen_addr_proxy_v2: "Explicit bind address for the PROXY-v2 listener. Empty = [::] wildcard.",
@@ -6713,6 +6714,7 @@ const _SETTINGS_COMMON = new Set([
     // Peer sources: not advanced tuning. Someone on a private tracker has to
     // be able to find these without hunting through the advanced list.
     "race::enable_dht", "race::enable_pex", "hoard::enable_dht", "hoard::enable_pex",
+    "race::enable_udp_trackers", "hoard::enable_udp_trackers",
     // Common toggles
     "vpn_speedtest::enabled", "race_drain::enabled",
 ]);
@@ -6739,6 +6741,7 @@ const _SETTINGS_DEFAULT = {
     "daemon::create_torrent_folder": true,
     "race::enable_dht": true, "race::enable_pex": true,
     "hoard::enable_dht": true, "hoard::enable_pex": true,
+    "race::enable_udp_trackers": true, "hoard::enable_udp_trackers": true,
     "race::listen_port": 16171, "race::max_connections": 4000,
     "race::max_uploads_per_torrent": 100,
     "race::peer_timeout": 30,

@@ -6,8 +6,8 @@ how to check both yourself. It is written for tracker operators deciding
 whether to allow the client, and it is meant to be checked rather than
 believed. Every claim below names the test that asserts it. The suite runs
 offline in seconds, and a second suite runs the client against software
-somebody else wrote: opentracker, Torrust in private mode, and
-qBittorrent/libtorrent.
+somebody else wrote: opentracker (HTTP and UDP), Torrust in private mode,
+and qBittorrent/libtorrent.
 
 Hydranos is a BitTorrent client written in Rust (engine name: Typhon). It is
 built for one unusual workload, a single instance seeding hundreds of thousands
@@ -78,7 +78,8 @@ and `interop`).
 | 10 | Extension protocol | Implemented |
 | 11 | Peer exchange (`ut_pex`) | Implemented. Never for a private torrent, sent or received |
 | 12 | Multitracker metadata (tiers) | Implemented |
-| 15 | UDP tracker protocol | **Not implemented** (see [deviations](#known-deviations)) |
+| 15 | UDP tracker protocol | Implemented. Switchable per engine (`enable_udp_trackers`, on by default); never sent while announces are proxied |
+| 41 | UDP tracker URL extension | Implemented: the tracker URL's path and query, passkey included, travel as URLData |
 | 19 | WebSeed (`url-list`) | Implemented |
 | 20 | Peer id conventions | Implemented |
 | 23 | Compact peer lists | Implemented |
@@ -272,7 +273,7 @@ state:
 
 | Counterpart | Version | What is checked | Read back from |
 |---|---|---|---|
-| opentracker | `lednerb/opentracker-docker` (digest in the script) | `started` as leecher, `completed` → one snatch, `stopped` → gone, resume → back as a seed with no second snatch; a cross-seed never counts as a snatch; `min interval` holds | its scrape |
+| opentracker | `lednerb/opentracker-docker` (digest in the script) | `started` as leecher, `completed` → one snatch, `stopped` → gone, resume → back as a seed with no second snatch -- over HTTP, and the same life over UDP (BEP 15); a cross-seed never counts as a snatch; `min interval` holds | its scrape |
 | Torrust Tracker, private mode | `torrust/tracker` (digest in the script) | our exact peer id; `started` with zero counters despite a 900 GB lifetime total; the session's upload; nothing sent inside `min interval`, and a forced re-announce heard; `stopped` removes us; the snatch counted once; no key → refused, and the refusal reaches the operator | its REST API peer table |
 | qBittorrent / libtorrent | 5.2.3 / 2.0.14 | libtorrent downloads a torrent from us, and we download one from it; MSE both ways with libtorrent *requiring* encryption; a private torrent transfers | libtorrent's own piece check; our hash check and our bytes on disk |
 
@@ -353,7 +354,15 @@ interoperability suite, which needs Docker.
 | A 429 slows us down rather than tripping the breaker | — | `a_tracker_asking_to_slow_down_is_not_set_aside` |
 | A host the breaker refuses is not announced to | — | `a_host_the_breaker_refuses_is_not_announced_to` |
 | A passkey never reaches the logs | — | `an_error_message_never_carries_the_url` |
-| A `udp://` tracker typed by hand is refused, with the reason | BEP 15 | `a_udp_tracker_is_refused_with_the_reason` |
+| A `udp://` tracker is told what the HTTP URL would have said: counters, event, port, numwant, `key`, `ip=` | BEP 15 | `a_udp_tracker_is_announced_to_over_bep_15`, `a_udp_tracker_is_told_what_the_http_url_says` |
+| The announce packet is laid out byte for byte as specified | BEP 15 | `the_announce_packet_is_laid_out_as_bep_15_says` |
+| The path and passkey travel as URLData, in options of 255 bytes at most | BEP 41 | `the_path_travels_as_url_data_in_255_byte_options` |
+| One `connect` per tracker per minute, not per announce | BEP 15 | `an_announce_connects_once_and_reuses_the_id` |
+| A connection id is dropped after a failure rather than trusted again | BEP 15 | `a_silent_tracker_times_out_and_forgets_the_id` |
+| A reply is only accepted from the address the request went to | — | `a_reply_from_another_address_is_not_delivered` |
+| An error reply is a refusal, filed like a `failure reason` | BEP 15 | `an_error_reply_is_the_trackers_refusal_in_its_words` |
+| A `udp://` tracker typed by hand needs a port | BEP 15 | `a_udp_tracker_is_accepted_with_a_port_and_refused_without` |
+| Switched off for an engine, a UDP tracker is not contacted at all | — | `a_udp_tracker_is_left_alone_when_the_engine_says_so` |
 
 ### The announce response
 
@@ -440,11 +449,17 @@ is not a probe that always reads zero.
 
 Stated first rather than buried: an operator will find them anyway.
 
-### UDP trackers are not supported
+### UDP retries are short
 
-BEP 15 is not implemented; announces go over HTTP(S) only. A `udp://` tracker
-inside a `.torrent` is never contacted, and one typed into the tracker editor
-is refused with the reason (`a_udp_tracker_is_refused_with_the_reason`).
+BEP 15 retransmits after 15 × 2ⁿ seconds, reaching an hour after eight tries.
+Hydranos tries each step (`connect`, then `announce`) twice, after 3 and 5
+seconds, which bounds a UDP announce to about the time an HTTP one is allowed;
+a tracker that did not answer is asked again at the next announce, under the
+same breaker and floor as an HTTP one. libtorrent does the same.
+
+UDP announces are not sent at all while announces go through a proxy
+(`TYPHON_ANNOUNCE_PROXY`): a SOCKS proxy carries TCP, and a UDP announce sent
+beside it would show the tracker the very address the proxy hides.
 
 ### Scrape is not implemented
 
