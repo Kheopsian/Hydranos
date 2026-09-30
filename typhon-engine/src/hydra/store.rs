@@ -129,6 +129,26 @@ pub struct StoredWorkflow {
     pub last_run: i64,
 }
 
+/// A magnet waiting for its metadata. See `magnets`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MagnetRow {
+    pub info_hash: String,
+    pub uri: String,
+    pub name: String,
+    pub engine: String,
+    pub category: String,
+    pub save_path: String,
+    pub tags: String,
+    pub paused: bool,
+    pub added_at: i64,
+    pub attempts: i64,
+    /// Not before this time (seconds) is the next resolution started.
+    pub next_try: i64,
+    /// `resolving` or `failed`.
+    pub state: String,
+    pub error: String,
+}
+
 /// Something that happened to a torrent, waiting for the event workflows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowEvent {
@@ -699,6 +719,20 @@ impl Store {
                  detail TEXT NOT NULL DEFAULT '');
              CREATE INDEX IF NOT EXISTS idx_workflow_activity_at
                  ON workflow_activity(at DESC);
+             CREATE TABLE IF NOT EXISTS magnets (
+                 info_hash TEXT PRIMARY KEY,
+                 uri TEXT NOT NULL,
+                 name TEXT NOT NULL DEFAULT '',
+                 engine TEXT NOT NULL,
+                 category TEXT NOT NULL DEFAULT '',
+                 save_path TEXT NOT NULL DEFAULT '',
+                 tags TEXT NOT NULL DEFAULT '',
+                 paused INTEGER NOT NULL DEFAULT 0,
+                 added_at INTEGER NOT NULL DEFAULT 0,
+                 attempts INTEGER NOT NULL DEFAULT 0,
+                 next_try INTEGER NOT NULL DEFAULT 0,
+                 state TEXT NOT NULL DEFAULT 'resolving',
+                 error TEXT NOT NULL DEFAULT '');
              CREATE TABLE IF NOT EXISTS workflow_events (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  at INTEGER NOT NULL,
@@ -707,6 +741,54 @@ impl Store {
                  info_hash TEXT NOT NULL);",
         )?;
         Ok(())
+    }
+
+    pub fn put_magnet(&self, m: &MagnetRow) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO magnets
+                 (info_hash, uri, name, engine, category, save_path, tags, paused,
+                  added_at, attempts, next_try, state, error)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            rusqlite::params![
+                m.info_hash, m.uri, m.name, m.engine, m.category, m.save_path, m.tags,
+                i64::from(m.paused), m.added_at, m.attempts, m.next_try, m.state, m.error
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn magnets(&self) -> anyhow::Result<Vec<MagnetRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT info_hash, uri, name, engine, category, save_path, tags, paused,
+                    added_at, attempts, next_try, state, error
+             FROM magnets ORDER BY added_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(MagnetRow {
+                info_hash: r.get(0)?,
+                uri: r.get(1)?,
+                name: r.get(2)?,
+                engine: r.get(3)?,
+                category: r.get(4)?,
+                save_path: r.get(5)?,
+                tags: r.get(6)?,
+                paused: r.get::<_, i64>(7)? != 0,
+                added_at: r.get(8)?,
+                attempts: r.get(9)?,
+                next_try: r.get(10)?,
+                state: r.get(11)?,
+                error: r.get(12)?,
+            })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn magnet(&self, info_hash: &str) -> anyhow::Result<Option<MagnetRow>> {
+        Ok(self.magnets()?.into_iter().find(|m| m.info_hash == info_hash))
+    }
+
+    pub fn delete_magnet(&self, info_hash: &str) -> anyhow::Result<bool> {
+        Ok(self.conn.execute("DELETE FROM magnets WHERE info_hash = ?1", rusqlite::params![info_hash])? > 0)
     }
 
     /// Write down that something happened, before anything acts on it.

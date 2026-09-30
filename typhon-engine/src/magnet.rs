@@ -27,6 +27,16 @@ pub const MAX_PEERS: usize = 100;
 /// Whole-job ceiling, so a job cannot sit in `Resolving` forever.
 pub const JOB_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// How long a job keeps starting new rounds. Under `JOB_TIMEOUT`, so the last
+/// round (discovery plus a fetch wave) ends before the job is declared dead.
+pub const RESOLVE_BUDGET: Duration = Duration::from_secs(120);
+
+/// Between two rounds.
+const ROUND_PAUSE: Duration = Duration::from_secs(3);
+
+/// Between two asks to the trackers and the DHT within one job.
+const DISCOVERY_EVERY: Duration = Duration::from_secs(30);
+
 /// We cannot know the torrent's size before we have the dict, which is the
 /// point of the exercise. Trackers only read `left` to tell a leecher from a
 /// seeder, and a magnet is always a leecher.
@@ -131,36 +141,59 @@ pub fn start(
 
     let jobs = self.clone();
     tokio::spawn(async move {
-        let peers = discover(info_hash, &trackers, seed_peers, &peer_id, port, dht).await;
-        if peers.is_empty() {
-            warn!("[magnet] no peers found for {}", hex(&info_hash));
-            jobs.set_state(info_hash, JobState::Failed("no peers found".into()));
-            return;
-        }
-        debug!("[magnet] {} candidate peers for {}", peers.len(), hex(&info_hash));
-        let result = crate::peer::metadata::fetch(
-            &peers,
-            info_hash,
-            peer_id,
-            // uTP is skipped for resolution: it is a short, one-shot exchange
-            // and the TCP legs cover it. Peers reachable only over uTP simply
-            // are not used as metadata sources.
-            None,
-            port,
-            egress,
-            crate::peer::metadata::DEFAULT_CONCURRENCY,
-        )
-        .await;
-        match result {
-            Ok(dict) => {
-                info!("[magnet] resolved {} ({} bytes)", hex(&info_hash), dict.len());
-                jobs.set_state(info_hash, JobState::Done(dict));
+        // Rounds until the budget runs out, not one. A peer that is still
+        // checking the torrent refuses the connection (libtorrent does, for
+        // seconds after an add), a tracker answers late, the DHT fills in
+        // slowly: one round made each of those a failure, and the magnet
+        // waited a minute for its next chance.
+        let started = Instant::now();
+        let mut last = String::from("no peers found");
+        let mut round = 0u32;
+        // Peers found so far. Asked again every round; the trackers and the
+        // DHT only every DISCOVERY_EVERY -- each tracker ask is an announce,
+        // and a magnet must not announce `started` to a tracker every three
+        // seconds.
+        let mut peers: Vec<SocketAddr> = seed_peers.clone();
+        let mut discovered_at: Option<Instant> = None;
+        while started.elapsed() < RESOLVE_BUDGET {
+            round += 1;
+            if discovered_at.map_or(true, |t| t.elapsed() >= DISCOVERY_EVERY) {
+                discovered_at = Some(Instant::now());
+                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone()).await {
+                    if !peers.contains(&p) {
+                        peers.push(p);
+                    }
+                }
             }
-            Err(e) => {
-                warn!("[magnet] {} failed: {}", hex(&info_hash), e);
-                jobs.set_state(info_hash, JobState::Failed(e));
+            if peers.is_empty() {
+                last = "no peers found".into();
+            } else {
+                debug!("[magnet] round {} for {}: {} candidate peers", round, hex(&info_hash), peers.len());
+                match crate::peer::metadata::fetch(
+                    &peers,
+                    info_hash,
+                    peer_id,
+                    // uTP is skipped for resolution: it is a short, one-shot
+                    // exchange and the TCP legs cover it.
+                    None,
+                    port,
+                    egress.clone(),
+                    crate::peer::metadata::DEFAULT_CONCURRENCY,
+                )
+                .await
+                {
+                    Ok(dict) => {
+                        info!("[magnet] resolved {} ({} bytes, round {})", hex(&info_hash), dict.len(), round);
+                        jobs.set_state(info_hash, JobState::Done(dict));
+                        return;
+                    }
+                    Err(e) => last = e,
+                }
             }
+            tokio::time::sleep(ROUND_PAUSE).await;
         }
+        warn!("[magnet] {} failed after {} rounds: {}", hex(&info_hash), round, last);
+        jobs.set_state(info_hash, JobState::Failed(last));
     });
     true
 }

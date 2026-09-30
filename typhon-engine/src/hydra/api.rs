@@ -1916,7 +1916,7 @@ fn categories_map(state: &AppState) -> std::collections::BTreeMap<String, Catego
 ///
 /// An unknown category lands on race, which is what 3.x does and what every
 /// downstream client has been configured against.
-fn placement(state: &AppState, category: &str, engine_override: &str) -> (String, String) {
+pub(crate) fn placement(state: &AppState, category: &str, engine_override: &str) -> (String, String) {
     let path = categories_map(state)
         .get(category)
         .map(|c| c.save_path.clone())
@@ -9641,13 +9641,13 @@ async fn get_hoard_torrent(
     Json(detail_payload(&state, "hoard", &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
 }
 
-/// Add a torrent, native API: a `torrent_path` already on this node's disk.
+/// Add a torrent, native API: a `torrent_path` already on this node's disk, or
+/// a `magnet_uri`.
 ///
 /// The refusal keeps the per-target breakdown the UI reads to say WHICH engine
-/// refused. `magnet_uri` is still not accepted here -- resolution is a
-/// background job with its own polling contract, and answering "added" for a
-/// magnet whose metadata never arrives would be worse than refusing it.
-async fn post_torrent_add(
+/// refused. A magnet is answered 202, not "added": it is resolved in the
+/// background (`magnets`), and appears in the list once its metadata is in.
+pub(crate) async fn post_torrent_add(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
@@ -9672,8 +9672,29 @@ async fn post_torrent_add(
         payload.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
     };
     let torrent_path = s("torrent_path");
+    let magnet_uri = s("magnet_uri");
+    if torrent_path.is_empty() && !magnet_uri.is_empty() {
+        let paused = payload.get("stopped").and_then(|v| v.as_bool()).unwrap_or(false);
+        let st = state.clone();
+        let (cat, sp, tags, engine) = (s("category"), s("save_path"), s("tags"), s("engine"));
+        let res = tokio::task::spawn_blocking(move || {
+            crate::magnets::request(&st, &magnet_uri, &cat, &sp, &tags, paused, &engine)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        // 202: accepted, not added. The torrent appears once its metadata
+        // is in; until then it is listed under /api/magnets.
+        return match res {
+            Ok(hash) => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"info_hash": hash, "status": "resolving"})),
+            )
+                .into_response(),
+            Err(e) => refuse(e),
+        };
+    }
     if torrent_path.is_empty() {
-        return refuse("race: torrent_path or magnet_uri required".to_string());
+        return refuse("torrent_path or magnet_uri required".to_string());
     }
 
     let bytes = match std::fs::read(&torrent_path) {
@@ -9722,6 +9743,7 @@ async fn qbit_torrent_add(
     // skip_checking is qBit's "trust the data on disk"; cross-seed relies on it
     // and treating it as false would re-hash every cross-seeded torrent.
     let mut seed_mode = false;
+    let mut urls: Vec<String> = Vec::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or_default().to_string();
@@ -9739,17 +9761,58 @@ async fn qbit_torrent_add(
                     "tags" => tags = value,
                     "paused" | "stopped" => paused = value == "true" || value == "1",
                     "skip_checking" => seed_mode = value == "true" || value == "1",
+                    // One link per line: magnets, or URLs of .torrent files.
+                    // It is how autobrr, Sonarr and Radarr send a magnet.
+                    "urls" => urls.extend(
+                        value.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from),
+                    ),
                     _ => {}
                 }
             }
         }
     }
 
-    if files.is_empty() {
+    if files.is_empty() && urls.is_empty() {
         return (StatusCode::BAD_REQUEST, "Bad request").into_response();
     }
 
     let mut failed = 0;
+    let mut url_failed = 0;
+    for u in &urls {
+        let outcome = if u.len() > 8 && u[..8].eq_ignore_ascii_case("magnet:?") {
+            let (st, u2) = (state.clone(), u.clone());
+            let (c, sp, tg) = (category.clone(), save_path.clone(), tags.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::magnets::request(&st, &u2, &c, &sp, &tg, paused, "").map(|_| ())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        } else {
+            match crate::mcp::fetch_torrent(u).await {
+                Ok(b) => {
+                    files.push(b);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = outcome {
+            if !e.contains("already added") {
+                // A .torrent URL from a tracker carries the passkey: the
+                // error names the URL, the log must not.
+                let e = e.replace(u.as_str(), "<url>");
+                tracing::warn!(error = %e, "qbit add: url refused");
+                url_failed += 1;
+            }
+        }
+    }
+    if files.is_empty() {
+        return if url_failed == urls.len() {
+            (StatusCode::BAD_REQUEST, "Fails.").into_response()
+        } else {
+            (StatusCode::OK, "Ok.").into_response()
+        };
+    }
     for bytes in &files {
         if let Err(e) =
             add_torrent_bytes(&state, bytes, &category, &save_path, &tags, paused, seed_mode, "")
@@ -9764,7 +9827,7 @@ async fn qbit_torrent_add(
         }
     }
 
-    if failed == files.len() {
+    if failed == files.len() && url_failed == urls.len() {
         return (StatusCode::BAD_REQUEST, "Fails.").into_response();
     }
     (StatusCode::OK, "Ok.").into_response()
@@ -12310,6 +12373,7 @@ pub fn router(state: AppState) -> Router {
         // Workflows carry their own routes, so this file does not grow another
         // six handlers. Merged before with_state so they share it.
         .merge(crate::rulesapi::routes())
+        .merge(crate::magnets::routes())
         // Every action on a selection, by rows or by filter.
         .merge(crate::selection::routes())
         // The agent endpoint, same reasoning: its own file, the same state.

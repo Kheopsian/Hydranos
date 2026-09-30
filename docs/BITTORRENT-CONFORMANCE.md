@@ -275,7 +275,7 @@ state:
 |---|---|---|---|
 | opentracker | `lednerb/opentracker-docker` (digest in the script) | `started` as leecher, `completed` → one snatch, `stopped` → gone, resume → back as a seed with no second snatch -- over HTTP, and the same life over UDP (BEP 15); a cross-seed never counts as a snatch; `min interval` holds | its scrape |
 | Torrust Tracker, private mode | `torrust/tracker` (digest in the script) | our exact peer id; `started` with zero counters despite a 900 GB lifetime total; the session's upload; nothing sent inside `min interval`, and a forced re-announce heard; `stopped` removes us; the snatch counted once; no key → refused, and the refusal reaches the operator | its REST API peer table |
-| qBittorrent / libtorrent | 5.2.3 / 2.0.14 | libtorrent downloads a torrent from us, and we download one from it; MSE both ways with libtorrent *requiring* encryption; a private torrent transfers | libtorrent's own piece check; our hash check and our bytes on disk |
+| qBittorrent / libtorrent | 5.2.3 / 2.0.14 | libtorrent downloads a torrent from us, and we download one from it; MSE both ways with libtorrent *requiring* encryption; a private torrent transfers; a magnet is resolved from it over BEP 9, knowing only the info hash | libtorrent's own piece check; our hash check and our bytes on disk |
 
 Test sources: `typhon-engine/src/hydra/announce/interop.rs` (trackers) and
 `typhon-engine/tests/interop_libtorrent.rs` (peers).

@@ -408,11 +408,13 @@ fn tools(with_destructive: bool) -> Value {
                 &["info_hashes", "category"]),
             reversible("Move to category", false, false)),
         tool("add_torrent",
-            "Add one .torrent, from a path on this node or an http(s) URL. The category is \
-             required and must exist: it decides the engine and the save path.",
+            "Add one torrent: a .torrent from a path on this node or an http(s) URL, or a \
+             magnet link (resolved in the background; it appears once its metadata is in). \
+             The category is required and must exist: it decides the engine and the save path.",
             obj(json!({
                 "torrent_path": {"type": "string", "description": "Path of a .torrent file on this node."},
                 "torrent_url": {"type": "string", "description": "http(s) URL of a .torrent file."},
+                "magnet": {"type": "string", "description": "A magnet:? link."},
                 "category": {"type": "string"},
                 "save_path": {"type": "string", "description": "Override the category's save path. Must be where the data is, or will be."},
                 "tags": {"type": "array", "items": {"type": "string"}},
@@ -1006,7 +1008,7 @@ async fn move_to_category(state: &AppState, args: &Value) -> Result<Value, Strin
     Ok(per_torrent(results))
 }
 
-async fn fetch_torrent(url: &str) -> Result<Vec<u8>, String> {
+pub(crate) async fn fetch_torrent(url: &str) -> Result<Vec<u8>, String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("torrent_url must be an http(s) URL".into());
     }
@@ -1031,9 +1033,28 @@ async fn fetch_torrent(url: &str) -> Result<Vec<u8>, String> {
 async fn add_torrent(state: &AppState, args: &Value) -> Result<Value, String> {
     let category = arg_str(args, "category").ok_or("category is required")?;
     known_category(state, &category).await?;
+    if let Some(uri) = arg_str(args, "magnet") {
+        if arg_str(args, "torrent_path").is_some() || arg_str(args, "torrent_url").is_some() {
+            return Err("give one of torrent_path, torrent_url or magnet".into());
+        }
+        let st = state.clone();
+        let (sp, eng) = (arg_str(args, "save_path").unwrap_or_default(), arg_str(args, "engine").unwrap_or_default());
+        let tags: Vec<String> = args
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.trim().to_string())).collect())
+            .unwrap_or_default();
+        let paused = arg_bool(args, "paused");
+        let hash = tokio::task::spawn_blocking(move || {
+            crate::magnets::request(&st, &uri, &category, &sp, &tags.join(","), paused, &eng)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        return Ok(json!({"info_hash": hash, "status": "resolving"}));
+    }
     let bytes = match (arg_str(args, "torrent_path"), arg_str(args, "torrent_url")) {
         (Some(_), Some(_)) => return Err("give torrent_path or torrent_url, not both".into()),
-        (None, None) => return Err("torrent_path or torrent_url is required".into()),
+        (None, None) => return Err("torrent_path, torrent_url or magnet is required".into()),
         (Some(p), None) => {
             let b = tokio::fs::read(&p).await.map_err(|e| format!("{p}: {e}"))?;
             if b.len() > MAX_TORRENT_BYTES {
