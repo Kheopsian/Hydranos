@@ -712,13 +712,11 @@ pub fn apply(
             Action::AddTags { tags } | Action::RemoveTags { tags } => {
                 let adding = matches!(action, Action::AddTags { .. });
                 let store = store.lock().map_err(|_| "store lock")?;
-                let mut current = store
-                    .workflow_facts(&m.engine)
-                    .unwrap_or_default()
-                    .get(&m.info_hash)
-                    .cloned()
-                    .unwrap_or_default()
-                    .tags;
+                // One row by primary key. This read the whole session -- a
+                // million rows, ~2.9 s under the writer -- for one torrent's
+                // tags, once per torrent: a 500-torrent pass held the store
+                // for twenty-odd minutes.
+                let mut current = store.tags_of(&m.info_hash);
                 for t in tags {
                     current.retain(|x| x != t);
                     if adding {
