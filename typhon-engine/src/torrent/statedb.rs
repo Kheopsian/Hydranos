@@ -147,12 +147,28 @@ impl StateDb {
     }
 
     pub fn remove(&self, info_hash_hex: &str) -> Result<(), rusqlite::Error> {
+        self.remove_timed(info_hash_hex).0
+    }
+
+    /// `remove`, with the time spent WAITING for the connection apart from
+    /// the time spent holding it. The DELETE itself measures under 1 ms; if a
+    /// removal is slow here, it is queued behind whoever else holds the
+    /// connection (the resume flush), and only the split says which.
+    pub fn remove_timed(
+        &self,
+        info_hash_hex: &str,
+    ) -> (Result<(), rusqlite::Error>, std::time::Duration, std::time::Duration) {
+        let asked = std::time::Instant::now();
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(e) => e.into_inner(),
         };
-        conn.execute("DELETE FROM torrent_state WHERE info_hash = ?1", params![info_hash_hex])?;
-        Ok(())
+        let got = std::time::Instant::now();
+        let r = conn
+            .execute("DELETE FROM torrent_state WHERE info_hash = ?1", params![info_hash_hex])
+            .map(|_| ());
+        drop(conn);
+        (r, got - asked, got.elapsed())
     }
 
     /// Read every record back. Shape-compatible with `fastresume::load_all`
