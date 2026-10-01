@@ -228,6 +228,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   900,000-torrent library was affected by the change.
 
 ### Fixed
+- **A workflow tagging torrents no longer holds the store for minutes.** Each
+  tag or untag read the tags of the whole engine -- a million rows, ~3 s
+  under the store's writer -- to change one torrent's, so a 500-torrent pass
+  kept adds, pauses and the API waiting for twenty-odd minutes. It now reads
+  that one row.
 - **Two workflows created in the same second are two workflows.** A new
   workflow's id was `wf<seconds>`, and saving is an upsert: the second one
   took the first one's id and replaced it, silently. A script creating a few
