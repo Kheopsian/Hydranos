@@ -95,54 +95,44 @@ pub fn refresh_records(path: std::path::PathBuf, cache: Records) {
     });
 }
 
-/// What the engines had already moved when this process started, and at the
-/// last midnight, so "this session" and "today" can be told from "ever".
+/// Where "today" starts: the session total at the last Europe/Paris midnight.
 ///
-/// The engines' per-torrent counters are LIFETIME totals loaded from resume
-/// data -- they do not reset at boot. Publishing them directly is what made
-/// `day_uploaded` read 321 TB: the whole history of every loaded torrent,
-/// labelled as one day.
+/// "This session" needs no mark of its own. Each engine counts the bytes it
+/// moves from zero at boot (`TorrentManager::moved`), so it is never a lifetime
+/// total minus an offset. That model -- lifetime counters summed over the
+/// LOADED torrents, minus a boot mark, with every delete and every fall of the
+/// sum compensated by hand -- is what made `day_uploaded` read 321 TB once
+/// (no mark), erase 7 TB in a day (no compensation), and on 01/10/2026 jump by
+/// the lifetime bytes of 1,813 deleted torrents (compensated twice, because the
+/// sum it read was a cache one tick behind the delete). A counter that only
+/// ever adds what moved cannot be moved by a delete.
 #[derive(Default)]
 pub struct Odometer {
-    /// Session totals at startup. `session_* = totals - this`.
-    pub session_offset: (i64, i64),
     /// Session totals at the last Europe/Paris midnight rollover.
     pub day_baseline: (i64, i64),
-    /// Engine totals seen on the previous poll, so a fall can be measured.
-    /// Without it the only reaction to a fall is to re-mark on the new total,
-    /// which throws away the session instead of stepping the mark down with it.
-    pub prev_totals: (i64, i64),
-    /// The date that baseline belongs to, `YYYY-MM-DD` in Europe/Paris.
+    /// The date that baseline belongs to, `YYYY-MM-DD` in Europe/Paris. Empty
+    /// until the first read, which then opens the day where the session is.
     pub day_date: String,
-    /// The same startup mark, per engine id, so a per-engine block can publish
-    /// its own session instead of the all-engines sum.
-    pub per_engine: std::collections::HashMap<String, (i64, i64)>,
 }
 
 impl Odometer {
-    /// Take a removed torrent's lifetime bytes off the marks.
+    /// The odometer of a process that has moved nothing yet: today starts at
+    /// zero, on today's date.
+    pub fn at_boot() -> Self {
+        Self { day_baseline: (0, 0), day_date: local_date() }
+    }
+
+    /// Today's bytes, given the session total and today's local date. Rolls
+    /// the baseline when the date changes.
     ///
-    /// `session = totals - session_offset`, and `totals` is a sum over the
-    /// torrents currently LOADED -- so it is about to lose this torrent's
-    /// lifetime bytes. Lowering the mark by the same amount is what keeps "this
-    /// session" and "today" continuous across a delete. Without it, removing a
-    /// torrent that had uploaded 500 GB over its life subtracts 500 GB from
-    /// TODAY's figure, for work done weeks ago.
-    ///
-    /// `day_baseline` is deliberately untouched: `day = session - day_baseline`
-    /// and `session` does not move here, so the day does not either.
-    pub fn forget(&mut self, engine_id: &str, ul: i64, dl: i64) {
-        self.session_offset.0 -= ul;
-        self.session_offset.1 -= dl;
-        // The next poll will see the totals minus these bytes. Step the
-        // previous-totals mark down too, or `session_and_day` reads the same
-        // fall a second time and compensates for it twice.
-        self.prev_totals.0 -= ul;
-        self.prev_totals.1 -= dl;
-        if let Some(mark) = self.per_engine.get_mut(engine_id) {
-            mark.0 -= ul;
-            mark.1 -= dl;
+    /// No clamp: the session only ever grows, so it cannot fall under a
+    /// baseline it was once equal to.
+    pub fn day(&mut self, session: (i64, i64), today: &str) -> (i64, i64) {
+        if self.day_date != today {
+            self.day_date = today.to_string();
+            self.day_baseline = session;
         }
+        (session.0 - self.day_baseline.0, session.1 - self.day_baseline.1)
     }
 }
 
@@ -156,77 +146,27 @@ fn local_date() -> String {
     crate::platform::local_date()
 }
 
-/// Bytes this session and today, from the engines' lifetime counters.
+/// (lifetime, session, day) bytes, each as (up, down).
 ///
 /// Rolls the day baseline when the local date changes, so calling it on a timer
 /// is what keeps the figure honest on a node nobody is looking at -- 3.x reset
 /// only on the first request of the new day, and the counter sat on yesterday's
 /// baseline until someone opened the page.
 pub fn session_and_day(state: &AppState) -> ((i64, i64), (i64, i64), (i64, i64)) {
-    let (total_up, total_down) = state.engines.session_totals();
-    let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
-
-    // A fall means torrents left the engines, taking their lifetime bytes out
-    // of the sum -- a delete whose `forget` never landed, or an engine that
-    // reloaded. Step the mark down by exactly what was lost, so the session is
-    // unchanged by the fall. Re-marking on the new total instead (what this did
-    // before) sets the session to zero, and `day`, being `session` minus a
-    // baseline, is dragged to zero with it: the header then republishes the
-    // whole session as today's traffic until the next midnight.
-    // The mark may go negative; that is the point -- it holds the bytes the
-    // engines no longer account for.
-    let fall = (
-        (odo.prev_totals.0 - total_up).max(0),
-        (odo.prev_totals.1 - total_down).max(0),
-    );
-    odo.session_offset.0 -= fall.0;
-    odo.session_offset.1 -= fall.1;
-    odo.prev_totals = (total_up, total_down);
-    let session = (
-        (total_up - odo.session_offset.0).max(0),
-        (total_down - odo.session_offset.1).max(0),
-    );
-
-    let today = local_date();
-    if odo.day_date != today {
-        odo.day_date = today;
-        odo.day_baseline = session;
-    }
-    // A session below the baseline means the session itself fell -- a removal
-    // whose `forget` never landed, or an engine that reloaded. Follow it down
-    // to `session`, never to zero: zeroing the baseline makes `day` equal
-    // `session` from that moment until the next midnight, so the header
-    // publishes weeks of traffic as today's. Clamping restarts the day at 0,
-    // which is wrong by at most the traffic since the dip instead of by all of it.
-    // Safety net only: with the mark stepping down, the session no longer
-    // falls under its own baseline. Clamp rather than zero if it ever does --
-    // zeroing is what made `day` equal `session`.
-    if session.0 < odo.day_baseline.0 || session.1 < odo.day_baseline.1 {
-        odo.day_baseline = session;
-    }
-    let day = (
-        (session.0 - odo.day_baseline.0).max(0),
-        (session.1 - odo.day_baseline.1).max(0),
-    );
     // Lifetime totals returned too: every caller needs them alongside, and
     // summing 300k counters twice per frame is the kind of waste that only
     // shows up as a warm CPU.
-    ((total_up, total_down), session, day)
+    let lifetime = state.engines.session_totals();
+    let session = state.engines.moved_totals();
+    let today = local_date();
+    let day = state.odometer.lock().unwrap_or_else(|e| e.into_inner()).day(session, &today);
+    (lifetime, session, day)
 }
 
-/// One engine's "since this process started" totals.
-///
-/// Same shape as `session_and_day`, scoped to a single engine: its live sum
-/// minus the mark taken at boot, ratcheted down if the sum falls below the mark
-/// so a large removal cannot publish a negative session.
+/// One engine's "since this process started" totals: what that engine has
+/// moved, counted by the engine itself.
 pub fn engine_session(state: &AppState, engine_id: &str) -> (i64, i64) {
-    let totals = state.engines.session_totals_of(engine_id);
-    let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
-    let mark = odo.per_engine.entry(engine_id.to_string()).or_insert(totals);
-    if totals.0 < mark.0 || totals.1 < mark.1 {
-        *mark = totals;
-    }
-    ((totals.0 - mark.0).max(0), (totals.1 - mark.1).max(0))
+    state.engines.moved_of(engine_id)
 }
 
 #[derive(Clone)]
@@ -9924,10 +9864,10 @@ async fn delete_torrent(
     let _ = cfg;
 
     let hash = info_hash.to_lowercase();
-    let resolved = {
-        let store = state.store.lock().unwrap();
+    let mut timings = DeleteTimings::start();
+    let resolved = timed_store(&state, &mut timings.lookup_wait, &mut timings.lookup_hold, |store| {
         store.resolve_hash(&hash)
-    };
+    });
     let Some(hash) = resolved else {
         return (
             StatusCode::NOT_FOUND,
@@ -9952,8 +9892,9 @@ async fn delete_torrent(
     // before a torrent could be in two places.
     let want = engine_param(&query, "");
     let sessions: Vec<String> = if want.is_empty() {
-        let store = state.store.lock().unwrap();
-        store.sessions_of(&hash)
+        timed_store(&state, &mut timings.lookup_wait, &mut timings.lookup_hold, |store| {
+            store.sessions_of(&hash)
+        })
     } else {
         vec![want.clone()]
     };
@@ -9961,7 +9902,7 @@ async fn delete_torrent(
         return not_found();
     }
 
-    match remove_one_torrent(&state, &hash, &sessions, &want, delete_files) {
+    match remove_one_torrent_timed(&state, &hash, &sessions, &want, delete_files, timings) {
         Ok(dropped) => {
             tracing::info!(hash = %hash, delete_files, copies = dropped, "torrent removed");
             Json(serde_json::json!({"status": "ok"})).into_response()
@@ -9987,13 +9928,15 @@ async fn delete_torrent(
 /// Per tracker as well as globally: the Trackers tab reads the same counters,
 /// and a ratio that forgets what a removed torrent gave back is the number an
 /// operator is judged on.
+///
+/// Returns (store lock wait, store lock hold), for `DeleteTimings`.
 pub(crate) fn absorb_on_remove(
     state: &AppState,
     engine_id: &str,
     torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
     hash: &str,
     session: Option<&str>,
-) {
+) -> (std::time::Duration, std::time::Duration) {
     use std::sync::atomic::Ordering;
     let ul = torrent.total_uploaded.load(Ordering::Relaxed) as i64;
     let dl = torrent.total_downloaded.load(Ordering::Relaxed) as i64;
@@ -10017,25 +9960,112 @@ pub(crate) fn absorb_on_remove(
         crate::store::Store::tracker_counter_key(engine_id, &host),
     ];
 
-    {
-        let store = state.store.lock().unwrap();
-        if let Err(e) = store.delete_absorb(hash, session, &keys, ul, dl) {
-            // Loud on purpose: lifetime upload is the one figure here that
-            // cannot be recomputed from anything else, so a fold that did not
-            // land must never pass for a clean delete.
-            tracing::error!(
-                hash = %hash, engine = %engine_id, ul, dl,
-                "absorb-on-remove failed, lifetime bytes not carried over: {e}"
-            );
-            return;
-        }
+    // Nothing to tell the odometer: session and day count what the engines
+    // MOVE, and the engine settled this torrent's last bytes as it let go.
+    // Lowering a mark here as well is what used to count a delete twice.
+    let (mut wait, mut hold) = Default::default();
+    let r = timed_store(state, &mut wait, &mut hold, |store| {
+        store.delete_absorb(hash, session, &keys, ul, dl)
+    });
+    if let Err(e) = r {
+        // Loud on purpose: lifetime upload is the one figure here that
+        // cannot be recomputed from anything else, so a fold that did not
+        // land must never pass for a clean delete.
+        tracing::error!(
+            hash = %hash, engine = %engine_id, ul, dl,
+            "absorb-on-remove failed, lifetime bytes not carried over: {e}"
+        );
+    }
+    (wait, hold)
+}
+
+/// Run `f` under the store lock, adding the time spent waiting for the lock
+/// and the time spent holding it to the two counters.
+fn timed_store<R>(
+    state: &AppState,
+    wait: &mut std::time::Duration,
+    hold: &mut std::time::Duration,
+    f: impl FnOnce(&crate::store::Store) -> R,
+) -> R {
+    let store = state.store.lock().unwrap();
+    *wait += store.waited();
+    let held = std::time::Instant::now();
+    let r = f(&store);
+    drop(store);
+    *hold += held.elapsed();
+    r
+}
+
+/// Where one torrent's delete spent its time, the API's stages and the
+/// engine's together, so a slow delete is ONE log line that names the stage.
+///
+/// On 01/10/2026 a selection job deleted 1,813 torrents in ~10 min: ~330 ms
+/// each, sequential. The SQLite statements on this path measure under 1 ms and
+/// unlinking a 12 GB file on ZFS ~6 ms, so ~320 ms per torrent is waiting on
+/// something in-process. Every lock is split into wait and hold: a store held
+/// long by someone else and a store held long by us are different bugs.
+#[derive(Default)]
+pub(crate) struct DeleteTimings {
+    started: Option<std::time::Instant>,
+    /// The handler's own lookups (resolve_hash, sessions_of).
+    lookup_wait: std::time::Duration,
+    lookup_hold: std::time::Duration,
+    /// `remove_one_torrent`'s count of the copies left.
+    count_wait: std::time::Duration,
+    count_hold: std::time::Duration,
+    find: std::time::Duration,
+    engine: typhon_engine::torrent::RemoveTimings,
+    announce_forget: std::time::Duration,
+    absorb_wait: std::time::Duration,
+    absorb_hold: std::time::Duration,
+    absorb_total: std::time::Duration,
+    final_wait: std::time::Duration,
+    final_hold: std::time::Duration,
+}
+
+impl DeleteTimings {
+    pub(crate) fn start() -> Self {
+        Self { started: Some(std::time::Instant::now()), ..Default::default() }
     }
 
-    // Only once the bytes are durable. The in-process mark and the stored
-    // counter have to move together, or the headline jumps by the difference
-    // until the next restart re-reads the store.
-    let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
-    odo.forget(engine_id, ul, dl);
+    fn report(&self, hash: &str) {
+        use typhon_engine::torrent::{ms, SLOW_REMOVE};
+        let total = self.started.map(|t| t.elapsed()).unwrap_or_default();
+        if total < SLOW_REMOVE {
+            tracing::debug!(hash = %hash, total_ms = ms(total), "delete");
+            return;
+        }
+        let e = &self.engine;
+        tracing::warn!(
+            hash = %hash,
+            total_ms = ms(total),
+            lookup_lock_wait_ms = ms(self.lookup_wait),
+            lookup_lock_hold_ms = ms(self.lookup_hold),
+            count_lock_wait_ms = ms(self.count_wait),
+            count_lock_hold_ms = ms(self.count_hold),
+            find_ms = ms(self.find),
+            engine_total_ms = ms(e.total),
+            statedb_wait_ms = ms(e.statedb_wait),
+            statedb_hold_ms = ms(e.statedb_hold),
+            resume_json_ms = ms(e.resume_json),
+            map_wait_ms = ms(e.map_wait),
+            map_hold_ms = ms(e.map_hold),
+            map_remove_ms = ms(e.map_remove),
+            publish_ms = ms(e.publish),
+            unlink_ms = ms(e.unlink),
+            files = e.files,
+            evict_wait_ms = ms(e.evict_wait),
+            evict_hold_ms = ms(e.evict_hold),
+            dirs_ms = ms(e.dirs),
+            announce_forget_ms = ms(self.announce_forget),
+            absorb_ms = ms(self.absorb_total),
+            absorb_lock_wait_ms = ms(self.absorb_wait),
+            absorb_lock_hold_ms = ms(self.absorb_hold),
+            final_lock_wait_ms = ms(self.final_wait),
+            final_lock_hold_ms = ms(self.final_hold),
+            "slow delete"
+        );
+    }
 }
 
 /// Remove a torrent from the engines that hold it, and from the store.
@@ -10053,6 +10083,33 @@ pub(crate) fn remove_one_torrent(
     want: &str,
     delete_files: bool,
 ) -> Result<usize, String> {
+    remove_one_torrent_timed(state, hash, sessions, want, delete_files, DeleteTimings::start())
+}
+
+/// `remove_one_torrent`, continuing a `DeleteTimings` the caller started, so
+/// the stages it ran before are in the same line.
+pub(crate) fn remove_one_torrent_timed(
+    state: &AppState,
+    hash: &str,
+    sessions: &[String],
+    want: &str,
+    delete_files: bool,
+    mut tm: DeleteTimings,
+) -> Result<usize, String> {
+    let r = remove_one_inner(state, hash, sessions, want, delete_files, &mut tm);
+    tm.report(hash);
+    r
+}
+
+fn remove_one_inner(
+    state: &AppState,
+    hash: &str,
+    sessions: &[String],
+    want: &str,
+    delete_files: bool,
+    tm: &mut DeleteTimings,
+) -> Result<usize, String> {
+    use std::time::Instant;
     // The engine first: dropping the store row alone leaves a torrent that
     // still seeds, still announces, and comes back at the next restart from the
     // engine's own state -- present to the network, invisible to the interface.
@@ -10060,36 +10117,45 @@ pub(crate) fn remove_one_torrent(
     // The files go only with the LAST copy: two engines seeding one payload
     // share it, so deleting it with the first would leave the others seeding
     // nothing.
-    let remaining = {
-        let store = state.store.lock().unwrap();
+    let remaining = timed_store(state, &mut tm.count_wait, &mut tm.count_hold, |store| {
         store.sessions_of(hash).len()
-    };
+    });
     let mut dropped = 0usize;
     for session in sessions {
         let Some(engine) = state.engines.get(session) else { continue };
-        let Some(torrent) = find_copy(state, session, hash) else { continue };
+        let stage = Instant::now();
+        let found = find_copy(state, session, hash);
+        tm.find += stage.elapsed();
+        let Some(torrent) = found else { continue };
         let last = dropped + 1 >= remaining;
         let keep = !(delete_files && last);
-        if let Err(e) = engine.manager.remove_torrent(&torrent.info_hash, keep) {
+        let (removed, engine_tm) = engine.manager.remove_torrent_timed(&torrent.info_hash, keep);
+        tm.engine.accumulate(&engine_tm);
+        if let Err(e) = removed {
             tracing::warn!(hash = %hash, session, "engine refused removal: {e}");
             return Err(e);
         }
+        let stage = Instant::now();
         engine.announce_cache.forget(hash);
+        tm.announce_forget += stage.elapsed();
         // AFTER the engine let go, never before: absorbing a torrent the engine
         // then refuses to drop counts its bytes twice, once in the carry-over
         // and once in the live sum. This also drops the row for this copy.
-        absorb_on_remove(state, session, &torrent, hash, Some(session));
+        let stage = Instant::now();
+        let (w, h) = absorb_on_remove(state, session, &torrent, hash, Some(session));
+        tm.absorb_total += stage.elapsed();
+        tm.absorb_wait += w;
+        tm.absorb_hold += h;
         dropped += 1;
     }
 
-    {
-        let store = state.store.lock().unwrap();
+    timed_store(state, &mut tm.final_wait, &mut tm.final_hold, |store| {
         if want.is_empty() {
             let _ = store.delete_torrent(hash);
         } else {
             let _ = store.delete_copy(hash, want);
         }
-    }
+    });
     Ok(dropped)
 }
 
@@ -10501,7 +10567,7 @@ fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bo
                     return;
                 }
                 engine.announce_cache.forget(&hash);
-                absorb_on_remove(state, &engine.id, &copy, &hash, Some(&engine.id));
+                let _ = absorb_on_remove(state, &engine.id, &copy, &hash, Some(&engine.id));
             }
         }
     }
@@ -12690,182 +12756,32 @@ mod bulk_body_tests {
 mod tests {
     use super::*;
 
-    /// The arithmetic behind session/day, without an engine.
-    ///
-    /// Written as a pure function of the same three marks `session_and_day`
-    /// keeps, because the bug it guards is not a crash: it is a lifetime total
-    /// published in a field labelled "day", which reads as a plausible number.
-    fn split(odo: &mut Odometer, totals: (i64, i64), today: &str) -> ((i64, i64), (i64, i64)) {
-        let fall = (
-            (odo.prev_totals.0 - totals.0).max(0),
-            (odo.prev_totals.1 - totals.1).max(0),
-        );
-        odo.session_offset.0 -= fall.0;
-        odo.session_offset.1 -= fall.1;
-        odo.prev_totals = totals;
-        let session = (
-            (totals.0 - odo.session_offset.0).max(0),
-            (totals.1 - odo.session_offset.1).max(0),
-        );
-        if odo.day_date != today {
-            odo.day_date = today.to_string();
-            odo.day_baseline = session;
-        }
-        if session.0 < odo.day_baseline.0 || session.1 < odo.day_baseline.1 {
-            odo.day_baseline = session;
-        }
-        let day = (
-            (session.0 - odo.day_baseline.0).max(0),
-            (session.1 - odo.day_baseline.1).max(0),
-        );
-        (session, day)
-    }
-
-    #[test]
-    fn a_lifetime_total_is_not_todays_traffic() {
-        // A library that has moved 321 TB before this process ever started.
-        let mut odo = Odometer {
-            per_engine: Default::default(),
-            session_offset: (321_000, 90_000),
-            prev_totals: (321_000, 90_000),
-            day_baseline: (0, 0),
-            day_date: "2026-09-08".into(),
-        };
-        // Nothing has moved yet this boot.
-        let (session, day) = split(&mut odo, (321_000, 90_000), "2026-09-08");
-        assert_eq!(session, (0, 0), "a fresh boot has moved nothing");
-        assert_eq!(day, (0, 0), "and today is not the whole history");
-
-        // 500 units later.
-        let (session, day) = split(&mut odo, (321_500, 90_000), "2026-09-08");
-        assert_eq!(session, (500, 0));
-        assert_eq!(day, (500, 0));
-    }
-
+    /// The day is the session minus its value at the last local midnight.
     #[test]
     fn midnight_resets_the_day_but_not_the_session() {
-        let mut odo = Odometer {
-            per_engine: Default::default(),
-            session_offset: (1000, 0),
-            prev_totals: (1000, 0),
-            day_baseline: (0, 0),
-            day_date: "2026-09-08".into(),
-        };
-        let (session, day) = split(&mut odo, (1700, 0), "2026-09-08");
-        assert_eq!((session.0, day.0), (700, 700));
+        let mut odo = Odometer { day_baseline: (0, 0), day_date: "2026-09-08".into() };
+        assert_eq!(odo.day((700, 10), "2026-09-08"), (700, 10), "the boot day counts from zero");
 
-        // The date rolls; the session keeps counting, the day starts over.
-        let (session, day) = split(&mut odo, (1900, 0), "2026-09-09");
-        assert_eq!(session.0, 900, "the session survives midnight");
-        assert_eq!(day.0, 0, "the day does not");
+        // The date rolls: the session keeps counting, the day starts over.
+        assert_eq!(odo.day((900, 10), "2026-09-09"), (0, 0), "the day does not survive midnight");
+        assert_eq!(odo.day((1000, 15), "2026-09-09"), (100, 5));
+        assert_eq!(odo.day_baseline, (900, 10), "the baseline is the session at the rollover");
 
-        let (session, day) = split(&mut odo, (2000, 0), "2026-09-09");
-        assert_eq!((session.0, day.0), (1000, 100));
+        // A second midnight: yesterday's traffic is not today's.
+        assert_eq!(odo.day((5000, 15), "2026-09-10"), (0, 0));
+        assert_eq!(odo.day((5001, 15), "2026-09-10"), (1, 0));
     }
 
+    /// A fresh odometer opens its day where the session is when first read --
+    /// the test states start it empty -- and `at_boot` opens it at zero, on
+    /// today's date, so nothing moved before the first poll is lost from it.
     #[test]
-    fn removing_a_torrent_never_makes_the_counters_negative() {
-        let mut odo = Odometer {
-            per_engine: Default::default(),
-            session_offset: (1000, 0),
-            prev_totals: (1000, 0),
-            day_baseline: (0, 0),
-            day_date: "2026-09-08".into(),
-        };
-        let _ = split(&mut odo, (1500, 0), "2026-09-08");
-        // A torrent carrying 1.2k lifetime bytes is removed: the sum drops
-        // below the mark taken at boot.
-        let (session, day) = split(&mut odo, (300, 0), "2026-09-08");
-        // The mark steps down with the fall, so the 500 already moved this
-        // session survive it. Before, this read (0, 0): the removal erased the
-        // session, and the day with it.
-        assert_eq!(session, (500, 0), "a removal does not erase the session");
-        assert_eq!(day, (500, 0));
-        // And nothing goes negative on the way.
-        let (session, day) = split(&mut odo, (0, 0), "2026-09-08");
-        assert!(session.0 >= 0 && day.0 >= 0);
-    }
-
-    /// The bug, stated as a test.
-    ///
-    /// The totals are a sum over the torrents currently LOADED, so a delete
-    /// takes that torrent's LIFETIME bytes out of the sum. Without `forget`,
-    /// removing a torrent that had uploaded 1.2k over months subtracts 1.2k
-    /// from TODAY -- and the ratchet above then floors the day at zero, which
-    /// is the "never negative" safety net firing on a number that should never
-    /// have moved. On prod this erased 7 TB in a single day.
-    #[test]
-    fn a_delete_does_not_rewrite_todays_figure() {
-        let mut odo = Odometer {
-            per_engine: [("hoard".to_string(), (1000, 0))].into_iter().collect(),
-            session_offset: (1000, 0),
-            prev_totals: (1000, 0),
-            day_baseline: (0, 0),
-            day_date: "2026-09-08".into(),
-        };
-        // 500 moved today, on a library summing 1500.
-        let (session, day) = split(&mut odo, (1500, 0), "2026-09-08");
-        assert_eq!((session.0, day.0), (500, 500));
-
-        // A torrent holding 1200 lifetime bytes is removed. The live sum falls
-        // to 300; the mark follows it down by the same 1200.
-        odo.forget("hoard", 1200, 0);
-        let (session, day) = split(&mut odo, (300, 0), "2026-09-08");
-        assert_eq!(session.0, 500, "the session is untouched by a delete");
-        assert_eq!(day.0, 500, "and so is the day");
-        assert_eq!(odo.per_engine["hoard"], (-200, 0), "the engine mark moved too");
-
-        // What the process keeps doing afterwards still counts.
-        let (session, day) = split(&mut odo, (400, 0), "2026-09-08");
-        assert_eq!((session.0, day.0), (600, 600));
-    }
-
-    /// An engine the odometer has no mark for must not be credited with the
-    /// removal -- a typo'd engine id silently moving the wrong mark is exactly
-    /// the kind of quiet drift this whole change exists to end.
-    #[test]
-    fn a_session_dip_after_midnight_does_not_publish_the_session_as_the_day() {
-        // The shape actually seen in prod on 2026-09-26: the header read the
-        // same 33.93 TB on "UL session" and "UL day", to the byte, on a daemon
-        // that had been up since the previous morning.
-        let mut odo = Odometer {
-            per_engine: Default::default(),
-            session_offset: (1000, 0),
-            prev_totals: (1000, 0),
-            day_baseline: (0, 0),
-            day_date: "2026-09-25".into(),
-        };
-        let _ = split(&mut odo, (1700, 0), "2026-09-25");
-        // Midnight: the day restarts, the session keeps its 900.
-        let (session, day) = split(&mut odo, (1900, 0), "2026-09-26");
-        assert_eq!((session.0, day.0), (900, 0));
-
-        // A removal the marks did not hear about: the sum falls by 1400.
-        // The mark steps down with it, so the session keeps its 900.
-        let (session, day) = split(&mut odo, (500, 0), "2026-09-26");
-        assert_eq!(session, (900, 0), "a fall does not erase the session");
-        assert_eq!(day, (0, 0), "and the day is still today's traffic: none yet");
-
-        // Hours of seeding later. The day is what moved since midnight, and
-        // it is NOT the session -- that equality was the bug.
-        let (session, day) = split(&mut odo, (34_000, 0), "2026-09-26");
-        assert_eq!(session.0, 34_400, "session = since boot, across the fall");
-        assert_eq!(day.0, 33_500, "day = since midnight");
-        assert_ne!(day, session, "the header must not publish one as the other");
-    }
-
-    #[test]
-    fn forgetting_names_an_engine_or_moves_only_the_global_mark() {
-        let mut odo = Odometer {
-            per_engine: [("hoard".to_string(), (10, 0))].into_iter().collect(),
-            session_offset: (10, 0),
-            prev_totals: (10, 0),
-            day_baseline: (0, 0),
-            day_date: "2026-09-08".into(),
-        };
-        odo.forget("nope", 5, 0);
-        assert_eq!(odo.session_offset, (5, 0), "the global mark always moves");
-        assert_eq!(odo.per_engine["hoard"], (10, 0), "an unknown engine moves nothing else");
+    fn a_first_read_opens_the_day() {
+        let mut odo = Odometer::default();
+        assert_eq!(odo.day((300, 0), "2026-10-01"), (0, 0));
+        let mut boot = Odometer::at_boot();
+        let today = boot.day_date.clone();
+        assert_eq!(boot.day((300, 0), &today), (300, 0));
     }
 
     fn state(key: &str, password_hash: &str) -> AppState {
@@ -17600,5 +17516,159 @@ mod export_route_tests {
         s.bytes()
             .map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod odometer_tests {
+    use super::testing::*;
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xCDu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn add(s: &TestState, engine_id: &str, name: &str) -> [u8; 20] {
+        let engine = s.engines.get(engine_id).unwrap_or_else(|| panic!("no engine {engine_id}"));
+        engine
+            .manager
+            .add_torrent_bytes(&torrent_bytes(name), "/tmp", true, true)
+            .unwrap_or_else(|e| panic!("add {name}: {e}"))
+            .0
+    }
+
+    /// The torrent was loaded with `ul` lifetime bytes from its resume
+    /// record: history that predates this process.
+    fn load_lifetime(s: &TestState, engine_id: &str, ih: &[u8; 20], ul: u64) {
+        let t = s.engines.get(engine_id).unwrap().manager.get(ih).unwrap();
+        t.restore_lifetime(ul, 0);
+    }
+
+    /// What main.rs does once the engines have loaded.
+    fn boot(s: &TestState) {
+        *s.odometer.lock().unwrap() = Odometer::at_boot();
+    }
+
+    fn upload(s: &TestState, engine_id: &str, ih: &[u8; 20], n: u64) {
+        s.engines.get(engine_id).unwrap().manager.get(ih).unwrap()
+            .total_uploaded.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn tick(s: &TestState) {
+        for e in s.engines.engines() {
+            e.manager.update_rates();
+        }
+    }
+
+    /// The 01/10/2026 incident, as an interleaving: deleting 1,813 torrents
+    /// pushed "today" and "this session" up by about their lifetime bytes,
+    /// because a poll between the engine removal and the next 1 Hz cache
+    /// refresh saw the fall of the totals after `forget` had already paid for
+    /// it. Failed on the old odometer with session = 1,000,300 at the first
+    /// poll after the delete.
+    #[tokio::test]
+    async fn a_poll_between_a_delete_and_the_next_tick_leaves_the_session_alone() {
+        let s = state_from("odo-delete-race", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let old = add(&s, "hoard", "old");
+        let busy = add(&s, "hoard", "busy");
+        load_lifetime(&s, "hoard", &old, 1_000_000);
+        tick(&s);
+        boot(&s);
+        // main.rs's 60 s roll timer polls once at startup: that opens the day.
+        let _ = session_and_day(&s.state);
+
+        upload(&s, "hoard", &busy, 300);
+        tick(&s);
+        let (_, session, day) = session_and_day(&s.state);
+        assert_eq!(session.0, 300);
+        assert_eq!(day.0, 300);
+
+        let hash = typhon_engine::torrent::hex_encode(&old);
+        remove_one_torrent(&s.state, &hash, &["hoard".to_string()], "hoard", false).expect("removed");
+
+        // The poll lands before the 1 Hz cache refresh.
+        let (_, session, day) = session_and_day(&s.state);
+        assert_eq!(session.0, 300, "a delete is not traffic (stale cache)");
+        assert_eq!(day.0, 300);
+        assert_eq!(engine_session(&s.state, "hoard").0, 300);
+
+        tick(&s);
+        let (_, session, day) = session_and_day(&s.state);
+        assert_eq!(session.0, 300, "a delete is not traffic (after the refresh)");
+        assert_eq!(day.0, 300);
+        assert_eq!(engine_session(&s.state, "hoard").0, 300);
+    }
+
+    /// Re-adding a torrent that carries lifetime counters -- the reload path,
+    /// a move between engines -- adds nothing to the session, and the session
+    /// of each engine is its own.
+    #[tokio::test]
+    async fn a_moved_torrent_brings_its_history_but_not_into_the_session() {
+        let s = state_from("odo-move", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let ih = add(&s, "hoard", "mover");
+        load_lifetime(&s, "hoard", &ih, 5_000_000);
+        tick(&s);
+        boot(&s);
+        upload(&s, "hoard", &ih, 40);
+        tick(&s);
+        assert_eq!(session_and_day(&s.state).1, (40, 0));
+
+        // What an engine move does: export, import on the other side, let go.
+        let hoard = &s.engines.get("hoard").unwrap().manager;
+        let race = &s.engines.get("race").unwrap().manager;
+        let blob = torrent_bytes("mover");
+        race.set_blob_source(Arc::new(move |_h: &str| Some(blob.clone())));
+        let rd = hoard.export_state(&ih).expect("exported");
+        race.import_state(&rd).expect("imported");
+        // A poll while both engines hold it: the old sum counted it twice.
+        let (life, session, day) = session_and_day(&s.state);
+        assert_eq!(session, (40, 0), "holding it twice is not traffic");
+        assert_eq!(day, (40, 0));
+        assert!(life.0 >= 5_000_040);
+        hoard.remove_torrent(&ih, true).expect("hoard lets go");
+        tick(&s);
+        assert_eq!(session_and_day(&s.state).1, (40, 0));
+        assert_eq!(engine_session(&s.state, "hoard"), (40, 0), "hoard keeps what it moved");
+        assert_eq!(engine_session(&s.state, "race"), (0, 0), "race moved nothing yet");
+
+        upload(&s, "race", &ih, 2);
+        tick(&s);
+        assert_eq!(session_and_day(&s.state).1, (42, 0));
+        assert_eq!(engine_session(&s.state, "race"), (2, 0));
+    }
+
+    /// Deleting a torrent that moved bytes since the last tick keeps them in
+    /// the session, through the whole API path (absorb included).
+    #[tokio::test]
+    async fn bytes_moved_just_before_a_delete_stay_in_the_session() {
+        let s = state_from("odo-settle", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let ih = add(&s, "race", "late");
+        load_lifetime(&s, "race", &ih, 77_000);
+        tick(&s);
+        boot(&s);
+        upload(&s, "race", &ih, 9);
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        remove_one_torrent(&s.state, &hash, &["race".to_string()], "race", false).expect("removed");
+        assert_eq!(session_and_day(&s.state).1, (9, 0), "settled by the removal, not lost");
+        tick(&s);
+        let (_, session, day) = session_and_day(&s.state);
+        assert_eq!((session, day), ((9, 0), (9, 0)), "and not counted again by the tick");
+        assert_eq!(engine_session(&s.state, "race"), (9, 0));
     }
 }

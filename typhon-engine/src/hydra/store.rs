@@ -460,6 +460,13 @@ impl StoreLock {
     }
 }
 
+impl StoreGuard<'_> {
+    /// How long this guard waited for the lock before it was granted.
+    pub fn waited(&self) -> std::time::Duration {
+        self.waited
+    }
+}
+
 impl std::ops::Deref for StoreGuard<'_> {
     type Target = Store;
     fn deref(&self) -> &Store {
