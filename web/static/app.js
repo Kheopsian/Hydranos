@@ -1185,6 +1185,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Pick the language and translate the static markup before anything else
     // paints. Everything in the DOM at this point came from index.html.
     try { await I18N.load(I18N.detect()); I18N.translateDOM(document.body); } catch (e) {}
+    // After the dictionary: the panels are drawn in the page's language.
+    _bulkRestore();
 
     let setup = null;
     try {
@@ -2511,7 +2513,6 @@ async function _applyTagOp(tags, op) {
     } else {
         fetchHoardPage(true);
     }
-    if (j.failed) _reportSelection(t("Edit tags"), j);
 }
 
 function _toggleTagSelected(tag, add) {
@@ -3431,7 +3432,6 @@ async function _pinSelected(on) {
     await _refreshHoardPins();
     renderHoardTable();
     _renderHoardCounts();
-    _reportSelection(on ? t("Force download") : t("Stop forcing"), j);
 }
 
 // ── Selection actions ─────────────────────────────────────────────────────
@@ -3442,7 +3442,8 @@ async function _pinSelected(on) {
 // to call once per row. The page only follows the job.
 
 // Start `action` on the selection (or on `selection` when given) and wait for
-// it. Returns the finished job, or null if it never started.
+// it. Returns the finished job, or null if it never started. The progress
+// panel below follows it on the way.
 async function _runSelection(action, params, label, selection) {
     const body = { selection: selection || _selectionPayload(), params: params || {} };
     for (;;) {
@@ -3472,48 +3473,347 @@ async function _runSelection(action, params, label, selection) {
             hydraNotify(label || action, (j && j.error) || ("HTTP " + r.status));
             return null;
         }
-        return _followSelectionJob(j.job, label || action);
+        return _bulkRun(j.job, label || action, j.total);
     }
 }
 
-async function _followSelectionJob(id, label) {
-    let delay = 200, misses = 0;
+// ── Selection job progress panel ──────────────────────────────────────────
+//
+// One panel per selection job, built on the `modal-overlay` pattern. It shows
+// itself, centred, only if the job is still running BULK_SHOW_AFTER_MS after
+// launch: the trigger is TIME, not the number of torrents, because the cost per
+// torrent is what varies (stopping 500 is instant, rechecking 3 large ones
+// takes minutes). "Minimize" docks it as a card in the bottom-right corner so
+// the page stays usable; a click on the card centres it again. A finished
+// panel stays, with its counts per outcome and the errors, until it is closed.
+//
+// The job ids live in localStorage until the panel is closed, so a reload
+// re-attaches to whatever the daemon is still running (it keeps a finished
+// job for an hour).
+const BULK_SHOW_AFTER_MS = 400;
+const BULK_STORE_KEY = "hydra_bulk_jobs";
+const _bulkPanels = new Map(); // job id -> panel
+
+// Outcome key (the job's `tally`) -> how to say it. `loud` outcomes open the
+// panel even when the job finished before it had a reason to show: the
+// operator has something to read or to do again ("127 refused (cooldown)" has
+// to be pressed again in a minute, which silence would hide).
+const _BULK_OUTCOMES = [
+    { key: "ok", say: "{n} done" },
+    { key: "moving", say: "{n} moving in the background" },
+    { key: "sent", say: "{n} sent to agents" },
+    { key: "complete", say: "{n} already complete" },
+    { key: "unchanged", say: "{n} already so" },
+    { key: "in_flight", say: "{n} already announcing" },
+    { key: "queued", say: "{n} queued" },
+    { key: "cooldown", say: "{n} refused (cooldown)", tone: "warn", loud: true },
+    { key: "skipped", say: "{n} not applicable", loud: true },
+    { key: "not_here", say: "{n} not on this node", loud: true },
+    { key: "needs_consent", say: "{n} waiting for your answer", tone: "warn", loud: true },
+    { key: "left_in_place", say: "{n} left in place (hardlinks)", tone: "warn", loud: true },
+    { key: "failed", say: "{n} failed", tone: "bad", loud: true },
+];
+
+function _bulkSave() {
+    const list = [];
+    for (const p of _bulkPanels.values()) list.push({ id: p.id, label: p.label, docked: !!p.docked });
+    try { localStorage.setItem(BULK_STORE_KEY, JSON.stringify(list)); } catch (_) { /* private mode */ }
+}
+
+function _bulkNoteworthy(j) {
+    if (!j) return true;
+    if (j.failed || j.cancelled) return true;
+    const tally = j.tally || {};
+    return Object.keys(tally).some(k => {
+        if (!tally[k]) return false;
+        const o = _BULK_OUTCOMES.find(x => x.key === k);
+        return !o || !!o.loud;
+    });
+}
+
+// Follow a launched job until it ends. Resolves to the finished job, or to
+// null when the daemon no longer knows it (a restart forgets its jobs).
+async function _bulkRun(id, label, total) {
+    const p = {
+        id, label, shown: false, docked: false, note: "", lost: false, cancelling: false,
+        job: { id, total: total || 0, done: 0, tally: {}, failed: 0, errors: [], finished: false, elapsed_ms: 0 },
+        showAt: Date.now() + BULK_SHOW_AFTER_MS,
+    };
+    _bulkPanels.set(id, p);
+    _bulkSave();
+    const j = await _bulkFollow(p);
+    if (!p.shown) {
+        // Finished before it was worth a panel: say nothing unless there is
+        // something to read.
+        if (_bulkNoteworthy(j)) _bulkShow(p, false);
+        else _bulkForget(p);
+    }
+    if (!j) return null;
+    j._panel = p;
+    return j;
+}
+
+async function _bulkFollow(p) {
+    // The first polls are close together so that a quick job is seen to end
+    // quickly, and one lands on BULK_SHOW_AFTER_MS: that is the poll that
+    // decides whether the panel shows.
+    const steps = [100, 150, 150];
+    let i = 0, misses = 0;
     for (;;) {
+        const delay = i < steps.length ? steps[i] : Math.min(1000, Math.round(150 * Math.pow(1.5, i - steps.length + 1)));
+        i++;
         await new Promise(res => setTimeout(res, delay));
-        delay = Math.min(1500, Math.round(delay * 1.5));
         let j;
-        try { j = await api(`/api/selection/jobs/${encodeURIComponent(id)}`); misses = 0; }
-        catch (e) {
-            // A daemon restart forgets its jobs: stop following rather than spin.
-            if (++misses >= 5) return null;
+        try {
+            j = await api(`/api/selection/jobs/${encodeURIComponent(p.id)}`);
+            misses = 0;
+        } catch (e) {
+            if (/\(404\)$/.test(e.message || "") || ++misses >= 5) {
+                p.lost = true;
+                p.job = Object.assign({}, p.job, { finished: true });
+                _bulkRender(p);
+                return null;
+            }
             continue;
         }
+        p.job = j;
+        if (!p.shown && !j.finished && p.showAt && Date.now() >= p.showAt) _bulkShow(p, false);
+        else if (p.shown) _bulkRender(p);
         if (j.finished) return j;
-        if (j.total > 50) {
-            _flashStatus(t("{label}: {done} / {total}", { label: label, done: fmtInt(j.done), total: fmtInt(j.total) }));
-        }
     }
 }
 
-// Say what a finished job did, in one line; open a dialog only for failures.
-function _reportSelection(label, j) {
-    const c = j.tally || {};
-    const parts = [];
-    const say = (k, msg) => { if (c[k]) parts.push(t(msg, { n: fmtInt(c[k]) })); };
-    say("ok", "{n} done");
-    say("moving", "{n} moving in the background");
-    say("sent", "{n} sent to agents");
-    say("complete", "{n} already complete");
-    say("unchanged", "{n} already so");
-    say("skipped", "{n} not applicable");
-    say("not_here", "{n} not on this node");
-    say("needs_consent", "{n} waiting for your answer");
-    if (j.failed) parts.push(t("{n} failed", { n: fmtInt(j.failed) }));
-    if (j.cancelled) parts.push(t("cancelled"));
-    const line = label + ": " + (parts.join(" \u00b7 ") || t("nothing to do"));
-    if (j.failed) hydraNotify(line + "\n\n" + (j.errors || []).join("\n"));
-    else _flashStatus(line);
+function _bulkShow(p, docked) {
+    p.shown = true;
+    p.closed = false;
+    if (!_bulkPanels.has(p.id)) _bulkPanels.set(p.id, p);
+    if (!p.box) {
+        p.box = document.createElement("div");
+        p.box.addEventListener("click", e => _bulkClick(p, e));
+    }
+    _bulkPlace(p, !!docked);
 }
+
+// Centre the panel, or dock it. Only one panel is centred at a time: centring
+// one docks the other.
+function _bulkPlace(p, docked) {
+    if (!docked) {
+        for (const o of _bulkPanels.values()) if (o !== p && o.shown && !o.docked) _bulkPlace(o, true);
+    }
+    p.docked = docked;
+    p.shape = "";
+    if (docked) {
+        let dock = document.getElementById("bulk-dock");
+        if (!dock) {
+            dock = document.createElement("div");
+            dock.id = "bulk-dock";
+            dock.className = "bulk-dock";
+            document.body.appendChild(dock);
+        }
+        dock.appendChild(p.box);
+        if (p.overlay) { p.overlay.remove(); p.overlay = null; }
+        p.box.className = "bulk-card";
+        p.box.title = t("Click to expand");
+    } else {
+        if (!p.overlay) {
+            p.overlay = document.createElement("div");
+            p.overlay.className = "modal-overlay bulk-overlay";
+            // A click beside the panel docks it: nothing is lost, the job runs on.
+            p.overlay.addEventListener("click", e => { if (e.target === p.overlay) _bulkPlace(p, true); });
+            document.body.appendChild(p.overlay);
+        }
+        p.overlay.appendChild(p.box);
+        p.box.className = "modal-box bulk-box";
+        p.box.title = "";
+        _bulkDropEmptyDock();
+    }
+    _bulkRender(p);
+    _bulkSave();
+}
+
+function _bulkDropEmptyDock() {
+    const dock = document.getElementById("bulk-dock");
+    if (dock && !dock.children.length) dock.remove();
+}
+
+function _bulkForget(p) {
+    _bulkPanels.delete(p.id);
+    _bulkSave();
+}
+
+function _bulkClose(p) {
+    p.shown = false;
+    p.closed = true;
+    if (p.overlay) { p.overlay.remove(); p.overlay = null; }
+    if (p.box) p.box.remove();
+    _bulkDropEmptyDock();
+    _bulkForget(p);
+}
+
+async function _bulkCancel(p) {
+    if (p.cancelling || (p.job && p.job.finished)) return;
+    p.cancelling = true;
+    _bulkRender(p);
+    try {
+        await api(`/api/selection/jobs/${encodeURIComponent(p.id)}/cancel`, { method: "POST" });
+    } catch (e) {
+        p.cancelling = false;
+        _bulkRender(p);
+        hydraNotify(p.label, e.message || String(e));
+    }
+}
+
+function _bulkClick(p, e) {
+    const b = e.target.closest("[data-bulk]");
+    const act = b ? b.dataset.bulk : (p.docked ? "centre" : null);
+    if (!act) return;
+    // The page's own click handler would read a click here as "elsewhere" and
+    // drop the selection.
+    e.stopPropagation();
+    if (act === "dock") _bulkPlace(p, true);
+    else if (act === "centre") _bulkPlace(p, false);
+    else if (act === "close") _bulkClose(p);
+    else if (act === "cancel") _bulkCancel(p);
+}
+
+// "1 790 done · 23 failed": one count per outcome, never a single total.
+function _bulkOutcomesHTML(j) {
+    const tally = Object.assign({}, j.tally || {});
+    if (j.failed && !tally.failed) tally.failed = j.failed;
+    const parts = [];
+    const seen = new Set();
+    for (const o of _BULK_OUTCOMES) {
+        seen.add(o.key);
+        const n = tally[o.key];
+        if (!n) continue;
+        const say = o.key === "ok" && j.action === "reannounce" ? "{n} reannounced" : o.say;
+        parts.push(`<span class="bulk-o${o.tone ? " bulk-o-" + o.tone : ""}">${esc(t(say, { n: fmtInt(n) }))}</span>`);
+    }
+    // An outcome this page has no words for yet is still counted, by its name.
+    for (const k of Object.keys(tally)) {
+        if (seen.has(k) || !tally[k]) continue;
+        parts.push(`<span class="bulk-o">${esc(k.replace(/_/g, " "))}: ${fmtInt(tally[k])}</span>`);
+    }
+    if (!parts.length && j.finished) parts.push(`<span class="bulk-o">${esc(t("nothing to do"))}</span>`);
+    return parts.join('<span class="bulk-sep"> · </span>');
+}
+
+function _bulkRender(p) {
+    if (!p.box || !p.shown) return;
+    const j = p.job || {};
+    const total = j.total || 0, done = j.done || 0;
+    const running = !j.finished;
+    const pct = total ? Math.min(100, Math.floor(done * 100 / total)) : (running ? 0 : 100);
+    const stateKey = p.lost ? "lost" : !running ? (j.cancelled ? "cancelled" : "finished") : p.cancelling ? "cancelling" : "running";
+    const stateText = {
+        lost: t("Lost"), cancelled: t("Cancelled"), finished: t("Finished"),
+        cancelling: t("Cancelling..."), running: t("Running"),
+    }[stateKey];
+    const count = `${fmtInt(done)} / ${fmtInt(total)}`;
+    let timing = "";
+    const ms = j.elapsed_ms || 0;
+    if (running && done > 0 && done < total && ms >= 1500) {
+        timing = t("about {d} left", { d: formatDuration((total - done) * ms / done / 1000) });
+    } else if (!running && !p.lost) {
+        timing = t("took {d}", { d: formatDuration(Math.max(1, Math.round(ms / 1000))) });
+    }
+    const fillCls = "progress-fill" + (running ? " downloading" : (j.failed ? " bulk-fill-bad" : ""));
+    const errors = j.errors || [];
+    // What changes on every poll is patched in place, so the bar slides
+    // instead of being redrawn; the rest is rebuilt only when it changes.
+    const shape = [p.docked, stateKey, errors.length, p.note].join("|");
+    if (p.shape === shape) {
+        const fill = p.box.querySelector(".progress-fill");
+        if (fill) { fill.className = fillCls; fill.style.width = pct + "%"; }
+        const c = p.box.querySelector(".bulk-count-n");
+        if (c) c.textContent = count;
+        const tm = p.box.querySelector(".bulk-count-t");
+        if (tm) tm.textContent = pct + "%" + (timing ? " · " + timing : "");
+        const out = p.box.querySelector(".bulk-outcomes");
+        if (out) out.innerHTML = _bulkOutcomesHTML(j);
+        return;
+    }
+    p.shape = shape;
+    const label = esc(p.label || j.action || "");
+    if (p.docked) {
+        p.box.innerHTML =
+            `<div class="bulk-card-head">` +
+                `<span class="bulk-card-title">${label}</span>` +
+                `<span class="bulk-state bulk-state-${stateKey}">${esc(stateText)}</span>` +
+                (running ? "" : `<button class="bulk-card-x" data-bulk="close" title="${esc(t("Close"))}">×</button>`) +
+            `</div>` +
+            `<div class="progress-bar"><div class="${fillCls}" style="width:${pct}%"></div></div>` +
+            `<div class="bulk-count"><span class="bulk-count-n">${count}</span><span class="bulk-count-t">${pct}%${timing ? " · " + esc(timing) : ""}</span></div>` +
+            `<div class="bulk-outcomes">${_bulkOutcomesHTML(j)}</div>`;
+        return;
+    }
+    let errHTML = "";
+    if (errors.length) {
+        const more = (j.failed || 0) - errors.length;
+        errHTML = `<div class="bulk-errors">${errors.map(e => `<div>${esc(e)}</div>`).join("")}` +
+            (more > 0 ? `<div class="bulk-errors-more">${esc(t("{n} more not listed", { n: fmtInt(more) }))}</div>` : "") +
+            `</div>`;
+    }
+    const lost = p.lost
+        ? `<p class="modal-desc">${esc(t("The daemon no longer knows this job (it restarted?), so its outcome cannot be shown."))}</p>`
+        : "";
+    const note = p.note ? `<p class="bulk-note">${esc(p.note)}</p>` : "";
+    const buttons = running
+        ? `<button class="btn-modal btn-keep" data-bulk="dock">${esc(t("Minimize"))}</button>` +
+          `<button class="btn-modal btn-cancel" data-bulk="cancel"${p.cancelling ? " disabled" : ""}>${esc(p.cancelling ? t("Cancelling...") : t("Cancel"))}</button>`
+        : `<button class="btn-modal btn-cancel" data-bulk="dock">${esc(t("Minimize"))}</button>` +
+          `<button class="btn-modal btn-keep" data-bulk="close">${esc(t("Close"))}</button>`;
+    p.box.innerHTML =
+        `<div class="bulk-head"><h3>${label}</h3><span class="bulk-state bulk-state-${stateKey}">${esc(stateText)}</span></div>` +
+        `<div class="progress-bar bulk-bar"><div class="${fillCls}" style="width:${pct}%"></div></div>` +
+        `<div class="bulk-count"><span class="bulk-count-n">${count}</span><span class="bulk-count-t">${pct}%${timing ? " · " + esc(timing) : ""}</span></div>` +
+        `<div class="bulk-outcomes">${_bulkOutcomesHTML(j)}</div>` +
+        lost + errHTML + note +
+        `<div class="modal-actions bulk-actions">${buttons}</div>`;
+}
+
+// Add what the caller has to say about a finished job ("the files did not
+// move", "follow them in Jobs") to its panel, opening the panel if the job was
+// too quick to have one. `j` may be a job the caller merged from two runs: its
+// counts replace the panel's.
+function _bulkNote(j, note) {
+    const p = j && j._panel;
+    if (!p || p.closed) return;
+    p.job = Object.assign({}, j, { _panel: undefined });
+    if (note) p.note = note;
+    if (p.shown) _bulkRender(p);
+    else if (note || _bulkNoteworthy(p.job)) _bulkShow(p, false);
+}
+
+// After a reload: put back the panels of the jobs the daemon still knows.
+async function _bulkRestore() {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem(BULK_STORE_KEY) || "[]") || []; } catch (_) { saved = []; }
+    if (!Array.isArray(saved) || !saved.length || !API_KEY) return;
+    for (const s of saved) {
+        if (!s || !s.id || _bulkPanels.has(s.id)) continue;
+        let j = null;
+        try {
+            const r = await fetch(`/api/selection/jobs/${encodeURIComponent(s.id)}`, { headers: { "X-Api-Key": API_KEY } });
+            if (r.ok) j = await r.json();
+        } catch (_) { j = null; }
+        if (!j || !j.id) continue;
+        const p = { id: s.id, label: s.label || j.action, shown: false, docked: false, note: "", lost: false, cancelling: false, job: j };
+        _bulkPanels.set(p.id, p);
+        _bulkShow(p, !!s.docked);
+        if (!j.finished) _bulkFollow(p);
+    }
+    // Jobs the daemon forgot (restart, or finished over an hour ago) go.
+    _bulkSave();
+}
+
+document.addEventListener("keydown", e => {
+    if (e.key !== "Escape") return;
+    // A question asked over the panel answers Escape first.
+    const dlg = document.getElementById("hydra-modal");
+    if (dlg && dlg.style.display !== "none") return;
+    for (const p of _bulkPanels.values()) if (p.shown && !p.docked) _bulkPlace(p, true);
+});
 
 // Ctrl+A selects everything the current filters match -- not just the rows on
 // screen. With 100k torrents the table renders a capped slice, so selecting
@@ -3858,9 +4158,8 @@ async function _fetchFromNode(nodeName, fromEngine, engine) {
     const j = await _runSelection("node-fetch", { node: nodeName, from_engine: fromEngine, engine: engine }, t("Bring here"));
     if (!j) return;
     const ok = (j.tally && j.tally.ok) || 0;
-    hydraNotify(t("Bring here"), j.failed
-        ? t("Fetched {ok} into \"{target}\", {failed} failure(s).", { ok: ok, target: "local-" + engine, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n")
-        : t("Fetching {ok} into \"{target}\" from \"{node}\".", { ok: ok, target: "local-" + engine, node: nodeName }));
+    // Failures and their errors are on the progress panel already.
+    _bulkNote(j, j.failed ? "" : t("Fetching {ok} into \"{target}\" from \"{node}\".", { ok: ok, target: "local-" + engine, node: nodeName }));
     fetchHoardPage(true);
 }
 
@@ -3870,9 +4169,7 @@ async function _moveOnNode(nodeName, engine) {
     const j = await _runSelection("node-move", { node: nodeName, engine: engine }, t("Move to engine"));
     if (!j) return;
     const ok = (j.tally && j.tally.ok) || 0;
-    hydraNotify(t("Move to engine"), j.failed
-        ? t("Moved {ok} to \"{target}\", {failed} failure(s).", { ok: ok, target: nodeName + "-" + engine, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n")
-        : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: nodeName + "-" + engine }));
+    _bulkNote(j, j.failed ? "" : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: nodeName + "-" + engine }));
     fetchHoardPage(true);
 }
 
@@ -3885,9 +4182,7 @@ async function _copyToLocalEngine(engine) {
     const j = await _runSelection("copy", { engine: engine }, t("Duplicate to engine"));
     if (!j) return;
     const ok = (j.tally && j.tally.ok) || 0;
-    hydraNotify(t("Duplicate to engine"), j.failed
-        ? t("Seeding {ok} more from \"{target}\", {failed} failure(s).", { ok: ok, target: "local-" + engine, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n")
-        : t("Seeding {ok} more from \"{target}\". Same files, second identity in the swarm.", { ok: ok, target: "local-" + engine }));
+    _bulkNote(j, j.failed ? "" : t("Seeding {ok} more from \"{target}\". Same files, second identity in the swarm.", { ok: ok, target: "local-" + engine }));
     fetchHoardPage(true);
     updateRaceTorrents();
 }
@@ -3903,9 +4198,7 @@ async function _moveToLocalEngine(engine) {
     const j = await _runSelection("move-engine", { engine: engine }, t("Move to engine"));
     if (!j) return;
     const ok = (j.tally && j.tally.ok) || 0;
-    hydraNotify(t("Move to engine"), j.failed
-        ? t("Moved {ok} to \"{target}\", {failed} failure(s).", { ok: ok, target: "local-" + engine, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n")
-        : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: "local-" + engine }));
+    _bulkNote(j, j.failed ? "" : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: "local-" + engine }));
     _scheduleHoardRender();
     fetchHoardPage(true);
 }
@@ -3925,17 +4218,13 @@ async function _sendToEngineSelected(nodeName, engine, then) {
     const sent = (j.tally && j.tally.ok) || 0;
     const target = nodeName + "-" + engine;
     if (j.failed) {
-        hydraNotify(t("Send to engine"),
-            t("Sent {ok} to \"{target}\", {failed} failure(s).",
-                { ok: sent, target: target, failed: j.failed }) + "\n\n" + (j.errors || []).join("\n"));
+        _bulkNote(j, "");
     } else if (then === "remove") {
-        hydraNotify(t("Send to engine"),
-            t("Sent {ok} to \"{target}\". The local copy goes once the far side reports complete.",
-                { ok: sent, target: target }));
+        _bulkNote(j, t("Sent {ok} to \"{target}\". The local copy goes once the far side reports complete.",
+            { ok: sent, target: target }));
     } else {
-        hydraNotify(t("Send to engine"),
-            t("Sent {ok} to \"{target}\". They fetch the data from here; this node keeps its copy.",
-                { ok: sent, target: target }));
+        _bulkNote(j, t("Sent {ok} to \"{target}\". They fetch the data from here; this node keeps its copy.",
+            { ok: sent, target: target }));
     }
 }
 
@@ -4055,18 +4344,20 @@ async function _showCategoryPicker(ev, move) {
 
 // _runMoveSelection runs a selection action that may move data (`category`,
 // `location`) and asks, once for all of them, about the torrents whose move
-// would break hardlinks. Resolves to the combined {ok, moving, failed, errors},
-// or null when the selection could not start.
+// would break hardlinks. Resolves to the first job with the second run's
+// outcomes merged into its counts (still carrying the progress panel to note
+// on), or null when the selection could not start.
 async function _runMoveSelection(action, params, label) {
     const j = await _runSelection(action, params, label);
     if (!j) return null;
-    let ok = (j.tally && j.tally.ok) || 0;
-    let moving = (j.tally && j.tally.moving) || 0;
+    const tally = Object.assign({}, j.tally || {});
     let failed = j.failed || 0;
     const errors = [...(j.errors || [])];
+    let panel = j._panel;
 
     // Torrents whose files are hardlinked elsewhere are not failures but a
-    // question, asked once for all of them.
+    // question, asked once for all of them. The first run's panel is open on
+    // "{n} waiting for your answer" while it is asked.
     const consent = j.consent || { items: [] };
     if (consent.items && consent.items.length) {
         const question = tp(consent.items.length,
@@ -4076,18 +4367,26 @@ async function _runMoveSelection(action, params, label) {
             + t("{files} file(s), {size}, are hardlinked elsewhere (usually the Sonarr or Radarr library). The target is on another filesystem, so copying them leaves a second full copy on disk.",
                 { files: consent.files, size: formatBytes(consent.bytes) })
             + "\n\n" + t("Move them anyway?");
+        const waiting = tally.needs_consent || 0;
+        delete tally.needs_consent;
         if (await hydraConfirm(question)) {
+            // The second run gets its own panel, which ends up showing both.
+            if (panel && panel.shown) _bulkClose(panel);
             const again = await _runSelection(action, Object.assign({}, params, { allow_breaking_hardlinks: true }),
                 label, { items: consent.items });
             if (again) {
-                ok += (again.tally && again.tally.ok) || 0;
-                moving += (again.tally && again.tally.moving) || 0;
+                for (const [k, v] of Object.entries(again.tally || {})) tally[k] = (tally[k] || 0) + v;
                 failed += again.failed || 0;
                 errors.push(...(again.errors || []));
+                panel = again._panel;
+            } else if (waiting) {
+                tally.left_in_place = waiting;
             }
+        } else if (waiting) {
+            tally.left_in_place = waiting;
         }
     }
-    return { ok, moving, failed, errors };
+    return Object.assign({}, j, { tally, failed, errors, _panel: panel });
 }
 
 async function _changeCategorySelected(catName, move) {
@@ -4096,19 +4395,19 @@ async function _changeCategorySelected(catName, move) {
     // The daemon addresses each torrent on the engine that holds it and works
     // out the rest: relabel, hand over to the other engine, or move the payload.
     const params = { category: catName, move_files: !!move, allow_breaking_hardlinks: false };
-    const r = await _runMoveSelection("category", params, label);
-    if (!r) return;
-    const { ok, moving, failed, errors } = r;
-
-    if (failed > 0) {
-        hydraNotify(t("Category changed to \"{cat}\": {ok} OK, {failed} failure(s).", { cat: catName, ok: ok + moving, failed: failed }) + "\n\n" + errors.join("\n"));
-    } else if (moving > 0) {
+    const j = await _runMoveSelection("category", params, label);
+    if (!j) return;
+    const moving = (j.tally && j.tally.moving) || 0;
+    // Failures and their errors are on the progress panel already.
+    if (moving > 0) {
         // A move runs in the background and can take hours, so say so rather
         // than leaving the row looking like nothing happened.
-        hydraNotify(tp(moving,
+        _bulkNote(j, tp(moving,
             "Moving {n} torrent to \"{cat}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.",
             "Moving {n} torrents to \"{cat}\" in the background. They keep seeding while their data is copied; follow them in Jobs.",
             { n: moving, cat: catName }));
+    } else {
+        _bulkNote(j, "");
     }
     // A row whose payload is being moved keeps its category until the move
     // has finished, so the page is refetched rather than repainted.
@@ -4140,16 +4439,16 @@ async function _setLocationSelected() {
     if (location === null) return;
     const target = location.trim();
     if (!target || target === current.replace(/\/+$/, "")) return;
-    const r = await _runMoveSelection("location", { location: target, allow_breaking_hardlinks: false }, label);
-    if (!r) return;
-    const { ok, moving, failed, errors } = r;
-    if (failed > 0) {
-        hydraNotify(t("Location set to \"{path}\": {ok} OK, {failed} failure(s).", { path: target, ok: ok + moving, failed: failed }) + "\n\n" + errors.join("\n"));
-    } else if (moving > 0) {
-        hydraNotify(tp(moving,
+    const j = await _runMoveSelection("location", { location: target, allow_breaking_hardlinks: false }, label);
+    if (!j) return;
+    const moving = (j.tally && j.tally.moving) || 0;
+    if (moving > 0) {
+        _bulkNote(j, tp(moving,
             "Moving {n} torrent to \"{path}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.",
             "Moving {n} torrents to \"{path}\" in the background. They keep seeding while their data is copied; follow them in Jobs.",
             { n: moving, path: target }));
+    } else {
+        _bulkNote(j, "");
     }
     fetchHoardPage(true);
     updateRaceTorrents();
@@ -4175,7 +4474,8 @@ document.addEventListener("click", e => {
         e.target.closest("#hoard-detail-panel") ||
         e.target.closest("#ctx-menu") ||
         e.target.closest("#ctx-submenu") ||
-        e.target.closest(".modal-overlay")) return;
+        e.target.closest(".modal-overlay") ||
+        e.target.closest("#bulk-dock")) return;
     _hideCtxMenu();
     _clearSelection();
     _updateRowHighlights();
@@ -4194,44 +4494,10 @@ document.addEventListener("click", e => {
 async function _reannounceSelected() {
     _hideCtxMenu();
     if (!_selCount()) return;
-    const j = await _runSelection("reannounce", {}, t("Reannounce"));
-    if (!j) return;
-    const c = j.tally || {};
-    _flashStatus(_reannounceSummary({
-        ok: c.ok || 0, in_flight: c.in_flight || 0, cooldown: c.cooldown || 0,
-        queued: c.queued || 0, failed: j.failed || 0, sent: c.sent || 0,
-    }));
-}
-
-// One line the operator can act on. "412 reannounced, 127 refused (cooldown)"
-// is a different instruction from "539 reannounced": the second half has to be
-// pressed again in a minute, and silence would hide that entirely.
-function _reannounceSummary(c) {
-    const parts = [];
-    if (c.ok) parts.push(t("{n} reannounced", { n: c.ok }));
-    if (c.sent) parts.push(t("{n} sent to agents", { n: c.sent }));
-    if (c.in_flight) parts.push(t("{n} already announcing", { n: c.in_flight }));
-    if (c.queued) parts.push(t("{n} queued", { n: c.queued }));
-    if (c.cooldown) parts.push(t("{n} refused (cooldown)", { n: c.cooldown }));
-    if (c.failed) parts.push(t("{n} failed", { n: c.failed }));
-    return parts.join(" \u00b7 ") || t("nothing to reannounce");
-}
-
-// Say something in the list's status line for a moment. The selection count
-// already lives there; both are transient and neither deserves a modal.
-function _flashStatus(msg) {
-    const el = document.getElementById("hoard-filter-count");
-    if (!el) return;
-    if (_flashStatus._prev === undefined) _flashStatus._prev = el.textContent;
-    const prev = _flashStatus._prev;
-    el.textContent = msg;
-    el.style.fontWeight = "bold";
-    clearTimeout(_flashStatus._t);
-    _flashStatus._t = setTimeout(() => {
-        el.style.fontWeight = "";
-        if (el.textContent === msg) el.textContent = prev;
-        _flashStatus._prev = undefined;
-    }, 6000);
+    // The progress panel says what happened to each, and opens on its own
+    // for a refusal: "412 reannounced, 127 refused (cooldown)" is a different
+    // instruction from "539 reannounced".
+    await _runSelection("reannounce", {}, t("Reannounce"));
 }
 
 // Recheck = hash-check the torrent data on disk (engine verify), resuming
@@ -4322,7 +4588,6 @@ async function _pauseSelected(paused) {
     // in hand, anything else refetches rather than claim a state it may not have.
     if (explicit && !j.failed) _markLocallyStopped(hoard, paused);
     else fetchHoardPage(true);
-    _reportSelection(paused ? t("Stop") : t("Start"), j);
     updateHoardStats();
 }
 
@@ -4335,7 +4600,6 @@ async function _recheckSelected() {
     _hideCtxMenu();
     const j = await _runSelection("recheck", {}, t("Recheck"));
     if (!j) return;
-    _reportSelection(t("Recheck"), j);
     updateHoardStats();
 }
 
@@ -4403,13 +4667,13 @@ async function _removeSelected(deleteFiles) {
             : t("Remove {n} torrents?", { n: fmtInt(n) }), undefined, t("Remove"), true)) return;
     }
     const hashes = new Set([..._selected.values()].map(v => _selHash(v)));
-    const j = await _runSelection("remove", { delete_files: !!deleteFiles }, t("Remove torrent"));
+    const j = await _runSelection("remove", { delete_files: !!deleteFiles },
+        deleteFiles ? t("Remove + delete files") : t("Remove torrent"));
     _clearSelection();
     _updateRowHighlights();
     if (!j) return;
     if (hashes.has(selectedTorrent)) closeDetail();
     if (hashes.has(selectedHoardTorrent)) closeHoardDetail();
-    if (j.failed) _reportSelection(t("Remove torrent"), j);
     fetchHoardPage(true);
     updateRaceTorrents();
     updateHoardStats();
