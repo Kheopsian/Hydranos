@@ -19,6 +19,92 @@ use futures::StreamExt;
 use tokio::sync::Semaphore;
 use sha1::{Sha1, Digest};
 
+/// Where one `remove_torrent` spent its time.
+///
+/// Deleting 1,813 torrents on 01/10/2026 took ~10 min, ~330 ms each, one after
+/// the other. Every SQLite statement on the path measures under 1 ms and
+/// unlinking a 12 GB file on ZFS ~6 ms, so ~320 ms per torrent is spent
+/// WAITING somewhere in the process: the statedb connection, the map's shard
+/// locks while the 1 Hz walk holds them, the fd cache. Each lock is split into
+/// wait and hold, because "slow under the lock" and "slow to get the lock"
+/// point at different culprits.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RemoveTimings {
+    pub statedb_wait: std::time::Duration,
+    pub statedb_hold: std::time::Duration,
+    /// `last_saved` and the legacy resume JSON unlink.
+    pub resume_json: std::time::Duration,
+    /// Getting the map entry: a shard READ lock, contended by the writers.
+    pub map_wait: std::time::Duration,
+    /// Holding it: flag, DHT untrack, collecting the file paths.
+    pub map_hold: std::time::Duration,
+    /// skey/incomplete/map removal: shard WRITE locks, which wait for every
+    /// reader of the shard -- the 1 Hz `update_rates` walk among them.
+    pub map_remove: std::time::Duration,
+    pub publish: std::time::Duration,
+    pub unlink: std::time::Duration,
+    pub files: usize,
+    pub evict_wait: std::time::Duration,
+    pub evict_hold: std::time::Duration,
+    pub dirs: std::time::Duration,
+    pub total: std::time::Duration,
+}
+
+/// Over this, a removal says where its time went. The measured healthy cost is
+/// well under 10 ms; 50 is "something waited", not noise.
+pub const SLOW_REMOVE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Milliseconds with a fractional part, for structured log fields.
+pub fn ms(d: std::time::Duration) -> f64 {
+    (d.as_micros() as f64) / 1000.0
+}
+
+impl RemoveTimings {
+    /// Add another removal's stages to these: a delete of several copies is
+    /// reported as one line.
+    pub fn accumulate(&mut self, o: &RemoveTimings) {
+        self.statedb_wait += o.statedb_wait;
+        self.statedb_hold += o.statedb_hold;
+        self.resume_json += o.resume_json;
+        self.map_wait += o.map_wait;
+        self.map_hold += o.map_hold;
+        self.map_remove += o.map_remove;
+        self.publish += o.publish;
+        self.unlink += o.unlink;
+        self.files += o.files;
+        self.evict_wait += o.evict_wait;
+        self.evict_hold += o.evict_hold;
+        self.dirs += o.dirs;
+        self.total += o.total;
+    }
+
+    /// One warn when slow, a debug line otherwise. For callers that do not
+    /// fold these stages into a report of their own.
+    pub fn report(&self, hash: &str) {
+        if self.total >= SLOW_REMOVE {
+            warn!(
+                hash = %hash,
+                total_ms = ms(self.total),
+                statedb_wait_ms = ms(self.statedb_wait),
+                statedb_hold_ms = ms(self.statedb_hold),
+                resume_json_ms = ms(self.resume_json),
+                map_wait_ms = ms(self.map_wait),
+                map_hold_ms = ms(self.map_hold),
+                map_remove_ms = ms(self.map_remove),
+                publish_ms = ms(self.publish),
+                unlink_ms = ms(self.unlink),
+                files = self.files,
+                evict_wait_ms = ms(self.evict_wait),
+                evict_hold_ms = ms(self.evict_hold),
+                dirs_ms = ms(self.dirs),
+                "slow engine removal"
+            );
+        } else {
+            tracing::debug!(hash = %hash, total_ms = ms(self.total), "engine removal");
+        }
+    }
+}
+
 pub struct TorrentManager {
     torrents: DashMap<InfoHash, Arc<TorrentState>>,
     data_dir: String,
@@ -47,6 +133,21 @@ pub struct TorrentManager {
     cached_total_uploaded: std::sync::atomic::AtomicU64,
     cached_total_downloaded: std::sync::atomic::AtomicU64,
     totals_ready: std::sync::atomic::AtomicBool,
+    /// Bytes this engine has moved since this process started. Only ever
+    /// grows; fed by `update_rates` and settled by `remove_torrent`, each byte
+    /// exactly once (see `TorrentState::take_uncounted_with`).
+    ///
+    /// This is what "this session" and "today" are, and it is deliberately NOT
+    /// derived from the totals above. Those are a sum of LIFETIME counters
+    /// over the torrents currently loaded, so a delete takes the torrent's
+    /// whole history out of them, and the old odometer had to guess how much
+    /// of a fall was a delete. It compensated twice whenever a poll landed
+    /// between the removal and the next 1 Hz cache refresh: on 01/10/2026,
+    /// deleting 1,813 torrents through a selection job pushed the header's day
+    /// and session figures up by roughly the lifetime bytes of the deleted
+    /// torrents. A counter that only adds what moved has no fall to read.
+    moved_uploaded: std::sync::atomic::AtomicU64,
+    moved_downloaded: std::sync::atomic::AtomicU64,
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
@@ -319,6 +420,8 @@ impl TorrentManager {
             cached_total_uploaded: std::sync::atomic::AtomicU64::new(0),
             cached_total_downloaded: std::sync::atomic::AtomicU64::new(0),
             totals_ready: std::sync::atomic::AtomicBool::new(false),
+            moved_uploaded: std::sync::atomic::AtomicU64::new(0),
+            moved_downloaded: std::sync::atomic::AtomicU64::new(0),
             skey_index: DashMap::new(),
             incomplete: DashSet::new(),
             dht: std::sync::OnceLock::new(),
@@ -515,6 +618,25 @@ impl TorrentManager {
         (up, down)
     }
 
+    /// (uploaded, downloaded) bytes this engine has moved since this process
+    /// started, as of the last `update_rates` tick plus every removal since.
+    /// Download is verified piece bytes, like `total_downloaded`.
+    pub fn moved(&self) -> (u64, u64) {
+        (
+            self.moved_uploaded.load(Ordering::Relaxed),
+            self.moved_downloaded.load(Ordering::Relaxed),
+        )
+    }
+
+    fn credit_moved(&self, (up, down): (u64, u64)) {
+        if up > 0 {
+            self.moved_uploaded.fetch_add(up, Ordering::Relaxed);
+        }
+        if down > 0 {
+            self.moved_downloaded.fetch_add(down, Ordering::Relaxed);
+        }
+    }
+
     /// How many torrents in this catalogue name each tracker host.
     ///
     /// The Trackers tab used to learn its hosts only from announce results, so
@@ -647,7 +769,23 @@ impl TorrentManager {
     }
 
     pub fn remove_torrent(&self, info_hash: &InfoHash, keep_data: bool) -> Result<(), String> {
-        self.forget_state(info_hash);
+        let (result, timings) = self.remove_torrent_timed(info_hash, keep_data);
+        timings.report(&hex_encode(info_hash));
+        result
+    }
+
+    /// `remove_torrent`, handing back where the time went instead of logging
+    /// it, so a caller with stages of its own (the API's delete) can publish
+    /// ONE line per torrent covering both.
+    pub fn remove_torrent_timed(
+        &self,
+        info_hash: &InfoHash,
+        keep_data: bool,
+    ) -> (Result<(), String>, RemoveTimings) {
+        use std::time::Instant;
+        let started = Instant::now();
+        let mut tm = RemoveTimings::default();
+        (tm.statedb_wait, tm.statedb_hold, tm.resume_json) = self.forget_state(info_hash);
         // Flag the TorrentState as removed BEFORE dropping the DashMap entry
         // so in-flight peer tasks (which hold Arc<TorrentState>) can observe
         // the flag on their next loop iteration and exit cleanly. Otherwise
@@ -658,8 +796,12 @@ impl TorrentManager {
         // a recursive blast on the parent dir) so a torrent that happens to
         // share its parent directory with unrelated files cannot collateral-
         // damage them: only files this torrent owns are touched.
+        let asked = Instant::now();
+        let entry = self.torrents.get(info_hash);
+        let got = Instant::now();
+        tm.map_wait = got - asked;
         let to_delete: Option<(Vec<std::path::PathBuf>, Option<std::path::PathBuf>)> =
-            if let Some(t) = self.torrents.get(info_hash) {
+            if let Some(t) = entry {
                 t.is_removed.store(true, Ordering::Relaxed);
                 // is_removed is only observed when the get_peers stream next
                 // yields, which may be never — cancel the task outright.
@@ -680,16 +822,32 @@ impl TorrentManager {
                     Some((files, folder))
                 } else { None }
             } else { None };
+        tm.map_hold = got.elapsed();
+        let stage = Instant::now();
         self.skey_index.remove(&crate::crypto::mse::sha1_combine(b"req2", info_hash));
         self.incomplete.remove(info_hash);
-        let result = self.torrents.remove(info_hash)
-            .map(|_| ())
-            .ok_or_else(|| "torrent not found".into());
+        let removed = self.torrents.remove(info_hash);
+        tm.map_remove = stage.elapsed();
+        let result = match removed {
+            Some((_, t)) => {
+                // Whatever this torrent moved since the last tick is settled
+                // here, or it would leave the session with it. A tick walking
+                // the map right now may be holding this same state: the
+                // counted mark makes whichever of the two gets there second
+                // find nothing left to count.
+                self.credit_moved(t.take_uncounted());
+                Ok(())
+            }
+            None => Err("torrent not found".to_string()),
+        };
         if result.is_ok() {
+            let stage = Instant::now();
             self.bus.publish(crate::rpc::events::Event::TorrentRemoved {
                 info_hash: hex_encode(info_hash),
             });
+            tm.publish = stage.elapsed();
             if let Some((files, folder)) = to_delete {
+                let stage = Instant::now();
                 for f in &files {
                     if let Err(e) = std::fs::remove_file(f) {
                         if e.kind() != std::io::ErrorKind::NotFound {
@@ -697,19 +855,24 @@ impl TorrentManager {
                         }
                     }
                 }
+                tm.unlink = stage.elapsed();
+                tm.files = files.len();
                 // Drop cached fds for the just-unlinked files so the kernel
                 // frees their blocks now (else /race leaks: the fd cache pins
                 // deleted inodes until LRU eviction, which ~never happens).
-                crate::disk::evict_fds(&files);
+                (tm.evict_wait, tm.evict_hold) = crate::disk::evict_fds_timed(&files);
                 // Multi-file: walk the torrent folder and remove empty subdirs
                 // bottom-up. remove_dir() only succeeds when empty, so any
                 // foreign file in there keeps its containing dir alive.
                 if let Some(folder) = folder {
+                    let stage = Instant::now();
                     remove_empty_dirs_recursive(&folder);
+                    tm.dirs = stage.elapsed();
                 }
             }
         }
-        result
+        tm.total = started.elapsed();
+        (result, tm)
     }
 
     pub fn start_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
@@ -1056,8 +1219,8 @@ impl TorrentManager {
             // Restored BEFORE the status is derived below: the fold that the
             // first sweep performs must find the carried-over total, not zero.
             state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
-            state.total_uploaded.store(rd.total_uploaded, Ordering::Relaxed);
-            state.total_downloaded.store(rd.total_downloaded, Ordering::Relaxed);
+            // History, not this session's traffic: the counted mark moves too.
+            state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
             // The lifetime totals are ours; what a tracker is told starts
             // from zero with the session this boot opens.
             state.begin_announce_session();
@@ -1133,12 +1296,19 @@ impl TorrentManager {
         let mut active_peers = 0usize;
         let mut with_peers = 0usize;
         let mut uploading = 0usize;
+        let mut moved = (0u64, 0u64);
         for entry in self.torrents.iter() {
             let t = entry.value();
             let ul = t.total_uploaded.load(Ordering::Relaxed);
             let dl = t.total_downloaded.load(Ordering::Relaxed);
             total_ul += ul;
             total_dl += dl;
+            // Before the cold-skip: a torrent whose peers all left during the
+            // last second still moved bytes in it. Two loads and a compare when
+            // nothing moved, which is the case for nearly all of 1.1M torrents.
+            let (mu, md) = t.take_uncounted_with(ul, dl);
+            moved.0 += mu;
+            moved.1 += md;
             // Gauges are summed before the cold-skip below: a torrent with no
             // peers still has to be counted as zero, and one that is uploading
             // is never cold, so the skip cannot hide either figure.
@@ -1164,6 +1334,7 @@ impl TorrentManager {
         }
         self.upload_rate.update(total_ul);
         self.download_rate.update(total_dl);
+        self.credit_moved(moved);
         self.cached_total_uploaded.store(total_ul, Ordering::Relaxed);
         self.cached_total_downloaded.store(total_dl, Ordering::Relaxed);
         self.totals_ready.store(true, Ordering::Release);
@@ -1352,14 +1523,24 @@ impl TorrentManager {
     /// file even when the mirror is off: production accumulated thousands of
     /// orphaned resume files precisely because a removal path forgot one of
     /// the places state lived. Deleting from a place that has nothing is free.
-    fn forget_state(&self, info_hash: &InfoHash) {
+    ///
+    /// Returns (statedb wait, statedb hold, the rest) for `RemoveTimings`.
+    fn forget_state(
+        &self,
+        info_hash: &InfoHash,
+    ) -> (std::time::Duration, std::time::Duration, std::time::Duration) {
+        let (mut wait, mut hold) = Default::default();
         if let Some(db) = &self.state_db {
-            if let Err(e) = db.remove(&hex_encode(info_hash)) {
+            let (r, w, h) = db.remove_timed(&hex_encode(info_hash));
+            (wait, hold) = (w, h);
+            if let Err(e) = r {
                 warn!("[statedb] remove {} failed: {}", &hex_encode(info_hash)[..8], e);
             }
         }
+        let rest = std::time::Instant::now();
         self.last_saved.remove(info_hash);
         fastresume::remove(&self.resume_dir, info_hash);
+        (wait, hold, rest.elapsed())
     }
 
     /// Export one torrent's durable state, for handing it to another engine.
@@ -1409,8 +1590,9 @@ impl TorrentManager {
         // Carried across an engine move: this is what makes "48 hours of
         // seeding" mean the same thing on both sides of a graduation.
         state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
-        state.total_uploaded.store(rd.total_uploaded, Ordering::Relaxed);
-        state.total_downloaded.store(rd.total_downloaded, Ordering::Relaxed);
+        // The source engine counted these bytes when it moved them, and
+        // settles the rest when it lets go: this side counts from here on.
+        state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
         // Bitfield before status, for the same reason the startup path does it
         // in that order: the status is derived from completeness.
         if !resume_bits.is_empty() {
@@ -2734,6 +2916,8 @@ mod manager_tests {
 
         let t = again.get(&ih).unwrap();
         assert_eq!(t.total_uploaded.load(Ordering::Relaxed), 500_000_000_000, "the lifetime total is kept");
+        again.update_rates();
+        assert_eq!(again.moved(), (0, 0), "a reloaded lifetime is not this process's traffic");
         assert_eq!(t.session_uploaded(), 0, "a new session reports from zero");
         assert_eq!(t.session_downloaded(), 0);
         t.total_uploaded.fetch_add(4096, Ordering::Relaxed);
@@ -2775,5 +2959,116 @@ mod manager_tests {
         let (mgr, root) = manager("refused");
         assert!(mgr.refused_records().is_empty());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ The moved counter counts traffic, not history: lifetime bytes a
+    /// torrent was loaded with are not this session's, what it moves after is.
+    #[test]
+    fn moved_counts_traffic_not_the_lifetime_a_torrent_arrives_with() {
+        let (mgr, root) = manager("moved-basic");
+        let a = add(&mgr, "alpha");
+        mgr.get(&a).unwrap().restore_lifetime(9_000_000, 1_000);
+        mgr.update_rates();
+        assert_eq!(mgr.moved(), (0, 0), "history is not traffic");
+        mgr.get(&a).unwrap().total_uploaded.fetch_add(500, Ordering::Relaxed);
+        mgr.get(&a).unwrap().total_downloaded.fetch_add(16_384, Ordering::Relaxed);
+        mgr.update_rates();
+        assert_eq!(mgr.moved(), (500, 16_384));
+        mgr.update_rates();
+        assert_eq!(mgr.moved(), (500, 16_384), "a quiet tick adds nothing");
+        // Removal settles what moved since the last tick, and nothing more.
+        mgr.get(&a).unwrap().total_uploaded.fetch_add(7, Ordering::Relaxed);
+        mgr.remove_torrent(&a, true).expect("removed");
+        assert_eq!(mgr.moved(), (507, 16_384), "the last 7 bytes are not lost with the torrent");
+        mgr.update_rates();
+        assert_eq!(mgr.moved(), (507, 16_384), "and the delete itself is not traffic");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ A tick racing a removal counts the bytes once.
+    ///
+    /// The tick walks the map holding the same `Arc<TorrentState>` the removal
+    /// settles. Whichever reaches the counted mark second must find nothing:
+    /// counted twice is the session jumping, counted never is it losing bytes.
+    #[test]
+    fn a_tick_racing_a_removal_counts_the_bytes_once() {
+        // Deterministic first: the tick read the totals, the removal settled,
+        // then the tick credits what it read.
+        let (mgr, root) = manager("moved-race");
+        let a = add(&mgr, "alpha");
+        let t = mgr.get(&a).unwrap();
+        t.total_uploaded.fetch_add(1_000, Ordering::Relaxed);
+        let (ul, dl) = (t.total_uploaded.load(Ordering::Relaxed), t.total_downloaded.load(Ordering::Relaxed));
+        mgr.remove_torrent(&a, true).expect("removed");
+        assert_eq!(mgr.moved(), (1_000, 0));
+        assert_eq!(t.take_uncounted_with(ul, dl), (0, 0), "the late tick finds it settled");
+        // A tick holding an OLDER read than the mark must not drag it back:
+        // the next reader would count the gap again.
+        t.total_uploaded.fetch_add(50, Ordering::Relaxed);
+        assert_eq!(t.take_uncounted_with(900, 0), (0, 0));
+        assert_eq!(t.take_uncounted(), (50, 0), "only the 50 new bytes, once");
+        let _ = std::fs::remove_dir_all(root);
+
+        // Then for real: a ticker thread walking while every torrent gets
+        // traffic and is removed under it.
+        let (mgr, root) = manager("moved-race-threads");
+        let hashes: Vec<InfoHash> = (0..200).map(|i| add(&mgr, &format!("t{i:03}"))).collect();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ticker = {
+            let (mgr, stop) = (mgr.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    mgr.update_rates();
+                }
+            })
+        };
+        let mut expected = 0u64;
+        for (i, ih) in hashes.iter().enumerate() {
+            let t = mgr.get(ih).unwrap();
+            for _ in 0..5 {
+                t.total_uploaded.fetch_add(i as u64 + 1, Ordering::Relaxed);
+                expected += i as u64 + 1;
+                std::thread::yield_now();
+            }
+            mgr.remove_torrent(ih, true).expect("removed");
+            // Traffic a peer task delivers after the entry is gone is not
+            // counted -- nor is it by the lifetime path, which read the total
+            // as it let go. Kept out of `expected` on purpose.
+        }
+        stop.store(true, Ordering::Relaxed);
+        ticker.join().unwrap();
+        mgr.update_rates();
+        assert_eq!(mgr.moved(), (expected, 0), "every byte exactly once");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ An engine move hands the lifetime over; the receiving engine counts
+    /// from there and the source settles what it moved until it let go.
+    #[test]
+    fn an_engine_move_adds_nothing_to_either_session() {
+        let (src, root) = manager("moved-src");
+        let (dst, root2) = manager("moved-dst");
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        dst.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+        let ih = add(&src, "alpha");
+        src.get(&ih).unwrap().restore_lifetime(4_000_000_000, 16_384);
+        src.get(&ih).unwrap().total_uploaded.fetch_add(100, Ordering::Relaxed);
+        src.update_rates();
+        assert_eq!(src.moved(), (100, 0));
+
+        let rd = src.export_state(&ih).expect("exported");
+        dst.import_state(&rd).expect("imported");
+        src.remove_torrent(&ih, true).expect("source lets go");
+        src.update_rates();
+        dst.update_rates();
+        assert_eq!(src.moved(), (100, 0), "the source keeps what it moved, no more");
+        assert_eq!(dst.moved(), (0, 0), "the destination did not move 4 GB by adopting it");
+        assert_eq!(dst.get(&ih).unwrap().total_uploaded.load(Ordering::Relaxed), 4_000_000_100);
+
+        dst.get(&ih).unwrap().total_uploaded.fetch_add(25, Ordering::Relaxed);
+        dst.update_rates();
+        assert_eq!(dst.moved(), (25, 0), "and counts what it moves from there");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root2);
     }
 }

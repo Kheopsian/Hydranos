@@ -101,10 +101,21 @@ struct CacheEntry {
 /// inode (and its disk blocks) alive until LRU eviction — a space leak that
 /// fills /race under drain churn (nofile is huge, so the LRU never evicts).
 pub fn evict_fds(paths: &[PathBuf]) {
+    let _ = evict_fds_timed(paths);
+}
+
+/// `evict_fds`, returning (time waiting for the fd cache lock, time holding
+/// it). The cache is process-wide and every piece read goes through it, so a
+/// slow removal can be queued here behind the serve path.
+pub fn evict_fds_timed(paths: &[PathBuf]) -> (std::time::Duration, std::time::Duration) {
+    let asked = std::time::Instant::now();
     let mut cache = fd_cache().lock();
+    let got = std::time::Instant::now();
     for p in paths {
         cache.pop(p);
     }
+    drop(cache);
+    (got - asked, got.elapsed())
 }
 
 pub struct DiskManager {

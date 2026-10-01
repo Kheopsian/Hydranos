@@ -466,6 +466,15 @@ pub struct TorrentState {
     /// of a new peer would have counted it all again.
     pub session_base_up: AtomicU64,
     pub session_base_down: AtomicU64,
+    /// `total_uploaded` / `total_downloaded` as last credited to the engine's
+    /// "moved since this process started" counter. See `take_uncounted`.
+    ///
+    /// Starts at the LIFETIME value the torrent was loaded with (resume
+    /// record, engine move), never at zero: history that predates this
+    /// process is not this process's traffic. Only `restore_lifetime` may
+    /// write the totals wholesale, because it moves this mark with them.
+    pub last_counted_up: AtomicU64,
+    pub last_counted_down: AtomicU64,
     /// Seconds spent seeding, folded in at every state change and at the
     /// periodic sweep. See `fold_seed_time`.
     pub seed_secs: AtomicI64,
@@ -624,6 +633,46 @@ impl TorrentState {
                 slot.tracker_id = None;
             }
         }
+    }
+
+    /// Set the lifetime totals a torrent arrives with -- from its resume
+    /// record at boot, or from the record another engine handed over.
+    ///
+    /// Moves the counted mark with them, so those bytes are never credited to
+    /// this process's session: they were moved before it, or by another
+    /// engine that already counted them.
+    pub fn restore_lifetime(&self, up: u64, down: u64) {
+        self.total_uploaded.store(up, Ordering::Relaxed);
+        self.total_downloaded.store(down, Ordering::Relaxed);
+        self.last_counted_up.store(up, Ordering::Relaxed);
+        self.last_counted_down.store(down, Ordering::Relaxed);
+    }
+
+    /// Bytes moved since the last call, given the current totals. Each byte is
+    /// handed out exactly once, whoever asks: the 1 Hz walk and the removal
+    /// race each other on purpose, and both must be able to settle.
+    ///
+    /// `fetch_max`, not `swap`: a caller holding an older read of the total
+    /// would `swap` the mark BACKWARDS, and the next caller would count the
+    /// gap a second time. The mark only ever moves forward. And it is touched
+    /// only when the total moved, so the walk over a million idle torrents
+    /// stays a pair of loads each.
+    pub fn take_uncounted_with(&self, up: u64, down: u64) -> (u64, u64) {
+        fn take(total: u64, mark: &AtomicU64) -> u64 {
+            if mark.load(Ordering::Relaxed) >= total {
+                return 0;
+            }
+            total.saturating_sub(mark.fetch_max(total, Ordering::Relaxed))
+        }
+        (take(up, &self.last_counted_up), take(down, &self.last_counted_down))
+    }
+
+    /// `take_uncounted_with` on the totals as they are now.
+    pub fn take_uncounted(&self) -> (u64, u64) {
+        self.take_uncounted_with(
+            self.total_uploaded.load(Ordering::Relaxed),
+            self.total_downloaded.load(Ordering::Relaxed),
+        )
     }
 
     /// BEP 3 `uploaded`: bytes sent to peers since the session began.
@@ -924,6 +973,8 @@ impl TorrentState {
             announce_book: Mutex::new(Vec::new()),
             session_base_up: AtomicU64::new(0),
             session_base_down: AtomicU64::new(0),
+            last_counted_up: AtomicU64::new(0),
+            last_counted_down: AtomicU64::new(0),
             seed_secs: AtomicI64::new(0),
             seed_since: AtomicI64::new(0),
             serving_suspended: AtomicBool::new(false),

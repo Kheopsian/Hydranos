@@ -228,6 +228,21 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   900,000-torrent library was affected by the change.
 
 ### Fixed
+- **Deleting torrents no longer adds their whole history to today's figures.**
+  Removing a torrent took its lifetime bytes out of the engines' sum, and two
+  separate mechanisms compensated for it; a poll landing between the removal
+  and the next once-a-second refresh made both fire, so "today" and "this
+  session" gained every deleted torrent's lifetime upload and download (seen
+  on a 1,813-torrent delete). Session and day are now counted from the bytes
+  each engine actually moves, so a delete, a re-add or a move between engines
+  changes neither. Lifetime totals are unchanged.
+- **A delete slower than 50 ms logs where the time went**: lock waits and
+  holds, state database, unlinks, folder cleanup, store writes.
+- **Bulk actions show their progress in a panel**, not in the search bar's
+  counter. It opens after 400 ms if the job is still running, counts each
+  outcome (done, failed, cooldown...) and lists the errors, can be docked to
+  the bottom-right corner while the page stays usable, cancels the job, and
+  stays with its summary until closed. A reload brings it back.
 - **A workflow tagging torrents no longer holds the store for minutes.** Each
   tag or untag read the tags of the whole engine -- a million rows, ~3 s
   under the store's writer -- to change one torrent's, so a 500-torrent pass

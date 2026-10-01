@@ -411,37 +411,29 @@ impl EngineHost {
         (up, down)
     }
 
-    /// The same figure for ONE engine.
-    ///
-    /// The headline used to publish the all-engines sum inside the per-engine
-    /// blocks, which made race and hoard report identical totals and hoard
-    /// report a hardcoded zero. A per-engine block has to be countable on its
-    /// own or it is decoration.
-    pub fn session_totals_of(&self, engine_id: &str) -> (i64, i64) {
+    /// Bytes moved by every engine since this process started: "this
+    /// session". Not `session_totals`, which despite its name is a sum of
+    /// LIFETIME counters over the torrents loaded right now, and falls by a
+    /// torrent's whole history when it is deleted. See
+    /// `TorrentManager::moved`.
+    pub fn moved_totals(&self) -> (i64, i64) {
         let (mut up, mut down) = (0i64, 0i64);
-        if let Some(engine) = self.get(engine_id) {
-            let (u, d) = engine.manager.totals();
+        for engine in &self.engines {
+            let (u, d) = engine.manager.moved();
             up += u as i64;
             down += d as i64;
         }
         (up, down)
     }
 
-    /// Every engine's id with its session totals, for marking the odometer at
-    /// boot in one walk instead of one walk per engine.
-    pub fn session_totals_by_engine(&self) -> Vec<(String, (i64, i64))> {
-        use std::sync::atomic::Ordering;
-        self.engines
-            .iter()
-            .map(|engine| {
-                let (mut up, mut down) = (0i64, 0i64);
-                for t in engine.manager.all().iter() {
-                    up += t.total_uploaded.load(Ordering::Relaxed) as i64;
-                    down += t.total_downloaded.load(Ordering::Relaxed) as i64;
-                }
-                (engine.id.clone(), (up, down))
+    /// The same for ONE engine; (0, 0) for an engine this node does not host.
+    pub fn moved_of(&self, engine_id: &str) -> (i64, i64) {
+        self.get(engine_id)
+            .map(|e| {
+                let (u, d) = e.manager.moved();
+                (u as i64, d as i64)
             })
-            .collect()
+            .unwrap_or((0, 0))
     }
 
     /// Total torrents across every engine, read from the engines themselves.

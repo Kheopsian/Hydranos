@@ -584,23 +584,12 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         api::refresh_records(bench_path.clone(), records.clone());
     }
 
-    // The mark that separates "this session" and "today" from "ever". Taken
-    // here, once the engines have loaded their resume data: their per-torrent
-    // counters are lifetime totals, so without this mark `day_uploaded`
-    // publishes the entire history of the library as one day's work.
-    let odometer: api::Odo = {
-        let (up, down) = engine_host.session_totals();
-        Arc::new(std::sync::Mutex::new(api::Odometer {
-            session_offset: (up, down),
-            prev_totals: (up, down),
-            day_baseline: (0, 0),
-            day_date: String::new(),
-            // The same mark per engine, taken in the same breath: marking them
-            // lazily on first read would count everything an engine did before
-            // anyone happened to open the page as this session's work.
-            per_engine: engine_host.session_totals_by_engine().into_iter().collect(),
-        }))
-    };
+    // "Today" is the session minus what it was at the last local midnight;
+    // the day this process starts on begins at zero. The session itself needs
+    // no mark: the engines count what they move from zero (see
+    // `TorrentManager::moved`), so the lifetime history their torrents load
+    // with is never mistaken for this boot's traffic.
+    let odometer: api::Odo = Arc::new(std::sync::Mutex::new(api::Odometer::at_boot()));
 
     let state = api::AppState {
         imports: Default::default(),
