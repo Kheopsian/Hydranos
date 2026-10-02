@@ -798,7 +798,6 @@
   "{n}th": "{n}e",
   "{ok} OK, {failed} failed:": "{ok} OK, {failed} en échec :",
   "{ord} pebibyte": "{ord} pébioctet",
-  "{shown} / {matched} ({total} total)": "{shown} / {matched} ({total} au total)",
   "{shown} of {all} trackers shown.": "{shown} trackers affiches sur {all}.",
   "{size} pieces ({n})": "pièces de {size} ({n})",
   "{total} torrents: {up} uploading, {withPeers} with peers, {peers}. {announced}": "{total} torrents : {up} en envoi, {withPeers} avec des pairs, {peers}. {announced}",
