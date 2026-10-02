@@ -4897,6 +4897,15 @@ fn status_payload(state: &AppState) -> serde_json::Value {
     let hoard_session = engine_session(state, "hoard");
     let race_session = engine_session(state, "race");
 
+    // Seed size from the last tracker pass (30 s old at most), space on disk
+    // from the link scanner (up to a day old). `null` until each has run once:
+    // a zero would read as "nothing seeded".
+    let seeded = crate::benchsampler::latest_trackers().map(|rows| {
+        let of = |e: &str| -> i64 { rows.iter().filter(|r| r.engine == e).map(|r| r.seed_size).sum() };
+        (of("hoard"), of("race"), rows.iter().map(|r| r.seed_size).sum::<i64>())
+    });
+    let disk = state.engines.catalogue_usage();
+
     serde_json::json!({
         "baseline": {
             "global_downloaded": base_down + total_down,
@@ -4914,6 +4923,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "active_upload_rate": hoard_live.upload_rate,
             "engine": "hoard", "listen_port": cfg.hoard.listen_port,
             "running": true,
+            "seed_size": seeded.map(|s| s.0),
             "session_downloaded": hoard_session.1, "session_uploaded": hoard_session.0,
             "stagger_complete": true,
             "swarm_leechers": swarm_leechers_total(state),
@@ -4926,6 +4936,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "race": {
             "active_downloads": downloading,
             "active_seeds": seeds,
+            "seed_size": seeded.map(|s| s.1),
             "session_downloaded": race_session.1,
             "session_grabbed": 0,
             "session_ratio": crate::row::num_json(ratio),
@@ -4935,6 +4946,14 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "total_download_rate": race_live.download_rate,
             "total_peers": race_live.active_peers,
             "total_upload_rate": race_live.upload_rate,
+        },
+        "storage": {
+            "seeded_bytes": seeded.map(|s| s.2),
+            "data_bytes": disk.map(|d| d.0.data_bytes),
+            "shared_bytes": disk.map(|d| d.0.shared_bytes),
+            "missing_files": disk.map(|d| d.0.missing_files),
+            "measured_torrents": disk.map(|d| d.0.torrents),
+            "measured_at": disk.map(|d| d.1),
         },
         // Process-wide peer counters. These live in atomics that only
         // `rpc::dispatch::get_diagnostics` used to read, and that function is
@@ -16154,6 +16173,48 @@ mod populated_tests {
         assert_eq!(of("race").torrents, 2, "got {rows:?}");
         assert_eq!(of("hoard").torrents, 2, "got {rows:?}");
         assert!(rows.iter().all(|r| r.ts == 42));
+    }
+
+    /// Seed size is what a tracker credits: the whole size of a torrent that
+    /// seeds, nothing for one that is not complete or is paused.
+    #[tokio::test]
+    async fn the_tracker_pass_counts_only_seeding_torrents_in_seed_size() {
+        use std::sync::atomic::Ordering;
+        use typhon_engine::torrent::meta::TorrentStatus;
+        let (s, _h) = populated("pop-seedsize");
+        let set = |t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>, st: TorrentStatus, paused: bool| {
+            t.status.store(st as u8, Ordering::Relaxed);
+            t.is_paused.store(paused, Ordering::Relaxed);
+        };
+        let hoard = s.state.engines.get("hoard").expect("hoard").manager.all();
+        let race = s.state.engines.get("race").expect("race").manager.all();
+        set(&hoard[0], TorrentStatus::Seeding, false);
+        set(&hoard[1], TorrentStatus::Downloading, false);
+        set(&race[0], TorrentStatus::Seeding, false);
+        set(&race[1], TorrentStatus::Seeding, true);
+
+        let rows = crate::benchsampler::tracker_totals(&s.state.engines, &s.state.store, 42);
+        let of = |engine: &str| {
+            rows.iter().find(|r| r.engine == engine && r.tracker == "tracker.example").expect("row").seed_size
+        };
+        assert_eq!(of("hoard"), hoard[0].meta.total_size as i64, "a downloading torrent is not seeded");
+        assert_eq!(of("race"), race[0].meta.total_size as i64, "a paused one announces nothing");
+        assert!(of("hoard") > 0);
+    }
+
+    /// The overview's space on disk is `null` until the link scanner has
+    /// counted, never a zero, then the count with its time.
+    #[tokio::test]
+    async fn status_reports_disk_usage_only_once_counted() {
+        let (s, _h) = populated("pop-diskusage");
+        let before = status_payload(&s.state);
+        assert!(before["storage"]["data_bytes"].is_null(), "got {before}");
+        let usage = crate::linkindex::DiskUsage { data_bytes: 5000, shared_bytes: 3000, missing_files: 1, torrents: 9 };
+        s.state.engines.publish_catalogue_usage(usage, 1234);
+        let after = status_payload(&s.state);
+        assert_eq!(after["storage"]["data_bytes"], 5000, "got {after}");
+        assert_eq!(after["storage"]["shared_bytes"], 3000);
+        assert_eq!(after["storage"]["measured_at"], 1234);
     }
 
     /// A click on a tracker's errors gets the tracker's own words, the torrent

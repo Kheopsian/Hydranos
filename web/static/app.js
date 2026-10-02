@@ -1283,6 +1283,23 @@ function _renderStatus(data) {
             if (ovt) ovt.textContent = fmtInt((data.hoard.total_torrents || 0) + (data.race?.torrents || 0));
         }
 
+        // Seed size (tracker pass, 30 s) against the space it takes (link
+        // scanner, up to a day old). Null until each has run once: "-", not 0.
+        const _bytesOrDash = v => (v == null ? "-" : formatBytes(v));
+        const _setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+        _setText("race-seed-size", _bytesOrDash(data.race?.seed_size));
+        _setText("hoard-seed-size", _bytesOrDash(data.hoard?.seed_size));
+        if (data.storage) {
+            const st = data.storage;
+            _setText("ov-seed-size", _bytesOrDash(st.seeded_bytes));
+            _setText("ov-data-bytes", _bytesOrDash(st.data_bytes));
+            _setText("ov-shared-bytes", _bytesOrDash(st.shared_bytes));
+            _setText("ov-own-bytes", st.data_bytes == null ? "-" : formatBytes(st.data_bytes - st.shared_bytes));
+            _setText("ov-missing-files", st.missing_files == null ? "-" : fmtInt(st.missing_files));
+            _setText("ov-usage-at", st.measured_at == null ? t("not yet")
+                : t("{when} · {n} torrents", { when: relTime(st.measured_at), n: fmtInt(st.measured_torrents) }));
+        }
+
         // Day totals, UL/DL accumulated since midnight Europe/Paris (auto reset)
         const dayUl = data.day_uploaded || 0;
         const dayDl = data.day_downloaded || 0;
@@ -8277,7 +8294,7 @@ function _renderTrackerStatsTable(rows) {
     const tbody = document.getElementById("trkstats-tbody");
     if (!tbody) return;
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="empty">No tracker stats yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="empty">No tracker stats yet</td></tr>';
         return;
     }
     const byTracker = {};
@@ -8298,6 +8315,7 @@ function _renderTrackerStatsTable(rows) {
                 `<td>${formatSpeed(r.download_rate)}</td>` +
                 `<td>${Math.round(r.peers)}</td>` +
                 `<td>${Math.round(r.active)}/${Math.round(r.torrents)}</td>` +
+                `<td>${formatBytes(r.seed_size || 0)}</td>` +
                 `<td>${formatBytes(r.cum_uploaded)}</td>` +
                 `<td>${formatBytes(r.cum_downloaded)}</td>` +
                 `<td>${ratio}</td>` +

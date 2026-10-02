@@ -80,6 +80,11 @@ pub struct TrackerRow {
     pub download_rate: i64,
     pub engine: String,
     pub peers: i64,
+    /// Bytes of the torrents seeding to this tracker: what the tracker credits
+    /// as seed size. A cross-seed counts under each of its trackers, as each
+    /// one counts it, so the sum across rows is not the space on disk -- the
+    /// link scanner answers that one (`linkindex::usage`).
+    pub seed_size: i64,
     pub torrents: i64,
     pub tracker: String,
     pub ts: i64,
@@ -141,6 +146,7 @@ pub fn tracker_totals(engines: &EngineHost, store: &crate::store::StoreLock, ts:
             row.download_rate += torrent.download_rate.get() as i64;
             row.peers += peers;
             row.active += (peers > 0) as i64;
+            row.seed_size += seeding_size(torrent);
             row.torrents += 1;
         }
         for (host, part) in live {
@@ -155,11 +161,28 @@ pub fn tracker_totals(engines: &EngineHost, store: &crate::store::StoreLock, ts:
             row.download_rate += part.download_rate;
             row.peers += part.peers;
             row.active += part.active;
+            row.seed_size += part.seed_size;
             row.torrents += part.torrents;
         }
     }
 
     rows.into_values().map(|r| TrackerRow { ts, ..r }).collect()
+}
+
+/// What one torrent adds to its tracker's seed size: all of it while it
+/// seeds, nothing otherwise.
+///
+/// Two atomics, never the picker: a tracker only credits what is announced as
+/// complete, and the engine's `Seeding` state is that claim. A paused torrent
+/// keeps the state word but announces nothing, so it counts for nothing.
+fn seeding_size(t: &typhon_engine::torrent::meta::TorrentState) -> i64 {
+    let seeding = t.status.load(Ordering::Relaxed)
+        == typhon_engine::torrent::meta::TorrentStatus::Seeding as u8;
+    if seeding && !t.is_paused.load(Ordering::Relaxed) {
+        t.meta.total_size as i64
+    } else {
+        0
+    }
 }
 
 /// Share of all CPU time spent waiting on I/O since the previous call, from

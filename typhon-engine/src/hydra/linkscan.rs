@@ -138,6 +138,9 @@ pub fn refresh_summary(engines: &EngineHost, store: &StoreLock) -> Option<usize>
     let summary = rulesrun::link_summary(&cat, &got.origin, &got.measured_at, &got.links);
     let n = summary.len();
     engines.publish_link_summary(summary);
+    // Here and not in `links_from_store`: a workflow pass reads that one too,
+    // and has no use for a second walk over every file.
+    engines.publish_catalogue_usage(crate::linkindex::usage(&got.entries), crate::store::now_secs());
     Some(n)
 }
 

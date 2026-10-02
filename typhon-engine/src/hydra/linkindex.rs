@@ -60,19 +60,7 @@ pub type Entry = (String, Vec<(PathBuf, Option<FileId>)>);
 /// answer depends on names held by OTHER torrents, so nothing can be decided
 /// until every file in the catalogue has been seen.
 pub fn compute(entries: &[Entry]) -> HashMap<String, LinkFacts> {
-    let mut owned: HashMap<(u64, u64), u64> = HashMap::new();
-    let mut seen: HashSet<&Path> = HashSet::new();
-
-    for (_, files) in entries {
-        for (path, st) in files {
-            let Some(st) = st else { continue };
-            // The dedup that keeps two cross-seeds of one path from counting
-            // as two names. See the module note.
-            if seen.insert(path.as_path()) {
-                *owned.entry((st.volume, st.index)).or_insert(0) += 1;
-            }
-        }
-    }
+    let owned = names_held(entries);
 
     let mut out = HashMap::with_capacity(entries.len());
     for (hash, files) in entries {
@@ -100,6 +88,69 @@ pub fn compute(entries: &[Entry]) -> HashMap<String, LinkFacts> {
             f.external_links = f.external_links.max(ext);
         }
         out.insert(hash.clone(), f);
+    }
+    out
+}
+
+/// How many of each inode's names the catalogue holds, keyed by
+/// (volume, inode). The one count both `compute` and `usage` stand on.
+fn names_held(entries: &[Entry]) -> HashMap<(u64, u64), u64> {
+    let mut owned: HashMap<(u64, u64), u64> = HashMap::new();
+    let mut seen: HashSet<&Path> = HashSet::new();
+    for (_, files) in entries {
+        for (path, st) in files {
+            let Some(st) = st else { continue };
+            // The dedup that keeps two cross-seeds of one path from counting
+            // as two names. See the module note.
+            if seen.insert(path.as_path()) {
+                *owned.entry((st.volume, st.index)).or_insert(0) += 1;
+            }
+        }
+    }
+    owned
+}
+
+/// What the catalogue's files take on disk, each inode counted once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct DiskUsage {
+    /// Bytes of every distinct inode the catalogue names. Two cross-seeds
+    /// hardlinked to one file are one file here; two copies of the same bytes
+    /// that are NOT linked are two, because they take the space twice.
+    pub data_bytes: u64,
+    /// Of `data_bytes`, the inodes some name outside the catalogue also holds
+    /// (the media library, a backup): bytes that would stay on disk if every
+    /// torrent went. The rule is `external_links`', so this figure and the
+    /// Hardlinks column cannot disagree on what "shared" means.
+    pub shared_bytes: u64,
+    /// Files the scan could not stat. Their size is unknown, so they are in
+    /// neither figure above.
+    pub missing_files: u64,
+    /// Torrents measured: the figures cover these and no others.
+    pub torrents: u64,
+}
+
+/// Count the catalogue's space on disk from the same measurements `compute`
+/// reads. Logical sizes: compression, sparse files and block cloning are below
+/// what `stat` reports.
+pub fn usage(entries: &[Entry]) -> DiskUsage {
+    let mut held = names_held(entries);
+    let mut out = DiskUsage { torrents: entries.len() as u64, ..Default::default() };
+    for (_, files) in entries {
+        for (_, st) in files {
+            let Some(st) = st else {
+                out.missing_files += 1;
+                continue;
+            };
+            // Taken out of the map on first sight: that is what counts an
+            // inode once however many torrents name it, with no second set.
+            let Some(names) = held.remove(&(st.volume, st.index)) else { continue };
+            out.data_bytes += st.size;
+            // `names > links` is incoherent (see `compute`); like there, it
+            // reads as "someone else may hold this".
+            if st.links != names {
+                out.shared_bytes += st.size;
+            }
+        }
     }
     out
 }
@@ -276,6 +327,36 @@ mod tests {
             "two torrents sharing ONE path is one owned name, not two"
         );
         assert_eq!(got["E2"].external_links, 1);
+    }
+
+    /// The fixture again, as space: eight torrents seed 8000 bytes, the disk
+    /// holds five inodes of them, and three are also named outside.
+    #[test]
+    fn usage_counts_each_inode_once_and_shares_by_the_columns_rule() {
+        let got = usage(&[
+            e("A", &[("/t/A.bin", st(1, 2, 1000))]),
+            e("B", &[("/t/B.bin", st(2, 3, 1000))]),
+            e("Bx", &[("/x/B.bin", st(2, 3, 1000))]),
+            e("C", &[("/t/C.bin", st(3, 2, 1000))]),
+            e("Cx", &[("/x/C.bin", st(3, 2, 1000))]),
+            e("D", &[("/t/D.bin", st(4, 1, 1000))]),
+            e("E1", &[("/t/E.bin", st(5, 2, 1000))]),
+            e("E2", &[("/t/E.bin", st(5, 2, 1000))]),
+            e("M", &[("/t/M.bin", None)]),
+        ]);
+        assert_eq!(got.data_bytes, 5000, "a hardlinked cross-seed is one file on disk");
+        assert_eq!(got.shared_bytes, 3000, "A, B and E have a name outside; C and D do not");
+        assert_eq!(got.missing_files, 1);
+        assert_eq!(got.torrents, 9);
+    }
+
+    /// An inode number is only unique within its volume.
+    #[test]
+    fn usage_keeps_one_inode_number_on_two_volumes_apart() {
+        let on = |volume| Some(FileId { volume, index: 7, links: 1, size: 100 });
+        let got = usage(&[e("a", &[("/a/f", on(1))]), e("b", &[("/b/f", on(2))])]);
+        assert_eq!(got.data_bytes, 200);
+        assert_eq!(got.shared_bytes, 0);
     }
 
     /// A and C both report `nlink = 2` and mean opposite things. This is the

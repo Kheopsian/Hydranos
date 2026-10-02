@@ -166,6 +166,7 @@
                         <div class="metric"><span>Upload</span><span class="hi" id="race-upload">0</span></div>
                         <div class="metric"><span>Download</span><span id="race-download">0</span></div>
                         <div class="metric"><span>Peers</span><span id="race-peers">0</span></div>
+                        <div class="metric"><span>Seeding</span><span id="race-seed-size">-</span></div>
                         <div class="metric"><span>Session ratio</span><span id="race-ov-ratio">0.00</span></div>
                     </div>
                 </div>
@@ -179,7 +180,21 @@
                         <div class="metric"><span>Upload</span><span class="hi" id="hoard-upload">0</span></div>
                         <div class="metric"><span>Download</span><span id="hoard-download">0</span></div>
                         <div class="metric"><span>Peers</span><span id="hoard-connections">0</span></div>
+                        <div class="metric"><span>Seeding</span><span id="hoard-seed-size">-</span></div>
                         <div class="metric"><span>Session ratio</span><span id="hoard-ov-ratio">0.00</span></div>
+                    </div>
+                </div>
+
+                <!-- Storage: seed size (tracker pass) against the space it takes (link scanner) -->
+                <div class="card">
+                    <h3>Storage <span class="tag" style="color:var(--accent-blue)">hardlinks</span></h3>
+                    <div class="card-body">
+                        <div class="metric" title="What the trackers credit: the size of every seeding torrent. A cross-seed counts once per tracker."><span>Seed size</span><span class="hi" id="ov-seed-size">-</span></div>
+                        <div class="metric" title="The files of every torrent, each hardlinked file counted once. Logical sizes, before compression."><span>Data on disk</span><span id="ov-data-bytes">-</span></div>
+                        <div class="metric" title="Data also named outside Hydranos (media library, backup): it stays on disk without the torrents."><span>Shared with other folders</span><span id="ov-shared-bytes">-</span></div>
+                        <div class="metric" title="Data only the torrents hold: what seeding actually costs in space."><span>Held only by torrents</span><span id="ov-own-bytes">-</span></div>
+                        <div class="metric"><span>Files not found</span><span id="ov-missing-files">-</span></div>
+                        <div class="metric"><span>Counted</span><span id="ov-usage-at">-</span></div>
                     </div>
                 </div>
 
@@ -926,7 +941,7 @@
                 <p class="sr-desc" style="margin:0 0 12px">Upload/download split by tracker across all engines. Sampled every few seconds; cumulative totals are lifetime.</p>
                 <table id="trkstats-table">
                     <thead>
-                        <tr><th>Tracker</th><th>Engine</th><th>&#8593; rate</th><th>&#8595; rate</th><th>Peers</th><th>Active/Total</th><th>&#8593; total</th><th>&#8595; total</th><th>Ratio</th></tr>
+                        <tr><th>Tracker</th><th>Engine</th><th>&#8593; rate</th><th>&#8595; rate</th><th>Peers</th><th>Active/Total</th><th>Seed size</th><th>&#8593; total</th><th>&#8595; total</th><th>Ratio</th></tr>
                     </thead>
                     <tbody id="trkstats-tbody">
                         <tr><td colspan="9" class="empty">No tracker stats yet</td></tr>

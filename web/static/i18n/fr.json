@@ -891,5 +891,15 @@
   "just now": "à l'instant",
   "{n} min ago": "il y a {n} min",
   "{n} h ago": "il y a {n} h",
-  "{n} d ago": "il y a {n} j"
+  "{n} d ago": "il y a {n} j",
+  "Storage": "Stockage",
+  "hardlinks": "hardlinks",
+  "Seed size": "Seedsize",
+  "Data on disk": "Données sur disque",
+  "Shared with other folders": "Partagé avec d'autres dossiers",
+  "Held only by torrents": "Tenu seulement par les torrents",
+  "Files not found": "Fichiers introuvables",
+  "Counted": "Compté",
+  "not yet": "pas encore",
+  "{when} · {n} torrents": "{when} · {n} torrents"
 }
