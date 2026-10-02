@@ -1995,6 +1995,26 @@ pub(crate) fn add_torrent_bytes(
     seed_mode: bool,
     engine_override: &str,
 ) -> Result<(String, String), String> {
+    let added = add_torrent_bytes_as(state, bytes, category, save_path_override, tags, paused, seed_mode, engine_override)?;
+    // The "on add" workflows: after the engine holds it, so the facts they
+    // read are the torrent's, not a placeholder's.
+    let (engine_id, _) = placement(state, category, engine_override);
+    crate::rulesapi::record_added(state, &engine_id, &added.0);
+    Ok(added)
+}
+
+/// `add_torrent_bytes` without the "on add" event: for a torrent that is not
+/// new, only changing client (the import wizard).
+pub(crate) fn add_torrent_bytes_as(
+    state: &AppState,
+    bytes: &[u8],
+    category: &str,
+    save_path_override: &str,
+    tags: &str,
+    paused: bool,
+    seed_mode: bool,
+    engine_override: &str,
+) -> Result<(String, String), String> {
     let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
         .map_err(|e| format!("torrent file did not parse: {e}"))?;
     let hash = typhon_engine::torrent::hex_encode(&meta.info_hash);
@@ -11044,7 +11064,9 @@ fn import_add(state: &AppState) -> crate::importer::AddFn {
         if state.engines.engines().iter().any(|e| e.manager.get(&meta.info_hash).is_some()) {
             return Ok(Added::AlreadyThere);
         }
-        add_torrent_bytes(
+        // Quiet: an imported library is not a stream of new arrivals, and an
+        // "on add" webhook firing once per torrent of it would be a flood.
+        add_torrent_bytes_as(
             &state, &r.bytes, &r.category, &r.plan.save_path, &r.tags,
             r.plan.paused, r.plan.seed_mode, &engine_id,
         )?;

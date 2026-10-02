@@ -150,6 +150,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   `TYPHON_ANNOUNCE_PROXY` is set: the proxy carries TCP, and a UDP announce
   beside it would show the tracker the address it hides. The tracker editor
   accepts `udp://host:port/...` and refuses one without a port.
+- **Workflows can run when a torrent is added.** A third trigger, *when a
+  torrent is added*: once per torrent, right after it lands -- added by hand,
+  by autobrr or the *arrs through the qBittorrent API, from a magnet once
+  resolved, or from a watched folder. Moving a torrent and importing a
+  library from another client are not adds and do not fire it. Same
+  machinery as *when a download completes*: queued in `workflow_events`
+  before anything acts, no *Run now*, no hardlink conditions; Preview judges
+  the torrents added in the last day. Nothing is queued while no enabled
+  workflow listens. API: `"trigger": "added"`; a webhook reports `"event":
+  "added"`.
 - **Workflows can run when a download completes.** A workflow now has a
   trigger: *on a timer* (every workflow so far, unchanged) or *when a download
   completes* -- once per torrent, at the moment its last piece verifies and

@@ -184,6 +184,28 @@ pub enum Trigger {
     /// told `completed`. A torrent added with its data already there, or
     /// rechecked whole, never finished downloading and never fires this.
     Completed,
+    /// Once, when a torrent is added to Hydranos: by the API, the qBittorrent
+    /// shim (autobrr, the *arrs), a resolved magnet or a watched folder.
+    /// Moving a torrent between engines or folders is not an add, and neither
+    /// is taking a library over with the import wizard: those torrents were
+    /// not new, they changed client.
+    Added,
+}
+
+impl Trigger {
+    /// Fires on something that happens to one torrent, not on the clock.
+    pub fn is_event(self) -> bool {
+        self != Trigger::Schedule
+    }
+
+    /// The name the event is queued under, and the one a webhook reports.
+    pub fn event_name(self) -> &'static str {
+        match self {
+            Trigger::Schedule => "matched",
+            Trigger::Completed => "completed",
+            Trigger::Added => "added",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -613,13 +635,13 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
     {
         return Err(CompileError::WebhookAlone);
     }
-    if w.trigger == Trigger::Completed {
+    if w.trigger.is_event() {
         if let Some(f) = LINK_FIELDS.iter().find(|f| uses_field(&w.when, f)) {
             return Err(CompileError::LinkFieldOnEvent(f.to_string()));
         }
-        // No condition is a real rule here: "every download that finishes".
-        // On a schedule the same empty tree is the whole catalogue, which is
-        // why it stays refused there.
+        // No condition is a real rule here: "every download that finishes",
+        // "every torrent that arrives". On a schedule the same empty tree is
+        // the whole catalogue, which is why it stays refused there.
         if matches!(&w.when, Node::All { of } | Node::Any { of } if of.is_empty()) {
             return Ok(Box::new(|_: &Facts| true));
         }
@@ -920,6 +942,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(w.trigger, Trigger::Completed);
+        let added: Workflow = serde_json::from_str(
+            r#"{"name":"new","trigger":"added","when":{"kind":"all","of":[]},"then":[{"type":"pause"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(added.trigger, Trigger::Added);
+        assert!(added.trigger.is_event() && !Trigger::Schedule.is_event());
+        assert!(compile_workflow(&added).is_ok(), "no condition: every torrent added");
     }
 
     /// Without this a workflow rewrites the same tag every fifteen minutes and

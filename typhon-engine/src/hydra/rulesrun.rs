@@ -558,7 +558,7 @@ pub fn evaluate(w: &Workflow, facts: &[Facts]) -> Result<(Vec<Match>, PassReport
         // pass where something else changes the torrent -- after which that
         // something converges and the webhook stops. On an event it goes out
         // every time: the event itself happens once.
-        if !todo.is_empty() || w.trigger == rules::Trigger::Completed {
+        if !todo.is_empty() || w.trigger.is_event() {
             todo.extend(w.then.iter().filter(|a| a.is_webhook()).cloned());
         }
         if todo.is_empty() {
@@ -593,13 +593,11 @@ pub fn evaluate(w: &Workflow, facts: &[Facts]) -> Result<(Vec<Match>, PassReport
 /// Mattermost), `message` (Gotify) -- so pointing a workflow at one of them
 /// works with nothing in between.
 pub fn webhook_payload(w: &Workflow, f: &Facts) -> serde_json::Value {
-    let event = match w.trigger {
-        rules::Trigger::Completed => "completed",
-        rules::Trigger::Schedule => "matched",
-    };
+    let event = w.trigger.event_name();
     let gib = f.total_size / (1024.0 * 1024.0 * 1024.0);
     let line = match w.trigger {
         rules::Trigger::Completed => format!("{} finished downloading ({gib:.2} GiB)", f.name),
+        rules::Trigger::Added => format!("{} added ({gib:.2} GiB)", f.name),
         rules::Trigger::Schedule => format!("{}: {} ({gib:.2} GiB)", w.name, f.name),
     };
     let num = |x: f64| if x.is_finite() { serde_json::json!(x) } else { serde_json::Value::Null };

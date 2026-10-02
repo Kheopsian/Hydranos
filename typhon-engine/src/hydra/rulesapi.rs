@@ -344,8 +344,12 @@ pub async fn preview(
         Err(e) => return bad(e),
     };
 
-    if w.trigger == rules::Trigger::Completed {
-        return match tokio::task::spawn_blocking(move || preview_completion(&state, &w)).await {
+    if w.trigger.is_event() {
+        let run = move || match w.trigger {
+            rules::Trigger::Added => preview_added(&state, &w),
+            _ => preview_completion(&state, &w),
+        };
+        return match tokio::task::spawn_blocking(run).await {
             Ok(Ok(v)) => Json(v).into_response(),
             Ok(Err(e)) => bad(e),
             Err(e) => bad(e),
@@ -413,6 +417,38 @@ fn preview_completion(state: &AppState, w: &Workflow) -> Result<serde_json::Valu
         "sample": sample,
     }))
 }
+
+/// Preview an "on add" workflow on the torrents added in the last day.
+///
+/// The torrents that will fire it do not exist yet; the latest arrivals are
+/// the closest stand-in for what keeps arriving, judged by the filter and the
+/// convergence check exactly as the event will judge each new one.
+fn preview_added(state: &AppState, w: &Workflow) -> Result<serde_json::Value, String> {
+    let mut facts = gather_all(state, rules::uses_field(&w.when, "free_space"));
+    facts.retain(|f| f.added_age < RECENT_ADD_SECS);
+    let unbounded = Workflow { cap: usize::MAX, ..w.clone() };
+    let (matches, report) = rulesrun::evaluate(&unbounded, &facts)?;
+    let sample: Vec<serde_json::Value> = matches
+        .iter()
+        .take(200)
+        .map(|m| serde_json::json!({"info_hash": m.info_hash, "name": m.name, "engine": m.engine, "total_size": m.total_size}))
+        .collect();
+    Ok(serde_json::json!({
+        "trigger": "added",
+        "recent": facts.len(),
+        "matched": report.matched,
+        "would_apply": matches.len(),
+        "skipped": report.skipped,
+        "capped": false,
+        "freed_bytes": report.freed_bytes,
+        "rechecked": 0,
+        "no_longer_true": 0,
+        "sample": sample,
+    }))
+}
+
+/// The window `preview_added` samples: a day of arrivals.
+const RECENT_ADD_SECS: f64 = 86400.0;
 
 /// Facts for every engine this node runs.
 fn gather_all(state: &AppState, want_free_space: bool) -> Vec<rules::Facts> {
@@ -569,7 +605,10 @@ pub async fn run_now(
         // Running it "now" would mean inventing the event, and the only
         // honest candidates -- torrents that finished at some point -- are
         // exactly what an event workflow exists NOT to act on.
-        return bad("this workflow runs when a download completes; use Preview to see which downloads it would act on");
+        return bad(match w.trigger {
+            rules::Trigger::Added => "this workflow runs when a torrent is added; use Preview to see what it would do to the last day's arrivals",
+            _ => "this workflow runs when a download completes; use Preview to see which downloads it would act on",
+        });
     }
     // Off the async runtime: a pass reads the link index and stats its
     // candidates, which is disk wait a request thread must not sit in.
@@ -848,6 +887,18 @@ pub fn spawn_events(
     state: AppState,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<(String, [u8; 20])>,
 ) {
+    // Adds are written to the store by the add itself (`record_added`); this
+    // only has to be told there is something to drain. A `Notify` keeps one
+    // permit, so a thousand adds in a burst wake it once or twice, not a
+    // thousand times.
+    let woken = state.clone();
+    tokio::spawn(async move {
+        loop {
+            EVENT_WAKE.notified().await;
+            let st = woken.clone();
+            let _ = tokio::task::spawn_blocking(move || run_events(&st)).await;
+        }
+    });
     tokio::spawn(async move {
         while let Some(first) = rx.recv().await {
             // A race finishing a burst of torrents is one store write, not
@@ -860,6 +911,31 @@ pub fn spawn_events(
             let _ = tokio::task::spawn_blocking(move || record_completions(&st, &batch)).await;
         }
     });
+}
+
+static EVENT_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Note a torrent just added, for the "on add" workflows. Returns whether
+/// there is anything to run; nothing is written when no enabled workflow
+/// listens, so a node without one pays a single small query per add.
+///
+/// Written to the store first, like a completion, and for the same reason: a
+/// restart between the add and the run loses nothing.
+pub fn record_added(state: &AppState, session: &str, info_hash: &str) {
+    let Ok(store) = state.store.lock() else { return };
+    let listening = store.workflows().unwrap_or_default().iter().any(|s| {
+        s.enabled
+            && serde_json::from_str::<Workflow>(&s.body).is_ok_and(|w| w.trigger == rules::Trigger::Added)
+    });
+    if !listening {
+        return;
+    }
+    if let Err(e) = store.push_workflow_event("added", session, info_hash) {
+        tracing::warn!(error = %e, info_hash = %info_hash, "add could not be recorded for workflows");
+        return;
+    }
+    drop(store);
+    EVENT_WAKE.notify_one();
 }
 
 /// Write finished downloads down, then run the event workflows on them.
@@ -897,7 +973,7 @@ fn run_events_at(state: &AppState, now: i64) -> usize {
             .into_iter()
             .filter(|s| s.enabled)
             .filter_map(|s| serde_json::from_str::<Workflow>(&s.body).ok())
-            .filter(|w| w.trigger == rules::Trigger::Completed)
+            .filter(|w| w.trigger.is_event())
             .collect();
         (events, workflows)
     };
@@ -905,7 +981,9 @@ fn run_events_at(state: &AppState, now: i64) -> usize {
     for ev in events {
         // No workflow to hand it to, or an event nothing here handles: the
         // row is cleared all the same, or it would wait forever.
-        let facts =if ev.event == "completed" && !workflows.is_empty() {
+        let listening: Vec<&Workflow> =
+            workflows.iter().filter(|w| w.trigger.event_name() == ev.event).collect();
+        let facts = if !listening.is_empty() {
             let Ok(store) = state.store.read() else { break };
             let f = rulesrun::gather_one(&state.engines, &store, &ev.session, &ev.info_hash);
             if f.is_none() && now - ev.at < EVENT_PATIENCE_SECS {
@@ -916,7 +994,7 @@ fn run_events_at(state: &AppState, now: i64) -> usize {
             None
         };
         if let Some(f) = facts {
-            for w in &workflows {
+            for w in listening {
                 match rulesrun::evaluate(w, std::slice::from_ref(&f)) {
                     Ok((matches, mut report)) => {
                         apply_matches(state, w, &matches, &Default::default(), &mut report)
@@ -1393,7 +1471,7 @@ mod event_tests {
     async fn save_wf(s: &TestState, trigger: &str, tag: &str) -> String {
         // A timer with no condition is refused (the whole catalogue); one that
         // would match anything still has to say so.
-        let when = if trigger == "completed" {
+        let when = if trigger != "schedule" {
             serde_json::json!({"kind": "all", "of": []})
         } else {
             serde_json::json!({"kind": "all", "of": [{"kind": "cond", "field": "ratio", "op": "ge", "value": "0"}]})
@@ -1416,6 +1494,58 @@ mod event_tests {
 
     fn waiting(s: &TestState) -> usize {
         s.state.store.lock().unwrap().workflow_events(100).unwrap().len()
+    }
+
+    /// ⭐ "On add": the add itself queues the event, the drain runs the add
+    /// workflows on that torrent alone, and neither the completion workflow
+    /// nor a torrent added before the workflow existed is touched.
+    #[tokio::test]
+    async fn an_added_torrent_runs_the_add_workflows_once() {
+        let s = st("wf-ev-added");
+        let before = add(&s, "before");
+        assert_eq!(waiting(&s), 0, "no add workflow yet: nothing is written");
+        save_wf(&s, "added", "new").await;
+        save_wf(&s, "completed", "done").await;
+
+        let hash = add(&s, "arrival");
+        assert_eq!(waiting(&s), 1, "the add is queued before anything runs");
+        assert_eq!(run_events(&s.state), 1);
+        assert_eq!(tags(&s, &hash), vec!["new".to_string()], "only the add workflow ran");
+        assert!(tags(&s, &before).is_empty(), "added before: not an event, untouched");
+        assert_eq!(waiting(&s), 0);
+        assert_eq!(run_events(&s.state), 0, "nothing to replay");
+    }
+
+    /// Taking a library over is not a stream of arrivals: the import wizard's
+    /// adds fire no "on add" workflow.
+    #[tokio::test]
+    async fn an_imported_torrent_fires_no_add_workflow() {
+        let s = st("wf-ev-import");
+        save_wf(&s, "added", "new").await;
+        crate::api::add_torrent_bytes_as(&s.state, &torrent_bytes("imported"), "", "/tmp", "", true, false, "hoard")
+            .expect("added");
+        assert_eq!(waiting(&s), 0);
+    }
+
+    /// The preview of an add workflow judges the last day's arrivals, and
+    /// running one "now" is refused like any event workflow.
+    #[tokio::test]
+    async fn an_add_workflow_previews_recent_arrivals_and_cannot_be_run_now() {
+        let s = st("wf-ev-added-preview");
+        add(&s, "recent");
+        let body = serde_json::json!({
+            "id": "", "name": "p", "trigger": "added",
+            "when": {"kind": "all", "of": []},
+            "then": [{"type": "add_tags", "tags": ["x"]}],
+        });
+        let v = body_json(preview(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await).await;
+        assert_eq!(v["trigger"], "added", "got {v}");
+        assert_eq!((v["recent"].as_u64(), v["would_apply"].as_u64()), (Some(1), Some(1)), "got {v}");
+
+        let id = save_wf(&s, "added", "x").await;
+        let r = run_now(State(s.state.clone()), Path(id), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(r).await["error"].as_str().unwrap().contains("torrent is added"));
     }
 
     /// ⭐ The whole road: the engine says a download finished, through the

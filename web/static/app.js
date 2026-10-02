@@ -10128,7 +10128,7 @@ async function updateWorkflows() {
         } else {
             body.innerHTML = rows.map(w => {
                 const acts = (w.then || []).map(a => a.type).join(", ");
-                const onEvent = w.trigger === "completed";
+                const onEvent = w.trigger === "completed" || w.trigger === "added";
                 // An event workflow has no last pass: what it did is in the
                 // activity below, one line per download.
                 const last = onEvent ? "" : (w.last_run ? new Date(w.last_run * 1000).toLocaleString() : "never");
@@ -10224,9 +10224,11 @@ function newWorkflow() {
 // The timer's settings mean nothing to an event workflow, and showing them
 // invites the question of which one wins.
 function _wfSyncTrigger() {
-    const onEvent = document.getElementById("wf-trigger").value === "completed";
+    const trig = document.getElementById("wf-trigger").value;
+    const onEvent = trig !== "schedule";
     document.querySelectorAll("#wf-form .wf-schedule-only").forEach(el => { el.style.display = onEvent ? "none" : ""; });
-    document.querySelectorAll("#wf-form .wf-completed-only").forEach(el => { el.style.display = onEvent ? "" : "none"; });
+    document.querySelectorAll("#wf-form .wf-completed-only").forEach(el => { el.style.display = trig === "completed" ? "" : "none"; });
+    document.querySelectorAll("#wf-form .wf-added-only").forEach(el => { el.style.display = trig === "added" ? "" : "none"; });
 }
 
 function hideWorkflowForm() {
@@ -10588,6 +10590,9 @@ async function previewWorkflow() {
         let msg = d.trigger === "completed"
             ? t("{n} downloads under way: {m} would be acted on when they complete, {s} already as asked")
                 .replace("{n}", d.downloading).replace("{m}", d.would_apply).replace("{s}", d.skipped)
+            : d.trigger === "added"
+            ? t("{n} torrents added in the last day: {m} would have been acted on, {s} already as asked")
+                .replace("{n}", d.recent).replace("{m}", d.would_apply).replace("{s}", d.skipped)
             : `${d.matched} matched, ${d.would_apply} would change, ${d.skipped} already as asked`;
         if (d.capped) msg += " (capped)";
         if (d.freed_bytes > 0) msg += ` -- would free ${(d.freed_bytes / 1e9).toFixed(1)} GB`;
@@ -10596,7 +10601,8 @@ async function previewWorkflow() {
         // the same green as a rule that found work to do.
         // No download under way is not a mistake in the rule, so it is not
         // painted as one; nothing matching among several downloads may be.
-        const fine = d.matched > 0 || (d.trigger === "completed" && !d.downloading);
+        const fine = d.matched > 0 || (d.trigger === "completed" && !d.downloading)
+            || (d.trigger === "added" && !d.recent);
         _wfSay(out, msg + (names ? ` :: ${names}` : ""), fine ? "success" : "error");
     } catch (e) {
         _wfSay(out, e.message, "error");
@@ -10634,7 +10640,7 @@ async function editWorkflow(id) {
     newWorkflow();
     _wfEditing = id;
     document.getElementById("wf-name").value = w.name;
-    document.getElementById("wf-trigger").value = w.trigger === "completed" ? "completed" : "schedule";
+    document.getElementById("wf-trigger").value = ["completed", "added"].includes(w.trigger) ? w.trigger : "schedule";
     _wfSyncTrigger();
     document.getElementById("wf-interval").value = w.interval_secs;
     document.getElementById("wf-cap").value = w.cap || 500;

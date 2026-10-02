@@ -901,5 +901,7 @@
   "Files not found": "Fichiers introuvables",
   "Counted": "Compté",
   "not yet": "pas encore",
-  "{when} · {n} torrents": "{when} · {n} torrents"
+  "{when} · {n} torrents": "{when} · {n} torrents",
+  "when a torrent is added": "quand un torrent est ajouté",
+  "{n} torrents added in the last day: {m} would have been acted on, {s} already as asked": "{n} torrents ajoutés ces dernières 24 h : {m} auraient été traités, {s} déjà conformes"
 }
