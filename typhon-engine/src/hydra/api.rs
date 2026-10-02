@@ -2636,7 +2636,7 @@ fn tracker_host_in(url: &str) -> &str {
     &rest[..end]
 }
 
-async fn engine_page_value(
+pub(crate) async fn engine_page_value(
     state: &AppState,
     engine_id: &str,
     query: &str,
@@ -2747,6 +2747,11 @@ async fn engine_page_value(
 
     let torrents = engine.manager.all();
     let total = torrents.len();
+    // The hardlink columns read a summary the link scanner (or a workflow
+    // pass) already computed, cf `linkindex::Summary`: one `Arc` clone here,
+    // one hash lookup per row below, and only when the sort asks for it or the
+    // row is on the page. Never `linkindex::compute` on this route.
+    let link_summary = state.engines.link_summary();
     // The class of a tracker error is read by its facet and its filter only;
     // otherwise classifying every failing torrent's message is wasted work.
     let need_err_class = want_facets || !err_inc.is_empty() || !err_exc.is_empty();
@@ -2937,7 +2942,14 @@ async fn engine_page_value(
                 let n = match sort.as_str() {
                     "total_size" => t.meta.total_size as f64,
                     "progress" => if core.state == "seeding" { 1.0 } else { core.progress },
-                    "ratio" => if total_download > 0 { total_upload as f64 / total_download as f64 } else { 0.0 },
+                    // The row's own definition, or a cross-seed sorts as 0
+                    // under a cell that reads 3.2 (02/10/2026). `core` is
+                    // already in hand, so `total_done` costs nothing here.
+                    "ratio" => crate::row::share_ratio(
+                        total_upload.max(0) as u64,
+                        total_download.max(0) as u64,
+                        core.total_done,
+                    ),
                     "upload_rate" => t.upload_rate.get() as f64,
                     "download_rate" => t.download_rate.get() as f64,
                     "num_peers" => t.peers_connected.load(std::sync::atomic::Ordering::Relaxed) as f64,
@@ -2945,6 +2957,11 @@ async fn engine_page_value(
                     "total_download" => total_download as f64,
                     "completed_time" => completed as f64,
                     "seeding_time" => if completed > 0 { (now_secs() - completed).max(0) as f64 } else { 0.0 },
+                    "external_links" | "links_checked_at" => match link_summary.get(&t.info_hash) {
+                        Some(c) if sort == "external_links" => c.external_links as f64,
+                        Some(c) => c.measured_at as f64,
+                        None => unmeasured_key(asc),
+                    },
                     _ => t.added_time as f64,
                 };
                 keyed.push((key, n, t.info_hash, idx as u32));
@@ -3076,7 +3093,9 @@ async fn engine_page_value(
         .map(|t| {
             let raw = typhon_engine::rpc::dispatch::torrent_to_json(t);
             let hash = raw.get("info_hash").and_then(|v| v.as_str()).unwrap_or("");
-            crate::row::build(&raw, rich.get(hash).unwrap_or(&empty_facts), &agent)
+            let mut row = crate::row::build(&raw, rich.get(hash).unwrap_or(&empty_facts), &agent);
+            with_link_columns(&mut row, link_summary.get(&t.info_hash));
+            row
         })
         .collect();
 
@@ -3130,6 +3149,32 @@ async fn engine_page_value(
     })
 }
 
+/// The hoard list's two hardlink columns, on a page row.
+///
+/// Added here and not in `row::build`: that row is the 3.x key set, which the
+/// qBittorrent shim, the stream and every other reader share, and a list
+/// column has no business there. JSON null when never measured -- "0" would
+/// claim that only the client holds the files.
+fn with_link_columns(row: &mut serde_json::Value, cached: Option<crate::linkindex::Cached>) {
+    let Some(obj) = row.as_object_mut() else { return };
+    obj.insert(
+        "external_links".into(),
+        cached.map_or(serde_json::Value::Null, |c| c.external_links.into()),
+    );
+    obj.insert(
+        "links_checked_at".into(),
+        cached.map_or(serde_json::Value::Null, |c| c.measured_at.into()),
+    );
+}
+
+/// Where a torrent with no hardlink measurement sorts: last, whichever the
+/// direction. A sort by "Hardlinks" ascending is the search for torrents at 0,
+/// and it must not open on a page of torrents nobody has looked at yet.
+/// (Descending reverses the comparison, hence the sign.)
+fn unmeasured_key(asc: bool) -> f64 {
+    if asc { f64::INFINITY } else { f64::NEG_INFINITY }
+}
+
 /// The sort key of an emitted row, mirroring the one `engine_page_value` builds
 /// over its own structs.
 ///
@@ -3138,6 +3183,12 @@ async fn engine_page_value(
 /// two nodes' rows differently from the way each ordered its own, and rows
 /// would appear to jump between pages.
 fn row_sort_key(row: &serde_json::Value, sort: &str) -> (String, f64) {
+    row_sort_key_dir(row, sort, true)
+}
+
+/// `row_sort_key`, knowing the direction: an unmeasured hardlink count sorts
+/// last both ways, as it does on the local path.
+fn row_sort_key_dir(row: &serde_json::Value, sort: &str, asc: bool) -> (String, f64) {
     let s = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or_default();
     let n = |k: &str| row.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
     match sort {
@@ -3155,6 +3206,10 @@ fn row_sort_key(row: &serde_json::Value, sort: &str) -> (String, f64) {
         | "total_upload" | "total_download" | "completed_time" | "seeding_time" => {
             (String::new(), n(sort))
         }
+        "external_links" | "links_checked_at" => (
+            String::new(),
+            row.get(sort).and_then(|v| v.as_f64()).unwrap_or_else(|| unmeasured_key(asc)),
+        ),
         _ => (String::new(), n("added_time")),
     }
 }
@@ -3228,8 +3283,8 @@ fn merge_pages(
 
     let textual = matches!(sort, "name" | "state" | "tracker_host" | "category");
     all.sort_by(|a, b| {
-        let (ka, na) = row_sort_key(a, sort);
-        let (kb, nb) = row_sort_key(b, sort);
+        let (ka, na) = row_sort_key_dir(a, sort, asc);
+        let (kb, nb) = row_sort_key_dir(b, sort, asc);
         let ord = if textual {
             ka.cmp(&kb)
         } else {
@@ -7332,7 +7387,7 @@ fn qbit_value_cmp(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ord
 /// poll this endpoint several times a minute. The category a row is filtered on
 /// is the one it will be reported under, engine-name fallback included, so a
 /// client that asks for what it sees gets it back.
-fn engine_qbit_rows(
+pub(crate) fn engine_qbit_rows(
     state: &AppState,
     engine_id: &str,
     now: i64,
@@ -9491,11 +9546,9 @@ fn detail_payload(
     let i = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
     let total_download = i(&row, "total_download");
     let total_upload = i(&row, "total_upload");
-    let ratio = if total_download > 0 {
-        total_upload as f64 / total_download as f64
-    } else {
-        0.0
-    };
+    // The row's ratio, not a second computation of it: this panel used to
+    // divide by the download on its own, and the UI papered over it.
+    let ratio = row.get("ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     serde_json::json!({
         // 0, not the engine's real figure: 3.x fills this from its IPC status,

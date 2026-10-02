@@ -133,7 +133,7 @@ pub async fn fields(
                     "freeable_bytes" => "only files nothing else points at; deleting a shared one frees nothing",
                     "data_missing" => "the torrent is seeding data it cannot read",
                     "seeding_time" => "counted since the torrent completed, pauses included",
-                    "ratio" => "uploaded divided by downloaded; 0 when nothing was downloaded",
+                    "ratio" => "uploaded divided by downloaded, or by the data held when under 1% of it was downloaded (a cross-seed); 0 when nothing is held or downloaded",
                     _ => match kind {
                         rules::Kind::Duration => "2d, 36h, 90m, or seconds",
                         rules::Kind::Size => "500GB or 500GiB (they differ)",
@@ -466,9 +466,11 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
     };
     let cat = rulesrun::catalogue_from(&state.engines, &stored);
     drop(stored);
-    let (mut entries, origin) = rulesrun::entries_from_store(&cat, &rows);
+    // The same computation the list's "Hardlinks" column is built from, cf
+    // `rulesrun::links_from_store`.
+    let rulesrun::StoredLinks { mut entries, origin, mut measured_at, links } =
+        rulesrun::links_from_store(&cat, &rows);
     drop(rows);
-    let links = crate::linkindex::compute(&entries);
     let mut facts = gather_all_with(state, &links, rules::uses_field(&w.when, "free_space"));
     let (first, _) = rulesrun::evaluate(w, &facts)?;
 
@@ -486,6 +488,7 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
         let stats: Vec<_> = e.1.iter().map(|(_, st)| *st).collect();
         rows.push(rulesrun::link_row(&cat[origin[i]], &stats, now));
         entries[i] = e;
+        measured_at[i] = now;
     }
     if !rows.is_empty() {
         let store = state.store.lock().map_err(|_| "store lock")?;
@@ -495,6 +498,12 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
     // Only the candidates' facts change: the others were not re-measured, and
     // letting them in now would act on what nobody just looked at.
     let links = crate::linkindex::compute(&entries);
+    // What this pass decided on is the freshest whole-catalogue answer there
+    // is: the list shows it from now on, so a torrent the pass just tagged
+    // "noHL" does not sit beside a column still reading the old count.
+    state
+        .engines
+        .publish_link_summary(rulesrun::link_summary(&cat, &origin, &measured_at, &links));
     rulesrun::patch_link_facts(&mut facts, &links, &want);
     let (second, report) = rulesrun::evaluate(w, &facts)?;
     let matches: Vec<_> = second.into_iter().filter(|m| want.contains(&m.info_hash)).collect();
@@ -1637,5 +1646,204 @@ mod event_tests {
         let rows = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
         let old = rows.as_array().unwrap().iter().find(|r| r["id"] == "old").unwrap();
         assert_eq!(old["trigger"], "schedule");
+    }
+}
+
+/// One ratio and one hardlink count, whoever asks.
+#[cfg(test)]
+mod one_number_tests {
+    use super::*;
+    use crate::api::testing::{state_from, TestState};
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn st(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
+    }
+
+    /// A single-file torrent named `name`. The info hash varies with the
+    /// name's first byte and length, so the names below are chosen distinct.
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xEFu8; 20];
+        piece[0] = name.as_bytes()[0];
+        piece[1] = name.len() as u8;
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let mut out = Vec::new();
+        out.extend_from_slice(b"d4:info");
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// Seeded (the data is trusted whole, as for a cross-seed) and stopped:
+    /// no network, and `total_done` is the full size.
+    fn add(s: &TestState, name: &str, save_path: &str) -> String {
+        crate::api::add_torrent_bytes(&s.state, &torrent_bytes(name), "", save_path, "", true, true, "hoard")
+            .unwrap_or_else(|e| panic!("add {name}: {e}"))
+            .0
+    }
+
+    fn set_transfer(s: &TestState, hash: &str, up: u64, down: u64) {
+        let t = s.state.engines.get("hoard").unwrap().manager
+            .get(&crate::store::hex20(hash).unwrap())
+            .expect("the engine holds it");
+        t.total_uploaded.store(up, std::sync::atomic::Ordering::Relaxed);
+        t.total_downloaded.store(down, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn by_hash(rows: &serde_json::Value, key: &str) -> std::collections::HashMap<String, serde_json::Value> {
+        rows.as_array()
+            .expect("rows")
+            .iter()
+            .map(|r| (r[key].as_str().unwrap().to_string(), r.clone()))
+            .collect()
+    }
+
+    /// ⭐ 02/10/2026: a cross-seed (downloaded 0, holds N, uploaded 3N) read
+    /// 3.2 in the table while the sort, the filters and the workflows saw 0.
+    /// Every reader now gets 3 from the same function.
+    #[tokio::test]
+    async fn a_cross_seed_has_one_ratio_in_the_row_the_sort_and_the_workflows() {
+        let s = st("one-ratio");
+        let n: u64 = 16384; // the torrents' size, so what each one holds
+        let xseed = add(&s, "xseed", "/tmp");
+        let two = add(&s, "twofold", "/tmp");
+        let one = add(&s, "o", "/tmp");
+        set_transfer(&s, &xseed, 3 * n, 0);
+        set_transfer(&s, &two, 2 * n, n);
+        set_transfer(&s, &one, n, n);
+
+        // The row.
+        let page = crate::api::engine_page_value(&s.state, "hoard", "sort=ratio&order=desc").await;
+        let rows = by_hash(&page["rows"], "info_hash");
+        assert_eq!(rows[&xseed]["ratio"], serde_json::json!(3));
+        assert_eq!(rows[&two]["ratio"], serde_json::json!(2), "a normal download is unchanged");
+        assert_eq!(rows[&one]["ratio"], serde_json::json!(1));
+
+        // The sort key: 3 puts it first. Under the old key it was 0, last.
+        let order: Vec<&str> = page["rows"].as_array().unwrap().iter()
+            .map(|r| r["info_hash"].as_str().unwrap()).collect();
+        assert_eq!(order, vec![xseed.as_str(), two.as_str(), one.as_str()]);
+
+        // The workflow facts.
+        let facts = gather_all(&s.state, false);
+        let ratio_of = |h: &str| facts.iter().find(|f| f.info_hash == h).expect("facts").ratio;
+        assert_eq!(ratio_of(&xseed), 3.0);
+        assert_eq!(ratio_of(&two), 2.0);
+        assert_eq!(ratio_of(&one), 1.0);
+
+        // The qBittorrent API is deliberately NOT part of this: it still answers
+        // 0 (the 3.x key spelling it reproduces, see qbitrow.rs). *arr can act
+        // on a ratio -- removing torrents once a seed goal is met -- so real
+        // figures there are their own decision and their own release.
+        let qbit = serde_json::Value::Array(crate::api::engine_qbit_rows(&s.state, "hoard", 0, None, None));
+        let qbit = by_hash(&qbit, "hash");
+        assert_eq!(qbit[&xseed]["ratio"], serde_json::json!(0));
+    }
+
+    /// ⭐ The "Hardlinks" column and a workflow condition on `external_links`
+    /// read ONE number. Real files, a real cross-seed hardlink and a real
+    /// outside one, measured and stored as the scanner does; then the column
+    /// (from the published summary) is compared torrent by torrent with what
+    /// `decide` evaluates the condition on.
+    #[tokio::test]
+    async fn the_hardlink_column_and_the_workflow_condition_agree() {
+        let s = st("links-agree");
+        let root = s.dir.join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        let p = |n: &str| root.join(n);
+        std::fs::write(p("ours.bin"), b"x").unwrap();
+        std::fs::hard_link(p("ours.bin"), p("cross.bin")).unwrap(); // a cross-seed of ours
+        std::fs::write(p("lib.bin"), b"y").unwrap();
+        std::fs::hard_link(p("lib.bin"), p("library-copy.mkv")).unwrap(); // the media library
+        std::fs::write(p("never.bin"), b"z").unwrap();
+
+        let root_s = root.to_str().unwrap();
+        let ours = add(&s, "ours.bin", root_s);
+        let cross = add(&s, "cross.bin", root_s);
+        let lib = add(&s, "lib.bin", root_s);
+
+        // Measured and stored the way `linkscan::sweep` does it.
+        let measured_at = 1_700_000_123;
+        {
+            let stored = {
+                let store = s.state.store.read().unwrap();
+                rulesrun::stored_facts(&s.state.engines, &store)
+            };
+            let cat = rulesrun::catalogue_from(&s.state.engines, &stored);
+            assert_eq!(cat.len(), 3);
+            let plan = cat.iter().map(|c| (c.info_hash.clone(), c.paths.clone())).collect();
+            let measured = rulesrun::stat_plan_with(plan, 2);
+            let rows: Vec<_> = cat.iter().zip(&measured)
+                .map(|(c, (_, fs))| {
+                    let stats: Vec<_> = fs.iter().map(|(_, st)| *st).collect();
+                    rulesrun::link_row(c, &stats, measured_at)
+                })
+                .collect();
+            s.state.store.lock().unwrap().put_link_rows(&rows).unwrap();
+        }
+        // Added after the sweep: no measurement at all.
+        let never = add(&s, "never.bin", root_s);
+
+        assert_eq!(crate::linkscan::refresh_summary(&s.state.engines, &s.state.store), Some(3));
+
+        let page = crate::api::engine_page_value(&s.state, "hoard", "sort=external_links&order=asc").await;
+        let order: Vec<&str> = page["rows"].as_array().unwrap().iter()
+            .map(|r| r["info_hash"].as_str().unwrap()).collect();
+        assert_eq!(order.last(), Some(&never.as_str()), "unmeasured sorts last ascending");
+        assert_eq!(order[2], lib.as_str());
+        let desc = crate::api::engine_page_value(&s.state, "hoard", "sort=external_links&order=desc").await;
+        let order_desc: Vec<&str> = desc["rows"].as_array().unwrap().iter()
+            .map(|r| r["info_hash"].as_str().unwrap()).collect();
+        assert_eq!(order_desc[0], lib.as_str());
+        assert_eq!(order_desc.last(), Some(&never.as_str()), "and last descending too");
+
+        let col = by_hash(&page["rows"], "info_hash");
+        assert_eq!(col[&ours]["external_links"], serde_json::json!(0), "a cross-seed of ours is not an outsider");
+        assert_eq!(col[&cross]["external_links"], serde_json::json!(0));
+        assert_eq!(col[&lib]["external_links"], serde_json::json!(1), "the library holds a name");
+        assert_eq!(col[&never]["external_links"], serde_json::Value::Null, "never measured is not 0");
+        assert_eq!(col[&ours]["links_checked_at"], serde_json::json!(measured_at));
+        assert_eq!(col[&never]["links_checked_at"], serde_json::Value::Null);
+
+        let w = parse(&serde_json::json!({
+            "id": "", "name": "noHL", "enabled": true, "interval_secs": 3600, "cap": 10,
+            "when": {"kind": "cond", "field": "external_links", "op": "eq", "value": "0"},
+            "then": [{"type": "add_tags", "tags": ["noHL"]}],
+        }).to_string()).expect("a valid workflow");
+        let d = decide(&s.state, &w).expect("decided");
+
+        // Torrent by torrent: the column's value is the workflow's value.
+        for (hash, row) in &col {
+            let wf = d.links.get(hash).map(|f| serde_json::json!(f.external_links));
+            assert_eq!(
+                row["external_links"],
+                wf.unwrap_or(serde_json::Value::Null),
+                "{hash}: column and workflow disagree"
+            );
+        }
+        // And the condition matches exactly the rows the column shows at 0.
+        let mut matched: Vec<&str> = d.matches.iter().map(|m| m.info_hash.as_str()).collect();
+        let mut zero: Vec<&str> = col.iter()
+            .filter(|(_, r)| r["external_links"] == serde_json::json!(0))
+            .map(|(h, _)| h.as_str()).collect();
+        matched.sort();
+        zero.sort();
+        assert_eq!(matched, zero);
+
+        // The pass re-measured its candidates and published what it decided
+        // on: the column still agrees, now dated by the re-measurement.
+        let after = crate::api::engine_page_value(&s.state, "hoard", "").await;
+        let after = by_hash(&after["rows"], "info_hash");
+        for (hash, row) in &after {
+            let wf = d.links.get(hash).map(|f| serde_json::json!(f.external_links));
+            assert_eq!(row["external_links"], wf.unwrap_or(serde_json::Value::Null), "{hash} after the pass");
+        }
+        assert!(after[&ours]["links_checked_at"].as_i64().unwrap() > measured_at);
+        assert_eq!(after[&lib]["links_checked_at"], serde_json::json!(measured_at), "not a candidate, not re-measured");
     }
 }

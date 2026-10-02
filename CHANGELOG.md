@@ -31,8 +31,24 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   store -- by its SHA-256 truncated to 20 bytes, as BEP 52 says. A hybrid is
   read as the v1 torrent it also is. Proven against libtorrent with torrents
   its own creator made: same info hashes, transfers both ways.
+- **"Hardlinks" and "Checked" columns in the hoard table** (hidden by
+  default, sortable). Hardlinks is the number workflows call
+  `external_links`: names of the torrent's files held outside the client,
+  0 when only Hydranos holds them. Checked is the age of that measurement.
+  Both read a summary the link scanner publishes (and a workflow pass on
+  hardlinks refreshes), so the list stays one lookup per row. A torrent not
+  measured yet shows "-" and sorts last. New row fields on the list:
+  `external_links`, `links_checked_at` (null when unmeasured).
 
 ### Fixed
+- **One ratio in the table, the sort, the filters and the workflows.** The
+  table divided upload by the data held, the rest by the download: a
+  cross-seed (downloaded 0) read 3.2 in the table and 0 everywhere else, so
+  "ratio > 2" never matched it. All of them now use qBittorrent's rule:
+  upload over download, or over the data held when less than 1% of it was
+  downloaded; 0 when nothing is held or downloaded. The qBittorrent API is
+  unchanged (it still reports 0, as 3.x did): *arr can act on a ratio, so
+  changing what it sees is left to its own release.
 - **Padding files (BEP 47) are no longer written to disk.** A hybrid torrent,
   or any torrent with pad files, used to get real `.pad/N` files full of
   zeros beside its data. Padding is now a gap in the stream -- read as
