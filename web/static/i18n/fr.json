@@ -904,5 +904,13 @@
   "{when} · {n} torrents": "{when} · {n} torrents",
   "when a torrent is added": "quand un torrent est ajouté",
   "{n} torrents added in the last day: {m} would have been acted on, {s} already as asked": "{n} torrents ajoutés ces dernières 24 h : {m} auraient été traités, {s} déjà conformes",
-  "No peers connected": "Aucun pair connecté"
+  "No peers connected": "Aucun pair connecté",
+  "set category (files stay)": "changer de catégorie (fichiers sur place)",
+  "move files to a folder": "déplacer les fichiers vers un dossier",
+  "add trackers": "ajouter des trackers",
+  "one announce URL per line": "une URL d'annonce par ligne",
+  "or the URL of a list, e.g. https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt": "ou l'URL d'une liste, ex. https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt",
+  "Moves the data as Set location does, category unchanged. Hardlinked files are not copied across disks: such a torrent is reported as failed.": "Déplace les données comme « Set location », catégorie inchangée. Les fichiers hardlinkés ne sont pas copiés vers un autre disque : un tel torrent est signalé en échec.",
+  "Never applied to a private torrent. Every tracker added learns this node's IP for the torrent.": "Jamais appliqué à un torrent privé. Chaque tracker ajouté apprend l'IP de ce nœud pour ce torrent.",
+  "Changes the label only; use \"move files to a folder\" to move the data.": "Change seulement l'étiquette ; utilisez « déplacer les fichiers vers un dossier » pour déplacer les données."
 }

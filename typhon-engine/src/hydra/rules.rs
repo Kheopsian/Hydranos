@@ -36,6 +36,13 @@ pub struct Facts {
     pub torrent_error: bool,
     pub user_paused: bool,
     pub multi_file: bool,
+    /// The .torrent's `private` flag: the tracker forbids DHT, PEX, and any
+    /// tracker it did not hand out.
+    pub private: bool,
+    /// Every announce URL the torrent carries, all tiers. Gathered only when a
+    /// workflow's action needs it (see `Action::needs_trackers`); empty
+    /// otherwise.
+    pub trackers: Vec<String>,
 
     pub progress: f64,
     pub ratio: f64,
@@ -147,6 +154,25 @@ pub enum Action {
     /// script behind a small HTTP server. Never a command run here -- an API
     /// key that leaks must not become a shell on this machine.
     Webhook { url: String },
+    /// Move the torrent's data to a folder, category unchanged: the job
+    /// "Set location..." submits. Queued, never inline. A file hardlinked
+    /// elsewhere is not copied across filesystems (that would double the
+    /// space it takes) unless `allow_breaking_hardlinks`.
+    SetLocation {
+        to: String,
+        #[serde(default)]
+        allow_breaking_hardlinks: bool,
+    },
+    /// Add trackers: announce URLs given here, and/or the URL of a list to
+    /// fetch (ngosang's trackerslist, say). ⚠️ NEVER on a private torrent,
+    /// whatever the conditions: giving a private torrent's hash to public
+    /// trackers is what gets an account banned.
+    AddTrackers {
+        #[serde(default)]
+        urls: Vec<String>,
+        #[serde(default)]
+        list_url: String,
+    },
 }
 
 impl Action {
@@ -156,6 +182,18 @@ impl Action {
     pub fn is_webhook(&self) -> bool {
         matches!(self, Action::Webhook { .. })
     }
+    /// Its convergence check reads `Facts::trackers`, which a pass gathers only
+    /// when asked: copying every torrent's tracker list costs memory on a
+    /// million-torrent catalogue.
+    pub fn needs_trackers(&self) -> bool {
+        matches!(self, Action::AddTrackers { .. })
+    }
+}
+
+/// A folder, compared the way a person reads it: `/data/films/` is `/data/films`.
+pub fn same_folder(a: &str, b: &str) -> bool {
+    let t = |s: &str| s.trim().trim_end_matches('/').to_string();
+    !b.trim().is_empty() && t(a) == t(b)
 }
 
 /// How many torrents one pass of one workflow may touch.
@@ -261,6 +299,12 @@ pub enum CompileError {
     /// background index, which has not seen a torrent that finished a second
     /// ago: the condition would read NEVER and quietly never match.
     LinkFieldOnEvent(String),
+    /// Not an absolute folder made of plain names.
+    BadLocation(String),
+    /// Not an http(s):// or udp:// announce URL.
+    BadTracker(String),
+    /// Add trackers with neither a tracker nor a list.
+    NoTrackers,
 }
 
 impl std::fmt::Display for CompileError {
@@ -281,6 +325,9 @@ impl std::fmt::Display for CompileError {
                 f,
                 "on a timer, a webhook needs another action that changes the torrent (a tag, say), or it would be called again every pass"
             ),
+            CompileError::BadLocation(x) => write!(f, "{x:?} is not an absolute folder (no `..`)"),
+            CompileError::BadTracker(x) => write!(f, "{x:?} is not an http://, https:// or udp:// announce URL"),
+            CompileError::NoTrackers => write!(f, "add trackers needs at least one tracker or the URL of a list"),
             CompileError::LinkFieldOnEvent(x) => write!(
                 f,
                 "{x:?} cannot be used when a download completes: the hardlink index has not measured the torrent yet"
@@ -340,6 +387,7 @@ pub const FIELDS: &[(&str, Kind)] = &[
     ("torrent_error", Kind::Bool),
     ("user_paused", Kind::Bool),
     ("multi_file", Kind::Bool),
+    ("private", Kind::Bool),
     ("progress", Kind::Percent),
     ("ratio", Kind::Number),
     ("total_size", Kind::Size),
@@ -491,6 +539,7 @@ fn bool_of(f: &Facts, field: &str) -> Option<bool> {
         "torrent_error" => f.torrent_error,
         "user_paused" => f.user_paused,
         "multi_file" => f.multi_file,
+        "private" => f.private,
         _ => return None,
     })
 }
@@ -616,13 +665,37 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
     if w.then.iter().any(Action::is_delete) && w.then.len() > 1 {
         return Err(CompileError::DeleteNotAlone);
     }
+    let http_url = |url: &str| {
+        let u = url.trim().to_ascii_lowercase();
+        let host = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or("");
+        !host.is_empty() && !host.starts_with('/')
+    };
     for a in &w.then {
-        if let Action::Webhook { url } = a {
-            let u = url.trim().to_ascii_lowercase();
-            let host = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or("");
-            if host.is_empty() || host.starts_with('/') {
+        match a {
+            Action::Webhook { url } if !http_url(url) => {
                 return Err(CompileError::BadWebhookUrl(url.clone()));
             }
+            Action::SetLocation { to, .. } => {
+                let p = std::path::Path::new(to.trim());
+                let plain = p.components().all(|c| {
+                    matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_))
+                });
+                if !p.is_absolute() || !plain {
+                    return Err(CompileError::BadLocation(to.clone()));
+                }
+            }
+            Action::AddTrackers { urls, list_url } => {
+                if let Some(bad) = urls.iter().find(|u| !crate::trackerlists::is_announce_url(u)) {
+                    return Err(CompileError::BadTracker(bad.clone()));
+                }
+                if !list_url.trim().is_empty() && !http_url(list_url) {
+                    return Err(CompileError::BadTracker(list_url.clone()));
+                }
+                if urls.is_empty() && list_url.trim().is_empty() {
+                    return Err(CompileError::NoTrackers);
+                }
+            }
+            _ => {}
         }
     }
     // ⭐ A webhook is never "already done", so on a timer it fires for every
@@ -666,12 +739,51 @@ pub fn already_satisfied(action: &Action, f: &Facts) -> bool {
         Action::Delete { .. } => false,
         // Nor is telling someone. When it is sent is decided by `evaluate`.
         Action::Webhook { .. } => false,
+        Action::SetLocation { to, .. } => same_folder(&f.save_path, to),
+        // A private torrent counts as done: it is never touched, and skipping
+        // it here keeps it out of the pass instead of failing every time.
+        // A list not fetched yet is not done; the action fetches it.
+        Action::AddTrackers { urls, list_url } => {
+            if f.private {
+                return true;
+            }
+            let listed = if list_url.trim().is_empty() {
+                Some(Vec::new())
+            } else {
+                crate::trackerlists::cached(list_url.trim())
+            };
+            match listed {
+                None => false,
+                Some(l) => urls.iter().chain(l.iter()).all(|u| f.trackers.iter().any(|t| t == u)),
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_is_done_once_the_torrent_is_in_the_folder() {
+        let f = Facts { save_path: "/data/final".into(), ..Default::default() };
+        let mv = |to: &str| Action::SetLocation { to: to.into(), allow_breaking_hardlinks: false };
+        assert!(already_satisfied(&mv("/data/final/"), &f), "a trailing slash is the same folder");
+        assert!(!already_satisfied(&mv("/data/temp"), &f));
+    }
+
+    #[test]
+    fn trackers_are_done_when_present_and_always_on_a_private_torrent() {
+        let add = Action::AddTrackers { urls: vec!["udp://a.example:1/announce".into()], list_url: String::new() };
+        let mut f = Facts { trackers: vec!["udp://a.example:1/announce".into()], ..Default::default() };
+        assert!(already_satisfied(&add, &f));
+        f.trackers.clear();
+        assert!(!already_satisfied(&add, &f));
+        f.private = true;
+        assert!(already_satisfied(&add, &f), "never touched, so never due");
+        let listed = Action::AddTrackers { urls: vec![], list_url: "https://lists.example/never-fetched.txt".into() };
+        assert!(!already_satisfied(&listed, &Facts::default()), "a list not fetched yet is not done");
+    }
 
     /// A pass pays for `free_space` -- a `statvfs` per save path -- only when
     /// a condition reads it, however deep in the tree.

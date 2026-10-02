@@ -62,13 +62,32 @@ pub struct PassReport {
 /// production, which kept this function -- then under the store's writer lock
 /// -- busy for over twenty seconds a pass. A rule that does not read the field
 /// does not pay for it.
+/// The facts a pass pays for only when a workflow reads them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Want {
+    /// A `statvfs` per save path (see `gather`).
+    pub free_space: bool,
+    /// A copy of every torrent's tracker list.
+    pub trackers: bool,
+}
+
+impl Want {
+    pub fn of(w: &Workflow) -> Self {
+        Want {
+            free_space: rules::uses_field(&w.when, "free_space"),
+            trackers: w.then.iter().any(Action::needs_trackers),
+        }
+    }
+}
+
 pub fn gather(
     host: &EngineHost,
     store: &Store,
     engine_id: &str,
     links: &std::collections::HashMap<String, LinkFacts>,
-    want_free_space: bool,
+    want: Want,
 ) -> Vec<Facts> {
+    let want_free_space = want.free_space;
     let Some(engine) = host.engines().iter().find(|e| e.id == engine_id) else {
         return Vec::new();
     };
@@ -94,7 +113,7 @@ pub fn gather(
                     .or_insert_with(|| free_space_at(&s.save_path))
             };
             let l = links.get(&hash);
-            facts_of(&t, hash, s, engine_id, l, free_space, now)
+            facts_of(&t, hash, s, engine_id, l, free_space, now, want.trackers)
         })
         .collect()
 }
@@ -119,7 +138,8 @@ pub fn gather_one(host: &EngineHost, store: &Store, engine_id: &str, info_hash: 
     let now = crate::store::now_secs() as f64;
     // No link facts: an event workflow may not ask for them (see
     // `CompileError::LinkFieldOnEvent`), so NEVER is the honest answer.
-    Some(facts_of(&t, info_hash.to_string(), s, engine_id, None, free_space, now))
+    // One torrent: its tracker list costs nothing worth saving.
+    Some(facts_of(&t, info_hash.to_string(), s, engine_id, None, free_space, now, true))
 }
 
 /// One torrent's facts, from the engine's live state and the store's row.
@@ -132,6 +152,7 @@ fn facts_of(
     l: Option<&LinkFacts>,
     free_space: f64,
     now: f64,
+    want_trackers: bool,
 ) -> Facts {
     let tracker_err = t
         .last_announce_error
@@ -155,6 +176,12 @@ fn facts_of(
         // intent, which is what a person clicked.
         user_paused: s.paused,
         multi_file: t.meta.files.len() > 1,
+        private: t.meta.private,
+        trackers: if want_trackers {
+            t.live_trackers.read().iter().flatten().cloned().collect()
+        } else {
+            Vec::new()
+        },
 
         progress: if size > 0.0 {
             (downloaded / size * 100.0).min(100.0)
@@ -742,6 +769,10 @@ pub fn apply(
     m: &Match,
     pause_hook: &dyn Fn(&str, &str, bool),
     delete_hook: &dyn Fn(&str, &str, bool) -> Result<(), String>,
+    // Queue a data move (engine, hash, folder, allow breaking hardlinks).
+    move_hook: &dyn Fn(&str, &str, &str, bool) -> Result<(), String>,
+    // Add announce URLs (engine, hash, urls); answers whether anything changed.
+    trackers_hook: &dyn Fn(&str, &str, &[String]) -> Result<bool, String>,
     // The scan's answer for this torrent, when the rule depended on it.
     // `Some` is what arms the guard on the delete path below.
     link_facts: Option<&LinkFacts>,
@@ -816,6 +847,29 @@ pub fn apply(
             Action::Webhook { url } => {
                 let payload = m.payload.clone().unwrap_or(serde_json::Value::Null);
                 send_webhook(url, &payload)?;
+            }
+            Action::SetLocation { to, allow_breaking_hardlinks } => {
+                move_hook(&m.engine, &m.info_hash, to.trim(), *allow_breaking_hardlinks)?;
+            }
+            Action::AddTrackers { urls, list_url } => {
+                // Checked again here, on the engine's own copy of the flag,
+                // whatever the pass decided: this is the one action whose
+                // mistake cannot be taken back.
+                let private = host
+                    .engines()
+                    .iter()
+                    .find(|e| e.id == m.engine)
+                    .and_then(|e| e.manager.get(&crate::store::hex20(&m.info_hash)?))
+                    .map(|t| t.meta.private)
+                    .unwrap_or(true);
+                if private {
+                    return Err("private torrent: trackers are never added to one".into());
+                }
+                let mut all = urls.clone();
+                if !list_url.trim().is_empty() {
+                    all.extend(crate::trackerlists::get(list_url.trim())?);
+                }
+                trackers_hook(&m.engine, &m.info_hash, &all)?;
             }
         }
     }

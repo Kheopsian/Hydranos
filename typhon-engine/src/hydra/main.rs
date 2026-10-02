@@ -49,6 +49,7 @@ mod selection;
 mod store;
 mod tomledit;
 mod trackeredit;
+mod trackerlists;
 mod spoofmigration;
 mod walrepair;
 mod web;
