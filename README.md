@@ -26,11 +26,11 @@ three uses of one instance:
 - **Race.** Grab and seed new releases fast. Hydranos runs a *race* engine and
   a *hoard* engine side by side in one process, each tuned for its job, so a
   large library never slows a race down.
-- **Stay light.** Serving 50,000 torrents takes 877 MiB of RAM (about
-  18 KiB per torrent) and 0.12 of a CPU core; holding 290,000 takes 2.8 GiB
-  (about 10 KiB per torrent).
+- **Stay light.** Holding 290,000 torrents takes 2.8 GiB of RAM (about
+  10 KiB per torrent), where the other clients we measured needed 12 to
+  31 GiB.
 
-How Hydranos and other clients behave at [50,000](docs/benchmarks.md) and
+How Hydranos and three other clients behave at
 [290,000 torrents](docs/scale-290k.md), measured on the same machine.
 
 And your automation keeps working: the qBittorrent v2 API shim means
