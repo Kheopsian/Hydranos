@@ -228,6 +228,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   900,000-torrent library was affected by the change.
 
 ### Fixed
+- **The hoard search box keeps one line and a usable width.** It was capped at
+  280 px and squeezed first, so on a laptop it shrank to a stub and changed
+  width whenever a chip count did. It now takes the space the state chips
+  leave, the counter reads "500 / 1,101,638" without the "(N total)" tail
+  (the total is on the All chip), and chips tighten on 1280-1400 px screens.
 - **Tagging a torrent whose tags came from the qBit shim no longer creates a
   tag named `["cross-seed"]`.** Those rows store their tags as a JSON list;
   the per-torrent tag read split on commas only, took the list for one tag

@@ -2751,7 +2751,10 @@ function renderHoardTable() {
         const matched = _hoardServerFiltered || filtered.length;
         const total = _hoardServerTotal || _hoardAllTorrents.length;
         if (matched > HOARD_RENDER_LIMIT)
-            countEl.textContent = t("{shown} / {matched} ({total} total)", { shown: fmtInt(Math.min(visible.length, HOARD_RENDER_LIMIT)), matched: fmtInt(matched), total: fmtInt(total) });
+            // No "(N total)" tail: the line has to fit beside the search box
+            // and the state chips on a laptop screen, and the total is already
+            // on the "All" chip.
+            countEl.textContent = `${fmtInt(Math.min(visible.length, HOARD_RENDER_LIMIT))} / ${fmtInt(matched)}`;
         else
             countEl.textContent = `${fmtInt(matched)} / ${fmtInt(total)}`;
     }
