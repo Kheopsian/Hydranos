@@ -24,6 +24,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **The peer lists in the detail panels sort, reorder and hide their
+  columns**, like the torrent tables: click a header to sort (a number column
+  starts with the biggest, a text one from A; again to reverse), drag a header
+  to move the column, right-click the header row to hide one. All of it is
+  kept per panel (race and hoard) across torrents and reloads, and the order
+  holds through the panel's refresh every few seconds.
 - **BitTorrent v2 torrents (BEP 52).** A v2-only `.torrent` is added,
   downloaded and seeded: each piece is checked against its SHA-256 merkle
   hash, the piece layers are checked against each file's root before being
@@ -51,6 +57,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   `external_links`, `links_checked_at` (null when unmeasured).
 
 ### Fixed
+- **Clicking a control that redraws itself no longer closes the detail
+  panel.** The "click outside closes the panel" check looked for the panel
+  above the clicked element, and found none when the element had just been
+  replaced by its own handler; the column menu was not counted as inside
+  either.
 - **Importing from qBittorrent or Transmission works again -- it had never
   been ported to v4.** The qBittorrent preview answered "empty qBittorrent
   URL" whatever was typed; the Transmission upload and preview refused every

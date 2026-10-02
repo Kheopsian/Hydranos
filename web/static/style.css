@@ -581,6 +581,10 @@ th {
 
 #hoard-table thead th.sort-asc::after { content: " ▲"; color: var(--accent-hoard); }
 #hoard-table thead th.sort-desc::after { content: " ▼"; color: var(--accent-hoard); }
+#detail-peers-table thead th.sort-asc::after { content: " ▲"; color: var(--accent-race); }
+#detail-peers-table thead th.sort-desc::after { content: " ▼"; color: var(--accent-race); }
+#h-detail-peers-table thead th.sort-asc::after { content: " ▲"; color: var(--accent-hoard); }
+#h-detail-peers-table thead th.sort-desc::after { content: " ▼"; color: var(--accent-hoard); }
 
 td {
     padding: 10px 16px;
