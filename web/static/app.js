@@ -10526,7 +10526,12 @@ function syncCondOps(el) {
 const WF_ACTIONS = [
     { type: "pause", label: "stop the torrent" },
     { type: "resume", label: "start the torrent" },
-    { type: "set_category", label: "move to category" },
+    // The label only: the files stay where they are. "move files to a
+    // folder" is the one that moves them -- this read "move to category" and
+    // moved nothing, the opposite of what the word promised.
+    { type: "set_category", label: "set category (files stay)" },
+    { type: "set_location", label: "move files to a folder" },
+    { type: "add_trackers", label: "add trackers" },
     { type: "add_tags", label: "add tags" },
     { type: "remove_tags", label: "remove tags" },
     { type: "delete", label: "delete the torrent" },
@@ -10536,7 +10541,18 @@ const WF_ACTIONS = [
 /// The argument control for an action. One box captioned
 /// "category / tags / with_files" asked the operator to know which of three
 /// things the action wanted, and to spell it.
-function _wfArgControl(type, value) {
+function _wfArgControl(type, value, act) {
+    if (type === "set_location") {
+        return `<input type="text" class="wf-a-arg" placeholder="/data/complete" value="${esc(value || "")}" autocomplete="off">`;
+    }
+    if (type === "add_trackers") {
+        const urls = (act && act.urls) || [];
+        const list = (act && act.list_url) || "";
+        return `<span class="wf-a-arg-wrap" style="display:flex;flex-direction:column;gap:4px;flex:1">`
+            + `<textarea class="wf-a-arg" rows="2" placeholder="${esc(t("one announce URL per line"))}" autocomplete="off">${esc(urls.join("\n"))}</textarea>`
+            + `<input type="url" class="wf-a-arg2" placeholder="${esc(t("or the URL of a list, e.g. https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"))}" value="${esc(list)}" autocomplete="off">`
+            + `</span>`;
+    }
     if (type === "set_category") {
         const list = (_wfChoices && _wfChoices.categories) || [];
         const opts = list.slice();
@@ -10566,6 +10582,9 @@ function _wfArgControl(type, value) {
 function _wfActionNote(type) {
     if (type === "delete") return t("delete must be the only action in a workflow");
     if (type === "webhook") return t("POSTs the torrent as JSON; Discord, Slack and Gotify read it as is. On a timer, it goes out when another action changes the torrent.");
+    if (type === "set_location") return t("Moves the data as Set location does, category unchanged. Hardlinked files are not copied across disks: such a torrent is reported as failed.");
+    if (type === "add_trackers") return t("Never applied to a private torrent. Every tracker added learns this node's IP for the torrent.");
+    if (type === "set_category") return t("Changes the label only; use \"move files to a folder\" to move the data.");
     return "";
 }
 
@@ -10599,7 +10618,7 @@ function addActionRow(act) {
     const type = act ? act.type : WF_ACTIONS[0].type;
     div.innerHTML = `
         <select class="wf-a-type" onchange="syncActionRow(this)">${opts}</select>
-        ${_wfArgControl(type, arg)}
+        ${_wfArgControl(type, arg, act)}
         <span class="sr-desc wf-a-note">${esc(_wfActionNote(type))}</span>
         <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this action">Remove</button>`;
     wrap.appendChild(div);
@@ -10613,6 +10632,11 @@ function _wfCollect() {
         if (type === "delete") return { type, with_files: !!(el && el.checked) };
         const arg = (el && el.value ? el.value : "").trim();
         if (type === "set_category") return { type, to: arg };
+        if (type === "set_location") return { type, to: arg };
+        if (type === "add_trackers") {
+            const list = (r.querySelector(".wf-a-arg2")?.value || "").trim();
+            return { type, urls: arg.split(/\s+/).map(s => s.trim()).filter(Boolean), list_url: list };
+        }
         if (type === "webhook") return { type, url: arg };
         if (type === "add_tags" || type === "remove_tags") {
             return { type, tags: arg.split(",").map(s => s.trim()).filter(Boolean) };
