@@ -2161,25 +2161,7 @@ async function refreshDetail() {
         document.getElementById("detail-choking-unchoked").textContent = d.choking?.num_unchoked ?? "-";
 
         // Peers table
-        const ptbody = document.getElementById("detail-peers-tbody");
-        if (d.peers && d.peers.length > 0) {
-            ptbody.innerHTML = d.peers.map(p => {
-                const flags = peerFlags(p);
-                return `<tr>
-                    <td>${incoIP(p.ip)}:${p.port}</td>
-                    <td>${p.client || "-"}</td>
-                    <td>${(p.progress * 100).toFixed(0)}%</td>
-                    <td>${formatSpeed(peerRate(p, 'dl'))}</td>
-                    <td>${formatSpeed(peerRate(p, 'ul'))}</td>
-                    <td>${formatBytes(p.total_download)}</td>
-                    <td>${formatBytes(p.total_upload)}</td>
-                    <td>${flags || "-"}</td>
-                    <td><button class="btn-small" title="${esc(t("Ban this address: disconnected now, refused from now on"))}" onclick="banPeer('${esc(p.ip)}')">${esc(t("Ban"))}</button></td>
-                </tr>`;
-            }).join("");
-        } else {
-            ptbody.innerHTML = '<tr><td colspan="8" class="empty">No peers connected</td></tr>';
-        }
+        renderPeerRows("detail-peers-table", d.peers);
 
         // Trackers table. Skipped while the editor is open: redrawing the
         // list someone is editing is how an edit gets lost mid-typing.
@@ -2232,6 +2214,70 @@ function peerFlags(p) {
     return Array.from(p.flags || "")
         .map(f => `<span class="peer-flag ${esc(f)}">${esc(f)}</span>`)
         .join("");
+}
+
+// ─── Peer tables (race and hoard detail panels) ─────────
+//
+// The same column system as the torrent tables (`TABLE_COLS`): click a header
+// to sort, drag it to reorder, right-click to hide, grips to resize -- all kept
+// per table. The list redraws on every refresh, so the order is applied at each
+// draw, not once. A number column starts biggest first (the fastest peer is
+// the one people look for), a text column from A.
+const _peerSort = (() => { try { return JSON.parse(localStorage.getItem("hydra_peer_sort") || "{}"); } catch (_) { return {}; } })();
+const _peerLast = {};
+const _peerCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+const _peerKeys = {
+    ip: p => p.ip || "",
+    client: p => p.client || "",
+    progress: p => p.progress || 0,
+    dl: p => peerRate(p, "dl"),
+    ul: p => peerRate(p, "ul"),
+    downloaded: p => p.total_download || 0,
+    uploaded: p => p.total_upload || 0,
+    flags: p => p.flags || "",
+};
+const _peerText = new Set(["ip", "client", "flags"]);
+const PEER_TABLES = ["detail-peers-table", "h-detail-peers-table"];
+
+function sortPeers(th) {
+    const tableId = th.closest("table").id;
+    const col = th.dataset.col;
+    const cur = _peerSort[tableId];
+    _peerSort[tableId] = cur && cur.col === col
+        ? { col, asc: !cur.asc }
+        : { col, asc: _peerText.has(col) };
+    localStorage.setItem("hydra_peer_sort", JSON.stringify(_peerSort));
+    _rerenderTable(tableId);
+}
+
+function renderPeerHeader(tableId) {
+    const sort = _peerSort[tableId] || {};
+    renderTableHeader(tableId, sort.col, sort.asc);
+}
+
+function renderPeerRows(tableId, peers) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    _peerLast[tableId] = peers || [];
+    const tbody = table.querySelector("tbody");
+    if (!peers || !peers.length) {
+        tbody.innerHTML = `<tr><td colspan="${_visibleCols(tableId).length}" class="empty">${esc(t("No peers connected"))}</td></tr>`;
+        return;
+    }
+    let rows = peers;
+    const sort = _peerSort[tableId];
+    const key = sort && _peerKeys[sort.col];
+    if (key) {
+        const dir = sort.asc ? 1 : -1;
+        rows = peers.slice().sort((a, b) => {
+            const x = key(a), y = key(b);
+            const c = typeof x === "number" ? x - y : _peerCollator.compare(x, y);
+            // Ties keep a fixed order (address), or equal rows -- every peer at
+            // 0 B/s -- would swap places on each refresh.
+            return dir * c || _peerCollator.compare(a.ip || "", b.ip || "") || (a.port || 0) - (b.port || 0);
+        });
+    }
+    tbody.innerHTML = rows.map(p => `<tr>${renderRowCells(tableId, p)}</tr>`).join("");
 }
 
 // Peer rates. The V4 engine publishes dl_rate / ul_rate; 3.x published
@@ -4495,9 +4541,16 @@ document.addEventListener("keydown", e => {
 });
 
 document.addEventListener("click", e => {
-    if (e.target.closest(".t-row") ||
+    // ⚠ A target no longer in the page was replaced by its own click handler
+    // -- a peer-table header redraws the header it sits in when it sorts -- so
+    // `closest` finds no panel above it and the click read as "outside",
+    // closing the panel the operator was sorting. Where it was, it is gone;
+    // it was not outside.
+    if (!e.target.isConnected ||
+        e.target.closest(".t-row") ||
         e.target.closest("#torrent-detail") ||
         e.target.closest("#hoard-detail-panel") ||
+        e.target.closest(".col-menu") ||
         e.target.closest("#ctx-menu") ||
         e.target.closest("#ctx-submenu") ||
         e.target.closest(".modal-overlay") ||
@@ -4747,25 +4800,7 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-active-time").textContent = _addedAgo(d.added_time);
         document.getElementById("h-detail-seeding-time").textContent = formatDuration(d.seeding_time);
 
-        const ptbody = document.getElementById("h-detail-peers-tbody");
-        if (d.peers && d.peers.length > 0) {
-            ptbody.innerHTML = d.peers.map(p => {
-                const flags = peerFlags(p);
-                return `<tr>
-                    <td>${incoIP(p.ip)}:${p.port}</td>
-                    <td>${p.client || "-"}</td>
-                    <td>${(p.progress * 100).toFixed(0)}%</td>
-                    <td>${formatSpeed(peerRate(p, 'dl'))}</td>
-                    <td>${formatSpeed(peerRate(p, 'ul'))}</td>
-                    <td>${formatBytes(p.total_download)}</td>
-                    <td>${formatBytes(p.total_upload)}</td>
-                    <td>${flags || "-"}</td>
-                    <td><button class="btn-small" title="${esc(t("Ban this address: disconnected now, refused from now on"))}" onclick="banPeer('${esc(p.ip)}')">${esc(t("Ban"))}</button></td>
-                </tr>`;
-            }).join("");
-        } else {
-            ptbody.innerHTML = '<tr><td colspan="8" class="empty">No peers connected</td></tr>';
-        }
+        renderPeerRows("h-detail-peers-table", d.peers);
 
         // Same freeze as the race panel: never redraw a list being edited.
         if (trackerEditorIsOpen()) return;
@@ -8674,6 +8709,19 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
 // `hidden: true` marks an optional column: off until the operator turns it on
 // from the column menu, including for a saved config that predates it -- a new
 // column must not widen every existing table on upgrade.
+function PEER_COLS() {
+    return [
+        { id: "ip", label: "IP", sort: "ip", mobile: true, render: p => `<td>${incoIP(p.ip)}:${p.port}</td>` },
+        { id: "client", label: "Client", sort: "client", render: p => `<td>${esc(p.client || "-")}</td>` },
+        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: p => `<td>${((p.progress || 0) * 100).toFixed(0)}%</td>` },
+        { id: "dl", label: "Down", sort: "dl", mobile: true, render: p => `<td>${formatSpeed(peerRate(p, "dl"))}</td>` },
+        { id: "ul", label: "Up", sort: "ul", mobile: true, render: p => `<td>${formatSpeed(peerRate(p, "ul"))}</td>` },
+        { id: "downloaded", label: "Downloaded", sort: "downloaded", render: p => `<td>${formatBytes(p.total_download || 0)}</td>` },
+        { id: "uploaded", label: "Uploaded", sort: "uploaded", render: p => `<td>${formatBytes(p.total_upload || 0)}</td>` },
+        { id: "flags", label: "Flags", sort: "flags", render: p => `<td>${peerFlags(p) || "-"}</td>` },
+        { id: "ban", label: "Ban", sort: null, render: p => `<td><button class="btn-small" title="${esc(t("Ban this address: disconnected now, refused from now on"))}" onclick="banPeer('${esc(p.ip)}')">${esc(t("Ban"))}</button></td>` },
+    ];
+}
 const TABLE_COLS = {
     "hoard-table": [
         { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash))}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
@@ -8702,6 +8750,10 @@ const TABLE_COLS = {
         // is a separate decision -- a node does not know its own name today.
         { id: "agent", label: "Location", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
     ],
+    // The detail panels' peer lists. `p` is the peer: `t` is the translation
+    // function and must not be shadowed.
+    "detail-peers-table": PEER_COLS(),
+    "h-detail-peers-table": PEER_COLS(),
     "race-table": [
         { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
@@ -8722,7 +8774,7 @@ const TABLE_COLS = {
         { id: "agent", label: "Location", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
     ],
 };
-const _COL_SORTFN = { "hoard-table": "sortHoard", "race-table": "sortRace" };
+const _COL_SORTFN = { "hoard-table": "sortHoard", "race-table": "sortRace", "detail-peers-table": "sortPeers", "h-detail-peers-table": "sortPeers" };
 
 // "Hardlinks" cell. 0 gets its own class: it is the one value that says
 // "deleting this torrent loses nothing", and it should not read like any
@@ -8799,7 +8851,7 @@ function _visibleCols(tableId) {
 if (typeof window.matchMedia === "function") {
     const _mq = window.matchMedia(MOBILE_COLS_Q);
     const _onCross = () => {
-        for (const id of ["hoard-table", "race-table"]) {
+        for (const id of ["hoard-table", "race-table", ...PEER_TABLES]) {
             const table = document.getElementById(id);
             if (!table) continue;
             // The resizer caches "already wired" on the element; the column set
@@ -8809,7 +8861,7 @@ if (typeof window.matchMedia === "function") {
         // `_rerenderTable` redraws the HEADER as well as the body. Redrawing
         // only the body would leave a header with the old column count over
         // rows with the new one.
-        for (const id of ["hoard-table", "race-table"]) {
+        for (const id of ["hoard-table", "race-table", ...PEER_TABLES]) {
             try { _rerenderTable(id); } catch (e) {}
         }
     };
@@ -8841,7 +8893,11 @@ function renderTableHeader(tableId, sortCol, sortAsc) {
     _wireHeaderDnD(tableId);
     // Re-attach the column-width resizers (the innerHTML rebuild dropped them).
     const _rt = document.getElementById(tableId);
-    if (_rt) { _rt._colResizeInit = false; initResizableColumns(_rt, tableId === "hoard-table" ? "hydra_cols_hoard" : "hydra_cols_race"); }
+    if (_rt) {
+        _rt._colResizeInit = false;
+        const key = { "hoard-table": "hydra_cols_hoard", "race-table": "hydra_cols_race" }[tableId] || "hydra_cols_" + tableId;
+        initResizableColumns(_rt, key);
+    }
 }
 let _colDragId = null;
 function _wireHeaderDnD(tableId) {
@@ -8867,6 +8923,7 @@ function _wireHeaderDnD(tableId) {
 function _rerenderTable(tableId) {
     if (tableId === "hoard-table") { renderTableHeader("hoard-table", _hoardSortCol, _hoardSortAsc); renderHoardTable(); }
     else if (tableId === "race-table") { renderTableHeader("race-table", _raceSortCol, _raceSortAsc); updateRaceTorrents(); }
+    else if (PEER_TABLES.includes(tableId)) { renderPeerHeader(tableId); renderPeerRows(tableId, _peerLast[tableId]); }
 }
 function showColumnMenu(ev, tableId) {
     ev.preventDefault();
@@ -8903,7 +8960,8 @@ document.addEventListener("click", e => {
     const wire = () => {
         renderTableHeader("hoard-table", _hoardSortCol, _hoardSortAsc);
         renderTableHeader("race-table", _raceSortCol, _raceSortAsc);
-        ["hoard-table", "race-table"].forEach(tid => {
+        PEER_TABLES.forEach(renderPeerHeader);
+        ["hoard-table", "race-table", ...PEER_TABLES].forEach(tid => {
             const thead = document.querySelector("#" + tid + " thead");
             if (thead && !thead.dataset.colMenuWired) {
                 thead.dataset.colMenuWired = "1";
