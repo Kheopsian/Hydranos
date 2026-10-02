@@ -7913,6 +7913,21 @@ async function muteTracker(host, muted) {
     } catch (e) { console.error("mute failed:", e); }
 }
 
+// Each cell labelled with its column's header, for the phone layout: below
+// the breakpoint a row becomes a card and the header is gone (style.css), as
+// in the torrent tables. Read from the header the table shows, so a label is
+// always the word the desktop column says, translation included.
+function _labelCells(tableId) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    const heads = [...table.querySelectorAll("thead th")].map(th => th.textContent.trim());
+    table.querySelectorAll("tbody tr").forEach(tr => {
+        [...tr.children].forEach((td, i) => {
+            if (!td.hasAttribute("colspan") && heads[i]) td.setAttribute("data-label", heads[i]);
+        });
+    });
+}
+
 /// The hidden trackers, as a list of their own.
 ///
 /// Mixed into the table above they were unfindable, which is the problem hiding
@@ -7945,6 +7960,7 @@ function _renderHiddenTrackers(hidden) {
             + `<td>${passkey}</td>`
             + `<td><button class="btn-small" onclick="hideTracker('${esc(r.host)}',false)">${esc(t("Unhide"))}</button></td></tr>`;
     }).join("");
+    _labelCells("trk-hidden-table");
 }
 
 // The drain's own verdict, put where it can be seen.
@@ -8206,6 +8222,7 @@ async function updateTrackers() {
         if (_thtml === _trackersSig) return;
         _trackersSig = _thtml;
         tbody.innerHTML = _thtml;
+        _labelCells("trackers-table");
     } catch (e) { console.error("Failed to update trackers:", e); }
 }
 // --- A tracker's errors, in its own words (Trackers tab) ---
@@ -8347,7 +8364,10 @@ function _renderTrackerStatsTable(rows) {
                 : '<span class="mode-tag mode-race">race</span>';
             const ratio = r.cum_downloaded > 0 ? (r.cum_uploaded / r.cum_downloaded).toFixed(2) : "∞";
             html += `<tr>` +
-                `<td>${i === 0 ? `<strong>${esc(trk)}</strong>` : ""}</td>` +
+                // The name on every row, shown on the first only: on a phone
+                // each row is its own card, and a card without its tracker
+                // says nothing.
+                `<td><strong${i === 0 ? "" : ' class="trk-cont"'}>${esc(trk)}</strong></td>` +
                 `<td>${tag}</td>` +
                 `<td>${formatSpeed(r.upload_rate)}</td>` +
                 `<td>${formatSpeed(r.download_rate)}</td>` +
@@ -8363,6 +8383,7 @@ function _renderTrackerStatsTable(rows) {
     if (html === _trkStatsSig) return;
     _trkStatsSig = html;
     tbody.innerHTML = html;
+    _labelCells("trkstats-table");
 }
 
 function _populateTrackerStatsSelect(rows) {
