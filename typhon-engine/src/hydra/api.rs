@@ -4141,8 +4141,15 @@ async fn get_qbit_import_status(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(serde_json::json!({"running": false})).into_response()
+    match latest_import(&state) {
+        Some((id, p)) => {
+            let mut v = p.as_json();
+            v["job_id"] = serde_json::json!(id);
+            v["running"] = serde_json::json!(p.running());
+            Json(v).into_response()
+        }
+        None => Json(serde_json::json!({"running": false})).into_response(),
+    }
 }
 
 // --- qBittorrent shim ------------------------------------------------------
@@ -4820,6 +4827,9 @@ async fn get_network_engines(
 ///
 /// 404 with a body, not an empty 404: clients distinguish "no import running"
 /// from "this build does not have the endpoint".
+/// The import wizard's progress feed: the newest job, twice a second, until it
+/// finishes. 404 when there has been no import, which also stops the
+/// browser's EventSource from retrying forever.
 async fn get_qbit_import_events(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -4827,11 +4837,25 @@ async fn get_qbit_import_events(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({"error": "no import job"})),
-    )
+    let Some((_, progress)) = latest_import(&state) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no import job"})))
+            .into_response();
+    };
+    let stream = async_stream::stream! {
+        loop {
+            // Read `finished` BEFORE the snapshot: the last frame sent must
+            // carry the final counts, never a "finished" over stale ones.
+            let finished = !progress.running();
+            let frame = progress.as_json().to_string();
+            yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(frame));
+            if finished {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    };
+    axum::response::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response()
 }
 
@@ -9251,7 +9275,6 @@ macro_rules! refuse {
 }
 
 refuse!(post_agent_create, StatusCode::BAD_REQUEST, "name and addr are required");
-refuse!(post_qbit_import_preview, StatusCode::BAD_REQUEST, "empty qBittorrent URL");
 refuse!(post_move_remote, StatusCode::BAD_REQUEST, "info_hash is required");
 refuse!(post_wireguard_engines, StatusCode::BAD_REQUEST, "no agents in the request");
 
@@ -9274,7 +9297,6 @@ async fn put_agent(
 
 
 refuse!(post_agent_test, StatusCode::BAD_REQUEST, "addr is required");
-refuse!(post_transmission_upload, StatusCode::BAD_REQUEST, "no zip in request");
 refuse!(post_wireguard_config_upload, StatusCode::BAD_REQUEST,
         "no file name: pass ?name=provider.conf or upload a named file");
 
@@ -9915,8 +9937,6 @@ async fn post_torrent_upload(
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
-refuse!(post_transmission_preview, StatusCode::BAD_REQUEST,
-        "no torrents folder at : open : no such file or directory");
 
 /// Remove a torrent from Hydra.
 ///
@@ -10945,6 +10965,135 @@ async fn post_settings_reset(
 /// something to poll, and the worker that fills it belongs to the import slice.
 /// The id carries nanoseconds, as 3.x does -- two imports started in the same
 /// second must not collide.
+// --- Import from another client -------------------------------------------
+//
+// One job at a time, kept in `state.imports` under `imp-<nanos>`; the wizard
+// watches the newest. The parsing, the preview and the per-torrent decisions
+// live in `importer`; what is here is the plumbing to this node's store and
+// engines.
+
+/// The newest import job. Ids are `imp-<nanos>`, so the newest is the greatest.
+fn latest_import(state: &AppState) -> Option<(String, Arc<crate::importer::Progress>)> {
+    let jobs = state.imports.lock().unwrap();
+    jobs.iter().max_by(|a, b| a.0.cmp(b.0)).map(|(id, p)| (id.clone(), p.clone()))
+}
+
+/// Register a new job, or refuse while one is still running: two imports
+/// walking the same library would race each other on every add.
+fn import_begin(state: &AppState) -> Result<(String, Arc<crate::importer::Progress>), Response> {
+    if let Some((id, p)) = latest_import(state) {
+        if p.running() {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": format!("an import is already running ({id})")})),
+            )
+                .into_response());
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let id = format!("imp-{nanos:020}");
+    let progress = Arc::new(crate::importer::Progress::default());
+    progress.set_phase("connect");
+    state.imports.lock().unwrap().insert(id.clone(), progress.clone());
+    Ok((id, progress))
+}
+
+/// The engine that receives an imported library: the hoard. A takeover is a
+/// settled collection, not a race.
+fn import_engine(state: &AppState) -> String {
+    state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.role == "hoard")
+        .map(|e| e.id.clone())
+        .unwrap_or_else(|| "hoard".to_string())
+}
+
+/// Create the categories an import needs, as hoard categories. One that
+/// already exists is left exactly as the operator set it.
+fn import_categories(state: &AppState) -> crate::importer::CategoryFn {
+    let state = state.clone();
+    Arc::new(move |cats| {
+        let _ = edit_categories(&state, |doc| {
+            for (name, path) in cats {
+                if !doc.contains_key(name) {
+                    doc.insert(
+                        name.clone(),
+                        serde_json::json!({"name": name, "save_path": path, "mode": "hoard"}),
+                    );
+                }
+            }
+        });
+    })
+}
+
+/// Add one imported torrent through the same path every add takes.
+fn import_add(state: &AppState) -> crate::importer::AddFn {
+    use crate::importer::Added;
+    let state = state.clone();
+    let engine_id = import_engine(&state);
+    Arc::new(move |r| {
+        let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&r.bytes)
+            .map_err(|e| format!("torrent file did not parse: {e}"))?;
+        // In ANY engine: adding a race torrent's twin to the hoard would seed
+        // one payload from two places.
+        if state.engines.engines().iter().any(|e| e.manager.get(&meta.info_hash).is_some()) {
+            return Ok(Added::AlreadyThere);
+        }
+        add_torrent_bytes(
+            &state, &r.bytes, &r.category, &r.plan.save_path, &r.tags,
+            r.plan.paused, r.plan.seed_mode, &engine_id,
+        )?;
+        // The source client's lifetime counters come along, as history: not
+        // this session's traffic, so not counted in the day or session totals.
+        if r.uploaded > 0 || r.downloaded > 0 {
+            if let Some(t) = state.engines.get(&engine_id).and_then(|e| e.manager.get(&meta.info_hash)) {
+                t.restore_lifetime(r.uploaded, r.downloaded);
+            }
+        }
+        Ok(if r.plan.seed_mode { Added::Seeded } else { Added::Resumed })
+    })
+}
+
+/// Log in to qBittorrent and list its library: the shared first half of the
+/// preview and the start, so both refuse the same things the same way.
+async fn qbit_library(body: &str) -> Result<(crate::importer::Qbit, Vec<crate::importer::Candidate>), Response> {
+    let creds = serde_json::from_str::<crate::importer::QbitCreds>(body)
+        .map_err(|_| bad_request("invalid body: url, username, password"))?;
+    if creds.url.trim().is_empty() {
+        return Err(bad_request("empty qBittorrent URL"));
+    }
+    let qbit = crate::importer::Qbit::login(&creds).await.map_err(|e| bad_request(&e))?;
+    let list = qbit
+        .torrents()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response())?;
+    Ok((qbit, list.iter().map(crate::importer::Candidate::from_qbit).collect()))
+}
+
+/// What a qBittorrent import would do, before it does anything.
+async fn post_qbit_import_preview(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let (_, cands) = match qbit_library(&body).await {
+        Ok(x) => x,
+        Err(resp) => return resp,
+    };
+    let preview = tokio::task::spawn_blocking(move || crate::importer::preview(&cands, |p| p.exists()))
+        .await
+        .unwrap_or_default();
+    Json(preview).into_response()
+}
+
 async fn post_qbit_import_start(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -10953,68 +11102,155 @@ async fn post_qbit_import_start(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-
-    let Ok(creds) = serde_json::from_str::<crate::importer::QbitCreds>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "invalid body: url, username, password"})),
-        )
-            .into_response();
+    // Logged in and listed BEFORE the job exists: a wrong password is an
+    // answer to this request, not an error frame on a progress screen.
+    let (qbit, cands) = match qbit_library(&body).await {
+        Ok(x) => x,
+        Err(resp) => return resp,
     };
+    let choices: crate::importer::Choices = serde_json::from_str(&body).unwrap_or_default();
+    let (job_id, progress) = match import_begin(&state) {
+        Ok(x) => x,
+        Err(resp) => return resp,
+    };
+    tracing::info!(job = %job_id, torrents = cands.len(), stopped = choices.start_stopped, "qBittorrent import started");
+    tokio::spawn(crate::importer::run_job(
+        cands,
+        Some(qbit),
+        choices,
+        progress,
+        import_categories(&state),
+        import_add(&state),
+    ));
+    Json(serde_json::json!({"job_id": job_id})).into_response()
+}
 
+#[derive(serde::Deserialize)]
+struct TransmissionReq {
+    #[serde(default)]
+    dir: String,
+    #[serde(default = "default_true")]
+    categories_from_dirs: bool,
+    #[serde(default = "default_true")]
+    import_labels: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Read a Transmission config folder, off the async workers: it is one
+/// `.torrent` and one `.resume` read per torrent.
+async fn transmission_library(body: &str) -> Result<crate::importer::TransmissionScan, Response> {
+    let req: TransmissionReq =
+        serde_json::from_str(body).map_err(|_| bad_request("invalid body: dir"))?;
+    if req.dir.trim().is_empty() {
+        return Err(bad_request("no folder given"));
+    }
+    let dir = std::path::PathBuf::from(req.dir.trim());
+    tokio::task::spawn_blocking(move || {
+        crate::importer::scan_transmission(&dir, req.categories_from_dirs, req.import_labels)
+    })
+    .await
+    .map_err(|e| bad_request(&e.to_string()))?
+    .map_err(|e| bad_request(&e))
+}
+
+/// Unpack an uploaded zip of a Transmission config folder, for a Transmission
+/// whose folder Hydranos cannot see. Answers the folder to preview.
+async fn post_transmission_upload(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let mut zip: Option<Vec<u8>> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            match field.bytes().await {
+                Ok(b) => zip = Some(b.to_vec()),
+                Err(e) => return bad_request(&format!("upload: {e}")),
+            }
+        }
+    }
+    let Some(zip) = zip.filter(|z| !z.is_empty()) else {
+        return bad_request("no zip in request");
+    };
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let job_id = format!("imp-{nanos}");
-    let progress = Arc::new(crate::importer::Progress::default());
-    state.imports.lock().unwrap().insert(job_id.clone(), progress.clone());
+    let into = std::path::Path::new(&state.cfg().daemon.data_dir)
+        .join("import")
+        .join(format!("transmission-{nanos}"));
+    let unpacked = tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&into).map_err(|e| format!("{}: {e}", into.display()))?;
+        let got = crate::importer::unpack_zip(&zip, &into);
+        if got.is_err() {
+            let _ = std::fs::remove_dir_all(&into);
+        }
+        got
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    match unpacked {
+        Ok(dir) => Json(serde_json::json!({"dir": dir.to_string_lossy()})).into_response(),
+        Err(e) => bad_request(&e),
+    }
+}
 
-    // The engine that receives the library. A qBittorrent import is a
-    // takeover of a settled collection, which is a hoard, not a race.
-    let manager = state
-        .engines
-        .engines()
-        .iter()
-        .find(|e| e.id == "hoard")
-        .map(|e| e.manager.clone());
-    let torrent_dir = state.config_path.parent().map(|p| p.join("hoard").join("torrents"));
-
-    tokio::spawn(async move {
-        crate::importer::run_import(creds, progress, move |t, bytes| {
-            let Some(manager) = manager.as_ref() else {
-                return Err("no hoard engine to import into".into());
-            };
-            // seed_mode: the data is already there, whole. Rechecking a
-            // quarter of a million imported torrents would read the entire
-            // library off disk before a single one could be served.
-            manager
-                .add_torrent_bytes(&bytes, &t.save_path, false, true)
-                .map(|_| ())
-        })
-        .await;
-    });
-
-    Json(serde_json::json!({"job_id": job_id})).into_response()
+async fn post_transmission_preview(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let scan = match transmission_library(&body).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let preview = tokio::task::spawn_blocking(move || {
+        let mut p = crate::importer::preview(&scan.cands, |p| p.exists());
+        p.problems = scan.problems;
+        p.without_resume = scan.without_resume;
+        p
+    })
+    .await
+    .unwrap_or_default();
+    Json(preview).into_response()
 }
 
 async fn post_transmission_import_start(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
-    _body: String,
+    body: String,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    Json(serde_json::json!({"job_id": format!("transmission-{secs}"), "status": "ok"}))
-        .into_response()
+    let scan = match transmission_library(&body).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let choices: crate::importer::Choices = serde_json::from_str(&body).unwrap_or_default();
+    let (job_id, progress) = match import_begin(&state) {
+        Ok(x) => x,
+        Err(resp) => return resp,
+    };
+    tracing::info!(job = %job_id, torrents = scan.cands.len(), stopped = choices.start_stopped, "Transmission import started");
+    tokio::spawn(crate::importer::run_job(
+        scan.cands,
+        None,
+        choices,
+        progress,
+        import_categories(&state),
+        import_add(&state),
+    ));
+    Json(serde_json::json!({"job_id": job_id})).into_response()
 }
 
 
@@ -12370,7 +12606,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents/test", axum::routing::post(post_agent_test))
         .route("/api/agents/restore/:name", axum::routing::post(post_agent_restore))
         .route("/api/agents/:name/action", axum::routing::post(post_agent_action))
-        .route("/api/import/transmission/upload", axum::routing::post(post_transmission_upload))
+        .route(
+            "/api/import/transmission/upload",
+            // A config folder of a large library is far past axum's 2 MB
+            // default: one .torrent and one .resume per torrent.
+            axum::routing::post(post_transmission_upload)
+                .layer(axum::extract::DefaultBodyLimit::max(4 << 30)),
+        )
         .route("/api/network/wireguard/configs", axum::routing::post(post_wireguard_config_upload))
         .route("/api/hoard/torrents/:info_hash", get(get_hoard_torrent))
         .route("/api/race/torrents/:info_hash", get(get_race_torrent))
@@ -16200,6 +16442,82 @@ mod populated_tests {
         assert_eq!(of("hoard"), hoard[0].meta.total_size as i64, "a downloading torrent is not seeded");
         assert_eq!(of("race"), race[0].meta.total_size as i64, "a paused one announces nothing");
         assert!(of("hoard") > 0);
+    }
+
+    /// The Transmission import end to end, through its routes: the folder is
+    /// read, the category is created as hoard, the torrent lands in the hoard
+    /// stopped with its carried upload, and a second run skips it.
+    #[tokio::test]
+    async fn a_transmission_folder_is_imported_into_the_hoard_and_not_twice() {
+        let s = st("imp-tr");
+        let dir = std::env::temp_dir().join(format!("imp-tr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("torrents")).unwrap();
+        std::fs::create_dir_all(dir.join("resume")).unwrap();
+        std::fs::write(dir.join("torrents/A.torrent"), torrent_bytes("alpha")).unwrap();
+        std::fs::write(dir.join("resume/A.resume"), b"d11:destination10:/tmp/films8:uploadedi77ee").unwrap();
+        let body = serde_json::json!({"dir": dir, "path_map": {}, "start_stopped": true}).to_string();
+
+        let preview = body_json(
+            super::post_transmission_preview(State(s.state.clone()), RawQuery(None), keyed(KEY), body.clone()).await,
+        )
+        .await;
+        assert_eq!(preview["total"], 1, "got {preview}");
+        assert_eq!(preview["incomplete"], 1, "no progress in the resume: checked, not trusted");
+        assert_eq!(preview["carried_uploaded_bytes"], 77);
+        assert_eq!(preview["categories"][0]["name"], "films");
+
+        let run = || async {
+            let resp = super::post_transmission_import_start(
+                State(s.state.clone()), RawQuery(None), keyed(KEY), body.clone(),
+            )
+            .await;
+            assert!(resp.status().is_success(), "start answered {:?}", resp.status());
+            for _ in 0..500 {
+                if !latest_import(&s.state).expect("a job").1.running() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            latest_import(&s.state).unwrap().1.as_json()
+        };
+        let first = run().await;
+        assert_eq!(first["phase"], "done", "got {first}");
+        assert_eq!((first["done"].as_u64(), first["downloading"].as_u64()), (Some(1), Some(1)), "got {first}");
+
+        let hoard = s.state.engines.get("hoard").expect("hoard").manager.all();
+        assert_eq!(hoard.len(), 1);
+        assert!(hoard[0].is_paused.load(std::sync::atomic::Ordering::Relaxed), "imported stopped");
+        assert_eq!(hoard[0].total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 77);
+        assert_eq!(categories_map(&s.state)["films"].mode, "hoard");
+
+        let second = run().await;
+        assert_eq!(second["skipped"], 1, "already there: skipped, not added twice: {second}");
+        assert_eq!(s.state.engines.get("hoard").unwrap().manager.all().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The qBittorrent preview answers the URL problem only when there is one.
+    #[tokio::test]
+    async fn the_qbit_preview_refuses_an_empty_url_and_reports_an_unreachable_one() {
+        let s = st("imp-qb");
+        let empty = super::post_qbit_import_preview(
+            State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"url":"  "}"#.into(),
+        )
+        .await;
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(empty).await["error"], "empty qBittorrent URL");
+        // A filled URL nobody answers on: the error names it, it is not "empty".
+        let down = body_json(
+            super::post_qbit_import_preview(
+                State(s.state.clone()), RawQuery(None), keyed(KEY),
+                r#"{"url":"127.0.0.1:1","username":"a","password":"b"}"#.into(),
+            )
+            .await,
+        )
+        .await;
+        let msg = down["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("cannot reach qBittorrent at http://127.0.0.1:1"), "got {down}");
     }
 
     /// The overview's space on disk is `null` until the link scanner has
