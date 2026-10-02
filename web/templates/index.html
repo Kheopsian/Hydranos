@@ -797,6 +797,7 @@
                             <select id="wf-trigger" onchange="_wfSyncTrigger()">
                                 <option value="schedule">on a timer</option>
                                 <option value="completed">when a download completes</option>
+                                <option value="added">when a torrent is added</option>
                             </select>
                         </div>
                         <div class="form-group wf-schedule-only">
@@ -814,6 +815,12 @@
                         Once per download, when its last piece is verified: the moment its trackers
                         are told it completed. A torrent added with its data already on disk, or
                         rechecked whole, never fires it. Leave no condition to act on every download.
+                    </p>
+                    <p class="sr-desc wf-added-only" style="margin:0 0 6px; display:none">
+                        Once per torrent, right after it is added: by hand, by autobrr or the *arrs
+                        through the qBittorrent API, from a magnet once resolved, or from a watched
+                        folder. Moving a torrent and importing a library from another client do not
+                        fire it. Leave no condition to act on every new torrent.
                     </p>
                     <div id="wf-conds"></div>
 
