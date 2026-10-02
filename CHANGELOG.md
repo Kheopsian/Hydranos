@@ -31,6 +31,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   store -- by its SHA-256 truncated to 20 bytes, as BEP 52 says. A hybrid is
   read as the v1 torrent it also is. Proven against libtorrent with torrents
   its own creator made: same info hashes, transfers both ways.
+- **Seed size, and the space it takes.** The Trackers tab has a "Seed size"
+  column: the size of every torrent seeding to that tracker, which is what
+  the tracker credits (a cross-seed counts under each of its trackers). The
+  Overview shows the seed size per engine, and a Storage card that sets the
+  total against the data on disk, each hardlinked file counted once, split
+  into what other folders (a media library, a backup) also hold and what
+  only the torrents hold. The disk figures come from the link scanner's
+  measurements, so they can be up to a day old; the card says when they were
+  counted. `GET /api/status` carries them under `storage` and as
+  `seed_size` in the `hoard` and `race` blocks, `null` until counted.
 - **"Hardlinks" and "Checked" columns in the hoard table** (hidden by
   default, sortable). Hardlinks is the number workflows call
   `external_links`: names of the torrent's files held outside the client,

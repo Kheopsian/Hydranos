@@ -103,6 +103,10 @@ pub struct EngineHost {
     /// Kept here because it describes these engines' catalogue, and both the
     /// scanner and the API already hold this host.
     link_summary: std::sync::RwLock<Arc<crate::linkindex::Summary>>,
+    /// The catalogue's space on disk and when it was counted, published by the
+    /// link scanner only. Apart from `link_summary` because a workflow pass
+    /// publishes that one too, and must not wipe a figure it does not compute.
+    catalogue_usage: std::sync::RwLock<Option<(crate::linkindex::DiskUsage, i64)>>,
 }
 
 impl EngineHost {
@@ -234,6 +238,7 @@ impl EngineHost {
             released: std::sync::Mutex::new(Default::default()),
             completions: std::sync::Mutex::new(Some(completed_rx)),
             link_summary: Default::default(),
+            catalogue_usage: Default::default(),
         }
     }
 
@@ -248,6 +253,18 @@ impl EngineHost {
     pub fn publish_link_summary(&self, summary: crate::linkindex::Summary) {
         if let Ok(mut g) = self.link_summary.write() {
             *g = Arc::new(summary);
+        }
+    }
+
+    /// The last counted space on disk with its unix time, `None` before the
+    /// link scanner's first count.
+    pub fn catalogue_usage(&self) -> Option<(crate::linkindex::DiskUsage, i64)> {
+        self.catalogue_usage.read().ok().and_then(|g| *g)
+    }
+
+    pub fn publish_catalogue_usage(&self, usage: crate::linkindex::DiskUsage, at: i64) {
+        if let Ok(mut g) = self.catalogue_usage.write() {
+            *g = Some((usage, at));
         }
     }
 
