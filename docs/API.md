@@ -48,6 +48,9 @@ Auth = `X-API-Key`.
 
 **État / stats**
 - `GET /api/status` — état global (baseline, hoard{...}, day_uploaded...).
+  - `hoard.seed_size` / `race.seed_size` — octets des torrents **en seed et non pausés** du moteur (passe trackers, ≤ 30 s). `null` avant la 1re passe.
+  - `storage` — `seeded_bytes` (somme des seed sizes), `data_bytes` (fichiers mesurés, **chaque inode compté une fois** : un cross-seed hardlinké = un fichier), `shared_bytes` (part de `data_bytes` dont un nom existe hors catalogue, même règle que `external_links`), `missing_files`, `measured_torrents`, `measured_at` (unix). Vient du scanner de liens : **jusqu'à 24 h de retard**, tailles logiques (avant compression ZFS). `null` avant son premier comptage.
+- `GET /api/benchmark/trackers/current` — une ligne par (moteur, tracker) : débits, pairs, `torrents`, cumuls, et `seed_size` (taille des torrents en seed, ce que le tracker crédite ; un cross-seed compte sous chacun de ses trackers).
 - `GET /api/hoard/torrents` — **liste hoard complète** (info_hash, name, state, progress, save_path, total_size, total_upload, swarm_seeds, tracker_error, tracker_error_msg...). LA source pour auditer.
   - `seeding_time` (secondes) est un **compteur cumulatif** depuis v3.130.0 : il n'avance que quand le torrent est complet et non stoppé par l'utilisateur (un torrent en attente d'un ordonnanceur ou en serving-suspend compte). Ce n'est plus `now - completed_time`. Les torrents antérieurs ont été **amorcés une seule fois** depuis l'ancienne formule, c'est donc une borne haute pour eux.
 - `GET /api/race/torrents` — liste race.
