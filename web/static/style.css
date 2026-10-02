@@ -1010,13 +1010,37 @@ input[type="file"] {
     display: flex;
     align-items: center;
     gap: 12px;
-    flex-wrap: wrap;
+    /* One line, always. The search box takes whatever the chips leave: it used
+       to be capped at 280 px and squeezed first, so on a laptop it shrank to a
+       stub and jumped every time a chip count changed length. */
+    flex-wrap: nowrap;
+}
+.hoard-filter-bar input[type="text"] {
+    flex: 1 1 140px;
+    min-width: 140px;
+    max-width: none;
+}
+.hoard-filter-bar #hoard-filter-count {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+}
+/* A 1280 px laptop is ~40 px short of one line at a million torrents: tighter
+   chips buy it back. Below ~1180 px one line cannot hold, so it wraps rather
+   than pushing "Error" off the screen. */
+@media (max-width: 1400px) {
+    .hoard-chips-state { gap: 4px; }
+    .hoard-chips-state .chip { padding: 3px 7px; }
+}
+@media (max-width: 1180px) {
+    .hoard-filter-bar { flex-wrap: wrap; }
+    .hoard-chips-state { flex-wrap: wrap; }
 }
 .hoard-chips-state {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 6px;
-    flex: 1 1 auto;
+    /* Natural width, never grown: the leftover goes to the search box. */
+    flex: 0 0 auto;
     /* Inherited from .hoard-chips-row, and it is the MARGIN box that a flex
        parent centres: 22px of chips plus 6px underneath, centred in 28px,
        lifts what you actually see by 3px. Visible to the eye against the
@@ -1864,6 +1888,8 @@ footer {
     .race-filter-bar input[type="text"] { max-width: 100%; }
     .hoard-filter-bar,
     .race-filter-bar { flex-wrap: wrap; }
+    /* A phone has no room for one line: the chips get their own and wrap. */
+    .hoard-chips-state { flex: 1 1 100%; flex-wrap: wrap; }
 
     /* Startup track */
     .startup-track { width: 85vw; }
