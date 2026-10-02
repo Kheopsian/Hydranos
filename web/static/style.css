@@ -2591,9 +2591,12 @@ footer {
 .ar.hot .via { color: var(--accent-hoard); }
 @media (max-width: 520px) { .ar { grid-template-columns: 1fr auto; } .ar .via { display: none; } }
 
-/* Fix largeur Overview : 3 colonnes pleines (l.auto-fit laissait une colonne vide à droite à cause du milestone en 1/-1) */
-#tab-overview .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-@media (max-width: 1000px) { #tab-overview .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* Fixed columns, not auto-fit: auto-fit left an empty column to the right of
+ * the full-width milestone card. */
+/* Two per row, not three: with Storage the overview has four cards under the
+ * wide one, and three columns left Records alone on a second row beside two
+ * empty slots. 2x2 reads as Race | Hoard, then Storage | Records. */
+#tab-overview .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 640px)  { #tab-overview .cards { grid-template-columns: 1fr; } }
 
 /* pastilles moteur retirées (rendu blob bizarre) — masquées live, spans retirés du HTML au prochain build */
