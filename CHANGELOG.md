@@ -51,6 +51,24 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   `external_links`, `links_checked_at` (null when unmeasured).
 
 ### Fixed
+- **Importing from qBittorrent or Transmission works again -- it had never
+  been ported to v4.** The qBittorrent preview answered "empty qBittorrent
+  URL" whatever was typed; the Transmission upload and preview refused every
+  request, and its start answered "ok" without importing anything. All of it
+  now does what the wizard says:
+  - The preview logs in and lists the library (or reads Transmission's
+    `torrents/` and `resume/`, from a folder or an uploaded zip): complete,
+    partial and stopped counts, carried upload, categories to create, the
+    folders to remap, and a sample of torrents whose data is looked for.
+  - The import applies the path mapping, creates missing categories as hoard
+    (an existing one is left alone), adds every torrent to the hoard, and
+    keeps it stopped when asked (the default) or when it was stopped in the
+    source client. A torrent is trusted without a hash check only when the
+    source says complete AND its data is found where Hydranos will look;
+    otherwise it is checked. Its lifetime upload and download come along.
+    A torrent Hydranos already holds is skipped, not added twice.
+  - The progress screen follows the job live; one import runs at a time
+    (a second start answers 409).
 - **One ratio in the table, the sort, the filters and the workflows.** The
   table divided upload by the data held, the rest by the download: a
   cross-seed (downloaded 0) read 3.2 in the table and 0 everywhere else, so

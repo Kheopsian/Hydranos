@@ -46,6 +46,13 @@ Auth = `X-API-Key`.
   - `session_runtimes` (`value`, ≥1) — taille du pool. **Refusé (400) une fois le pool construit** (= après le premier `session_pinning:true`) : démonter des runtimes qui portent des sessions vivantes n'est pas le rôle d'un bouton de mesure. Défaut = `TYPHON_SESSION_RUNTIMES`, sinon 1/cœur.
 
 
+**Import depuis un autre client** (une tâche à la fois, la plus récente est suivie)
+- `POST /api/import/qbit/preview` `{url, username, password}` → `{total, completed, incomplete, stopped, carried_uploaded_bytes, categories:[{name,save_path}], path_prefixes, data_checked, data_found}`. URL sans schéma = `http://`. 400 identifiants refusés / injoignable, 502 liste illisible.
+- `POST /api/import/qbit/start` `{url, username, password, path_map:{"/chemin/qbit":"/chemin/hydranos"}, start_stopped}` → `{job_id}`. `start_stopped` par défaut **true**. 409 si un import tourne déjà.
+- `POST /api/import/transmission/upload` (multipart `file` = zip du dossier de config, ≤ 4 Gio) → `{dir}` (décompressé sous `<data_dir>/import/`). `POST /api/import/transmission/preview` `{dir, categories_from_dirs, import_labels}` → comme qBit + `problems`, `without_resume`. `POST /api/import/transmission/start` = preview + `path_map`, `start_stopped`.
+- `GET /api/import/qbit/status` → progression de la dernière tâche + `running`, `job_id` ; `GET /api/import/qbit/events` = la même chose en SSE (2/s) jusqu'à `finished`, 404 si aucun import.
+- Règles : catégories créées en `hoard` si absentes (une existante n'est pas touchée) ; tout va au hoard ; **seed sans vérification seulement si complet ET données trouvées au chemin mappé**, sinon vérification ; upload/download à vie repris ; un torrent déjà présent (n'importe quel moteur) = `skipped`.
+
 **État / stats**
 - `GET /api/status` — état global (baseline, hoard{...}, day_uploaded...).
   - `hoard.seed_size` / `race.seed_size` — octets des torrents **en seed et non pausés** du moteur (passe trackers, ≤ 30 s). `null` avant la 1re passe.
