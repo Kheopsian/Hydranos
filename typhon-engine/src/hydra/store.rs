@@ -256,12 +256,29 @@ fn split_tags(raw: &str) -> Vec<String> {
                 .collect();
         }
     }
-    trimmed
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    // A piece that is itself a JSON list is flattened: `tags_of` once read the
+    // JSON form as one comma-separated tag and wrote it back with the new one
+    // appended, which left 479 rows reading `["cross-seed"],noHL` (01/10/2026)
+    // -- a tag literally named `["cross-seed"]` that no filter could select.
+    let mut out = Vec::new();
+    for piece in trimmed.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if piece.starts_with('[') {
+            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(piece) {
+                out.extend(
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                );
+                continue;
+            }
+        }
+        out.push(piece.to_string());
+    }
+    out.dedup();
+    out
 }
 
 /// One torrent's share of `SlimFacts`: eight bytes, no allocation.
@@ -2186,17 +2203,19 @@ impl Store {
         Ok(())
     }
 
-    /// Tags of one torrent, as stored: a comma-separated list.
+    /// Tags of one torrent, read the way every other reader reads them.
+    ///
+    /// ⚠ Through `split_tags`, never a bare comma split: rows written by the
+    /// qBit shim hold a JSON list (`["cross-seed"]`, 95k of them in prod). A
+    /// comma split returned that whole string as ONE tag, and every add or
+    /// remove wrote it back -- the workflow tagging noHL on 01/10/2026 turned
+    /// 479 cross-seeds into a tag named `["cross-seed"]`.
     pub fn tags_of(&self, info_hash: &str) -> Vec<String> {
         let raw: String = self
             .conn
             .query_row("SELECT tags FROM torrents WHERE info_hash = ?1 LIMIT 1", [info_hash], |r| r.get(0))
             .unwrap_or_default();
-        raw.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect()
+        split_tags(&raw)
     }
 
     /// Push the engines' seed counters into the column the UI and the rules
@@ -3602,6 +3621,22 @@ mod absorb_and_copies_tests {
         assert_eq!(got, vec!["anime".to_string(), "fr".to_string()]);
         s.set_tags(H, &[]).unwrap();
         assert!(s.tags_of(H).is_empty());
+    }
+
+    #[test]
+    fn tags_stored_as_json_read_as_tags_and_survive_an_edit() {
+        let s = store();
+        add(&s, H, "race");
+        s.conn.execute("UPDATE torrents SET tags = '[\"cross-seed\"]' WHERE info_hash = ?1", [H]).unwrap();
+        assert_eq!(s.tags_of(H), vec!["cross-seed".to_string()]);
+        // What a tag action does: read, append, write back.
+        let mut tags = s.tags_of(H);
+        tags.push("noHL".into());
+        s.set_tags(H, &tags).unwrap();
+        assert_eq!(s.tags_of(H), vec!["cross-seed".to_string(), "noHL".to_string()]);
+        // And the rows the old read already damaged come back whole.
+        s.conn.execute("UPDATE torrents SET tags = '[\"cross-seed\"],noHL' WHERE info_hash = ?1", [H]).unwrap();
+        assert_eq!(s.tags_of(H), vec!["cross-seed".to_string(), "noHL".to_string()]);
     }
 
     #[test]
