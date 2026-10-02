@@ -2855,13 +2855,16 @@ function renderHoardTable() {
 //
 // Meta keys (__none__) are drawn by their own branch below and are kept out of
 // this list.
+// Alphabetical as a person reads it: "animes" between "ABNormal" and
+// "Calewood", not after every capitalised name as a bare `.sort()` puts it.
+const _facetCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 function _facetKeys(counts, inc, exc, metas, seen) {
     const out = Object.keys(counts);
     for (const k of inc.concat(exc).concat(seen ? [...seen] : [])) {
         if (!metas.includes(k) && !out.includes(k)) out.push(k);
     }
     if (seen) for (const k of Object.keys(counts)) seen.add(k);
-    return out.filter(k => !metas.includes(k)).sort();
+    return out.filter(k => !metas.includes(k)).sort(_facetCollator.compare);
 }
 
 // Every chip a family has shown since the page loaded. A search narrows the
