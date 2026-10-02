@@ -395,7 +395,7 @@ pub async fn preview(
 /// and the convergence check exactly as the event will run them, minus the
 /// cap, which an event of one torrent never reaches.
 fn preview_completion(state: &AppState, w: &Workflow) -> Result<serde_json::Value, String> {
-    let mut facts = gather_all(state, rules::uses_field(&w.when, "free_space"));
+    let mut facts = gather_all(state, rulesrun::Want::of(w));
     facts.retain(|f| f.progress < 100.0);
     let unbounded = Workflow { cap: usize::MAX, ..w.clone() };
     let (matches, report) = rulesrun::evaluate(&unbounded, &facts)?;
@@ -424,7 +424,7 @@ fn preview_completion(state: &AppState, w: &Workflow) -> Result<serde_json::Valu
 /// the closest stand-in for what keeps arriving, judged by the filter and the
 /// convergence check exactly as the event will judge each new one.
 fn preview_added(state: &AppState, w: &Workflow) -> Result<serde_json::Value, String> {
-    let mut facts = gather_all(state, rules::uses_field(&w.when, "free_space"));
+    let mut facts = gather_all(state, rulesrun::Want::of(w));
     facts.retain(|f| f.added_age < RECENT_ADD_SECS);
     let unbounded = Workflow { cap: usize::MAX, ..w.clone() };
     let (matches, report) = rulesrun::evaluate(&unbounded, &facts)?;
@@ -451,8 +451,8 @@ fn preview_added(state: &AppState, w: &Workflow) -> Result<serde_json::Value, St
 const RECENT_ADD_SECS: f64 = 86400.0;
 
 /// Facts for every engine this node runs.
-fn gather_all(state: &AppState, want_free_space: bool) -> Vec<rules::Facts> {
-    gather_all_with(state, &std::collections::HashMap::new(), want_free_space)
+fn gather_all(state: &AppState, want: rulesrun::Want) -> Vec<rules::Facts> {
+    gather_all_with(state, &std::collections::HashMap::new(), want)
 }
 
 /// What one pass decided, and the link facts it decided on.
@@ -481,7 +481,7 @@ struct Decision {
 /// before anything is done to it.
 fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
     if !rules::needs_link_scan(&w.when) {
-        let facts = gather_all(state, rules::uses_field(&w.when, "free_space"));
+        let facts = gather_all(state, rulesrun::Want::of(w));
         let (matches, report) = rulesrun::evaluate(w, &facts)?;
         return Ok(Decision {
             matches,
@@ -507,7 +507,7 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
     let rulesrun::StoredLinks { mut entries, origin, mut measured_at, links } =
         rulesrun::links_from_store(&cat, &rows);
     drop(rows);
-    let mut facts = gather_all_with(state, &links, rules::uses_field(&w.when, "free_space"));
+    let mut facts = gather_all_with(state, &links, rulesrun::Want::of(w));
     let (first, _) = rulesrun::evaluate(w, &facts)?;
 
     let want: std::collections::HashSet<String> =
@@ -555,7 +555,7 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
 fn gather_all_with(
     state: &AppState,
     links: &std::collections::HashMap<String, crate::linkindex::LinkFacts>,
-    want_free_space: bool,
+    want: rulesrun::Want,
 ) -> Vec<rules::Facts> {
     let ids: Vec<String> = state
         .engines
@@ -569,7 +569,7 @@ fn gather_all_with(
     let store = state.store.read().unwrap();
     let mut out = Vec::new();
     for id in ids {
-        out.extend(rulesrun::gather(&state.engines, &store, &id, links, want_free_space));
+        out.extend(rulesrun::gather(&state.engines, &store, &id, links, want));
     }
     out
 }
@@ -689,6 +689,12 @@ fn apply_matches(
         crate::api::remove_one_torrent(state, hash, &[engine.to_string()], engine, with_files)
             .map(|_| ())
     };
+    // Moves and tracker edits too: the job "Set location..." queues, the edit
+    // the tracker editor makes.
+    let move_hook = |engine: &str, hash: &str, to: &str, allow: bool| {
+        crate::api::queue_location_move(state, engine, hash, to, allow)
+    };
+    let trackers_hook = |_engine: &str, hash: &str, urls: &[String]| crate::api::add_trackers_to(state, hash, urls);
 
     for m in matches {
         let action_name = m
@@ -702,6 +708,8 @@ fn apply_matches(
                 rules::Action::RemoveTags { .. } => "remove_tags",
                 rules::Action::Delete { .. } => "delete",
                 rules::Action::Webhook { .. } => "webhook",
+                rules::Action::SetLocation { .. } => "set_location",
+                rules::Action::AddTrackers { .. } => "add_trackers",
             })
             .collect::<Vec<_>>()
             .join("+");
@@ -713,6 +721,8 @@ fn apply_matches(
             m,
             &hook,
             &delete_hook,
+            &move_hook,
+            &trackers_hook,
             links.get(&m.info_hash),
         ) {
             Ok(()) => {
@@ -1548,6 +1558,93 @@ mod event_tests {
         assert!(body_json(r).await["error"].as_str().unwrap().contains("torrent is added"));
     }
 
+    fn torrent_bytes_private(name: &str) -> Vec<u8> {
+        let mut t = torrent_bytes(name);
+        // Inside the info dict, after `pieces` (keys stay sorted).
+        let at = t.len() - 2;
+        t.splice(at..at, b"7:privatei1e".iter().copied());
+        t
+    }
+
+    async fn save_wf_then(s: &TestState, trigger: &str, then: serde_json::Value) -> String {
+        let body = serde_json::json!({
+            "id": "", "name": "wf", "enabled": true, "trigger": trigger,
+            "when": {"kind": "all", "of": []}, "then": then,
+        });
+        let r = save(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let status = r.status();
+        let v = body_json(r).await;
+        assert!(status.is_success(), "saved: {v}");
+        v["id"].as_str().unwrap().to_string()
+    }
+
+    fn trackers_of(s: &TestState, hash: &str) -> Vec<String> {
+        let ih = crate::store::hex20(hash).unwrap();
+        let e = s.state.engines.engines().iter().find(|e| e.id == "hoard").unwrap();
+        e.manager.get(&ih).unwrap().live_trackers.read().iter().flatten().cloned().collect()
+    }
+
+    /// "Add trackers" on arrival adds to a public torrent, and NEVER to a
+    /// private one, whatever the conditions say.
+    #[tokio::test]
+    async fn trackers_are_added_on_arrival_but_never_to_a_private_torrent() {
+        let s = st("wf-addtrk");
+        save_wf_then(&s, "added", serde_json::json!([
+            {"type": "add_trackers", "urls": ["udp://open.example:1337/announce"]}
+        ])).await;
+        let public = add(&s, "public");
+        let private = crate::api::add_torrent_bytes(&s.state, &torrent_bytes_private("private"), "", "/tmp", "", true, false, "hoard")
+            .expect("added").0;
+        run_events(&s.state);
+        assert!(trackers_of(&s, &public).contains(&"udp://open.example:1337/announce".to_string()));
+        assert!(trackers_of(&s, &private).is_empty(), "a private torrent keeps its own trackers only");
+    }
+
+    /// A refused URL never reaches a torrent: the workflow does not save.
+    #[tokio::test]
+    async fn add_trackers_refuses_what_is_not_an_announce_url() {
+        let s = st("wf-addtrk-bad");
+        for then in [
+            serde_json::json!([{"type": "add_trackers", "urls": ["ftp://x/announce"]}]),
+            serde_json::json!([{"type": "add_trackers"}]),
+            serde_json::json!([{"type": "set_location", "to": "relative/dir"}]),
+            serde_json::json!([{"type": "set_location", "to": "/data/../etc"}]),
+        ] {
+            let body = serde_json::json!({"id": "", "name": "x", "enabled": true, "trigger": "added",
+                "when": {"kind": "all", "of": []}, "then": then});
+            let r = save(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "accepted {body}");
+        }
+    }
+
+    /// "Move files to a folder" when a download completes queues the same
+    /// data move "Set location..." does, and only once: a torrent already
+    /// there is left alone.
+    #[tokio::test]
+    async fn a_completed_download_is_moved_to_its_folder() {
+        let s = st("wf-move");
+        let root = std::env::temp_dir().join(format!("wf-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, dst) = (root.join("temp"), root.join("final"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("moved"), vec![0u8; 16384]).unwrap();
+        let hash = crate::api::add_torrent_bytes(&s.state, &torrent_bytes("moved"), "", src.to_str().unwrap(), "", true, true, "hoard")
+            .expect("added").0;
+        save_wf_then(&s, "completed", serde_json::json!([
+            {"type": "set_location", "to": dst.to_str().unwrap()}
+        ])).await;
+        s.state.store.lock().unwrap().push_workflow_event("completed", "hoard", &hash).unwrap();
+        run_events(&s.state);
+        let jobs = s.state.store.lock().unwrap().list_jobs(10).unwrap();
+        let moves: Vec<_> = jobs.iter().filter(|j| j.info_hash == hash).collect();
+        assert_eq!(moves.len(), 1, "one move queued: {jobs:?}");
+        assert!(moves[0].params.contains("final"), "towards the folder asked: {:?}", moves[0].params);
+        let act = s.state.store.lock().unwrap().workflow_activity(10).unwrap();
+        assert_eq!((act[0].action.as_str(), act[0].outcome.as_str()), ("set_location", "applied"), "{act:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// ⭐ The whole road: the engine says a download finished, through the
     /// hook `EngineHost` installs; the completion workflow acts on that
     /// torrent, the scheduled one does not, and the event is gone after.
@@ -1860,7 +1957,7 @@ mod one_number_tests {
         assert_eq!(order, vec![xseed.as_str(), two.as_str(), one.as_str()]);
 
         // The workflow facts.
-        let facts = gather_all(&s.state, false);
+        let facts = gather_all(&s.state, Default::default());
         let ratio_of = |h: &str| facts.iter().find(|f| f.info_hash == h).expect("facts").ratio;
         assert_eq!(ratio_of(&xseed), 3.0);
         assert_eq!(ratio_of(&two), 2.0);

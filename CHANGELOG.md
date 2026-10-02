@@ -24,6 +24,19 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- an endpoint for agents
 
 ### Added
+- **Two workflow actions: move files to a folder, and add trackers.**
+  - *Move files to a folder* moves a torrent's data, category unchanged --
+    the job *Set location...* queues, with its refusals (hardlinked files are
+    not copied across disks unless allowed, not enough space). The classic
+    use: *when a download completes*, move it from the temporary folder to
+    the final one. Done once the torrent is in the folder.
+  - *Add trackers* adds announce URLs given one per line, and/or the URL of
+    a list (ngosang's trackerslist, say), fetched at most once a day and kept
+    if a later fetch fails. **Never applied to a private torrent**, whatever
+    the conditions: it is skipped, and the action checks the flag again on
+    the engine before touching anything. Every tracker added learns the
+    node's IP for the torrent. Done once every tracker is present.
+  - New condition field `private`.
 - **The peer lists in the detail panels sort, reorder and hide their
   columns**, like the torrent tables: click a header to sort (a number column
   starts with the biggest, a text one from A; again to reverse), drag a header
@@ -57,6 +70,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   `external_links`, `links_checked_at` (null when unmeasured).
 
 ### Fixed
+- **The workflow action that changes a category says it moves nothing.** It
+  read "move to category" and only changed the label; it is now "set
+  category (files stay)", and *move files to a folder* is the one that moves.
 - **Categories are in alphabetical order, whatever their case** -- the hoard's
   filter chips and every category list (`GET /api/categories`: the add
   dialog, *Move to category*, settings, workflows). They were in byte order,

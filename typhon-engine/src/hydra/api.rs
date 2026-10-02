@@ -6327,40 +6327,45 @@ fn queue_data_move(
     to: Option<String>,
     allow: bool,
 ) -> Response {
+    match queue_data_move_core(state, hash, engine, category, plan, name, total, to, allow) {
+        Ok(v) => (StatusCode::ACCEPTED, Json(v)).into_response(),
+        Err((code, v)) => (code, Json(v)).into_response(),
+    }
+}
+
+fn queue_data_move_core(
+    state: &AppState,
+    hash: &str,
+    engine: &str,
+    category: &str,
+    plan: crate::jobsrun::MovePlan,
+    name: &str,
+    total: i64,
+    to: Option<String>,
+    allow: bool,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     // Refused whatever the operator agrees to: these are not a cost to accept
     // but a move that would damage something that is not this torrent.
     if let Some((reason, why)) = plan.refusal() {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": why, "reason": reason, "plan": plan.summary()})),
-        )
-            .into_response();
+        return Err((StatusCode::CONFLICT, serde_json::json!({"error": why, "reason": reason, "plan": plan.summary()})));
     }
     let (hl_files, hl_bytes) = plan.hardlinked();
     if hl_files > 0 && !allow {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
+        return Err((StatusCode::CONFLICT, serde_json::json!({
                 "error": "moving would break hardlinks",
                 "reason": "hardlinks",
                 "hardlinked_files": hl_files,
                 "hardlinked_bytes": hl_bytes,
                 "plan": plan.summary(),
-            })),
-        )
-            .into_response();
+            })));
     }
     if let Some(free) = crate::jobs::free_space_near(&plan.new_root) {
         if free < plan.copy_bytes() {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
+            return Err((StatusCode::CONFLICT, serde_json::json!({
                     "error": "not enough free space at the target",
                     "reason": "space",
                     "plan": plan.summary(),
-                })),
-            )
-                .into_response();
+                })));
         }
     }
     let save_path = plan.new_root.to_string_lossy().to_string();
@@ -6371,16 +6376,8 @@ fn queue_data_move(
             state, hash, name, engine, to, category, &save_path, allow, total)),
     };
     match queued {
-        Some(job) => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({"status": "moving", "job": job, "kind": kind, "plan": plan.summary()})),
-        )
-            .into_response(),
-        None => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "a move is already queued or running for this torrent"})),
-        )
-            .into_response(),
+        Some(job) => Ok(serde_json::json!({"status": "moving", "job": job, "kind": kind, "plan": plan.summary()})),
+        None => Err((StatusCode::CONFLICT, serde_json::json!({"error": "a move is already queued or running for this torrent"}))),
     }
 }
 
@@ -6458,6 +6455,26 @@ async fn post_location(state: &AppState, info_hash: &str, query: &str, body: &st
     }
     let (name, total) = (torrent.meta.name.clone(), torrent.meta.total_size as i64);
     queue_data_move(state, &hash, &engine, "", plan, &name, total, None, allow)
+}
+
+/// Queue a move of one copy's data to `location`, as "Set location..." does:
+/// the same plan, the same refusals. For a workflow action. Already there,
+/// or already being moved, is not an error -- the next pass sees it settle.
+pub(crate) fn queue_location_move(state: &AppState, engine: &str, hash: &str, location: &str, allow: bool) -> Result<(), String> {
+    let location = location_path(location)?;
+    let Some(torrent) = find_copy(state, engine, hash) else {
+        return Err("torrent not found".into());
+    };
+    let plan = crate::jobsrun::plan_move_checked(state, &torrent, &location);
+    if plan.is_noop() {
+        return Ok(());
+    }
+    let (name, total) = (torrent.meta.name.clone(), torrent.meta.total_size as i64);
+    match queue_data_move_core(state, hash, engine, "", plan, &name, total, None, allow) {
+        Ok(_) => Ok(()),
+        Err((_, v)) if v["error"].as_str().is_some_and(|e| e.contains("already queued")) => Ok(()),
+        Err((_, v)) => Err(v["error"].as_str().unwrap_or("move refused").to_string()),
+    }
 }
 
 async fn set_torrent_location(
@@ -8467,8 +8484,23 @@ struct TrackerEdit {
 
 /// Edit the tracker list of one torrent.
 fn edit_trackers(state: &AppState, info_hash: &str, req: &TrackerEdit) -> Response {
+    match edit_trackers_core(state, info_hash, req) {
+        Ok((next, changed)) => Json(serde_json::json!({"trackers": next, "changed": changed})).into_response(),
+        Err((StatusCode::NOT_FOUND, _)) => not_found(),
+        Err((code, message)) => (code, Json(serde_json::json!({"error": message}))).into_response(),
+    }
+}
+
+/// Add announce URLs to one torrent through the editor's own path. For a
+/// workflow action; answers whether anything changed.
+pub(crate) fn add_trackers_to(state: &AppState, info_hash: &str, urls: &[String]) -> Result<bool, String> {
+    let req = TrackerEdit { op: "add".into(), urls: urls.to_vec(), ..Default::default() };
+    edit_trackers_core(state, info_hash, &req).map(|(_, changed)| changed).map_err(|(_, m)| m)
+}
+
+fn edit_trackers_core(state: &AppState, info_hash: &str, req: &TrackerEdit) -> Result<(Vec<Vec<String>>, bool), (StatusCode, String)> {
     let Some((_, torrent)) = find_torrent(state, info_hash) else {
-        return not_found();
+        return Err((StatusCode::NOT_FOUND, "torrent not found".into()));
     };
 
     // The row carries its tracker host, so an edit changes what the list
@@ -8505,23 +8537,14 @@ fn edit_trackers(state: &AppState, info_hash: &str, req: &TrackerEdit) -> Respon
                     // revert at the next restart: the operator would believe a
                     // tracker was added and find out weeks later, when the
                     // credit did not arrive.
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error":
-                            "this torrent has no stored .torrent yet, so the edit could not be saved. \
-A torrent added moments ago is written to the store on the next state sync; try again shortly"})),
-                    )
-                        .into_response();
+                    return Err((StatusCode::BAD_REQUEST, "this torrent has no stored .torrent yet, so the edit could not be saved. \
+A torrent added moments ago is written to the store on the next state sync; try again shortly".to_string()));
                 }
                 *torrent.live_trackers.write() = next.clone();
             }
-            Json(serde_json::json!({"trackers": next, "changed": changed})).into_response()
+            Ok((next, changed))
         }
-        Err(message) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": message})),
-        )
-            .into_response(),
+        Err(message) => Err((StatusCode::BAD_REQUEST, message)),
     }
 }
 
