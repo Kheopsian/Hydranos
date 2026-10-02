@@ -57,6 +57,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   `external_links`, `links_checked_at` (null when unmeasured).
 
 ### Fixed
+- **Categories are in alphabetical order, whatever their case** -- the hoard's
+  filter chips and every category list (`GET /api/categories`: the add
+  dialog, *Move to category*, settings, workflows). They were in byte order,
+  which put every capitalised name (`Calewood`, `MAM`) before every
+  lowercase one (`animes`). Tracker and tag chips use the same order.
 - **Clicking a control that redraws itself no longer closes the detail
   panel.** The "click outside closes the panel" check looked for the panel
   above the clicked element, and found none when the element had just been

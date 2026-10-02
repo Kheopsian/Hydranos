@@ -1810,7 +1810,9 @@ async fn get_categories(
     });
 
     // On disk it is a map keyed by name; the API publishes a list with the name
-    // folded in, sorted. BTreeMap already iterates in that order.
+    // folded in, in alphabetical order -- sorted again below, because the
+    // BTreeMap's order is BYTE order, which puts every capitalised name
+    // ("Calewood", "MAM") before every lowercase one ("animes").
     // A document that will not parse yields an empty list, as in 3.x, but it is
     // logged: silently serving [] for a list the user has configured is the
     // kind of failure nobody notices until a category stops being applied.
@@ -1831,6 +1833,9 @@ async fn get_categories(
             cat
         })
         .collect();
+    let mut out = out;
+    // Ties on case ("Films" and "films") keep byte order, so the list is stable.
+    out.sort_by_cached_key(|c| (c.name.to_lowercase(), c.name.clone()));
     Json(out).into_response()
 }
 
@@ -16464,6 +16469,19 @@ mod populated_tests {
         assert_eq!(of("hoard"), hoard[0].meta.total_size as i64, "a downloading torrent is not seeded");
         assert_eq!(of("race"), race[0].meta.total_size as i64, "a paused one announces nothing");
         assert!(of("hoard") > 0);
+    }
+
+    /// Categories are listed alphabetically, whatever their case: byte order
+    /// put every capitalised name before every lowercase one.
+    #[tokio::test]
+    async fn categories_are_listed_alphabetically_whatever_their_case() {
+        let s = st("cats-alpha");
+        for name in ["MAM", "animes", "Calewood", "kids", "ABNormal"] {
+            crate::api::testing::put_category(&s.state, name, "hoard", "/tmp");
+        }
+        let v = body_json(super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let names: Vec<&str> = v.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["ABNormal", "animes", "Calewood", "kids", "MAM"]);
     }
 
     /// The Transmission import end to end, through its routes: the folder is
