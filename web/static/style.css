@@ -3986,3 +3986,60 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
    these files", so it is told apart by colour (not by opacity, which costs
    contrast). Matched selector for selector with the table cell rules. */
 #hoard-table td.hl-zero { color: var(--accent-green); }
+
+/* ── Trackers tab on a phone: one card per row, as the torrent tables ──────
+   Both tables were wider than the screen (886 and 723 px at 390): Passkey,
+   Actions, Peers, the totals and the seed size fell off the right edge. Each
+   cell becomes a labelled line (`data-label`, set by `_labelCells`). */
+.trk-cont { visibility: hidden; }
+@media (max-width: 768px) {
+    #trackers-table, #trkstats-table, #trk-hidden-table,
+    #trackers-table tbody, #trkstats-table tbody, #trk-hidden-table tbody,
+    #trackers-table tr, #trkstats-table tr, #trk-hidden-table tr,
+    #trackers-table td, #trkstats-table td, #trk-hidden-table td {
+        display: block;
+        width: auto;
+        max-width: none !important;
+    }
+    #trackers-table thead, #trkstats-table thead, #trk-hidden-table thead { display: none; }
+    #trackers-table tr, #trkstats-table tr, #trk-hidden-table tr {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 10px 12px;
+        margin-bottom: 8px;
+    }
+    #trackers-table td, #trkstats-table td, #trk-hidden-table td {
+        border: none;
+        padding: 2px 0;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px 8px;
+        /* The errors cell is one ellipsed line on a desktop (inline style). */
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        overflow-wrap: anywhere;
+    }
+    #trackers-table td::before, #trkstats-table td::before, #trk-hidden-table td::before {
+        content: attr(data-label);
+        flex: 0 0 38%;
+        color: var(--text-secondary);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+    }
+    /* The tracker is the card's title, not a labelled field. */
+    #trackers-table td:first-child, #trkstats-table td:first-child, #trk-hidden-table td:first-child {
+        display: block;
+        margin-bottom: 6px;
+    }
+    #trackers-table td:first-child::before, #trkstats-table td:first-child::before,
+    #trk-hidden-table td:first-child::before { display: none; }
+    .trk-cont { visibility: visible; }
+    /* A cell with no header (none today) and the empty-state row: no label. */
+    #trackers-table td:not([data-label])::before, #trkstats-table td:not([data-label])::before,
+    #trk-hidden-table td:not([data-label])::before { display: none; }
+    #trackers-table td.empty, #trkstats-table td.empty { display: block; text-align: center; }
+}
