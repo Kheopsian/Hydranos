@@ -228,6 +228,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   900,000-torrent library was affected by the change.
 
 ### Fixed
+- **Tagging a torrent whose tags came from the qBit shim no longer creates a
+  tag named `["cross-seed"]`.** Those rows store their tags as a JSON list;
+  the per-torrent tag read split on commas only, took the list for one tag
+  and wrote it back with the new one. Rows already damaged read correctly
+  again without any repair.
 - **Deleting torrents no longer adds their whole history to today's figures.**
   Removing a torrent took its lifetime bytes out of the engines' sum, and two
   separate mechanisms compensated for it; a poll landing between the removal
