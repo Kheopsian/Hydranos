@@ -97,6 +97,12 @@ pub struct EngineHost {
     /// Finished downloads, every engine's, tagged with the engine. Taken once,
     /// by the event workflows.
     completions: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(String, [u8; 20])>>>,
+    /// The catalogue's hardlink answers for the hoard list's "Hardlinks" and
+    /// "Checked" columns. Published whole by whoever just computed them (the
+    /// link scanner, a workflow pass), read as one `Arc` clone per request.
+    /// Kept here because it describes these engines' catalogue, and both the
+    /// scanner and the API already hold this host.
+    link_summary: std::sync::RwLock<Arc<crate::linkindex::Summary>>,
 }
 
 impl EngineHost {
@@ -227,6 +233,21 @@ impl EngineHost {
             engines,
             released: std::sync::Mutex::new(Default::default()),
             completions: std::sync::Mutex::new(Some(completed_rx)),
+            link_summary: Default::default(),
+        }
+    }
+
+    /// The last published hardlink summary. Empty until the first one: every
+    /// torrent then reads as never measured, which is the truth.
+    pub fn link_summary(&self) -> Arc<crate::linkindex::Summary> {
+        self.link_summary.read().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// Replace the summary. Whole, never patched: it is one computation over
+    /// the whole catalogue, and half of two would match neither.
+    pub fn publish_link_summary(&self, summary: crate::linkindex::Summary) {
+        if let Ok(mut g) = self.link_summary.write() {
+            *g = Arc::new(summary);
         }
     }
 

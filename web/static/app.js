@@ -2095,17 +2095,17 @@ function formatDuration(seconds) {
     return `${s}s`;
 }
 
-// displayRatio mirrors the torrent-list ratio (total_upload / bytes-we-have)
-// instead of the engine's raw upload/download. For our own uploads we never
-// downloaded, so download==0 -> engine ratio is 0; measuring against the data
-// we actually hold (done = total_done, or total_size*progress as fallback)
-// gives the same meaningful ratio the table shows.
+// The server's ratio, as is. It is computed in ONE place (`row::share_ratio`,
+// qBittorrent's rule: against the data held when next to nothing was
+// downloaded) and that value is the one the sort, the filters, the workflows
+// and the qBittorrent API use. This used to recompute total_upload / data
+// held on its own, and on 02/10/2026 a cross-seed read 3.2 in the table while
+// everything else saw 0.
+//
+// 0 for a row that carries no ratio (a torrent_added push, before the next
+// page lands): a torrent that was just added has uploaded nothing.
 function displayRatio(d) {
-    let done = (d.total_done && d.total_done > 0)
-        ? d.total_done
-        : (d.total_size > 0 ? d.total_size * (d.progress || 0) : 0);
-    if (done > 0) return d.total_upload / done;
-    return d.ratio || 0;
+    return typeof d.ratio === "number" ? d.ratio : 0;
 }
 
 async function refreshDetail() {
@@ -2552,8 +2552,17 @@ function sortHoard(th) {
 // peers are 0 on most rows): hashes are lowercase hex, so plain string order
 // is the same order for free.
 const _hoardCollator = new Intl.Collator();
+// Columns where null means "never measured": those rows sort last in both
+// directions, as the server orders them (`unmeasured_key`). Reading null as 0
+// would re-sort the page the server sent and put them among the zeros.
+const _HOARD_NULL_LAST = new Set(["external_links", "links_checked_at"]);
 function _hoardCmp(col, asc) {
+    const nullLast = _HOARD_NULL_LAST.has(col);
     return (a, b) => {
+        if (nullLast) {
+            const na = typeof a[col] !== "number", nb = typeof b[col] !== "number";
+            if (na !== nb) return na ? 1 : -1;
+        }
         const va = a[col] ?? 0, vb = b[col] ?? 0;
         if (typeof va === "string") {
             const cmp = _hoardCollator.compare(va, vb);
@@ -2702,9 +2711,6 @@ async function _fetchHoardPageInner(qs) {
     _hoardServerFiltered = d.filtered || 0;
     if (d.facets) _hoardFacets = d.facets;
     const rows = Array.isArray(d.rows) ? d.rows : [];
-    for (const t of rows) {
-        if (t.total_size > 0 && t.total_done > 0) t.ratio = t.total_upload / t.total_done;
-    }
     _hoardAllTorrents = rows;
     _hydMap = null;
     // Chips and rows in the same frame. The chips used to follow a pins round
@@ -6826,9 +6832,6 @@ function setupHoardSSE() {
             if (data.partial) {
                 const rows = Array.isArray(data.torrents) ? data.torrents : [];
                 if (!rows.length) return;
-                for (const t of rows) {
-                    if (t.total_size > 0 && t.total_done > 0) t.ratio = t.total_upload / t.total_done;
-                }
                 if (_hydMap) {
                     // Hydration in flight: feed its accumulator instead, or the
                     // batch we are in the middle of would overwrite these.
@@ -6855,11 +6858,6 @@ function setupHoardSSE() {
             if (!_hydMap) _hydMap = new Map(_hoardAllTorrents.map(t => [_rowKey(t), t]));
             if (Array.isArray(data.torrents) && data.torrents.length) {
                 for (const t of data.torrents) {
-                    // Ratio against data-held (matches the detail panel). The
-                    // server sends upload/download, which is 0 for our own
-                    // uploads (download==0); recompute at ingest so the list
-                    // and the sort agree with the detail.
-                    if (t.total_size > 0 && t.total_done > 0) t.ratio = t.total_upload / t.total_done;
                     _hydMap.set(_rowKey(t), t);
                     if (_resyncing) _resyncSeen.add(_rowKey(t));
                 }
@@ -6909,9 +6907,9 @@ function setupHoardSSE() {
                 t.total_download = m.total_downloaded;
                 t.num_peers = m.peers_connected;
                 if (typeof m.progress === "number") t.progress = m.progress;
-                if (t.total_size && t.total_size > 0 && t.total_done > 0) {
-                    t.ratio = t.total_upload / t.total_done;
-                }
+                // The ratio is left as the server computed it; the next page
+                // brings the new one. Recomputing it here is how the table
+                // came to disagree with the sort (02/10/2026).
                 touched++;
             }
             if (touched > 0) _scheduleHoardRender();
@@ -8672,6 +8670,11 @@ const TABLE_COLS = {
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(incoTracker(t.tracker_host) || "-")}</td>` },
         { id: "category", label: "Category", sort: "category", render: t => `<td>${esc(incoCat(t.category))}</td>` },
         { id: "save_path", label: "Save Path", sort: null, hidden: true, render: t => `<td class="col-path" title="${esc(t.save_path || "")}">${esc(t.save_path || "-")}</td>` },
+        // The link index's answer, as the workflows read it (`external_links`):
+        // names of these files held outside the client. null = never measured,
+        // which is not 0 -- 0 means only the client holds the data.
+        { id: "external_links", label: "Hardlinks", sort: "external_links", hidden: true, render: _hardlinksCell },
+        { id: "links_checked_at", label: "Checked", sort: "links_checked_at", hidden: true, render: _linksCheckedCell },
         { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "-"}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
         { id: "completed_time", label: "Completed", sort: "completed_time", render: t => `<td>${formatDate(t.completed_time)}</td>` },
@@ -8702,6 +8705,23 @@ const TABLE_COLS = {
     ],
 };
 const _COL_SORTFN = { "hoard-table": "sortHoard", "race-table": "sortRace" };
+
+// "Hardlinks" cell. 0 gets its own class: it is the one value that says
+// "deleting this torrent loses nothing", and it should not read like any
+// other count. "-" when never measured, like every other empty cell.
+function _hardlinksCell(r) {
+    const n = r.external_links;
+    if (typeof n !== "number") return `<td title="${esc(t("Not measured yet"))}">-</td>`;
+    if (n === 0) return `<td class="hl-zero" title="${esc(t("Only Hydranos holds these files"))}">0</td>`;
+    return `<td title="${esc(t("Names of these files outside Hydranos"))}">${n}</td>`;
+}
+
+// "Checked" cell: how old the hardlink measurement is, the date in the tooltip.
+function _linksCheckedCell(r) {
+    const at = r.links_checked_at;
+    if (typeof at !== "number" || at <= 0) return `<td title="${esc(t("Not measured yet"))}">-</td>`;
+    return `<td title="${esc(formatDate(at))}">${esc(relTime(at))}</td>`;
+}
 
 function _colCfg(tableId) {
     const ids = TABLE_COLS[tableId].map(c => c.id);

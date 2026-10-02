@@ -125,7 +125,7 @@ pub fn gather_one(host: &EngineHost, store: &Store, engine_id: &str, info_hash: 
 /// One torrent's facts, from the engine's live state and the store's row.
 /// The single place a `Facts` is built, so a pass and an event read the same.
 fn facts_of(
-    t: &typhon_engine::torrent::meta::TorrentState,
+    t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
     hash: String,
     s: crate::store::WorkflowFacts,
     engine_id: &str,
@@ -161,11 +161,10 @@ fn facts_of(
         } else {
             0.0
         },
-        ratio: if downloaded > 0.0 {
-            uploaded / downloaded
-        } else {
-            0.0
-        },
+        // The row's definition (`row::share_ratio`). Uploaded / downloaded
+        // here made a cross-seed 0 for every rule while its row read 3.2
+        // (02/10/2026): "ratio > 2" never matched what the operator saw.
+        ratio: crate::row::torrent_ratio(t),
         total_size: size,
         total_uploaded: uploaded,
         total_downloaded: downloaded,
@@ -343,12 +342,12 @@ pub fn catalogue_from(
 /// that re-measures a candidate writes it back to the store under that copy.
 pub fn entries_from_store(
     cat: &[CatalogueEntry],
-    rows: &std::collections::HashMap<(String, String), (String, Vec<u8>)>,
+    rows: &LinkRows,
 ) -> (Vec<linkindex::Entry>, Vec<usize>) {
     let mut out = Vec::with_capacity(rows.len().min(cat.len()));
     let mut origin = Vec::with_capacity(out.capacity());
     for (i, c) in cat.iter().enumerate() {
-        let Some((save_path, blob)) = rows.get(&(c.info_hash.clone(), c.session.clone())) else {
+        let Some((save_path, _, blob)) = rows.get(&(c.info_hash.clone(), c.session.clone())) else {
             continue;
         };
         if *save_path != c.save_path {
@@ -362,6 +361,60 @@ pub fn entries_from_store(
         origin.push(i);
     }
     (out, origin)
+}
+
+/// The store's link rows, as `Store::link_index_stats` reads them:
+/// (info_hash, session) -> (save_path, measured_at, packed stats).
+pub type LinkRows = std::collections::HashMap<(String, String), (String, i64, Vec<u8>)>;
+
+/// The catalogue's link facts as the store last measured them.
+pub struct StoredLinks {
+    pub entries: Vec<linkindex::Entry>,
+    /// Index in the catalogue each entry came from.
+    pub origin: Vec<usize>,
+    /// When each entry was measured, in step with `entries`.
+    pub measured_at: Vec<i64>,
+    pub links: HashMapFacts,
+}
+
+/// ⭐ THE computation of the link facts from the store. A workflow pass
+/// (`rulesapi::decide`) and the list's summary (`linkscan::refresh_summary`)
+/// both call this one, so the "Hardlinks" column and a condition on
+/// `external_links` cannot be two definitions of one number.
+pub fn links_from_store(cat: &[CatalogueEntry], rows: &LinkRows) -> StoredLinks {
+    let (entries, origin) = entries_from_store(cat, rows);
+    let measured_at = origin
+        .iter()
+        .map(|&i| {
+            rows.get(&(cat[i].info_hash.clone(), cat[i].session.clone()))
+                .map(|r| r.1)
+                .unwrap_or(0)
+        })
+        .collect();
+    let links = linkindex::compute(&entries);
+    StoredLinks { entries, origin, measured_at, links }
+}
+
+/// What the list shows, from what a pass or the scanner just computed.
+///
+/// Keyed by hash alone, like `compute`'s answer: when two engines hold the same
+/// torrent, the copy listed last wins in both, so the column dates the very
+/// measurement whose count it shows.
+pub fn link_summary(
+    cat: &[CatalogueEntry],
+    origin: &[usize],
+    measured_at: &[i64],
+    links: &HashMapFacts,
+) -> linkindex::Summary {
+    let mut out = linkindex::Summary::default();
+    for (&i, &at) in origin.iter().zip(measured_at) {
+        let hash = &cat[i].info_hash;
+        let (Some(f), Some(raw)) = (links.get(hash), crate::store::hex20(hash)) else {
+            continue;
+        };
+        out.insert(raw, linkindex::Cached { external_links: f.external_links, measured_at: at });
+    }
+    out
 }
 
 /// The store row for one measured copy.
@@ -886,9 +939,9 @@ mod tests {
             cat("fresh", "race", "/r", &["/r/a"]),
         ];
         let mut rows = std::collections::HashMap::new();
-        rows.insert(("fresh".to_string(), "hoard".to_string()), ("/d".to_string(), linkindex::pack(&[fid(1, 1)])));
-        rows.insert(("moved".to_string(), "hoard".to_string()), ("/old".to_string(), linkindex::pack(&[fid(2, 1)])));
-        rows.insert(("regrown".to_string(), "hoard".to_string()), ("/d".to_string(), linkindex::pack(&[fid(3, 1)])));
+        rows.insert(("fresh".to_string(), "hoard".to_string()), ("/d".to_string(), 1, linkindex::pack(&[fid(1, 1)])));
+        rows.insert(("moved".to_string(), "hoard".to_string()), ("/old".to_string(), 1, linkindex::pack(&[fid(2, 1)])));
+        rows.insert(("regrown".to_string(), "hoard".to_string()), ("/d".to_string(), 1, linkindex::pack(&[fid(3, 1)])));
         let (got, origin) = entries_from_store(&catalogue, &rows);
         assert_eq!(origin, vec![0], "and it says where it came from");
         let hashes: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
@@ -961,7 +1014,7 @@ mod tests {
         let mut rows = std::collections::HashMap::new();
         for (c, (_, files)) in catalogue.iter().zip(&measured) {
             let stats: Vec<_> = files.iter().map(|(_, st)| *st).collect();
-            rows.insert((c.info_hash.clone(), c.session.clone()), (c.save_path.clone(), linkindex::pack(&stats)));
+            rows.insert((c.info_hash.clone(), c.session.clone()), (c.save_path.clone(), 1, linkindex::pack(&stats)));
         }
         let stored = linkindex::compute(&entries_from_store(&catalogue, &rows).0);
 

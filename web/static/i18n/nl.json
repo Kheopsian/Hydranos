@@ -84,5 +84,14 @@
   "Errors (1h)": "Fouten (1 u)",
   "Filters": "Filters",
   "{n} left in place (hardlinks)": "{n} op hun plaats gelaten (hardlinks)",
-  "{n} more not listed": "en {n} meer, niet getoond"
+  "{n} more not listed": "en {n} meer, niet getoond",
+  "Hardlinks": "Hardlinks",
+  "Checked": "Gecontroleerd",
+  "Not measured yet": "Nog niet gemeten",
+  "Only Hydranos holds these files": "Alleen Hydranos heeft deze bestanden",
+  "Names of these files outside Hydranos": "Namen van deze bestanden buiten Hydranos",
+  "just now": "zojuist",
+  "{n} min ago": "{n} min geleden",
+  "{n} h ago": "{n} u geleden",
+  "{n} d ago": "{n} d geleden"
 }
