@@ -1,8 +1,7 @@
 # Four clients at 290,000 torrents
 
-At 50,000 torrents every client we tried works (see
-[`benchmarks.md`](benchmarks.md)). This page is about roughly six times that,
-which is far outside what most clients are designed for. None of what follows
+Most clients are designed around libraries of a few thousand torrents. This
+page is about roughly 290,000, far outside that range. None of what follows
 is a bug report: each client makes reasonable choices for the libraries its
 users actually have, and those choices only start to show at this size.
 
@@ -25,7 +24,6 @@ per second** for every torrent to stay visible to its tracker.
 | RSS after load | 2.8 GiB (~10 KiB/torrent) | 12.3 GiB (~44 KiB) | 31.3 GiB (~114 KiB) | 15.6–18.3 GiB (57–64 KiB) |
 | CPU after load | 3.4–3.7 cores (hoard + race) | 0.8–1.0 core | 1.2–1.3 cores | 0.7 core |
 | Announces/s | 146–155 | 13.6 default, 61 with a raised limit | ~4–12 | ~15 default, 86 with a raised limit |
-| Served | ~5 TB/day | 685 GB in 24.8 h (raised limit) | 0.15 GB in 23.7 h | < 0.05 MB/s over ~6 h |
 
 Hydranos uses more CPU than the others here: that figure includes the race
 engine and about 5 TB a day of upload, far more traffic than any of the other
