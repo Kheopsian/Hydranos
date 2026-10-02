@@ -3974,3 +3974,8 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .bulk-card-x:hover { color: var(--text-primary); }
 .bulk-card .bulk-count { margin-top: 4px; }
 .bulk-card .bulk-outcomes { font-size: 12px; margin-top: 4px; }
+
+/* Hoard "Hardlinks" column: 0 is the one count that means "only Hydranos holds
+   these files", so it is told apart by colour (not by opacity, which costs
+   contrast). Matched selector for selector with the table cell rules. */
+#hoard-table td.hl-zero { color: var(--accent-green); }

@@ -85,5 +85,14 @@
   "Errors (1h)": "Errores (1 h)",
   "Filters": "Filtros",
   "{n} left in place (hardlinks)": "{n} dejados en su sitio (enlaces duros)",
-  "{n} more not listed": "y {n} mas, no mostrados"
+  "{n} more not listed": "y {n} mas, no mostrados",
+  "Hardlinks": "Enlaces duros",
+  "Checked": "Comprobado",
+  "Not measured yet": "Aún sin medir",
+  "Only Hydranos holds these files": "Solo Hydranos tiene estos archivos",
+  "Names of these files outside Hydranos": "Nombres de estos archivos fuera de Hydranos",
+  "just now": "ahora mismo",
+  "{n} min ago": "hace {n} min",
+  "{n} h ago": "hace {n} h",
+  "{n} d ago": "hace {n} d"
 }

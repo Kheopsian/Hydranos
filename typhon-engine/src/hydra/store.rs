@@ -2686,17 +2686,21 @@ impl Store {
     }
 
     /// Every row's measurement, keyed by (info_hash, session), with the save
-    /// path it was taken under.
+    /// path it was taken under and when.
+    ///
+    /// `measured_at` rides along so the list's "Checked" column is read in the
+    /// same query as the measurement it dates, not from a second read that a
+    /// batch written in between would make disagree.
     pub fn link_index_stats(
         &self,
-    ) -> anyhow::Result<std::collections::HashMap<(String, String), (String, Vec<u8>)>> {
+    ) -> anyhow::Result<std::collections::HashMap<(String, String), (String, i64, Vec<u8>)>> {
         let mut q = self
             .conn
-            .prepare("SELECT info_hash, session, save_path, stats FROM link_index")?;
+            .prepare("SELECT info_hash, session, save_path, measured_at, stats FROM link_index")?;
         let rows = q.query_map([], |r| {
             Ok((
                 (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
-                (r.get::<_, String>(2)?, r.get::<_, Vec<u8>>(3)?),
+                (r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, Vec<u8>>(4)?),
             ))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -4387,7 +4391,7 @@ mod link_index_tests {
         assert_eq!(meta[&("a".into(), "hoard".into())].measured_at, 20);
         assert_eq!(meta[&("a".into(), "hoard".into())].files, 3);
         let stats = s.link_index_stats().unwrap();
-        assert_eq!(stats[&("a".into(), "race".into())], ("/data/x".to_string(), vec![7, 7]));
+        assert_eq!(stats[&("a".into(), "race".into())], ("/data/x".to_string(), 11, vec![7, 7]));
     }
 
     #[test]

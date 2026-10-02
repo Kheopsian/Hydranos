@@ -104,6 +104,46 @@ pub fn compute(entries: &[Entry]) -> HashMap<String, LinkFacts> {
     out
 }
 
+/// One torrent's answer as the hoard list shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cached {
+    /// `LinkFacts::external_links`, the very number a workflow condition on
+    /// `external_links` reads.
+    pub external_links: u64,
+    /// When the files behind it were measured (unix seconds).
+    pub measured_at: i64,
+}
+
+/// The catalogue's link answers, kept for the list.
+///
+/// ⚠️ Why a summary and not a lookup: `external_links` is a property of the
+/// WHOLE catalogue (a name held by another torrent of ours is not external),
+/// so no single stored row can answer it. Computing it means reading every
+/// measurement and counting every name -- seconds at a million torrents, on a
+/// list route that is polled every second. So it is computed where that cost
+/// is already paid (the link scanner, a workflow pass) and the list reads one
+/// hash lookup per row.
+#[derive(Debug, Default)]
+pub struct Summary {
+    by_hash: HashMap<[u8; 20], Cached>,
+}
+
+impl Summary {
+    pub fn insert(&mut self, hash: [u8; 20], c: Cached) {
+        self.by_hash.insert(hash, c);
+    }
+
+    /// `None` is "never measured", not zero: zero means only the client holds
+    /// the data, and the list must not claim that about files nobody looked at.
+    pub fn get(&self, hash: &[u8; 20]) -> Option<Cached> {
+        self.by_hash.get(hash).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_hash.len()
+    }
+}
+
 /// Does a fresh measurement still justify the deletion the pass decided on?
 ///
 /// The decision, alone, so it can be exercised without an engine or a store.

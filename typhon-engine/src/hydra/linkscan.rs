@@ -41,6 +41,13 @@ const PAUSE: Duration = Duration::from_secs(1);
 /// When nothing is due. A torrent added in the meantime is picked up then.
 const IDLE: Duration = Duration::from_secs(300);
 
+/// During a long sweep, how often the list's summary is brought up to date.
+/// A first sweep of a million torrents takes hours; the column should not sit
+/// on "never measured" for all of them until the last batch lands. Each
+/// refresh reads every measurement and counts the catalogue (seconds of CPU,
+/// the cost of one workflow pass), so not after every batch.
+const SUMMARY_EVERY: Duration = Duration::from_secs(600);
+
 /// Where the scanner is, for the status line. Plain atomics: written by one
 /// thread, read by a request that only wants an approximate picture.
 pub struct Progress {
@@ -112,8 +119,33 @@ pub fn spawn(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
     }
 }
 
+/// Recompute the hoard list's hardlink summary from the store, and publish it.
+///
+/// ⭐ Through `rulesrun::links_from_store`, the function a workflow pass reads
+/// its `external_links` from: same rows, same catalogue resolution, same
+/// count. The column and the condition can only differ by WHEN they were
+/// computed, never by HOW. Returns how many torrents it answers for.
+pub fn refresh_summary(engines: &EngineHost, store: &StoreLock) -> Option<usize> {
+    // The read connection, released before the counting.
+    let (stored, rows) = {
+        let s = store.read().ok()?;
+        (rulesrun::stored_facts(engines, &s), s.link_index_stats().ok()?)
+    };
+    let cat = rulesrun::catalogue_from(engines, &stored);
+    drop(stored);
+    let got = rulesrun::links_from_store(&cat, &rows);
+    drop(rows);
+    let summary = rulesrun::link_summary(&cat, &got.origin, &got.measured_at, &got.links);
+    let n = summary.len();
+    engines.publish_link_summary(summary);
+    Some(n)
+}
+
 fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
     std::thread::sleep(SETTLE);
+    // Nothing published yet: the first pass of the loop publishes what the
+    // store already holds from before the restart, before measuring anything.
+    let mut summary_stale = true;
     loop {
         // One snapshot per sweep, not per batch: reading a million rows and
         // resolving a million torrents' paths is seconds, not something to
@@ -131,6 +163,9 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
         PROGRESS.catalogue.store(cat.len() as i64, Ordering::Relaxed);
 
         let gone = orphans(&cat, &meta);
+        // A removed torrent's names leave the count: another torrent that
+        // shared its files may now have an external link.
+        summary_stale |= !gone.is_empty();
         for chunk in gone.chunks(BATCH) {
             if let Ok(s) = store.lock() {
                 if let Err(e) = s.drop_link_rows(chunk) {
@@ -141,16 +176,22 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
 
         let order = due(&cat, &meta, crate::store::now_secs());
         drop(meta);
+        if summary_stale {
+            refresh_summary(&engines, &store);
+            summary_stale = false;
+        }
         if order.is_empty() {
             std::thread::sleep(IDLE);
             continue;
         }
-        sweep(&cat, &order, &store);
+        sweep(&cat, &order, &store, &engines);
+        summary_stale = true;
     }
 }
 
-fn sweep(cat: &[CatalogueEntry], order: &[usize], store: &StoreLock) {
+fn sweep(cat: &[CatalogueEntry], order: &[usize], store: &StoreLock, engines: &EngineHost) {
     let started = std::time::Instant::now();
+    let mut summarised = std::time::Instant::now();
     PROGRESS.sweep_total.store(order.len() as i64, Ordering::Relaxed);
     PROGRESS.sweep_done.store(0, Ordering::Relaxed);
     PROGRESS.sweep_started.store(crate::store::now_secs(), Ordering::Relaxed);
@@ -191,6 +232,10 @@ fn sweep(cat: &[CatalogueEntry], order: &[usize], store: &StoreLock) {
         PROGRESS.sweep_done.store(done as i64, Ordering::Relaxed);
         PROGRESS.last_batch_at.store(now, Ordering::Relaxed);
         PROGRESS.files_per_sec.store((batch_files as f64 / secs) as i64, Ordering::Relaxed);
+        if summarised.elapsed() >= SUMMARY_EVERY {
+            refresh_summary(engines, store);
+            summarised = std::time::Instant::now();
+        }
         std::thread::sleep(PAUSE);
     }
 

@@ -101,6 +101,56 @@ fn b(v: &Value, key: &str) -> bool {
     v.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// A torrent's share ratio. The ONE definition: the row, the list's sort and
+/// filter key, the qBittorrent shim, the detail panel and the workflow facts
+/// all call this.
+///
+/// qBittorrent's rule (`TorrentImpl::realRatio`): when what was downloaded is
+/// under 1% of what is held, the torrent is one we were handed whole -- a
+/// cross-seed, our own upload, an import -- and what it uploaded is measured
+/// against the bytes we hold instead. Otherwise uploaded / downloaded.
+///
+/// ⚠️ Why it exists (02/10/2026): two definitions coexisted. The UI divided
+/// by the bytes held, the server by the bytes downloaded, so a cross-seed
+/// (downloaded 0) showed 3.2 in the table while the sort, the filters and the
+/// workflows all saw 0 -- a rule "ratio > 2" would never have matched the row
+/// the operator was looking at.
+///
+/// Two deliberate differences from qBittorrent: nothing held and nothing
+/// downloaded is 0 here, where qBittorrent answers 9999 ("infinite") when
+/// something was uploaded anyway; and there is no 9999 cap.
+pub fn share_ratio(uploaded: u64, downloaded: u64, total_done: u64) -> f64 {
+    // Compared as floats, as qBittorrent does (`total_done * 0.01`): integer
+    // division would round the 1% threshold down and disagree on small torrents.
+    let download = if (downloaded as f64) < total_done as f64 * 0.01 {
+        total_done
+    } else {
+        downloaded
+    };
+    if download > 0 {
+        uploaded as f64 / download as f64
+    } else {
+        0.0
+    }
+}
+
+/// `share_ratio` of a live torrent, for the callers that walk the catalogue.
+///
+/// `total_done` costs the picker lock on a torrent that is still downloading
+/// (`torrent_core`), and a pass over a million torrents should not take it a
+/// million times. It is only needed when downloaded is under 1% of what could
+/// be held, and what is held is never more than `total_size` -- so above that
+/// line the answer is uploaded / downloaded without asking.
+pub fn torrent_ratio(t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) -> f64 {
+    use std::sync::atomic::Ordering;
+    let up = t.total_uploaded.load(Ordering::Relaxed);
+    let down = t.total_downloaded.load(Ordering::Relaxed);
+    if (down as f64) >= t.meta.total_size as f64 * 0.01 {
+        return share_ratio(up, down, 0);
+    }
+    share_ratio(up, down, typhon_engine::rpc::dispatch::torrent_core(t).total_done)
+}
+
 /// Project one engine torrent, plus what the store knows, into an API row.
 ///
 /// The shape is a MAP, not a struct, and that is not a detail: encoding/json
@@ -123,11 +173,14 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
 
     let total_download = i(engine, "total_download");
     let total_upload = i(engine, "total_upload");
-    let ratio = if total_download > 0 {
-        total_upload as f64 / total_download as f64
-    } else {
-        0.0
-    };
+    // Against the bytes held when next to nothing was downloaded, see
+    // `share_ratio`. `total_done` is read and not published: the 3.x key set
+    // below does not carry it.
+    let ratio = share_ratio(
+        total_upload.max(0) as u64,
+        total_download.max(0) as u64,
+        i(engine, "total_done").max(0) as u64,
+    );
 
     let engine_save_path = s(engine, "save_path");
     let save_path = if facts.save_path.is_empty() {
@@ -257,6 +310,45 @@ mod tests {
         assert_eq!(row["ratio"], json!(0));
         let row = build(&json!({"total_upload": 500, "total_download": 250}), &StoreFacts::default(), "");
         assert_eq!(row["ratio"], json!(2));
+    }
+
+    // 02/10/2026: the table showed 3.2 for a cross-seed while the sort, the
+    // filters and the workflows saw 0. A torrent we were handed whole is
+    // measured against what it holds.
+    #[test]
+    fn a_cross_seed_is_measured_against_the_bytes_it_holds() {
+        let n = 1_000_000;
+        let row = build(
+            &json!({"total_upload": 3 * n, "total_download": 0, "total_done": n}),
+            &StoreFacts::default(),
+            "",
+        );
+        assert_eq!(row["ratio"], json!(3));
+        assert_eq!(share_ratio(3 * n as u64, 0, n as u64), 3.0);
+    }
+
+    #[test]
+    fn a_normal_download_is_still_uploaded_over_downloaded() {
+        // Downloaded more than it holds (wasted pieces, a re-check): the
+        // download is the denominator, as before.
+        assert_eq!(share_ratio(500, 250, 200), 2.0);
+        // Downloaded exactly what it holds.
+        assert_eq!(share_ratio(300, 100, 100), 3.0);
+    }
+
+    #[test]
+    fn nothing_held_and_nothing_downloaded_is_zero() {
+        assert_eq!(share_ratio(0, 0, 0), 0.0);
+        assert_eq!(share_ratio(999, 0, 0), 0.0, "qBittorrent says 9999 here; we say 0");
+    }
+
+    // The 1% line, compared as qBittorrent compares it: in floats. 1 byte of
+    // 150 held is under 1.5, so the held bytes are the denominator; integer
+    // division (150 / 100 = 1) would have kept the 1 and answered 300.
+    #[test]
+    fn the_one_percent_line_is_not_rounded_down() {
+        assert_eq!(share_ratio(300, 1, 150), 2.0);
+        assert_eq!(share_ratio(300, 2, 150), 150.0, "2 is past 1.5: downloaded wins");
     }
 
     // The exact key set of a 3.x row, read off a live answer. Both halves
