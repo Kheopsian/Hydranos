@@ -145,10 +145,13 @@ pub fn refresh_summary(engines: &EngineHost, store: &StoreLock) -> Option<usize>
 }
 
 fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
+    // What the store holds from before the restart is published NOW, not after
+    // the settle: it is a read, and the catalogue is loaded by the time this
+    // thread is spawned. Waiting left the Hardlinks and Checked columns at "-"
+    // for every torrent for four minutes after each start (rc32, 2026-10-03).
+    // Only the measuring waits for the disks to settle.
+    let mut summary_stale = refresh_summary(&engines, &store).is_none();
     std::thread::sleep(SETTLE);
-    // Nothing published yet: the first pass of the loop publishes what the
-    // store already holds from before the restart, before measuring anything.
-    let mut summary_stale = true;
     loop {
         // One snapshot per sweep, not per batch: reading a million rows and
         // resolving a million torrents' paths is seconds, not something to
