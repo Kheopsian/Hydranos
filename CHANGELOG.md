@@ -75,6 +75,13 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   are kept, as after a drag.
 
 ### Fixed
+- **Deleting a torrent with its files no longer deletes files another
+  torrent reads.** Two torrents pointed at one path -- a cross-seed, or an
+  upload seeded from the files it was made from -- read the same bytes, and
+  "remove with files" on one took them from the other, which went on
+  announcing an empty folder as complete. Those files now stay (the log says
+  how many), and go with the last torrent that reads them. The same check a
+  move already made, over every engine.
 - **A column turned on from the column menu showed at 0px** once any column
   had been resized: the table kept its old pinned width, and the new column
   got what was left of it, nothing. Save Path, Hardlinks, Checked and

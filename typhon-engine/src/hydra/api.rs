@@ -10272,7 +10272,15 @@ fn remove_one_inner(
         let Some(torrent) = found else { continue };
         let last = dropped + 1 >= remaining;
         let keep = !(delete_files && last);
-        let (removed, engine_tm) = engine.manager.remove_torrent_timed(&torrent.info_hash, keep);
+        // Files another torrent reads stay: a cross-seed, or an upload seeded
+        // from the very files it was made from, points at the same path. On
+        // 2026-10-02 a bulk delete took 1 376 uploads' books with their source
+        // torrents, and they went on "seeding" empty folders.
+        let spare = if keep { Default::default() } else { crate::jobsrun::files_read_by_others(state, &torrent) };
+        let (removed, engine_tm) = engine.manager.remove_torrent_sparing(&torrent.info_hash, keep, &spare);
+        if engine_tm.spared > 0 {
+            tracing::info!(hash = %hash, session, spared = engine_tm.spared, "files kept: another torrent reads them");
+        }
         tm.engine.accumulate(&engine_tm);
         if let Err(e) = removed {
             tracing::warn!(hash = %hash, session, "engine refused removal: {e}");
@@ -10700,12 +10708,18 @@ fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bo
     let keep_data = !delete_files;
     if let Some((_, torrent)) = find_torrent(state, &hash) {
         let ih = torrent.info_hash;
+        // The files go with the LAST copy only, minus what another torrent
+        // reads -- the same rules as `remove_one_inner`.
+        let mut copies = state.engines.engines().iter().filter(|e| e.manager.get(&ih).is_some()).count();
+        let spare = if keep_data { Default::default() } else { crate::jobsrun::files_read_by_others(state, &torrent) };
         for engine in state.engines.engines() {
             // This engine's OWN copy: the counters are per copy, and absorbing
             // the first engine's figures for every engine would credit the
             // carry-over with bytes the others never moved.
             if let Some(copy) = engine.manager.get(&ih) {
-                if let Err(e) = engine.manager.remove_torrent(&ih, keep_data) {
+                copies -= 1;
+                let keep = keep_data || copies > 0;
+                if let Err(e) = engine.manager.remove_torrent_sparing(&ih, keep, &spare).0 {
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
                     return;
                 }
@@ -18179,5 +18193,48 @@ mod odometer_tests {
         let (_, session, day) = session_and_day(&s.state);
         assert_eq!((session, day), ((9, 0), (9, 0)), "and not counted again by the tick");
         assert_eq!(engine_session(&s.state, "race"), (9, 0));
+    }
+}
+
+#[cfg(test)]
+mod delete_spares_shared_files_tests {
+    use super::testing::*;
+    use super::*;
+
+    /// One file, `book.epub`, 16 KiB. `private` changes the info dict, so the
+    /// two torrents have two info hashes and read the same path -- what an
+    /// upload seeded from its source's files is.
+    fn torrent_bytes(private: bool) -> Vec<u8> {
+        let name = "book.epub";
+        format!(
+            "d8:announce19:https://t.example/a4:infod6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:{}{}ee",
+            name.len(),
+            "A".repeat(20),
+            if private { "7:privatei1e" } else { "" }
+        )
+        .into_bytes()
+    }
+
+    /// 2026-10-02: a bulk delete "with files" took the source torrents' files,
+    /// which the V3X uploads made from them also read, and 1 376 uploads went
+    /// on announcing empty folders as complete.
+    #[test]
+    fn deleting_a_torrent_with_its_files_keeps_the_ones_another_torrent_reads() {
+        let s = state("delete-spares");
+        let dir = s.dir.join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("book.epub");
+        std::fs::write(&file, vec![7u8; 16384]).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let (source, _) = add_torrent_bytes(&s.state, &torrent_bytes(false), "", &root, "", true, true, "hoard").expect("source added");
+        let (upload, _) = add_torrent_bytes(&s.state, &torrent_bytes(true), "", &root, "", true, true, "hoard").expect("upload added");
+        assert_ne!(source, upload);
+        let sessions = vec!["hoard".to_string()];
+
+        remove_one_torrent(&s.state, &source, &sessions, "", true).expect("source removed");
+        assert!(file.exists(), "the upload still reads book.epub: it must stay");
+
+        remove_one_torrent(&s.state, &upload, &sessions, "", true).expect("upload removed");
+        assert!(!file.exists(), "nothing reads it any more: deleting with files deletes it");
     }
 }

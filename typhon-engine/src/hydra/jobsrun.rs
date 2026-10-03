@@ -402,12 +402,40 @@ pub fn plan_move_checked(
     }
     let mine: std::collections::HashSet<std::path::PathBuf> =
         plan.files.iter().map(|f| f.from.clone()).collect();
-    let root = &plan.old_root;
+    let (hashes, _) = scan_shared(state, t, &plan.old_root, &mine);
+    plan.shared_with = hashes;
+    plan
+}
+
+/// The files of `t` that another torrent -- in any engine -- reads too.
+///
+/// What a deletion must leave on disk: two torrents pointed at one path (a
+/// cross-seed, an upload seeded from the files it was made from) read the same
+/// bytes, and deleting them with the first torrent leaves the other one
+/// announcing an empty folder, complete by its own account.
+pub fn files_read_by_others(
+    state: &AppState,
+    t: &typhon_engine::torrent::meta::TorrentState,
+) -> std::collections::HashSet<std::path::PathBuf> {
+    let root = t.save_path.read().clone();
+    let mine: std::collections::HashSet<std::path::PathBuf> =
+        rel_paths(t).into_iter().map(|p| root.join(p)).collect();
+    scan_shared(state, t, &root, &mine).1
+}
+
+/// Every other torrent that reads one of `mine` (files of `t`, under `root`),
+/// and which of those files they read.
+fn scan_shared(
+    state: &AppState,
+    t: &typhon_engine::torrent::meta::TorrentState,
+    root: &std::path::Path,
+    mine: &std::collections::HashSet<std::path::PathBuf>,
+) -> (Vec<String>, std::collections::HashSet<std::path::PathBuf>) {
     let my_top = top_entry(t);
-    // Whether `other` reads one of the files this move would take away.
-    let shares = |other: &typhon_engine::torrent::meta::TorrentState| -> bool {
+    // The files of `mine` that `other` reads, or None when it reads none.
+    let shared_by = |other: &typhon_engine::torrent::meta::TorrentState| -> Option<Vec<std::path::PathBuf>> {
         if other.meta.info_hash == t.meta.info_hash {
-            return false;
+            return None;
         }
         // Only a torrent whose root is on the same branch can name the
         // same files: a prefix test first, the file list only then.
@@ -416,7 +444,7 @@ pub fn plan_move_checked(
         let r = {
             let r = other.save_path.read();
             if !(root.starts_with(&*r) || r.starts_with(root)) {
-                return false;
+                return None;
             }
             // Same folder, different top-level entry: no file can be
             // shared, since every path of each starts with its own entry.
@@ -425,14 +453,21 @@ pub fn plan_move_checked(
             if *r == *root {
                 if let (Some(a), Some(b)) = (my_top, top_entry(other)) {
                     if a != b {
-                        return false;
+                        return None;
                     }
                 }
             }
             r.clone()
         };
-        rel_paths(other).iter().any(|p| mine.contains(&r.join(p)))
+        let hit: Vec<std::path::PathBuf> =
+            rel_paths(other).into_iter().map(|p| r.join(p)).filter(|p| mine.contains(p)).collect();
+        if hit.is_empty() { None } else { Some(hit) }
     };
+    let pair = |o: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>| {
+        shared_by(o).map(|files| (typhon_engine::torrent::hex_encode(&o.meta.info_hash), files))
+    };
+    let mut hashes: Vec<String> = Vec::new();
+    let mut files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     // Over every torrent of every engine, in slices on their own threads: the
     // prefix test alone is a second per move at a million torrents, and a
     // move of a hundred torrents runs it a hundred times.
@@ -442,34 +477,27 @@ pub fn plan_move_checked(
             .map(|n| n.get())
             .unwrap_or(1)
             .clamp(1, 16);
-        let found: Vec<Vec<String>> = if threads == 1 || all.len() < SHARED_SCAN_PARALLEL_FROM {
-            vec![all.iter().filter(|o| shares(o)).map(|o| typhon_engine::torrent::hex_encode(&o.meta.info_hash)).collect()]
+        let found: Vec<Vec<(String, Vec<std::path::PathBuf>)>> = if threads == 1 || all.len() < SHARED_SCAN_PARALLEL_FROM {
+            vec![all.iter().filter_map(pair).collect()]
         } else {
             let per = all.len().div_ceil(threads).max(1);
             std::thread::scope(|sc| {
-                let shares = &shares;
+                let pair = &pair;
                 let handles: Vec<_> = all
                     .chunks(per)
-                    .map(|slice| {
-                        sc.spawn(move || {
-                            slice
-                                .iter()
-                                .filter(|o| shares(o))
-                                .map(|o| typhon_engine::torrent::hex_encode(&o.meta.info_hash))
-                                .collect::<Vec<String>>()
-                        })
-                    })
+                    .map(|slice| sc.spawn(move || slice.iter().filter_map(pair).collect::<Vec<_>>()))
                     .collect();
                 handles.into_iter().map(|h| h.join().expect("shared-file scan slice")).collect()
             })
         };
-        for h in found.into_iter().flatten() {
-            if !plan.shared_with.contains(&h) {
-                plan.shared_with.push(h);
+        for (h, fs) in found.into_iter().flatten() {
+            if !hashes.contains(&h) {
+                hashes.push(h);
             }
+            files.extend(fs);
         }
     }
-    plan
+    (hashes, files)
 }
 
 /// Plan moving `t`'s files from where it reads them to `new_root`.
