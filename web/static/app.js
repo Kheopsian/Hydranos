@@ -8603,29 +8603,44 @@ function initResizableColumns(table, key) {
         table._colFixed = true;
     };
 
-    // Restore saved widths (works even while the tab is hidden: no measuring).
+    // Restore saved widths. A column with none -- one just turned on from the
+    // column menu -- gets its fitted width, and the total is recomputed from
+    // the columns shown NOW. The table element outlives a header rebuild, so
+    // the old pinned total used to stay: the fixed layout handed the new
+    // column what was left of it, which was 0px (Save Path, Hardlinks).
     const saved = JSON.parse(localStorage.getItem(key) || "{}");
-    let anySaved = false;
-    ths.forEach(th => {
-        const w = saved[colKey(th)];
-        if (w) { th.style.width = w + "px"; anySaved = true; }
-    });
-    if (anySaved) {
+    if (ths.some(th => saved[colKey(th)])) {
+        const widths = ths.map((th, i) => saved[colKey(th)] || _fitColWidth(table, th, i));
+        ths.forEach((th, i) => { th.style.width = widths[i] + "px"; });
         table.style.tableLayout = "fixed";
-        // Only claim the layout is settled once EVERY column has a width; a
-        // partial restore still needs goFixed to pin the rest, and pinning the
-        // total from an incomplete sum would squeeze whatever it left out.
-        if (ths.every(th => saved[colKey(th)])) {
-            table.style.width = ths.reduce((sum, th) => sum + saved[colKey(th)], 0) + "px";
-            table._colFixed = true;
-        }
+        table.style.width = widths.reduce((a, b) => a + b, 0) + "px";
+        table._colFixed = true;
+    } else {
+        table.style.tableLayout = "";
+        table.style.width = "";
+        table._colFixed = false;
     }
+
+    // Fit every column to its content and keep the result, as a drag does.
+    const fitAll = () => {
+        const widths = _fitToWidth(ths.map((th, i) => _fitColWidth(table, th, i)),
+            (table.parentElement || table).clientWidth);
+        ths.forEach((th, i) => { th.style.width = widths[i] + "px"; });
+        table.style.tableLayout = "fixed";
+        table.style.width = widths.reduce((a, b) => a + b, 0) + "px";
+        table._colFixed = true;
+        const s = JSON.parse(localStorage.getItem(key) || "{}");
+        ths.forEach((th, i) => { s[colKey(th)] = widths[i]; });
+        localStorage.setItem(key, JSON.stringify(s));
+    };
 
     ths.forEach(th => {
         if (getComputedStyle(th).position === "static") th.style.position = "relative";
         const grip = document.createElement("div");
         grip.className = "col-grip";
+        grip.title = t("Drag to resize, double-click to fit every column");
         grip.addEventListener("click", e => e.stopPropagation()); // never trigger sort
+        grip.addEventListener("dblclick", e => { e.preventDefault(); e.stopPropagation(); fitAll(); });
         grip.addEventListener("mousedown", e => {
             e.preventDefault();
             e.stopPropagation();
@@ -8654,6 +8669,52 @@ function initResizableColumns(table, key) {
         });
         th.appendChild(grip);
     });
+}
+/// The width column `i` needs to show its header and every rendered row whole.
+///
+/// Measured as TEXT on a canvas, not read back from the layout: under a fixed
+/// layout a cell is as wide as it was told to be, and a table in a hidden tab
+/// measures 0 everywhere. Rows are the ones on screen -- the list is paged, so
+/// that is what the operator is looking at. Bounded so that one 300-character
+/// release name cannot push every other column off the page.
+const _FIT_MIN = 48, _FIT_MAX = 560;
+let _fitCanvas = null;
+function _fitColWidth(table, th, i) {
+    const ctx = (_fitCanvas = _fitCanvas || document.createElement("canvas")).getContext("2d");
+    const textW = (el, text) => {
+        const cs = getComputedStyle(el);
+        ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        return ctx.measureText(text).width + (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    };
+    // The header also carries the sort arrow and the grip.
+    let w = textW(th, th.textContent.trim()) + 18;
+    const cols = th.parentElement.children.length;
+    for (const row of (table.tBodies[0] ? table.tBodies[0].rows : [])) {
+        // Spacer and "empty list" rows span the table; their text is not a cell's.
+        if (row.cells.length !== cols) continue;
+        const td = row.cells[i];
+        // A progress bar has no text worth measuring but needs room to read.
+        const floor = td.querySelector(".progress-bar") ? 90 : 0;
+        w = Math.max(w, textW(td, td.textContent.trim()) + 4, floor);
+    }
+    return Math.round(Math.min(_FIT_MAX, Math.max(_FIT_MIN, w)));
+}
+/// Shrink fitted widths into `room` pixels, taking only from the long columns.
+///
+/// Every column at its content width can come to far more than the screen (a
+/// name and a path at their cap alone are 1 100px). The short columns -- a
+/// size, a ratio, a date -- are already as narrow as they can be read, so the
+/// excess comes out of what sits above `_FIT_KEEP`, in proportion to how far
+/// above it each one is. When even that is not enough the table scrolls.
+const _FIT_KEEP = 200;
+function _fitToWidth(widths, room) {
+    const total = widths.reduce((a, b) => a + b, 0);
+    if (!room || total <= room) return widths;
+    const spare = widths.map(w => Math.max(0, w - _FIT_KEEP));
+    const pool = spare.reduce((a, b) => a + b, 0);
+    if (!pool) return widths;
+    const cut = Math.min(pool, total - room);
+    return widths.map((w, i) => Math.round(w - cut * spare[i] / pool));
 }
 function initTorrentColumnResizers() {
     initResizableColumns(document.getElementById("race-table"), "hydra_cols_race");
