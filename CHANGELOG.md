@@ -68,8 +68,20 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   hardlinks refreshes), so the list stays one lookup per row. A torrent not
   measured yet shows "-" and sorts last. New row fields on the list:
   `external_links`, `links_checked_at` (null when unmeasured).
+- **Double-click a column's resize grip to fit every column** to its header
+  and the rows on screen. Short columns (a size, a ratio, a date) get the
+  width they need; when the total is wider than the window, the long ones
+  (name, save path) give up the difference, down to 200px each. The widths
+  are kept, as after a drag.
 
 ### Fixed
+- **A column turned on from the column menu showed at 0px** once any column
+  had been resized: the table kept its old pinned width, and the new column
+  got what was left of it, nothing. Save Path, Hardlinks, Checked and
+  Location all did it. It now gets its fitted width and the table grows.
+- **Set location keeps a trailing space in a folder name.** The path was
+  trimmed, so a folder like `Purity  2016 ` became `Purity  2016`: the torrent
+  was re-added at a folder that does not exist and stayed in error.
 - **The workflow action that changes a category says it moves nothing.** It
   read "move to category" and only changed the label; it is now "set
   category (files stay)", and *move files to a folder* is the one that moves.
