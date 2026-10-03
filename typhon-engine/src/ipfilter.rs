@@ -316,22 +316,22 @@ mod tests {
 # a comment
 // another
 ; and eMule's
-Some ISP:1.2.3.0-1.2.3.255
+Some ISP:203.0.113.10-203.0.113.20
 Weird: name: with colons:10.0.0.1-10.0.0.9
-001.002.004.000 - 001.002.004.255 , 000 , eMule, blocked
-009.009.009.000 - 009.009.009.255 , 200 , eMule, allowed
+198.051.100.000 - 198.051.100.255 , 000 , eMule, blocked
+192.000.002.000 - 192.000.002.255 , 200 , eMule, allowed
 192.168.50.0/24
-8.8.8.8
+203.0.113.200
 2001:db8::/32
 2001:db9::1-2001:db9::ff
 not an address at all
 ";
         let (f, st) = IpFilter::parse(text);
         assert_eq!(st, ParseStats { ranges: 7, unreadable: 1, allowed: 1 });
-        for yes in ["1.2.3.0", "1.2.3.255", "10.0.0.5", "1.2.4.7", "192.168.50.99", "8.8.8.8", "2001:db8:ffff::1", "2001:db9::80"] {
+        for yes in ["203.0.113.10", "203.0.113.20", "10.0.0.5", "198.51.100.7", "192.168.50.99", "203.0.113.200", "2001:db8:ffff::1", "2001:db9::80"] {
             assert!(f.contains(ip(yes)), "{yes} should be blocked");
         }
-        for no in ["1.2.2.255", "1.2.5.0", "9.9.9.9", "192.168.51.0", "8.8.4.4", "2001:dba::1", "2001:db9::100"] {
+        for no in ["203.0.113.9", "203.0.113.21", "192.0.2.9", "192.168.51.0", "203.0.113.201", "2001:dba::1", "2001:db9::100"] {
             assert!(!f.contains(ip(no)), "{no} should pass");
         }
     }
@@ -340,25 +340,25 @@ not an address at all
     /// range still has to catch it.
     #[test]
     fn a_v4_mapped_address_is_its_v4_address() {
-        let (f, _) = IpFilter::parse("5.6.7.0/24");
-        assert!(f.contains(ip("::ffff:5.6.7.8")));
+        let (f, _) = IpFilter::parse("198.51.100.0/24");
+        assert!(f.contains(ip("::ffff:198.51.100.8")));
     }
 
     #[test]
     fn overlapping_and_touching_ranges_merge() {
-        let (f, _) = IpFilter::parse("1.0.0.0-1.0.0.10\n1.0.0.5-1.0.0.20\n1.0.0.21-1.0.0.30\n1.0.0.40-1.0.0.50");
+        let (f, _) = IpFilter::parse("203.0.113.0-203.0.113.10\n203.0.113.5-203.0.113.20\n203.0.113.21-203.0.113.30\n203.0.113.40-203.0.113.50");
         assert_eq!(f.len(), 2, "three that touch are one, the fourth stands apart");
-        assert!(f.contains(ip("1.0.0.30")) && !f.contains(ip("1.0.0.35")) && f.contains(ip("1.0.0.40")));
+        assert!(f.contains(ip("203.0.113.30")) && !f.contains(ip("203.0.113.35")) && f.contains(ip("203.0.113.40")));
         let (g, _) = IpFilter::parse("0.0.0.0-255.255.255.255\n255.255.255.255");
         assert!(g.contains(ip("255.255.255.255")), "no overflow at the top");
-        let u = IpFilter::union(&[f, IpFilter::parse("1.0.0.31-1.0.0.39").0]);
+        let u = IpFilter::union(&[f, IpFilter::parse("203.0.113.31-203.0.113.39").0]);
         assert_eq!(u.len(), 1, "a union merges across its parts");
     }
 
     #[test]
     fn a_range_written_backwards_is_the_same_range() {
-        let (f, _) = IpFilter::parse("1.0.0.20 - 1.0.0.10");
-        assert!(f.contains(ip("1.0.0.15")));
+        let (f, _) = IpFilter::parse("203.0.113.20 - 203.0.113.10");
+        assert!(f.contains(ip("203.0.113.15")));
     }
 
     /// Big enough to be a real list: a quarter of a million ranges, checked
@@ -385,7 +385,7 @@ not an address at all
         let before = generation();
         install(Some(IpFilter::parse("203.0.113.0/24").0));
         assert!(blocked(ip("203.0.113.9")));
-        assert!(!blocked(ip("203.0.114.9")));
+        assert!(!blocked(ip("198.51.100.9")));
         assert!(generation() > before);
         install(Some(IpFilter::default()));
         assert!(!blocked(ip("203.0.113.9")), "an empty list filters nothing");
