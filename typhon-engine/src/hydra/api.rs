@@ -6409,9 +6409,12 @@ async fn set_race_torrent_category(
 ///
 /// Absolute, and made of plain names only: a `..` would let the folder the
 /// move checks be a different one from the folder the files land in.
+///
+/// Not trimmed: a folder name can end in a space (release names often do),
+/// and trimming it re-added the torrent at a folder that does not exist.
+/// The UI trims what a person types; a script sends the path it found.
 fn location_path(raw: &str) -> Result<std::path::PathBuf, String> {
-    let raw = raw.trim();
-    if raw.is_empty() {
+    if raw.trim().is_empty() {
         return Err("a location is required".into());
     }
     let p = std::path::Path::new(raw);
@@ -13065,6 +13068,17 @@ mod fleet_tests {
 #[cfg(test)]
 mod bulk_body_tests {
     use super::*;
+
+    /// 03/10/2026: eleven torrents whose folder ended in a space were "set
+    /// location"-ed to it, re-added at the trimmed name, and stayed in error.
+    #[test]
+    fn a_location_keeps_the_trailing_space_of_its_folder() {
+        let p = location_path("/calewood/sw_1/Purity  2016 ").unwrap();
+        assert_eq!(p, std::path::PathBuf::from("/calewood/sw_1/Purity  2016 "));
+        assert_eq!(location_path("/data/tv/").unwrap(), std::path::PathBuf::from("/data/tv"));
+        assert!(location_path("   ").is_err());
+        assert!(location_path(" /data").is_err());
+    }
 
     /// ⭐ THE REGRESSION TEST FOR 2026-09-16.
     ///
