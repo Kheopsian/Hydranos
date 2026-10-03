@@ -8681,13 +8681,35 @@ const _FIT_MIN = 48, _FIT_MAX = 560;
 let _fitCanvas = null;
 function _fitColWidth(table, th, i) {
     const ctx = (_fitCanvas = _fitCanvas || document.createElement("canvas")).getContext("2d");
-    const textW = (el, text) => {
+    const px = v => parseFloat(v) || 0;
+    // An element's horizontal box around its content: padding, border, margin.
+    const box = cs => px(cs.paddingLeft) + px(cs.paddingRight) + px(cs.borderLeftWidth)
+        + px(cs.borderRightWidth) + px(cs.marginLeft) + px(cs.marginRight);
+    // The width `el`'s content asks for, walked node by node: a badge has its
+    // own font and padding, and measuring the cell's text in the cell's font
+    // cut "seeding" to "seedi..." (reported 2026-10-03). Inline children sit
+    // side by side and add up; block ones stack, so the widest wins.
+    const contentW = el => {
         const cs = getComputedStyle(el);
-        ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-        return ctx.measureText(text).width + (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+        let inline = 0, block = 0;
+        for (const n of el.childNodes) {
+            if (n.nodeType === Node.TEXT_NODE) {
+                const s = n.textContent.replace(/\s+/g, " ");
+                if (!s.trim()) continue;
+                ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+                inline += ctx.measureText(s).width;
+            } else if (n.nodeType === Node.ELEMENT_NODE) {
+                const ccs = getComputedStyle(n);
+                if (ccs.display === "none" || n.classList.contains("col-grip")) continue;
+                const w = contentW(n) + box(ccs);
+                if (ccs.display.startsWith("inline")) inline += w; else block = Math.max(block, w);
+            }
+        }
+        return Math.max(inline, block);
     };
+    const cellW = el => { const cs = getComputedStyle(el); return contentW(el) + px(cs.paddingLeft) + px(cs.paddingRight); };
     // The header also carries the sort arrow and the grip.
-    let w = textW(th, th.textContent.trim()) + 18;
+    let w = cellW(th) + 18;
     const cols = th.parentElement.children.length;
     for (const row of (table.tBodies[0] ? table.tBodies[0].rows : [])) {
         // Spacer and "empty list" rows span the table; their text is not a cell's.
@@ -8695,7 +8717,7 @@ function _fitColWidth(table, th, i) {
         const td = row.cells[i];
         // A progress bar has no text worth measuring but needs room to read.
         const floor = td.querySelector(".progress-bar") ? 90 : 0;
-        w = Math.max(w, textW(td, td.textContent.trim()) + 4, floor);
+        w = Math.max(w, cellW(td) + 4, floor);
     }
     return Math.round(Math.min(_FIT_MAX, Math.max(_FIT_MIN, w)));
 }
