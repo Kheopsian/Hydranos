@@ -44,6 +44,8 @@ pub struct RemoveTimings {
     pub publish: std::time::Duration,
     pub unlink: std::time::Duration,
     pub files: usize,
+    /// Files left on disk because another torrent reads them.
+    pub spared: usize,
     pub evict_wait: std::time::Duration,
     pub evict_hold: std::time::Duration,
     pub dirs: std::time::Duration,
@@ -72,6 +74,7 @@ impl RemoveTimings {
         self.publish += o.publish;
         self.unlink += o.unlink;
         self.files += o.files;
+        self.spared += o.spared;
         self.evict_wait += o.evict_wait;
         self.evict_hold += o.evict_hold;
         self.dirs += o.dirs;
@@ -782,6 +785,20 @@ impl TorrentManager {
         info_hash: &InfoHash,
         keep_data: bool,
     ) -> (Result<(), String>, RemoveTimings) {
+        self.remove_torrent_sparing(info_hash, keep_data, &std::collections::HashSet::new())
+    }
+
+    /// `remove_torrent_timed`, leaving on disk every file named in `spare`.
+    ///
+    /// This engine only knows its own torrents. Whether another one -- in
+    /// another engine as well -- reads the same file is the caller's to work
+    /// out; deleting it anyway left that torrent "seeding" an empty folder.
+    pub fn remove_torrent_sparing(
+        &self,
+        info_hash: &InfoHash,
+        keep_data: bool,
+        spare: &std::collections::HashSet<std::path::PathBuf>,
+    ) -> (Result<(), String>, RemoveTimings) {
         use std::time::Instant;
         let started = Instant::now();
         let mut tm = RemoveTimings::default();
@@ -846,7 +863,10 @@ impl TorrentManager {
                 info_hash: hex_encode(info_hash),
             });
             tm.publish = stage.elapsed();
-            if let Some((files, folder)) = to_delete {
+            if let Some((mut files, folder)) = to_delete {
+                let before = files.len();
+                files.retain(|f| !spare.contains(f));
+                tm.spared = before - files.len();
                 let stage = Instant::now();
                 for f in &files {
                     if let Err(e) = std::fs::remove_file(f) {
