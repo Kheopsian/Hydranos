@@ -21,9 +21,86 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- an endpoint for agents
+## v4.3.0 -- magnets, UDP trackers, BitTorrent v2 and an IP filter
 
 ### Added
+- **BitTorrent v2 torrents (BEP 52).** A v2-only `.torrent` is added,
+  downloaded and seeded: each piece is checked against its SHA-256 merkle
+  hash, the piece layers are checked against each file's root before being
+  trusted, and the torrent is known everywhere -- trackers, peers, DHT, the
+  store -- by its SHA-256 truncated to 20 bytes, as BEP 52 says. A hybrid is
+  read as the v1 torrent it also is. Proven against libtorrent with torrents
+  its own creator made: same info hashes, transfers both ways.
+- **Magnet links.** Accepted by the Add tab (both engines), by
+  `POST /api/torrents` (`magnet_uri`, answered 202), by the qBittorrent API's
+  `urls` field -- which is how autobrr, Sonarr and Radarr send them -- and by
+  the MCP `add_torrent` tool. The request is kept in the store, so a restart
+  does not lose it; its metadata is fetched from the swarm (trackers,
+  including UDP ones, the DHT, `x.pe` peers, then BEP 9), checked against
+  the info hash, and the torrent is added as asked -- category, save path,
+  tags, paused -- with the magnet's trackers. One nobody answers is retried
+  after 1, 5 and 15 minutes, then listed as failed with the reason under the
+  Add form, where it can be retried or removed (`GET /api/magnets`,
+  `DELETE /api/magnets/:hash`, `POST /api/magnets/:hash/retry`). A magnet
+  with only a v2 hash is refused by name. The qBittorrent `urls` field also
+  takes `.torrent` URLs now. Proven against libtorrent in the interop suite.
+- **UDP trackers (BEP 15, with BEP 41).** A `udp://` tracker in a torrent or
+  a magnet is now announced to; it used to be handed to the HTTP client and
+  fail on every pass. The packet carries what the HTTP URL would have --
+  counters, event, port, numwant, `key`, `ip=` -- built in the same call, and
+  the URL's path and query (a passkey in `/announce/<key>` included) travel
+  as URLData. One socket per address family for every announce, a `connect`
+  per tracker per minute rather than per announce, and a reply is taken only
+  from the address it was asked of. Proven against a real opentracker in
+  `tools/interop/run.sh`. On by default; `enable_udp_trackers = false` in
+  `[race]` or `[hoard]` leaves them alone for that engine. Never sent while
+  `TYPHON_ANNOUNCE_PROXY` is set: the proxy carries TCP, and a UDP announce
+  beside it would show the tracker the address it hides. The tracker editor
+  accepts `udp://host:port/...` and refuses one without a port.
+- **An IP filter.** Addresses no connection is made with: an inbound one is
+  refused before the handshake, an outbound dial before the TCP connect,
+  and a peer already connected is dropped the moment it becomes blocked --
+  its session is woken through its own notifier, so an idle seed-to-seed
+  link goes too, and 67k sessions do not contend on a shared one. Block
+  lists from a file or a URL, in PeerGuardian P2P, eMule `.dat` (levels 128+
+  let through) or CIDR form, gzip or zip, reloaded every `refresh_hours` and
+  at once when changed; a list that fails to load keeps its last copy. Bans
+  by hand -- from the Config tab, or the new Ban button on a peer row --
+  apply even with the lists off. `GET/PUT /api/ipfilter`,
+  `POST/DELETE /api/ipfilter/bans`, `POST /api/ipfilter/reload`. Proven
+  against libtorrent: cut off, kept out, not dialled.
+- **Watched folders.** A `.torrent` -- or a `.magnet` file holding a link --
+  dropped in a watched folder is added in the folder's category, which
+  decides the engine and the save path; optionally stopped. Scanned every
+  10 s rather than through inotify, which sees nothing written over SMB,
+  NFS or Unraid's `/mnt/user`; a file is read once its size and mtime held
+  over two scans, so a copy in progress is never read half-written. An added
+  file moves to `added/`, a refused one is renamed `.invalid` with a `.txt`
+  giving the reason; a torrent already in the client counts as added.
+  Nothing is deleted. Set in the Config tab (`GET/PUT /api/watch`), each
+  folder checked when saved: absolute, existing, with an existing category.
+- **Workflows can run when a download completes.** A workflow now has a
+  trigger: *on a timer* (every workflow so far, unchanged) or *when a download
+  completes* -- once per torrent, at the moment its last piece verifies and
+  its trackers are told `completed`. A torrent added with its data already on
+  disk, or rechecked whole, never fires it, and enabling such a workflow does
+  nothing to the torrents that finished before. With no condition it acts on
+  every download that completes. The event is written to the store before
+  anything acts on it (`workflow_events`), so a restart between the two loses
+  nothing. Preview shows the downloads under way it would act on; there is no
+  *Run now*, which would have to invent the event. Hardlink conditions are
+  refused on it: the index has not measured a torrent that finished a second
+  ago. API: `"trigger": "schedule" | "completed"` in the workflow body.
+- **Workflows can run when a torrent is added.** A third trigger, *when a
+  torrent is added*: once per torrent, right after it lands -- added by hand,
+  by autobrr or the *arrs through the qBittorrent API, from a magnet once
+  resolved, or from a watched folder. Moving a torrent and importing a
+  library from another client are not adds and do not fire it. Same
+  machinery as *when a download completes*: queued in `workflow_events`
+  before anything acts, no *Run now*, no hardlink conditions; Preview judges
+  the torrents added in the last day. Nothing is queued while no enabled
+  workflow listens. API: `"trigger": "added"`; a webhook reports `"event":
+  "added"`.
 - **Two workflow actions: move files to a folder, and add trackers.**
   - *Move files to a folder* moves a torrent's data, category unchanged --
     the job *Set location...* queues, with its refusals (hardlinked files are
@@ -37,19 +114,55 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
     the engine before touching anything. Every tracker added learns the
     node's IP for the torrent. Done once every tracker is present.
   - New condition field `private`.
+- **Workflows can call a webhook.** A new action POSTs the torrent as JSON
+  (`event`, `workflow`, and `torrent`: hash, name, category, tags, engine,
+  save path, state, tracker, size, progress, ratio, bytes, seeding time),
+  with the same one-line summary under `content`, `text` and `message` so
+  Discord, Slack/Mattermost and Gotify read it as is. On *when a download
+  completes* it goes out once per download. On a timer it has to come with
+  another action and goes out in the pass where that action changes the
+  torrent -- so a "tag it `told`, then call" rule tells once, not every
+  fifteen minutes; a webhook alone on a timer is refused. A 5xx or no answer
+  is tried three times, a 4xx once; the URL never appears in the activity
+  log, since for Discord it is the secret. No "run a command" action, on
+  purpose: a leaked API key must not become a shell.
+- **Set location: move a torrent's data to any folder, category unchanged**
+  (#4, and the save-path half of #15). Right-click → *Set location…* asks for
+  an absolute path, pre-filled with the current one for a single torrent.
+  Before, the only way to move data was a category, which meant one category
+  per destination folder. It is the same background job as *Change category
+  + move files* -- the torrent keeps seeding while cross-filesystem copies
+  run, hardlinks are asked about first, and a file another torrent reads is
+  never taken. API: `POST /api/{hoard,race}/torrents/:hash/location`
+  `{"location", "allow_breaking_hardlinks"}` and the selection action
+  `location`. A path that is relative or holds `.`/`..` is refused (400).
+- **Export a selection.** Right-click → Export: the selected torrents'
+  `.torrent` files as a zip, their info hashes as a text file, or a CSV (hash,
+  name, size, category, tags, tracker hosts, added date, save path). Works on
+  a Ctrl+A over the whole library: the zip is streamed as it is built, with
+  ZIP64 past 65 535 files or 4 GiB, and the store is read in batches on the
+  read-only connection. Choosing "Remove trackers" drops `announce` and
+  `announce-list` from every `.torrent`, passkeys with them, without touching
+  the info hash; a file that cannot be rewritten is left out rather than
+  shipped with its passkey. The CSV names tracker hosts, never their URLs.
+  Hashes this node does not hold are listed in `missing.txt`.
+  `POST /api/torrents/export` (form: `selection`, `format=zip|txt|csv`,
+  `strip_trackers=1`; `hashes` still accepted for scripts).
+- **`POST /mcp`: Hydranos speaks the Model Context Protocol.** An agent
+  (Claude Code, or any MCP client) connects with the API key -- as `X-Api-Key`
+  or `Authorization: Bearer` -- and gets tools instead of two hundred routes to
+  guess. Reads: `overview`, `find_torrents`, `torrent_detail`, `torrent_files`,
+  `tracker_errors`, `trackers`, `categories`, `health`, `drain`, `jobs`, `logs`.
+  Writes: `pause`, `resume`, `reannounce`, `recheck`, `set_category`,
+  `set_tags`, `add_torrent`. Every read answers a page or a summary, never the
+  whole library, and every write names its torrents by info_hash: there is no
+  write by filter.
 - **The peer lists in the detail panels sort, reorder and hide their
   columns**, like the torrent tables: click a header to sort (a number column
   starts with the biggest, a text one from A; again to reverse), drag a header
   to move the column, right-click the header row to hide one. All of it is
   kept per panel (race and hoard) across torrents and reloads, and the order
   holds through the panel's refresh every few seconds.
-- **BitTorrent v2 torrents (BEP 52).** A v2-only `.torrent` is added,
-  downloaded and seeded: each piece is checked against its SHA-256 merkle
-  hash, the piece layers are checked against each file's root before being
-  trusted, and the torrent is known everywhere -- trackers, peers, DHT, the
-  store -- by its SHA-256 truncated to 20 bytes, as BEP 52 says. A hybrid is
-  read as the v1 torrent it also is. Proven against libtorrent with torrents
-  its own creator made: same info hashes, transfers both ways.
 - **Seed size, and the space it takes.** The Trackers tab has a "Seed size"
   column: the size of every torrent seeding to that tracker, which is what
   the tracker credits (a cross-seed counts under each of its trackers). The
@@ -73,6 +186,153 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   width they need; when the total is wider than the window, the long ones
   (name, save path) give up the difference, down to 200px each. The widths
   are kept, as after a drag.
+- **An optional Save Path column** in the Hoard and Race tables (#2), off by
+  default: turn it on from the column menu (right-click a header).
+- **A tracker's errors open on a click, in its own words.** The Trackers tab
+  counted "other x10" with no way to see what "other" was. Each class now
+  keeps the last few distinct messages of the hour (the same words with other
+  numbers count as one), with the torrent and the event of the latest one;
+  the dialog lists them and opens the Hoard list on that tracker and those
+  errors. `GET /api/announce/errors?host=` serves them. Messages are redacted
+  before they are kept, as in the log.
+- **An interoperability suite, `tools/interop/run.sh`, run in CI.** The client
+  against software somebody else wrote: opentracker and Torrust in private
+  mode read back what they understood of our announces, and qBittorrent
+  (libtorrent 2.0.14) moves real pieces with us both ways, with encryption
+  required and on a private torrent. `docs/BITTORRENT-CONFORMANCE.md` is
+  rewritten around it, and a test now fails if the document names a test that
+  does not exist.
+- The agent endpoint gained `move_to_category`.
+- **`[mcp] allow_destructive`**, off by default. It lists and allows
+  `delete_torrents` and `purge_race`; while it is off the agent is not even
+  shown them, and calling them anyway is refused.
+- **A hardlink index, kept in the background.** A thread walks the catalogue at
+  its own pace -- never-measured torrents first, then anything older than a day
+  -- and stores each torrent's files as it found them (`link_index`). A
+  restart resumes where it stopped. The Workflows tab says how far it has got,
+  and how many torrents it found with their files missing: those used to show
+  only when a peer asked for a piece we could not serve.
+  `HYDRANOS_LINK_SCAN_THREADS` (16 by default) bounds how hard it leans on the
+  disk; `GET /api/workflows/links` reports its progress.
+- **Every action on a selection takes a filter.** `POST /api/selection/:action`
+  (`stop`, `start`, `pin`, `unpin`, `tags`, `category`, `reannounce`,
+  `recheck`, `remove`, `copy`, `move-engine`, `handoff`, `node-fetch`,
+  `node-move`) takes `{selection, params}`, where the selection is either rows
+  (`items`) or the list's filter with exceptions (`filter`, `exclude`,
+  `expect`). The daemon resolves the filter with the function that answers the
+  list page, runs the action as a background job, and
+  `GET /api/selection/jobs/:id` follows it (`POST .../cancel` stops it).
+  Ctrl+A no longer downloads every matching hash into the page -- a million of
+  them was 43 MB each way -- it keeps the filter, and Ctrl+click takes rows out
+  of it. Changing the filter drops the selection rather than let it quietly
+  mean another set.
+  Built against what happened on 2026-09-16, when a filter the bulk route did
+  not implement was dropped and 293k torrents started instead of 70k: every
+  body refuses a key it does not know, an unknown filter parameter is a 400
+  that names it, an empty selection is a refusal (`filter: ""` is the only way
+  to say "the whole list"), and a filter must carry `expect`, the count the
+  operator confirmed -- one that now matches more is refused with the new
+  count and asked again.
+- **A delete slower than 50 ms logs where the time went**: lock waits and
+  holds, state database, unlinks, folder cleanup, store writes.
+- **Bulk actions show their progress in a panel**, not in the search bar's
+  counter. It opens after 400 ms if the job is still running, counts each
+  outcome (done, failed, cooldown...) and lists the errors, can be docked to
+  the bottom-right corner while the page stays usable, cancels the job, and
+  stays with its summary until closed. A reload brings it back.
+- **A store lock held longer than 200 ms is logged with the line that took
+  it**, so the next slow path names itself instead of being hunted from the
+  outside.
+
+### Changed
+- **Stop, start, pin, tags and relabelling a selection are one write, not one
+  request per torrent.** The rows go to the store in transactions of 10 000,
+  the lock released between two, and the list's cached facts are updated by
+  the write itself, so the next
+  list request has nothing left to re-read under the store's lock (15 000
+  tagged rows used to cost it 210 ms; past 100 000 it re-read the whole
+  library). Moving files, rechecking, reannouncing, removing and handing
+  torrents to another node still go one by one: each is real work.
+- **The store's writer keeps 64 MB of page cache instead of SQLite's 2 MB.**
+  A flag change moves an entry in the covering index the list reads, and with
+  2 MB those pages came back from the kernel every few rows: 50 000 paused
+  flags took 1.69 s, 0.59 s with the larger cache.
+- **The tracker chart gets at most ~300 points per engine**, averaged over
+  buckets, instead of every sample: one day of one tracker was 17k rows and
+  3 MB. It reads on its own connection and no longer waits for the sampler.
+- **Tracker history older than 48 h is kept as 5-minute rows.** Existing
+  history is folded in the background after upgrading, 6 h of samples per
+  pass (0.3-0.45 s each): on two months of 5 s samples, 14.4M rows become
+  800k in about 20 minutes. The space is reused by later samples; a
+  `VACUUM` of `bench.db` returns it to the disk.
+- **`bench.db` is in WAL mode**, like the store, except on a network share.
+- **The store runs in WAL.** A write costs 0.08 ms instead of 1.4, and a long
+  read no longer holds writers up (p99 1.2 s to 0.07 s, measured on a copy of
+  production). Long reads -- the tag list, a page's rows, pins -- go through a
+  read-only connection of their own, and the WAL is checkpointed once a
+  second on another. `synchronous=NORMAL`: a power cut can cost the last few
+  seconds of changes, never the file. A store on a network share, which
+  cannot hold a WAL, keeps the rollback journal.
+- **The category form no longer offers routing it never applied.** Strategy
+  (`all`, `least_torrents`, `most_free_space`, `least_load`, `fill_then_next`),
+  Free space reserve and Placement & per-agent save path were saved and then
+  ignored by every 4.x release: a category routes on its mode alone. They are
+  gone from the form and the categories table; a stored value is kept as it
+  was, including across an edit, and the API still accepts the fields. To put
+  a torrent on a given engine: `engine=` when adding, *Move to engine* after.
+  The wiki's *Categories & Routing* page said the opposite and is corrected.
+- **Announces are paced per tracker, by how fast each one answers.** The pool
+  of announce workers had a fixed size, too small for a million torrents and
+  blind to which tracker was slow. Each tracker now gets its own limit on
+  requests in flight, learnt the way TCP Vegas learns a link: it rises while
+  the tracker answers at its usual speed and work is waiting, and falls when
+  answers slow down, when it refuses or times out, or when a rise bought no
+  more answers than before. A saturated tracker is held at the point where it
+  answers as fast as it can without queueing us; one slow tracker no longer
+  holds up the others' announces. On a bench tracker capped at 350 answers a
+  second, the limit settles near 200 in flight at the tracker's normal 0.5 s,
+  where sizing the pool from demand alone climbed past 1,700 and pushed its
+  answers to 2.8 s for the same throughput.
+- **A search no longer shakes the list.** While typing, the rows on screen
+  step back (dimmed) until the new page lands, then fade in. A filter chip
+  whose count a search takes to zero stays where it was, struck through,
+  instead of disappearing: the chip rows keep their height, so the table no
+  longer jumps under the cursor, and every filter keeps its place. And the
+  list is no longer refiltered with half a typed word against the previous
+  page -- that briefly showed 41 results for a search that had 85 000.
+- **Three more long reads moved off the shared store connection**: the
+  qBittorrent-API category listing, the download-slot manager's paused set,
+  and the store reconcile's row list (its deletes still go through the shared
+  one). Each held every write for half a second to a second.
+- **The torrent list answers in a fifth of a second at a million torrents,
+  where it took three to five.** Every page, search or filter re-read the
+  category, tags and pause flag of the whole library from the database -- a
+  second of it, holding the store's lock, so every other write waited behind
+  every keystroke in the search box. That copy is now kept in memory and
+  brought up to date from the rows written since the previous request, which
+  is what makes it hold while torrents are being added all day. The walk over
+  the library is split across up to sixteen threads, reads each torrent's
+  tracker and name without allocating, and builds the sort keys as it goes;
+  only the page being shown is sorted, so page 1 200 no longer sorts 600 000
+  rows first. On a copy of the production library, the same 26 queries return
+  the same rows, counts and facets as before, 11 to 27 times faster.
+- **The bench shows announces as figures**: announces a second against the
+  rate the catalogue needs, how many torrents are late and by how much, and
+  workers in flight against the current limit. The announce lag chart is gone.
+- **Counts are grouped by thousands**, in the interface's language: 945 775 in
+  French, 945,775 in English, instead of 945775. Header, overview, filter
+  chips, the list's status line and the records card.
+- The changelog no longer claims semantic versioning. Versions read
+  `major.release.patch`: one release a week, anything published in between is
+  a patch.
+
+### Security
+- **A .torrent could name files outside its download folder.** File paths
+  from the metainfo were joined onto the save path unchecked, so a torrent
+  listing `../../somewhere/file`, or an absolute path, was accepted and would
+  have been downloaded there -- anywhere the daemon can write. Such a torrent
+  is now refused when it is added, as other clients do. No torrent in a
+  900,000-torrent library was affected by the change.
 
 ### Fixed
 - **Deleting a torrent with its files no longer deletes files another
@@ -82,17 +342,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   announcing an empty folder as complete. Those files now stay (the log says
   how many), and go with the last torrent that reads them. The same check a
   move already made, over every engine.
-- **Hardlinks and Checked are filled as soon as the list is up after a
-  restart.** The last measurements are in the store, but they were only
-  published after the link scanner's three-minute settle: every torrent read
-  "-" for the first minutes. Only the measuring waits now.
-- **A column turned on from the column menu showed at 0px** once any column
-  had been resized: the table kept its old pinned width, and the new column
-  got what was left of it, nothing. Save Path, Hardlinks, Checked and
-  Location all did it. It now gets its fitted width and the table grows.
-- **Set location keeps a trailing space in a folder name.** The path was
-  trimmed, so a folder like `Purity  2016 ` became `Purity  2016`: the torrent
-  was re-added at a folder that does not exist and stayed in error.
 - **The workflow action that changes a category says it moves nothing.** It
   read "move to category" and only changed the label; it is now "set
   category (files stay)", and *move files to a folder* is the one that moves.
@@ -137,206 +386,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   zeros beside its data. Padding is now a gap in the stream -- read as
   zeros, never written, never opened -- and web seeds place each file at its
   offset around it.
-- **Watched folders.** A `.torrent` -- or a `.magnet` file holding a link --
-  dropped in a watched folder is added in the folder's category, which
-  decides the engine and the save path; optionally stopped. Scanned every
-  10 s rather than through inotify, which sees nothing written over SMB,
-  NFS or Unraid's `/mnt/user`; a file is read once its size and mtime held
-  over two scans, so a copy in progress is never read half-written. An added
-  file moves to `added/`, a refused one is renamed `.invalid` with a `.txt`
-  giving the reason; a torrent already in the client counts as added.
-  Nothing is deleted. Set in the Config tab (`GET/PUT /api/watch`), each
-  folder checked when saved: absolute, existing, with an existing category.
-- **An IP filter.** Addresses no connection is made with: an inbound one is
-  refused before the handshake, an outbound dial before the TCP connect,
-  and a peer already connected is dropped the moment it becomes blocked --
-  its session is woken through its own notifier, so an idle seed-to-seed
-  link goes too, and 67k sessions do not contend on a shared one. Block
-  lists from a file or a URL, in PeerGuardian P2P, eMule `.dat` (levels 128+
-  let through) or CIDR form, gzip or zip, reloaded every `refresh_hours` and
-  at once when changed; a list that fails to load keeps its last copy. Bans
-  by hand -- from the Config tab, or the new Ban button on a peer row --
-  apply even with the lists off. `GET/PUT /api/ipfilter`,
-  `POST/DELETE /api/ipfilter/bans`, `POST /api/ipfilter/reload`. Proven
-  against libtorrent: cut off, kept out, not dialled.
-- **Magnet links.** Accepted by the Add tab (both engines), by
-  `POST /api/torrents` (`magnet_uri`, answered 202), by the qBittorrent API's
-  `urls` field -- which is how autobrr, Sonarr and Radarr send them -- and by
-  the MCP `add_torrent` tool. The request is kept in the store, so a restart
-  does not lose it; its metadata is fetched from the swarm (trackers,
-  including UDP ones, the DHT, `x.pe` peers, then BEP 9), checked against
-  the info hash, and the torrent is added as asked -- category, save path,
-  tags, paused -- with the magnet's trackers. One nobody answers is retried
-  after 1, 5 and 15 minutes, then listed as failed with the reason under the
-  Add form, where it can be retried or removed (`GET /api/magnets`,
-  `DELETE /api/magnets/:hash`, `POST /api/magnets/:hash/retry`). A magnet
-  with only a v2 hash is refused by name. The qBittorrent `urls` field also
-  takes `.torrent` URLs now. Proven against libtorrent in the interop suite.
-
-### Fixed
-- **Magnet resolution gave up after one round.** A peer still checking the
-  torrent (libtorrent refuses connections for a few seconds after an add) or
-  a tracker answering late made the whole resolution fail. It now keeps
-  asking within its two-minute budget, re-asking the trackers and the DHT
-  every 30 s -- not every round, which would announce `started` every few
-  seconds.
-- **Workflows can call a webhook.** A new action POSTs the torrent as JSON
-  (`event`, `workflow`, and `torrent`: hash, name, category, tags, engine,
-  save path, state, tracker, size, progress, ratio, bytes, seeding time),
-  with the same one-line summary under `content`, `text` and `message` so
-  Discord, Slack/Mattermost and Gotify read it as is. On *when a download
-  completes* it goes out once per download. On a timer it has to come with
-  another action and goes out in the pass where that action changes the
-  torrent -- so a "tag it `told`, then call" rule tells once, not every
-  fifteen minutes; a webhook alone on a timer is refused. A 5xx or no answer
-  is tried three times, a 4xx once; the URL never appears in the activity
-  log, since for Discord it is the secret. No "run a command" action, on
-  purpose: a leaked API key must not become a shell.
-- **UDP trackers (BEP 15, with BEP 41).** A `udp://` tracker in a torrent or
-  a magnet is now announced to; it used to be handed to the HTTP client and
-  fail on every pass. The packet carries what the HTTP URL would have --
-  counters, event, port, numwant, `key`, `ip=` -- built in the same call, and
-  the URL's path and query (a passkey in `/announce/<key>` included) travel
-  as URLData. One socket per address family for every announce, a `connect`
-  per tracker per minute rather than per announce, and a reply is taken only
-  from the address it was asked of. Proven against a real opentracker in
-  `tools/interop/run.sh`. On by default; `enable_udp_trackers = false` in
-  `[race]` or `[hoard]` leaves them alone for that engine. Never sent while
-  `TYPHON_ANNOUNCE_PROXY` is set: the proxy carries TCP, and a UDP announce
-  beside it would show the tracker the address it hides. The tracker editor
-  accepts `udp://host:port/...` and refuses one without a port.
-- **Workflows can run when a torrent is added.** A third trigger, *when a
-  torrent is added*: once per torrent, right after it lands -- added by hand,
-  by autobrr or the *arrs through the qBittorrent API, from a magnet once
-  resolved, or from a watched folder. Moving a torrent and importing a
-  library from another client are not adds and do not fire it. Same
-  machinery as *when a download completes*: queued in `workflow_events`
-  before anything acts, no *Run now*, no hardlink conditions; Preview judges
-  the torrents added in the last day. Nothing is queued while no enabled
-  workflow listens. API: `"trigger": "added"`; a webhook reports `"event":
-  "added"`.
-- **Workflows can run when a download completes.** A workflow now has a
-  trigger: *on a timer* (every workflow so far, unchanged) or *when a download
-  completes* -- once per torrent, at the moment its last piece verifies and
-  its trackers are told `completed`. A torrent added with its data already on
-  disk, or rechecked whole, never fires it, and enabling such a workflow does
-  nothing to the torrents that finished before. With no condition it acts on
-  every download that completes. The event is written to the store before
-  anything acts on it (`workflow_events`), so a restart between the two loses
-  nothing. Preview shows the downloads under way it would act on; there is no
-  *Run now*, which would have to invent the event. Hardlink conditions are
-  refused on it: the index has not measured a torrent that finished a second
-  ago. API: `"trigger": "schedule" | "completed"` in the workflow body.
-- **Set location: move a torrent's data to any folder, category unchanged**
-  (#4, and the save-path half of #15). Right-click → *Set location…* asks for
-  an absolute path, pre-filled with the current one for a single torrent.
-  Before, the only way to move data was a category, which meant one category
-  per destination folder. It is the same background job as *Change category
-  + move files* -- the torrent keeps seeding while cross-filesystem copies
-  run, hardlinks are asked about first, and a file another torrent reads is
-  never taken. API: `POST /api/{hoard,race}/torrents/:hash/location`
-  `{"location", "allow_breaking_hardlinks"}` and the selection action
-  `location`. A path that is relative or holds `.`/`..` is refused (400).
-- **An optional Save Path column** in the Hoard and Race tables (#2), off by
-  default: turn it on from the column menu (right-click a header).
-- **A tracker's errors open on a click, in its own words.** The Trackers tab
-  counted "other x10" with no way to see what "other" was. Each class now
-  keeps the last few distinct messages of the hour (the same words with other
-  numbers count as one), with the torrent and the event of the latest one;
-  the dialog lists them and opens the Hoard list on that tracker and those
-  errors. `GET /api/announce/errors?host=` serves them. Messages are redacted
-  before they are kept, as in the log.
-- **An interoperability suite, `tools/interop/run.sh`, run in CI.** The client
-  against software somebody else wrote: opentracker and Torrust in private
-  mode read back what they understood of our announces, and qBittorrent
-  (libtorrent 2.0.14) moves real pieces with us both ways, with encryption
-  required and on a private torrent. `docs/BITTORRENT-CONFORMANCE.md` is
-  rewritten around it, and a test now fails if the document names a test that
-  does not exist.
-- **`POST /mcp`: Hydranos speaks the Model Context Protocol.** An agent
-  (Claude Code, or any MCP client) connects with the API key -- as `X-Api-Key`
-  or `Authorization: Bearer` -- and gets tools instead of two hundred routes to
-  guess. Reads: `overview`, `find_torrents`, `torrent_detail`, `torrent_files`,
-  `tracker_errors`, `trackers`, `categories`, `health`, `drain`, `jobs`, `logs`.
-  Writes: `pause`, `resume`, `reannounce`, `recheck`, `set_category`,
-  `set_tags`, `add_torrent`. Every read answers a page or a summary, never the
-  whole library, and every write names its torrents by info_hash: there is no
-  write by filter.
-- **`[mcp] allow_destructive`**, off by default. It lists and allows
-  `delete_torrents` and `purge_race`; while it is off the agent is not even
-  shown them, and calling them anyway is refused.
-- **A hardlink index, kept in the background.** A thread walks the catalogue at
-  its own pace -- never-measured torrents first, then anything older than a day
-  -- and stores each torrent's files as it found them (`link_index`). A
-  restart resumes where it stopped. The Workflows tab says how far it has got,
-  and how many torrents it found with their files missing: those used to show
-  only when a peer asked for a piece we could not serve.
-  `HYDRANOS_LINK_SCAN_THREADS` (16 by default) bounds how hard it leans on the
-  disk; `GET /api/workflows/links` reports its progress.
-- **Export a selection.** Right-click → Export: the selected torrents'
-  `.torrent` files as a zip, their info hashes as a text file, or a CSV (hash,
-  name, size, category, tags, tracker hosts, added date, save path). Works on
-  a Ctrl+A over the whole library: the zip is streamed as it is built, with
-  ZIP64 past 65 535 files or 4 GiB, and the store is read in batches on the
-  read-only connection. Choosing "Remove trackers" drops `announce` and
-  `announce-list` from every `.torrent`, passkeys with them, without touching
-  the info hash; a file that cannot be rewritten is left out rather than
-  shipped with its passkey. The CSV names tracker hosts, never their URLs.
-  Hashes this node does not hold are listed in `missing.txt`.
-  `POST /api/torrents/export` (form: `selection`, `format=zip|txt|csv`,
-  `strip_trackers=1`; `hashes` still accepted for scripts).
-- **Every action on a selection takes a filter.** `POST /api/selection/:action`
-  (`stop`, `start`, `pin`, `unpin`, `tags`, `category`, `reannounce`,
-  `recheck`, `remove`, `copy`, `move-engine`, `handoff`, `node-fetch`,
-  `node-move`) takes `{selection, params}`, where the selection is either rows
-  (`items`) or the list's filter with exceptions (`filter`, `exclude`,
-  `expect`). The daemon resolves the filter with the function that answers the
-  list page, runs the action as a background job, and
-  `GET /api/selection/jobs/:id` follows it (`POST .../cancel` stops it).
-  Ctrl+A no longer downloads every matching hash into the page -- a million of
-  them was 43 MB each way -- it keeps the filter, and Ctrl+click takes rows out
-  of it. Changing the filter drops the selection rather than let it quietly
-  mean another set.
-  Built against what happened on 2026-09-16, when a filter the bulk route did
-  not implement was dropped and 293k torrents started instead of 70k: every
-  body refuses a key it does not know, an unknown filter parameter is a 400
-  that names it, an empty selection is a refusal (`filter: ""` is the only way
-  to say "the whole list"), and a filter must carry `expect`, the count the
-  operator confirmed -- one that now matches more is refused with the new
-  count and asked again.
-- **Stop, start, pin, tags and relabelling a selection are one write, not one
-  request per torrent.** The rows go to the store in transactions of 10 000,
-  the lock released between two, and the list's cached facts are updated by
-  the write itself, so the next
-  list request has nothing left to re-read under the store's lock (15 000
-  tagged rows used to cost it 210 ms; past 100 000 it re-read the whole
-  library). Moving files, rechecking, reannouncing, removing and handing
-  torrents to another node still go one by one: each is real work.
-- **The store's writer keeps 64 MB of page cache instead of SQLite's 2 MB.**
-  A flag change moves an entry in the covering index the list reads, and with
-  2 MB those pages came back from the kernel every few rows: 50 000 paused
-  flags took 1.69 s, 0.59 s with the larger cache.
-
-### Fixed (unreleased features)
-- **Removing a tag from a selection set that tag instead.** The page sent
-  `{tags, op}` to the single-torrent tags route, which replaces the whole set
-  and has no `op`: "remove X" left every selected torrent tagged X and nothing
-  else. The selection now honours `op`; the single route keeps its documented
-  replace semantics.
-- **The per-tracker pass no longer holds a runtime worker.** It reads every
-  torrent, 1.0-1.6 s on 1.1M, and ran inside the sampler's task; it now runs
-  on a blocking thread, never two at once. It warned at 1 s, so every pass
-  logged `tracker pass is slow`: the warning is now for 5 s.
-
-### Security
-- **A .torrent could name files outside its download folder.** File paths
-  from the metainfo were joined onto the save path unchecked, so a torrent
-  listing `../../somewhere/file`, or an absolute path, was accepted and would
-  have been downloaded there -- anywhere the daemon can write. Such a torrent
-  is now refused when it is added, as other clients do. No torrent in a
-  900,000-torrent library was affected by the change.
-
-### Fixed
 - **The hoard search box keeps one line and a usable width.** It was capped at
   280 px and squeezed first, so on a laptop it shrank to a stub and changed
   width whenever a chip count did. It now takes the space the state chips
@@ -355,13 +404,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   on a 1,813-torrent delete). Session and day are now counted from the bytes
   each engine actually moves, so a delete, a re-add or a move between engines
   changes neither. Lifetime totals are unchanged.
-- **A delete slower than 50 ms logs where the time went**: lock waits and
-  holds, state database, unlinks, folder cleanup, store writes.
-- **Bulk actions show their progress in a panel**, not in the search bar's
-  counter. It opens after 400 ms if the job is still running, counts each
-  outcome (done, failed, cooldown...) and lists the errors, can be docked to
-  the bottom-right corner while the page stays usable, cancels the job, and
-  stays with its summary until closed. A reload brings it back.
 - **A workflow tagging torrents no longer holds the store for minutes.** Each
   tag or untag read the tags of the whole engine -- a million rows, ~3 s
   under the store's writer -- to change one torrent's, so a 500-torrent pass
@@ -382,15 +424,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   was flat. The sampler now takes one pass over the torrents every 30 s; the
   table is served from that pass instead of reading every torrent on each
   poll, and the chart from the same figures.
-- **The tracker chart gets at most ~300 points per engine**, averaged over
-  buckets, instead of every sample: one day of one tracker was 17k rows and
-  3 MB. It reads on its own connection and no longer waits for the sampler.
-- **Tracker history older than 48 h is kept as 5-minute rows.** Existing
-  history is folded in the background after upgrading, 6 h of samples per
-  pass (0.3-0.45 s each): on two months of 5 s samples, 14.4M rows become
-  800k in about 20 minutes. The space is reused by later samples; a
-  `VACUUM` of `bench.db` returns it to the disk.
-- **`bench.db` is in WAL mode**, like the store, except on a network share.
 - **Trackers are told the session's counters, not the lifetime totals.**
   `uploaded` and `downloaded` were the totals persisted across restarts, so
   every boot sent `started` claiming the torrent's whole history -- the
@@ -473,7 +506,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   filesystems after the operator agrees, as the page already asked. A category
   of the other engine's kind graduates the torrent there. `move-preview`,
   which answered 400 to everything, now says what a move would do.
-- The agent endpoint gained `move_to_category`.
 - **Every tag, pause or category change scanned the whole library.** The
   route resolved its torrent with `info_hash LIKE ? || '%'`, which SQLite
   cannot answer from an index: a million rows read, under the store's lock,
@@ -481,16 +513,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   seconds and held up everything else meanwhile. A hash or a hash prefix is
   now looked up as a range on the index: 179 ms to 0.02 ms on the production
   copy, and the same hundred tags in a tenth of a second.
-- **The store runs in WAL.** A write costs 0.08 ms instead of 1.4, and a long
-  read no longer holds writers up (p99 1.2 s to 0.07 s, measured on a copy of
-  production). Long reads -- the tag list, a page's rows, pins -- go through a
-  read-only connection of their own, and the WAL is checkpointed once a
-  second on another. `synchronous=NORMAL`: a power cut can cost the last few
-  seconds of changes, never the file. A store on a network share, which
-  cannot hold a WAL, keeps the rollback journal.
-- **A store lock held longer than 200 ms is logged with the line that took
-  it**, so the next slow path names itself instead of being hunted from the
-  outside.
 - **Every store operation waited ~0.6 s for twelve minutes of every hour.**
   The copy of each torrent's seeding time into the store ran hourly (and two
   minutes after boot) in transactions of 2 000 rows: at a million torrents
@@ -518,60 +540,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - **IOWait and ARC misses were recorded as 0 since the Rust port.** The
   bench sampler wrote the columns but never read `/proc/stat` or the ZFS ARC
   counters; both are measured again, over each sample's interval.
-
-### Changed
-- **The category form no longer offers routing it never applied.** Strategy
-  (`all`, `least_torrents`, `most_free_space`, `least_load`, `fill_then_next`),
-  Free space reserve and Placement & per-agent save path were saved and then
-  ignored by every 4.x release: a category routes on its mode alone. They are
-  gone from the form and the categories table; a stored value is kept as it
-  was, including across an edit, and the API still accepts the fields. To put
-  a torrent on a given engine: `engine=` when adding, *Move to engine* after.
-  The wiki's *Categories & Routing* page said the opposite and is corrected.
-- **Announces are paced per tracker, by how fast each one answers.** The pool
-  of announce workers had a fixed size, too small for a million torrents and
-  blind to which tracker was slow. Each tracker now gets its own limit on
-  requests in flight, learnt the way TCP Vegas learns a link: it rises while
-  the tracker answers at its usual speed and work is waiting, and falls when
-  answers slow down, when it refuses or times out, or when a rise bought no
-  more answers than before. A saturated tracker is held at the point where it
-  answers as fast as it can without queueing us; one slow tracker no longer
-  holds up the others' announces. On a bench tracker capped at 350 answers a
-  second, the limit settles near 200 in flight at the tracker's normal 0.5 s,
-  where sizing the pool from demand alone climbed past 1,700 and pushed its
-  answers to 2.8 s for the same throughput.
-- **A search no longer shakes the list.** While typing, the rows on screen
-  step back (dimmed) until the new page lands, then fade in. A filter chip
-  whose count a search takes to zero stays where it was, struck through,
-  instead of disappearing: the chip rows keep their height, so the table no
-  longer jumps under the cursor, and every filter keeps its place. And the
-  list is no longer refiltered with half a typed word against the previous
-  page -- that briefly showed 41 results for a search that had 85 000.
-- **Three more long reads moved off the shared store connection**: the
-  qBittorrent-API category listing, the download-slot manager's paused set,
-  and the store reconcile's row list (its deletes still go through the shared
-  one). Each held every write for half a second to a second.
-- **The torrent list answers in a fifth of a second at a million torrents,
-  where it took three to five.** Every page, search or filter re-read the
-  category, tags and pause flag of the whole library from the database -- a
-  second of it, holding the store's lock, so every other write waited behind
-  every keystroke in the search box. That copy is now kept in memory and
-  brought up to date from the rows written since the previous request, which
-  is what makes it hold while torrents are being added all day. The walk over
-  the library is split across up to sixteen threads, reads each torrent's
-  tracker and name without allocating, and builds the sort keys as it goes;
-  only the page being shown is sorted, so page 1 200 no longer sorts 600 000
-  rows first. On a copy of the production library, the same 26 queries return
-  the same rows, counts and facets as before, 11 to 27 times faster.
-- **The bench shows announces as figures**: announces a second against the
-  rate the catalogue needs, how many torrents are late and by how much, and
-  workers in flight against the current limit. The announce lag chart is gone.
-- **Counts are grouped by thousands**, in the interface's language: 945 775 in
-  French, 945,775 in English, instead of 945775. Header, overview, filter
-  chips, the list's status line and the records card.
-- The changelog no longer claims semantic versioning. Versions read
-  `major.release.patch`: one release a week, anything published in between is
-  a patch.
 
 ## v4.2.4 -- a header that moves from the first minute
 

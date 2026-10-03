@@ -88,7 +88,7 @@ fn our_address_towards(peer: &str) -> std::net::IpAddr {
 
 fn peer_id() -> [u8; 20] {
     let cfg: typhon_engine::config::EngineConfig = serde_json::from_str("{}").unwrap();
-    typhon_engine::config::set_version("4.2.4");
+    typhon_engine::config::set_version("4.3.0");
     cfg.peer_id()
 }
 
