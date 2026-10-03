@@ -82,6 +82,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   announcing an empty folder as complete. Those files now stay (the log says
   how many), and go with the last torrent that reads them. The same check a
   move already made, over every engine.
+- **Hardlinks and Checked are filled as soon as the list is up after a
+  restart.** The last measurements are in the store, but they were only
+  published after the link scanner's three-minute settle: every torrent read
+  "-" for the first minutes. Only the measuring waits now.
 - **A column turned on from the column menu showed at 0px** once any column
   had been resized: the table kept its old pinned width, and the new column
   got what was left of it, nothing. Save Path, Hardlinks, Checked and
