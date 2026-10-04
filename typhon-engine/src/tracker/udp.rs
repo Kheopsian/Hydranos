@@ -261,13 +261,26 @@ impl Drop for AliveGuard {
 }
 
 impl Family {
-    fn open(v6: bool) -> Result<Family, String> {
+    fn open(v6: bool, device: &str) -> Result<Family, String> {
         let bind = if v6 {
             SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
         } else {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
         };
         let std = std::net::UdpSocket::bind(bind).map_err(|e| format!("udp: bind {bind}: {e}"))?;
+        // Pinned to the engine's interface, failing closed: a socket that
+        // cannot be pinned is not opened at all.
+        if !device.trim().is_empty() {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                let egress = crate::netpin::Egress { device: device.to_string(), ..Default::default() };
+                crate::netpin::pin_fd(std.as_raw_fd(), &egress)
+                    .map_err(|e| format!("udp: pin to {device}: {e}"))?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("udp: bind_interface {device:?} cannot be applied on this platform"));
+        }
         std.set_nonblocking(true).map_err(|e| format!("udp: {e}"))?;
         let sock = Arc::new(UdpSocket::from_std(std).map_err(|e| format!("udp: {e}"))?);
         let pending: Arc<DashMap<u32, (SocketAddr, oneshot::Sender<Vec<u8>>)>> = Arc::new(DashMap::new());
@@ -331,6 +344,7 @@ impl Family {
 
 /// The UDP announce client: sockets, connection ids and resolved addresses.
 pub struct Client {
+    device: String,
     v4: Mutex<Option<Arc<Family>>>,
     v6: Mutex<Option<Arc<Family>>>,
     conns: DashMap<SocketAddr, (u64, Instant)>,
@@ -340,6 +354,7 @@ pub struct Client {
 impl Default for Client {
     fn default() -> Self {
         Client {
+            device: String::new(),
             v4: Mutex::new(None),
             v6: Mutex::new(None),
             conns: DashMap::new(),
@@ -355,7 +370,7 @@ impl Client {
         if let Some(f) = slot.as_ref().filter(|f| f.alive.load(Ordering::Relaxed)) {
             return Ok(f.clone());
         }
-        let f = Arc::new(Family::open(v6)?);
+        let f = Arc::new(Family::open(v6, &self.device)?);
         *slot = Some(f.clone());
         Ok(f)
     }
@@ -436,10 +451,30 @@ static CLIENT: OnceLock<Client> = OnceLock::new();
 /// sending the UDP announce directly would publish exactly what the proxy is
 /// there to hide.
 pub async fn send_announce(a: &UdpAnnounce, mode: IpMode) -> Result<AnnounceResponse, String> {
+    send_announce_on(a, mode, "").await
+}
+
+/// One client per interface: connection ids and sockets belong to the path
+/// they were obtained on.
+static PINNED: OnceLock<Mutex<std::collections::HashMap<String, Arc<Client>>>> = OnceLock::new();
+
+/// `send_announce` from the engine's interface. Empty = the default route.
+pub async fn send_announce_on(a: &UdpAnnounce, mode: IpMode, device: &str) -> Result<AnnounceResponse, String> {
     if super::http::announces_proxied() {
         return Err("udp tracker skipped: announces are proxied and UDP cannot follow the proxy".into());
     }
-    CLIENT.get_or_init(Client::default).announce(a, mode).await
+    let device = device.trim();
+    if device.is_empty() {
+        return CLIENT.get_or_init(Client::default).announce(a, mode).await;
+    }
+    let client = {
+        let map = PINNED.get_or_init(Default::default);
+        let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
+        map.entry(device.to_string())
+            .or_insert_with(|| Arc::new(Client { device: device.to_string(), ..Client::default() }))
+            .clone()
+    };
+    client.announce(a, mode).await
 }
 
 #[cfg(test)]
