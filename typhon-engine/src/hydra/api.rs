@@ -10447,22 +10447,24 @@ async fn post_torrent_graduate(
                 Json(serde_json::json!({"error": "save_path is required (or a category that has one)"})))
             .into_response();
     }
-    match crate::jobsrun::queue_graduation(
+    // The same checks as a category change that graduates: an unsafe path,
+    // files another torrent reads, hardlinks (unless allowed) and free space.
+    // 4.3 queued this route's job with none of them.
+    let allow = v.get("allow_breaking_hardlinks").and_then(|x| x.as_bool()).unwrap_or(false);
+    let plan = crate::jobsrun::plan_move_checked(&state, &torrent, std::path::Path::new(&save_path));
+    match queue_data_move_core(
         &state,
         &hash,
-        &torrent.meta.name,
         &current,
-        &to,
         &category,
-        &save_path,
+        plan,
+        &torrent.meta.name,
         torrent.meta.total_size as i64,
+        Some(to),
+        allow,
     ) {
-        Some(id) => Json(serde_json::json!({"status": "queued", "job": id})).into_response(),
-        None => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "a graduation is already queued or running for this torrent"})),
-        )
-            .into_response(),
+        Ok(v) => Json(serde_json::json!({"status": "queued", "job": v["job"], "plan": v["plan"]})).into_response(),
+        Err((code, v)) => (code, Json(v)).into_response(),
     }
 }
 
@@ -10661,34 +10663,43 @@ async fn post_torrent_engine(
             .into_response();
     };
 
-    // Source first, and KEEPING the data: the files are the whole point of not
-    // transferring anything.
+    // Target first, source second. 4.3 removed the source and then re-added
+    // the .torrent in seed mode: a target that refused left the torrent in no
+    // engine, an incomplete torrent came out marked complete, and the tracker
+    // edits, byte counters and stopped state were lost on the way.
+    //
+    // The record that crosses is the source's own resume record -- pieces,
+    // trackers, counters, seed time, paused -- adopted by the target the way
+    // a restart reads it back. Both engines point at the same files for the
+    // instant they overlap, which is what "duplicate to engine" does anyway.
     let ih = torrent.info_hash;
-    if let Some(src) = state.engines.get(&current) {
-        if let Err(e) = src.manager.remove_torrent(&ih, true) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("the source engine refused: {e}")})),
-            )
-                .into_response();
-        }
-        src.announce_cache.forget(&hash);
-    }
+    let Some(src) = state.engines.get(&current) else { return not_found() };
     let Some(dst) = state.engines.get(&target) else { return not_found() };
-    // seed_mode: the data is already there and already verified. Rechecking a
-    // large payload for a move that touched nothing would cost hours of disk.
-    if let Err(e) = dst
-        .manager
-        .add_torrent_bytes(&blob, &save_path, paused, true)
-    {
+    let Some(mut record) = src.manager.export_state(&ih) else { return not_found() };
+    if !save_path.is_empty() {
+        record.save_path = save_path.clone();
+    }
+    record.paused = record.paused || paused;
+    if let Err(e) = dst.manager.import_state_bytes(&record, &blob) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
-                "error": format!("the target engine refused it, and the source has let it go: {e}")
+                "error": format!("the target engine refused it; nothing was changed: {e}")
             })),
         )
             .into_response();
     }
+    if let Err(e) = src.manager.remove_torrent(&ih, true) {
+        // Undo the adoption rather than leave the torrent in both engines
+        // with one store row.
+        let _ = dst.manager.remove_torrent(&ih, true);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("the source engine refused to let go; nothing was changed: {e}")})),
+        )
+            .into_response();
+    }
+    src.announce_cache.forget(&hash);
     {
         let store = state.store.lock().unwrap();
         let _ = store.set_session(&hash, &current, &target);
@@ -16961,6 +16972,31 @@ mod write_path_tests {
         )
         .await;
         assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// A move carries the torrent's own state across: an edited tracker list
+    /// and the stopped state survive, and the source lets go only once the
+    /// target holds it. 4.3 re-added the .torrent in seed mode and lost both.
+    #[tokio::test]
+    async fn a_move_between_engines_keeps_the_torrent_as_it_was() {
+        let (s, hash) = with_torrent("move-keeps");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let race = s.state.engines.get("race").unwrap();
+        race.manager.set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]]).unwrap();
+        let resp = super::post_torrent_engine(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"engine":"hoard"}"#.to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(race.manager.get(&ih).is_none(), "the source let go");
+        let hoard = s.state.engines.get("hoard").unwrap();
+        let t = hoard.manager.get(&ih).expect("the target holds it");
+        assert_eq!(*t.live_trackers.read(), vec![vec!["https://edited.example/announce".to_string()]]);
+        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "added paused, still paused");
     }
 
     /// Copying to an engine that does not exist is refused: the copy would
