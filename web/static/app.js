@@ -7330,9 +7330,9 @@ async function changePassword() {
     const el = document.getElementById("newpass-input");
     const res = document.getElementById("newpass-result");
     const pw = el.value;
-    if (pw.length < 6) {
+    if (pw.length < 8) {
         res.className = "result-msg error";
-        res.textContent = t("Password too short (min 6).");
+        res.textContent = t("Password too short (min 8).");
         return;
     }
     try {

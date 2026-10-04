@@ -36,6 +36,7 @@ pub async fn setup_status(State(state): State<AppState>) -> Response {
 /// whoever finds it first.
 pub async fn setup_password(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
@@ -47,7 +48,7 @@ pub async fn setup_password(
         )
             .into_response();
     }
-    if !is_local_request(&headers) {
+    if !is_local_request(peer.ip(), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
@@ -200,9 +201,15 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 
 /// Whether the caller is on loopback or a private network.
 ///
-/// Read from the forwarding headers when present, because the answer decides
-/// whether an unconfigured instance can be claimed.
-fn is_local_request(headers: &HeaderMap) -> bool {
+/// The socket peer decides first: a public peer is refused whatever headers
+/// it sends, since anyone can write `X-Forwarded-For: 127.0.0.1`. A private
+/// peer may be a reverse proxy, so its forwarding header, when present, must
+/// name a private client too. 4.3 read only the header and let a direct call
+/// without one through, which made the guard a no-op on a forwarded port.
+fn is_local_request(peer: std::net::IpAddr, headers: &HeaderMap) -> bool {
+    if !is_private(&peer.to_canonical().to_string()) {
+        return false;
+    }
     let forwarded = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -210,9 +217,6 @@ fn is_local_request(headers: &HeaderMap) -> bool {
         .map(|s| s.trim().to_string());
     match forwarded {
         Some(ip) => is_private(&ip),
-        // No proxy header: axum gives us the peer address only through an
-        // extractor the caller does not have here, so a direct call is treated
-        // as local. The instance is reachable on its own port either way.
         None => true,
     }
 }
@@ -257,10 +261,24 @@ mod tests {
 
     #[test]
     fn a_forwarded_public_address_is_refused_even_over_a_proxy() {
+        let proxy: std::net::IpAddr = "192.168.99.1".parse().unwrap();
         let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", "8.8.8.8, 192.168.99.1".parse().unwrap());
-        assert!(!is_local_request(&h), "the first hop is the client, not the proxy");
+        h.insert("x-forwarded-for", "203.0.113.9, 192.168.99.1".parse().unwrap());
+        assert!(!is_local_request(proxy, &h), "the first hop is the client, not the proxy");
         h.insert("x-forwarded-for", "192.168.99.50".parse().unwrap());
-        assert!(is_local_request(&h));
+        assert!(is_local_request(proxy, &h));
+    }
+
+    /// The hole 4.3 had: a direct call from the internet, with no header,
+    /// was taken for a local one.
+    #[test]
+    fn a_public_peer_is_refused_with_or_without_a_header() {
+        let public: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        assert!(!is_local_request(public, &HeaderMap::new()));
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
+        assert!(!is_local_request(public, &h), "a forged header does not make a public peer local");
+        let mapped: std::net::IpAddr = "::ffff:192.168.1.20".parse().unwrap();
+        assert!(is_local_request(mapped, &HeaderMap::new()), "an IPv4-mapped LAN peer is local");
     }
 }
