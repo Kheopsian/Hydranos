@@ -145,6 +145,39 @@ pub async fn announce(
     left: u64,
     event: &str,
 ) -> Result<AnnounceResponse, String> {
+    announce_on(tracker_url, info_hash, peer_id, port, uploaded, downloaded, left, event, "").await
+}
+
+/// Pin a client builder to an interface, or refuse where that is impossible.
+fn pin_builder(builder: reqwest::ClientBuilder, device: &str) -> Result<reqwest::ClientBuilder, String> {
+    let device = device.trim();
+    if device.is_empty() {
+        return Ok(builder);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        Ok(builder.interface(device))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = builder;
+        Err(format!("bind_interface {device:?} cannot be applied to announces on this platform"))
+    }
+}
+
+/// `announce` from an interface. Empty = the default route.
+#[allow(clippy::too_many_arguments)]
+pub async fn announce_on(
+    tracker_url: &str,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    port: u16,
+    uploaded: u64,
+    downloaded: u64,
+    left: u64,
+    event: &str,
+    device: &str,
+) -> Result<AnnounceResponse, String> {
     // URL-encode info_hash and peer_id (binary -> %XX)
     let ih_encoded = url_encode_binary(info_hash);
     let pid_encoded = url_encode_binary(peer_id);
@@ -185,9 +218,12 @@ pub async fn announce(
 
     // HTTP GET with timeout. Route via TYPHON_ANNOUNCE_PROXY if set to
     // avoid leaking the styx-netns v6 source IP on AAAA-only trackers.
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent(crate::config::user_agent());
+    let mut builder = pin_builder(
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent(crate::config::user_agent()),
+        device,
+    )?;
     if let Some(px) = primary_proxy() {
         builder = builder.proxy(px.clone());
     }
@@ -389,30 +425,46 @@ impl IpMode {
 /// announcing as a leecher to a tracker we seed returned our
 /// `[2a01:...]:16172` in `peers6` and nothing of ours in `peers`. Every
 /// IPv4-only leecher in those swarms could not see us at all.
-static ANNOUNCE_CLIENT_V4: OnceLock<reqwest::Client> = OnceLock::new();
-static ANNOUNCE_CLIENT_V6: OnceLock<reqwest::Client> = OnceLock::new();
+/// One client per (interface, family), built once each.
+///
+/// Keyed by the engine's `bind_interface` as well: 4.3 had one client per
+/// family for the whole process, so every engine's announces left by the
+/// default route whatever interface the engine was pinned to -- the tracker
+/// saw the host's address, not the tunnel's. A pinned client binds its
+/// sockets to the device (SO_BINDTODEVICE), so a tunnel that is down makes
+/// the announce FAIL rather than leave another way.
+static ANNOUNCE_CLIENTS: OnceLock<std::sync::Mutex<std::collections::HashMap<(String, bool), reqwest::Client>>> =
+    OnceLock::new();
 
-fn family_client(v6: bool) -> &'static reqwest::Client {
-    let cell = if v6 { &ANNOUNCE_CLIENT_V6 } else { &ANNOUNCE_CLIENT_V4 };
-    cell.get_or_init(|| {
-        let bind = if v6 {
-            std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-        } else {
-            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-        };
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .http1_only()
-            .pool_max_idle_per_host(64)
-            .local_address(bind);
-        if let Some(px) = primary_proxy() {
-            builder = builder.proxy(px.clone());
-        }
-        builder.build().unwrap_or_else(|e| {
-            eprintln!("[tracker] announce client build failed ({e}), falling back to default");
-            reqwest::Client::new()
-        })
-    })
+fn family_client(v6: bool, device: &str) -> Result<reqwest::Client, String> {
+    let device = device.trim();
+    let map = ANNOUNCE_CLIENTS.get_or_init(Default::default);
+    let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(c) = map.get(&(device.to_string(), v6)) {
+        return Ok(c.clone());
+    }
+    let bind = if v6 {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    } else {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    };
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .http1_only()
+        .pool_max_idle_per_host(64)
+        .local_address(bind);
+    // No per-socket interface pin on some platforms: refused there rather
+    // than announcing from the default route while the operator believes the
+    // engine is pinned.
+    builder = pin_builder(builder, device)?;
+    if let Some(px) = primary_proxy() {
+        builder = builder.proxy(px.clone());
+    }
+    let client = builder
+        .build()
+        .map_err(|e| format!("announce client for {device:?}: {e}"))?;
+    map.insert((device.to_string(), v6), client.clone());
+    Ok(client)
 }
 
 /// One announce, from one family.
@@ -420,8 +472,9 @@ async fn send_announce_family(
     url: &str,
     user_agent: &str,
     v6: bool,
+    device: &str,
 ) -> Result<AnnounceResponse, String> {
-    let resp = family_client(v6)
+    let resp = family_client(v6, device)?
         .get(url)
         .header(reqwest::header::USER_AGENT, user_agent)
         .send()
@@ -469,15 +522,25 @@ pub async fn send_announce(
     user_agent: &str,
     mode: IpMode,
 ) -> Result<AnnounceResponse, String> {
+    send_announce_on(url, user_agent, mode, "").await
+}
+
+/// `send_announce` from the engine's interface. Empty = the default route.
+pub async fn send_announce_on(
+    url: &str,
+    user_agent: &str,
+    mode: IpMode,
+    device: &str,
+) -> Result<AnnounceResponse, String> {
     match mode {
-        IpMode::V4 => return send_announce_family(url, user_agent, false).await,
-        IpMode::V6 => return send_announce_family(url, user_agent, true).await,
+        IpMode::V4 => return send_announce_family(url, user_agent, false, device).await,
+        IpMode::V6 => return send_announce_family(url, user_agent, true, device).await,
         IpMode::Auto => {}
     }
     // Same peer id on both, as libtorrent does: one peer, two addresses.
     let (a, b) = tokio::join!(
-        send_announce_family(url, user_agent, false),
-        send_announce_family(url, user_agent, true),
+        send_announce_family(url, user_agent, false, device),
+        send_announce_family(url, user_agent, true, device),
     );
     return merge_announce(a, b);
 }

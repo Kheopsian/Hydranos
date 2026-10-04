@@ -330,6 +330,8 @@ impl EngineHost {
                     // Per engine, from its own section: one engine can keep
                     // to HTTP trackers while another announces everywhere.
                     first.skip_udp = !session.udp_trackers();
+                    first.device = session.bind_interface.trim().to_string();
+                    first.no_ipv6 = !session.enable_ipv6;
                     let policy: crate::announce::PolicyHandle =
                         std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(first)));
                     let _ = engine.announce_policy.set(policy.clone());

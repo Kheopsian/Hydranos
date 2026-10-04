@@ -53,6 +53,8 @@ pub fn refresh_policies(config: &Config, engines: &[crate::engines::Engine]) -> 
         next.user_agent = old.user_agent.clone();
         // From the engine's section, read at start like its DHT switch.
         next.skip_udp = old.skip_udp;
+        next.device = old.device.clone();
+        next.no_ipv6 = old.no_ipv6;
         *slot = Arc::new(next);
         done += 1;
     }
@@ -79,6 +81,8 @@ pub fn policy_from_config(config: &Config, peer_id: String, public_ip: String) -
         public_ip,
         // Per engine, set by whoever builds the engine's policy.
         skip_udp: false,
+        device: String::new(),
+        no_ipv6: false,
     }
 }
 
