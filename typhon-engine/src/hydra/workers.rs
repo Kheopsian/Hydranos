@@ -1122,7 +1122,10 @@ pub fn spawn_store_reconcile(
                 if !doomed.is_empty() {
                     let store = store.lock().unwrap();
                     for hash in doomed {
-                        if store.delete_torrent(&hash).unwrap_or(false) {
+                        // This engine's row only: `all_hashes` listed this
+                        // engine's half, and 4.3's delete by info hash took
+                        // another engine's copy of the same torrent with it.
+                        if store.delete_copy(&hash, &engine.id).unwrap_or(false) {
                             dropped += 1;
                         }
                     }
