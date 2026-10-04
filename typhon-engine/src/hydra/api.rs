@@ -11553,7 +11553,7 @@ async fn get_health_anomalies(
 // Fully ported
 // ---------------------------------------------------------------------------
 
-/// Change the admin password. Refuses anything under six characters.
+/// Change the admin password. Same floor as first-run setup: eight characters.
 async fn post_password(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -11562,22 +11562,41 @@ async fn post_password(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
 
     let password = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("password").and_then(|p| p.as_str()).map(str::to_string))
         .unwrap_or_default();
-    if password.chars().count() < 6 {
+    if password.chars().count() < 8 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "password too short (min 6 chars)"})),
+            Json(serde_json::json!({"error": "password must be at least 8 characters"})),
         )
             .into_response();
     }
-    // Hashing and storing belongs with the auth slice; the refusal is the half
-    // the bench exercises and the half that protects the instance.
+    let Ok(hash) = bcrypt::hash(&password, bcrypt::DEFAULT_COST) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot hash the password"})),
+        )
+            .into_response();
+    };
+    // 4.3 answered "ok" here and stored nothing, so the old password kept
+    // working and the new one never did. Written the way setup writes it.
+    let pairs = vec![(
+        "password_hash".to_string(),
+        crate::tomledit::quote_toml_key(&hash),
+    )];
+    if !edit_config(&state, move |doc| {
+        crate::tomledit::set_toml_table(doc, "auth", &pairs)
+    }) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot write the config"})),
+        )
+            .into_response();
+    }
+    tracing::info!("admin password changed");
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
@@ -13579,6 +13598,53 @@ pub(crate) mod testing {
         let mut h = axum::http::HeaderMap::new();
         h.insert("X-API-Key", key.parse().unwrap());
         h
+    }
+}
+
+#[cfg(test)]
+mod password_change_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    /// The new password is the one that logs in afterwards, in memory and in
+    /// the file the next boot reads; the old one no longer does.
+    #[tokio::test]
+    async fn a_changed_password_is_the_one_that_works() {
+        let old = bcrypt::hash("old-password", 4).unwrap();
+        let s = state_from(
+            "pw-change",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n\n[auth]\nusername = \"admin\"\npassword_hash = \"{old}\"\n"),
+        );
+        let resp = post_password(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"password":"new-password"}"#.into(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let live = s.state.cfg().auth.password_hash.clone();
+        assert!(bcrypt::verify("new-password", &live).unwrap());
+        assert!(!bcrypt::verify("old-password", &live).unwrap());
+
+        let on_disk: Config = toml::from_str(&std::fs::read_to_string(&s.state.config_path).unwrap()).unwrap();
+        assert!(bcrypt::verify("new-password", &on_disk.auth.password_hash).unwrap());
+        assert_eq!(on_disk.auth.username, "admin", "the rest of [auth] is kept");
+    }
+
+    #[tokio::test]
+    async fn a_short_password_changes_nothing() {
+        let old = bcrypt::hash("old-password", 4).unwrap();
+        let s = state_from(
+            "pw-short",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n\n[auth]\npassword_hash = \"{old}\"\n"),
+        );
+        let resp = post_password(State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"password":"short"}"#.into()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(bcrypt::verify("old-password", &s.state.cfg().auth.password_hash).unwrap());
     }
 }
 
