@@ -10753,11 +10753,19 @@ async fn purge_race_torrent(
         store.resolve_hash_in("race", &hash)
     };
     match found {
-        Some(hash) => {
-            let store = state.store.lock().unwrap();
-            let _ = store.delete_torrent(&hash);
-            Json(serde_json::json!({"status": "ok"})).into_response()
-        }
+        // The race copy only, engine first and with its files, sparing what
+        // another copy or torrent reads -- the delete path's own rules. 4.3
+        // deleted every store row of the hash and left the engine seeding:
+        // the race copy came back at the next restart, and a hoard copy of
+        // the same torrent lost its row for good.
+        Some(hash) => match remove_one_torrent(&state, &hash, &["race".to_string()], "race", true) {
+            Ok(_) => Json(serde_json::json!({"status": "ok"})).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("the race engine refused: {e}")})),
+            )
+                .into_response(),
+        },
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "torrent not in race"})),
@@ -10830,10 +10838,11 @@ async fn post_restart(
     let cfg = state.cfg();
     let _ = cfg;
 
+    // After the response is out: the stop drains the API, this request with it.
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        tracing::info!("restart requested via API, exiting for container restart");
-        std::process::exit(0);
+        tracing::info!("restart requested via API: stopping cleanly, then exiting for the supervisor");
+        crate::shutdown::request_restart();
     });
     Json(serde_json::json!({"ok": true, "restarting": true})).into_response()
 }
@@ -10851,7 +10860,8 @@ async fn post_settings_restart(
 
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        std::process::exit(0);
+        tracing::info!("restart requested from settings: stopping cleanly, then exiting for the supervisor");
+        crate::shutdown::request_restart();
     });
     Json(serde_json::json!({"status": "restarting"})).into_response()
 }
@@ -12367,9 +12377,11 @@ async fn rescue_repair(State(state): State<RescueState>) -> Response {
 }
 
 async fn rescue_restart() -> Response {
+    // Rescue mode runs no engine: nothing to flush, but the exit code must
+    // still read as "bring me back" to systemd.
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        std::process::exit(0);
+        crate::shutdown::exit_for_restart();
     });
     Json(serde_json::json!({"status": "restarting"})).into_response()
 }
@@ -15453,6 +15465,46 @@ mod body_route_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let info = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:{}e",
+            name.len(),
+            "C".repeat(20)
+        );
+        let announce = "https://tracker.example/announce";
+        format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
+    }
+
+    /// The race purge drops the race copy from the engine and its row, and
+    /// nothing of a hoard copy of the same torrent. 4.3 deleted every row of
+    /// the hash and left both engines holding the torrent.
+    #[tokio::test]
+    async fn a_purge_takes_the_race_copy_and_only_it() {
+        let s = state_from("purge-copy", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let dir = s.dir.join("payload");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = torrent_bytes("purged");
+        let save = dir.display().to_string();
+        let (hash, _) = add_torrent_bytes(&s.state, &bytes, "", &save, "", true, true, "race").expect("race add");
+        add_torrent_bytes(&s.state, &bytes, "", &save, "", true, true, "hoard").expect("hoard add");
+        assert_eq!(s.state.store.lock().unwrap().sessions_of(&hash), vec!["hoard".to_string(), "race".to_string()]);
+
+        let resp = purge_race_torrent(State(s.state.clone()), Path(hash.clone()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert_eq!(s.state.store.lock().unwrap().sessions_of(&hash), vec!["hoard".to_string()], "the hoard row stays");
+        assert!(find_copy(&s.state, "race", &hash).is_none(), "the race engine let go");
+        assert!(find_copy(&s.state, "hoard", &hash).is_some(), "the hoard engine still holds it");
     }
 }
 

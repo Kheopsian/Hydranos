@@ -329,11 +329,15 @@ fn stop_daemon(_dir: &Path) -> Result<(), String> {
             return Ok(());
         }
         println!("stopping hydranos...");
-        // /T so the engine goes with it. No /F: that is the kill this is
-        // trying to avoid.
-        let _ = std::process::Command::new("taskkill")
-            .args(["/IM", "hydranos.exe", "/T"])
-            .output();
+        // The daemon waits on this event and stops the way the tray's Quit
+        // does: drain, flush resume data, exit. `taskkill` without /F could
+        // not do it -- it posts WM_CLOSE to top-level windows, and the
+        // daemon has none -- so it is only the fallback for an older daemon.
+        if !signal_stop_event() {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/IM", "hydranos.exe", "/T"])
+                .output();
+        }
         for _ in 0..60 {
             if !running() {
                 return Ok(());
@@ -351,6 +355,25 @@ fn stop_daemon(_dir: &Path) -> Result<(), String> {
         // restart is the operator's, and systemd's, business.
         println!("note: restart the service for the new binaries to take effect");
         Ok(())
+    }
+}
+
+/// Set the daemon's stop event. False when there is none to set (a daemon
+/// older than 4.4, or none running).
+#[cfg(windows)]
+fn signal_stop_event() -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+    // Same name as `shutdown::STOP_EVENT` in the daemon.
+    let name: Vec<u16> = "Local\\HydranosStop".encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if h.is_null() {
+            return false;
+        }
+        let ok = SetEvent(h) != 0;
+        CloseHandle(h);
+        ok
     }
 }
 
