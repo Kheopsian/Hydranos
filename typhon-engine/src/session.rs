@@ -94,22 +94,27 @@ pub async fn start(
             .device()
             .map(|d| d.parse::<librqbit_utp::BindDevice>())
             .transpose();
-        let utp_dev = match utp_dev {
-            Ok(d) => d,
+        match utp_dev {
+            // The message always said "refusing to open it"; 4.3 then opened
+            // it anyway with no device, so an interface missing at startup (a
+            // tunnel not up yet) sent every uTP dial out by the default route.
+            // Refused for real now: TCP-only until a restart finds the device.
             Err(e) => {
-                error!("[engine] bind_device is not usable for the uTP socket: {} — refusing to open it rather than leak the default route", e);
+                error!("[engine] bind_device is not usable for the uTP socket: {} — uTP disabled rather than leak the default route; restart once the interface is up", e);
                 None
             }
-        };
-        let udp_opts = librqbit_utp::UtpSocketUdpOpts { bind_device: utp_dev.as_ref() };
-        match librqbit_utp::UtpSocketUdp::new_udp_with_opts(utp_bind, utp_opts, udp_opts).await {
-            Ok(s) => {
-                info!("[engine] uTP socket bound on {}", utp_bind);
-                Some(s)
-            }
-            Err(e) => {
-                error!("[engine] failed to bind uTP socket on {}: {} — uTP disabled", utp_bind, e);
-                None
+            Ok(utp_dev) => {
+                let udp_opts = librqbit_utp::UtpSocketUdpOpts { bind_device: utp_dev.as_ref() };
+                match librqbit_utp::UtpSocketUdp::new_udp_with_opts(utp_bind, utp_opts, udp_opts).await {
+                    Ok(s) => {
+                        info!("[engine] uTP socket bound on {}", utp_bind);
+                        Some(s)
+                    }
+                    Err(e) => {
+                        error!("[engine] failed to bind uTP socket on {}: {} — uTP disabled", utp_bind, e);
+                        None
+                    }
+                }
             }
         }
     };
