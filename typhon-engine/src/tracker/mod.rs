@@ -292,9 +292,29 @@ pub static PEX_EXT_HANDSHAKES_RECV: AtomicU64 = AtomicU64::new(0);
 /// spawns `dial_peer` for each entry.
 static DIAL_TX: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(std::net::SocketAddr, Arc<TorrentState>)>> = std::sync::OnceLock::new();
 
+/// One dial queue per engine, keyed by the engine's limiter (every torrent
+/// carries its engine's). 4.3 had one queue for the process: the first engine
+/// to start owned it, and every other engine's dials left with that engine's
+/// binding, peer id, uTP socket and connection limits -- out of the wrong
+/// tunnel, under the wrong identity.
+type DialTx = tokio::sync::mpsc::UnboundedSender<(std::net::SocketAddr, Arc<TorrentState>)>;
+static ENGINE_DIAL_TX: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, DialTx>>> =
+    std::sync::OnceLock::new();
+
+fn dial_tx_for(torrent: &TorrentState) -> Option<DialTx> {
+    if let Some(limiter) = torrent.limiter.get() {
+        let key = Arc::as_ptr(limiter) as usize;
+        let map = ENGINE_DIAL_TX.get_or_init(Default::default);
+        if let Some(tx) = map.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+            return Some(tx.clone());
+        }
+    }
+    DIAL_TX.get().cloned()
+}
+
 pub fn enqueue_dial(addr: std::net::SocketAddr, torrent: Arc<TorrentState>) {
     let traced = is_traced(&torrent.info_hash);
-    match DIAL_TX.get() {
+    match dial_tx_for(&torrent) {
         Some(tx) => match tx.send((addr, torrent)) {
             Ok(()) => {
                 DIAL_ENQUEUED.fetch_add(1, AtomicOrdering::Relaxed);
@@ -382,7 +402,15 @@ pub fn start_announce_loop(
     // it picks one binding by hashing the peer addr → consistent peer_id+src
     // per peer across reconnects.
     let (dial_tx, mut dial_rx) = tokio::sync::mpsc::unbounded_channel::<(std::net::SocketAddr, Arc<TorrentState>)>();
-    if DIAL_TX.set(dial_tx).is_ok() {
+    // This engine's queue, for this engine's torrents. The first one is also
+    // the fallback for a torrent that has no engine handle yet.
+    ENGINE_DIAL_TX
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(Arc::as_ptr(&limiter) as usize, dial_tx.clone());
+    let _ = DIAL_TX.set(dial_tx);
+    {
         let disk_c = disk_mgr.clone();
         let utp_c = utp_socket.clone();
         let bindings_c = bindings.clone();
@@ -919,5 +947,54 @@ mod self_dial_tests {
             crate::rpc::dispatch::tracker_host_of("https://tracker.example/announce?passkey=x"),
             "tracker.example"
         );
+    }
+}
+
+#[cfg(test)]
+mod per_engine_dial_tests {
+    use super::*;
+    use crate::torrent::meta::TorrentMeta;
+
+    fn torrent_of(limiter: &Arc<dial_limiter::DialLimiter>, n: u8) -> Arc<TorrentState> {
+        let t = Arc::new(TorrentState::new(
+            TorrentMeta {
+                info_hash: [n; 20],
+                name: "t".into(),
+                num_pieces: 1,
+                piece_length: 16384,
+                total_size: 16384,
+                files: Vec::new(),
+                trackers: Vec::new(),
+                url_list: Vec::new(),
+                private: false,
+                multi_file: false,
+                info_dict_len: 0,
+                v2: false,
+            },
+            std::path::PathBuf::from("/tmp"),
+            false,
+        ));
+        let _ = t.limiter.set(limiter.clone());
+        t
+    }
+
+    /// Each engine's torrents reach that engine's queue, so a dial leaves with
+    /// that engine's binding. 4.3 sent every engine's dials to the first one.
+    #[test]
+    fn a_torrent_dials_through_its_own_engine() {
+        let (a, b) = (Arc::new(dial_limiter::DialLimiter::default()), Arc::new(dial_limiter::DialLimiter::default()));
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut map = ENGINE_DIAL_TX.get_or_init(Default::default).lock().unwrap();
+            map.insert(Arc::as_ptr(&a) as usize, tx_a);
+            map.insert(Arc::as_ptr(&b) as usize, tx_b);
+        }
+        let peer: std::net::SocketAddr = "192.0.2.1:6881".parse().unwrap();
+        enqueue_dial(peer, torrent_of(&b, 2));
+        assert!(rx_a.try_recv().is_err(), "engine A got B's dial");
+        assert_eq!(rx_b.try_recv().unwrap().1.info_hash, [2u8; 20]);
+        enqueue_dial(peer, torrent_of(&a, 1));
+        assert_eq!(rx_a.try_recv().unwrap().1.info_hash, [1u8; 20]);
     }
 }
