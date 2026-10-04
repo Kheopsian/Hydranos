@@ -8502,7 +8502,7 @@ pub(crate) fn add_trackers_to(state: &AppState, info_hash: &str, urls: &[String]
 }
 
 fn edit_trackers_core(state: &AppState, info_hash: &str, req: &TrackerEdit) -> Result<(Vec<Vec<String>>, bool), (StatusCode, String)> {
-    let Some((_, torrent)) = find_torrent(state, info_hash) else {
+    let Some((engine_id, torrent)) = find_torrent(state, info_hash) else {
         return Err((StatusCode::NOT_FOUND, "torrent not found".into()));
     };
 
@@ -8543,7 +8543,17 @@ fn edit_trackers_core(state: &AppState, info_hash: &str, req: &TrackerEdit) -> R
                     return Err((StatusCode::BAD_REQUEST, "this torrent has no stored .torrent yet, so the edit could not be saved. \
 A torrent added moments ago is written to the store on the next state sync; try again shortly".to_string()));
                 }
-                *torrent.live_trackers.write() = next.clone();
+                // Through the engine, which writes the resume record now. 4.3
+                // set the live list only, so the edit lived in memory until
+                // the next periodic save, and a kill before it lost the edit
+                // the UI had called "kept across restarts".
+                match state.engines.get(&engine_id) {
+                    Some(engine) => engine
+                        .manager
+                        .set_trackers(&torrent.info_hash, next.clone())
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
+                    None => *torrent.live_trackers.write() = next.clone(),
+                }
             }
             Ok((next, changed))
         }

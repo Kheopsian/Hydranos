@@ -731,7 +731,7 @@
   "since {date}": "depuis {date}",
   "start": "démarrer",
   "stopped": "arrêté",
-  "substring matched in tracker URL": "sous-chaîne recherchée dans l'URL du tracker",
+  "as shown in the Tracker column; passkey and IP family also cover its subdomains": "tel qu'affiché dans la colonne Tracker ; passkey et famille IP couvrent aussi ses sous-domaines",
   "this machine": "cette machine",
   "torrents": "torrents",
   "torrents seeding": "torrents en partage",
