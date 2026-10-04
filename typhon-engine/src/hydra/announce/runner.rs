@@ -405,8 +405,8 @@ pub(super) async fn announce_one(
                     break;
                 };
                 let result = match &req.udp {
-                    Some(u) => typhon_engine::tracker::udp::send_announce(u, req.ip_mode).await,
-                    None => typhon_engine::tracker::http::send_announce(&req.url, &req.user_agent, req.ip_mode).await,
+                    Some(u) => typhon_engine::tracker::udp::send_announce_on(u, req.ip_mode, &req.device).await,
+                    None => typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device).await,
                 };
                 {
                     let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());

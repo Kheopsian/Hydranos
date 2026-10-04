@@ -159,7 +159,7 @@ pub fn start(
             round += 1;
             if discovered_at.map_or(true, |t| t.elapsed() >= DISCOVERY_EVERY) {
                 discovered_at = Some(Instant::now());
-                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone()).await {
+                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone(), &egress.device).await {
                     if !peers.contains(&p) {
                         peers.push(p);
                     }
@@ -207,6 +207,9 @@ async fn discover(
     peer_id: &[u8; 20],
     port: u16,
     dht: Option<librqbit_dht::Dht>,
+    // The engine's interface: the magnet's announces leave by it, as its
+    // metadata dials already did. 4.3 announced magnets by the default route.
+    device: &str,
 ) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -232,9 +235,9 @@ async fn discover(
                 num_want: 200,
                 port,
             };
-            crate::tracker::udp::send_announce(&a, crate::tracker::http::IpMode::Auto).await
+            crate::tracker::udp::send_announce_on(&a, crate::tracker::http::IpMode::Auto, device).await
         } else if url.starts_with("http://") || url.starts_with("https://") {
-            crate::tracker::http::announce(url, &info_hash, peer_id, port, 0, 0, UNKNOWN_LEFT, "started").await
+            crate::tracker::http::announce_on(url, &info_hash, peer_id, port, 0, 0, UNKNOWN_LEFT, "started", device).await
         } else {
             continue;
         };

@@ -29,6 +29,14 @@ pub struct Policy {
     /// lists is a tracker it expects to be told about. Named for what it
     /// does when set, so `Policy::default()` cannot turn UDP off by accident.
     pub skip_udp: bool,
+    /// The engine's `bind_interface`: announces leave by it or not at all.
+    /// Empty = the default route.
+    pub device: String,
+    /// The engine's `enable_ipv6 = false`: every tracker is announced over
+    /// IPv4 only (4.3 announced `auto` trackers over both regardless). Named
+    /// for what it does when set, like `skip_udp`, so a default policy keeps
+    /// both families.
+    pub no_ipv6: bool,
 }
 
 /// The passkey this tracker should be given, if it is not the one already in
@@ -86,6 +94,8 @@ pub struct Request {
     /// carries it. Built from the same inputs in the same call, so the two
     /// transports cannot disagree about what the tracker is told.
     pub udp: Option<typhon_engine::tracker::udp::UdpAnnounce>,
+    /// The interface to announce from (the engine's `bind_interface`).
+    pub device: String,
 }
 
 /// The peer id this policy sends. One identity, the same to every tracker and
@@ -143,8 +153,11 @@ pub fn prepare(
         None
     };
 
-    let ip_mode = ip_mode_for(policy, tracker_url);
-    Some(Request { url: primary, user_agent, ip_mode, udp })
+    let mut ip_mode = ip_mode_for(policy, tracker_url);
+    if policy.no_ipv6 {
+        ip_mode = typhon_engine::tracker::http::IpMode::V4;
+    }
+    Some(Request { url: primary, user_agent, ip_mode, udp, device: policy.device.clone() })
 }
 
 /// The BEP 15 form of one announce.
@@ -212,6 +225,24 @@ mod identity_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An engine with IPv6 off announces over IPv4 only, whatever the
+    /// tracker's override says, and every request carries the engine's
+    /// interface so the transport can pin it.
+    #[test]
+    fn an_engine_without_ipv6_announces_over_v4_from_its_interface() {
+        let mut p = policy();
+        p.no_ipv6 = true;
+        p.device = "wg1".into();
+        p.ip_modes.insert("tracker.example".into(), "v6".into());
+        let ih = "ab".repeat(20);
+        let r = prepare(&p, "https://tracker.example/announce", &ih, 6881, 0, 0, 0, "", None, None).expect("request");
+        assert_eq!(r.ip_mode, typhon_engine::tracker::http::IpMode::V4);
+        assert_eq!(r.device, "wg1");
+        let r = prepare(&policy(), "https://other.example/announce", &ih, 6881, 0, 0, 0, "", None, None).expect("request");
+        assert_eq!(r.ip_mode, typhon_engine::tracker::http::IpMode::Auto, "a default policy keeps both families");
+        assert_eq!(r.device, "");
+    }
 
     fn policy() -> Policy {
         let mut p = Policy {
