@@ -82,6 +82,7 @@ mod ipfilter;
 mod watch;
 mod mcp;
 mod session;
+mod shutdown;
 
 use config::Config;
 
@@ -94,7 +95,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
-    let mut path = PathBuf::from("/config/default.toml");
+    let mut path = default_config_path();
     let mut console = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -117,6 +118,34 @@ fn parse_args() -> Args {
         }
     }
     Args { config: path, console }
+}
+
+/// Where the config lives when `--config` is not given.
+///
+/// On Windows, beside the executable, as the Windows README says ("writes
+/// `default.toml` ... beside itself"). 4.3 used `/config/default.toml` on
+/// every platform, which Windows resolves to `\config` on the CURRENT drive:
+/// a double-click from Explorer and a launch from a shell on another drive
+/// read two different configs.
+fn default_config_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+            let beside = dir.join("default.toml");
+            // An install that 4.3 seeded at \config keeps it: starting on a
+            // fresh config would look like every torrent and setting vanished.
+            let legacy = PathBuf::from("/config/default.toml");
+            if !beside.exists() && legacy.exists() {
+                eprintln!(
+                    "hydranos: using {} (the 4.3 location); move it beside hydranos.exe or pass --config",
+                    legacy.display()
+                );
+                return legacy;
+            }
+            return beside;
+        }
+    }
+    PathBuf::from("/config/default.toml")
 }
 
 /// Attach to the terminal that launched us, or make one when asked.
@@ -179,6 +208,7 @@ fn attach_console(_force: bool) {}
 async fn rescue(
     store_path: &std::path::Path,
     config_path: &std::path::Path,
+    addr: &str,
     why: &str,
 ) -> anyhow::Result<()> {
     // A diagnosis that itself fails must still carry the PATH: that is the one
@@ -203,7 +233,10 @@ async fn rescue(
         diagnosis,
         config_path: config_path.to_path_buf(),
     };
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8199").await?;
+    // The address the operator configured, as in normal mode: 4.3 bound
+    // 0.0.0.0:8199 here whatever api_host said, so an instance kept on
+    // loopback became reachable from the network exactly when it was broken.
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, api::rescue_router(state)).await?;
     Ok(())
 }
@@ -380,9 +413,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     let store = match store::Store::open(&store_path, false) {
         Ok(store) => match store.check_schema() {
             Ok(()) => store,
-            Err(e) => return rescue(&store_path, &config_path, &e.to_string()).await,
+            Err(e) => return rescue(&store_path, &config_path, &addr, &e.to_string()).await,
         },
-        Err(e) => return rescue(&store_path, &config_path, &e.to_string()).await,
+        Err(e) => return rescue(&store_path, &config_path, &addr, &e.to_string()).await,
     };
     tracing::info!(torrents = engine_host.total_torrents(), "engines up");
 
@@ -688,6 +721,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // so a tooltip cannot go stale the way a copied value would.
     {
         let engines = state.engines.clone();
+        shutdown::spawn_stop_event_listener();
         tray::spawn(
             port,
             std::sync::Arc::new(move || {
@@ -726,14 +760,36 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // (`session::start`), so a kill throws away up to five minutes of piece
     // progress and byte counters for every engine, and the next start
     // re-checks what it lost. 3.x saved on the way out; the port dropped it.
-    axum::serve(
+    //
+    // ⚠ The drain is bounded. A graceful shutdown waits for every open
+    // connection, and the UI keeps two that never end on their own (the event
+    // stream and the live log tail): with a tab open, 4.3 never reached the
+    // flush and the supervisor's SIGKILL arrived first. Five seconds is
+    // enough for any real request to finish.
+    let draining = std::sync::Arc::new(tokio::sync::Notify::new());
+    let drain_started = draining.clone();
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        drain_started.notify_one();
+    });
+    tokio::select! {
+        r = std::future::IntoFuture::into_future(serve) => r?,
+        _ = async {
+            draining.notified().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        } => {
+            tracing::warn!("connections still open 5 s into the drain (event stream, log tail); flushing without them");
+        }
+    }
 
     flush_on_shutdown(&engines_for_shutdown);
+    if shutdown::restart_requested() {
+        shutdown::exit_for_restart();
+    }
     Ok(())
 }
 
@@ -764,8 +820,10 @@ async fn shutdown_signal() -> () {
 
     let which = tokio::select! {
         _ = recv(&mut term) => "SIGTERM",
-        // No tray on Unix, but the same future keeps the two paths identical.
-        _ = tray::quit_notify().notified() => "tray quit",
+        // No tray on Unix; this is also where a restart from the UI lands.
+        _ = tray::quit_notify().notified() => {
+            if shutdown::restart_requested() { "restart request" } else { "tray quit" }
+        }
         _ = recv(&mut int) => "SIGINT",
     };
     tracing::warn!("{which} received, draining the API and flushing resume data");
@@ -776,11 +834,42 @@ async fn shutdown_signal() -> () {
     // The tray's Quit ends here too, so it flushes resume data exactly like
     // Ctrl+C does. A tray that terminated the process would be the Task
     // Manager kill the 3.x README told people not to use.
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = tray::quit_notify().notified() => tracing::info!("shutdown requested from the tray"),
+    //
+    // 4.3 heard only Ctrl+C and the tray: closing the console window, a
+    // Windows shutdown, a sign-out and Ctrl+Break all ended the process
+    // without a flush. Windows allows a few seconds after these events, so
+    // the flush is a race there, but a partial flush beats none.
+    use tokio::signal::windows;
+    // One arm per console event. A handler that cannot be installed waits
+    // forever instead of faking a shutdown.
+    macro_rules! console_event {
+        ($make:path) => {
+            async {
+                match $make() {
+                    Ok(mut s) => {
+                        s.recv().await;
+                    }
+                    Err(e) => {
+                        tracing::error!("console handler setup failed: {e}");
+                        std::future::pending::<()>().await
+                    }
+                }
+            }
+        };
     }
+    let which = tokio::select! {
+        _ = tokio::signal::ctrl_c() => "Ctrl+C",
+        _ = console_event!(windows::ctrl_break) => "Ctrl+Break",
+        _ = console_event!(windows::ctrl_close) => "console closed",
+        _ = console_event!(windows::ctrl_logoff) => "sign-out",
+        _ = console_event!(windows::ctrl_shutdown) => "system shutdown",
+        _ = tray::quit_notify().notified() => {
+            if shutdown::restart_requested() { "restart request" } else { "tray quit" }
+        }
+    };
+    tracing::warn!("{which}: draining the API and flushing resume data");
 }
+
 
 /// Write every engine's resume state before the process ends.
 ///
@@ -815,16 +904,21 @@ fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>) {
         })
         .collect();
 
+    // The budget is enforced here: past it, the process leaves with what is
+    // written. 4.3 joined every thread unconditionally, so the variable only
+    // chose which log line to print. Each engine's resume store commits per
+    // transaction, so leaving mid-sweep loses the unwritten rest, not the
+    // written part.
     for h in handles {
-        // No per-thread timeout exists for a std thread, so the budget is
-        // enforced by the caller of `docker stop`: this logs how close it came.
+        while !h.is_finished() && started.elapsed() < budget {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !h.is_finished() {
+            tracing::warn!(budget_s = budget.as_secs(),
+                           "shutdown flush hit HYDRANOS_STOP_TIMEOUT; leaving with what is saved");
+            return;
+        }
         let _ = h.join();
     }
-    let took = started.elapsed();
-    if took > budget {
-        tracing::warn!(took_s = took.as_secs(), budget_s = budget.as_secs(),
-                       "shutdown flush overran its budget; raise HYDRANOS_STOP_TIMEOUT and docker stop -t");
-    } else {
-        tracing::info!(took_s = took.as_secs(), "shutdown flush complete");
-    }
+    tracing::info!(took_s = started.elapsed().as_secs(), "shutdown flush complete");
 }
