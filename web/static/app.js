@@ -8428,14 +8428,17 @@ function _renderTrackerStatsChart(rows) {
     _trkStatsChart.update();
 }
 
-function showTrackerForm(host = "", ipmode = "auto", minseed = 0) {
+function showTrackerForm(host = "", ipmode = "auto", minseed = -1) {
     document.getElementById("trk-host").value = host;
     document.getElementById("trk-passkey").value = "";
     document.getElementById("trk-ipmode").value = ipmode || "auto";
     // Blank, not 0: they mean different things. Blank is "nothing declared",
     // which PROTECTS the torrent from the drain; 0 is "this tracker asks for
     // nothing", which releases it.
-    document.getElementById("trk-minseed").value = minseed >= 0 ? minseed : "";
+    // 4.3 defaulted to 0 here, so "+ Manual host" pre-filled 0 and a Save
+    // released every torrent of that tracker to the drain.
+    document.getElementById("trk-minseed").value =
+        typeof minseed === "number" && minseed >= 0 ? minseed : "";
     document.getElementById("trk-result").style.display = "none";
     document.getElementById("trk-form").style.display = "block";
 }
