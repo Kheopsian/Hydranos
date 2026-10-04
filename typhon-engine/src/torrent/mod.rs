@@ -1585,6 +1585,29 @@ impl TorrentManager {
         let meta = self
             .metainfo_for(rd)
             .map_err(|e| format!("import: {}: {}", rd.info_hash, e))?;
+        self.import_state_with(rd, meta)
+    }
+
+    /// `import_state` with the metainfo in hand, for a caller that already
+    /// read it (a move between engines of one process reads it once).
+    pub fn import_state_bytes(
+        &self,
+        rd: &fastresume::ResumeData,
+        metainfo: &[u8],
+    ) -> Result<(InfoHash, String), String> {
+        let meta = metainfo::parse_torrent_bytes(metainfo)
+            .map_err(|e| format!("import: {}: {}", rd.info_hash, e))?;
+        if hex_encode(&meta.info_hash) != rd.info_hash.to_lowercase() {
+            return Err(format!("import: the metainfo given is not {}", rd.info_hash));
+        }
+        self.import_state_with(rd, meta)
+    }
+
+    fn import_state_with(
+        &self,
+        rd: &fastresume::ResumeData,
+        meta: meta::TorrentMeta,
+    ) -> Result<(InfoHash, String), String> {
         let ih = meta.info_hash;
         let name = meta.name.clone();
         if self.torrents.contains_key(&ih) {
