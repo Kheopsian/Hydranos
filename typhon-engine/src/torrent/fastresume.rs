@@ -4,7 +4,7 @@ use tracing::{info, warn};
 
 use super::meta::InfoHash;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ResumeData {
     pub info_hash: String,
     pub save_path: String,

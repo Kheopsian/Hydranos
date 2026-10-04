@@ -147,11 +147,16 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let ih = typhon_engine::torrent::hex_decode(&hash).map_err(|e| e)?;
     let t = src.manager.get(&ih).ok_or("the source engine no longer holds it")?;
 
-    // Captured BEFORE the torrent leaves the engine: re-adding builds a fresh
-    // state, and the seed counter would restart at zero -- on the very move
-    // that a 48-hour obligation is being carried across.
-    let now = typhon_engine::torrent::meta::now_secs();
-    let seeded = t.seed_time_now(now);
+    // The torrent's own resume record, captured BEFORE it leaves the engine:
+    // pieces, edited trackers, byte counters, seed time, stopped state. 4.3
+    // re-added the .torrent in seed mode instead, which marked incomplete data
+    // complete, dropped tracker edits, reset the counters and restarted a
+    // stopped torrent.
+    let original = src
+        .manager
+        .export_state(&ih)
+        .ok_or("the source engine no longer holds it")?;
+    let seeded = original.seed_secs;
     let old_root = t.save_path.read().clone();
     let multi = t.meta.multi_file;
     let name = t.meta.name.clone();
@@ -168,6 +173,18 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             (old_root.join(&rel), std::path::Path::new(&dest_root).join(&rel))
         })
         .collect();
+    drop(t);
+    let dst = state.engines.get(&to).ok_or("target engine is gone")?;
+    // The metainfo must be reachable before anything moves: the target
+    // adopts by reading it from the store.
+    let metainfo = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.torrent_blob(&hash).ok().flatten()
+    }
+    .ok_or("no metainfo in the store; nothing was moved")?;
 
     // Out of the engine first, KEEPING the data: moving files under a running
     // torrent is how a seed starts serving bytes that are no longer there.
@@ -176,14 +193,34 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         .map_err(|e| format!("the source engine refused to release it: {e}"))?;
     src.announce_cache.forget(&hash);
 
+    // From here, any failure puts the files back and the torrent back in its
+    // source engine, as it was. 4.3 had no way back: an error after the
+    // removal left the torrent in no engine.
+    let put_back = |moved: &[(std::path::PathBuf, std::path::PathBuf)], why: String| -> String {
+        let mut problems = Vec::new();
+        for (from_path, to_path) in moved.iter().rev() {
+            if let Err(e) = crate::jobs::run_move_allowing(to_path, from_path, true) {
+                problems.push(format!("{}: {e}", to_path.display()));
+            }
+        }
+        match src.manager.import_state_bytes(&original, &metainfo) {
+            Ok(_) if problems.is_empty() => format!("{why}; rolled back, the torrent is in {from} as before"),
+            Ok(_) => format!("{why}; back in {from}, but these files did not move back: {}", problems.join("; ")),
+            Err(e) => format!("{why}; ROLLBACK FAILED, re-add it by hand at {}: {e}", old_root.display()),
+        }
+    };
+
     let mut done: i64 = 0;
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for (from_path, to_path) in &files {
         if !from_path.exists() {
             continue;
         }
         let size = std::fs::metadata(from_path).map(|m| m.len()).unwrap_or(0) as i64;
-        crate::jobs::run_move_allowing(from_path, to_path, allow)
-            .map_err(|e| format!("moving {}: {e}", from_path.display()))?;
+        if let Err(e) = crate::jobs::run_move_allowing(from_path, to_path, allow) {
+            return Err(put_back(&moved, format!("moving {}: {e}", from_path.display())));
+        }
+        moved.push((from_path.clone(), to_path.clone()));
         done += size;
         let store = match state.store.lock() {
             Ok(s) => s,
@@ -192,49 +229,14 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         let _ = store.job_progress(&job.id, done);
     }
 
-    // The blob keyed by this hash IS this torrent, so there is nothing left to
-    // guard against here. The file under uploads/ named after a hash did not
-    // necessarily CONTAIN that torrent -- measured on the bench,
-    // uploads/cae7a364....torrent held GHOST_D, so the graduation re-added the
-    // wrong torrent, pointed it at the data of the right one, and lost the
-    // original from every engine. That whole failure mode goes away with the
-    // file: the metainfo is fetched by key and handed straight to the engine.
-    let metainfo = {
-        let store = match state.store.lock() {
-            Ok(s) => s,
-            Err(e) => e.into_inner(),
-        };
-        store.torrent_blob(&hash).ok().flatten()
+    let mut record = original.clone();
+    record.save_path = dest_root.clone();
+    if let Err(e) = dst.manager.import_state_bytes(&record, &metainfo) {
+        return Err(put_back(&moved, format!("the target engine refused it: {e}")));
     }
-    .ok_or("no metainfo in the store; the data moved but nothing can re-add it")?;
-
-    let dst = state.engines.get(&to).ok_or("target engine is gone")?;
-    // seed_mode: the payload was verified where it came from and the move
-    // copied it byte for byte. A recheck here would read every byte again.
-    let (added_ih, _name) = dst
-        .manager
-        .add_torrent_bytes(&metainfo, &dest_root, false, true)
-        .map_err(|e| format!("the target engine refused it, and the data has already moved: {e}"))?;
-
-    // The hash it actually added, against the one asked for. Without this the
-    // job adds whatever the file happened to hold, reports success, and leaves
-    // the real torrent in no engine at all.
-    if added_ih != ih {
-        let _ = dst.manager.remove_torrent(&added_ih, true);
-        return Err(format!(
-            "the metainfo for {hash} describes {} instead; nothing was re-added",
-            typhon_engine::torrent::hex_encode(&added_ih)
-        ));
+    if dst.manager.get(&ih).is_none() {
+        return Err(put_back(&moved, "the target engine accepted it and does not hold it".into()));
     }
-    // And that it is really there. `if let Some` with no else is how the last
-    // version declared this job a success while the torrent was gone.
-    let nt = dst
-        .manager
-        .get(&ih)
-        .ok_or("the target engine accepted it and does not hold it")?;
-    nt.seed_secs
-        .store(seeded, std::sync::atomic::Ordering::Relaxed);
-    nt.fold_seed_time(typhon_engine::torrent::meta::now_secs());
     {
         let store = match state.store.lock() {
             Ok(s) => s,
@@ -787,5 +789,91 @@ fn prune_empty_dirs(plan: &MovePlan) {
     dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
     for d in dirs {
         let _ = std::fs::remove_dir(&d);
+    }
+}
+
+#[cfg(test)]
+mod graduate_tests {
+    use super::*;
+    use crate::api::testing::{state_from, TestState};
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let info = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:{}e",
+            name.len(),
+            "G".repeat(20)
+        );
+        let announce = "https://tracker.example/announce";
+        format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
+    }
+
+    fn setup(tag: &str) -> (TestState, String, std::path::PathBuf, std::path::PathBuf) {
+        let s = state_from(tag, "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("hoard-data");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
+        let (hash, _) = crate::api::add_torrent_bytes(
+            &s.state, &torrent_bytes("grad"), "", &src.display().to_string(), "", true, true, "race",
+        )
+        .expect("added");
+        (s, hash, src, dst)
+    }
+
+    fn job(hash: &str, dest: &std::path::Path) -> crate::store::Job {
+        crate::store::Job {
+            id: "j1".into(),
+            kind: "graduate".into(),
+            state: "running".into(),
+            info_hash: hash.into(),
+            params: serde_json::json!({
+                "from_engine": "race", "to_engine": "hoard", "to_category": "",
+                "save_path": dest.display().to_string(),
+            })
+            .to_string(),
+            progress_bytes: 0,
+            total_bytes: 16384,
+            error: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The torrent arrives with its own state: the stopped flag and an edited
+    /// tracker list survive the move, and the data is where the record says.
+    #[test]
+    fn a_graduation_carries_the_torrent_as_it_was() {
+        let (s, hash, src, dst) = setup("grad-ok");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let race = s.state.engines.get("race").unwrap();
+        race.manager.set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]]).unwrap();
+
+        graduate(&s.state, &job(&hash, &dst)).expect("graduated");
+
+        assert!(race.manager.get(&ih).is_none());
+        let t = s.state.engines.get("hoard").unwrap().manager.get(&ih).expect("in hoard");
+        assert_eq!(*t.live_trackers.read(), vec![vec!["https://edited.example/announce".to_string()]]);
+        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a stopped torrent stays stopped");
+        assert!(dst.join("grad").exists() && !src.join("grad").exists());
+    }
+
+    /// ⭐ A target that refuses puts everything back: the files return and the
+    /// source engine holds the torrent again. 4.3 left it in no engine.
+    #[test]
+    fn a_refused_graduation_is_rolled_back() {
+        let (s, hash, src, dst) = setup("grad-refused");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        // The target already holds this torrent, so its adoption is refused.
+        let hoard = s.state.engines.get("hoard").unwrap();
+        let other = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        hoard.manager.add_torrent_bytes(&torrent_bytes("grad"), &other.display().to_string(), true, true).unwrap();
+
+        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("refused");
+        assert!(err.contains("rolled back"), "{err}");
+        assert!(src.join("grad").exists(), "the file came back");
+        assert!(!dst.join("grad").exists());
+        let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*back.save_path.read(), src);
     }
 }
