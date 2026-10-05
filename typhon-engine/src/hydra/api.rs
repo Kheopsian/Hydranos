@@ -8106,13 +8106,66 @@ async fn get_torrent_files(
     let Some((_, torrent)) = find_torrent(&state, &info_hash) else {
         return not_found();
     };
+    // What each file already has on disk, so the Content tab shows what was
+    // downloaded and what is still missing. It listed paths and sizes only.
+    let done = file_done_bytes(&torrent);
     let files: Vec<serde_json::Value> = torrent
         .meta
         .files
         .iter()
-        .map(|f| serde_json::json!({"path": f.path.to_string_lossy(), "size": f.length}))
+        .zip(done.iter())
+        .map(|(f, d)| {
+            serde_json::json!({
+                "path": f.path.to_string_lossy(),
+                "size": f.length,
+                // null: no piece map to tell (a stopped, never-checked torrent).
+                "done": d,
+                "progress": d.map(|d| if f.length == 0 { 1.0 } else { d as f64 / f.length as f64 }),
+            })
+        })
         .collect();
     Json(serde_json::json!({"files": files})).into_response()
+}
+
+/// Bytes of each file already held, in `meta.files` order.
+///
+/// Counted from the pieces held, by overlap: a piece that straddles two
+/// files counts for each only the bytes that are in it, so a file's figure
+/// is exact rather than "pieces held / pieces touched", which rounded a
+/// small file sharing one piece with a large one to all or nothing. `None`
+/// for every file when the torrent is incomplete and has no piece map to
+/// read: unknown is not zero.
+fn file_done_bytes(torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) -> Vec<Option<u64>> {
+    let meta = &torrent.meta;
+    // Complete by the same rule as the list's progress column (a seed, or a
+    // seed-mode add that carries no piece map): the two must never disagree.
+    if typhon_engine::rpc::dispatch::torrent_core(torrent).progress >= 1.0 {
+        return meta.files.iter().map(|f| Some(f.length)).collect();
+    }
+    let Some(picker) = torrent.picker.get() else {
+        return vec![None; meta.files.len()];
+    };
+    let p = picker.lock().unwrap_or_else(|e| e.into_inner());
+    let piece_len = meta.piece_length.max(1) as u64;
+    meta.files
+        .iter()
+        .map(|f| {
+            if f.length == 0 {
+                return Some(0);
+            }
+            Some(held_bytes(f.offset, f.length, piece_len, |i| p.has_piece(i as u32)))
+        })
+        .collect()
+}
+
+/// Bytes of the stream range `[offset, offset + len)` covered by held pieces.
+fn held_bytes(offset: u64, len: u64, piece_len: u64, has: impl Fn(u64) -> bool) -> u64 {
+    let (first, last) = file_piece_range(offset, len, piece_len);
+    let end = offset + len;
+    (first..=last)
+        .filter(|i| has(*i))
+        .map(|i| end.min((i + 1) * piece_len).saturating_sub(offset.max(i * piece_len)))
+        .sum()
 }
 
 /// Trackers of one torrent, grouped by tier, plus the engine holding it.
@@ -8210,7 +8263,9 @@ async fn qbit_torrent_files(
     // of an incomplete torrent saw it finished.
     let piece_len = torrent.meta.piece_length.max(1) as u64;
     let complete = torrent.bytes_left() == 0;
-    let picker = torrent.picker.get().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
+    // The same per-file bytes the native Content tab shows, so the two never
+    // disagree. qBit has no "unknown": a file with no piece map reads 0.
+    let done = file_done_bytes(&torrent);
     let files: Vec<serde_json::Value> = torrent
         .meta
         .files
@@ -8218,12 +8273,10 @@ async fn qbit_torrent_files(
         .enumerate()
         .map(|(index, f)| {
             let (first, last) = file_piece_range(f.offset, f.length, piece_len);
-            let progress = if complete || picker.is_none() {
-                1.0
-            } else {
-                let p = picker.as_ref().unwrap();
-                let held = (first..=last).filter(|i| p.has_piece(*i as u32)).count();
-                held as f64 / (last - first + 1) as f64
+            let progress = match done[index] {
+                _ if f.length == 0 => 1.0,
+                Some(d) => d as f64 / f.length as f64,
+                None => 0.0,
             };
             serde_json::json!({
                 "availability": 1,
@@ -19805,6 +19858,33 @@ mod qbit_shim_post_tests {
         for route in ["categories", "tags"] {
             let (status, _) = call(&s, "POST", &format!("/api/v2/torrents/{route}"), "").await;
             assert_eq!(status, StatusCode::OK, "POST torrents/{route}");
+        }
+    }
+
+    /// A piece shared by two files counts for each only its own bytes.
+    #[test]
+    fn held_bytes_count_the_overlap_not_the_whole_piece() {
+        // 16 KiB pieces; a 10 000-byte file, then one at 10 000 of 20 000.
+        let only = |held: &'static [u64]| move |i: u64| held.contains(&i);
+        assert_eq!(held_bytes(0, 10_000, 16_384, only(&[0])), 10_000);
+        // Piece 0 holds the second file's first 6 384 bytes.
+        assert_eq!(held_bytes(10_000, 20_000, 16_384, only(&[0])), 6_384);
+        assert_eq!(held_bytes(10_000, 20_000, 16_384, only(&[1])), 13_616);
+        assert_eq!(held_bytes(10_000, 20_000, 16_384, only(&[0, 1])), 20_000);
+        assert_eq!(held_bytes(10_000, 20_000, 16_384, only(&[])), 0);
+    }
+
+    /// The Content tab's route says what each file already has.
+    #[tokio::test]
+    async fn the_native_file_list_carries_what_was_downloaded() {
+        let (s, hash) = populated("native-files-done", &multi_file_bytes());
+        let (status, body) = call(&s, "GET", &format!("/api/torrents/{hash}/files"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let files = json(&body)["files"].clone();
+        // Added in seed mode: complete, so every file is all there.
+        for f in files.as_array().unwrap() {
+            assert_eq!(f["done"], f["size"], "{f}");
+            assert_eq!(f["progress"], 1.0);
         }
     }
 

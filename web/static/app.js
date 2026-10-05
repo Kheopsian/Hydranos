@@ -1728,31 +1728,47 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
         return;
     }
     const total = files.reduce((a, f) => a + (f.size || 0), 0);
-    const sorted = files.slice().sort((a, b) => (b.size || 0) - (a.size || 0));
+    // `done` is null when the engine cannot tell (no piece map): shown as a
+    // dash, never as 0 %, which would read as "nothing downloaded".
+    const known = files.every(f => f.done != null);
+    const doneTotal = files.reduce((a, f) => a + (f.done || 0), 0);
+    // Unfinished files first, then by size: what is still missing is what
+    // this list is opened for.
+    const sorted = files.slice().sort((a, b) => {
+        const pa = a.progress == null ? 1 : a.progress, pb = b.progress == null ? 1 : b.progress;
+        return (pa >= 1) - (pb >= 1) || (b.size || 0) - (a.size || 0);
+    });
     const rows = sorted.map(f => {
-        const share = total > 0 ? (f.size || 0) * 100 / total : 0;
+        const pct = f.progress == null ? null : Math.min(100, f.progress * 100);
+        const fill = pct == null ? 0 : pct;
+        const cls = pct != null && pct >= 100 ? " tc-bar-done" : "";
         return `<tr>
             <td class="tc-path">${esc(f.path || "")}</td>
             <td class="tc-num">${formatBytes(f.size || 0)}</td>
-            <td class="tc-num">${share.toFixed(1)}%</td>
-            <td class="tc-barcell"><div class="tc-bar"><div class="tc-bar-fill" style="width:${share.toFixed(1)}%"></div></div></td>
+            <td class="tc-num">${f.done == null ? "–" : formatBytes(f.done)}</td>
+            <td class="tc-num">${pct == null ? "–" : (pct >= 100 ? "100%" : pct.toFixed(1) + "%")}</td>
+            <td class="tc-barcell"><div class="tc-bar"><div class="tc-bar-fill${cls}" style="width:${fill.toFixed(1)}%"></div></div></td>
         </tr>`;
     }).join("");
     if (summary) {
         let line = tp(files.length, "{n} file", "{n} files") + " · " + formatBytes(total);
-        // Seeding torrents carry no piece map, so there is no availability to
-        // show. Say that instead of printing a misleading zero.
+        if (known) {
+            const missing = Math.max(0, total - doneTotal);
+            line += " · " + t("{done} downloaded", { done: formatBytes(doneTotal) });
+            if (missing > 0) line += " · " + t("{missing} missing", { missing: formatBytes(missing) });
+        }
+        // Only when the engine reports it. The route never sent it, and the
+        // fallback said "seeding, no piece map" on every torrent, downloading
+        // ones included.
         if (avail) {
             line += " · " + t("availability {range} (avg {avg} over {pieces} pieces)", {
                 range: avail.min + (avail.max !== avail.min ? "-" + avail.max : ""),
                 avg: avail.avg.toFixed(2), pieces: avail.num_pieces });
-        } else {
-            line += " · " + t("availability n/a (seeding, no piece map)");
         }
         summary.textContent = line;
     }
     body.innerHTML = `<div class="tc-scroll"><table class="tc-table">
-        <thead><tr><th>${t("Path")}</th><th class="tc-num">${t("Size")}</th><th class="tc-num">${t("Share")}</th><th></th></tr></thead>
+        <thead><tr><th>${t("Path")}</th><th class="tc-num">${t("Size")}</th><th class="tc-num">${t("Downloaded")}</th><th class="tc-num">${t("Progress")}</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>`;
 }

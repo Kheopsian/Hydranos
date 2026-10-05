@@ -112,6 +112,7 @@ Status: ✓ works · ◐ works with a caveat. Stub routes appear only in *Routes
 | `/api/torrents` | POST JSON | Add from exactly one of `torrent_path` (a file **on the Hydranos host**), `torrent_url` (fetched by Hydranos) or `magnet_uri`; plus `category`, `save_path`, `tags`, `engine` or `mode`, `stopped`, `seed_mode` (or `skip_recheck`), `create_subfolder`. Magnet → `202 {"info_hash","status":"resolving"}`; `seed_mode` and `stopped` apply to magnets too. | ✓ |
 | `/api/torrents/:info_hash` | DELETE | Remove. `?delete_files=true` deletes data; `?engine=` removes one copy, otherwise all. Files another torrent still reads are kept. | ✓ |
 | `/api/torrents/:info_hash/{files,torrent}` | GET | File list; the `.torrent` bytes from the store. | ✓ |
+| `/api/torrents/:info_hash/files` | GET | `{"files":[{"path","size","done","progress"}]}`: `done` is the bytes of that file already held (from the pieces held, by overlap), `progress` 0-1; both `null` when the torrent is incomplete and has no piece map to read. | ✓ |
 | `/api/torrents/:info_hash/trackers` | GET, POST | Read / edit (saved at once). POST `{"op":"add"\|"remove","urls":[...]}`, `{"op":"replace","from","to"}` or `{"op":"set","tiers":[ ["u1"], ["u2"] ]}`. `.../add-tracker` takes `{"url"}`. | ✓ |
 | `/api/torrents/:info_hash/reannounce` | POST | Announce now, one copy only: the `?engine=` one, else the first engine holding it. `429` in the 60 s cooldown. | ✓ |
 | `/api/torrents/:info_hash/peers` | POST | `{"peers":["203.0.113.5:16172"]}`: dial these peers. | ✓ |
