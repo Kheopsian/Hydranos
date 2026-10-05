@@ -190,6 +190,14 @@ pub struct TorrentManager {
     /// `peer::listen` rebinds without restarting: torrents and live peer
     /// connections are untouched.
     rebind_tx: std::sync::OnceLock<tokio::sync::watch::Sender<u16>>,
+    /// The port trackers are told once a rebind moved the listener; 0 until
+    /// then, meaning the configured one. Without it a rebind moved the accept
+    /// socket while every announce kept handing out the old port, and peers
+    /// dialled a port nothing listened on.
+    live_port: std::sync::atomic::AtomicU16,
+    /// No announce until a port is known: set while a forwarded port (gluetun)
+    /// has not been read yet, so no tracker is ever handed a guess.
+    port_pending: std::sync::atomic::AtomicBool,
     /// This engine's event stream.
     bus: crate::rpc::events::EventBus,
     /// Completions waiting to be persisted. A torrent that finishes is only
@@ -336,10 +344,32 @@ impl TorrentManager {
     /// Ask this engine's TCP listener to rebind to `port`. False when the
     /// supervisor is not up yet.
     pub fn request_listen_rebind(&self, port: u16) -> bool {
-        match self.rebind_tx.get() {
+        let sent = match self.rebind_tx.get() {
             Some(tx) => tx.send(port).is_ok(),
             None => false,
+        };
+        if sent {
+            self.live_port.store(port, std::sync::atomic::Ordering::Relaxed);
         }
+        sent
+    }
+
+    /// The port to announce: the one a rebind moved the listener to, or the
+    /// configured one when nothing has.
+    pub fn announced_port(&self, configured: u16) -> u16 {
+        match self.live_port.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => configured,
+            p => p,
+        }
+    }
+
+    /// Hold (or release) every announce until the listen port is known.
+    pub fn set_port_pending(&self, pending: bool) {
+        self.port_pending.store(pending, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn port_pending(&self) -> bool {
+        self.port_pending.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// This engine's dial ceilings.
@@ -433,6 +463,8 @@ impl TorrentManager {
             policy: Default::default(),
             trusted_proxy_sources: std::sync::OnceLock::new(),
             rebind_tx: std::sync::OnceLock::new(),
+            live_port: std::sync::atomic::AtomicU16::new(0),
+            port_pending: std::sync::atomic::AtomicBool::new(false),
             bus: Default::default(),
             completed_tx,
             completed_rx: std::sync::Mutex::new(Some(completed_rx)),

@@ -67,6 +67,7 @@ mod wgtun;
 mod volumes;
 mod workers;
 mod portfwd;
+mod gluetun;
 mod igd;
 mod portmap;
 mod raceevents;

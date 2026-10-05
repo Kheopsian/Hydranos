@@ -327,6 +327,14 @@ pub(super) async fn announce_one(
     if manager.limiter().dials_paused() {
         return Outcome { next_in: Duration::from_secs(15), gone: false, ..gone };
     }
+    // Same while the forwarded port is not known yet: an announce now would
+    // hand the tracker a port nothing will listen on.
+    if manager.port_pending() {
+        return Outcome { next_in: Duration::from_secs(15), gone: false, ..gone };
+    }
+    // Where the listener is NOW: a rebind (gluetun's rotation, the API) moves
+    // it after this runner started with the configured port.
+    let port = manager.announced_port(port);
     let silent = torrent.is_paused.load(Ordering::Relaxed) || status == TorrentStatus::Error as u8;
 
     // BEP 3's counters are the SESSION's: bytes moved since `started`. The
@@ -1781,6 +1789,39 @@ mod announce_one_tests {
         assert_eq!(&p[96..98], &16371u16.to_be_bytes(), "our listen port");
         assert_eq!(&p[98..], &[&[0x2u8, 9][..], b"/announce"].concat()[..], "the path, as BEP 41 URL data");
         assert_eq!(cache.get(&hash).map(|e| e.complete), Some(5), "the swarm count is recorded like an HTTP one");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ After a rebind (gluetun's rotation), the tracker is told the NEW
+    /// port. The runner started with the configured one, and 4.3 kept sending
+    /// it: peers dialled a port nothing listened on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_announce_follows_a_rebound_listen_port() {
+        let (url, seen) = udp_tracker(1234).await;
+        let (mgr, root) = manager("udprebind");
+        let hash = add(&mgr, "udprebind", &url);
+        let (tx, _rx) = tokio::sync::watch::channel(0u16);
+        mgr.set_rebind_tx(tx);
+        assert!(mgr.request_listen_rebind(40123));
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(&got[0][96..98], &40123u16.to_be_bytes(), "the port the listener moved to");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// While the forwarded port is unknown, not a packet leaves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_is_announced_while_the_port_is_pending() {
+        let (url, seen) = udp_tracker(1234).await;
+        let (mgr, root) = manager("udppending");
+        let hash = add(&mgr, "udppending", &url);
+        mgr.set_port_pending(true);
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(seen.lock().unwrap().is_empty(), "held until the port is known");
         let _ = std::fs::remove_dir_all(root);
     }
 
