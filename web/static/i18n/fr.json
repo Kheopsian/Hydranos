@@ -927,5 +927,11 @@
   "{n} torrents were added stopped, as chosen: nothing announces until you start them from the list.": "{n} torrents ont été ajoutés à l'arrêt, comme demandé : rien n'est annoncé tant que vous ne les démarrez pas depuis la liste.",
   "Retry failed": "Réessayer les échecs",
   "Retry the {n} failed": "Réessayer les {n} échecs",
-  "…and {n} more, in the log.": "…et {n} de plus, dans le journal."
+  "…and {n} more, in the log.": "…et {n} de plus, dans le journal.",
+  "disk: {used} used of {total}": "disque : {used} utilisés sur {total}",
+  "quota": "quota",
+  "of quota used": "du quota utilisés",
+  "Quota": "Quota",
+  "On a shared disk (a seedbox slot), the space you are allowed rather than the disk's size. The percentages and the drain then count the data of this engine's torrents against it. Empty: the whole disk.": "Sur un disque partagé (un slot de seedbox), l'espace qui vous est alloué plutôt que la taille du disque. Les pourcentages et la vidange comptent alors les données des torrents de cet engine par rapport à ce quota. Vide : le disque entier.",
+  "whole disk": "disque entier"
 }

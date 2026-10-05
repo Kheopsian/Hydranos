@@ -671,10 +671,13 @@ pub fn drain_once(
     if to_free <= 0.0 {
         return DrainOutcome::default();
     }
+    // `basis` says what the percentages are of. On a shared seedbox slot a
+    // bare "96" cannot be told apart from the disk the neighbours filled.
     tracing::warn!(
         volume = %volume.id,
         pct = volume.used_pct().round(),
         alloc_pct = volume.alloc_pct().round(),
+        basis = %volume.basis(),
         committed_gb = (volume.committed as f64 / 1e9).round(),
         high = volume.policy.high,
         "race volume over its high watermark, draining"
@@ -818,6 +821,7 @@ pub fn drain_once(
     if to_free > 0.0 {
         tracing::warn!(
             volume = %volume.id,
+            basis = %volume.basis(),
             still_needed_gb = (to_free / 1e9).round(),
             deleted,
             graduated,
@@ -836,12 +840,11 @@ pub fn drain_once(
     // below still runs on the declared sizes (something has to decide what to
     // remove before removing it), but what is reported and archived is the
     // delta that actually happened.
-    let (after_used, after) = crate::volumes::usage(std::path::Path::new(&volume.id))
-        .map(|(used, total, _)| {
-            (used, if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 })
-        })
-        .unwrap_or((volume.used, volume.used_pct()));
-    let freed = volume.used.saturating_sub(after_used);
+    // `after_drain` keeps the after-percentage on the same basis the trigger
+    // used (the quota, when there is one) while freed stays the disk delta.
+    let (freed, after) = volume.after_drain(
+        crate::volumes::usage(std::path::Path::new(&volume.id)).map(|(used, total, _)| (used, total)),
+    );
     if deleted > 0 || graduated > 0 || stuck > 0 {
         let store = match state.store.lock() {
             Ok(g) => g,
@@ -1158,16 +1161,16 @@ mod drain_tests {
     }
 
     fn volume(total: u64, used: u64, enabled: bool, high: i64, low: i64) -> Volume {
-        Volume {
-            id: "/mnt/race".into(),
-            dev: 1,
-            total,
-            used,
-            free: total.saturating_sub(used),
-            committed: 0,
-            torrents: 0,
-            policy: Policy { enabled, high, low, inherited: true },
-        }
+        Volume::measure(
+            "/mnt/race".into(),
+            1,
+            (used, total, total.saturating_sub(used)),
+            None,
+            0,
+            0,
+            0,
+            Policy { enabled, high, low, inherited: true },
+        )
     }
 
     fn race_manager(s: &TestState) -> Arc<TorrentManager> {
@@ -1322,16 +1325,17 @@ mod drain_policy_gate_tests {
     /// A volume reported as `used_pct` full, with the policy the test is about.
     fn volume(used_pct: u64, enabled: bool, high: i64, low: i64) -> Volume {
         let total = 100_000_000_000u64;
-        Volume {
-            id: "/mnt/race".into(),
-            dev: 1,
-            total,
-            used: total / 100 * used_pct,
-            free: total - total / 100 * used_pct,
-            committed: 0,
-            torrents: 1,
-            policy: Policy { enabled, high, low, inherited: true },
-        }
+        let used = total / 100 * used_pct;
+        Volume::measure(
+            "/mnt/race".into(),
+            1,
+            (used, total, total - used),
+            None,
+            0,
+            0,
+            1,
+            Policy { enabled, high, low, inherited: true },
+        )
     }
 
     /// State with `n` seeding torrents on the race engine, each announcing to

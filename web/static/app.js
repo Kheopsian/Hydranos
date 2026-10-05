@@ -6464,7 +6464,12 @@ function _rpVolCard(v, i) {
     const at = formatBytes((v.total || 0) * (v.high_watermark || 0) / 100);
     const back = formatBytes((v.total || 0) * (v.low_watermark || 0) / 100);
     return '<div class="card vol-card">'
-        + "<h3><span>" + esc(v.id) + '</span><span class="cap">' + formatBytes(v.total || 0) + "</span>"
+        // With a quota every figure on this card is the quota's; the disk it
+        // sits on stays in the tooltip, for a shared seedbox slot where the
+        // two disagree by design.
+        + "<h3><span>" + esc(v.id) + '</span><span class="cap"'
+        + (v.basis === "quota" ? ' title="' + esc(t("disk: {used} used of {total}", { used: formatBytes(v.disk_used || 0), total: formatBytes(v.disk_total || 0) })) + '"' : "")
+        + ">" + formatBytes(v.total || 0) + (v.basis === "quota" ? " " + t("quota") : "") + "</span>"
         + '<div class="rp2-spacer"></div>'
         + '<button class="rp2-btn ghost" onclick="_rpToggleHist(' + i + ')">' + t("History") + "</button>"
         + '<button class="rp2-btn" onclick="_rpVolDrain(this,' + i + ')">' + t("Drain now") + "</button></h3>"
@@ -6473,7 +6478,7 @@ function _rpVolCard(v, i) {
         + '<div class="rp2-mark low" style="left:' + (v.low_watermark || 0) + '%"></div>'
         + '<div class="rp2-mark" style="left:' + (v.high_watermark || 0) + '%"></div></div>'
         + '<div class="rp2-row"><div class="rp2-disk"><b>' + pct.toFixed(0) + "%</b> "
-        + t("used") + " &middot; " + formatBytes(v.free || 0) + " " + t("free")
+        + (v.basis === "quota" ? t("of quota used") : t("used")) + " &middot; " + formatBytes(v.free || 0) + " " + t("free")
         + ' <span style="color:var(--text-muted)">&middot; ' + (v.torrents || 0) + " " + t("torrents") + "</span></div>"
         + '<div class="rp2-spacer"></div>'
         + (hot ? '<span class="rp2-warn" style="color:var(--accent-yellow)">' + t("over its mark") + "</span>" : "")
@@ -6489,6 +6494,10 @@ function _rpVolCard(v, i) {
         + '" onchange="_rpVolSave(' + i + ',\'low_watermark\',parseInt(this.value))">%</div>'
         + '<span class="abs">' + t("that is {at}, back to {back}", { at: at, back: back }) + "</span>"
         + "</div></div>"
+        + '<div class="rp2-row"><div class="rp2-lbl">' + t("Quota")
+        + '<span class="rp2-info">i<span class="rp2-tip">' + esc(t("On a shared disk (a seedbox slot), the space you are allowed rather than the disk's size. The percentages and the drain then count the data of this engine's torrents against it. Empty: the whole disk.")) + "</span></span></div>"
+        + '<div class="rp2-body"><div class="rp2-f"><input type="number" min="0" step="1" placeholder="' + t("whole disk") + '" value="'
+        + (v.quota ? Math.round(v.quota / 1e9) : "") + '" onchange="_rpVolSave(' + i + ',\'quota_gb\',parseFloat(this.value)||0)"> GB</div></div></div>'
         + '<div class="rp2-row rp2-drain-result" id="rp-res-' + i + '" style="display:none"></div>'
         + '<div class="rp2-hist" id="rp-hist-' + i + '" style="display:none"></div>'
         + "</div></div>";
@@ -6506,7 +6515,9 @@ async function _rpVolSave(i, key, value) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
         });
-        _rpVols[i] = Object.assign({}, v, r, { inherited: false });
+        // A quota alone is not a threshold override: the volume keeps
+        // following the defaults it inherited.
+        _rpVols[i] = Object.assign({}, v, r, key === "quota_gb" ? {} : { inherited: false });
         loadRacePolicy();
     } catch (e) {
         hydraNotify(t("Save failed: {msg}", { msg: e.message }));
