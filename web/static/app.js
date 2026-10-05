@@ -4078,7 +4078,10 @@ function _applyCtxGroups() {
     // Shown as soon as one node is declared. It used to be decided from
     // `/api/agents`, whose entries carry no `name`, so the test was against an
     // always-empty list and the group's fate had nothing to do with the fleet.
-    const showNodes = (_ctxNodes || []).length > 0;
+    // Or as soon as this node has a second engine -- every default install
+    // has two (race and hoard). 4.3 required a declared node, so the only UI
+    // way to move a torrent between local engines was hidden on most setups.
+    const showNodes = (_ctxNodes || []).length > 0 || _ctxLocalEngines > 1;
     const nodeGrp = document.getElementById("ctx-grp-node");
     const nodeSep = document.getElementById("ctx-sep-node");
     if (nodeGrp) nodeGrp.style.display = showNodes ? "" : "none";
@@ -4096,6 +4099,10 @@ function _applyCtxGroups() {
 
 // Known nodes, cached so opening the menu stays synchronous.
 async function _refreshCtxNodes() {
+    try {
+        const engines = await api("/api/engines");
+        if (Array.isArray(engines)) _ctxLocalEngines = engines.length;
+    } catch (e) { /* keep the previous count */ }
     try {
         const list = await api("/api/nodes");
         if (Array.isArray(list)) _ctxNodes = list;
@@ -4345,6 +4352,7 @@ function _hideCtxSubmenu() {
 // The row the open submenu belongs to. Kept so a submenu that re-renders
 // itself (adding a tag re-opens the tag panel) stays where it was.
 let _ctxNodes = [];
+let _ctxLocalEngines = 0;
 let _ctxSubAnchor = null;
 
 function _openCtxSubmenu(html, anchor) {
@@ -5121,7 +5129,6 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                         const ov = _addOverrides();
                         if (ov.create_subfolder !== undefined) formData.append("create_subfolder", String(ov.create_subfolder));
                         if (ov.skip_recheck) formData.append("skip_recheck", "true");
-                if (ov.start_paused) formData.append("paused", "true");
                         if (ov.start_paused) formData.append("paused", "true");
                         const res = await fetch("/api/torrents/upload", {
                             method: "POST",
@@ -5160,6 +5167,9 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                 category: category || undefined,
                 create_subfolder: ov.create_subfolder,
                 skip_recheck: ov.skip_recheck,
+                // 4.3 sent this for an upload only: a path or a magnet
+                // added with the box ticked started anyway.
+                stopped: ov.start_paused,
             };
 
             const torrentPath = document.getElementById("torrent-path").value.trim();
@@ -5592,7 +5602,9 @@ document.getElementById("torrent-category").addEventListener("change", async (e)
         // /api/categories returns an ARRAY of {name, save_path, mode, ...}.
         const cat = Array.isArray(cats) ? cats.find(c => c.name === name) : (cats || {})[name];
         if (cat) {
-            if (cat.save_path) document.getElementById("save-path").value = cat.save_path;
+            // Always replaced: keeping the previous category's path when the
+            // new one has none sent the torrent to the wrong folder.
+            document.getElementById("save-path").value = cat.save_path || "";
             document.querySelectorAll(".mode-btn").forEach(b => {
                 b.classList.toggle("active", b.dataset.mode === cat.mode);
             });
@@ -9254,7 +9266,7 @@ function updateIssueLink() {
     const a = document.getElementById("logs-issue");
     if (!a) return;
     const body = "**Describe the issue**\n\n\n**Version:** (see the startup banner)\n\n**Logs** (paste from the Logs tab, check for your public IP before posting):\n```\n\n```\n";
-    a.href = "https://github.com/Kheopsian/Hydra/issues/new?title=" + encodeURIComponent("[bug] ") + "&body=" + encodeURIComponent(body);
+    a.href = "https://github.com/Kheopsian/Hydranos/issues/new?title=" + encodeURIComponent("[bug] ") + "&body=" + encodeURIComponent(body);
 }
 
 // ─── Startup pause ──────────────────────────────────────

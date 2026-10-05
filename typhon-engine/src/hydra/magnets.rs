@@ -219,6 +219,22 @@ pub fn request(
     paused: bool,
     engine_override: &str,
 ) -> Result<String, String> {
+    request_with(state, uri, category, save_path, tags, paused, false, engine_override)
+}
+
+/// `request`, with `seed_mode`: once the metadata is in, the data at the save
+/// path is trusted rather than hash-checked.
+#[allow(clippy::too_many_arguments)]
+pub fn request_with(
+    state: &AppState,
+    uri: &str,
+    category: &str,
+    save_path: &str,
+    tags: &str,
+    paused: bool,
+    seed_mode: bool,
+    engine_override: &str,
+) -> Result<String, String> {
     let m = parse(uri)?;
     let hash = hex(&m.info_hash);
     let (engine_id, category_path) = crate::api::placement(state, category, engine_override);
@@ -238,6 +254,7 @@ pub fn request(
         save_path: save_path.to_string(),
         tags: tags.to_string(),
         paused,
+        seed_mode,
         added_at: crate::store::now_secs(),
         attempts: 0,
         next_try: 0,
@@ -351,7 +368,7 @@ pub(crate) fn complete(state: &AppState, row: &mut crate::store::MagnetRow, dict
     let trackers = parse(&row.uri).map(|m| m.trackers).unwrap_or_default();
     let bytes = torrent_from_dict(dict, &trackers);
     match crate::api::add_torrent_bytes(
-        state, &bytes, &row.category, &row.save_path, &row.tags, row.paused, false, &row.engine,
+        state, &bytes, &row.category, &row.save_path, &row.tags, row.paused, row.seed_mode, &row.engine,
     ) {
         Ok(_) => {
             tracing::info!(info_hash = %row.info_hash, name = %row.name, "magnet resolved and added");
