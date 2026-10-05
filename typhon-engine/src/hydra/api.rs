@@ -5803,6 +5803,26 @@ use std::collections::BTreeMap;
 /// per endpoint.
 type Fields = BTreeMap<String, String>;
 
+/// The `hashes` field of a shim write: qBittorrent's `all` means every
+/// torrent. 4.3 split it as a hash named "all", matched nothing and answered
+/// 200 -- "pause all" in a client paused nothing.
+fn qbit_hashes(state: &AppState, form: &Fields) -> Vec<String> {
+    let raw = form.get("hashes").map(String::as_str).unwrap_or("");
+    if raw.trim().eq_ignore_ascii_case("all") {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        let mut all: Vec<String> = state
+            .engines
+            .engines()
+            .iter()
+            .flat_map(|e| store.all_hashes(&e.id).unwrap_or_default())
+            .collect();
+        all.sort();
+        all.dedup();
+        return all;
+    }
+    split_list(raw)
+}
+
 fn split_list(raw: &str) -> Vec<String> {
     raw.split(&[',', '|'][..])
         .map(str::trim)
@@ -6010,26 +6030,20 @@ async fn qbit_delete_tags(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     let tags = split_list(form.get("tags").map(String::as_str).unwrap_or(""));
-    let _ = tags;
-    // ⚠ Deliberately does NOT touch tag_registry.
-    //
-    // 3.x removes the tag from a FILE registry (tagstore.SaveRegistry) and
-    // leaves the tag_registry table alone, while createTags writes to the
-    // table. Its registry is therefore split in two halves that drift apart,
-    // and a deleted tag survives in the database. That is a bug, and it is
-    // reproduced here rather than fixed, because fixing it silently would make
-    // 4.0.0 answer differently from the version it has to replace. It is
-    // written up so it can be fixed on purpose, with a note, in a later
-    // release.
+    // As qBittorrent does: the tag goes from the list and from every torrent.
+    // 4.x reproduced a 3.x bug and deleted nothing, so a tag a client deleted
+    // came back in the next listing.
+    let store = state.store.lock().unwrap();
+    let _ = store.unregister_tags(&tags);
+    let _ = store.strip_tags(&tags);
     qbit_ok()
 }
 
 /// Apply a tag change to every torrent named in `hashes`.
 fn retag(state: &AppState, form: &Fields, add: bool) {
     let tags = split_list(form.get("tags").map(String::as_str).unwrap_or(""));
-    let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
+    let hashes = qbit_hashes(state, form);
     let store = state.store.lock().unwrap();
 
     if add {
@@ -6123,7 +6137,7 @@ fn apply_pause_everywhere(state: &AppState, hash: &str, paused: bool) {
 }
 
 fn set_paused(state: &AppState, form: &Fields, paused: bool) {
-    let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
+    let hashes = qbit_hashes(state, form);
     let resolved: Vec<String> = {
         let store = state.store.lock().unwrap();
         hashes
@@ -7355,14 +7369,18 @@ async fn qbit_transfer_info(
     let _ = cfg;
 
     let (up, down) = state.engines.session_totals();
+    // The engines' own rates, summed: 4.3 answered 0 for both speeds.
+    let (up_speed, down_speed) = state.engines.engines().iter().fold((0u64, 0u64), |acc, e| {
+        (acc.0 + e.manager.upload_rate.get(), acc.1 + e.manager.download_rate.get())
+    });
     Json(serde_json::json!({
         "connection_status": "connected",
         "dht_nodes": 0,
         "dl_info_data": down,
-        "dl_info_speed": 0,
+        "dl_info_speed": down_speed,
         "dl_rate_limit": 0,
         "up_info_data": up,
-        "up_info_speed": 0,
+        "up_info_speed": up_speed,
         "up_rate_limit": 0,
     }))
     .into_response()
@@ -7385,7 +7403,7 @@ async fn qbit_set_category(
     let _ = cfg;
 
     let category = form.get("category").cloned().unwrap_or_default();
-    let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
+    let hashes = qbit_hashes(&state, &form);
     let store = state.store.lock().unwrap();
     for prefix in hashes {
         if let Some(hash) = store.resolve_hash(&prefix) {
@@ -7637,7 +7655,14 @@ pub(crate) fn engine_qbit_rows(
             let Some(torrent) = engine.manager.get(&key) else { continue };
             let raw = typhon_engine::rpc::dispatch::torrent_to_json(&torrent);
             let native = crate::row::build(&raw, torrent_facts, &agent);
-            rows.push(crate::qbitrow::build(&native, engine_id, now));
+            let mut row = crate::qbitrow::build(&native, engine_id, now);
+        // The tracker qBittorrent reports: the first one announced to. 4.3
+        // left it empty, so cross-seed and the *arrs could not tell which
+        // tracker a torrent belonged to.
+        if let Some(url) = torrent.live_trackers.read().iter().flatten().next() {
+            row["tracker"] = serde_json::Value::String(url.clone());
+        }
+        rows.push(row);
         }
         return rows;
     }
@@ -7668,7 +7693,14 @@ pub(crate) fn engine_qbit_rows(
         }
         let raw = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
         let native = crate::row::build(&raw, torrent_facts, &agent);
-        rows.push(crate::qbitrow::build(&native, engine_id, now));
+        let mut row = crate::qbitrow::build(&native, engine_id, now);
+        // The tracker qBittorrent reports: the first one announced to. 4.3
+        // left it empty, so cross-seed and the *arrs could not tell which
+        // tracker a torrent belonged to.
+        if let Some(url) = torrent.live_trackers.read().iter().flatten().next() {
+            row["tracker"] = serde_json::Value::String(url.clone());
+        }
+        rows.push(row);
     }
     rows
 }
@@ -7727,15 +7759,19 @@ async fn qbit_torrents_info(
     // null. Clients dereference the array directly -- cross-seed calls
     // torrents.find(...) straight on the parsed body -- so a null throws there
     // instead of reading as "no torrents".
+    // Every engine, not only race and hoard, and each torrent once: a torrent
+    // held by two engines was listed twice, which a client reads as two
+    // torrents with one hash. The first engine holding it answers.
     let mut rows: Vec<serde_json::Value> = Vec::new();
-    for engine in ["race", "hoard"] {
-        rows.extend(engine_qbit_rows(
-            &state,
-            engine,
-            now,
-            category.as_deref(),
-            hashes.as_ref(),
-        ));
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let ids: Vec<String> = state.engines.engines().iter().map(|e| e.id.clone()).collect();
+    for engine in &ids {
+        for row in engine_qbit_rows(&state, engine, now, category.as_deref(), hashes.as_ref()) {
+            let h = row.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if seen.insert(h) {
+                rows.push(row);
+            }
+        }
     }
 
     if filter != "all" {
@@ -8174,23 +8210,38 @@ async fn qbit_torrent_files(
     let Some((_, torrent)) = find_torrent(&state, &hash) else {
         return not_found();
     };
+    // Each file's pieces and how many of them are held. 4.3 answered every
+    // file at 100 % on piece range [0, 0], so a client waiting for one file
+    // of an incomplete torrent saw it finished.
+    let piece_len = torrent.meta.piece_length.max(1) as u64;
+    let complete = torrent.bytes_left() == 0;
+    let picker = torrent.picker.get().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut offset = 0u64;
     let files: Vec<serde_json::Value> = torrent
         .meta
         .files
         .iter()
         .enumerate()
         .map(|(index, f)| {
+            let len = f.length as u64;
+            let first = offset / piece_len;
+            let last = if len == 0 { first } else { (offset + len - 1) / piece_len };
+            offset += len;
+            let progress = if complete || picker.is_none() {
+                1.0
+            } else {
+                let p = picker.as_ref().unwrap();
+                let held = (first..=last).filter(|i| p.has_piece(*i as u32)).count();
+                held as f64 / (last - first + 1) as f64
+            };
             serde_json::json!({
                 "availability": 1,
                 "index": index,
-                "is_seed": false,
+                "is_seed": complete,
                 "name": f.path.to_string_lossy(),
-                // The piece range is not tracked per file here; qBit clients
-                // read it for a progress bar they do not draw for a complete
-                // torrent, and cross-seed ignores it entirely.
-                "piece_range": [0, 0],
+                "piece_range": [first, last],
                 "priority": 1,
-                "progress": 1,
+                "progress": progress,
                 "size": f.length,
             })
         })
@@ -8923,7 +8974,18 @@ async fn qbit_add_trackers(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let _ = cfg;
-    qbit_edit_trackers(&state, &form, "add").await
+    let r = qbit_edit_trackers(&state, &form, "add").await;
+    // Announce to the new trackers now, as qBittorrent does when a tracker
+    // is added, instead of waiting out the old interval.
+    if r.status() == StatusCode::OK {
+        let hash = form.get("hash").map(|h| h.trim().to_lowercase()).unwrap_or_default();
+        for (id, _) in copies_of(&state, &hash) {
+            if let Some(bump) = state.engines.get(&id).and_then(|e| e.bump.get()) {
+                let _ = bump.try_send(crate::announce::scheduler::BumpReq { info_hash: hash.clone(), reply: None, forced: false });
+            }
+        }
+    }
+    r
 }
 
 async fn qbit_remove_trackers(
@@ -11066,7 +11128,7 @@ async fn qbit_delete(
         .map(|v| matches!(v.trim(), "true" | "1"))
         .unwrap_or(false);
 
-    let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
+    let hashes = qbit_hashes(&state, &form);
     for prefix in hashes {
         let resolved = {
             let store = state.store.lock().unwrap();
@@ -12158,7 +12220,7 @@ fn copies_of(
 /// touches engines and sockets, and holding the database across that would
 /// serialise every other request behind one bulk call.
 fn resolved_hashes(state: &AppState, form: &Fields) -> Vec<String> {
-    let hashes = split_list(form.get("hashes").map(String::as_str).unwrap_or(""));
+    let hashes = qbit_hashes(state, form);
     let store = state.store.lock().unwrap();
     hashes
         .into_iter()
@@ -15760,6 +15822,56 @@ mod body_route_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod shim_fidelity_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let info = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:{}e",
+            name.len(),
+            name.chars().next().unwrap().to_string().repeat(20)
+        );
+        let announce = "https://tracker.example/announce";
+        format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
+    }
+
+    /// One row per torrent even when two engines hold it, with the tracker
+    /// it announces to; `hashes=all` names every torrent; a deleted tag is
+    /// gone from the torrents too.
+    #[tokio::test]
+    async fn the_shim_answers_like_qbittorrent() {
+        let s = state_from("shim-fid", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let a = torrent_bytes("alpha");
+        let (ha, _) = add_torrent_bytes(&s.state, &a, "", "/tmp", "keep,drop", true, true, "race").unwrap();
+        add_torrent_bytes(&s.state, &a, "", "/tmp", "keep,drop", true, true, "hoard").unwrap();
+        assert!(s.state.store.lock().unwrap().tags_of(&ha).contains(&"drop".to_string()));
+        let (hb, _) = add_torrent_bytes(&s.state, &torrent_bytes("bravo"), "", "/tmp", "", true, true, "hoard").unwrap();
+
+        let r = qbit_torrents_info(State(s.state.clone()), RawQuery(None), keyed(KEY), String::new()).await;
+        let rows = body_json(r).await;
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2, "alpha once, bravo once: {rows:?}");
+        assert!(rows.iter().all(|r| r["tracker"] == "https://tracker.example/announce"));
+
+        let mut form = Fields::new();
+        form.insert("hashes".into(), "all".into());
+        let mut all = qbit_hashes(&s.state, &form);
+        all.sort();
+        let mut want = vec![ha.clone(), hb];
+        want.sort();
+        assert_eq!(all, want);
+
+        let mut form = Fields::new();
+        form.insert("tags".into(), "drop".into());
+        qbit_delete_tags(State(s.state.clone()), RawQuery(None), keyed(KEY), Form(form)).await;
+        assert_eq!(s.state.store.lock().unwrap().tags_of(&ha), vec!["keep".to_string()]);
     }
 }
 

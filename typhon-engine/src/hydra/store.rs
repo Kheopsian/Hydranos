@@ -2245,6 +2245,34 @@ impl Store {
         Ok(())
     }
 
+    /// Take these tags off every torrent wearing them. Returns how many rows
+    /// changed.
+    pub fn strip_tags(&self, tags: &[String]) -> anyhow::Result<usize> {
+        let mut changed = 0usize;
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut find = tx.prepare("SELECT rowid, tags FROM torrents WHERE tags LIKE '%' || ?1 || '%'")?;
+            let mut put = tx.prepare("UPDATE torrents SET tags = ?2 WHERE rowid = ?1")?;
+            for tag in tags {
+                let rows: Vec<(i64, String)> = find
+                    .query_map([tag], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .filter_map(Result::ok)
+                    .collect();
+                for (rowid, raw) in rows {
+                    let current = split_tags(&raw);
+                    if !current.iter().any(|t| t == tag) {
+                        continue;
+                    }
+                    let kept: Vec<String> = current.into_iter().filter(|t| t != tag).collect();
+                    put.execute(rusqlite::params![rowid, kept.join(",")])?;
+                    changed += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn unregister_tags(&self, tags: &[String]) -> anyhow::Result<()> {
         for tag in tags {
             self.conn
