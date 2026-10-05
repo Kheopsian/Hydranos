@@ -157,6 +157,14 @@ pub struct EngineConfig {
     /// disclosed to, the swarm outside the tracker.
     #[serde(default = "default_true")]
     pub pex_enabled: bool,
+    /// Local Service Discovery (BEP 14): announce active torrents to the LAN
+    /// by multicast and take the peers the LAN announces (`lsd`). Off unless
+    /// set: the engine binary has no role to choose a default from; Hydra
+    /// passes its per-role decision (`Session::lsd_on`). Off behind the SOCKS5
+    /// proxy whatever this says (`dht::lsd_policy`); `private` torrents are
+    /// never announced either way.
+    #[serde(default)]
+    pub lsd_enabled: bool,
     /// Fetch from the BEP 19 `url-list` HTTP mirrors a torrent names.
     /// On by default: a torrent that ships webseeds and has no seeder --
     /// every Internet Archive item is one -- cannot complete any other
@@ -200,7 +208,7 @@ fn default_socks5_port() -> u16 { 1080 }
 /// password holding `@`, `:` or `/` would otherwise be cut at that character
 /// and the proxy would refuse every announce with an authentication error
 /// that names nothing.
-fn userinfo_escape(s: &str) -> String {
+pub fn userinfo_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

@@ -245,6 +245,8 @@ impl AppState {
 
     /// Replace the live configuration after the file has been edited.
     pub fn set_cfg(&self, config: Config) {
+        // The daemon's own way out follows the file at once (`killswitch`).
+        crate::killswitch::apply(&config);
         *self.config.write().unwrap() = Arc::new(config);
     }
 }
@@ -1568,6 +1570,24 @@ async fn get_update_check(
 
 const UPDATE_CHECK_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 
+/// The release list's body, through the daemon's own way out
+/// (`typhon_engine::egress`): GitHub would otherwise see the home address of
+/// a node whose every engine is in a tunnel, every six hours.
+pub(crate) async fn fetch_release_tags(url: &str) -> Result<String, String> {
+    let r = typhon_engine::egress::client()?
+        .get(url)
+        .timeout(std::time::Duration::from_secs(5))
+        .header("User-Agent", format!("Hydra/{HYDRANOS_VERSION}"))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.status().as_u16() != 200 {
+        return Err(format!("HTTP {}", r.status().as_u16()));
+    }
+    r.text().await.map_err(|e| e.to_string())
+}
+
 async fn latest_release(state: &AppState) -> (String, String) {
     {
         let cached = state.update_check.lock().await;
@@ -1578,37 +1598,17 @@ async fn latest_release(state: &AppState) -> (String, String) {
         }
     }
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return (String::new(), String::new()),
-    };
-
-    let response = client
-        .get("https://api.github.com/repos/Kheopsian/Hydranos/tags?per_page=100")
-        .header("User-Agent", format!("Hydra/{HYDRANOS_VERSION}"))
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await;
-
-    // Any failure -- no network, rate limit, malformed answer -- keeps whatever
-    // was cached and reports no update. An update check must never be the
-    // reason the endpoint fails.
-    // reqwest is built here without its "json" feature -- the engine pulls it in
-    // with a deliberately narrow feature set -- so the body is decoded by hand
-    // rather than widening a dependency the rest of the binary shares.
-    let tags: Vec<serde_json::Value> = match response {
-        Ok(r) if r.status().as_u16() == 200 => match r.text().await {
+    // Any failure -- no network, rate limit, malformed answer, a kill switch
+    // with no way out -- keeps whatever was cached and reports no update. An
+    // update check must never be the reason the endpoint fails.
+    let tags: Vec<serde_json::Value> =
+        match fetch_release_tags("https://api.github.com/repos/Kheopsian/Hydranos/tags?per_page=100").await {
             Ok(body) => match serde_json::from_str(&body) {
                 Ok(v) => v,
                 Err(_) => return (String::new(), String::new()),
             },
             Err(_) => return (String::new(), String::new()),
-        },
-        _ => return (String::new(), String::new()),
-    };
+        };
 
     let mut best = String::new();
     for tag in &tags {
@@ -5877,6 +5877,8 @@ async fn get_wireguard(
                         "port_forward": t.port_forward,
                         "degraded": t.degraded,
                         "last_error": t.last_error,
+                        "dns": t.dns,
+                        "dns_leak": t.dns_leak,
                     })
                 })
                 .collect(),
@@ -7620,7 +7622,8 @@ async fn qbit_preferences(
         "encryption": 1,
         "listen_port": cfg.race.listen_port,
         "locale": "en",
-        "lsd": false,
+        // The page's engine, as its file says (applied at the next start).
+        "lsd": qbit_preferences_lsd(&state),
         "max_active_downloads": 20,
         "max_active_torrents": queue_cap(cfg.race.active_limit, 100),
         "max_active_uploads": queue_cap(cfg.race.active_seeds, 50),
@@ -8746,6 +8749,31 @@ async fn qbit_torrent_properties(
     Json(props).into_response()
 }
 
+/// The `** [LSD] **` row of a torrent's trackers, as LSD really stands for it:
+/// disabled (status 0) when its engine runs no LSD or the torrent is private,
+/// else working with the LAN peers LSD found for it in `num_peers`.
+fn lsd_pseudo_row(
+    state: &AppState,
+    engine_id: &str,
+    torrent: &typhon_engine::torrent::meta::TorrentState,
+) -> serde_json::Value {
+    let lsd = state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.id == engine_id)
+        .and_then(|e| e.manager.lsd().cloned());
+    let (status, peers, msg) = match lsd {
+        _ if !torrent.meta.allows_peer_discovery() => (0, 0, "This torrent is private"),
+        None => (0, 0, "LSD is off for this engine"),
+        Some(s) => (2, s.found_for(&torrent.info_hash), ""),
+    };
+    serde_json::json!({
+        "msg": msg, "num_downloaded": 0, "num_leeches": 0, "num_peers": peers,
+        "num_seeds": 0, "status": status, "tier": "", "url": "** [LSD] **",
+    })
+}
+
 /// Trackers of one torrent, qBittorrent shape.
 ///
 /// The three bracketed entries are qBittorrent's convention for its own peer
@@ -8771,7 +8799,6 @@ async fn qbit_torrent_trackers(
     let mut rows = vec![
         pseudo("** [DHT] **"),
         pseudo("** [PeX] **"),
-        pseudo("** [LSD] **"),
     ];
 
     // And the real ones. This route used to return the three pseudo rows and
@@ -8779,11 +8806,12 @@ async fn qbit_torrent_trackers(
     // announcing to" got an answer that was the same for every torrent in the
     // catalogue, and looked like a torrent with no trackers at all.
     let hash = shim_param(&query, &body, "hash").unwrap_or_default().to_lowercase();
-    let Some((_, torrent)) = find_torrent(&state, &hash) else {
+    let Some((engine_id, torrent)) = find_torrent(&state, &hash) else {
         // qBit answers an unknown hash with 404, not with an empty list: a
         // 200 here read as "this torrent has no trackers".
         return not_found();
     };
+    rows.push(lsd_pseudo_row(&state, &engine_id, &torrent));
     {
         let last_error = torrent
             .last_announce_error
@@ -9272,8 +9300,10 @@ async fn post_settings(
         // engine keys, in [race] / [hoard]. Every file from before 4.4 lacks
         // the rate caps and `choking`, and a refusal would make them settable
         // nowhere; a name on this short list cannot be a typo.
+        // `enable_lsd` too: no file from before 4.4 has it, and its switch is
+        // offered in the settings tab all the same (applied at restart).
         let creatable = (change.section == "race" || change.section == "hoard")
-            && LIVE_SESSION_KEYS.contains(&change.key.as_str());
+            && (LIVE_SESSION_KEYS.contains(&change.key.as_str()) || change.key == "enable_lsd");
         let edited = match crate::tomledit::set_toml_value(&doc, &change.section, &change.key, &literal) {
             Err(_) if creatable => crate::tomledit::set_toml_table(
                 &doc,
@@ -12657,16 +12687,27 @@ async fn post_network_check(
     // through its SOCKS5. One direct client for all four answered the host's
     // own address on a proxied engine -- the check said "leak" about a setup
     // that had none, or worse, the opposite.
-    let probe_client = |proxy: Option<String>| -> Result<reqwest::Client, String> {
+    // And by the engine's interface: a probe from an engine pinned to a
+    // tunnel that left by the default route reported the home address as
+    // the one trackers see -- and sent it out, under a kill switch too.
+    let probe_client = |proxy: Option<String>, device: &str| -> Result<reqwest::Client, String> {
         let mut b = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8));
         if let Some(url) = proxy {
             b = b.proxy(reqwest::Proxy::all(&url).map_err(|e| e.to_string())?);
         }
+        if !device.trim().is_empty() {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                b = b.interface(device.trim()).dns_resolver(typhon_engine::tunneldns::Resolver::new(device));
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            return Err(format!("{device} cannot be bound on this platform"));
+        }
         b.build().map_err(|e| e.to_string())
     };
+    let local = cfg.local_engines();
 
     let mut results = Vec::new();
-    let mut measured_any = false;
 
     for engine in ["race", "hoard"] {
         let session = if engine == "race" { &cfg.race } else { &cfg.hoard };
@@ -12677,14 +12718,25 @@ async fn post_network_check(
             } else {
                 Some(crate::engines::session_socks5_url(session)).filter(|u| !u.is_empty())
             };
-            let outcome = match probe_client(proxy) {
+            let device = local
+                .iter()
+                .find(|e| e.id == engine)
+                .map(|e| e.session.bind_interface.clone())
+                .unwrap_or_default();
+            if cfg.daemon.kill_switch && proxy.is_none() && device.trim().is_empty() {
+                results.push(serde_json::json!({
+                    "id": format!("{prefix}_{engine}"), "label": label, "status": "warn",
+                    "detail": "not measured: this engine has no interface and no proxy, so the kill switch does not cover it, and the check sends nothing by the default route",
+                }));
+                continue;
+            }
+            let outcome = match probe_client(proxy, &device) {
                 Ok(c) => c.get(&echo).send().await.map_err(|e| e.to_string()),
                 Err(e) => Err(format!("no HTTP client: {e}")),
             };
             match outcome {
                 Ok(response) => {
                     let ip = response.text().await.unwrap_or_default().trim().to_string();
-                    measured_any = true;
                     results.push(serde_json::json!({
                         "id": format!("{prefix}_{engine}"), "label": label,
                         "status": "ok", "detail": ip,
@@ -12698,12 +12750,25 @@ async fn post_network_check(
         }
     }
 
-    results.push(serde_json::json!({
-        "id": "host_ip",
-        "label": "Address the daemon's own requests use",
-        "status": if measured_any { "ok" } else { "warn" },
-        "detail": if measured_any { "" } else { "could not be determined" },
-    }));
+    // Measured on the daemon's own way out (`[proxy]`, `[daemon]
+    // bind_interface`), which is what the label says. It used to report
+    // "ok" with no address whenever an engine probe had answered.
+    let own = match typhon_engine::egress::client() {
+        Ok(c) => match c.get(&echo).timeout(std::time::Duration::from_secs(8)).send().await {
+            Ok(r) => Ok(r.text().await.unwrap_or_default().trim().to_string()),
+            Err(e) => Err(e.to_string()),
+        },
+        Err(e) => Err(e),
+    };
+    results.push(match own {
+        Ok(ip) => serde_json::json!({
+            "id": "host_ip", "label": "Address the daemon's own requests use", "status": "ok",
+            "detail": format!("{ip} ({})", typhon_engine::egress::route().describe()),
+        }),
+        Err(e) => serde_json::json!({
+            "id": "host_ip", "label": "Address the daemon's own requests use", "status": "warn", "detail": e,
+        }),
+    });
 
     for engine in ["race", "hoard"] {
         results.push(serde_json::json!({
@@ -13220,8 +13285,8 @@ async fn qbit_set_preferences(
         )
             .into_response();
     }
-    // The share limits are the keys this page writes; the rest is accepted
-    // and ignored as before. Every local engine: a qBit client has one
+    // The share limits and `lsd` are the keys this page writes; the rest is
+    // accepted and ignored as before. Every local engine: a qBit client has one
     // session in mind and means all of it.
     let doc: serde_json::Value = if has_form_json {
         form_field(&body, "json").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
@@ -13239,7 +13304,50 @@ async fn qbit_set_preferences(
             }
         }
     }
+    // `lsd`, written only when it differs from what `preferences` shows: a
+    // client that posts back the whole page it read must not switch LSD on
+    // for a hoard that the page never spoke for. Takes effect at the next
+    // start of the engines, like the settings tab's `enable_lsd`.
+    let lsd = doc.get("lsd").and_then(|v| v.as_bool().or_else(|| match v.as_str()? {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }));
+    if let Some(on) = lsd.filter(|on| *on != qbit_preferences_lsd(&state)) {
+        for id in state.cfg().local_engines().into_iter().map(|l| l.id) {
+            if let Err(e) = write_engine_key(&state, &id, "enable_lsd", if on { "true" } else { "false" }) {
+                tracing::warn!(engine = %id, "setPreferences: lsd not written: {e}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+            }
+        }
+    }
     qbit_ok()
+}
+
+/// qBittorrent's `lsd` preference: whether the engine the preferences page
+/// speaks for (`sharelimits::preferences_engine`) runs LSD, as its file says.
+fn qbit_preferences_lsd(state: &AppState) -> bool {
+    let id = crate::sharelimits::preferences_engine(state);
+    state
+        .cfg()
+        .local_engines()
+        .into_iter()
+        .find(|l| l.id == id)
+        .is_some_and(|l| l.session.lsd_on(&l.role))
+}
+
+/// Set one session key of one local engine in the config file: the
+/// `[race]`/`[hoard]` section, or the session of an `[[engine]]` block.
+fn write_engine_key(state: &AppState, engine_id: &str, key: &str, literal: &str) -> Result<(), String> {
+    let kv = [(key.to_string(), literal.to_string())];
+    let ok = edit_config(state, |doc| {
+        if engine_id == "race" || engine_id == "hoard" {
+            return crate::tomledit::set_toml_table(doc, engine_id, &kv);
+        }
+        crate::tomledit::set_agent_session_key(doc, engine_id, key, literal)
+            .ok_or_else(|| format!("no [[engine]] block for {engine_id}"))
+    });
+    if ok { Ok(()) } else { Err("the config could not be written".into()) }
 }
 
 /// Every engine holding a copy of `hash`, with that copy.
@@ -14245,6 +14353,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/port-forward", get(get_port_forward))
         .route("/api/benchmark/compare", get(get_bench_compare))
         .route("/api/network/wireguard", get(get_wireguard))
+        .route("/api/network/egress", get(crate::killswitch::get_egress).post(crate::killswitch::post_egress))
         .route("/api/v2/torrents/createCategory", axum::routing::post(qbit_create_category))
         .route("/api/v2/torrents/editCategory", axum::routing::post(qbit_edit_category))
         .route("/api/v2/torrents/removeCategories", axum::routing::post(qbit_remove_categories))
@@ -19293,6 +19402,50 @@ mod route_table_tests {
             assert_ne!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{path} left the table");
         }
     }
+
+    /// The daemon's route and kill switch are saved by the real router, read
+    /// back, refused without a key, and a kill switch with no way out is
+    /// reported as refusing the daemon's requests.
+    #[tokio::test]
+    async fn the_egress_route_saves_the_kill_switch_and_reports_it() {
+        let srv = serve("route-egress").await;
+        let c = reqwest::Client::new();
+        let url = format!("{}/api/network/egress", srv.url);
+        assert_eq!(c.get(&url).send().await.unwrap().status(), reqwest::StatusCode::UNAUTHORIZED);
+        let bad = c.post(&url).header("X-API-Key", KEY).body(r#"{"socks5_host":"10.0.0.1","socks5_port":0}"#).send().await.unwrap();
+        assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let saved: serde_json::Value = c
+            .post(&url)
+            .header("X-API-Key", KEY)
+            .body(r#"{"kill_switch":true}"#)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(saved["kill_switch"], true, "{saved:#}");
+        assert!(saved["daemon"]["error"].as_str().unwrap().contains("kill switch"), "{saved:#}");
+        assert!(saved["not_covered"].as_array().is_some_and(|a| !a.is_empty()));
+
+        let got: serde_json::Value = c
+            .post(&url)
+            .header("X-API-Key", KEY)
+            .body(r#"{"socks5_host":"10.0.0.1","socks5_port":1080,"socks5_user":"u","socks5_pass":"p","kill_switch":true}"#)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(got["daemon"]["socks5_host"], "10.0.0.1");
+        assert_eq!(got["daemon"]["error"], "", "{got:#}");
+        assert!(!got["daemon"]["route"].as_str().unwrap().contains(":p@"), "credentials never shown in the route line");
+        let again: serde_json::Value =
+            c.get(&url).header("X-API-Key", KEY).send().await.unwrap().json().await.unwrap();
+        assert_eq!(again["daemon"]["socks5_port"], 1080, "read back from the file");
+    }
 }
 
 #[cfg(test)]
@@ -20263,6 +20416,77 @@ mod qbit_shim_post_tests {
         call(&s, "POST", "/api/v2/transfer/setUploadLimit", "limit=0").await;
         let (_, b) = call(&s, "GET", "/api/v2/transfer/info", "").await;
         assert_eq!(json(&b)["up_rate_limit"], 0, "0 = no limit");
+    }
+
+    fn lsd_prefs(on: bool) -> String {
+        format!("json=%7B%22lsd%22%3A{on}%7D")
+    }
+
+    /// ⭐ `preferences.lsd` is the race engine's real setting (on when the
+    /// file says nothing), and `setPreferences` writes it to every engine --
+    /// but only when it changes: a client posting back the page it read must
+    /// not switch LSD on for the hoard.
+    #[tokio::test]
+    async fn preferences_lsd_is_real_and_an_echo_changes_nothing() {
+        let (s, _) = populated("shim-lsd-prefs", &single_file_bytes());
+        let (_, b) = call(&s, "GET", "/api/v2/app/preferences", "").await;
+        assert_eq!(json(&b)["lsd"], true, "race default");
+
+        let (st, _) = call(&s, "POST", "/api/v2/app/setPreferences", &lsd_prefs(true)).await;
+        assert_eq!(st, StatusCode::OK);
+        let cfg = s.state.cfg();
+        assert_eq!(cfg.hoard.enable_lsd, None, "the echo wrote nothing");
+        assert!(!cfg.hoard.lsd_on("hoard"));
+
+        call(&s, "POST", "/api/v2/app/setPreferences", &lsd_prefs(false)).await;
+        let cfg = s.state.cfg();
+        assert_eq!((cfg.race.enable_lsd, cfg.hoard.enable_lsd), (Some(false), Some(false)));
+        let (_, b) = call(&s, "GET", "/api/v2/app/preferences", "").await;
+        assert_eq!(json(&b)["lsd"], false);
+
+        call(&s, "POST", "/api/v2/app/setPreferences", r#"{"lsd":true}"#).await;
+        assert_eq!(s.state.cfg().race.enable_lsd, Some(true), "a JSON body too");
+        let raw = std::fs::read_to_string(&s.config_path).unwrap();
+        assert!(crate::deadkeys::config_warnings(&raw).is_empty(), "{raw}");
+    }
+
+    /// ⭐ The `[LSD]` row of `torrents/trackers` says what LSD does for the
+    /// torrent: disabled when the engine runs none or the torrent is private,
+    /// working with the LAN peers found otherwise.
+    #[tokio::test]
+    async fn the_lsd_tracker_row_shows_the_real_state() {
+        let row = |b: &[u8]| {
+            json(b).as_array().unwrap().iter().find(|r| r["url"] == "** [LSD] **").cloned().expect("an [LSD] row")
+        };
+        let (s, hash) = populated("shim-lsd-row", &single_file_bytes());
+        let (_, b) = call(&s, "GET", &format!("/api/v2/torrents/trackers?hash={hash}"), "").await;
+        let r = row(&b);
+        assert_eq!((r["status"].clone(), r["msg"].clone()), (serde_json::json!(0), serde_json::json!("LSD is off for this engine")));
+
+        let mut private = format!("d4:infod6:lengthi16384e4:name{}12:piece lengthi16384e6:pieces20:", bstr("secret.mkv")).into_bytes();
+        private.extend_from_slice(&[1u8; 20]);
+        private.extend_from_slice(b"7:privatei1eee");
+        let (secret, _) = add_torrent_bytes(&s.state, &private, "", "/tmp", "fr", true, true, "race").expect("added");
+
+        let port = std::net::UdpSocket::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port();
+        let Ok(lsd) = typhon_engine::lsd::LsdSession::bind(None, port).await else {
+            eprintln!("no multicast here: the running half is skipped");
+            return;
+        };
+        let race = s.state.engines.get("race").unwrap();
+        race.manager.set_lsd(lsd.clone());
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        // Added stopped by the fixture; a stopped torrent takes no LSD peer.
+        find_torrent(&s.state, &hash).unwrap().1.is_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+        let from: std::net::SocketAddr = "192.0.2.7:6771".parse().unwrap();
+        lsd.offer(&race.manager, from, &typhon_engine::lsd::Announce { port: 6881, info_hashes: vec![ih], cookie: None });
+
+        let (_, b) = call(&s, "GET", &format!("/api/v2/torrents/trackers?hash={hash}"), "").await;
+        let r = row(&b);
+        assert_eq!((r["status"].clone(), r["num_peers"].clone()), (serde_json::json!(2), serde_json::json!(1)));
+        let (_, b) = call(&s, "GET", &format!("/api/v2/torrents/trackers?hash={secret}"), "").await;
+        let r = row(&b);
+        assert_eq!((r["status"].clone(), r["msg"].clone()), (serde_json::json!(0), serde_json::json!("This torrent is private")));
     }
 
     /// ⭐ The engine keys are live: saving `upload_rate_limit` (bytes/s, the

@@ -68,6 +68,19 @@ pub fn default_gateway() -> Option<Ipv4Addr> {
     parse_default_gateway(&text)
 }
 
+/// The interface the IPv4 default route leaves by: the home router's side.
+pub fn parse_default_interface(proc_net_route: &str) -> Option<String> {
+    proc_net_route.lines().skip(1).find_map(|line| {
+        let mut f = line.split_whitespace();
+        let iface = f.next()?;
+        (f.next()? == "00000000").then(|| iface.to_string())
+    })
+}
+
+pub fn default_interface() -> Option<String> {
+    parse_default_interface(&std::fs::read_to_string("/proc/net/route").ok()?)
+}
+
 /// Which way the port was obtained, for the log and for the interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mapped {
@@ -147,6 +160,15 @@ pub fn spawn(internal_port: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_route_names_its_interface() {
+        let t = "Iface\tDestination\tGateway\tFlags\n\
+                 wg7\t0000000A\t00000000\t0001\n\
+                 eth0\t00000000\t0101A8C0\t0003\n";
+        assert_eq!(parse_default_interface(t).as_deref(), Some("eth0"));
+        assert_eq!(parse_default_interface("Iface\tDestination\n"), None);
+    }
 
     const ROUTE: &str = "\
 Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT

@@ -13,6 +13,10 @@
 //!   hydranos-update --dir C:\Hydranos       download it and swap the binaries
 //!   hydranos-update --dir . --yes           no confirmation prompt
 //!   hydranos-update --dir . --tag v4.1.7    a specific release
+//!
+//! Its requests leave the way the daemon's do: `[proxy]` and `[daemon]
+//! bind_interface` / `kill_switch` of the config file (`--config`, default
+//! `default.toml` in `--dir`), through `typhon_engine::egress`.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,13 +36,14 @@ fn main() -> std::process::ExitCode {
 
 struct Args {
     dir: PathBuf,
+    config: Option<PathBuf>,
     tag: Option<String>,
     check: bool,
     yes: bool,
 }
 
 fn parse() -> Args {
-    let mut a = Args { dir: PathBuf::from("."), tag: None, check: false, yes: false };
+    let mut a = Args { dir: PathBuf::from("."), config: None, tag: None, check: false, yes: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -48,6 +53,7 @@ fn parse() -> Args {
                 }
             }
             "--tag" => a.tag = it.next(),
+            "--config" => a.config = it.next().map(PathBuf::from),
             "--check" => a.check = true,
             "--yes" | "-y" => a.yes = true,
             "--help" | "-h" => {
@@ -66,6 +72,8 @@ hydranos-update -- replace the daemon's binaries with a newer release
   --check          report the latest release and exit
   --dir <path>     the folder holding hydranos (default: .)
   --tag <vX.Y.Z>   a specific release instead of the latest
+  --config <file>  the daemon's config, for its [proxy] and [daemon]
+                   bind_interface / kill_switch (default: <dir>/default.toml)
   --yes            do not ask before replacing
 
 Nothing is replaced unless the archive downloads AND its SHA-256 matches the
@@ -73,6 +81,12 @@ checksum published beside it.";
 
 fn run() -> Result<(), String> {
     let args = parse();
+    let config = args.config.clone().unwrap_or_else(|| args.dir.join("default.toml"));
+    let route = route_from(&config)?;
+    if !route.is_direct() || route.kill_switch {
+        println!("network: {}", route.describe());
+    }
+    let _ = ROUTE.set(route);
     let latest = resolve(args.tag.as_deref())?;
     let running = installed_version(&args.dir);
 
@@ -217,16 +231,51 @@ fn expected_sha(r: &Release, archive: &str) -> Result<String, String> {
 // HTTP
 // ---------------------------------------------------------------------------
 
+/// The way out, read once from the config file.
+static ROUTE: std::sync::OnceLock<typhon_engine::egress::Route> = std::sync::OnceLock::new();
+
+/// The daemon's route as its config file describes it. No file is the
+/// default route; a file that does not parse is refused, since it may be the
+/// one holding a kill switch.
+fn route_from(path: &Path) -> Result<typhon_engine::egress::Route, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return Ok(typhon_engine::egress::Route::default()),
+    };
+    let v: toml::Value = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let s = |t: &str, k: &str| v.get(t).and_then(|t| t.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let port = v.get("proxy").and_then(|t| t.get("socks5_port")).and_then(|x| x.as_integer()).unwrap_or(0);
+    let kill = v.get("daemon").and_then(|t| t.get("kill_switch")).and_then(|x| x.as_bool()).unwrap_or(false);
+    Ok(typhon_engine::egress::Route::new(
+        &s("proxy", "socks5_host"),
+        u16::try_from(port).unwrap_or(0),
+        &s("proxy", "socks5_user"),
+        &s("proxy", "socks5_pass"),
+        &s("daemon", "bind_interface"),
+        kill,
+    ))
+}
+
 fn client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent(UA)
+    let route = ROUTE.get().cloned().unwrap_or_default();
+    let c = typhon_engine::egress::blocking_client_for(&route)
+        .map_err(|e| format!("cannot build an HTTP client: {e}"))?;
+    Ok(c)
+}
+
+/// One GET with this tool's identity and the generous timeout a release
+/// archive needs.
+fn get(url: &str) -> Result<reqwest::blocking::Response, String> {
+    client()?
+        .get(url)
+        .header(reqwest::header::USER_AGENT, UA)
         .timeout(std::time::Duration::from_secs(900))
-        .build()
-        .map_err(|e| format!("cannot build an HTTP client: {e}"))
+        .send()
+        .map_err(|e| format!("GET {url}: {e}"))
 }
 
 fn get_text(url: &str) -> Result<String, String> {
-    let r = client()?.get(url).send().map_err(|e| format!("GET {url}: {e}"))?;
+    let r = get(url)?;
     if !r.status().is_success() {
         return Err(format!("GET {url}: HTTP {}", r.status()));
     }
@@ -234,7 +283,7 @@ fn get_text(url: &str) -> Result<String, String> {
 }
 
 fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let r = client()?.get(url).send().map_err(|e| format!("GET {url}: {e}"))?;
+    let r = get(url)?;
     if !r.status().is_success() {
         return Err(format!("GET {url}: HTTP {}", r.status()));
     }
@@ -442,4 +491,33 @@ fn confirm(tag: &str) -> Result<bool, String> {
         .read_line(&mut line)
         .map_err(|e| format!("cannot read the answer: {e}"))?;
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes" | "o" | "oui"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_updater_leaves_the_way_the_daemon_does() {
+        let path = std::env::temp_dir().join(format!("hydranos-update-route-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[daemon]\nbind_interface = \"wg0\"\nkill_switch = true\n[proxy]\nsocks5_host = \"10.0.0.1\"\nsocks5_port = 1080\n",
+        )
+        .unwrap();
+        let r = route_from(&path).unwrap();
+        assert_eq!(r.proxy, "socks5h://10.0.0.1:1080");
+        assert_eq!(r.interface, "wg0");
+        assert!(r.kill_switch);
+        // A kill switch with no way out refuses to download anything.
+        std::fs::write(&path, "[daemon]\nkill_switch = true\n").unwrap();
+        let r = route_from(&path).unwrap();
+        assert!(typhon_engine::egress::blocking_client_for(&r).is_err());
+        // A file that does not parse may be the one holding the switch.
+        std::fs::write(&path, "[daemon\n").unwrap();
+        assert!(route_from(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+        // No file: the default route, as before.
+        assert!(route_from(Path::new("/nonexistent/default.toml")).unwrap().is_direct());
+    }
 }

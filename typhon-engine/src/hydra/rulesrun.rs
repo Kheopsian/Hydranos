@@ -662,20 +662,15 @@ pub fn webhook_payload(w: &Workflow, f: &Facts) -> serde_json::Value {
 /// ⚠️ The URL is never in the error: a Discord webhook URL IS its secret, and
 /// errors go to the activity log that the whole UI can read.
 pub fn send_webhook(url: &str, payload: &serde_json::Value) -> Result<(), String> {
-    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .user_agent(typhon_engine::config::user_agent())
-            .build()
-            .unwrap_or_default()
-    });
+    // The daemon's own way out, refused rather than sent direct when the
+    // kill switch has none. The reason names no URL, for the same reason.
+    let client = typhon_engine::egress::blocking_client().map_err(|e| format!("webhook: {e}"))?;
     let mut last = String::new();
     for (attempt, wait) in [0u64, 2, 5].into_iter().enumerate() {
         if wait > 0 {
             std::thread::sleep(std::time::Duration::from_secs(wait));
         }
-        match client.post(url).json(payload).send() {
+        match client.post(url).timeout(std::time::Duration::from_secs(10)).json(payload).send() {
             Ok(r) if r.status().is_success() => return Ok(()),
             // A 4xx will not get better by asking again: the URL or the body
             // is wrong. Only a 5xx or no answer is retried.

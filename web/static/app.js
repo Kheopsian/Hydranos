@@ -7325,6 +7325,9 @@ const NET_OWNED_KEYS = new Set([
     "listen_port_proxy_v2", "listen_addr_proxy_v2", "proxy_v2_trusted_sources",
     "socks5_outbound_host", "socks5_outbound_port", "socks5_outbound_user",
     "socks5_outbound_pass", "announce_proxy", "announce_ip",
+    // [daemon] / [proxy]: the daemon's own way out and the kill switch,
+    // saved by the Network tab's "Daemon traffic" card.
+    "kill_switch", "socks5_host", "socks5_port", "socks5_user", "socks5_pass",
 ]);
 
 // Keys and sections nothing reads ("section::key", or a whole "section" and its
@@ -7371,6 +7374,7 @@ const _SETTINGS_DESC = {
     enable_dht: "Find peers through the global DHT (BEP 5) on top of the trackers. Private torrents are never announced to it either way. Off, this engine bootstraps no DHT node at all and reaches nothing but its trackers.",
     enable_udp_trackers: "Announce to udp:// trackers (BEP 15) as well as http(s):// ones. Most public torrents list only UDP trackers. Off, they are left alone -- not contacted, and not reported as failing. Takes effect at the next start of the engine.",
     enable_pex: "Trade peer lists with the peers already connected (BEP 11). Off, the engine stops advertising ut_pex and ignores any PEX message it still receives, so no address is learned from or given to the swarm.",
+    enable_lsd: "Local Service Discovery (BEP 14): announce the torrents this engine is downloading, or has peers for, to the LAN by multicast, and connect to the LAN peers announcing the same ones. At most one small datagram a second. Never for private torrents, and off behind a SOCKS5 proxy. On by default for race, off for hoard. Takes effect at the next start of the engine.",
     listen_port_proxy_v2: "Extra listener expecting HAProxy PROXY-protocol v2 (real peer IP). 0 = off.",
     listen_addr_proxy_v2: "Explicit bind address for the PROXY-v2 listener. Empty = [::] wildcard.",
     proxy_v2_trusted_sources: "Source IPs allowed to send PROXY-v2 headers.",
@@ -7426,6 +7430,7 @@ const _SETTINGS_COMMON = new Set([
     // Peer sources: not advanced tuning. Someone on a private tracker has to
     // be able to find these without hunting through the advanced list.
     "race::enable_dht", "race::enable_pex", "hoard::enable_dht", "hoard::enable_pex",
+    "race::enable_lsd", "hoard::enable_lsd",
     "race::enable_udp_trackers", "hoard::enable_udp_trackers",
     // Common toggles
     "vpn_speedtest::enabled", "race_drain::enabled",
@@ -7453,6 +7458,7 @@ const _SETTINGS_DEFAULT = {
     "daemon::create_torrent_folder": true,
     "race::enable_dht": true, "race::enable_pex": true,
     "hoard::enable_dht": true, "hoard::enable_pex": true,
+    "race::enable_lsd": true, "hoard::enable_lsd": false,
     "race::enable_udp_trackers": true, "hoard::enable_udp_trackers": true,
     "race::listen_port": 16171, "race::max_connections": 4000,
     "race::max_uploads_per_torrent": 100,
@@ -7492,6 +7498,9 @@ function _withLiveEngineKeys(cfg) {
         for (const [k, d] of Object.entries(_LIVE_ENGINE_KEY_DEFAULTS)) {
             if (!(k in cfg[sec])) cfg[sec][k] = d;
         }
+        // LSD's switch, at the value the daemon runs with when the file says
+        // nothing (Session::lsd_on): on for race, off for hoard.
+        if (!("enable_lsd" in cfg[sec])) cfg[sec].enable_lsd = sec === "race";
     }
     return cfg;
 }
@@ -9642,6 +9651,7 @@ function netModeRender() {
         ${warn}
         ${fields}
         ${env}
+        <div id="net-egress-body"></div>
         <div style="margin:1em 0;display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn-primary" onclick="netModeSave()">${t("Save this mode")}</button>
             <button class="btn-small" id="net-check-btn" onclick="netModeCheck()">${t("Check what actually happens")}</button>
@@ -9651,6 +9661,83 @@ function netModeRender() {
     // are doing right now, which is a different question from what the config
     // file says, and the two are worth seeing side by side.
     if (mode === "wireguard") netWgLoad();
+    netEgressLoad();
+}
+
+// --- The daemon's own traffic and the kill switch ---------------------------
+//
+// Its own card, saved on its own and applied at once: the daemon's client is
+// rebuilt at the next request, nothing restarts. Shown in every mode, because
+// tracker lists and webhooks leave the same way whatever the engines do.
+
+let _egress = null;
+
+async function netEgressLoad() {
+    const body = document.getElementById("net-egress-body");
+    if (!body) return;
+    try {
+        _egress = await api("/api/network/egress");
+    } catch (e) {
+        body.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+        return;
+    }
+    netEgressRender();
+}
+
+function netEgressRender() {
+    const body = document.getElementById("net-egress-body");
+    if (!body || !_egress) return;
+    const d = _egress.daemon || {};
+    const list = (_detectedIfaces || []).map(i => (i.name || i));
+    let cover = "";
+    for (const e of (_egress.engines || [])) {
+        const cls = e.covered ? "net-ok" : "net-fail";
+        const gaps = (e.gaps || []).map(g => `<span class="sr-desc net-warn">${esc(t(g))}</span>`).join("");
+        cover += `<div class="settings-row"><div class="sr-label"><span class="sr-key ${cls}">${esc(e.engine)}: ${esc(e.covered ? t("covered") : t("NOT covered"))}</span>
+            <span class="sr-desc">${esc(t(e.how))}</span>${gaps}</div></div>`;
+    }
+    const daemonLine = d.error
+        ? `<div class="result-msg error" style="margin:.3em 0">${esc(t("The daemon's own requests are refused: {msg}", { msg: d.error }))}</div>`
+        : `<p class="sr-desc">${esc(t("The daemon's own requests leave by: {route}", { route: d.route || "" }))}</p>`;
+    const outside = (_egress.not_covered || []).map(g => `<li>${esc(t(g))}</li>`).join("");
+    body.innerHTML = `<div class="settings-section"><div class="settings-section-title">${t("Daemon traffic and kill switch")}</div>
+        <p class="sr-desc" style="margin:.2em 0 .8em">${t("Tracker lists, ipfilter lists, the update check, webhooks and .torrent URLs are the daemon's own requests, not an engine's. They leave by this proxy and/or interface, applied at once.")}</p>
+        ${_netField("net-eg-host", "Proxy host", "text", d.socks5_host, "SOCKS5 server for the daemon's requests (names are resolved by the proxy). Empty: no proxy.")}
+        ${_netField("net-eg-port", "Proxy port", "number", d.socks5_port || "", "")}
+        ${_netField("net-eg-user", "Username", "text", d.socks5_user, "Leave both credentials empty for an open proxy.")}
+        ${_netField("net-eg-pass", "Password", "password", d.socks5_pass, "")}
+        ${_netSelect("net-eg-iface", "Daemon interface", d.bind_interface, list, "The interface the daemon's requests (or its connection to the proxy) are bound to. Empty means the host's default route.")}
+        ${_netCheckbox("net-eg-kill", "Kill switch", !!_egress.kill_switch, "Nothing leaves outside the interface or proxy configured. With neither, the daemon sends nothing at all; an engine with no interface and no proxy is listed below as not covered.")}
+        ${daemonLine}
+        ${_egress.kill_switch && !_egress.all_engines_covered ? `<div class="result-msg error" style="margin:.3em 0">${esc(t("Some engines are not covered by the kill switch: they have no interface and no proxy."))}</div>` : ""}
+        ${cover}
+        <details style="margin:.5em 0"><summary class="sr-desc">${t("What the kill switch does not cover")}</summary><ul class="sr-desc">${outside}</ul></details>
+        <button class="btn-small" onclick="netEgressSave()">${t("Save daemon traffic")}</button>
+        <div id="net-egress-result"></div>
+    </div>`;
+}
+
+async function netEgressSave() {
+    const out = document.getElementById("net-egress-result");
+    const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
+    const payload = {
+        socks5_host: val("net-eg-host"),
+        socks5_port: Number(val("net-eg-port") || 0),
+        socks5_user: val("net-eg-user"),
+        socks5_pass: (document.getElementById("net-eg-pass") || {}).value || "",
+        bind_interface: val("net-eg-iface"),
+        kill_switch: !!(document.getElementById("net-eg-kill") || {}).checked,
+    };
+    try {
+        _egress = await api("/api/network/egress", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        });
+        netEgressRender();
+        const r = document.getElementById("net-egress-result");
+        if (r) r.innerHTML = `<div class="result-msg success" style="margin:.3em 0">${esc(t("Saved and applied, no restart needed."))}</div>`;
+    } catch (e) {
+        if (out) out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+    }
 }
 
 // Compare two shapes by CONTENT, not by the order their keys happen to be in.
@@ -10195,6 +10282,12 @@ function netWgRender() {
             // buried everything that actually changes.
             const degraded = tn.degraded
                 ? ` <span class="net-warn" title="${esc(tn.degraded)}">${esc(t("IPv4 only"))}</span>` : "";
+            // Where the tracker names are asked: the file's DNS through the
+            // tunnel, or -- with no DNS line -- the host's resolver, which
+            // tells the host's DNS provider every tracker this engine uses.
+            const dns = tn.dns_leak
+                ? `<span class="sr-desc net-warn" title="${esc(t("Add a DNS = line to this WireGuard file to resolve tracker names inside the tunnel."))}">${esc(t("tracker names resolved by the host's DNS (name leak)"))}</span>`
+                : ((tn.dns || []).length ? `<span class="sr-desc">${esc(t("DNS {servers} through the tunnel", { servers: tn.dns.join(", ") }))}</span>` : "");
             rows += `<div class="settings-row">
                 <div class="sr-label"><span class="sr-key">${esc(_wgAgentName(tn.engine))}</span>
                 <span class="sr-desc">${esc(tn.device)} · ${esc(tn.provider_label || tn.provider || "")}</span></div>
@@ -10203,6 +10296,7 @@ function netWgRender() {
                         : (tn.created === false || tn.present === false) ? t("down: this engine reaches nobody")
                         : t("no recent handshake"))}${degraded}</span>
                     <span class="sr-desc">${esc(facts)}</span>
+                    ${dns}
                     ${tn.last_error ? `<span class="sr-desc net-fail" title="${esc(tn.last_error)}">${esc(t("last attempt failed"))}</span>` : ""}
                 </div>
             </div>`;

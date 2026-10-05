@@ -174,6 +174,10 @@ pub struct TorrentManager {
     /// than per process: two engines in one process each get their own node,
     /// and an engine with `enable_dht = false` simply never sets it.
     dht: std::sync::OnceLock<Arc<crate::dht::DhtSession>>,
+    /// This engine's LSD socket, when it runs one (`lsd::start`). Per manager
+    /// like the DHT: two engines in one process announce with their own port
+    /// and cookie, and find each other.
+    lsd: std::sync::OnceLock<Arc<crate::lsd::LsdSession>>,
     /// Claims, backoff and queue for this engine's webseed workers. Per
     /// manager for the same reason as the DHT: a hoard worker must not be able
     /// to claim a race torrent.
@@ -400,6 +404,16 @@ impl TorrentManager {
         &self.webseed
     }
 
+    /// Attach this engine's LSD session. Called once, after it joined.
+    pub fn set_lsd(&self, session: Arc<crate::lsd::LsdSession>) {
+        let _ = self.lsd.set(session);
+    }
+
+    /// This engine's LSD session; None when LSD is off or could not start.
+    pub fn lsd(&self) -> Option<&Arc<crate::lsd::LsdSession>> {
+        self.lsd.get()
+    }
+
     /// This engine's DHT node, if it has one.
     pub fn dht(&self) -> Option<&Arc<crate::dht::DhtSession>> {
         self.dht.get()
@@ -466,6 +480,7 @@ impl TorrentManager {
             skey_index: DashMap::new(),
             incomplete: DashSet::new(),
             dht: std::sync::OnceLock::new(),
+            lsd: std::sync::OnceLock::new(),
             webseed: Default::default(),
             magnet: Default::default(),
             policy: Default::default(),

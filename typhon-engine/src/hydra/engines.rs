@@ -386,6 +386,9 @@ impl EngineHost {
             if let Some((_, Some(m))) = &follow {
                 born.listen_port = m.external_port;
             }
+            // LSD's default depends on the role, which the session alone
+            // does not carry: resolved here, written out for the engine.
+            born.enable_lsd = Some(session.lsd_on(&engine.role));
             match engine_config(&born, &data_dir, &resume_dir) {
                 Some(engine_cfg) => {
                     let _ = engine.engine_config.set(engine_cfg.clone());
@@ -891,6 +894,9 @@ fn engine_config(
         "bind_device": session.bind_interface,
         "dht_enabled": session.enable_dht,
         "pex_enabled": session.enable_pex,
+        // Resolved by the caller from the role (`Session::lsd_on`); a session
+        // that was not resolved runs none.
+        "lsd_enabled": session.enable_lsd.unwrap_or(false),
         "enable_webseed": session.enable_webseed,
         "enable_ipv6": session.enable_ipv6,
         "max_connections": session.max_connections.max(0),
@@ -936,6 +942,19 @@ mod network_wiring_tests {
     fn cfg_of(s: &Session) -> typhon_engine::config::EngineConfig {
         let dir = std::path::Path::new("/tmp");
         engine_config(s, dir, dir).expect("engine config builds")
+    }
+
+    /// `enable_lsd` reaches the engine, and only once resolved: the start
+    /// loop writes the role's default into the session before this runs.
+    #[test]
+    fn enable_lsd_reaches_the_engine() {
+        assert!(cfg_of(&session("enable_lsd = true\n")).lsd_enabled);
+        assert!(!cfg_of(&session("enable_lsd = false\n")).lsd_enabled);
+        assert!(!cfg_of(&session("")).lsd_enabled, "unresolved = off");
+        let race = session("");
+        let mut born = race.clone();
+        born.enable_lsd = Some(race.lsd_on("race"));
+        assert!(cfg_of(&born).lsd_enabled, "race resolves to on");
     }
 
     /// ⭐ The keys reach the engine. `engine_config` passed none of them, so a
