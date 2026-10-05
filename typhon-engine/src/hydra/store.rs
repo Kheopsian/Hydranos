@@ -1526,7 +1526,7 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT COUNT(*) FROM jobs
-                 WHERE type = ?1 AND info_hash = ?2 AND state IN ('queued','running')",
+                 WHERE type = ?1 AND info_hash = ?2 AND state IN ('queued','running','cancelling')",
                 rusqlite::params![kind, info_hash],
                 |r| r.get::<_, i64>(0),
             )
@@ -1561,8 +1561,43 @@ impl Store {
         Ok(())
     }
 
+    /// Cancel a job: a queued one is cancelled at once; a running one is
+    /// marked `cancelling` and its runner stops at its next check. Returns the
+    /// state it was found in (`None` when there is no such job).
+    pub fn cancel_job(&self, id: &str) -> Option<String> {
+        let before = self.job(id)?.state;
+        let now = now_secs();
+        match before.as_str() {
+            "queued" => {
+                let _ = self.conn.execute(
+                    "UPDATE jobs SET state = 'cancelled', error = 'cancelled', updated_at = ?2 WHERE id = ?1 AND state = 'queued'",
+                    rusqlite::params![id, now],
+                );
+            }
+            "running" => {
+                let _ = self.conn.execute(
+                    "UPDATE jobs SET state = 'cancelling', updated_at = ?2 WHERE id = ?1 AND state = 'running'",
+                    rusqlite::params![id, now],
+                );
+            }
+            _ => {}
+        }
+        Some(before)
+    }
+
+    /// Whether a running job has been asked to stop.
+    pub fn job_cancelling(&self, id: &str) -> bool {
+        self.job(id).is_some_and(|j| j.state == "cancelling")
+    }
+
     pub fn job_finish(&self, id: &str, error: &str) -> anyhow::Result<()> {
-        let state = if error.is_empty() { "done" } else { "failed" };
+        let state = if error.is_empty() {
+            "done"
+        } else if error.starts_with("cancelled") {
+            "cancelled"
+        } else {
+            "failed"
+        };
         self.conn.execute(
             "UPDATE jobs SET state = ?2, error = ?3, updated_at = ?4 WHERE id = ?1",
             rusqlite::params![id, state, error, now_secs()],
@@ -1581,7 +1616,7 @@ impl Store {
         self.conn
             .execute(
                 "UPDATE jobs SET state = 'queued', progress_bytes = 0, updated_at = ?1
-                 WHERE state = 'running'",
+                 WHERE state IN ('running', 'cancelling')",
                 rusqlite::params![now_secs()],
             )
             .unwrap_or(0)
@@ -3802,6 +3837,25 @@ mod jobs_nodes_drain_tests {
         s.create_job("graduate", H, "{}", 100).unwrap();
         assert!(!s.job_pending_for("move", H), "a different kind is not pending");
         assert!(!s.job_pending_for("graduate", H2), "another torrent is not this one");
+    }
+
+    /// A queued job is cancelled outright and never claimed; a running one
+    /// is marked and finishes as cancelled when its runner gives up.
+    #[test]
+    fn a_job_can_be_cancelled_queued_or_running() {
+        let s = store();
+        let queued = s.create_job("graduate", H, "{}", 100).unwrap();
+        assert_eq!(s.cancel_job(&queued).as_deref(), Some("queued"));
+        assert_eq!(s.job(&queued).unwrap().state, "cancelled");
+        assert!(s.claim_next_job().is_none(), "a cancelled job is not run");
+
+        let running = s.create_job("graduate", H2, "{}", 100).unwrap();
+        s.claim_next_job().unwrap();
+        assert_eq!(s.cancel_job(&running).as_deref(), Some("running"));
+        assert!(s.job_cancelling(&running));
+        s.job_finish(&running, "cancelled; rolled back").unwrap();
+        assert_eq!(s.job(&running).unwrap().state, "cancelled");
+        assert!(s.cancel_job("nope").is_none());
     }
 
     /// A finished job stops being pending, or the torrent could never be
