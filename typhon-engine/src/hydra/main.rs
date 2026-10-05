@@ -93,7 +93,66 @@ struct Args {
     console: bool,
 }
 
+/// `hydranos reset-password <password> [config]` and `hydranos hash-password
+/// <password>`: the recovery the first-run screen and the packaging point to.
+/// 4.3 had neither, and an unknown argument just started the daemon.
+fn password_command() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let Some(cmd) = argv.first().map(String::as_str) else { return };
+    if cmd != "reset-password" && cmd != "hash-password" {
+        return;
+    }
+    let Some(password) = argv.get(1) else {
+        eprintln!("usage: hydranos {cmd} <password>{}", if cmd == "reset-password" { " [path/to/default.toml]" } else { "" });
+        std::process::exit(2);
+    };
+    if password.chars().count() < 8 {
+        eprintln!("hydranos: the password must be at least 8 characters");
+        std::process::exit(2);
+    }
+    let hash = match bcrypt::hash(password, bcrypt::DEFAULT_COST) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("hydranos: cannot hash the password: {e}");
+            std::process::exit(1);
+        }
+    };
+    if cmd == "hash-password" {
+        println!("{hash}");
+        std::process::exit(0);
+    }
+    let path = argv
+        .iter()
+        .skip(2)
+        .find(|a| a.as_str() != "--config")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_config_path);
+    let doc = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("hydranos: cannot read {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    let pairs = vec![("password_hash".to_string(), tomledit::quote_toml_key(&hash))];
+    match tomledit::set_toml_table(&doc, "auth", &pairs) {
+        Ok(out) if toml::from_str::<Config>(&out).is_ok() => {
+            if let Err(e) = std::fs::write(&path, out) {
+                eprintln!("hydranos: cannot write {}: {e}", path.display());
+                std::process::exit(1);
+            }
+            println!("hydranos: password set in {}. Restart Hydranos for it to apply.", path.display());
+            std::process::exit(0);
+        }
+        _ => {
+            eprintln!("hydranos: {} would not parse after the edit; nothing written", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
 fn parse_args() -> Args {
+    password_command();
     let mut args = std::env::args().skip(1);
     let mut path = default_config_path();
     let mut console = false;
@@ -282,7 +341,7 @@ fn seed_config(path: &Path) {
 /// The on-disk log, beside the config. None when the operator asked for stdout
 /// only, or when the file cannot be opened -- a daemon that will not start
 /// because its log file is read-only would be a poor trade.
-fn log_file(config_path: &Path) -> Option<std::fs::File> {
+fn log_file(config_path: &Path) -> Option<RotatingLog> {
     if std::env::var_os("HYDRANOS_LOG_STDOUT").is_some() {
         return None;
     }
@@ -291,7 +350,7 @@ fn log_file(config_path: &Path) -> Option<std::fs::File> {
         Some(d) => d.join("hydranos.log"),
         None => PathBuf::from("hydranos.log"),
     };
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match RotatingLog::open(path.clone()) {
         Ok(f) => Some(f),
         Err(e) => {
             eprintln!("hydranos: no log file at {} ({e}); console only", path.display());
@@ -354,7 +413,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
                         // No colour: this is read in Notepad, and escape
                         // codes there are line noise.
                         .with_ansi(false)
-                        .with_writer(move || file.try_clone().expect("clone the log handle")),
+                        .with_writer(move || file.clone()),
                 )
                 .init(),
             None => registry.init(),
@@ -925,4 +984,87 @@ fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>) {
         let _ = h.join();
     }
     tracing::info!(took_s = started.elapsed().as_secs(), "shutdown flush complete");
+}
+
+/// The log file, rotated by size: `hydranos.log` up to `LOG_MAX` bytes, then
+/// `.1` to `.4` behind it. 4.3 appended forever; one line per inbound peer
+/// connection fills a disk in weeks on a busy instance.
+#[derive(Clone)]
+struct RotatingLog(std::sync::Arc<std::sync::Mutex<RotatingInner>>);
+
+struct RotatingInner {
+    path: PathBuf,
+    file: std::fs::File,
+    size: u64,
+}
+
+const LOG_MAX: u64 = 128 * 1024 * 1024;
+const LOG_KEEP: u32 = 4;
+
+impl RotatingLog {
+    fn open(path: PathBuf) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(RotatingLog(std::sync::Arc::new(std::sync::Mutex::new(RotatingInner { path, file, size }))))
+    }
+}
+
+impl RotatingInner {
+    fn rotate(&mut self) -> std::io::Result<()> {
+        let name = |i: u32| {
+            let mut p = self.path.clone().into_os_string();
+            p.push(format!(".{i}"));
+            PathBuf::from(p)
+        };
+        // Close before renaming: Windows refuses to rename an open file.
+        self.file = std::fs::OpenOptions::new().append(true).open(if cfg!(windows) { "NUL" } else { "/dev/null" })?;
+        let _ = std::fs::remove_file(name(LOG_KEEP));
+        for i in (1..LOG_KEEP).rev() {
+            let _ = std::fs::rename(name(i), name(i + 1));
+        }
+        let _ = std::fs::rename(&self.path, name(1));
+        self.file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        self.size = 0;
+        Ok(())
+    }
+}
+
+impl std::io::Write for RotatingLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if inner.size + buf.len() as u64 > LOG_MAX {
+            let _ = inner.rotate();
+        }
+        let n = inner.file.write(buf)?;
+        inner.size += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).file.flush()
+    }
+}
+
+#[cfg(test)]
+mod rotating_log_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn the_log_rotates_and_keeps_four_behind_it() {
+        let dir = std::env::temp_dir().join(format!("hydranos-logrot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hydranos.log");
+        let mut log = RotatingLog::open(path.clone()).unwrap();
+        for _ in 0..6 {
+            log.0.lock().unwrap().size = LOG_MAX; // as if full
+            log.write_all(b"line\n").unwrap();
+        }
+        assert!(path.exists());
+        for i in 1..=LOG_KEEP {
+            assert!(dir.join(format!("hydranos.log.{i}")).exists(), "{i}");
+        }
+        assert!(!dir.join(format!("hydranos.log.{}", LOG_KEEP + 1)).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
