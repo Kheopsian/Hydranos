@@ -726,7 +726,7 @@ function importWizard(opts) {
             <p class="modal-desc">${t("Point Hydranos at your qBittorrent WebUI. Hydranos seeds the data already on disk (completed torrents skip the hash-check), so nothing is re-downloaded.")}</p>
             <input type="text" id="qb-url" placeholder="http://qbittorrent:8080" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.url || "")}">
             <input type="text" id="qb-user" placeholder="${t("Username")}" autocomplete="off" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.user || "admin")}">
-            <input type="password" id="qb-pass" placeholder="${t("Password")}" autocomplete="off" style="width:100%">
+            <input type="password" id="qb-pass" placeholder="${t("Password")}" autocomplete="off" style="width:100%" value="${esc(prefill && prefill.pass || "")}">
             <p class="modal-desc" id="qb-msg" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="qb-skip" class="btn-small">${t("Back")}</button>
@@ -818,7 +818,9 @@ function importWizard(opts) {
                 info.textContent = t("Network error: {msg}", { msg: e.message });
             }
         };
-        box.querySelector("#qb-back").onclick = () => stepCreds({ url: creds.url, user: creds.username });
+        // The password comes back too: it only ever lived in this page, and
+        // retyping it to fix one path mapping was the whole cost of "Back".
+        box.querySelector("#qb-back").onclick = () => stepCreds({ url: creds.url, user: creds.username, pass: creds.password });
         box.querySelector("#qb-go").onclick = async () => {
             const path_map = {};
             box.querySelectorAll(".qb-map").forEach(inp => {
@@ -851,21 +853,33 @@ function importWizard(opts) {
             </div>
             <p class="modal-desc" id="qb-stats"></p>
             <p class="modal-desc" id="qb-cur" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7"></p>
-            <div class="modal-actions"><button class="btn-primary" id="qb-done" style="display:none">${t("Close &amp; reload")}</button></div>`;
+            <p class="modal-desc" id="qb-note"></p>
+            <div id="qb-fails" style="display:none;max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px;font-size:12px"></div>
+            <p class="modal-desc" id="qb-retry-msg" style="min-height:1em"></p>
+            <div class="modal-actions">
+                <button id="qb-retry" style="display:none">${t("Retry failed")}</button>
+                <button class="btn-primary" id="qb-done" style="display:none">${t("Close &amp; reload")}</button>
+            </div>`;
         const q = API_KEY ? ("?apikey=" + encodeURIComponent(API_KEY)) : "";
         const es = new EventSource("/api/import/qbit/events" + q);
         const title = box.querySelector("#qb-title"),
             phase = box.querySelector("#qb-phase"), bar = box.querySelector("#qb-bar"),
             stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
-            doneBtn = box.querySelector("#qb-done");
+            doneBtn = box.querySelector("#qb-done"), note = box.querySelector("#qb-note"),
+            fails = box.querySelector("#qb-fails"), retryBtn = box.querySelector("#qb-retry"),
+            retryMsg = box.querySelector("#qb-retry-msg");
         const labels = { connect: t("Connecting…"), categories: t("Creating categories…"), torrents: t("Importing torrents…"), done: t("Done"), error: t("Error") };
         es.onmessage = (ev) => {
             let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
             phase.style.color = ""; phase.textContent = labels[d.phase] || d.phase;
             if (d.total > 0) bar.style.width = Math.round(100 * d.done / d.total) + "%";
-            stats.textContent = t("{done}/{total} · {seeding} seeding · {resuming} resuming · {failed} failed", {
-                done: d.done, total: d.total, seeding: d.seeded, resuming: d.downloading, failed: d.failed })
-                + (d.skipped ? " · " + t("{n} skipped", { n: d.skipped }) : "");
+            // What the data was (complete and found, or to check), then whether
+            // it announces. 4.3 said "7821 seeding" over torrents that had all
+            // been added stopped, as the wizard's default asks.
+            stats.textContent = t("{done}/{total} · {complete} complete, data found · {check} to check or download · {failed} failed", {
+                done: d.done, total: d.total, complete: d.seeded, check: d.downloading, failed: d.failed })
+                + (d.skipped ? " · " + t("{n} skipped", { n: d.skipped }) : "")
+                + (d.stopped ? " · " + t("{n} added stopped", { n: d.stopped }) : "");
             cur.textContent = d.current ? t("last: {name}", { name: d.current }) : "";
             if (d.phase === "error") { phase.style.color = "var(--accent-red)"; phase.textContent = t("Error: {msg}", { msg: d.error || t("unknown") }); }
             if (d.finished) {
@@ -878,6 +892,28 @@ function importWizard(opts) {
                     bar.style.width = "100%";
                     title.textContent = t("Import complete");
                     phase.textContent = labels.done; // not the title again
+                }
+                if (d.stopped) {
+                    note.textContent = t("{n} torrents were added stopped, as chosen: nothing announces until you start them from the list.", { n: d.stopped });
+                }
+                const list = d.failures || [];
+                if (list.length) {
+                    fails.style.display = "";
+                    fails.innerHTML = list.map(f => `<div><b>${esc(f.name)}</b>: ${esc(f.error)}</div>`).join("")
+                        + (d.failed > list.length ? `<div><i>${t("…and {n} more, in the log.", { n: d.failed - list.length })}</i></div>` : "");
+                }
+                if (d.retryable) {
+                    retryBtn.style.display = "";
+                    retryBtn.textContent = t("Retry the {n} failed", { n: d.failed });
+                    retryBtn.onclick = async () => {
+                        retryMsg.style.color = ""; retryMsg.textContent = t("Starting…");
+                        try {
+                            const res = await fetch("/api/import/retry", { method: "POST", headers: { "X-Api-Key": API_KEY } });
+                            const r = await res.json().catch(() => ({}));
+                            if (!res.ok) { retryMsg.style.color = "var(--accent-red)"; retryMsg.textContent = r.error || t("Start failed ({status})", { status: res.status }); return; }
+                            stepProgress();
+                        } catch (e) { retryMsg.style.color = "var(--accent-red)"; retryMsg.textContent = t("Network error: {msg}", { msg: e.message }); }
+                    };
                 }
                 doneBtn.style.display = "";
                 doneBtn.onclick = () => location.reload();

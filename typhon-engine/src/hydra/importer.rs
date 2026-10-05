@@ -20,6 +20,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Where to reach the client we are taking over from.
+///
+/// Kept in memory by a finished job that had failures, so "retry the failed
+/// ones" does not ask for the password again. Never written anywhere, and gone
+/// with the next import or a restart.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct QbitCreds {
     pub url: String,
@@ -74,10 +78,41 @@ pub struct Progress {
     /// Already in Hydranos.
     pub skipped: AtomicUsize,
     pub failed: AtomicUsize,
+    /// Of the added ones, how many were left stopped (the wizard's default).
+    /// The outcome counts above say what the data was; this says whether it
+    /// is announcing -- 4.3 printed "7821 seeding" over 7997 stopped torrents.
+    pub stopped: AtomicUsize,
+    /// Each torrent that did not go in, and why. What the "retry" acts on.
+    pub failures: std::sync::Mutex<Vec<Failure>>,
+    /// What a retry needs: the failed candidates and how to reach their
+    /// source. Taken (not cloned) by the retry, so the password does not
+    /// outlive the job that needed it.
+    pub retry: std::sync::Mutex<Option<RetryKit>>,
     pub finished: AtomicBool,
     pub error: std::sync::RwLock<String>,
     pub current: std::sync::RwLock<String>,
 }
+
+/// One torrent an import could not add.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Failure {
+    pub name: String,
+    pub hash: String,
+    pub error: String,
+}
+
+/// Everything a retry of the failed torrents needs.
+#[derive(Debug, Clone)]
+pub struct RetryKit {
+    pub cands: Vec<Candidate>,
+    /// Set when the candidates come from qBittorrent.
+    pub creds: Option<QbitCreds>,
+    pub choices: Choices,
+}
+
+/// At most this many failures travel in a status frame: the count is exact,
+/// the list is for reading, and a broken mapping can fail a whole library.
+const FAILURES_SHOWN: usize = 200;
 
 impl Progress {
     pub fn set_phase(&self, phase: &str) {
@@ -104,6 +139,9 @@ impl Progress {
             "downloading": self.downloading.load(Ordering::Relaxed),
             "skipped": self.skipped.load(Ordering::Relaxed),
             "failed": self.failed.load(Ordering::Relaxed),
+            "stopped": self.stopped.load(Ordering::Relaxed),
+            "failures": self.failures.lock().unwrap().iter().take(FAILURES_SHOWN).collect::<Vec<_>>(),
+            "retryable": self.retry.lock().unwrap().is_some(),
             "finished": self.finished.load(Ordering::Relaxed),
             "error": self.error.read().unwrap().clone(),
             "current": self.current.read().unwrap().clone(),
@@ -116,7 +154,38 @@ pub struct Qbit {
     base: String,
     client: reqwest::Client,
     /// `SID=...` or, since 5.x, `QBT_SID_<port>=...`: sent back by hand.
-    cookie: String,
+    /// Behind a lock because it is renewed mid-import: qBit expires a session
+    /// after an hour idle by default, and a large library takes longer.
+    cookie: std::sync::RwLock<String>,
+    creds: QbitCreds,
+    /// First wait between two export attempts; doubles each time.
+    backoff: std::time::Duration,
+}
+
+/// Attempts at one `.torrent` before the torrent is counted as failed.
+const EXPORT_ATTEMPTS: u32 = 4;
+
+/// What to do after a failed export.
+#[derive(Debug, PartialEq, Eq)]
+enum Retry {
+    /// Transient: the connection, a 5xx, a 429. Wait and try again.
+    Later,
+    /// The session is gone (401/403): log in again, then try again.
+    Relogin,
+    /// Asking again will not change the answer.
+    Never,
+}
+
+/// How an export status is handled.
+///
+/// A 409 from qBittorrent's export is "no metadata yet": a magnet that never
+/// finished fetching its info dict. Nothing to import until it has.
+fn export_retry(status: u16) -> Retry {
+    match status {
+        401 | 403 => Retry::Relogin,
+        429 | 500..=599 => Retry::Later,
+        _ => Retry::Never,
+    }
 }
 
 /// Did qBittorrent accept the login?
@@ -146,7 +215,30 @@ impl Qbit {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("http client: {e}"))?;
+        let cookie = Self::authenticate(&client, &base, creds).await?;
+        Ok(Self {
+            base,
+            client,
+            cookie: std::sync::RwLock::new(cookie),
+            creds: creds.clone(),
+            backoff: std::time::Duration::from_secs(1),
+        })
+    }
 
+    /// The credentials this session logged in with, for a later retry.
+    pub fn creds(&self) -> &QbitCreds {
+        &self.creds
+    }
+
+    /// Log in again on the same client, after qBit dropped the session.
+    async fn relogin(&self) -> Result<(), String> {
+        let cookie = Self::authenticate(&self.client, &self.base, &self.creds).await?;
+        *self.cookie.write().unwrap() = cookie;
+        Ok(())
+    }
+
+    /// POST the login form; the session cookie on success.
+    async fn authenticate(client: &reqwest::Client, base: &str, creds: &QbitCreds) -> Result<String, String> {
         let body = format!(
             "username={}&password={}",
             urlencoding(&creds.username),
@@ -155,7 +247,7 @@ impl Qbit {
         let resp = client
             .post(format!("{base}/api/v2/auth/login"))
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("Referer", &base)
+            .header("Referer", base)
             .body(body)
             .send()
             .await
@@ -179,12 +271,13 @@ impl Qbit {
             let why = if text.trim().is_empty() { format!("http {status}") } else { text.trim().to_string() };
             return Err(format!("qBittorrent refused the login: {why}"));
         }
-        Ok(Self { base, client, cookie })
+        Ok(cookie)
     }
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
         let req = self.client.get(format!("{}{path}", self.base)).header("Referer", &self.base);
-        if self.cookie.is_empty() { req } else { req.header(reqwest::header::COOKIE, &self.cookie) }
+        let cookie = self.cookie.read().unwrap().clone();
+        if cookie.is_empty() { req } else { req.header(reqwest::header::COOKIE, cookie) }
     }
 
     /// Every torrent it holds.
@@ -197,16 +290,52 @@ impl Qbit {
     }
 
     /// The .torrent file for one hash.
+    ///
+    /// Retried: on a library of thousands, a qBittorrent that is busy (or
+    /// restarting, or behind a flaky VPN) drops a few requests, and 4.3 counted
+    /// each of those as a torrent that could not be imported. A session that
+    /// expired mid-import is renewed rather than failing everything after it.
     pub async fn export(&self, hash: &str) -> Result<Vec<u8>, String> {
+        let mut last = String::new();
+        let mut wait = self.backoff;
+        for attempt in 1..=EXPORT_ATTEMPTS {
+            let (err, retry) = match self.export_once(hash).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(x) => x,
+            };
+            last = err;
+            match retry {
+                Retry::Never => return Err(last),
+                Retry::Relogin => {
+                    if let Err(e) = self.relogin().await {
+                        last = format!("{last}; login again: {e}");
+                    }
+                }
+                Retry::Later => {}
+            }
+            if attempt < EXPORT_ATTEMPTS {
+                tokio::time::sleep(wait).await;
+                wait *= 2;
+            }
+        }
+        Err(format!("{last} (gave up after {EXPORT_ATTEMPTS} attempts)"))
+    }
+
+    async fn export_once(&self, hash: &str) -> Result<Vec<u8>, (String, Retry)> {
         let resp = self
             .get(&format!("/api/v2/torrents/export?hash={}", urlencoding(hash)))
             .send()
             .await
-            .map_err(|e| format!("export {hash}: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("export {hash}: http {}", resp.status()));
+            .map_err(|e| (format!("export {hash}: {e}"), Retry::Later))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let why = if status == 409 { " (no metadata yet in qBittorrent)" } else { "" };
+            return Err((format!("export {hash}: http {status}{why}"), export_retry(status)));
         }
-        resp.bytes().await.map(|b| b.to_vec()).map_err(|e| format!("export {hash} body: {e}"))
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| (format!("export {hash} body: {e}"), Retry::Later))
     }
 }
 
@@ -486,8 +615,12 @@ pub async fn run_job(
     }
 
     progress.set_phase("torrents");
+    let mut failed_cands = Vec::new();
     for c in cands {
         *progress.current.write().unwrap() = c.name.clone();
+        let stays_stopped = choices.start_stopped || c.stopped;
+        // Kept whole for a retry; cheap next to the export it follows.
+        let retry_copy = c.clone();
         let bytes = match &c.source {
             Source::Qbit(hash) => match &qbit {
                 Some(q) => q.export(hash).await,
@@ -521,16 +654,35 @@ pub async fn run_job(
                 .unwrap_or_else(|e| Err(e.to_string()))
             }
         };
+        if matches!(outcome, Ok(Added::Seeded) | Ok(Added::Resumed)) && stays_stopped {
+            progress.stopped.fetch_add(1, Ordering::Relaxed);
+        }
         match outcome {
             Ok(Added::Seeded) => progress.seeded.fetch_add(1, Ordering::Relaxed),
             Ok(Added::Resumed) => progress.downloading.fetch_add(1, Ordering::Relaxed),
             Ok(Added::AlreadyThere) => progress.skipped.fetch_add(1, Ordering::Relaxed),
             Err(e) => {
-                tracing::warn!(name = %progress.current.read().unwrap(), error = %e, "import: torrent not added");
+                tracing::warn!(name = %retry_copy.name, error = %e, "import: torrent not added");
+                progress.failures.lock().unwrap().push(Failure {
+                    name: retry_copy.name.clone(),
+                    hash: match &retry_copy.source {
+                        Source::Qbit(h) => h.clone(),
+                        Source::File(p) => p.to_string_lossy().into_owned(),
+                    },
+                    error: e,
+                });
+                failed_cands.push(retry_copy);
                 progress.failed.fetch_add(1, Ordering::Relaxed)
             }
         };
         progress.done.fetch_add(1, Ordering::Relaxed);
+    }
+    if !failed_cands.is_empty() {
+        *progress.retry.lock().unwrap() = Some(RetryKit {
+            cands: failed_cands,
+            creds: qbit.as_ref().map(|q| q.creds().clone()),
+            choices: choices.clone(),
+        });
     }
     progress.set_phase("done");
     progress.finished.store(true, Ordering::Relaxed);
@@ -978,5 +1130,160 @@ mod transmission_tests {
         assert!(!into.parent().unwrap().join("escape.txt").exists());
         assert!(unpack_zip(&zip_of(&[("readme.txt", b"x")]), &into).unwrap_err().contains("no torrents/"));
         let _ = std::fs::remove_dir_all(&into);
+    }
+}
+
+/// The import against a fake qBittorrent: what happens when it misbehaves.
+#[cfg(test)]
+mod qbit_session_tests {
+    use super::*;
+    use axum::extract::{Query, State};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Fake {
+        logins: AtomicUsize,
+        calls: Mutex<HashMap<String, usize>>,
+    }
+
+    /// Hash names a behaviour: `flaky` fails twice with a 500, `expired`
+    /// refuses the first session, `magnet` is qBit's 409, `down` never answers
+    /// anything but 503.
+    async fn export(
+        State(f): State<Arc<Fake>>,
+        Query(q): Query<HashMap<String, String>>,
+        headers: HeaderMap,
+    ) -> axum::response::Response {
+        let hash = q.get("hash").cloned().unwrap_or_default();
+        let n = {
+            let mut calls = f.calls.lock().unwrap();
+            let n = calls.entry(hash.clone()).or_default();
+            *n += 1;
+            *n
+        };
+        let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let ok = (StatusCode::OK, b"d4:infode".to_vec()).into_response();
+        match hash.as_str() {
+            "flaky" if n <= 2 => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            "expired" if cookie == "SID=1" => StatusCode::FORBIDDEN.into_response(),
+            "magnet" => StatusCode::CONFLICT.into_response(),
+            "down" => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            _ => ok,
+        }
+    }
+
+    async fn login(State(f): State<Arc<Fake>>) -> axum::response::Response {
+        let n = f.logins.fetch_add(1, Ordering::Relaxed) + 1;
+        ([("set-cookie", format!("SID={n}; HttpOnly"))], "Ok.").into_response()
+    }
+
+    async fn fake() -> (Arc<Fake>, Qbit) {
+        let f = Arc::new(Fake::default());
+        let app = axum::Router::new()
+            .route("/api/v2/auth/login", axum::routing::post(login))
+            .route("/api/v2/torrents/export", axum::routing::get(export))
+            .with_state(f.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let creds = QbitCreds { url: format!("http://{addr}"), username: "u".into(), password: "p".into() };
+        let mut q = Qbit::login(&creds).await.expect("login");
+        q.backoff = std::time::Duration::from_millis(1);
+        (f, q)
+    }
+
+    fn calls(f: &Fake, hash: &str) -> usize {
+        f.calls.lock().unwrap().get(hash).copied().unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn a_transient_error_is_retried_until_the_torrent_comes() {
+        let (f, q) = fake().await;
+        assert!(q.export("flaky").await.is_ok());
+        assert_eq!(calls(&f, "flaky"), 3);
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_is_renewed_and_the_export_carries_on() {
+        let (f, q) = fake().await;
+        assert!(q.export("expired").await.is_ok());
+        assert_eq!(f.logins.load(Ordering::Relaxed), 2, "logged in again once");
+        assert_eq!(calls(&f, "expired"), 2);
+    }
+
+    #[tokio::test]
+    async fn a_magnet_without_metadata_is_not_asked_again() {
+        let (f, q) = fake().await;
+        let err = q.export("magnet").await.unwrap_err();
+        assert!(err.contains("no metadata"), "{err}");
+        assert_eq!(calls(&f, "magnet"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_client_that_stays_down_fails_after_a_bounded_number_of_tries() {
+        let (f, q) = fake().await;
+        let err = q.export("down").await.unwrap_err();
+        assert!(err.contains("gave up"), "{err}");
+        assert_eq!(calls(&f, "down"), EXPORT_ATTEMPTS as usize);
+    }
+
+    fn file_cand(name: &str, path: PathBuf) -> Candidate {
+        Candidate {
+            name: name.into(),
+            category: String::new(),
+            save_path: "/nowhere".into(),
+            content: "/nowhere".into(),
+            complete: true,
+            stopped: false,
+            uploaded: 0,
+            downloaded: 0,
+            tags: Vec::new(),
+            source: Source::File(path),
+        }
+    }
+
+    /// The summary says what is stopped, and a failed torrent is kept, whole,
+    /// for the retry.
+    #[tokio::test]
+    async fn failures_are_listed_and_kept_for_a_retry_and_stopped_ones_counted() {
+        let dir = std::env::temp_dir().join(format!("imp-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.torrent");
+        std::fs::write(&good, b"x").unwrap();
+        let cands = vec![
+            file_cand("good", good),
+            file_cand("missing", dir.join("missing.torrent")),
+        ];
+        let progress = Arc::new(Progress::default());
+        let add: AddFn = Arc::new(|_| Ok(Added::Seeded));
+        let cats: CategoryFn = Arc::new(|_| {});
+        run_job(cands, None, Choices::default(), progress.clone(), cats, add).await;
+
+        assert_eq!(progress.seeded.load(Ordering::Relaxed), 1);
+        assert_eq!(progress.stopped.load(Ordering::Relaxed), 1, "the wizard's default leaves it stopped");
+        assert_eq!(progress.failed.load(Ordering::Relaxed), 1);
+        let failures = progress.failures.lock().unwrap().clone();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "missing");
+        let kit = progress.retry.lock().unwrap().clone().expect("a retry kit");
+        assert_eq!(kit.cands.len(), 1);
+        assert_eq!(kit.cands[0].name, "missing");
+        assert!(kit.creds.is_none(), "a Transmission import has no password to keep");
+        let json = progress.as_json();
+        assert_eq!(json["retryable"], true);
+        assert_eq!(json["failures"][0]["name"], "missing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_server_side_or_session_failure_is_retried() {
+        assert_eq!(export_retry(500), Retry::Later);
+        assert_eq!(export_retry(429), Retry::Later);
+        assert_eq!(export_retry(403), Retry::Relogin);
+        assert_eq!(export_retry(409), Retry::Never);
+        assert_eq!(export_retry(404), Retry::Never);
     }
 }
