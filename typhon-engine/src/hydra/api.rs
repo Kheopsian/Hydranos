@@ -1560,7 +1560,7 @@ async fn latest_release(state: &AppState) -> (String, String) {
     };
 
     let response = client
-        .get("https://api.github.com/repos/Kheopsian/Hydra/tags?per_page=100")
+        .get("https://api.github.com/repos/Kheopsian/Hydranos/tags?per_page=100")
         .header("User-Agent", format!("Hydra/{HYDRANOS_VERSION}"))
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -1597,7 +1597,7 @@ async fn latest_release(state: &AppState) -> (String, String) {
     let url = if best.is_empty() {
         String::new()
     } else {
-        format!("https://github.com/Kheopsian/Hydra/releases/tag/{best}")
+        format!("https://github.com/Kheopsian/Hydranos/releases/tag/{best}")
     };
 
     let mut cached = state.update_check.lock().await;
@@ -9741,12 +9741,23 @@ async fn get_hoard_torrent(
     Json(detail_payload(&state, "hoard", &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
 }
 
-/// Add a torrent, native API: a `torrent_path` already on this node's disk, or
-/// a `magnet_uri`.
+/// Add a torrent, native API: a `torrent_path` already on this node's disk, a
+/// `torrent_url` to fetch, or a `magnet_uri`.
 ///
-/// The refusal keeps the per-target breakdown the UI reads to say WHICH engine
-/// refused. A magnet is answered 202, not "added": it is resolved in the
-/// background (`magnets`), and appears in the list once its metadata is in.
+/// Options, all optional:
+/// - `engine` (an engine id) or `mode` (`race` / `hoard`): where it goes.
+///   Without either, the category decides.
+/// - `stopped`: add it without starting.
+/// - `seed_mode` (or `skip_recheck`): trust the data already on disk.
+/// - `create_subfolder`: a single-file torrent gets a folder of its own,
+///   named after the torrent. Defaults to `[daemon] create_torrent_folder`.
+///
+/// 4.3 read none of `mode`, `skip_recheck` and `create_subfolder` -- the Add
+/// tab sent them and they changed nothing -- had no URL form, and answered
+/// every refusal with a 500 whose message started with "race: " whichever
+/// engine refused. A refusal is now 400 (bad request), 404 (no such file),
+/// 409 (already added) or 500 (the engine failed), and names what refused.
+/// A magnet is answered 202: it is resolved in the background (`magnets`).
 pub(crate) async fn post_torrent_add(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -9756,9 +9767,9 @@ pub(crate) async fn post_torrent_add(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
 
-    let refuse = |message: String| {
+    let refuse = |code: StatusCode, message: String| {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            code,
             Json(serde_json::json!({
                 "error": message,
                 "targets": [{"agent": "local", "error": message}],
@@ -9766,19 +9777,48 @@ pub(crate) async fn post_torrent_add(
         )
             .into_response()
     };
-
-    let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let s = |k: &str| {
-        payload.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    let refusal_code = |e: &str| {
+        if e.contains("already added") {
+            StatusCode::CONFLICT
+        } else if e.contains("did not parse") || e.contains("no save path") || e.contains("not a magnet") || e.contains("no engine") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     };
+
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return refuse(StatusCode::BAD_REQUEST, "the body is not JSON".into());
+    };
+    let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+    let flag = |k: &str| payload.get(k).and_then(|v| v.as_bool());
+    let paused = flag("stopped").or_else(|| flag("paused")).unwrap_or(false);
+    let seed_mode = flag("seed_mode").or_else(|| flag("skip_recheck")).unwrap_or(false);
+    let subfolder = flag("create_subfolder").unwrap_or_else(|| state.cfg().daemon.create_torrent_folder);
+
+    // `engine` names an engine; `mode` names a role and takes the engine that
+    // carries it (the one named after the role first).
+    let engine = match add_target_engine(&state, &s("engine"), &s("mode")) {
+        Ok(e) => e,
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, e),
+    };
+
     let torrent_path = s("torrent_path");
+    let torrent_url = s("torrent_url");
     let magnet_uri = s("magnet_uri");
-    if torrent_path.is_empty() && !magnet_uri.is_empty() {
-        let paused = payload.get("stopped").and_then(|v| v.as_bool()).unwrap_or(false);
+    let given = [!torrent_path.is_empty(), !torrent_url.is_empty(), !magnet_uri.is_empty()]
+        .iter()
+        .filter(|g| **g)
+        .count();
+    if given != 1 {
+        return refuse(StatusCode::BAD_REQUEST, "give exactly one of torrent_path, torrent_url or magnet_uri".into());
+    }
+
+    if !magnet_uri.is_empty() {
         let st = state.clone();
-        let (cat, sp, tags, engine) = (s("category"), s("save_path"), s("tags"), s("engine"));
+        let (cat, sp, tags) = (s("category"), s("save_path"), s("tags"));
         let res = tokio::task::spawn_blocking(move || {
-            crate::magnets::request(&st, &magnet_uri, &cat, &sp, &tags, paused, &engine)
+            crate::magnets::request_with(&st, &magnet_uri, &cat, &sp, &tags, paused, seed_mode, &engine)
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
@@ -9790,35 +9830,107 @@ pub(crate) async fn post_torrent_add(
                 Json(serde_json::json!({"info_hash": hash, "status": "resolving"})),
             )
                 .into_response(),
-            Err(e) => refuse(e),
+            Err(e) => refuse(refusal_code(&e), e),
         };
     }
-    if torrent_path.is_empty() {
-        return refuse("torrent_path or magnet_uri required".to_string());
-    }
 
-    let bytes = match std::fs::read(&torrent_path) {
-        Ok(b) => b,
-        Err(e) => return refuse(format!("race: {torrent_path}: {e}")),
-    };
-    let paused = payload.get("stopped").and_then(|v| v.as_bool()).unwrap_or(false);
-    let seed_mode = payload.get("seed_mode").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    match add_torrent_bytes(
-        &state,
-        &bytes,
-        &s("category"),
-        &s("save_path"),
-        &s("tags"),
-        paused,
-        seed_mode,
-        &s("engine"),
-    ) {
-        Ok((hash, name)) => {
-            Json(serde_json::json!({"info_hash": hash, "name": name})).into_response()
+    let bytes = if !torrent_url.is_empty() {
+        match crate::mcp::fetch_torrent(&torrent_url).await {
+            Ok(b) => b,
+            // A tracker's .torrent URL carries the passkey: not echoed back.
+            Err(e) => return refuse(StatusCode::BAD_REQUEST, e.replace(torrent_url.as_str(), "<url>")),
         }
-        Err(e) => refuse(format!("race: {e}")),
+    } else {
+        match std::fs::read(&torrent_path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return refuse(StatusCode::NOT_FOUND, format!("{torrent_path}: no such file"))
+            }
+            Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("{torrent_path}: {e}")),
+        }
+    };
+
+    let save_path = match add_save_path(&state, &bytes, &s("category"), &engine, &s("save_path"), subfolder) {
+        Ok(p) => p,
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, e),
+    };
+
+    match add_torrent_bytes(&state, &bytes, &s("category"), &save_path, &s("tags"), paused, seed_mode, &engine) {
+        Ok((hash, name)) => {
+            let (engine_id, _) = placement(&state, &s("category"), &engine);
+            Json(serde_json::json!({"info_hash": hash, "name": name, "engine": engine_id, "mode": engine_role(&state, &engine_id)}))
+                .into_response()
+        }
+        Err(e) => refuse(refusal_code(&e), e),
     }
+}
+
+/// The engine an add goes to: `engine` by id, or `mode` by role (the engine
+/// named after the role first). Empty = let the category decide.
+pub(crate) fn add_target_engine(state: &AppState, engine: &str, mode: &str) -> Result<String, String> {
+    let engine = engine.trim();
+    let mode = mode.trim().to_ascii_lowercase();
+    if !engine.is_empty() {
+        return match state.engines.get(engine) {
+            Some(_) => Ok(engine.to_string()),
+            None => Err(format!("no engine {engine}")),
+        };
+    }
+    if mode.is_empty() {
+        return Ok(String::new());
+    }
+    if mode != "race" && mode != "hoard" {
+        return Err(format!("mode must be race or hoard, not {mode:?}"));
+    }
+    let engines = state.engines.engines();
+    engines
+        .iter()
+        .find(|e| e.id == mode && e.role == mode)
+        .or_else(|| engines.iter().find(|e| e.role == mode))
+        .map(|e| e.id.clone())
+        .ok_or_else(|| format!("no engine has the {mode} role"))
+}
+
+/// The save path of an add, with `create_subfolder` applied: a single-file
+/// torrent gets the folder a multi-file torrent already brings, named after
+/// the torrent without its extension. 4.3 never applied it, nor
+/// `[daemon] create_torrent_folder`.
+pub(crate) fn add_save_path(
+    state: &AppState,
+    bytes: &[u8],
+    category: &str,
+    engine: &str,
+    save_path: &str,
+    subfolder: bool,
+) -> Result<String, String> {
+    if !subfolder {
+        return Ok(save_path.to_string());
+    }
+    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+        .map_err(|e| format!("torrent file did not parse: {e}"))?;
+    if meta.multi_file {
+        return Ok(save_path.to_string());
+    }
+    let base = if save_path.is_empty() { placement(state, category, engine).1 } else { save_path.to_string() };
+    if base.is_empty() {
+        return Err("no save path: give one, or a category that has one".into());
+    }
+    let stem = std::path::Path::new(&meta.name)
+        .file_stem()
+        .map(|x| x.to_string_lossy().to_string())
+        .unwrap_or_else(|| meta.name.clone());
+    Ok(std::path::Path::new(&base).join(stem).display().to_string())
+}
+
+/// The role of an engine, for the answer the Add tab prints.
+fn engine_role(state: &AppState, engine_id: &str) -> String {
+    state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.id == engine_id)
+        .map(|e| e.role.clone())
+        .unwrap_or_default()
 }
 
 /// qBittorrent's add: multipart, one or more `torrents` file parts.
@@ -9883,7 +9995,7 @@ async fn qbit_torrent_add(
             let (st, u2) = (state.clone(), u.clone());
             let (c, sp, tg) = (category.clone(), save_path.clone(), tags.clone());
             tokio::task::spawn_blocking(move || {
-                crate::magnets::request(&st, &u2, &c, &sp, &tg, paused, "").map(|_| ())
+                crate::magnets::request_with(&st, &u2, &c, &sp, &tg, paused, seed_mode, "").map(|_| ())
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
@@ -9953,6 +10065,8 @@ async fn post_torrent_upload(
     let (mut category, mut save_path, mut tags, mut engine) =
         (String::new(), String::new(), String::new(), String::new());
     let (mut paused, mut seed_mode) = (false, false);
+    let mut mode = String::new();
+    let mut subfolder = state.cfg().daemon.create_torrent_folder;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or_default().to_string();
@@ -9967,7 +10081,9 @@ async fn post_torrent_upload(
             "tags" => tags = value,
             "engine" => engine = value,
             "paused" | "stopped" => paused = value == "true" || value == "1",
-            "skip_checking" | "seed_mode" => seed_mode = value == "true" || value == "1",
+            "skip_checking" | "seed_mode" | "skip_recheck" => seed_mode = value == "true" || value == "1",
+            "mode" => mode = value,
+            "create_subfolder" => subfolder = value == "true" || value == "1",
             _ => {}
         }
     }
@@ -9981,21 +10097,28 @@ async fn post_torrent_upload(
     // A named engine that does not exist is refused rather than quietly
     // falling back: silently landing in race is how a hoard torrent changes
     // tier without anyone noticing.
-    if !engine.is_empty() && !state.engines.engines().iter().any(|e| e.id == engine) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("no engine named {engine} on this node")})),
-        )
-            .into_response();
-    }
+    let engine = match add_target_engine(&state, &engine, &mode) {
+        Ok(e) => e,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let save_path = match add_save_path(&state, &bytes, &category, &engine, &save_path, subfolder) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
     match add_torrent_bytes(
         &state, &bytes, &category, &save_path, &tags, paused, seed_mode, &engine,
     ) {
-        Ok((hash, name)) => Json(serde_json::json!({
-            "info_hash": hash, "name": name, "engine": engine
-        }))
-        .into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Ok((hash, name)) => {
+            let (engine_id, _) = placement(&state, &category, &engine);
+            Json(serde_json::json!({
+                "info_hash": hash, "name": name, "engine": engine_id, "mode": engine_role(&state, &engine_id)
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            let code = if e.contains("already added") { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
+            (code, Json(serde_json::json!({"error": e}))).into_response()
+        }
     }
 }
 
@@ -15490,6 +15613,67 @@ mod body_route_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod native_add_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let info = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:{}e",
+            name.len(),
+            "N".repeat(20)
+        );
+        let announce = "https://tracker.example/announce";
+        format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
+    }
+
+    async fn add(s: &TestState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let r = post_torrent_add(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let code = r.status();
+        (code, body_json(r).await)
+    }
+
+    /// The Add tab's options do what they say: the mode picks the engine,
+    /// "add without starting" holds the torrent, the subfolder is made for a
+    /// single file. 4.3 read none of them on this route.
+    #[tokio::test]
+    async fn the_add_options_are_applied() {
+        let s = state_from("native-add", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let file = s.dir.join("book.epub.torrent");
+        std::fs::write(&file, torrent_bytes("book.epub")).unwrap();
+        let base = s.dir.join("lib").display().to_string();
+        let (code, v) = add(&s, serde_json::json!({
+            "torrent_path": file.display().to_string(), "save_path": base,
+            "mode": "hoard", "stopped": true, "create_subfolder": true, "seed_mode": true,
+        })).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert_eq!(v["mode"], "hoard");
+        let hash = v["info_hash"].as_str().unwrap().to_string();
+        let t = find_copy(&s.state, "hoard", &hash).expect("in hoard");
+        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "added without starting");
+        assert_eq!(*t.save_path.read(), std::path::Path::new(&base).join("book"));
+
+        // The same again: already added is a conflict, not a server error.
+        let (code, _) = add(&s, serde_json::json!({"torrent_path": file.display().to_string(), "save_path": base, "mode": "hoard"})).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_says_what_was_wrong() {
+        let s = state_from("native-add-refuse", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (code, v) = add(&s, serde_json::json!({"torrent_path": "/nonexistent/x.torrent", "save_path": "/tmp"})).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert!(!v["error"].as_str().unwrap().starts_with("race:"), "{v}");
+        let (code, _) = add(&s, serde_json::json!({"torrent_path": "/x", "mode": "turbo"})).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, _) = add(&s, serde_json::json!({})).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
     }
 }
 
