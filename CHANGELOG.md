@@ -21,6 +21,32 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- 4.4
+
+### Changed
+- **Every configuration key Hydranos accepts but ignores is named at
+  startup**, one warning per key, with why and what to use instead: the 3.x
+  `[[agent]]` blocks and `agent_token`, `listen_interfaces`,
+  `[race.custom_choking]`, `[hoard.disk_slots]`, `[bench]`, `[metrics]`,
+  `[peer_intel]`, `[arr_cleanup]`, `[notify]`, the speedtest timing keys,
+  `min_age_minutes`, and the 3.x category fields. An old file still starts.
+  The shipped template no longer contains any of them.
+- **The Docker entrypoint refuses `HYDRANOS_ENGINE_ID` and
+  `HYDRANOS_ENGINES`** with a message and always starts on its config file;
+  they used to start a daemon on built-in defaults.
+- **The 3.x `/api/agents` routes and `/api/jobs/move-remote` answer 410**
+  with the routes that replace them.
+
+### Removed
+- The Choking card, the old Remove dialog and the SEEDBOX badge, which were
+  never shown, and the stub routes behind dead buttons: download-slots
+  writes, `POST /api/race/settings`, `/api/opt/flags`, `/api/race/choking`,
+  `verify-downloading`, `restart-stuck`, `arr-cleanup/execute`.
+
+### Fixed
+- The network-storage banner appears when the data directory is on a
+  network filesystem; the server never reported it.
+
 ## v4.3.1 -- cross-seed sees the library
 
 A patch ahead of Saturday's release. It started with a move from qBittorrent
