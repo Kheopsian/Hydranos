@@ -126,6 +126,61 @@ impl Catalogue for EngineCatalogue {
     }
 }
 
+/// Tell every tracker that heard `started` that this torrent is leaving.
+///
+/// For a torrent about to be removed, or a daemon about to stop: neither goes
+/// back through the scheduler, so 4.3 sent no `stopped` at all and every
+/// tracker kept listing us as a peer until its own timeout, sending leechers
+/// to a client that no longer had the torrent. Same request as a periodic
+/// announce -- passkey, IP family, interface, tracker id -- with the session's
+/// counters, once per tracker, never retried (as every client does). Returns
+/// how many trackers acknowledged it.
+pub async fn depart(torrent: Arc<typhon_engine::torrent::meta::TorrentState>, policy: Arc<Policy>, port: u16) -> usize {
+    let ih = hex(&torrent.info_hash);
+    let uploaded = torrent.session_uploaded() as i64;
+    let downloaded = torrent.session_downloaded() as i64;
+    let left = torrent.bytes_left() as i64;
+    let owed: Vec<(String, Option<String>)> = {
+        let book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+        torrent
+            .live_trackers
+            .read()
+            .iter()
+            .flatten()
+            .filter_map(|url| {
+                let key = typhon_engine::torrent::meta::tracker_key(url);
+                book.iter()
+                    .find(|s| s.key == key && s.started && !s.disabled)
+                    .map(|s| (url.clone(), s.tracker_id.as_deref().map(String::from)))
+            })
+            .collect()
+    };
+    let mut acknowledged = 0;
+    for (url, tracker_id) in owed {
+        if policy.skip_udp && typhon_engine::tracker::udp::is_udp(&url) {
+            continue;
+        }
+        let Some(req) = policy::prepare(&policy, &url, &ih, port, uploaded, downloaded, left, "stopped", None, tracker_id.as_deref()) else {
+            continue;
+        };
+        let result = match &req.udp {
+            Some(u) => typhon_engine::tracker::udp::send_announce_on(u, req.ip_mode, &req.device).await,
+            None => typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device).await,
+        };
+        if result.is_ok() {
+            acknowledged += 1;
+        }
+    }
+    let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+    for slot in book.iter_mut() {
+        slot.started = false;
+        slot.stopped_owed = false;
+        slot.completed_owed = false;
+        slot.tracker_id = None;
+    }
+    acknowledged
+}
+
 fn hex(hash: &[u8; 20]) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -1533,6 +1588,28 @@ mod announce_one_tests {
         }
         run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
         assert_eq!(param(&a.last(), "event"), None, "completed is said once");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A departure says `stopped` to the tracker that heard `started`, and
+    /// to no one else; the book forgets the session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_departure_tells_the_tracker_that_heard_started() {
+        let a = recording_tracker(OPEN_BODY).await;
+        let b = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("depart");
+        let hash = add(&mgr, "leaving", &a.url);
+        let st = state(&mgr, &hash);
+        *st.live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(param(&a.last(), "event").as_deref(), Some("started"));
+
+        let acked = depart(st.clone(), Arc::new(policy), 6881).await;
+        assert_eq!(acked, 1);
+        assert_eq!(param(&a.last(), "event").as_deref(), Some("stopped"));
+        assert!(b.queries().is_empty(), "a tracker that never heard started is told nothing");
+        assert!(!st.announce_book.lock().unwrap().iter().any(|s| s.started));
         let _ = std::fs::remove_dir_all(root);
     }
 
