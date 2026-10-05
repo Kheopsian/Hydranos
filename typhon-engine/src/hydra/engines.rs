@@ -343,6 +343,16 @@ impl EngineHost {
                     let policy: crate::announce::PolicyHandle =
                         std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(first)));
                     let _ = engine.announce_policy.set(policy.clone());
+                    // Before the runner: the hold has to be in place when the
+                    // first announce is due, not a moment after.
+                    if session.gluetun_port_forward {
+                        crate::gluetun::spawn(
+                            engine.id.clone(),
+                            engine.manager.clone(),
+                            session.gluetun_url.clone(),
+                            session.gluetun_api_key.clone(),
+                        );
+                    }
                     let bump = crate::announce::runner::start(
                         engine.manager.clone(),
                         policy,
@@ -416,7 +426,7 @@ impl EngineHost {
             for t in engine.manager.all() {
                 let started = t.announce_book.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|s| s.started);
                 if started {
-                    work.push((t, policy.clone(), engine.session.listen_port));
+                    work.push((t, policy.clone(), engine.manager.announced_port(engine.session.listen_port)));
                 }
             }
         }
@@ -453,7 +463,7 @@ impl EngineHost {
         let Some(engine) = self.engines().iter().find(|e| e.id == engine_id) else { return };
         let Some(handle) = engine.announce_policy.get() else { return };
         let policy = handle.read().unwrap_or_else(|p| p.into_inner()).clone();
-        let port = engine.session.listen_port;
+        let port = engine.manager.announced_port(engine.session.listen_port);
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
                 let _ = tokio::time::timeout(
