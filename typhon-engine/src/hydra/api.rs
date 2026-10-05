@@ -12249,18 +12249,30 @@ async fn delete_job(
     let cfg = state.cfg();
     let _ = cfg;
 
-    let exists = {
+    // 4.3 answered ok and cancelled nothing. A queued job is cancelled; a
+    // running graduation stops between two files and is rolled back; other
+    // running jobs cannot be interrupted safely (a move is half on each side
+    // until it ends) and are refused.
+    let kind = {
         let store = state.store.lock().unwrap();
-        store.job(&id).is_some()
+        store.job(&id).map(|j| (j.kind, j.state))
     };
-    if !exists {
+    let Some((kind, job_state)) = kind else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("no such job {id}")}))).into_response();
+    };
+    if job_state == "running" && kind != "graduate" {
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("jobs: no such job {id}")})),
+            Json(serde_json::json!({"error": "a running move cannot be interrupted safely; it will finish"})),
         )
             .into_response();
     }
-    Json(serde_json::json!({"status": "ok"})).into_response()
+    if job_state != "queued" && job_state != "running" {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("the job is already {job_state}")}))).into_response();
+    }
+    let before = state.store.lock().unwrap().cancel_job(&id);
+    let status = if before.as_deref() == Some("running") { "cancelling" } else { "cancelled" };
+    Json(serde_json::json!({"status": status})).into_response()
 }
 
 /// Removing an agent is idempotent: 200 whether it was there or not.

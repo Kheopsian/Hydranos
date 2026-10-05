@@ -183,8 +183,11 @@ fn facts_of(
             Vec::new()
         },
 
+        // From the pieces held, not from what this client downloaded: a
+        // torrent added over its data (seed mode, a cross-seed) read about 0 %
+        // in 4.3 while the list showed it complete.
         progress: if size > 0.0 {
-            (downloaded / size * 100.0).min(100.0)
+            ((size - t.bytes_left() as f64) / size * 100.0).clamp(0.0, 100.0)
         } else {
             0.0
         },

@@ -217,6 +217,17 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             continue;
         }
         let size = std::fs::metadata(from_path).map(|m| m.len()).unwrap_or(0) as i64;
+        // A cancel is honoured between two files, and undone like a failure.
+        let cancelling = {
+            let store = match state.store.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            store.job_cancelling(&job.id)
+        };
+        if cancelling {
+            return Err(put_back(&moved, "cancelled".to_string()));
+        }
         if let Err(e) = crate::jobs::run_move_allowing(from_path, to_path, allow) {
             return Err(put_back(&moved, format!("moving {}: {e}", from_path.display())));
         }
