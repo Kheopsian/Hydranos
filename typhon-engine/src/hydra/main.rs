@@ -88,10 +88,100 @@ mod shutdown;
 use config::Config;
 
 /// What the command line asked for.
+#[derive(Debug, PartialEq)]
 struct Args {
     config: PathBuf,
     /// Make a console window even when launched without one.
     console: bool,
+    /// One line per argument that was not understood. Printed once the
+    /// console is attached: before that, on Windows, stderr goes nowhere.
+    warnings: Vec<String>,
+}
+
+/// The outcome of reading the command line, kept apart from acting on it so
+/// it can be tested without the process exiting under the test.
+#[derive(Debug, PartialEq)]
+enum Cli {
+    Run(Args),
+    Version,
+    Help,
+}
+
+const USAGE: &str = "usage: hydranos [--config <path/to/default.toml>] [--console]
+       hydranos --version
+       hydranos reset-password <password> [path/to/default.toml]
+       hydranos hash-password <password>";
+
+/// The 3.x split-process flags. 4.x is one process: there is no agent or front
+/// to start any more, and machines join a fleet as nodes instead.
+fn is_legacy_split_flag(name: &str) -> bool {
+    name.starts_with("agent-") || name.starts_with("front-")
+}
+
+/// The 3.x flags that took a value. Their value is swallowed with them, or a
+/// 3.x command line would print a second, more confusing warning about it.
+fn legacy_flag_takes_value(name: &str) -> bool {
+    matches!(name, "agent-addr" | "agent-token" | "agent-tls-cert" | "agent-tls-key" | "front-addr")
+}
+
+/// Read the command line (without the program name).
+///
+/// ⚠ An argument that is not understood is WARNED about, never fatal. 4.3
+/// ignored them in silence, so a 3.x script still passing `--agent-only`
+/// started a full daemon and nobody was told; refusing to start now would
+/// instead break every such script at its next upgrade. Saying so on stderr
+/// and starting anyway is the one choice that both informs and keeps running.
+fn parse_argv<I: IntoIterator<Item = String>>(argv: I, default_config: PathBuf) -> Cli {
+    let mut args = argv.into_iter().peekable();
+    let mut path = default_config;
+    let mut console = false;
+    let mut warnings = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--console" => console = true,
+            "--config" => match args.next() {
+                Some(value) => path = PathBuf::from(value),
+                None => warnings.push(format!(
+                    "--config needs a path; using {}", path.display()
+                )),
+            },
+            a if a.starts_with("--config=") => path = PathBuf::from(&a["--config=".len()..]),
+            // CARGO_PKG_VERSION is 0.1.0 and has never been bumped: the
+            // release number lives in HYDRANOS_VERSION. See parse_args.
+            "--version" | "-V" => return Cli::Version,
+            "--help" | "-h" => return Cli::Help,
+            other => {
+                // Go's flag package, which 3.x used, took -flag and --flag
+                // alike and allowed --flag=value: old scripts carry all three.
+                let name = other.trim_start_matches('-');
+                let (name, inline_value) = match name.split_once('=') {
+                    Some((n, _)) => (n, true),
+                    None => (name, false),
+                };
+                if other.starts_with('-') && is_legacy_split_flag(name) {
+                    if !inline_value && legacy_flag_takes_value(name) {
+                        if let Some(next) = args.peek() {
+                            if !next.starts_with('-') {
+                                args.next();
+                            }
+                        }
+                    }
+                    warnings.push(format!(
+                        "ignoring {other}: the agent/front split was removed in 4.x and Hydranos \
+                         now runs as one process. Starting a normal instance. To spread torrents \
+                         over several machines, enrol each one as a node instead \
+                         (install.sh --register-to <url> --token <token>; the Nodes page \
+                         gives the full command)."
+                    ));
+                } else {
+                    warnings.push(format!(
+                        "ignoring unknown argument {other:?}; starting anyway (see hydranos --help)"
+                    ));
+                }
+            }
+        }
+    }
+    Cli::Run(Args { config: path, console, warnings })
 }
 
 /// `hydranos reset-password <password> [config]` and `hydranos hash-password
@@ -154,30 +244,22 @@ fn password_command() {
 
 fn parse_args() -> Args {
     password_command();
-    let mut args = std::env::args().skip(1);
-    let mut path = default_config_path();
-    let mut console = false;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--console" => console = true,
-            "--config" => {
-                if let Some(value) = args.next() {
-                    path = PathBuf::from(value);
-                }
-            }
-            "--version" => {
-                // CARGO_PKG_VERSION is 0.1.0 and has never been bumped: the
-                // release number lives in HYDRANOS_VERSION, which is what the
-                // API, the changelog and the CI guard all agree on. This
-                // printed "hydra 0.1.0" -- the old name and a version no
-                // release has ever carried.
-                println!("hydranos {}", api::HYDRANOS_VERSION);
-                std::process::exit(0);
-            }
-            _ => {}
+    match parse_argv(std::env::args().skip(1), default_config_path()) {
+        Cli::Run(args) => args,
+        Cli::Version => {
+            // CARGO_PKG_VERSION is 0.1.0 and has never been bumped: the
+            // release number lives in HYDRANOS_VERSION, which is what the
+            // API, the changelog and the CI guard all agree on. This
+            // printed "hydra 0.1.0" -- the old name and a version no
+            // release has ever carried.
+            println!("hydranos {}", api::HYDRANOS_VERSION);
+            std::process::exit(0);
+        }
+        Cli::Help => {
+            println!("{USAGE}");
+            std::process::exit(0);
         }
     }
-    Args { config: path, console }
 }
 
 /// Where the config lives when `--config` is not given.
@@ -388,6 +470,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // send every startup line to a console that may not exist.
     let args = parse_args();
     attach_console(args.console);
+    for w in &args.warnings {
+        eprintln!("hydranos: {w}");
+    }
     let config_path = args.config;
     seed_config(&config_path);
 
@@ -422,6 +507,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     }
 
     tracing::info!("tokio runtime: {} worker threads", workers);
+    // Read now, not only at the stop: a typo here would otherwise surface
+    // for the first time in the last log lines of a shutdown nobody watches.
+    let stop_budget = stop_budget();
 
     let mut config = Config::load(&config_path)?;
     // Before anything is served: an install with no key of its own would
@@ -850,7 +938,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // stop_tracker_timeout: trackers stop sending leechers to a client that
     // is going away. 4.3 sent none.
     engines_for_shutdown.depart_all(std::time::Duration::from_secs(5)).await;
-    flush_on_shutdown(&engines_for_shutdown);
+    flush_on_shutdown(&engines_for_shutdown, stop_budget);
     if shutdown::restart_requested() {
         shutdown::exit_for_restart();
     }
@@ -935,6 +1023,147 @@ async fn shutdown_signal() -> () {
 }
 
 
+const STOP_TIMEOUT_DEFAULT_S: u64 = 120;
+
+/// The shutdown flush budget from `HYDRANOS_STOP_TIMEOUT`.
+///
+/// An unreadable value falls back to the default WITH a warning. 4.x parsed a
+/// bare integer only, so the `45s` / `2m` forms the 3.x changelog documented
+/// were dropped in silence and a budget raised for a large instance quietly
+/// became 120 s again.
+fn stop_budget() -> std::time::Duration {
+    let secs = match std::env::var("HYDRANOS_STOP_TIMEOUT") {
+        Err(_) => STOP_TIMEOUT_DEFAULT_S,
+        Ok(raw) => parse_duration_secs(&raw).unwrap_or_else(|| {
+            tracing::warn!(
+                "HYDRANOS_STOP_TIMEOUT={raw:?} is not a duration (use 120, 60s, 2m or 1m30s); \
+                 using {STOP_TIMEOUT_DEFAULT_S} s"
+            );
+            STOP_TIMEOUT_DEFAULT_S
+        }),
+    };
+    std::time::Duration::from_secs(secs)
+}
+
+/// Seconds in `120`, `60s`, `2m`, `1m30s` or `1h`. Units run largest first and
+/// each appears at most once, so `30s1m` and `1m1m` are refused rather than
+/// guessed at; an empty string, a sign or a fraction is refused too.
+fn parse_duration_secs(raw: &str) -> Option<u64> {
+    let s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    if s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.parse().ok();
+    }
+    let mut total: u64 = 0;
+    let mut last_unit = u64::MAX;
+    let mut rest = s.as_str();
+    while !rest.is_empty() {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        let n: u64 = rest[..digits].parse().ok()?;
+        let unit = match rest.as_bytes().get(digits)? {
+            b'h' => 3600,
+            b'm' => 60,
+            b's' => 1,
+            _ => return None,
+        };
+        if unit >= last_unit {
+            return None;
+        }
+        last_unit = unit;
+        total = total.checked_add(n.checked_mul(unit)?)?;
+        rest = &rest[digits + 1..];
+    }
+    Some(total)
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn run(argv: &[&str]) -> Args {
+        match parse_argv(argv.iter().map(|s| s.to_string()), PathBuf::from("/d.toml")) {
+            Cli::Run(a) => a,
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn known_flags_are_read_without_warnings() {
+        let a = run(&["--config", "/x.toml", "--console"]);
+        assert_eq!((a.config, a.console, a.warnings.len()), (PathBuf::from("/x.toml"), true, 0));
+        assert_eq!(run(&["--config=/y.toml"]).config, PathBuf::from("/y.toml"));
+        assert_eq!(run(&[]).config, PathBuf::from("/d.toml"));
+    }
+
+    #[test]
+    fn version_and_help_stop_the_parse() {
+        let p = |v: &[&str]| parse_argv(v.iter().map(|s| s.to_string()), PathBuf::new());
+        assert_eq!(p(&["--bogus", "--version"]), Cli::Version);
+        assert_eq!(p(&["-h"]), Cli::Help);
+    }
+
+    #[test]
+    fn an_unknown_argument_warns_and_still_starts() {
+        let a = run(&["--bogus", "--config", "/x.toml"]);
+        assert_eq!(a.config, PathBuf::from("/x.toml"));
+        assert_eq!(a.warnings.len(), 1);
+        assert!(a.warnings[0].contains("--bogus"), "{:?}", a.warnings);
+    }
+
+    #[test]
+    fn the_3x_split_flags_point_to_nodes() {
+        for flag in ["--agent-only", "--front-only", "-agent-only"] {
+            let a = run(&[flag]);
+            assert_eq!(a.warnings.len(), 1, "{flag}");
+            assert!(a.warnings[0].contains("removed in 4.x"), "{flag}");
+            assert!(a.warnings[0].contains("--register-to"), "{flag}");
+        }
+        // The value of a 3.x flag goes with it, not into a second warning.
+        let a = run(&["--agent-only", "--agent-addr", ":9090", "--config", "/x.toml"]);
+        assert_eq!(a.warnings.len(), 2, "{:?}", a.warnings);
+        assert_eq!(a.config, PathBuf::from("/x.toml"));
+    }
+
+    #[test]
+    fn a_config_flag_without_a_path_keeps_the_default_and_says_so() {
+        let a = run(&["--config"]);
+        assert_eq!(a.config, PathBuf::from("/d.toml"));
+        assert_eq!(a.warnings.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod stop_timeout_tests {
+    use super::parse_duration_secs as p;
+
+    #[test]
+    fn a_bare_number_is_seconds() {
+        assert_eq!(p("120"), Some(120));
+        assert_eq!(p(" 45 "), Some(45));
+    }
+
+    #[test]
+    fn suffixed_and_compound_forms_are_read() {
+        assert_eq!(p("60s"), Some(60));
+        assert_eq!(p("2m"), Some(120));
+        assert_eq!(p("1m30s"), Some(90));
+        assert_eq!(p("1h"), Some(3600));
+        assert_eq!(p("2M"), Some(120));
+    }
+
+    #[test]
+    fn anything_else_is_refused_not_guessed() {
+        for bad in ["", "abc", "2 m", "1.5m", "-5", "m", "30s1m", "1m1m", "5x", "10ms", "99999999999999999999"] {
+            assert_eq!(p(bad), None, "{bad:?}");
+        }
+    }
+}
+
 /// Write every engine's resume state before the process ends.
 ///
 /// Bounded, because the alternative to a partial sweep is not a complete one
@@ -945,12 +1174,7 @@ async fn shutdown_signal() -> () {
 ///
 /// Engines are flushed on threads of their own: one slow disk must not spend
 /// another engine's share of the budget.
-fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>) {
-    let budget = std::env::var("HYDRANOS_STOP_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(120);
-    let budget = std::time::Duration::from_secs(budget);
+fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>, budget: std::time::Duration) {
     let started = std::time::Instant::now();
 
     let handles: Vec<_> = engines
