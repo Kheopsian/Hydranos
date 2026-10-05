@@ -639,6 +639,19 @@ pub struct Tunnel {
     /// 0 = none (yet, or ever for this provider).
     pub forwarded_port: u16,
     pub port_forward: String,
+    /// The `.conf`'s `DNS =` servers, which this engine's tracker names are
+    /// resolved by, through the tunnel (`tunneldns`).
+    pub dns: Vec<String>,
+    /// The `.conf` names no DNS server: tracker names go to the host's
+    /// resolver. The swarm still sees only the tunnel; the host's DNS
+    /// provider sees which trackers the engine talks to.
+    pub dns_leak: bool,
+}
+
+/// The `.conf`'s DNS servers that are addresses. A search domain may sit on
+/// the same line (`DNS = 10.2.0.1, example.lan`) and is not a server.
+pub fn dns_servers(conf: &Conf) -> Vec<std::net::IpAddr> {
+    conf.dns.iter().filter_map(|d| d.trim().parse().ok()).collect()
 }
 
 /// The tunnels of this process, by engine.
@@ -707,6 +720,7 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
     for stale in read_managed(dir) {
         if !wanted_devices.contains(&stale) {
             let _ = execute(runner, &teardown_plan(&stale));
+            typhon_engine::tunneldns::forget(&stale);
             tracing::info!(device = %stale, "wireguard: tunnel no longer asked for, taken down");
         }
     }
@@ -733,9 +747,9 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
             forwarded_port: if w.port_forward == PortForward::Manual { w.manual_port } else { 0 },
             ..Default::default()
         };
-        let result = supported
-            .map_err(String::from)
-            .and_then(|()| load_conf(dir, &w.config_file))
+        let conf = supported.map_err(String::from).and_then(|()| load_conf(dir, &w.config_file));
+        let dns = conf.as_ref().map(dns_servers).unwrap_or_default();
+        let result = conf
             .and_then(|conf| up_plan(w, &conf))
             .and_then(|plan| {
                 // Recorded before running: a plan that dies halfway still
@@ -747,6 +761,18 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
         match result {
             Ok(outcome) => {
                 t.created = true;
+                // Before the engine starts: its first announce already asks
+                // the tunnel's server, not the host's.
+                typhon_engine::tunneldns::set_servers(&w.device, &dns);
+                t.dns = dns.iter().map(|ip| ip.to_string()).collect();
+                if dns.is_empty() {
+                    t.dns_leak = true;
+                    tracing::warn!(
+                        engine = %w.engine, device = %w.device, file = %w.config_file,
+                        "wireguard: the file has no DNS line, so this engine's tracker NAMES are resolved by the \
+                         host's resolver (a name leak; addresses stay in the tunnel)"
+                    );
+                }
                 if let Some(d) = outcome.degraded {
                     tracing::warn!(engine = %w.engine, device = %w.device, "wireguard: {d}");
                     t.degraded = d;
@@ -758,6 +784,7 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
             }
             Err(e) => {
                 let _ = execute(runner, &teardown_plan(&w.device));
+                typhon_engine::tunneldns::forget(&w.device);
                 tracing::error!(
                     engine = %w.engine, device = %w.device, error = %e,
                     "wireguard: the tunnel did not come up; the engine stays pinned to it and reaches nobody (no direct fallback)"
@@ -779,6 +806,7 @@ pub fn down_all(runner: &mut dyn Runner, dir: &Path, registry: &Registry) -> usi
     }
     for d in &devices {
         let _ = execute(runner, &teardown_plan(d));
+        typhon_engine::tunneldns::forget(d);
     }
     write_managed(dir, &[]);
     devices.len()
@@ -838,6 +866,40 @@ Endpoint = 192.0.2.10:51820
                 None => Ok(String::new()),
             }
         }
+    }
+
+    /// A tunnel that comes up hands its file's DNS servers to the resolver
+    /// its engine uses; one with no `DNS =` line is flagged as a name leak;
+    /// one taken down is forgotten.
+    #[test]
+    fn a_tunnel_up_registers_its_dns_and_one_without_is_a_named_leak() {
+        force_support(Some(Ok(())));
+        let dir = std::env::temp_dir().join(format!("wgtunnel-dns-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let reg = Registry::default();
+        let mut w = want("dnstest");
+        store_conf(&dir, "p.conf", CONF.as_bytes()).expect("stored");
+        reconcile(&mut Fake::new(|_| None), &dir, std::slice::from_ref(&w), &reg);
+        let t = reg.get("dnstest").unwrap();
+        assert!(t.created && !t.dns_leak, "{t:?}");
+        assert_eq!(t.dns, vec!["10.2.0.1".to_string()]);
+        assert_eq!(
+            typhon_engine::tunneldns::servers(&w.device),
+            Some(vec!["10.2.0.1:53".parse().unwrap()])
+        );
+
+        let no_dns = CONF.replace("DNS = 10.2.0.1\n", "");
+        store_conf(&dir, "nodns.conf", no_dns.as_bytes()).expect("stored");
+        w.config_file = "nodns.conf".into();
+        reconcile(&mut Fake::new(|_| None), &dir, std::slice::from_ref(&w), &reg);
+        let t = reg.get("dnstest").unwrap();
+        assert!(t.dns_leak && t.dns.is_empty(), "{t:?}");
+        assert_eq!(typhon_engine::tunneldns::servers(&w.device), Some(vec![]));
+
+        down_all(&mut Fake::new(|_| None), &dir, &reg);
+        assert_eq!(typhon_engine::tunneldns::servers(&w.device), None, "a tunnel taken down is forgotten");
+        force_support(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

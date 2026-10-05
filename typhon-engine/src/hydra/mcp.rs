@@ -1012,11 +1012,15 @@ pub(crate) async fn fetch_torrent(url: &str) -> Result<Vec<u8>, String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("torrent_url must be an http(s) URL".into());
     }
-    let client = reqwest::Client::builder()
+    // A `.torrent` URL is usually a tracker's, often with a passkey in it:
+    // the daemon's own way out, never the default route behind its back.
+    let client = typhon_engine::egress::client()?;
+    let resp = client
+        .get(url)
         .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client.get(url).send().await.map_err(|e| format!("{url}: {e}"))?;
+        .send()
+        .await
+        .map_err(|e| format!("{url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("{url} answered {}", resp.status()));
     }

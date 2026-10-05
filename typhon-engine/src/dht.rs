@@ -29,7 +29,7 @@ use crate::torrent::meta::{InfoHash, TorrentState};
 /// Whether an engine may run a DHT node, and why not when it may not.
 ///
 /// Decided in one place for the two discovery mechanisms that speak plain UDP
-/// to strangers -- the DHT, and Local Service Discovery once there is one --
+/// to strangers -- the DHT and Local Service Discovery --
 /// because they share the reason to be off: the SOCKS5 proxy here has no UDP
 /// ASSOCIATE, so neither can go through it. A DHT node behind the proxy would
 /// leave by the host's route and hand its real address to every node in the
@@ -50,6 +50,8 @@ pub enum Discovery {
 pub const OFF_BY_CONFIG: &str = "disabled by config";
 pub const OFF_BEHIND_PROXY: &str =
     "off behind the SOCKS5 proxy: the DHT is plain UDP, the proxy carries no UDP, and DHT nodes would see this host's address";
+pub const LSD_OFF_BEHIND_PROXY: &str =
+    "off behind the SOCKS5 proxy: LSD is UDP multicast, which no proxy carries, and it would announce this host's own address";
 
 impl Discovery {
     pub fn is_on(&self) -> bool {
@@ -68,18 +70,38 @@ pub fn dht_policy(config: &crate::config::EngineConfig) -> Discovery {
     }
 }
 
-/// The Local Service Discovery (BEP 14) decision, for when LSD exists.
+/// The Local Service Discovery (BEP 14) decision (`lsd::start`).
 ///
-/// There is no LSD in this engine yet. This is the hook it must go through
-/// when it arrives: multicast on the LAN, never through a proxy, so it is off
-/// behind one for the same reason as the DHT. Kept separate from
-/// `dht_policy` so an LSD switch of its own slots in without touching the DHT.
+/// Multicast on the LAN, never through a proxy, so it is off behind one for
+/// the same reason as the DHT. Its own switch, `lsd_enabled`, rather than the
+/// DHT's: a hoard can want one without the other.
 pub fn lsd_policy(config: &crate::config::EngineConfig) -> Discovery {
-    if !config.socks5_outbound_host.trim().is_empty() {
-        Discovery::Off(OFF_BEHIND_PROXY)
+    if !config.lsd_enabled {
+        Discovery::Off(OFF_BY_CONFIG)
+    } else if !config.socks5_outbound_host.trim().is_empty() {
+        Discovery::Off(LSD_OFF_BEHIND_PROXY)
     } else {
         Discovery::On
     }
+}
+
+/// The bootstrap routers as addresses, resolved by the tunnel's DNS server.
+///
+/// The DHT resolves its routers itself with the host's resolver, which for an
+/// engine in a managed tunnel tells the host's DNS provider that this machine
+/// runs a DHT node. Handing it literal addresses leaves it nothing to resolve.
+/// A router the tunnel cannot resolve is dropped, never asked of the host: no
+/// router at all is a DHT that does not bootstrap, the trackers carry on.
+async fn tunnel_bootstrap(device: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for router in librqbit_dht::DHT_BOOTSTRAP {
+        let Some((host, port)) = router.rsplit_once(':') else { continue };
+        match crate::tunneldns::resolve(device, host).await {
+            Ok(ips) => out.extend(ips.into_iter().map(|ip| std::net::SocketAddr::new(ip, port.parse().unwrap_or(6881)).to_string())),
+            Err(e) => warn!("[dht] bootstrap router {} not resolved through the tunnel: {}", host, e),
+        }
+    }
+    out
 }
 
 /// One DHT node, owned by one engine.
@@ -111,6 +133,10 @@ impl DhtSession {
     pub async fn start(device: Option<&str>) -> Option<Arc<Self>> {
         let config = librqbit_dht::DhtConfig {
             bind_device: device.map(str::to_string),
+            bootstrap_addrs: match device {
+                Some(d) if crate::tunneldns::is_tunnel(d) => Some(tunnel_bootstrap(d).await),
+                _ => None,
+            },
             ..Default::default()
         };
         match DhtBuilder::with_config(config).await {
@@ -220,15 +246,18 @@ mod tests {
     /// and LSD with it; without a proxy the switch is the operator's.
     #[test]
     fn a_proxied_engine_runs_no_dht_and_no_lsd() {
-        let proxied = config(r#"{"socks5_outbound_host":"10.0.0.1","dht_enabled":true}"#);
+        let proxied = config(r#"{"socks5_outbound_host":"10.0.0.1","dht_enabled":true,"lsd_enabled":true}"#);
         assert_eq!(dht_policy(&proxied), Discovery::Off(OFF_BEHIND_PROXY));
-        assert_eq!(lsd_policy(&proxied), Discovery::Off(OFF_BEHIND_PROXY));
+        assert_eq!(lsd_policy(&proxied), Discovery::Off(LSD_OFF_BEHIND_PROXY));
 
-        let direct = config(r#"{"dht_enabled":true}"#);
+        let direct = config(r#"{"dht_enabled":true,"lsd_enabled":true}"#);
         assert!(dht_policy(&direct).is_on());
         assert!(lsd_policy(&direct).is_on());
         let off = config(r#"{"dht_enabled":false}"#);
         assert_eq!(dht_policy(&off), Discovery::Off(OFF_BY_CONFIG));
+        // LSD is off unless asked for: the engine has no role to pick a
+        // default from, Hydra decides it per role (`Session::lsd_on`).
+        assert_eq!(lsd_policy(&off), Discovery::Off(OFF_BY_CONFIG));
     }
 
     /// A tunnel is not a proxy: an engine pinned to a device keeps its DHT.

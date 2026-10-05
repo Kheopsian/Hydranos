@@ -73,6 +73,9 @@ num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"
 librqbit-utp = "0.7"
+# Local Service Discovery multicast socket (src/lsd.rs). Already in the tree
+# through librqbit-dht, patched to third_party/ below.
+librqbit-dualstack-sockets = "0.7"
 # sha1-ring, not the default sha1-crypto-hash: the latter pulls OpenSSL in as a
 # shared library, which made the release tarball unusable on any host whose
 # libssl is older than the build runner's. ring compiles in.

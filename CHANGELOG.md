@@ -24,6 +24,20 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- 4.4
 
 ### Added
+- **Local Service Discovery (BEP 14)**, per engine (`enable_lsd`, on for
+  race and off for hoard by default). Only torrents an engine is downloading
+  or has peers for are announced, at most one small multicast datagram a
+  second whatever the library's size, each torrent once per 5 minutes; never
+  a private torrent, never behind a SOCKS5 proxy. LAN peers are dialled like
+  any other. The qBittorrent API's `preferences.lsd` is real.
+- **Kill switch** (`[daemon] kill_switch`): the daemon's own requests are
+  refused when neither its interface nor its proxy is usable, never sent by
+  the default route. An engine with neither an interface nor a proxy is
+  named as not covered, at startup and in the Network tab.
+- **The daemon's own requests have an exit too**: tracker lists, IP filter
+  lists, the update check and `hydranos-update`, webhooks and `.torrent`
+  URLs go through `[proxy]` (SOCKS5, `socks5h`) and/or
+  `[daemon] bind_interface`, set live from the Network tab.
 - **Share limits, as in qBittorrent.** Per engine (`max_ratio`,
   `max_seeding_time`, `max_inactive_seeding_time`, `share_limit_action` =
   stop / remove / remove with files) and per torrent (right-click > Share
@@ -60,6 +74,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   resolved by the proxy); `TYPHON_ANNOUNCE_PROXY` stays as a global fallback.
 
 ### Fixed
+- **Tracker lists, IP filter lists, the update check, webhooks and `.torrent`
+  URLs left by the default route**, from the home address, even with every
+  engine in a tunnel.
+- **In a managed WireGuard tunnel, tracker names were resolved by the host's
+  resolver.** They are now resolved by the `.conf`'s DNS, through the tunnel;
+  a `.conf` without `DNS =` is reported as a name leak.
+- The network check probed a tunnelled engine by the default route and
+  reported the home address as the one trackers see.
 - **A torrent's Content tab shows what each file has downloaded and what is
   missing.** It listed paths and sizes only. Unfinished files come first; the
   qBittorrent API's `torrents/files` progress uses the same per-file count,
@@ -83,6 +105,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - The engine RPC `set_upload_limit` / `set_download_limit` did nothing.
 
 ### Changed
+- No UPnP/NAT-PMP mapping on the home router for an engine pinned to another
+  interface, behind a proxy or behind gluetun: that port would publish the
+  host's address. Webseeds of an engine pinned without a proxy are pinned to
+  its interface instead of switched off.
 - **Behind a SOCKS5 proxy the DHT is off**, as in qBittorrent: it is plain
   UDP and would publish the host's address. PEX stays on. The Network tab
   says so when the proxy is saved. The DHT socket is now pinned to the

@@ -3207,6 +3207,7 @@ dependencies = [
  "futures",
  "libc",
  "librqbit-dht",
+ "librqbit-dualstack-sockets",
  "librqbit-utp",
  "lru",
  "nix",
