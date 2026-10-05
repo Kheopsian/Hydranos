@@ -77,6 +77,37 @@ pub struct Session {
     pub aio_threads: Option<usize>,
     #[serde(default)]
     pub active_downloads: i64,
+    /// qBittorrent's queue: `active_seeds` and `active_limit` are read ONLY
+    /// while this is on, as qBittorrent reads `max_active_uploads` /
+    /// `max_active_torrents` only under `queueing_enabled`. Off unless set,
+    /// and that is the safety of it: 3.x's built-in defaults put
+    /// `active_seeds = 50` / `active_limit = 100` on [race], and a file that
+    /// carries them would otherwise stop all but 50 seeds at the upgrade.
+    /// `active_downloads` keeps working without it, as it always has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queueing: Option<bool>,
+    /// Seeds allowed to run at once under `queueing`; absent or < 0 = no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_seeds: Option<i64>,
+    /// Torrents (downloads + seeds) allowed to run at once under `queueing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_limit: Option<i64>,
+    /// Share limits, qBittorrent's: when a seed reaches ANY of them, the
+    /// share-limit worker applies `share_limit_action`. Each one absent or
+    /// negative = off, which is the default -- Options rather than plain
+    /// numbers because a `Default` session would otherwise read as "ratio 0",
+    /// and a ratio limit of 0 is reached by every torrent at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ratio: Option<f64>,
+    /// Minutes of seeding, as qBittorrent counts them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seeding_time: Option<i64>,
+    /// Minutes of seeding with nothing uploaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inactive_seeding_time: Option<i64>,
+    /// `stop` (default), `remove` or `remove_with_files`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_limit_action: Option<String>,
     /// Unchoke slots per seeding torrent, read only while `choking` is on.
     /// 0 / absent = 4, negative = unlimited. Live, NOT a dead key.
     #[serde(default)]
@@ -132,6 +163,23 @@ pub struct Session {
     /// Empty = not sent, the tracker uses the address the announce came from.
     #[serde(default)]
     pub announce_ip: String,
+    /// Managed WireGuard (`[network] mode = "wireguard"`): bring a tunnel up
+    /// for this engine and pin it there. See `wgtunnel`.
+    #[serde(default)]
+    pub wireguard_enabled: bool,
+    /// The provider file, by NAME, in `<data_dir>/wireguard`. Never its
+    /// contents: the private key stays out of the config tree.
+    #[serde(default)]
+    pub wireguard_config: String,
+    /// Provider id (`wgtunnel::providers`): decides how the port is forwarded.
+    #[serde(default)]
+    pub wireguard_provider: String,
+    /// The port a provider assigned out of band (AirVPN, PIA, Windscribe).
+    #[serde(default)]
+    pub wireguard_port: u16,
+    /// Empty = the provider's own way; "manual", "off" or "natpmp" override it.
+    #[serde(default)]
+    pub wireguard_port_forward: String,
 }
 
 /// `[network]`: how the engines reach the network, as the Network tab saved it.
@@ -591,6 +639,10 @@ impl Config {
     /// engine without restating the rest.
     pub fn local_engines(&self) -> Vec<LocalEngine> {
         let mut out = self.local_engines_as_written();
+        // A tunnelled engine is pinned to its device and, for a provider that
+        // hands the port out by hand, listens there. Before the port check
+        // below, so a typed-in port that collides is caught like any other.
+        crate::wgtunnel::apply(crate::netmode::current(self), &mut out);
         // A port nobody wrote, or one another engine already has, is given a
         // free one: 4.3 listened on port 0 (a random port no tracker was told
         // about) for a section without `listen_port`, and an extra engine
@@ -661,6 +713,12 @@ impl Config {
             }
             if extra && !agent.session.contains_key("gluetun_port_forward") {
                 session.gluetun_port_forward = false;
+            }
+            // Nor its role's WireGuard tunnel: two engines on one tunnel leave
+            // by one address with one forwarded port, which is what a tunnel
+            // per engine exists to avoid -- and both would claim one device.
+            if extra && !agent.session.contains_key("wireguard_enabled") {
+                session.wireguard_enabled = false;
             }
             let engine = LocalEngine { id: id.clone(), role: agent.role.trim().to_string(), session };
             match out.iter().position(|e| e.id == id) {

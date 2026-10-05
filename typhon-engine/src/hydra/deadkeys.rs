@@ -11,12 +11,15 @@
 //! holds.
 //!
 //! Only keys that are dead for good belong here. A key that a planned change
-//! will wire (queue limits, `inactivity_timeout`) is NOT listed: a warning
-//! telling the operator to delete it would have them delete a setting the next
-//! release reads. The proxy and relay keys (`socks5_outbound_*`,
-//! `announce_proxy`, `announce_ip`, `*_proxy_v2`), the rate caps
-//! (`upload_rate_limit`, `download_rate_limit`), `peer_timeout`, `choking` and
-//! `max_uploads_per_torrent` are read since 4.4 and are live.
+//! will wire (`inactivity_timeout`) is NOT listed: a warning telling the
+//! operator to delete it would have them delete a setting the next release
+//! reads. The proxy and relay keys (`socks5_outbound_*`, `announce_proxy`,
+//! `announce_ip`, `*_proxy_v2`), the rate caps (`upload_rate_limit`,
+//! `download_rate_limit`), `peer_timeout`, `choking`,
+//! `max_uploads_per_torrent`, the queue (`active_seeds` and `active_limit`,
+//! under `queueing = true`) and the share limits (`max_ratio`,
+//! `max_seeding_time`, `max_inactive_seeding_time`, `share_limit_action`) are
+//! read since 4.4.
 
 use toml::Value;
 

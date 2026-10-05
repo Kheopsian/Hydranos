@@ -1160,6 +1160,12 @@ pub struct DhtConfig {
     pub listen_addr: Option<SocketAddr>,
     pub peer_store: Option<PeerStore>,
     pub cancellation_token: Option<CancellationToken>,
+    /// Hydra/Typhon patch: pin the DHT socket to one network device
+    /// (SO_BINDTODEVICE). An engine that leaves by a tunnel must not have its
+    /// DHT leave by the host's default route: every node it talks to would
+    /// learn the host's own address. Linux only; asking for it elsewhere is an
+    /// error rather than an unpinned socket.
+    pub bind_device: Option<String>,
 }
 
 impl DhtState {
@@ -1206,6 +1212,16 @@ impl DhtState {
                         None,
                     );
                 }
+            }
+
+            // Fail rather than run unpinned: see `DhtConfig::bind_device`.
+            if let Some(dev) = config.bind_device.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                socket
+                    .bind_device(Some(dev.as_bytes()))
+                    .with_context(|| format!("cannot pin the DHT socket to device {dev}"))?;
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                anyhow::bail!("cannot pin the DHT socket to device {dev}: not supported on this platform");
             }
 
             let listen_addr = socket
