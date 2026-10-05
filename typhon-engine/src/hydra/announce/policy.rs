@@ -7,6 +7,7 @@
 //! it is checkable without a network.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use super::overrides::{longest_override_key, override_host};
 use super::url::{self, Announce};
@@ -37,6 +38,9 @@ pub struct Policy {
     /// for what it does when set, like `skip_udp`, so a default policy keeps
     /// both families.
     pub no_ipv6: bool,
+    /// How long a race retries a tracker that has not registered the torrent
+    /// yet. Zero = the default window.
+    pub registration_window: Duration,
 }
 
 /// The passkey this tracker should be given, if it is not the one already in

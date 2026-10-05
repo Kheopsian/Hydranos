@@ -35,6 +35,12 @@ impl Session {
     pub fn udp_trackers(&self) -> bool {
         self.enable_udp_trackers.unwrap_or(true)
     }
+
+    /// How long a race keeps retrying, every 5 s, a tracker that answers
+    /// "unregistered torrent". 6 minutes when unset.
+    pub fn registration_retry_minutes(&self) -> u64 {
+        self.registration_retry_minutes.unwrap_or(6)
+    }
 }
 
 /// One engine's section of the config ([race] or [hoard]).
@@ -43,6 +49,8 @@ impl Session {
 /// and is served verbatim by /api/settings, which re-reads it.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Session {
+    #[serde(default)]
+    pub registration_retry_minutes: Option<u64>,
     #[serde(default)]
     pub listen_port: u16,
     #[serde(default)]

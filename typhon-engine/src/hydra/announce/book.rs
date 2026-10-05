@@ -160,20 +160,28 @@ pub fn is_refusal(err: &str) -> bool {
     err.contains("tracker: ")
 }
 
-/// How many times a race retries a tracker that has not registered the
-/// torrent yet, and how often: autobrr's defaults, which trackers already see
-/// from every racing qBittorrent.
-pub const REGISTRATION_ATTEMPTS: u8 = 50;
-pub const REGISTRATION_RETRY: Duration = Duration::from_secs(7);
+/// How often a race retries a tracker that has not registered the torrent
+/// yet, and for how long by default. Read from the code of the clients
+/// trackers already accept: libtorrent 1.2 with `tracker_backoff = 0` retries
+/// a refusing tracker every 5 s with no limit; autobrr retries qBittorrent
+/// every 7 s for 50 attempts (~6 min). Hydranos takes the shorter interval and
+/// the bounded window. Configurable per engine (`registration_retry_minutes`).
+pub const REGISTRATION_RETRY: Duration = Duration::from_secs(5);
+pub const REGISTRATION_WINDOW: Duration = Duration::from_secs(6 * 60);
+
+/// How many refusals fit in a retry window.
+pub fn registration_attempts(window: Duration) -> u8 {
+    (window.as_secs() / REGISTRATION_RETRY.as_secs()).clamp(1, u8::MAX as u64) as u8
+}
 
 /// Whether a race should come back in seconds: some tracker is still refusing
-/// a torrent it has not registered, it has not refused too many times, and
-/// no tracker has registered us (then peers arrive by themselves).
-pub fn registration_pending(book: &[TrackerSlot]) -> bool {
+/// a torrent it has not registered, it has not refused `max_attempts` times,
+/// and no tracker has registered us (then peers arrive by themselves).
+pub fn registration_pending(book: &[TrackerSlot], max_attempts: u8) -> bool {
     !book.iter().any(|s| s.started)
         && book
             .iter()
-            .any(|s| !s.disabled && s.refusals > 0 && s.refusals < REGISTRATION_ATTEMPTS)
+            .any(|s| !s.disabled && s.refusals > 0 && s.refusals < max_attempts)
 }
 
 /// Whether a skipped tracker still counts as "the tier has us" in hoard mode.
@@ -355,19 +363,21 @@ mod tests {
     #[test]
     fn registration_retries_are_bounded_and_end_on_registration() {
         let refused = || Err::<AnnounceResponse, String>("tracker: Unregistered torrent".into());
+        let max = registration_attempts(REGISTRATION_WINDOW);
+        assert_eq!(max, 72, "six minutes at five seconds");
         let mut book = vec![TrackerSlot::default()];
-        assert!(!registration_pending(&book), "nothing refused yet");
+        assert!(!registration_pending(&book, max), "nothing refused yet");
         record(&mut book[0], "started", &refused(), 0);
-        assert!(registration_pending(&book));
-        for i in 1..REGISTRATION_ATTEMPTS as i64 {
+        assert!(registration_pending(&book, max));
+        for i in 1..max as i64 {
             record(&mut book[0], "started", &refused(), i);
         }
-        assert!(!registration_pending(&book), "fifty refusals, then the ordinary schedule");
+        assert!(!registration_pending(&book, max), "the window is spent, then the ordinary schedule");
 
         let mut book = vec![TrackerSlot::default()];
         record(&mut book[0], "started", &refused(), 0);
         record(&mut book[0], "started", &ok(0, None), 7);
-        assert!(!registration_pending(&book), "registered: the swarm finds us");
+        assert!(!registration_pending(&book, max), "registered: the swarm finds us");
         assert_eq!(book[0].refusals, 0);
     }
 
@@ -377,7 +387,7 @@ mod tests {
     fn a_tracker_that_does_not_answer_is_not_retried_in_seconds() {
         let mut book = vec![TrackerSlot::default()];
         record(&mut book[0], "started", &Err("http request: connect refused".into()), 0);
-        assert!(!registration_pending(&book));
+        assert!(!registration_pending(&book, registration_attempts(REGISTRATION_WINDOW)));
     }
 
     /// Events are exempt: `completed` and `stopped` are one-shot, and every

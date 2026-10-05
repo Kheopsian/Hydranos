@@ -332,6 +332,7 @@ impl EngineHost {
                     first.skip_udp = !session.udp_trackers();
                     first.device = session.bind_interface.trim().to_string();
                     first.no_ipv6 = !session.enable_ipv6;
+                    first.registration_window = std::time::Duration::from_secs(session.registration_retry_minutes() * 60);
                     let policy: crate::announce::PolicyHandle =
                         std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(first)));
                     let _ = engine.announce_policy.set(policy.clone());
