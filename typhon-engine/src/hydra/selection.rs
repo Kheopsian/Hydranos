@@ -109,7 +109,9 @@ impl Target {
         match self.agent.strip_prefix("local-") {
             Some(e) => e.to_string(),
             None if self.is_local() => self.mode.clone(),
-            None => self.agent.split_once('-').map(|(_, e)| e.to_string()).unwrap_or_default(),
+            // Only a guess without the node list; `split_remote` is the
+            // authority for a remote row.
+            None => self.agent.rsplit_once('-').map(|(_, e)| e.to_string()).unwrap_or_default(),
         }
     }
 }
@@ -580,15 +582,80 @@ fn enc(s: &str) -> String {
     out
 }
 
-async fn agent_action(c: &Caller, t: &Target, action: &str) -> Outcome {
-    c.simple(
-        Method::POST,
-        &format!("/api/agents/{}/action", enc(&t.agent)),
-        Some(json!({"engine": t.mode, "action": action, "info_hash": t.hash})),
-        &t.hash,
-        "sent",
-    )
-    .await
+/// The node and engine a remote row's `agent` names.
+///
+/// Matched against the declared node names, longest first: `agent` is
+/// `<node>-<engine>` and either part may itself contain a hyphen. 4.3 split
+/// on the first one, so a node named `nas-2` was looked up as `nas`.
+fn split_remote(state: &AppState, agent: &str) -> Option<(crate::store::Node, String)> {
+    let nodes = state.store.lock().ok()?.nodes().ok()?;
+    nodes
+        .into_iter()
+        .filter(|n| agent.len() > n.name.len() + 1 && agent.starts_with(&n.name) && agent.as_bytes()[n.name.len()] == b'-')
+        .max_by_key(|n| n.name.len())
+        .map(|n| {
+            let engine = agent[n.name.len() + 1..].to_string();
+            (n, engine)
+        })
+}
+
+/// One remote row's action, sent to the node that holds it, on its own
+/// routes for that engine's copy.
+///
+/// 4.3 sent these to `/api/agents/:id/action`, a stub that answered and did
+/// nothing, or to this node's own routes, which acted on this node's copy of
+/// the same hash -- or found none.
+async fn remote_action(state: &AppState, t: &Target, action: &Action) -> Outcome {
+    let h = t.hash.as_str();
+    let Some((node, engine)) = split_remote(state, &t.agent) else {
+        return Outcome::failed(h, format!("no declared node holds {}", t.agent));
+    };
+    let mode = if t.mode == "race" { "race" } else { "hoard" };
+    let e = enc(&engine);
+    let (method, path, body) = match action {
+        Action::Category { category, move_files, allow_breaking_hardlinks } => (
+            reqwest::Method::POST,
+            format!("/api/{mode}/torrents/{h}/category?engine={e}"),
+            Some(json!({"category": category, "move_files": move_files, "allow_breaking_hardlinks": allow_breaking_hardlinks})),
+        ),
+        Action::Location { location, allow_breaking_hardlinks } => (
+            reqwest::Method::POST,
+            format!("/api/{mode}/torrents/{h}/location?engine={e}"),
+            Some(json!({"location": location, "allow_breaking_hardlinks": allow_breaking_hardlinks})),
+        ),
+        Action::Reannounce => (reqwest::Method::POST, format!("/api/torrents/{h}/reannounce?engine={e}"), None),
+        Action::Recheck => (reqwest::Method::POST, format!("/api/hoard/torrents/{h}/verify?engine={e}"), None),
+        Action::Pause(p) => (
+            reqwest::Method::POST,
+            format!("/api/engines/{e}/pause"),
+            Some(json!({"hashes": [h], "paused": p})),
+        ),
+        Action::Remove { delete_files } => (
+            reqwest::Method::DELETE,
+            format!("/api/torrents/{h}?delete_files={delete_files}&engine={e}"),
+            None,
+        ),
+        _ => return Outcome::skip("not_here"),
+    };
+    let body = body.map(|b| b.to_string().into_bytes()).unwrap_or_default();
+    match crate::nodes::forward(&node.url, &node.api_key, method, &path, body).await {
+        Ok((status, bytes, _)) if status.is_success() => {
+            let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            if status == reqwest::StatusCode::ACCEPTED {
+                if v.get("kind").and_then(Value::as_str) == Some("graduate") {
+                    return Outcome::ok("graduating");
+                }
+                return Outcome::ok("moving");
+            }
+            Outcome::ok("ok")
+        }
+        Ok((status, bytes, _)) => {
+            let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            let msg = v.get("error").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| status.to_string());
+            Outcome::failed(h, format!("{}: {msg}", node.name))
+        }
+        Err(e) => Outcome::failed(h, format!("{}: {e}", node.name)),
+    }
 }
 
 fn category_of(state: &AppState, hash: &str) -> String {
@@ -602,6 +669,12 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
         Action::Pause(_) => unreachable!("set-based"),
         Action::Pin(_) | Action::Tags { .. } => unreachable!("set-based"),
         Action::Category { .. } | Action::Location { .. } => {
+            // A row from another node is that node's torrent; the local
+            // routes would act on this node's copy of the same hash. Relayed
+            // by `remote_action` once nodes can be driven from here.
+            if !t.is_local() {
+                return remote_action(state, t, action).await;
+            }
             let mode = if t.mode == "race" { "race" } else { "hoard" };
             let (route, body) = match action {
                 Action::Category { category, move_files, allow_breaking_hardlinks } => ("category", json!({
@@ -615,7 +688,16 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
                 })),
                 _ => unreachable!("matched above"),
             };
-            let (s, v) = c.call(Method::POST, &format!("/api/{mode}/torrents/{h}/{route}"), Some(body)).await;
+            // The copy the row is: an extra engine's row named no engine, and
+            // the route fell back to the hoard or race copy of the same hash
+            // -- or answered "torrent not found".
+            let engine_q = t
+                .agent
+                .strip_prefix("local-")
+                .filter(|e| !e.is_empty())
+                .map(|e| format!("?engine={}", enc(e)))
+                .unwrap_or_default();
+            let (s, v) = c.call(Method::POST, &format!("/api/{mode}/torrents/{h}/{route}{engine_q}"), Some(body)).await;
             if s == StatusCode::CONFLICT && v.get("reason").and_then(Value::as_str) == Some("hardlinks") {
                 let files = v.get("hardlinked_files").and_then(Value::as_u64).unwrap_or(0);
                 let bytes = v.get("hardlinked_bytes").and_then(Value::as_u64).unwrap_or(0);
@@ -623,6 +705,9 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
                 return Outcome { key: "needs_consent".into(), error: None, consent: Some((item, files, bytes)) };
             }
             match s {
+                // A graduation changes engine: the torrent stops seeding
+                // while its data is copied. Told apart so the UI can say so.
+                StatusCode::ACCEPTED if v.get("kind").and_then(Value::as_str) == Some("graduate") => Outcome::ok("graduating"),
                 StatusCode::ACCEPTED => Outcome::ok("moving"),
                 s if s.is_success() => Outcome::ok("ok"),
                 s => Outcome::failed(h, error_of(s, &v)),
@@ -630,7 +715,7 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
         }
         Action::Reannounce => {
             if !t.is_local() {
-                return agent_action(c, t, "reannounce").await;
+                return remote_action(state, t, action).await;
             }
             let (s, v) = c.call(Method::POST, &format!("/api/torrents/{h}/reannounce"), None).await;
             let status = v.get("status").and_then(Value::as_str).map(str::to_string);
@@ -641,15 +726,17 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             }
         }
         Action::Recheck => {
-            if t.mode != "hoard" {
-                return Outcome::skip("skipped");
-            }
+            // Every engine's copies: the route checks the copy `engine`
+            // names. 4.3 skipped race rows here.
             if !t.is_local() {
-                return agent_action(c, t, "verify").await;
+                return remote_action(state, t, action).await;
             }
-            c.simple(Method::POST, &format!("/api/hoard/torrents/{h}/verify"), None, h, "ok").await
+            c.simple(Method::POST, &format!("/api/hoard/torrents/{h}/verify?engine={}", enc(&t.engine())), None, h, "ok").await
         }
         Action::Remove { delete_files } => {
+            if !t.is_local() {
+                return remote_action(state, t, action).await;
+            }
             c.simple(
                 Method::DELETE,
                 &format!("/api/torrents/{h}?delete_files={delete_files}&agent={}", enc(&t.agent)),
@@ -776,7 +863,14 @@ async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, ta
             if cancelled(job) {
                 return;
             }
-            let o = agent_action(c, t, if p { "pause" } else { "resume" }).await;
+            let o = remote_action(state, t, &Action::Pause(p)).await;
+            record(job, 1, o);
+        } else if let SetEdit::Category(cat) = &edit {
+            if cancelled(job) {
+                return;
+            }
+            let relabel = Action::Category { category: cat.clone(), move_files: false, allow_breaking_hardlinks: false };
+            let o = remote_action(state, t, &relabel).await;
             record(job, 1, o);
         } else {
             record(job, 1, Outcome::skip("not_here"));
@@ -1202,5 +1296,39 @@ mod tests {
             let j = wait(&s, v["job"].as_str().unwrap()).await;
             assert_eq!(j["tally"][expected], 3, "{j}");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use crate::api::testing::state_from;
+
+    /// A node name with a hyphen is found whole, and the longest declared
+    /// name wins: `nas-2-race` is node `nas-2`, engine `race`, even with a
+    /// node called `nas` declared too. 4.3 split on the first hyphen.
+    #[test]
+    fn a_remote_row_names_its_node_whole() {
+        let s = state_from("remote-split", "");
+        {
+            let store = s.state.store.lock().unwrap();
+            for name in ["nas", "nas-2"] {
+                store
+                    .put_node(&crate::store::Node {
+                        name: name.into(),
+                        url: "http://192.0.2.10:8199".into(),
+                        api_key: "k".into(),
+                        enabled: true,
+                        added_at: 0,
+                    })
+                    .unwrap();
+            }
+        }
+        let (n, e) = split_remote(&s.state, "nas-2-race").expect("found");
+        assert_eq!((n.name.as_str(), e.as_str()), ("nas-2", "race"));
+        let (n, e) = split_remote(&s.state, "nas-vpn-1").expect("found");
+        assert_eq!((n.name.as_str(), e.as_str()), ("nas", "vpn-1"));
+        assert!(split_remote(&s.state, "other-race").is_none());
     }
 }

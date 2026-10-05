@@ -2566,6 +2566,26 @@ impl Store {
     /// which copy they mean. Every other caller knows its engine and must use
     /// `set_category_in`; this one is named for what it does so the choice is
     /// visible at the call site rather than hidden in a WHERE clause.
+    /// Give every torrent labelled `old` the label `new` (a category rename;
+    /// `new` empty clears the label). Returns how many rows changed.
+    pub fn relabel_category(&self, old: &str, new: &str) -> anyhow::Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE torrents SET category = ?2 WHERE category = ?1",
+            rusqlite::params![old, new],
+        )?)
+    }
+
+    /// Which labels the torrents wear, with where they run and live:
+    /// `(category, session, save_path, torrents)`, empty label excluded.
+    pub fn category_usage(&self) -> anyhow::Result<Vec<(String, String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT category, session, save_path, COUNT(*) FROM torrents
+             WHERE category != '' GROUP BY category, session, save_path",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
     pub fn set_category_everywhere(&self, info_hash: &str, category: &str) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE torrents SET category = ?2 WHERE info_hash = ?1",
