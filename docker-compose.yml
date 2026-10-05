@@ -27,9 +27,9 @@ services:
     # environment:
     #   PUID: 1000
     #   PGID: 1000
-    #   # Shutdown flush budget, in seconds (120 by default). Raise it, and
-    #   # stop_grace_period above with it, for several hundred thousand
-    #   # torrents.
+    #   # Shutdown flush budget (120 s by default): 120, 90s, 2m or 1m30s.
+    #   # Raise it, and stop_grace_period above with it, for several hundred
+    #   # thousand torrents. A value it cannot read is logged and ignored.
     #   HYDRANOS_STOP_TIMEOUT: 120
     #   # Log to the console only (`docker logs hydranos`), with no
     #   # /config/hydranos.log. Set to any value to turn it on.
