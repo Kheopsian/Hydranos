@@ -94,8 +94,12 @@ pub fn set_toml_value(doc: &str, section: &str, key: &str, value: &str) -> Resul
         if current != section || trimmed.starts_with('#') {
             continue;
         }
-        let Some(eq) = line.find('=') else { continue };
-        if line[..eq].trim() != key {
+        let Some(eq) = key_end(&line) else { continue };
+        let lhs = line[..eq].trim().to_string();
+        // A quoted key ("tracker.example" = ...) is the same key as the bare
+        // name the UI sends. 4.3 compared the raw text, so the five
+        // host-keyed tracker tables could never be saved: "key not found".
+        if unquote_key(&lhs) != unquote_key(key) {
             continue;
         }
 
@@ -105,7 +109,7 @@ pub fn set_toml_value(doc: &str, section: &str, key: &str, value: &str) -> Resul
             Some(ci) => format!("  {}", after[ci..].trim()),
             None => String::new(),
         };
-        lines[i] = format!("{indent}{key} = {value}{comment}");
+        lines[i] = format!("{indent}{lhs} = {value}{comment}");
         return Ok(lines.join("\n"));
     }
     Err(format!("toml: key {key:?} not found in section {section:?}"))
@@ -167,8 +171,8 @@ pub fn delete_toml_key(doc: &str, section: &str, key: &str) -> String {
             continue;
         }
         if current == section && !line.trim().starts_with('#') {
-            if let Some(eq) = line.find('=') {
-                if line[..eq].trim() == key {
+            if let Some(eq) = key_end(line) {
+                if unquote_key(&line[..eq]) == unquote_key(key) {
                     continue;
                 }
             }
@@ -664,5 +668,45 @@ mod session_key_tests {
     fn an_unknown_engine_changes_nothing() {
         let doc = format!("{DOC}\n[[engine]]\nname = \"vpn1\"\nengine_id = \"vpn1\"\nrole = \"hoard\"\n");
         assert!(set_agent_session_key(&doc, "absent", "listen_port", "1").is_none());
+    }
+}
+
+/// Where a key ends: the first `=` outside a quoted key.
+fn key_end(line: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (None, '"') | (None, '\'') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (None, '=') => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A key as a name: surrounding quotes removed.
+fn unquote_key(k: &str) -> String {
+    let k = k.trim();
+    if k.len() >= 2 && ((k.starts_with('"') && k.ends_with('"')) || (k.starts_with('\'') && k.ends_with('\''))) {
+        k[1..k.len() - 1].to_string()
+    } else {
+        k.to_string()
+    }
+}
+
+#[cfg(test)]
+mod quoted_key_tests {
+    use super::*;
+
+    /// The tracker tables are keyed by quoted host names; the UI names the
+    /// key bare. Both spellings find the line, and the line keeps its own.
+    #[test]
+    fn a_quoted_key_is_found_by_its_bare_name() {
+        let doc = "[announce_passkeys]\n\"tracker.example\" = \"OLD\"\n";
+        let out = set_toml_value(doc, "announce_passkeys", "tracker.example", "\"NEW\"").unwrap();
+        assert!(out.contains("\"tracker.example\" = \"NEW\""), "{out}");
+        let out = set_toml_value(doc, "announce_passkeys", "\"tracker.example\"", "\"NEW\"").unwrap();
+        assert!(out.contains("\"NEW\""));
     }
 }

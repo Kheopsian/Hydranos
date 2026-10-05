@@ -12011,6 +12011,20 @@ async fn post_network_mode(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    // Refused like the race and hoard ports, before anything is written. 4.3
+    // skipped an out-of-range port in silence and answered 200, old value kept.
+    for e in &extras {
+        if let Some(p) = e.get("listen_port").and_then(|v| v.as_i64()) {
+            if !(1..=65535).contains(&p) {
+                let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("the {id} listen port must be between 1 and 65535")})),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     let ok = edit_config(&state, |doc| {
         let mut out = crate::tomledit::set_toml_table(doc, "race", &race_kv)?;
