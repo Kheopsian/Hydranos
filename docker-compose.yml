@@ -1,19 +1,19 @@
-# Minimal single-node (monolith) Hydra using the prebuilt image.
-# First start seeds a default config into ./config and generates an admin login.
-# Log in at http://localhost:8199 with user "admin" and the temporary password:
-#   docker compose logs hydra | grep "temporary admin password"
+# One Hydranos with the prebuilt image.
+# The first start seeds a default config into ./config. Open
+# http://localhost:8199 and create the admin account on the first-run screen
+# (it answers callers on this machine or a private network only).
 services:
-  hydra:
+  hydranos:
     image: ghcr.io/kheopsian/hydranos:latest
-    container_name: hydra
+    container_name: hydranos
     restart: unless-stopped
-    # Shutdown budget. On SIGTERM Hydra saves its store, then stops the two
-    # engines one after the other, each with its own timeout (10s by default,
-    # HYDRANOS_STOP_TIMEOUT below). Docker's own default is 10s for the whole
-    # container, which is not enough: it would SIGKILL mid-flush and leave the
-    # resume data stale, so a restart re-checks pieces that were already done.
-    # Keep this above 2 x HYDRANOS_STOP_TIMEOUT.
-    stop_grace_period: 30s
+    # Shutdown budget. On SIGTERM Hydranos tells the trackers it is leaving
+    # (5 s at most), then flushes every engine's resume data in parallel within
+    # HYDRANOS_STOP_TIMEOUT (120 s by default). Docker's own default is 10 s,
+    # which would SIGKILL mid-flush and leave the resume data stale, so a
+    # restart re-checks pieces that were already done. Keep this above
+    # HYDRANOS_STOP_TIMEOUT + 5 s.
+    stop_grace_period: 150s
     ulimits:
       nofile: { soft: 1048576, hard: 1048576 }
     ports:
@@ -27,20 +27,16 @@ services:
     # environment:
     #   PUID: 1000
     #   PGID: 1000
-    #   # Per-engine shutdown budget. The default 10s fits an ordinary
-    #   # instance; raise it (and stop_grace_period above with it) if you hold
-    #   # several hundred thousand torrents, where the resume sweep is longer.
-    #   HYDRANOS_STOP_TIMEOUT: 10s
-    #   # Send the log stream to stdout (`docker logs hydra`) instead of
-    #   # /config/hydra.log. Any value but 0/false/no/off turns it on. Mind the
-    #   # logging block below: on stdout it is Docker, not Hydra, that caps the
-    #   # log, and the default json-file driver caps nothing.
+    #   # Shutdown flush budget, in seconds (120 by default). Raise it, and
+    #   # stop_grace_period above with it, for several hundred thousand
+    #   # torrents.
+    #   HYDRANOS_STOP_TIMEOUT: 120
+    #   # Log to the console only (`docker logs hydranos`), with no
+    #   # /config/hydranos.log. Set to any value to turn it on.
     #   HYDRANOS_LOG_STDOUT: 1
-    # The file mirror rotates itself at 128 MiB x 5. Nothing rotates the Docker
-    # json-file driver unless you say so, and this is a chatty log -- one line
-    # per inbound peer connection, which reached 41 GB in production before the
-    # file mirror was capped. Same ceiling here, so HYDRANOS_LOG_STDOUT cannot
-    # bring that back.
+    # /config/hydranos.log rotates itself at 128 MiB, four old files kept.
+    # Nothing rotates Docker's json-file driver unless you say so, and this is
+    # a chatty log -- one line per inbound peer connection. Same ceiling here.
     logging:
       driver: json-file
       options:

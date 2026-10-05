@@ -18,7 +18,8 @@ TOKEN=""
 NAME="$(hostname -s 2>/dev/null || hostname)"
 PORT="8199"
 DIR="/opt/hydranos"
-IMAGE="ghcr.io/kheopsian/hydranos:latest"
+CONTAINER="hydranos"
+IMAGE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -27,6 +28,8 @@ while [ $# -gt 0 ]; do
         --name)        NAME="$2";        shift 2 ;;
         --port)        PORT="$2";        shift 2 ;;
         --dir)         DIR="$2";         shift 2 ;;
+        --container)   CONTAINER="$2";   shift 2 ;;
+        --image)       IMAGE="$2";       shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -44,6 +47,12 @@ SELF_IP=$(ip route get "$(getent hosts "$controller_host" | awk '{print $1; exit
 [ -n "${SELF_IP:-}" ] || { echo "cannot work out which address to publish; pass --name and edit the node afterwards" >&2; exit 1; }
 
 API_KEY=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+
+# The node runs the controller's version, not whatever :latest is today: a
+# re-run months later must not upgrade one node of the fleet behind the
+# operator's back. HYDRANOS_VERSION_PIN overrides it.
+CTRL_VER=$(curl -fsS -m 10 "$REGISTER_TO/health" 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1)
+VER="${HYDRANOS_VERSION_PIN:-${CTRL_VER:+v$CTRL_VER}}"
 
 echo "==> node   : $NAME"
 echo "==> address: $SELF_IP:$PORT"
@@ -75,15 +84,30 @@ fi
 
 if command -v docker >/dev/null 2>&1; then
     echo "==> installing with docker"
-    docker rm -f hydranos >/dev/null 2>&1 || true
-    docker run -d --name hydranos --restart unless-stopped --network host \
+    [ -n "$IMAGE" ] || IMAGE="ghcr.io/kheopsian/hydranos:${VER:-latest}"
+    echo "==> image  : $IMAGE"
+    # Only a container this script made is replaced. 4.3 ran `docker rm -f
+    # hydranos` whatever it was -- on the controller's own machine, that was
+    # the controller.
+    if docker ps -aq -f "name=^${CONTAINER}\$" | grep -q .; then
+        if [ "$(docker inspect -f '{{index .Config.Labels "io.hydranos.enrolled"}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
+            docker rm -f "$CONTAINER" >/dev/null
+        else
+            echo "a container named $CONTAINER already exists and was not made by this script;" >&2
+            echo "pass --container <another-name>, or remove it yourself" >&2
+            exit 1
+        fi
+    fi
+    docker run -d --name "$CONTAINER" --label io.hydranos.enrolled=true --restart unless-stopped --network host \
         -v "$DIR:/configs" -v "$DIR/data:/data" \
         "$IMAGE" --config /configs/default.toml >/dev/null
 else
     echo "==> docker not found, installing the static binary"
+    # The names the release publishes: hydranos-<tag>-linux-amd64.tar.gz.
+    # 4.3 asked for x86_64-unknown-linux-musl, which no release has.
     case "$(uname -m)" in
-        x86_64|amd64)  ARCH="x86_64-unknown-linux-musl" ;;
-        aarch64|arm64) ARCH="aarch64-unknown-linux-musl" ;;
+        x86_64|amd64)  ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
         *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
     esac
     # The release tarballs are built against musl, so the binary carries its own
@@ -92,7 +116,7 @@ else
     # be spelled without knowing it. This asked for hydranos-$ARCH.tar.gz,
     # which no release has ever published: the binary install path answered
     # 404 from the day it was written. The tag comes from the API first.
-    VER="${HYDRANOS_VERSION_PIN:-$(curl -fsSL https://api.github.com/repos/Kheopsian/Hydranos/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)}"
+    [ -n "$VER" ] || VER="$(curl -fsSL https://api.github.com/repos/Kheopsian/Hydranos/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
     [ -n "$VER" ] || { echo "could not resolve the latest release tag" >&2; exit 1; }
     URL="https://github.com/Kheopsian/Hydranos/releases/download/$VER/hydranos-$VER-linux-$ARCH.tar.gz"
     echo "==> fetching $URL"
@@ -141,7 +165,7 @@ while [ $i -lt 60 ]; do
     if curl -fsS -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then break; fi
     i=$((i + 1)); sleep 1
 done
-[ $i -lt 60 ] || { echo "the node did not come up; look at: docker logs hydranos" >&2; exit 1; }
+[ $i -lt 60 ] || { echo "the node did not come up; look at: docker logs $CONTAINER" >&2; exit 1; }
 
 echo "==> registering with $REGISTER_TO"
 body=$(printf '{"token":"%s","name":"%s","url":"http://%s:%s","api_key":"%s"}' \

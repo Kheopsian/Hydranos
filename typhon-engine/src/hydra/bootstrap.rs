@@ -53,7 +53,7 @@ pub async fn setup_password(
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
                 "error": "first-run setup only answers a local caller; \
-                          use `hydra reset-password` from the host"
+                          run `hydranos reset-password <password>` on the host"
             })),
         )
             .into_response();
