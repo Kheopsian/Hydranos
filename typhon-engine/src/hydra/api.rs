@@ -344,6 +344,19 @@ fn query_param(query: &str, name: &str) -> Option<String> {
     None
 }
 
+/// One qBittorrent parameter, from the query string or the form body.
+///
+/// qBittorrent reads both, and clients pick either: cross-seed sends every
+/// call as a POST form. A shim route that only looked at the query got an
+/// empty `hash` from it, answered 404, and cross-seed saw a client with no
+/// torrents at all. An empty value counts as absent, so `?hash=` on the URL
+/// does not shadow the real one in the body.
+fn shim_param(query: &str, body: &str, name: &str) -> Option<String> {
+    query_param(query, name)
+        .filter(|v| !v.is_empty())
+        .or_else(|| query_param(body, name).filter(|v| !v.is_empty()))
+}
+
 /// 400 with a message, the shape every other refusal in this file uses.
 fn bad_request(msg: &str) -> Response {
     (
@@ -7753,11 +7766,7 @@ async fn qbit_torrents_info(
     // The route answers any verb, and qBittorrent takes these either on the
     // query string or as a POST form, so both are read. On a GET the body is
     // empty and the second lookup costs nothing.
-    let param = |name: &str| {
-        query_param(&query, name)
-            .filter(|v| !v.is_empty())
-            .or_else(|| query_param(&body, name).filter(|v| !v.is_empty()))
-    };
+    let param = |name: &str| shim_param(&query, &body, name);
 
     let filter = param("filter").unwrap_or_else(|| "all".to_string());
     let category = param("category");
@@ -8229,13 +8238,14 @@ async fn qbit_torrent_files(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
+    body: String,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
     let _ = cfg;
 
-    let hash = query_param(&query, "hash").unwrap_or_default();
+    let hash = shim_param(&query, &body, "hash").unwrap_or_default();
     let Some((_, torrent)) = find_torrent(&state, &hash) else {
         return not_found();
     };
@@ -8245,17 +8255,13 @@ async fn qbit_torrent_files(
     let piece_len = torrent.meta.piece_length.max(1) as u64;
     let complete = torrent.bytes_left() == 0;
     let picker = torrent.picker.get().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
-    let mut offset = 0u64;
     let files: Vec<serde_json::Value> = torrent
         .meta
         .files
         .iter()
         .enumerate()
         .map(|(index, f)| {
-            let len = f.length as u64;
-            let first = offset / piece_len;
-            let last = if len == 0 { first } else { (offset + len - 1) / piece_len };
-            offset += len;
+            let (first, last) = file_piece_range(f.offset, f.length, piece_len);
             let progress = if complete || picker.is_none() {
                 1.0
             } else {
@@ -8267,7 +8273,7 @@ async fn qbit_torrent_files(
                 "availability": 1,
                 "index": index,
                 "is_seed": complete,
-                "name": f.path.to_string_lossy(),
+                "name": qbit_file_name(&torrent.meta, &f.path),
                 "piece_range": [first, last],
                 "priority": 1,
                 "progress": progress,
@@ -8278,6 +8284,64 @@ async fn qbit_torrent_files(
     Json(files).into_response()
 }
 
+/// First and last piece a file touches.
+///
+/// From the file's own offset in the stream, not a running sum of the listed
+/// lengths: BEP 47 padding files are dropped from `meta.files` but still take
+/// room in the stream, so a running sum drifts back by every pad before it.
+fn file_piece_range(offset: u64, len: u64, piece_len: u64) -> (u64, u64) {
+    let first = offset / piece_len;
+    let last = if len == 0 { first } else { (offset + len - 1) / piece_len };
+    (first, last)
+}
+
+/// A file's name as qBittorrent gives it: relative to the save path, so a
+/// multi-file torrent's files carry the torrent's folder in front.
+///
+/// cross-seed matches these names against the files of the torrent it wants
+/// to inject; without the folder every multi-file candidate looked like a
+/// different layout.
+fn qbit_file_name(meta: &typhon_engine::torrent::meta::TorrentMeta, path: &std::path::Path) -> String {
+    let rel = if meta.multi_file {
+        std::path::Path::new(&meta.name).join(path)
+    } else {
+        path.to_path_buf()
+    };
+    // qBit answers with forward slashes on every platform. Joined component by
+    // component rather than by replacing '\\': on Linux a backslash is a legal
+    // character inside a file name.
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// One torrent's `.torrent`, qBittorrent's `torrents/export`.
+///
+/// Served from the store like the native route, so the info dict is the one
+/// that was added and the info hash still matches it.
+async fn qbit_torrent_export(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let hash = shim_param(&query, &body, "hash").unwrap_or_default().to_lowercase();
+    let blob = {
+        let store = state.store.lock().unwrap();
+        store.torrent_blob(&hash).ok().flatten()
+    };
+    match blob {
+        Some(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/x-bittorrent")],
+            bytes,
+        )
+            .into_response(),
+        None => not_found(),
+    }
+}
 
 /// One torrent's properties panel, qBittorrent shape.
 ///
@@ -8289,13 +8353,14 @@ async fn qbit_torrent_properties(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
+    body: String,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
     let _ = cfg;
 
-    let hash = query_param(&query, "hash").unwrap_or_default();
+    let hash = shim_param(&query, &body, "hash").unwrap_or_default();
     let Some((engine_id, torrent)) = find_torrent(&state, &hash) else {
         return not_found();
     };
@@ -8362,6 +8427,7 @@ async fn qbit_torrent_trackers(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
+    body: String,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
@@ -8384,8 +8450,13 @@ async fn qbit_torrent_trackers(
     // nothing else, whatever the torrent: a client asking "who is this
     // announcing to" got an answer that was the same for every torrent in the
     // catalogue, and looked like a torrent with no trackers at all.
-    let hash = query_param(&query, "hash").unwrap_or_default().to_lowercase();
-    if let Some((_, torrent)) = find_torrent(&state, &hash) {
+    let hash = shim_param(&query, &body, "hash").unwrap_or_default().to_lowercase();
+    let Some((_, torrent)) = find_torrent(&state, &hash) else {
+        // qBit answers an unknown hash with 404, not with an empty list: a
+        // 200 here read as "this torrent has no trackers".
+        return not_found();
+    };
+    {
         let last_error = torrent
             .last_announce_error
             .lock()
@@ -11562,6 +11633,64 @@ async fn post_qbit_import_start(
     Json(serde_json::json!({"job_id": job_id})).into_response()
 }
 
+/// Run the failed torrents of the last import again, without asking for the
+/// qBittorrent password a second time: the finished job kept what it needs.
+///
+/// The kit is TAKEN from the old job, so the password lives no longer than
+/// one retry. Put back if the retry cannot start, so a typo in the network
+/// does not cost the list.
+async fn post_import_retry(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    _body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let Some((prev_id, prev)) = latest_import(&state) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no import to retry"}))).into_response();
+    };
+    if prev.running() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("an import is already running ({prev_id})")})),
+        )
+            .into_response();
+    }
+    let Some(kit) = prev.retry.lock().unwrap().take() else {
+        return bad_request("the last import has nothing left to retry");
+    };
+    let put_back = |kit: crate::importer::RetryKit| *prev.retry.lock().unwrap() = Some(kit);
+    let qbit = match &kit.creds {
+        Some(creds) => match crate::importer::Qbit::login(creds).await {
+            Ok(q) => Some(q),
+            Err(e) => {
+                put_back(kit);
+                return bad_request(&e);
+            }
+        },
+        None => None,
+    };
+    let (job_id, progress) = match import_begin(&state) {
+        Ok(x) => x,
+        Err(resp) => {
+            put_back(kit);
+            return resp;
+        }
+    };
+    let n = kit.cands.len();
+    tracing::info!(job = %job_id, from = %prev_id, torrents = n, "import retry started");
+    tokio::spawn(crate::importer::run_job(
+        kit.cands,
+        qbit,
+        kit.choices,
+        progress,
+        import_categories(&state),
+        import_add(&state),
+    ));
+    Json(serde_json::json!({"job_id": job_id, "torrents": n})).into_response()
+}
+
 #[derive(serde::Deserialize)]
 struct TransmissionReq {
     #[serde(default)]
@@ -13095,6 +13224,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/restart", axum::routing::post(post_restart))
         .route("/api/settings/reset", axum::routing::post(post_settings_reset))
         .route("/api/import/qbit/start", axum::routing::post(post_qbit_import_start))
+        .route("/api/import/retry", axum::routing::post(post_import_retry))
         .route("/api/import/transmission/start", axum::routing::post(post_transmission_import_start))
         .route("/api/settings/restart", axum::routing::post(post_settings_restart))
         .route("/api/startup-pause/release", axum::routing::post(post_startup_release))
@@ -13165,8 +13295,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hoard/download-slots", get(get_download_slots).post(download_slots_write).delete(download_slots_write))
         .route("/api/race/choking", get(get_race_choking))
         .route("/api/import/qbit/status", get(get_qbit_import_status))
-        .route("/api/v2/torrents/categories", get(qbit_categories))
-        .route("/api/v2/torrents/tags", get(qbit_tags))
+        // Any verb: cross-seed sends every call, reads included, as a POST.
+        .route("/api/v2/torrents/categories", axum::routing::any(qbit_categories))
+        .route("/api/v2/torrents/tags", axum::routing::any(qbit_tags))
         .route("/api/v2/app/version", axum::routing::any(qbit_version))
         .route("/api/v2/app/webapiVersion", axum::routing::any(qbit_webapi_version))
         .route("/api/v2/app/buildInfo", axum::routing::any(qbit_build_info))
@@ -13176,6 +13307,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/torrents/files", axum::routing::any(qbit_torrent_files))
         .route("/api/v2/torrents/trackers", axum::routing::any(qbit_torrent_trackers))
         .route("/api/v2/torrents/properties", axum::routing::any(qbit_torrent_properties))
+        .route("/api/v2/torrents/export", axum::routing::any(qbit_torrent_export))
         .route("/api/torrents/:info_hash/files", get(get_torrent_files))
         .route("/api/torrents/:info_hash/torrent", get(get_torrent_file))
         .route("/api/torrents/:info_hash/peers", axum::routing::post(post_torrent_peers))
@@ -15423,15 +15555,51 @@ mod more_route_tests {
         r_qbit_build_info => qbit_build_info,
         r_qbit_preferences => qbit_preferences,
         r_qbit_transfer_info => qbit_transfer_info,
-        r_qbit_torrent_files => qbit_torrent_files,
-        r_qbit_torrent_properties => qbit_torrent_properties,
-        r_qbit_torrent_trackers => qbit_torrent_trackers,
         r_get_fs_browse => get_fs_browse,
         r_post_node_enrol => post_node_enrol,
         r_clear_download_slots => clear_download_slots,
         r_hoard_pause_all => hoard_pause_all,
         r_hoard_resume_all => hoard_resume_all,
         r_download_slots_write => download_slots_write,
+    );
+
+    /// The same, for the shim routes that also read a form body: cross-seed
+    /// sends their parameters there.
+    macro_rules! read_routes_with_body {
+        ($($test_name:ident => $name:ident),+ $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $test_name() {
+                    let s = with_key(concat!("r2b-", stringify!($name)));
+                    let refused = super::$name(
+                        State(s.state.clone()), RawQuery(None), HeaderMap::new(), String::new(),
+                    )
+                    .await;
+                    assert_eq!(
+                        refused.status(),
+                        StatusCode::UNAUTHORIZED,
+                        concat!(stringify!($name), " must refuse a caller with no key")
+                    );
+                    let allowed = super::$name(
+                        State(s.state.clone()), RawQuery(None), keyed(KEY), String::new(),
+                    )
+                    .await;
+                    assert!(
+                        allowed.status().is_success() || allowed.status().is_client_error(),
+                        concat!(stringify!($name), " answered {:?}"),
+                        allowed.status()
+                    );
+                }
+            )+
+        };
+    }
+
+    read_routes_with_body!(
+        r_qbit_torrent_files => qbit_torrent_files,
+        r_qbit_torrent_properties => qbit_torrent_properties,
+        r_qbit_torrent_trackers => qbit_torrent_trackers,
+        r_qbit_torrent_export => qbit_torrent_export,
+        r_post_import_retry => post_import_retry,
     );
 
     gate_only!(
@@ -18938,5 +19106,167 @@ mod delete_spares_shared_files_tests {
 
         remove_one_torrent(&s.state, &upload, &sessions, "", true).expect("upload removed");
         assert!(!file.exists(), "nothing reads it any more: deleting with files deletes it");
+    }
+}
+
+/// cross-seed against the qBit shim, through the real router.
+///
+/// cross-seed sends every call as a POST form; 4.3 read `hash` from the query
+/// string only, answered 404, and cross-seed reported "all 0 torrents".
+#[cfg(test)]
+mod qbit_shim_post_tests {
+    use super::testing::*;
+    use super::*;
+    use tower::ServiceExt;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn bstr(s: &str) -> String {
+        format!("{}:{s}", s.len())
+    }
+
+    /// A multi-file torrent whose second file sits behind a BEP 47 pad: the
+    /// pad is dropped from the file list but still takes room in the stream.
+    fn multi_file_bytes() -> Vec<u8> {
+        let file = |attr: &str, len: u64, path: &[&str]| {
+            let mut f = String::from("d");
+            if !attr.is_empty() {
+                f += &format!("4:attr{}", bstr(attr));
+            }
+            f += &format!("6:lengthi{len}e4:pathl");
+            for p in path {
+                f += &bstr(p);
+            }
+            f + "ee"
+        };
+        let files = [
+            file("", 10_000, &["a.mkv"]),
+            file("p", 6_384, &[".pad", "6384"]),
+            file("", 20_000, &["b.mkv"]),
+        ]
+        .concat();
+        let mut out = format!(
+            "d4:infod5:filesl{files}e4:name{}12:piece lengthi16384e6:pieces60:",
+            bstr("Show S02")
+        )
+        .into_bytes();
+        out.extend_from_slice(&[0u8; 60]);
+        out.extend_from_slice(b"ee");
+        out
+    }
+
+    fn single_file_bytes() -> Vec<u8> {
+        let mut out = format!(
+            "d4:infod6:lengthi16384e4:name{}12:piece lengthi16384e6:pieces20:",
+            bstr("solo.mkv")
+        )
+        .into_bytes();
+        out.extend_from_slice(&[0u8; 20]);
+        out.extend_from_slice(b"ee");
+        out
+    }
+
+    fn populated(tag: &str, bytes: &[u8]) -> (TestState, String) {
+        let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (hash, _) = add_torrent_bytes(&s.state, bytes, "", "/tmp", "fr", true, true, "race")
+            .expect("added");
+        (s, hash)
+    }
+
+    async fn call(s: &TestState, method: &str, uri: &str, form: &str) -> (StatusCode, Vec<u8>) {
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("X-API-Key", KEY)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(form.to_string()))
+            .unwrap();
+        let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, bytes.to_vec())
+    }
+
+    fn json(bytes: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(bytes).expect("json")
+    }
+
+    /// ⭐⭐ The bug as cross-seed met it: hash in the body, nothing on the URL.
+    #[tokio::test]
+    async fn the_detail_routes_read_the_hash_from_a_post_form() {
+        let (s, hash) = populated("shim-post-detail", &multi_file_bytes());
+        let form = format!("hash={hash}");
+        for route in ["files", "properties", "trackers"] {
+            let (status, _) = call(&s, "POST", &format!("/api/v2/torrents/{route}"), &form).await;
+            assert_eq!(status, StatusCode::OK, "POST torrents/{route} with the hash in the body");
+        }
+        // The query string still works, as it did.
+        let (status, _) = call(&s, "GET", &format!("/api/v2/torrents/files?hash={hash}"), "").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_hash_is_a_404_on_every_detail_route() {
+        let (s, _) = populated("shim-post-404", &multi_file_bytes());
+        let form = format!("hash={}", "ab".repeat(20));
+        for route in ["files", "properties", "trackers", "export"] {
+            let (status, _) = call(&s, "POST", &format!("/api/v2/torrents/{route}"), &form).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "torrents/{route}: a 200 here reads as an empty torrent");
+        }
+    }
+
+    /// qBit names a multi-file torrent's files from the save path, folder
+    /// first; cross-seed compares those names to its candidate's.
+    #[tokio::test]
+    async fn files_carry_the_torrent_folder_and_the_padded_piece_range() {
+        let (s, hash) = populated("shim-files-layout", &multi_file_bytes());
+        let (_, body) = call(&s, "POST", "/api/v2/torrents/files", &format!("hash={hash}")).await;
+        let files = json(&body);
+        let names: Vec<&str> = files.as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["Show S02/a.mkv", "Show S02/b.mkv"], "the pad is not a file");
+        // b.mkv starts at 16384 (10000 + the 6384 pad), i.e. at piece 1, and
+        // runs to byte 36383, piece 2. A running sum of the listed lengths
+        // put it at 10000, piece 0.
+        assert_eq!(files[1]["piece_range"], serde_json::json!([1, 2]));
+        assert_eq!(files[0]["piece_range"], serde_json::json!([0, 0]));
+    }
+
+    #[tokio::test]
+    async fn a_single_file_torrent_is_named_without_a_folder() {
+        let (s, hash) = populated("shim-files-single", &single_file_bytes());
+        let (_, body) = call(&s, "POST", "/api/v2/torrents/files", &format!("hash={hash}")).await;
+        assert_eq!(json(&body)[0]["name"], "solo.mkv");
+    }
+
+    #[tokio::test]
+    async fn export_returns_the_torrent_as_it_was_added() {
+        let bytes = multi_file_bytes();
+        let (s, hash) = populated("shim-export", &bytes);
+        for (method, uri, form) in [
+            ("POST", "/api/v2/torrents/export".to_string(), format!("hash={hash}")),
+            ("GET", format!("/api/v2/torrents/export?hash={}", hash.to_uppercase()), String::new()),
+        ] {
+            let (status, body) = call(&s, method, &uri, &form).await;
+            assert_eq!(status, StatusCode::OK, "{method} export");
+            assert_eq!(body, bytes, "{method}: byte-identical, so the info hash still matches");
+        }
+    }
+
+    /// cross-seed reads categories with a POST too: a GET-only route was a 405.
+    #[tokio::test]
+    async fn categories_and_tags_answer_a_post() {
+        let (s, _) = populated("shim-post-lists", &single_file_bytes());
+        for route in ["categories", "tags"] {
+            let (status, _) = call(&s, "POST", &format!("/api/v2/torrents/{route}"), "").await;
+            assert_eq!(status, StatusCode::OK, "POST torrents/{route}");
+        }
+    }
+
+    #[test]
+    fn shim_param_prefers_a_non_empty_query_then_the_body() {
+        assert_eq!(shim_param("hash=aa", "hash=bb", "hash").as_deref(), Some("aa"));
+        assert_eq!(shim_param("hash=", "hash=bb", "hash").as_deref(), Some("bb"));
+        assert_eq!(shim_param("", "category=a%20b", "category").as_deref(), Some("a b"));
+        assert_eq!(shim_param("", "", "hash"), None);
     }
 }

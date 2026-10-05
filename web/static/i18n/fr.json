@@ -921,5 +921,11 @@
   "none of these (NOT)": "aucune de ces conditions (NON)",
   "copy hardlinked files across disks anyway (breaks the link, uses the space twice)": "copier quand même les fichiers hardlinkés d'un disque à l'autre (casse le lien, double l'espace)",
   "Moves the data as Set location does, category unchanged. Hardlinked files are not copied across disks unless the box is ticked: such a torrent is reported as failed.": "Déplace les données comme « Définir l'emplacement », sans changer la catégorie. Les fichiers hardlinkés ne sont pas copiés d'un disque à l'autre sauf si la case est cochée : un tel torrent est signalé en échec.",
-  "Cancel this job? A waiting job is dropped. A move to another engine stops after the current file and is put back as it was; another running move cannot be interrupted and finishes.": "Annuler ce job ? Un job en attente est abandonné. Un déplacement vers un autre engine s'arrête après le fichier en cours et tout est remis comme avant ; un autre déplacement en cours ne peut pas être interrompu et se termine."
+  "Cancel this job? A waiting job is dropped. A move to another engine stops after the current file and is put back as it was; another running move cannot be interrupted and finishes.": "Annuler ce job ? Un job en attente est abandonné. Un déplacement vers un autre engine s'arrête après le fichier en cours et tout est remis comme avant ; un autre déplacement en cours ne peut pas être interrompu et se termine.",
+  "{done}/{total} · {complete} complete, data found · {check} to check or download · {failed} failed": "{done}/{total} · {complete} complets, données trouvées · {check} à vérifier ou télécharger · {failed} en échec",
+  "{n} added stopped": "{n} ajoutés à l'arrêt",
+  "{n} torrents were added stopped, as chosen: nothing announces until you start them from the list.": "{n} torrents ont été ajoutés à l'arrêt, comme demandé : rien n'est annoncé tant que vous ne les démarrez pas depuis la liste.",
+  "Retry failed": "Réessayer les échecs",
+  "Retry the {n} failed": "Réessayer les {n} échecs",
+  "…and {n} more, in the log.": "…et {n} de plus, dans le journal."
 }
