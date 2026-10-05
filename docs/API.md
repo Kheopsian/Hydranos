@@ -1,155 +1,346 @@
-# Hydranos — API HTTP
+# REST API
 
-Deux interfaces sur le même daemon. **Lis ça avant de deviner un endpoint.**
+*Applies to Hydranos 4.3.1.*
 
-## Instances
-| Compte | URL | Container |
+For scripting Hydranos: every native API route (`/api/*`) in 4.3.1, which work, which are stubs, `curl` examples. The qBittorrent-compatible API (`/api/v2/*`) is documented on [qBittorrent Shim and Automation](https://github.com/Kheopsian/Hydranos/wiki/qBittorrent-Shim-and-Automation) (changes in 4.3.1: *qBittorrent shim* below), and the MCP endpoint on [MCP Server](https://github.com/Kheopsian/Hydranos/wiki/MCP-Server).
+
+## Basics
+
+### Base URL and format
+
+One port, **8199** by default (`[daemon] api_port`), serves the web UI, `/api`, the qBittorrent shim and `/mcp`. Examples use:
+
+```bash
+export HY=http://hydranos.example.org:8199
+export KEY=YOUR_API_KEY
+```
+
+Bodies and answers are JSON unless a row says otherwise. Responses over 32 bytes are gzip-compressed when the client accepts it (`curl --compressed`).
+
+### Authentication
+
+There is one credential, the **API key** (`[daemon] api_key`, 48 hex characters, generated at first start). Where to find it, how to rotate it and how to expose Hydranos safely: [Security and Access](https://github.com/Kheopsian/Hydranos/wiki/Security-and-Access).
+
+| How the key travels | Example | Notes |
 |---|---|---|
-| A (prod, Kheopsian) | `http://localhost:8199` | `hydra-go` (net=container:styx) |
-| B (compte 2, pur-seeder) | `http://localhost:8299` | `hydra-b` |
+| `X-Api-Key` header | `-H "X-Api-Key: $KEY"` | The normal way. |
+| `apikey` query parameter | `"$HY/api/status?apikey=$KEY"` | For clients that cannot set headers. Lands in proxy logs. |
+| `SID` session cookie | from `POST /api/v2/auth/login` | Form `username` + `password` (admin password or API key). Unlocks the **whole** native API. Expires after 3600 s idle; lost on restart. |
+| `Authorization: Bearer` | `-H "Authorization: Bearer $KEY"` | Accepted by `/mcp` **only**. |
 
-## Auth
-- **Natif `/api/*`** : header `X-API-Key: change-me-in-production`
-- **Shim qBit `/api/v2/*`** : stateless. `POST /api/v2/auth/login` (n'importe quels creds → cookie `SID`). La plupart des calls passent même sans.
+`POST /api/login` (JSON `{"username","password"}`) does **not** set a cookie: it returns `{"api_key": "..."}`, which the web UI then sends as `X-Api-Key`. An empty `api_key` in the config refuses every caller.
 
----
+**Refusal shapes** (test the status code, not the text):
 
-## ⭐ API NATIVE `/api/*` — LA vraie interface, à utiliser par défaut
-Auth = `X-API-Key`.
+| Where | Status | Body |
+|---|---|---|
+| `/api/*` (almost every route) | `401` | `{"error":"Invalid or missing API key"}` |
+| `/api/selection/*` | `401` | `{"error":"unauthorized"}` |
+| `/api/v2/*` (qBittorrent shim) | `403` | plain text `Forbidden.` (Sonarr and Radarr expect 403 before login) |
+| `/mcp` | `401` | JSON as above + header `WWW-Authenticate: Bearer` |
+| `POST /api/nodes/register` | `401` | `{"error":"enrolment token unknown, already used, or expired"}` |
+| `POST /api/setup` | `409` once an admin exists; `403` if the caller is not on loopback or a private network | JSON |
 
-**Torrents**
-- `POST /api/torrents/upload` — **ajoute un NOUVEAU torrent à DL+seed**. multipart : `mode=hoard|race`, `save_path`, `category`, fichier `.torrent`. (Le farm sw_fill l'utilise en `mode=hoard`.)
-- `POST /api/torrents` — add (magnet/url).
-- Options par-add, communes à `POST /api/torrents` (JSON) et `POST /api/torrents/upload` (multipart) :
-  - `create_subfolder` (bool, **absent = défaut daemon `create_torrent_folder`**) : met la charge dans son propre sous-dossier. Sans effet sur un multi-file, qui porte déjà son dossier ; hoard seulement (race est un répertoire de staging plat).
-  - `skip_recheck` (bool, défaut `false`) : ajoute en seed mode. ⚠️ **L'add est REFUSÉ** si un fichier déclaré manque ou n'a pas la bonne taille sous `<engine save_path>/<info.name si multi-file>/<chemin BEP-3>` — le seed mode ne retombe PAS sur un téléchargement.
-- `GET /api/torrents/add-defaults` — `{"create_subfolder":bool,"skip_recheck":false}`, ce que le formulaire d'ajout pré-coche.
-- **Sélection** — un objet commun à toutes les actions groupées : soit `{"items":[{"hash","agent","mode"}]}` (lignes choisies), soit `{"filter":"category=movies&tracker_not=x","view":"hoard","exclude":[{"hash","agent"}],"expect":N}` (Ctrl+A). `filter` = les paramètres de filtre de `/api/<view>/page` et eux seuls (`search`, `category[_not]`, `tag[_not]`, `tracker[_not]`, `error_class[_not]`, `state`) ; toute autre clé → 400. `filter: ""` = toute la liste. `expect` obligatoire avec un filtre : si le filtre correspond maintenant à PLUS de torrents → **409** `{"reason":"grew","count","expected"}`. Sélection vide → 400 (jamais « tout »).
-- `POST /api/selection/:action` — `{"selection":{…},"params":{…}}` → **202** `{"job","total"}`. Actions : `stop`, `start`, `pin`, `unpin`, `tags` (`{tags,op:add|remove}`), `category` (`{category,move_files,allow_breaking_hardlinks}`), `location` (`{location,allow_breaking_hardlinks}`), `reannounce`, `recheck`, `remove` (`{delete_files}`), `copy` / `move-engine` (`{engine}`), `handoff` (`{node,engine,then:keep|remove}`), `node-fetch` (`{node,engine,from_engine}`), `node-move` (`{node,engine}`). Chaque torrent passe par la route unitaire existante, en interne ; stop/start par la route groupée de son moteur, par lots de 2000.
-- `GET /api/selection/jobs/:id` — `{total,done,tally:{ok,failed,moving,skipped,…},failed,errors[≤100],consent:{items,files,bytes},finished,cancelled,elapsed_ms}`. Gardé 1 h après la fin, en mémoire (perdu au redémarrage). `POST /api/selection/jobs/:id/cancel` l'arrête entre deux torrents.
-- `POST /api/torrents/export` — télécharge une sélection. Form urlencoded : `selection` (le JSON ci-dessus) ou `hashes` (séparés par `,` ou `|`, pour les scripts), `format=zip|txt|csv` (défaut `zip`), `strip_trackers=1` (zip : retire `announce`/`announce-list`, info hash inchangé). Réponse en flux (`Content-Disposition: attachment`) ; zip = un `.torrent` par hash + `missing.txt` pour les hash absents de ce nœud ; `txt` ne lit pas le store ; CSV = hôtes des trackers, jamais les URL. 400/409 comme ci-dessus.
-- `GET /api/torrents/:info_hash/torrent` — le `.torrent` d'origine d'un torrent.
-- `DELETE /api/torrents/:info_hash` — **retire des DEUX moteurs** (≠ purge race-only).
-- `POST /api/torrents/:info_hash/reannounce`
-- `POST /api/torrents/:info_hash/add-tracker` — ajoute UN tracker. ⚠️ Jusqu'à cette version la route répondait 200 **sans rien faire** (no-op dans les deux moteurs) ; elle passe désormais par le même chemin que `POST /trackers` avec `op=add`.
-- `GET /api/torrents/:info_hash/trackers` — liste les trackers **réellement annoncés**, groupés en tiers : `{"engine":"hoard","trackers":[["url","url de repli"],["tier 2"]]}`. Ce n'est pas forcément ce que dit le `.torrent` : la liste s'édite à chaud.
-- `POST /api/torrents/:info_hash/trackers` — édite la liste. Corps : `{"op":"add|remove|replace|set", "urls":[...], "from":"...", "to":"..."}`. Réponse : `{"trackers":[[...]], "changed":bool}`.
-  - `add` ajoute chaque URL dans un nouveau tier ; une URL déjà présente est ignorée (`changed:false`) — annoncer deux fois au même tracker double notre charge et nous fait passer pour deux pairs.
-  - `remove` retire les URL citées ; un tier vidé disparaît.
-  - `replace` (`from`/`to`) renomme **en gardant la position dans le tier** — c'est le cas changement de domaine.
-  - `set` remplace tout par `urls` (un tier par URL).
-  - ⚠️ L'édition est appliquée au moteur **puis** écrite dans le `.torrent` stocké (clés `announce`/`announce-list` seules, dict `info` copié octet pour octet → **l'infohash ne change pas**). Si le moteur accepte mais que l'écriture échoue, la réponse le dit explicitement (état vivant OK, perdu au prochain redémarrage).
-  - Les URL sont validées (`http`/`https`/`udp` + hôte) mais **jamais réécrites** : une URL de tracker est une clé ailleurs (compteurs par tracker, override de passkey, onglet Trackers).
-- `GET /api/torrents/:info_hash/files` — contenu du torrent : `files[]` (`path`, `size`), cherché dans le moteur qui le détient. Ajoute `availability` (`min`, `max`, `avg`, `num_pieces`) **uniquement si le torrent a une piece map**, c.-à-d. en mode download — un torrent seed_mode n'a pas de bitfield (c'est ce qui rend 100k torrents pas chers), donc la clé est absente et l'UI affiche « n/a ».
-- `GET /api/opt/flags` / `POST /api/opt/flags` — flags d'optim à chaud. En plus des flags Go (`ipc_route`, `ipc_frame`, `list_cache`, `ipc_prealloc`, `qbit_snapshot`, `totals_cache`, `gogc`, `list_cache_ttl_ms`), deux flags **moteur** (Rust), appliqués aux DEUX moteurs et rendus sous `engine_flags.{race,hoard}` :
-  - `session_pinning` (bool) — thread-per-core : épingle chaque session de pair sur un runtime mono-thread. ⚠️ **Ne s'applique qu'aux NOUVELLES sessions** : une bascule met des minutes à prendre effet, le temps que les pairs tournent. Blocs d'A/B assez longs pour survivre à ça.
-  - `session_runtimes` (`value`, ≥1) — taille du pool. **Refusé (400) une fois le pool construit** (= après le premier `session_pinning:true`) : démonter des runtimes qui portent des sessions vivantes n'est pas le rôle d'un bouton de mesure. Défaut = `TYPHON_SESSION_RUNTIMES`, sinon 1/cœur.
+`POST /api/setup` judges the caller by the socket peer first: a public peer is refused whatever headers it sends, and a private peer (a reverse proxy) that sends `X-Forwarded-For` must name a private client there too.
 
+**Public routes** (no key): `/health`, `/metrics`, `/`, `/static/*`, `/changelog.md`, `/install.sh`, `GET|POST /api/setup`, `POST /api/login`, `GET /api/startup`, `POST /api/v2/auth/login`, `POST /api/v2/auth/logout`, and `POST /api/nodes/register` (enrolment token instead of the key).
 
-**Import depuis un autre client** (une tâche à la fois, la plus récente est suivie)
-- `POST /api/import/qbit/preview` `{url, username, password}` → `{total, completed, incomplete, stopped, carried_uploaded_bytes, categories:[{name,save_path}], path_prefixes, data_checked, data_found}`. URL sans schéma = `http://`. 400 identifiants refusés / injoignable, 502 liste illisible.
-- `POST /api/import/qbit/start` `{url, username, password, path_map:{"/chemin/qbit":"/chemin/hydranos"}, start_stopped}` → `{job_id}`. `start_stopped` par défaut **true**. 409 si un import tourne déjà.
-- `POST /api/import/transmission/upload` (multipart `file` = zip du dossier de config, ≤ 4 Gio) → `{dir}` (décompressé sous `<data_dir>/import/`). `POST /api/import/transmission/preview` `{dir, categories_from_dirs, import_labels}` → comme qBit + `problems`, `without_resume`. `POST /api/import/transmission/start` = preview + `path_map`, `start_stopped`.
-- `GET /api/import/qbit/status` → progression de la dernière tâche + `running`, `job_id` ; `GET /api/import/qbit/events` = la même chose en SSE (2/s) jusqu'à `finished`, 404 si aucun import.
-- Règles : catégories créées en `hoard` si absentes (une existante n'est pas touchée) ; tout va au hoard ; **seed sans vérification seulement si complet ET données trouvées au chemin mappé**, sinon vérification ; upload/download à vie repris ; un torrent déjà présent (n'importe quel moteur) = `skipped`.
+### Errors
 
-**État / stats**
-- `GET /api/status` — état global (baseline, hoard{...}, day_uploaded...).
-  - `hoard.seed_size` / `race.seed_size` — octets des torrents **en seed et non pausés** du moteur (passe trackers, ≤ 30 s). `null` avant la 1re passe.
-  - `storage` — `seeded_bytes` (somme des seed sizes), `data_bytes` (fichiers mesurés, **chaque inode compté une fois** : un cross-seed hardlinké = un fichier), `shared_bytes` (part de `data_bytes` dont un nom existe hors catalogue, même règle que `external_links`), `missing_files`, `measured_torrents`, `measured_at` (unix). Vient du scanner de liens : **jusqu'à 24 h de retard**, tailles logiques (avant compression ZFS). `null` avant son premier comptage.
-- `GET /api/benchmark/trackers/current` — une ligne par (moteur, tracker) : débits, pairs, `torrents`, cumuls, et `seed_size` (taille des torrents en seed, ce que le tracker crédite ; un cross-seed compte sous chacun de ses trackers).
-- `GET /api/hoard/torrents` — **liste hoard complète** (info_hash, name, state, progress, save_path, total_size, total_upload, swarm_seeds, tracker_error, tracker_error_msg...). LA source pour auditer.
-  - `seeding_time` (secondes) est un **compteur cumulatif** depuis v3.130.0 : il n'avance que quand le torrent est complet et non stoppé par l'utilisateur (un torrent en attente d'un ordonnanceur ou en serving-suspend compte). Ce n'est plus `now - completed_time`. Les torrents antérieurs ont été **amorcés une seule fois** depuis l'ancienne formule, c'est donc une borne haute pour eux.
-- `GET /api/race/torrents` — liste race.
-- **Categories** : une categorie = un `mode` (`race`/`hoard`, qui choisit le moteur) + un `save_path` (+ `graduate_to`, `transit`). ⚠️ `placement`, `agents`, `strategy` et `min_free_bytes` (routage multi-agents 3.x) sont **acceptes et conserves mais ignores** en v4 : aucun effet sur le placement. Viser un moteur precis : `engine=` a l'ajout, ou `move-engine` apres.
-  - ⚠️ `least_load` etait documente ici et dans le code **sans etre implemente** avant v3.131.0 : le choisir faisait un fan-out sur TOUS les agents (multi-home silencieux).
-- `POST /api/agents/:name/action` — exécute UNE action par-torrent sur un agent NOMMÉ : `{engine, action, info_hash, delete_files?, category?, save_path?}`. Actions : `pause` · `resume` · `verify` · `reannounce` · `remove` · `setcategory` (relocalise) · `setcategorylabel` (libellé seul). ⚠️ Les endpoints par-torrent classiques résolvent leur cible en regardant **le local d'abord** : ce n'est non ambigu que tant qu'un infohash ne vit qu'à un endroit. Un `duplicate` le met volontairement sur deux nœuds, d'où la nécessité de nommer le nœud.
-- `POST /api/jobs/move-remote` — `{info_hash, source_agent, target_agent, engine?, mode}` avec `mode` = `move` | `duplicate`. La destination est le chemin que la **catégorie du torrent** définit pour l'agent cible ; elle ne se passe pas en paramètre. `202 {job_id}`, suivi dans Jobs.
-- `DELETE /api/torrents/:info_hash?agent=<nom>` — vise explicitement un nœud (`local` ou un agent).
-- `GET /api/stats/baseline`
-- `GET /api/events` — SSE push.
+Errors are JSON `{"error": "<message>"}`, sometimes with more fields:
 
-**Race-only (handoff/drain)**
-- `POST /api/race/torrents/:info_hash/purge?delete_files=` — **retire du SEUL moteur race** (garde le hoard). À préférer au DELETE quand dual-seed.
+- `400`: bad or missing field (strict bodies name the unknown field).
+- `404`: `{"error":"torrent not found"}`, or no such engine/node/job.
+- `409`: refused because of state. Data moves add `"reason"` (`hardlinks`, `space`, …) and a `plan`; a filter selection that grew answers `"reason":"grew"` with the new `count`; an add of a torrent already present answers 409.
+- `POST /api/torrents` answers `400` (bad request), `404` (`torrent_path` not found), `409` (already added) or `500` (the engine failed), with `{"error","targets"}`.
 
-**Catégories** : `GET/POST /api/categories`, `PUT/DELETE /api/categories/:name`
-  - `GET /api/categories/orphans` -> `[{name, torrents}]` : labels portés par des torrents mais ne correspondant à aucune catégorie configurée (résidus de suppressions antérieures au nettoyage durable du label).
-  - `DELETE /api/categories/:name` -> `{cleared, cleared_stored, was_orphan}` : retire l'entrée de `categories.json`, efface le label dans les DEUX moteurs et dans le store SQLite. Accepte un label orphelin (absent de la liste) ; **404 seulement si aucun torrent ne le porte non plus**.
-**Pause de démarrage (3.61.0+)** : `GET /api/startup-pause` -> `{held:["hoard"], holding:true}` ; `POST /api/startup-pause/release` -> `{status:"ok", released:[...], holding:false}`. Verrou **niveau process** armé par `start_paused` (par moteur) : tant qu'il tient, aucune annonce ni aucun dial ne sort. **N'écrit rien** — l'intention `paused` par torrent est intacte, la relâche ne réveille pas un torrent mis en pause à la main. Relâche globale (pas de granularité par moteur) et **idempotente** : relâcher à vide = 200 avec `released:[]`.
+### Hashes, engines and copies
 
-**Pause/reprise en masse** — deux routes, et elles ne font pas la même chose :
-  - `POST /api/hoard/pause` (aussi `/api/race/pause`, `/api/engines/:id/pause`) `{hashes:[...], paused:bool}` -> `{status,applied,paused}`. Par COPIE, dans le moteur nommé : la copie tenue par un autre moteur n'est pas touchée. Résout chaque hash avant d'écrire (**hash exact**, pas de préfixe, contrairement au shim qBit) et applique au moteur en plus du store. **C'est la route à utiliser.**
-  - `POST /api/hoard/torrents/bulk` `{action:"start"|"stop", hashes:[...], exclude:[...], all:bool}` -> `{status,action,matched,applied,failed}`. Sur TOUTES les copies de chaque hash.
-  - ⚠️⚠️ **`hashes` vide est un 400, pas un joker.** Jusqu'au 16/09/2026 une liste vide voulait dire « tout le moteur » : l'interface envoyait un champ `filter` que cette route n'a jamais implémenté, serde le jetait en silence, `hashes` retombait sur sa valeur par défaut et un démarrage visant 70 k torrents en a démarré 293 k. Pour viser tout le moteur, il faut désormais le dire : `"all": true`.
-  - ⚠️ Le corps **refuse tout champ inconnu** (`deny_unknown_fields`) et nomme le coupable dans `detail`. Un client qui envoie un champ non implémenté l'apprend au lieu de le voir disparaître.
-  - Les deux écrivent en **une transaction** et hors du runtime async. Envoyer par lots (~2 000 hashes) reste préférable : le verrou du store est tenu le temps d'un lot.
+- `:info_hash` is the 40-character hex v1 hash. Some routes resolve a shorter prefix and act on the first match: always send the full hash.
+- Engines are addressed by id under `/api/engines/:id/...`; `/api/race/...` and `/api/hoard/...` are aliases for the two engines that always exist. Exception: `GET /api/race/torrents` lists **every** engine with the race role.
+- The same torrent can be in several engines (one **copy** per engine). Torrent routes pick a copy with **`?engine=<id>`**. The legacy spelling **`?agent=`** (a 3.x name) is also accepted: `local` or empty means the default, `local-<id>` means engine `<id>`.
+- List rows carry a label in the field `agent` (legacy name): `local-<engine>` for a local copy, `<node>-<engine>` for a row merged from a declared node. Per-torrent routes answer 404 for a node row; `/api/selection/*` relays reannounce, recheck, stop/start, remove, category and set location to the node that holds it.
 
-**Override passkey (2.7.10+)** : `GET /api/announce/passkeys` ; `POST /api/announce/passkeys` `{"host":"tracker.torr9.net","passkey":"..."}` (vide = clear). Hot, pas de restart, par-tracker.
-**Divers** : `GET /api/public-ip`, `/api/fs/browse`, `/api/peers/top`, `/health`, `/metrics`.
+## Quick examples
 
----
+Status (fields: *Monitoring*):
 
-## ⚠️ SHIM qBit `/api/v2/*` — couche de COMPAT (autobrr/cross-seed). À n'utiliser QUE si nécessaire.
-La **SEULE** raison légitime de l'utiliser : **seeder de la DATA DÉJÀ SUR DISQUE** sans re-DL (`skip_checking=true` → `AddTorrentSeedMode`). Le natif `verify/recheck` stall sur de la data existante.
+```bash
+curl -s -H "X-Api-Key: $KEY" "$HY/api/status"
+```
 
-- `POST /api/v2/app/setPreferences` — form `json={"listen_port":51413}` (chaîne acceptée aussi, corps JSON brut aussi). **Seul `listen_port` est appliqué** (rebind du moteur race + persisté) ; les autres clés sont acceptées et ignorées comme le fait qBit. 500 si le rebind échoue — le port annoncé est toujours le port réellement bindé.
-- `POST /api/v2/torrents/add` — multipart : `torrents=@file`, `savepath`, `skip_checking=true`, `paused=false`, `category=<cat>`.
-  - ⚠️ **ROUTING PAR CATÉGORIE** : le `mode` de la catégorie (`categories.json`) décide race vs hoard. **Catégorie inconnue → défaut RACE** (piège classique). Utiliser une catégorie `mode=hoard` (`movies`, `Calewood`, `caleB`...).
-  - ⚠️ **`savepath` = le chemin CONTENU EXACT** (le dossier qui contient le top-level du torrent) = le `save_path` que l'API reporte pour le même torrent côté A. PAS le parent. Pour un single-file-in-folder, c'est le dossier release.
-  - ⚠️ **Lag stats ~25s** : juste après l'add, `total_size`/`progress` = 0 (verify-throttle mappe les fichiers). `seeding prog=1.0` apparaît après. NE PAS conclure à un échec avant ~30s.
-- `POST /api/v2/torrents/delete` : `hashes=<ih>&deleteFiles=false` (⚠️ `false` pour garder la data).
-- Autres : `/torrents/info`, `/pause`, `/resume`, `/setCategory`, `/auth/login`.
+First 100 hoard torrents of category `tv`, newest first (server-side filter and paging):
 
----
+```bash
+curl -s --compressed -H "X-Api-Key: $KEY" \
+  "$HY/api/hoard/page?category=tv&limit=100&sort=added_time"
+```
 
-## Règle d'or (le truc que je me plante dessus)
-| Besoin | Endpoint |
+Create a category (there is no default save path, so adds need one):
+
+```bash
+curl -s -H "X-Api-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"name":"tv","save_path":"/data/tv","mode":"hoard"}' "$HY/api/categories"
+```
+
+Add a `.torrent` file with a category (multipart):
+
+```bash
+curl -s -H "X-Api-Key: $KEY" \
+  -F "torrents=@show.s01e01.torrent" -F "category=tv" "$HY/api/torrents/upload"
+```
+
+Add `-F "seed_mode=true"` to seed data already on disk without hashing it (**seed mode**; risks: [Adding Torrents and Existing Data](https://github.com/Kheopsian/Hydranos/wiki/Adding-Torrents-and-Existing-Data)).
+
+Stop every hoard torrent of category `old` (a **bulk action** by filter; count first, send the count as `expect`):
+
+```bash
+N=$(curl -s -H "X-Api-Key: $KEY" "$HY/api/hoard/page?category=old&limit=1" | jq .filtered)
+curl -s -H "X-Api-Key: $KEY" -H "Content-Type: application/json" \
+  -d "{\"selection\":{\"filter\":\"category=old\",\"view\":\"hoard\",\"expect\":$N},\"params\":{}}" \
+  "$HY/api/selection/stop"
+# 202 {"job":"...","total":N}  ->  poll GET /api/selection/jobs/<job>
+```
+
+## Torrents and adding
+
+Status: ✓ works · ◐ works with a caveat. Stub routes appear only in *Routes that are stubs in 4.3.1*.
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/torrents/upload` | POST multipart | Add a `.torrent`. File part `torrents`, `torrent` or `file`; fields `category`, `savepath`/`save_path`, `tags`, `engine` or `mode` (`race`/`hoard`: the engine with that role), `paused`/`stopped`, `skip_checking`/`seed_mode`/`skip_recheck`, `create_subfolder`. Unknown `engine` or `mode` → 400; already added → 409. Body limit 2 MB. | ✓ |
+| `/api/torrents` | POST JSON | Add from exactly one of `torrent_path` (a file **on the Hydranos host**), `torrent_url` (fetched by Hydranos) or `magnet_uri`; plus `category`, `save_path`, `tags`, `engine` or `mode`, `stopped`, `seed_mode` (or `skip_recheck`), `create_subfolder`. Magnet → `202 {"info_hash","status":"resolving"}`; `seed_mode` and `stopped` apply to magnets too. | ✓ |
+| `/api/torrents/:info_hash` | DELETE | Remove. `?delete_files=true` deletes data; `?engine=` removes one copy, otherwise all. Files another torrent still reads are kept. | ✓ |
+| `/api/torrents/:info_hash/{files,torrent}` | GET | File list; the `.torrent` bytes from the store. | ✓ |
+| `/api/torrents/:info_hash/trackers` | GET, POST | Read / edit (saved at once). POST `{"op":"add"\|"remove","urls":[...]}`, `{"op":"replace","from","to"}` or `{"op":"set","tiers":[ ["u1"], ["u2"] ]}`. `.../add-tracker` takes `{"url"}`. | ✓ |
+| `/api/torrents/:info_hash/reannounce` | POST | Announce now, one copy only: the `?engine=` one, else the first engine holding it. `429` in the 60 s cooldown. | ✓ |
+| `/api/torrents/:info_hash/peers` | POST | `{"peers":["203.0.113.5:16172"]}`: dial these peers. | ✓ |
+| `/api/torrents/:info_hash/copy` | POST | `{"engine":"vpn1"}`: add a second copy in another engine, same files. | ✓ |
+| `/api/torrents/:info_hash/engine` | POST | `{"engine":"vpn1"}`: move the torrent to another engine, files stay where they are. `?engine=` names the source copy. The target adopts the source's state (pieces, trackers, counters, stopped) before the source lets go; if either refuses, nothing changes. | ✓ |
+| `/api/torrents/:info_hash/graduate` | POST | `{"engine","category","save_path","allow_breaking_hardlinks":false}`: queue a `graduate` job (data move + engine change). `save_path` defaults to the category's. Same checks as a category change (unsafe path, shared files, hardlinks, free space: 409 with `reason`); a failure moves the files back. | ✓ |
+| `/api/torrents/add-defaults` | GET | `{"create_subfolder","skip_recheck"}`: the defaults the Add tab starts from (`create_subfolder` is `[daemon] create_torrent_folder`). | ✓ |
+| `/api/torrents/export` | POST form | `format=zip\|txt\|csv`, `selection` (JSON) **or** `hashes`, `strip_trackers=1`. Streams a download. | ✓ |
+| `/api/{hoard,race}/torrents/:info_hash` | GET | One row with live detail. | ✓ |
+| `/api/{hoard,race}/torrents/:info_hash/category` | POST | `{"category","move_files":false,"allow_breaking_hardlinks":false}`. With `move_files`, `202` + job (or a graduation if the mode differs). | ✓ |
+| `/api/{hoard,race}/torrents/:info_hash/location` | POST | **Set location**: `{"location":"/abs/path","allow_breaking_hardlinks":false}`. `202` + job when bytes move, `200 "moved":false` if already there. | ✓ |
+| `/api/{hoard,race}/torrents/:info_hash/move-preview` | GET | What a move would do, without doing it. | ✓ |
+| `/api/{hoard,race}/torrents/:info_hash/tags` | POST | `{"tags":[...]}` replaces the whole set. | ✓ |
+| `/api/{hoard,race}/torrents/:info_hash/{pause,resume}` | POST | Stop / start one torrent. | ✓ |
+| `/api/hoard/torrents/:info_hash/{pin,unpin}` | POST | Force download / stop forcing. | ✓ |
+| `/api/hoard/torrents/:info_hash/verify` | POST | Recheck (`?engine=` picks the copy). | ✓ |
+| `/api/race/torrents/:info_hash/purge` | POST | Remove the **race copy** (engine first). Its data is deleted when no other copy of the torrent remains; files another torrent reads are kept. Other copies are untouched. `404` if the torrent is not in race. | ✓ |
+| `/api/race/timeline/:info_hash`, `/api/trackers` | GET | Race timeline; Trackers tab table. | ✓ |
+
+How an add picks its engine and save path: [Categories and Routing](https://github.com/Kheopsian/Hydranos/wiki/Categories-and-Routing). Without `engine` or `mode`, the category decides. `create_subfolder` gives a single-file torrent a folder of its own, named after the torrent.
+
+## Lists and engines
+
+Each `/api/engines/:id/...` row also answers as `/api/hoard/...` and `/api/race/...`, except `pinned`, `pause-all` and `resume-all` (hoard alias only).
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/engines` | GET | Local engines (`id`, `role`, `listen_port`, `torrents`…). | ✓ |
+| `/api/engines` | POST | `{"id","role":"race"\|"hoard","listen_port","bind_interface"}`: add an extra engine to the config. Answers `restart_required: true`. | ✓ (after restart) |
+| `/api/engines/:id` | DELETE | Remove an extra engine from the config. `409` with the count while it still holds torrents (move or remove them first); `race` and `hoard` → 400. An empty engine keeps its listener until restart. | ✓ (after restart) |
+| `/api/engines/:id/page` | GET | Paged list (see below). | ✓ |
+| `/api/engines/:id/torrents` | GET | The engine as one array, with the page filters applied when given (no paging: `offset`/`limit` are ignored). | ✓ |
+| `/api/engines/:id/pinned` | GET | Forced-download hashes. | ✓ |
+| `/api/engines/:id/pause` | POST | `{"hashes":[...],"paused":true}`: stop/start exact hashes. | ✓ |
+| `/api/engines/:id/torrents/bulk` | POST | `{"action":"stop"\|"start","hashes":[...],"exclude":[...],"all":false}`. Unknown fields → 400; an empty `hashes` is **not** "all". | ✓ |
+| `/api/engines/:id/{pause-all,resume-all}` | POST | Stop / start every torrent of the engine. | ✓ |
+| `/api/engines/:id/listen-port` | POST | `{"port":16172}`: rebind the TCP listener live; announces carry the new port. Answers `"persisted": false`. | ◐ not persisted; uTP keeps the startup port |
+| `/api/engines/:id/dial-limits` | POST | `{"max_dials_per_sec","max_connections"}` (0 = unlimited). | ◐ not persisted |
+| `/api/hoard/stats` | GET | Totals. | ✓ |
+| `/api/hoard/download-slots` | GET | Configured `active_downloads`; other counters are zeros. | ◐ |
+| `/api/race/settings` | GET | Race settings echo. | ◐ |
+| `/api/startup-pause`, `/api/startup-pause/release` | GET, POST | Startup gate: `{"held":[engines],"holding"}`; POST releases it and answers `released`. With `start_paused`, a held engine makes no dial and no announce until released ([Engines: Race and Hoard](https://github.com/Kheopsian/Hydranos/wiki/Engines-Race-and-Hoard)). | ✓ |
+
+**Paging parameters** of `.../page`: `offset` (default 0), `limit` (default 500, clamped to 1–5000), `sort` (a row field, default `added_time`), `order=asc` (default descending), `facets=1` (adds category/tag/tracker counts), `fields=hash` (hashes only). Filters: `search` (words ANDed, or a hex hash prefix of 6+ characters), `category`, `tag`, `tracker`, `error_class` and their `_not` variants (comma-separated lists, `__none__` = without one), `state` (a row state such as `seeding`, or `__active__`, `__error__`, `__tracker_err__`, `__pinned__`). The answer is `{"total","filtered","offset","limit","rows","facets"}`. A page also merges the other local engines of the same role and the rows of declared nodes. The same filters apply to `GET /api/{hoard,race}/torrents` and `/api/engines/:id/torrents`.
+
+## Selections (bulk actions)
+
+`POST /api/selection/:action` runs one action on many torrents as an in-memory **bulk task** (the web UI's context menu uses it). It answers `202 {"job","total"}`; poll `GET /api/selection/jobs/:id` (kept 1 h after it ends, lost on restart). `POST /api/selection/jobs/:id/cancel` stops between two torrents. These tasks are not the persistent jobs of the **Jobs** tab: see [Jobs, Bulk Actions and Moving Data](https://github.com/Kheopsian/Hydranos/wiki/Jobs-and-Moving-Data).
+
+Body: `{"selection": ..., "params": {...}}`, strict (unknown keys → 400).
+
+- By rows: `"selection":{"items":[{"hash":"<40 hex>","agent":"local-hoard"}]}`. Each row acts on its own copy (the engine in its `agent` label).
+- By filter: `"selection":{"filter":"category=tv&state=seeding","view":"hoard","expect":<count>}`, optional `"exclude":[items]`. `filter` takes only the filter keys listed under *Lists and engines*; `view` is an engine id (default `hoard`); `expect` is required.
+
+| Action | `params` |
 |---|---|
-| **Nouveau** torrent (DL puis seed) | natif `POST /api/torrents/upload` `mode=hoard` |
-| **Seeder data existante** (pas de re-DL) | shim `POST /api/v2/torrents/add` `skip_checking=true` + catégorie hoard |
-| Lister / auditer | natif `GET /api/hoard/torrents` |
-| Retirer une copie race (dual-seed) | `POST /api/race/.../purge` (PAS le DELETE qui vire les 2) |
+| `stop`, `start`, `pin`, `unpin`, `reannounce`, `recheck` | `{}` (`recheck` covers race copies too) |
+| `tags` | `{"tags":["a"],"op":"add"\|"remove"}` |
+| `category` | `{"category","move_files":false,"allow_breaking_hardlinks":false}` |
+| `location` | `{"location":"/abs/path","allow_breaking_hardlinks":false}` |
+| `remove` | `{"delete_files":false}` |
+| `copy`, `move-engine` | `{"engine":"vpn1"}` |
+| `handoff` | `{"node","engine","then":"keep"\|"remove"}` |
+| `node-fetch` | `{"node","from_engine","engine"}` |
+| `node-move` | `{"node","engine"}` |
 
----
+## Categories and tags
 
-## 🗺️ CARTE COMPLÈTE DES ROUTES (dérivée de `internal/api/routes_hydra.go` + `routes_qbit.go`)
-> Les sections au-dessus = highlights curés. Ci-dessous = **exhaustif**. Si un endpoint n'est pas ici, il n'existe pas — ne le devine pas. Source de vérité = le code ; régénérer cette table quand on ajoute une route.
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/categories` | GET, POST | List / create `{"name","save_path","mode":"race"\|"hoard","graduate_to","transit"}` → `201`. `mode` is case-insensitive, defaults to `race`, any other value → 400; an existing name → 409. | ✓ |
+| `/api/categories/:name` | PUT, DELETE | Replace; a different `name` in the body **renames** it and relabels its torrents (`{"name","relabelled"}`; 409 if the new name exists) / delete: the label is cleared from its torrents (`{"cleared"}`). | ✓ |
+| `/api/categories/orphans` | GET | Labels worn by torrents that match no category: `[{"name","torrents","mode","save_path"}]` (most common role and save path). | ✓ |
+| `/api/tags` | GET | Tags. | ✓ |
 
-**Racine (hors `/api`, pas d'auth)** : `GET /health` · `GET /metrics` · `GET /api/startup`
+## Trackers and announces
 
-**`/api/*` — natif, auth `X-API-Key`**
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/announce/{health,policy}`, `/api/announce/errors?host=` | GET | Tracker health, live policy, error details. | ✓ |
+| `/api/announce/ip-modes` | GET, POST | `{"host","mode"}` IP family per tracker. | ✓ |
+| `/api/announce/passkeys` | GET, POST | `{"host","passkey"}` (empty passkey clears). | ✓ |
+| `/api/announce/min-seed` | POST | `{"host","hours"}` or `{"host","clear":true}`. | ✓ |
+| `/api/announce/{mute,hidden}` | POST | `{"host","muted"}` / `{"host","hidden"}` or `{"hosts":[...],"hidden"}`. | ✓ |
 
-| Groupe | Routes |
+Meaning of each setting: [Trackers and Announces](https://github.com/Kheopsian/Hydranos/wiki/Trackers-and-Announces).
+
+## Workflows and jobs
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/workflows` | GET, POST | List / create or replace a workflow. | ✓ |
+| `/api/workflows/:id`, `/api/workflows/:id/run` | DELETE, POST | Delete; run now (`?dry=1`: dry run). | ✓ |
+| `/api/workflows/{fields,activity,links}`, `.../preview` | GET, POST | Editor fields, activity log, link status; POST preview: torrents a draft would touch. | ✓ |
+| `/api/jobs`, `/api/jobs/:id` | GET | Persistent jobs (`?limit=`, default 100); one job. | ✓ |
+| `/api/jobs/:id` | DELETE | Cancel. A queued job → `{"status":"cancelled"}`; a running graduation stops between two files and is rolled back (`"cancelling"`); another running move → 409 (it finishes); unknown id → 404. | ✓ |
+
+Bodies: [Workflows](https://github.com/Kheopsian/Hydranos/wiki/Workflows), [Jobs, Bulk Actions and Moving Data](https://github.com/Kheopsian/Hydranos/wiki/Jobs-and-Moving-Data).
+
+## Race drain
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/drain/{status,history,graduations}` | GET | Volumes, past drains, graduations in progress. | ✓ |
+| `/api/drain/now?volume=` | POST | Drain now. | ✓ |
+| `/api/drain/policy` | POST | `{"volume","enabled","high_watermark","low_watermark"}` or `{"volume","inherit":true}`; optional `"quota_gb"` (declared capacity in GB of 10^9 bytes, `0` removes it), on its own or with either form. | ✓ |
+
+A **quota** is for a volume shared with other data (a seedbox slot): with one, the volume's `used` is what Hydranos torrents wrote there and `free` is the smaller of the quota left and the disk's free space; the drain, the add refusal and the panel all use it. Each volume in `GET /api/drain/status` carries `quota` (bytes, or `null`), `basis` (`"quota"` or `"disk"`: what `total`/`used`/`free`/`used_pct` are measured against) and the disk underneath as `disk_total`, `disk_used`, `disk_free`.
+
+See [Race Drain, Graduation and Seed Obligations](https://github.com/Kheopsian/Hydranos/wiki/Race-Drain-and-Graduation).
+
+## Nodes
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/nodes` | GET, POST | List (probed live) / declare `{"name","url","api_key"}`. | ✓ |
+| `/api/nodes/test` | POST | Probe without saving. | ✓ |
+| `/api/nodes/:name` | DELETE | Forget a node (the remote is untouched). | ✓ |
+| `/api/nodes/enrol`, `/api/nodes/register` | POST | One-time token + install command; called by the new machine with the token. A name already taken is refused before the token is spent. | ✓ |
+| `/api/nodes/:name/{handoff,fetch,move-engine}` | POST | Push / pull / move between that node's engines (bodies: [Nodes and Multiple Machines](https://github.com/Kheopsian/Hydranos/wiki/Nodes-and-Multiple-Machines)). | ✓ |
+| `/node/:name/open` | GET | Redirect to the node's UI with its key. | ✓ |
+| `/install.sh` | GET | Enrolment script (public). | ✓ |
+
+Legacy 3.x routes `/api/agents*` are still routed: `GET /api/agents` lists the local engines as `local-<id>`, the others are stubs (fixed 400/404, empty list, or 200 doing nothing). Use `/api/engines` and `/api/nodes` ([Upgrading from 3.x](https://github.com/Kheopsian/Hydranos/wiki/Upgrading-from-3x)).
+
+## Magnets, watched folders, import, dedup
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/magnets`, `/api/magnets/:hash`, `/api/magnets/:hash/retry` | GET, DELETE, POST | Magnets resolving or failed; drop; retry. | ✓ |
+| `/api/watch` | GET, PUT | Watched folders. PUT takes the whole list `[{"path","category","engine","paused","enabled"}]`; path absolute and existing, category must exist. | ✓ |
+| `/api/import/qbit/{preview,start}`, `.../{status,events}` | POST, GET | Import from a qBittorrent instance; progress (`events` is SSE). | ✓ |
+| `/api/import/transmission/{upload,preview,start}` | POST | Import from Transmission (`upload` multipart, up to 4 GiB). | ✓ |
+| `/api/import/retry` | POST | Retry the torrents the last import failed, with its choices and (for qBittorrent) its login, held in memory: no password to resend. `{"job_id","torrents"}`; `404` no import, `409` one is running, `400` nothing left to retry. | ✓ |
+| `/api/import/check-paths` | POST | `{"paths":[...]}`: which paths this host can see. | ✓ |
+| `/api/provenance` | GET | Where the library was imported from. | ◐ (see below) |
+| `/api/dedup/config`, `/api/dedup/stats` | POST, GET | `{"enabled":true}` (restart to apply); duplicate-data counters. | ✓ |
+
+**Import status** (`GET /api/import/qbit/status`, and each `events` frame) describes the latest import: `job_id`, `running`, `phase`, `total`, `done`, `seeded` (complete, data found), `downloading` (to check or download), `stopped` (added stopped), `skipped`, `failed`, `failures` (up to 200 `{"name","hash","error"}`), `retryable` (true when `POST /api/import/retry` has something to do), `finished`, `error`, `current`. A qBittorrent export is retried on a dropped connection, a 5xx or a 429 (4 attempts, with backoff), and the import logs in again if the session expires.
+
+Import wizard: [Migrating from qBittorrent](https://github.com/Kheopsian/Hydranos/wiki/Migrating-from-qBittorrent). Magnets, watched folders, dedup: [Adding Torrents and Existing Data](https://github.com/Kheopsian/Hydranos/wiki/Adding-Torrents-and-Existing-Data).
+
+## Network and IP filter
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/network/{interfaces,engines}`, `/api/public-ip` | GET | Interfaces that are up; exit IP per engine (`?refresh=1`); process exit IP. | ✓ |
+| `/api/network/mode` | GET, POST | Network tab: POST writes ports, interfaces and other keys, `restart_required`. A port outside 1–65535 → 400. Several modes are not implemented. | ◐ |
+| `/api/network/check` | POST | Partly constant results. | ◐ |
+| `/api/ipfilter` | GET, PUT | Status / `{"enabled","sources":[...],"refresh_hours"}`. | ✓ |
+| `/api/ipfilter/bans`, `/api/ipfilter/reload` | POST, DELETE | Ban `{"ip","reason"}` / unban `{"ip"}`; POST reload reloads block lists. | ✓ |
+
+What works and what does not on the Network tab: [Networking](https://github.com/Kheopsian/Hydranos/wiki/Networking-Modes).
+
+## Settings, setup, restart
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/api/setup` | GET, POST | First run: `{"needs_setup",...}` / create the admin `{"username","password"}` (8+ chars) → API key. Public, loopback or private network only. | ✓ |
+| `/api/login` | POST | `{"username","password"}` → `{"api_key"}`. Public. | ✓ |
+| `/api/auth/password` | POST | `{"password"}` (8+ chars): stored hashed in `[auth] password_hash`, as setup does. | ✓ |
+| `/api/settings` | GET, POST | Whole config as JSON, **secrets included** / `{"changes":[{"section","key","value"}]}` edits existing keys only. | ✓ |
+| `/api/settings/reset` | POST | Reset to defaults (keeps login, key, data dir). | ✓ |
+| `/api/settings/restart`, `/api/restart` | POST | Answer, then stop cleanly (the same path as SIGTERM: `stopped` to trackers, resume data flushed) and exit with code **75** for the supervisor to restart (systemd `Restart=on-failure` included). | ✓ |
+| `/api/fs/browse?path=` | GET | List folders on the Hydranos host. | ✓ |
+| `/api/update-check` | GET | New release available. | ✓ |
+
+A forgotten password is reset on the host with `hydranos reset-password <password> [config]`: [Security and Access](https://github.com/Kheopsian/Hydranos/wiki/Security-and-Access).
+
+## Monitoring
+
+| Route | Method | Purpose | Status |
+|---|---|---|---|
+| `/health` | GET | Public, static `healthy` + version + uptime. | ◐ |
+| `/metrics` | GET | Public, Prometheus: `hydra_up`, `hydra_uptime_seconds`, `hydra_torrents{engine}`. | ✓ |
+| `/api/startup` | GET | Public; `ready` is always true. | ◐ |
+| `/api/status` | GET | Header and Overview figures. | ✓ |
+| `/api/events` | GET | SSE stream of status snapshots. | ✓ |
+| `/api/logs`, `/api/logs/stream` | GET | Recent log lines (query filters ignored); SSE tail. | ◐ |
+| `/api/stats/baseline` | GET, POST | Lifetime counter baseline `{"total_uploaded","total_downloaded"}`. | ✓ |
+| `/api/health/anomalies` | GET | Mostly zeros. | ◐ |
+| `/api/benchmark/{records,range,current,race-events}`, `.../trackers/{current,range}` | GET | Benchmark data, tracker stats. | ✓ |
+
+**`/api/status` fields** (also the `status_snapshot` frame of `/api/events`, 1/s). Bytes, bytes/s. Engines `race` and `hoard` only.
+
+| Field | Meaning |
 |---|---|
-| *(top-level)* | `POST /torrents` · `POST /torrents/upload` · `DELETE /torrents/:ih` · `POST /torrents/:ih/reannounce` · `POST /torrents/:ih/add-tracker` · `GET /torrents/:ih/files` · `GET /status` · `GET /events` (SSE) · `GET /public-ip` · `GET /fs/browse` · `GET /health/anomalies` |
-| announce | `GET/POST /announce/passkeys` · `GET/POST /announce/clients` |
-| startup-pause | `GET /startup-pause` · `POST /startup-pause/release` |
-| categories | `GET /categories` · `GET /categories/orphans` · `POST /categories` · `PUT /categories/:name` · `DELETE /categories/:name` |
-| peers | `GET /peers/top` · `GET /peers/seedboxes` |
-| stats | `GET/POST /stats/baseline` |
-| config | `GET/POST /config/create-folder` |
-| port-forward | `GET /port-forward` · `GET /port-forward/assignment` · `POST /port-forward/assignment` |
-| **`/api/race`** | `GET /torrents` · `GET /torrents/:ih` · `GET /choking` · `GET/POST /settings` · `POST /uploader` · `GET /uploaders` · `GET /uploaders/:username` · `GET /timeline/:ih` · `POST /torrents/:ih/purge` · `POST /listen-port` · `POST /dial-limits` |
-| **`/api/hoard`** | `GET /stats` · `GET /torrents` · `GET /torrents/:ih` · `POST /pause` · `POST /torrents/bulk` · `POST /pause-all` · `POST /resume-all` · `POST /restart-stuck` · `POST /verify-downloading` · `POST /torrents/:ih/verify` · `POST /torrents/:ih/category` · `POST /torrents/:ih/location` · `GET/POST/DELETE /download-slots` · `POST /listen-port` · `POST /dial-limits` |
-| **`/api/hardlinks`** | `GET /summary` · `POST /scan` · `GET /orphans` · `GET /orphans/:ih/files` · `GET/POST /config` · `GET /orphan-media` · `GET /ghosts` · `POST /cleanup` · `POST /relink` · `GET /superseded` |
-| **`/api/drain`** | `GET /status` · `GET /history` · `POST /now` |
-| **`/api/huntarr`** | `GET /status` · `GET /history` · `GET/POST /config` · `GET /library` · `GET /grabs` · `GET /found` · `POST /scan` |
-| **`/api/arr-cleanup`** | `GET /scan` · `POST /execute` |
-| **`/api/benchmark`** | `GET /current` · `GET /range` · `GET /compare` · `GET /race-events` · `GET /race-snapshots/:ih` |
-| **`/api/vpn-speedtest`** | `GET /latest` · `GET /history` · `POST /run` |
+| `version`, `uptime` (s), `server_ts` (Unix s) · `day_uploaded`, `day_downloaded` | Process · since local midnight, all engines. |
+| `baseline.session_*` · `.total_*` · `.global_*` | Since start · stored counter (`/api/stats/baseline` + removed torrents) · stored + loaded torrents' lifetime. |
+| `hoard.active_upload_rate`, `.active_download_rate`, `.active_peers`, `.torrents_with_peers`, `.torrents_uploading`, `.total_torrents`, `.torrents_announced`, `.swarm_leechers`, `.unseeded_peers`, `.listen_port` | Hoard, live. |
+| `hoard.session_uploaded`, `.session_downloaded` · `race.session_downloaded` | Per engine since start. |
+| `race.session_uploaded`, `race.session_ratio` | **All engines** since start. |
+| `race.total_upload_rate`, `.total_download_rate`, `.total_peers`, `.torrents`, `.active_seeds`, `.active_downloads`, `.torrents_with_peers` | Race, live. |
+| `hoard.seed_size`, `race.seed_size`, `storage.seeded_bytes` | Last tracker pass (≤ 30 s); a cross-seed counts per tracker. `null` before. |
+| `storage.data_bytes`, `.shared_bytes`, `.missing_files`, `.measured_torrents`, `.measured_at` | Link scan (≤ 1 day old). `null` before. |
+| `engine_counters.*` | Peer-wire diagnostics. |
+| `hoard.running`, `.stagger_complete`, `race.session_grabbed`, `tunnels` | Constants. |
 
-**`/api/v2/*` — shim qBit** (compat only, cf section dédiée) : `POST /auth/login` · `POST /auth/logout` · `POST /app/setPreferences` · `POST /torrents/add` · `POST /torrents/delete` · `POST /torrents/pause` · `POST /torrents/resume` · `POST /torrents/setCategory` · `GET /torrents/info` · `GET /torrents/categories` · `POST /torrents/createCategory` · `POST /torrents/editCategory` · `POST /torrents/removeCategories`
+**`/api/benchmark/current`**: `ts`, `global_uploaded`/`_downloaded` (as `baseline.global_*`), `hoard_upload_rate`, `hoard_peers`, `hoard_with_peers`, `hoard_uploading`, `race_upload_rate`, `race_download_rate`, `race_uploading`, `race_torrents`, `race_session_uploaded` (all engines), `iowait_pct`, `open_fds`, `arc_*` (host ZFS ARC). Always 0: `*_announce_rate`, `*_announce_fail_rate`, `race_avg_share`, `hoard_session_uploaded`. `race_peers` is the race torrent count.
 
-### Download slots (sélecteur hoard) — `enforceDownloadSlots` (`internal/engine/hoard.go`)
-- `active_downloads` = N slots de DL simultané. Le reste des torrents incomplets est **parké** (stop).
-- Sélection = **seeds descendants** (mieux seedé = finit + vite) + une **probe quota** (`maxSlots/5`) réservée aux « jamais servis » (anti-catch-22 seeds=0). Phase 1 = **progress-demote** avec cooldown/backoff si pas de progrès dans la fenêtre.
-- `GET/POST/DELETE /api/hoard/download-slots` = override **global** du nombre de slots (`SetDownloadSlotsOverride`), PAS un pin par-torrent.
-- ✅ **Pin par-torrent (2.9.3)** : `POST /api/hoard/torrents/:ih/pin` · `POST /api/hoard/torrents/:ih/unpin` · `GET /api/hoard/pinned`. Un torrent pinné entre dans le target-set en PREMIER (hors seed-sort, ignore le cooldown) et est exempté du progress-demote. Persisté dans `<dataDir hoard>/hoard_pinned.json` (= `<dataDir>/hoard/hoard_pinned.json`, survit aux restarts). Le pin vide le slotProgress pour un start immédiat au prochain tick. Cas d'usage = grabs `releases_src` délibérés (BDMV, raretés) qu'on veut peu importe la santé du swarm (ex JJK S2 BD à 1-3 seed).
+**`/api/benchmark/trackers/current`**: one row per engine and tracker host: `engine`, `tracker`, `torrents`, `active` (with a peer), `peers`, `upload_rate`, `download_rate`, `cum_uploaded`/`cum_downloaded` (lifetime), `seed_size`, `ts`. `range` routes take `start`/`end` (Unix s, default last 24 h); `trackers/range` also `tracker=`.
 
----
+What each monitoring route reports: [Monitoring and Logs](https://github.com/Kheopsian/Hydranos/wiki/Monitoring-and-Logs).
 
-## torr9 (API externe, ≠ Hydranos)
-- Base `https://api.torr9.net/api/v1`. Bearer = `/tmp/token.txt`. Passkey = `/tmp/passkey.txt`.
-- `GET /users/me` → profil (jeton_balance, passkey, total_*_bytes).
-- `GET /torrents/search?uploader=<username>&limit=100&page=N` → **filtre uploader OK** (`total_count`, `total_pages`, `torrents[]`). (≠ `/torrents?...` qui n'expose pas `uploader` et cap à 20.)
-- `GET /torznab/torrents/{id}/download?passkey=<pk>` → `.torrent` avec la passkey embarquée dans l'announce.
+## qBittorrent shim
+
+Documented on [qBittorrent Shim and Automation](https://github.com/Kheopsian/Hydranos/wiki/qBittorrent-Shim-and-Automation). Changes in 4.3.1:
+
+- `torrents/files`, `torrents/properties` and `torrents/trackers` read `hash` from a POST form body as well as the query string (cross-seed sends every call as a POST). An unknown hash on `torrents/trackers` is a 404.
+- `torrents/categories` and `torrents/tags` answer POST as well as GET.
+- `torrents/export` serves the stored `.torrent` of `hash`.
+- `torrents/info` lists every engine, each torrent once, with `tracker` filled; `hashes=all` means every torrent on the write endpoints; `torrents/files` gives real piece ranges and progress, with the torrent's folder in multi-file names.
+
+## Routes that are stubs in 4.3.1
+
+These routes answer but do not do what their name says. The live listen-port and dial-limit changes and `/api/provenance`: callouts below.
+
+| Route | What it answers | Use instead |
+|---|---|---|
+| `GET\|POST\|DELETE /api/hoard/download-slots` | The configured `active_downloads` and zeros; writes change nothing. | `active_downloads` in the config, restart ([Configuration: Engines and Race Drain](https://github.com/Kheopsian/Hydranos/wiki/Configuration-Engines)). |
+| `POST /api/race/settings` | Echoes the current config, ignores the body. | `POST /api/settings`, then restart. |
+| `GET\|POST /api/opt/flags` | GET returns constants; POST always `400 unknown flag`. | — |
+| `GET /api/race/choking` | Always `null`. | — |
+| `POST /api/hoard/verify-downloading` | `{"verified":0}`, does nothing. | `POST /api/selection/recheck`. |
+| `POST /api/hoard/restart-stuck` | `{"restarted":0}`, does nothing. | `stop` then `start` through `/api/selection/*`. |
+| `GET /api/arr-cleanup/scan`, `POST /api/arr-cleanup/execute` | Empty scan; `{"errors":null,"removed":0}`. | — |
+| `POST /api/jobs/move-remote` | Always 400. | `POST /api/selection/handoff`. |
+| `/api/network/wireguard*`, `/api/vpn-speedtest/*`, `/api/benchmark/compare`, `/api/benchmark/race-snapshots/:info_hash`, `GET /api/port-forward` (ports and IPs real, reachability constant) | Constants, empty lists, or a fixed 400. | — |
+
+> **Known limitation in 4.3.1:** a live listen-port or dial-limit change answers OK and applies at once (the TCP listener moves and announces carry the new port) — it is lost at the next restart, and uTP keeps the port it was opened on at startup — change `listen_port` (or the dial limits) in the config and restart to make it permanent (details on [Networking](https://github.com/Kheopsian/Hydranos/wiki/Networking-Modes)).
+
+> **Known limitation in 4.3.1:** `GET /api/provenance` is not written by any 4.x import, so after a 4.3.x import it answers `{"present":false}` (a 3.x import's record is still shown).
