@@ -32,20 +32,48 @@ enable_ipv6 = false
 enable_dht = true
 enable_pex = true
 max_connections = 4000
+# Speed caps for this engine, in BYTES per second. 0 = unlimited. Applied live
+# when saved. A torrent can carry its own cap on top (right-click > Limit rate).
+upload_rate_limit = 0
+download_rate_limit = 0
+# The choker: keep only `max_uploads_per_torrent` peers unchoked per seeding
+# torrent, re-ranked every 10 s. OFF by default, and leave it off unless the
+# uplink itself is the bottleneck: on a large library it churns the peers and
+# can cut total upload by an order of magnitude (it was removed for that in
+# 2.4.13). -1 slots = unlimited.
+choking = false
 max_uploads_per_torrent = 100
-peer_timeout = 30
+# Seconds a peer may send nothing useful (keep-alives do not count) before it
+# is dropped. Under 120 is raised to 120.
+peer_timeout = 300
 inactivity_timeout = 20
 
-# --- Advanced: send this session's tracker announces through a SOCKS5 proxy --
-# socks5_outbound_* (if you set it) only covers PEER connections. Announces are
-# separate: without the key below they leave directly and the tracker records
-# this host's own address, however well the peer traffic is relayed.
-# UDP trackers are skipped while this is set (SOCKS5 carries TCP only).
+# --- Advanced: proxy and relay (the Network tab writes these as one set) ----
+# Every outbound PEER connection through a SOCKS5 proxy, v4 and v6 alike. A dial
+# the proxy refuses is dropped, never retried directly, and outbound uTP is off
+# (SOCKS5 cannot carry UDP). DHT stays plain UDP: turn it off above if this
+# host's address must stay hidden from DHT nodes.
+# socks5_outbound_host = "10.0.0.1"
+# socks5_outbound_port = 1080
+# socks5_outbound_user = ""
+# socks5_outbound_pass = ""
+#
+# Tracker announces and webseed fetches go through the SOCKS5 proxy above
+# (socks5h: the tracker's name is resolved by the proxy). Set this only to send
+# them another way. UDP trackers are NOT announced while a proxy is in use.
 # announce_proxy = "socks5h://user:pass@10.0.0.1:1080"
 #
-# Address advertised in the BEP-7 `ip=` announce parameter. Empty = omit it and
-# let the tracker observe the source address (right for almost every setup).
+# Address advertised in the BEP-7 `ip=` announce parameter (and the BEP-15 `ip`
+# field, IPv4 only). Empty = omit it and let the tracker observe the source
+# address (right for almost every setup).
 # announce_ip = ""
+#
+# Incoming peers forwarded by a relay (haproxy...) with a PROXY-v2 header that
+# carries their real address. 0 = no such listener. Loopback and private ranges
+# are always trusted as the relay; list a public relay explicitly.
+# listen_port_proxy_v2 = 0
+# listen_addr_proxy_v2 = ""
+# proxy_v2_trusted_sources = []
 
 # ─────────────────────────────────────────────
 # HOARD SESSION - upload-optimized (long-term seeding)
@@ -67,24 +95,45 @@ enable_ipv6 = false
 enable_dht = true
 enable_pex = true
 max_connections = 12000
+# Speed caps, bytes/s, 0 = unlimited (see [race]).
+upload_rate_limit = 0
+download_rate_limit = 0
+# The choker, off: a seedbox wants every interested peer served (see [race]).
+choking = false
 max_uploads_per_torrent = -1
-peer_timeout = 20
+peer_timeout = 300
 inactivity_timeout = 20
 
 active_seeds = -1
 active_limit = -1
 active_downloads = 10
 
-# --- Advanced: send this session's tracker announces through a SOCKS5 proxy --
-# socks5_outbound_* (if you set it) only covers PEER connections. Announces are
-# separate: without the key below they leave directly and the tracker records
-# this host's own address, however well the peer traffic is relayed.
-# UDP trackers are skipped while this is set (SOCKS5 carries TCP only).
+# --- Advanced: proxy and relay (the Network tab writes these as one set) ----
+# Every outbound PEER connection through a SOCKS5 proxy, v4 and v6 alike. A dial
+# the proxy refuses is dropped, never retried directly, and outbound uTP is off
+# (SOCKS5 cannot carry UDP). DHT stays plain UDP: turn it off above if this
+# host's address must stay hidden from DHT nodes.
+# socks5_outbound_host = "10.0.0.1"
+# socks5_outbound_port = 1080
+# socks5_outbound_user = ""
+# socks5_outbound_pass = ""
+#
+# Tracker announces and webseed fetches go through the SOCKS5 proxy above
+# (socks5h: the tracker's name is resolved by the proxy). Set this only to send
+# them another way. UDP trackers are NOT announced while a proxy is in use.
 # announce_proxy = "socks5h://user:pass@10.0.0.1:1080"
 #
-# Address advertised in the BEP-7 `ip=` announce parameter. Empty = omit it and
-# let the tracker observe the source address (right for almost every setup).
+# Address advertised in the BEP-7 `ip=` announce parameter (and the BEP-15 `ip`
+# field, IPv4 only). Empty = omit it and let the tracker observe the source
+# address (right for almost every setup).
 # announce_ip = ""
+#
+# Incoming peers forwarded by a relay (haproxy...) with a PROXY-v2 header that
+# carries their real address. 0 = no such listener. Loopback and private ranges
+# are always trusted as the relay; list a public relay explicitly.
+# listen_port_proxy_v2 = 0
+# listen_addr_proxy_v2 = ""
+# proxy_v2_trusted_sources = []
 
 # ─────────────────────────────────────────────
 # VPN SPEEDTEST

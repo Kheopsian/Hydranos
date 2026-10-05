@@ -11,9 +11,12 @@
 //! holds.
 //!
 //! Only keys that are dead for good belong here. A key that a planned change
-//! will wire (queue limits, upload slots, rate limits, peer timeouts, the
-//! proxy and network-mode keys) is NOT listed: a warning telling the operator
-//! to delete it would have them delete a setting the next release reads.
+//! will wire (queue limits, `inactivity_timeout`) is NOT listed: a warning
+//! telling the operator to delete it would have them delete a setting the next
+//! release reads. The proxy and relay keys (`socks5_outbound_*`,
+//! `announce_proxy`, `announce_ip`, `*_proxy_v2`), the rate caps
+//! (`upload_rate_limit`, `download_rate_limit`), `peer_timeout`, `choking` and
+//! `max_uploads_per_torrent` are read since 4.4 and are live.
 
 use toml::Value;
 
@@ -101,8 +104,8 @@ pub const DEAD_KEYS: &[DeadKey] = &[
     ),
     dead(
         Scope::Engine("custom_choking"),
-        "there is no custom choker: choking is disabled in the engine",
-        "nothing; delete the table",
+        "a 3.x choking strategy; the engine has one built-in choker and no strategy to pick",
+        "choking = true and max_uploads_per_torrent = <slots> (off by default; read their help first)",
     ),
     dead(
         Scope::Engine("disk_slots"),
@@ -461,6 +464,8 @@ inactivity_timeout = 20
 active_seeds = 5
 active_limit = 10
 upload_rate_limit = 0
+download_rate_limit = 0
+choking = false
 announce_rate_limit = 0
 start_paused = false
 announce_proxy = "socks5h://10.0.0.1:1080"

@@ -381,12 +381,16 @@ async fn tcp_accept_loop(
 /// Listen for incoming peer connections wrapped in PROXY protocol v2.
 /// Used behind an haproxy TCP frontend that prepends a PROXY v2 header carrying
 /// the real peer IP (bypass path v6: peer -> VPS haproxy -> the router rdr v6 -> the seedbox host).
+///
+/// `peer_id` and `egress` are the engine's first binding's, like the main
+/// listener's: one engine, one identity, one way out.
 pub async fn listen_proxy_v2(
     bind_addr: String,
     port: u16,
     torrent_mgr: Arc<TorrentManager>,
     disk_mgr: Arc<DiskManager>,
     peer_id: [u8; 20],
+    egress: crate::netpin::Egress,
     utp_socket: Option<Arc<UtpSocketUdp>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr_str = if bind_addr.is_empty() { "[::]".to_string() } else { bind_addr };
@@ -394,48 +398,74 @@ pub async fn listen_proxy_v2(
         .parse()
         .map_err(|e| format!("invalid proxy-v2 listen addr {}:{}: {}", addr_str, port, e))?;
     let socket = if sockaddr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+    // Pinned like the main listener, for the same reason: an accepted socket
+    // inherits the device, so the reply to the relay leaves by the tunnel the
+    // relay reached us through, not by the default route.
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if let Err(e) = crate::netpin::pin_fd(socket.as_raw_fd(), &egress) {
+            return Err(format!(
+                "cannot pin the PROXY v2 listener to bind_device: {} — refusing to listen on the default route",
+                e
+            )
+            .into());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = &egress;
     socket.set_reuseaddr(true)?;
     socket.bind(sockaddr)?;
     let listener = socket.listen(4096)?;
     info!("[peer] PROXY v2 TCP listening on {} (backlog=4096)", sockaddr);
 
     loop {
-        let (mut stream, wire_addr) = match listener.accept().await {
+        let (stream, wire_addr) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
                 warn!("[peer] proxy-v2 accept error: {}", e);
                 continue;
             }
         };
-        // Defense-in-depth : only trust PROXY v2 source from loopback or
-        // Docker private network (where the seedbox host socat relay sits).
-        // An attacker forging a PROXY v2 header could otherwise claim any
-        // peer IP and bypass per-IP rate limits or pollute PeerStats.
-        if !is_trusted_proxy_source(&wire_addr, torrent_mgr.trusted_proxy_sources()) {
-            warn!("[peer] proxy-v2 reject untrusted src {}", wire_addr);
-            continue;
-        }
         let tm = torrent_mgr.clone();
         let dm = disk_mgr.clone();
         let u = utp_socket.clone();
         tokio::spawn(async move {
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                proxy_protocol::parse_v2(&mut stream),
-            )
-            .await
-            {
-                Ok(Ok(real_addr)) => {
+            let extras = tm.trusted_proxy_sources().to_vec();
+            match accept_proxied(stream, wire_addr, &extras).await {
+                Ok((stream, real_addr)) => {
                     // Same rationale as the plain TCP listener: BT handshake
                     // catches real self-loops via peer_id, and the IP filter
                     // blocked cross-engine peers behind the same public IP.
                     stream.set_nodelay(true).ok();
                     handle_incoming(PeerTransport::Tcp(stream), real_addr, tm, dm, peer_id, u, port).await;
                 }
-                Ok(Err(e)) => warn!("[peer] proxy-v2 parse err from {}: {}", wire_addr, e),
-                Err(_) => warn!("[peer] proxy-v2 read timeout from {}", wire_addr),
+                Err(e) => warn!("[peer] proxy-v2 {}", e),
             }
         });
+    }
+}
+
+/// The trust check and the header read for one connection to the PROXY v2
+/// listener: the peer address to hand to `handle_incoming`, or why not.
+///
+/// The source is checked BEFORE a byte is read. The header carries an address
+/// the sender chose, so from anyone but our own relay it is an attacker
+/// claiming to be any peer -- past the IP filter, into PeerStats, around a
+/// per-IP limit. Apart from the listener so the decision can be tested
+/// against a real socket without an engine behind it.
+async fn accept_proxied(
+    mut stream: tokio::net::TcpStream,
+    wire_addr: SocketAddr,
+    trusted: &[std::net::IpAddr],
+) -> Result<(tokio::net::TcpStream, SocketAddr), String> {
+    if !is_trusted_proxy_source(&wire_addr, trusted) {
+        return Err(format!("reject untrusted src {}", wire_addr));
+    }
+    match tokio::time::timeout(Duration::from_secs(5), proxy_protocol::parse_v2(&mut stream)).await {
+        Ok(Ok(real_addr)) => Ok((stream, real_addr)),
+        Ok(Err(e)) => Err(format!("parse err from {}: {}", wire_addr, e)),
+        Err(_) => Err(format!("read timeout from {}", wire_addr)),
     }
 }
 
@@ -786,5 +816,61 @@ mod proxy_trust_tests {
     #[test]
     fn an_empty_allowlist_grants_nothing_extra() {
         assert!(!is_trusted_proxy_source(&addr("93.184.216.34:16271"), &[]));
+    }
+}
+
+#[cfg(test)]
+mod proxy_v2_accept_tests {
+    use super::accept_proxied;
+    use tokio::io::AsyncWriteExt;
+
+    /// A PROXY v2 header for a TCP/IPv4 peer at `src`, as haproxy sends it.
+    fn header(src: std::net::SocketAddrV4) -> Vec<u8> {
+        let mut h = vec![0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A, 0x21, 0x11, 0, 12];
+        h.extend_from_slice(&src.ip().octets());
+        h.extend_from_slice(&[192, 0, 2, 1]);
+        h.extend_from_slice(&src.port().to_be_bytes());
+        h.extend_from_slice(&16271u16.to_be_bytes());
+        h
+    }
+
+    /// One real connection: the client writes `bytes`, the server side is
+    /// handed to `accept_proxied` as if it came from `wire`.
+    async fn accept_as(wire: &str, trusted: &[std::net::IpAddr], bytes: Vec<u8>) -> Result<std::net::SocketAddr, String> {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = l.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut c = tokio::net::TcpStream::connect(at).await.unwrap();
+            c.write_all(&bytes).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+        let (s, _) = l.accept().await.unwrap();
+        let out = accept_proxied(s, wire.parse().unwrap(), trusted).await.map(|(_, real)| real);
+        client.abort();
+        out
+    }
+
+    /// ⭐ From our relay, the peer is who the header says: that address is
+    /// what `handle_incoming` and the IP filter see, not the relay's.
+    #[tokio::test]
+    async fn a_trusted_relay_hands_over_the_real_peer_address() {
+        let real = "198.51.100.7:51413".parse().unwrap();
+        let got = accept_as("127.0.0.1:40000", &[], header(real)).await.unwrap();
+        assert_eq!(got, std::net::SocketAddr::V4(real));
+        // A public relay is trusted only once listed.
+        let relay: std::net::IpAddr = "203.0.113.20".parse().unwrap();
+        let got = accept_as("203.0.113.20:40000", &[relay], header(real)).await.unwrap();
+        assert_eq!(got, std::net::SocketAddr::V4(real));
+    }
+
+    /// ⭐ From anyone else the header is a forged identity and the connection
+    /// is refused before it is read.
+    #[tokio::test]
+    async fn an_untrusted_source_is_refused() {
+        let real = "198.51.100.7:51413".parse().unwrap();
+        let err = accept_as("203.0.113.66:40000", &[], header(real)).await.unwrap_err();
+        assert!(err.contains("untrusted"), "{err}");
+        let listed: std::net::IpAddr = "203.0.113.20".parse().unwrap();
+        assert!(accept_as("203.0.113.66:40000", &[listed], header(real)).await.is_err(), "another listed IP is not this one");
     }
 }

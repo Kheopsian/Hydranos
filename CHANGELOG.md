@@ -23,7 +23,48 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ## Unreleased -- 4.4
 
+### Added
+- **Speed limits that actually limit.** `upload_rate_limit` and
+  `download_rate_limit` per engine (bytes/s, applied live), a cap per torrent
+  (right-click > Limit rate…, `/api/torrents/:h/limits`, selection action
+  `limits`) saved with the torrent, and one client-wide cap. Lock-free token
+  buckets; a torrent with no cap allocates nothing.
+- qBittorrent API speed-limit routes: `torrents/setUploadLimit`,
+  `setDownloadLimit`, `uploadLimit`, `downloadLimit`, `transfer/*Limit`, and
+  `upLimit`/`dlLimit` on add.
+- The choker is back as an opt-in (`choking = true`, `max_uploads_per_torrent`
+  slots), switched live. Off by default: on a large library it can cut total
+  upload by an order of magnitude.
+- `announce_proxy` and `announce_ip` per engine. Announces, magnets and
+  webseeds go through the engine's proxy (`socks5h`: the tracker's name is
+  resolved by the proxy); `TYPHON_ANNOUNCE_PROXY` stays as a global fallback.
+
+### Fixed
+- **The SOCKS5 proxy (`socks5_outbound_*`) was never handed to the engine**:
+  every peer connection left directly. It now covers every outgoing
+  connection, IPv4 and IPv6.
+- **A peer dial the SOCKS5 proxy refused fell back to a direct uTP
+  connection**, from the host's own address. With a proxy, a refused dial is
+  dropped and outgoing uTP is off.
+- The PROXY-v2 listener never started in Hydranos and its trusted sources
+  were not applied; it now starts, pinned to the engine's interface, with the
+  engine's peer id.
+- The Network tab remembers the mode chosen (`[network] mode`, WireGuard
+  included), removes the previous mode's keys, asks for a restart only when
+  one is needed, and reads back which engine follows the gluetun port.
+- `peer_timeout` is read (every peer used 300 s). Absent or 0 means 300 s;
+  values under 120 are raised to 120, so the old template's 30/20 do not
+  shorten anything.
+- The engine RPC `set_upload_limit` / `set_download_limit` did nothing.
+
 ### Changed
+- **The qBittorrent API reports the real `uploaded`, `ratio`, `share_ratio`,
+  `total_uploaded`, `total_downloaded` and `seeding_time`.** They were 0 for
+  every torrent. A Sonarr/Radarr seeding goal or an autobrr ratio rule will
+  now act on them.
+- UDP trackers behind a proxy are refused with the reason shown on the
+  tracker, and the Network tab warns when the proxy is saved: SOCKS5 has no
+  UDP here (no UDP ASSOCIATE).
 - **Every configuration key Hydranos accepts but ignores is named at
   startup**, one warning per key, with why and what to use instead: the 3.x
   `[[agent]]` blocks and `agent_token`, `listen_interfaces`,

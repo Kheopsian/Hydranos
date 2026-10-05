@@ -648,10 +648,11 @@ async fn reporter(mgr: Arc<TorrentManager>) {
 
 /// Build the HTTP client used for every webseed fetch.
 ///
-/// It deliberately reuses `TYPHON_ANNOUNCE_PROXY`: a webseed GET is an outbound
-/// request carrying our IP to a third party, exactly like an announce, so it
-/// must leave by the same door. Anything else would re-open the leak the
-/// announce proxy exists to close.
+/// It deliberately reuses the engine's announce proxy (`http_proxy`, with
+/// the `TYPHON_ANNOUNCE_PROXY` fallback): a webseed GET is an outbound request
+/// carrying our IP to a third party, exactly like an announce, so it must
+/// leave by the same door. Anything else would re-open the leak the announce
+/// proxy exists to close.
 fn build_client(cfg: &EngineConfig) -> Result<reqwest::Client, String> {
     let mut b = reqwest::Client::builder()
         .user_agent(cfg.user_agent.clone())
@@ -676,12 +677,11 @@ fn build_client(cfg: &EngineConfig) -> Result<reqwest::Client, String> {
         // to keep them: the default would re-handshake TLS constantly at this
         // request rate.
         .pool_max_idle_per_host(256);
-    if let Ok(url) = std::env::var("TYPHON_ANNOUNCE_PROXY") {
-        if !url.is_empty() {
-            let p = reqwest::Proxy::all(&url).map_err(|e| format!("proxy {}: {}", url, e))?;
-            b = b.proxy(p);
-            info!("[webseed] fetches proxied via {}", url);
-        }
+    if let Some(url) = crate::tracker::http::effective_proxy(&cfg.http_proxy()) {
+        let shown = crate::tracker::http::redact_proxy(&url);
+        let p = reqwest::Proxy::all(&url).map_err(|e| format!("proxy {}: {}", shown, e))?;
+        b = b.proxy(p);
+        info!("[webseed] fetches proxied via {}", shown);
     }
     b.build().map_err(|e| e.to_string())
 }
@@ -693,16 +693,14 @@ pub fn start(mgr: Arc<TorrentManager>, cfg: &EngineConfig) {
         info!("[webseed] disabled by config: url-list is parsed but never fetched");
         return;
     }
-    let proxied = std::env::var("TYPHON_ANNOUNCE_PROXY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
+    let proxied = crate::tracker::http::effective_proxy(&cfg.http_proxy()).is_some();
     if !cfg.bind_device.is_empty() && !proxied {
         // SO_BINDTODEVICE is applied to the sockets this engine opens itself;
         // reqwest opens its own, so a device-pinned engine with no proxy would
         // fetch straight out of the default route and publish the host IP to
         // the mirror. Refusing is the only safe answer.
         warn!(
-            "[webseed] DISABLED: engine is pinned to '{}' but TYPHON_ANNOUNCE_PROXY is unset — \
+            "[webseed] DISABLED: engine is pinned to '{}' but has no announce proxy — \
              an HTTP fetch would bypass the pin and expose the host address",
             cfg.bind_device
         );

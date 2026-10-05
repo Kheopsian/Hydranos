@@ -139,6 +139,10 @@ pub fn start(
         }
     };
 
+    // The magnet's announces go where the engine's do: through its proxy
+    // when it has one. A magnet announced directly would hand the tracker
+    // this host's address before the torrent even exists.
+    let http_proxy = config.http_proxy();
     let jobs = self.clone();
     tokio::spawn(async move {
         // Rounds until the budget runs out, not one. A peer that is still
@@ -159,7 +163,7 @@ pub fn start(
             round += 1;
             if discovered_at.map_or(true, |t| t.elapsed() >= DISCOVERY_EVERY) {
                 discovered_at = Some(Instant::now());
-                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone(), &egress.device).await {
+                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone(), &egress.device, &http_proxy).await {
                     if !peers.contains(&p) {
                         peers.push(p);
                     }
@@ -210,6 +214,8 @@ async fn discover(
     // The engine's interface: the magnet's announces leave by it, as its
     // metadata dials already did. 4.3 announced magnets by the default route.
     device: &str,
+    // The engine's announce proxy (`EngineConfig::http_proxy`).
+    proxy: &str,
 ) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -235,9 +241,9 @@ async fn discover(
                 num_want: 200,
                 port,
             };
-            crate::tracker::udp::send_announce_on(&a, crate::tracker::http::IpMode::Auto, device).await
+            crate::tracker::udp::send_announce_on(&a, crate::tracker::http::IpMode::Auto, device, proxy).await
         } else if url.starts_with("http://") || url.starts_with("https://") {
-            crate::tracker::http::announce_on(url, &info_hash, peer_id, port, 0, 0, UNKNOWN_LEFT, "started", device).await
+            crate::tracker::http::announce_on(url, &info_hash, peer_id, port, 0, 0, UNKNOWN_LEFT, "started", device, proxy).await
         } else {
             continue;
         };

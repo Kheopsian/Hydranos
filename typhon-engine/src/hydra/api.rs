@@ -3800,7 +3800,9 @@ async fn get_race_settings(
     Json(serde_json::json!({
         "listen_port": cfg.race.listen_port,
         "max_connections": cfg.race.max_connections,
-        "upload_rate_limit": 0,
+        // Bytes/s as configured, 0 = unlimited. Was a constant 0.
+        "upload_rate_limit": cfg.race.upload_rate_limit.max(0),
+        "download_rate_limit": cfg.race.download_rate_limit.max(0),
     }))
     .into_response()
 }
@@ -4505,9 +4507,10 @@ async fn get_trackers(
 
 /// How the engines reach the network, and with what.
 ///
-/// The mode is DEDUCED from the configuration rather than stored: a field
-/// saying "proxy_v2" while no listener is configured is how an operator ends up
-/// believing traffic is tunnelled when it is not.
+/// The mode is the one the tab saved (`[network] mode`), and deduced from the
+/// keys only for a file it never saved: see `netmode::current`. The deduction
+/// alone reopened a WireGuard setup on another mode, since WireGuard leaves
+/// nothing in [race]/[hoard] for it to find.
 async fn get_network_mode(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -4519,15 +4522,11 @@ async fn get_network_mode(
 
     let race = &cfg.race;
     let hoard = &cfg.hoard;
-    let mode = if hoard.gluetun_port_forward || race.gluetun_port_forward {
-        "gluetun"
-    } else if race.listen_port_proxy_v2 != 0 || hoard.listen_port_proxy_v2 != 0 {
-        "proxy_v2"
-    } else if !race.socks5_outbound_host.is_empty() {
-        "socks5"
-    } else {
-        "direct"
-    };
+    let mode = crate::netmode::current(&cfg);
+    // The engine that follows the gluetun port, read from the file: it was
+    // answered as "hoard" whatever the file said, so a race-forwarding setup
+    // reopened on hoard and the next save moved the port.
+    let gluetun = if race.gluetun_port_forward && !hoard.gluetun_port_forward { race } else { hoard };
 
     #[derive(serde::Serialize)]
     struct Fields<'a> {
@@ -4548,6 +4547,8 @@ async fn get_network_mode(
         gluetun_url: &'a str,
         gluetun_api_key: &'a str,
         gluetun_port_engine: &'a str,
+        announce_proxy: &'a str,
+        announce_ip: &'a str,
     }
 
     let fields = Fields {
@@ -4564,10 +4565,12 @@ async fn get_network_mode(
         hoard_proxy_v2_port: hoard.listen_port_proxy_v2,
         proxy_v2_listen_addr: &race.listen_addr_proxy_v2,
         proxy_v2_trusted_sources: &race.proxy_v2_trusted_sources,
-        gluetun_port_forward: hoard.gluetun_port_forward,
-        gluetun_url: &hoard.gluetun_url,
-        gluetun_api_key: &hoard.gluetun_api_key,
-        gluetun_port_engine: "hoard",
+        gluetun_port_forward: gluetun.gluetun_port_forward,
+        gluetun_url: &gluetun.gluetun_url,
+        gluetun_api_key: &gluetun.gluetun_api_key,
+        gluetun_port_engine: if std::ptr::eq(gluetun, race) { "race" } else { "hoard" },
+        announce_proxy: &race.announce_proxy,
+        announce_ip: &race.announce_ip,
     };
 
     // The OUTER object is a struct too, so its key order is mode, fields,
@@ -4603,14 +4606,36 @@ async fn get_network_mode(
         })
         .collect();
 
+    // Said on every load, not only after a save: a proxied engine skipping its
+    // UDP trackers is a standing fact of the mode, not an event.
+    let warnings = crate::netmode::warnings(&cfg, &|id: &str| engine_lists_udp(&state, id));
+    // The fallback the page cannot change. Its value with any credentials cut.
+    let env_overrides = typhon_engine::tracker::http::env_announce_proxy().map(|v| {
+        serde_json::json!([{
+            "name": "TYPHON_ANNOUNCE_PROXY",
+            "value": typhon_engine::tracker::http::redact_proxy(v),
+            "effect": "Announces and webseed fetches of every engine without a proxy of its own go through this proxy.",
+        }])
+    });
+
     Json(NetworkMode {
         mode,
         fields,
-        env_overrides: None,
-        warnings: None,
+        env_overrides,
+        warnings: (!warnings.is_empty()).then(|| serde_json::json!(warnings)),
         extra_engines,
     })
     .into_response()
+}
+
+/// Whether an engine holds a torrent with a `udp://` tracker. Stops at the
+/// first one: the question is yes or no, and a million-torrent hoard answers
+/// it on the first few torrents.
+fn engine_lists_udp(state: &AppState, engine_id: &str) -> bool {
+    let Some(engine) = state.engines.get(engine_id) else { return false };
+    engine.manager.all().iter().any(|t| {
+        t.live_trackers.read().iter().flatten().any(|u| typhon_engine::tracker::udp::is_udp(u))
+    })
 }
 
 /// Directory listing, used by the save-path picker.
@@ -7311,6 +7336,11 @@ async fn qbit_preferences(
         "max_connec": cfg.race.max_connections,
         "max_uploads_per_torrent": cfg.race.max_uploads_per_torrent,
         "pex": cfg.race.enable_pex,
+        // The client-wide caps, bytes/s, 0 = none. qBittorrent's wiki says
+        // KiB/s here; qBittorrent itself sends bytes/s (its own WebUI divides
+        // by 1024 to display them), and that is what clients read.
+        "up_limit": state.engines.client_rates().up.rate(),
+        "dl_limit": state.engines.client_rates().down.rate(),
         "queueing_enabled": false,
         "save_path": "/downloads",
         "temp_path_enabled": false,
@@ -7339,10 +7369,11 @@ async fn qbit_transfer_info(
         "dht_nodes": 0,
         "dl_info_data": down,
         "dl_info_speed": down_speed,
-        "dl_rate_limit": 0,
+        // The client-wide caps, bytes/s, 0 = none. Were constant zeroes.
+        "dl_rate_limit": state.engines.client_rates().down.rate(),
         "up_info_data": up,
         "up_info_speed": up_speed,
-        "up_rate_limit": 0,
+        "up_rate_limit": state.engines.client_rates().up.rate(),
     }))
     .into_response()
 }
@@ -7623,6 +7654,9 @@ pub(crate) fn engine_qbit_rows(
         if let Some(url) = torrent.live_trackers.read().iter().flatten().next() {
             row["tracker"] = serde_json::Value::String(url.clone());
         }
+        let (up_cap, down_cap) = torrent.rate_limits();
+        row["up_limit"] = qbit_limit_field(up_cap).into();
+        row["dl_limit"] = qbit_limit_field(down_cap).into();
         rows.push(row);
         }
         return rows;
@@ -7661,6 +7695,9 @@ pub(crate) fn engine_qbit_rows(
         if let Some(url) = torrent.live_trackers.read().iter().flatten().next() {
             row["tracker"] = serde_json::Value::String(url.clone());
         }
+        let (up_cap, down_cap) = torrent.rate_limits();
+        row["up_limit"] = qbit_limit_field(up_cap).into();
+        row["dl_limit"] = qbit_limit_field(down_cap).into();
         rows.push(row);
     }
     rows
@@ -8264,10 +8301,10 @@ async fn qbit_torrent_export(
 
 /// One torrent's properties panel, qBittorrent shape.
 ///
-/// The `total_*` figures come out ZERO for the same reason the listing does:
-/// the shim reads the "-ed" spellings that the native row does not carry. That
-/// is 3.x's behaviour and it is reproduced here too -- see the note in
-/// qbitrow.rs. `dl_limit` and `up_limit` are -1, qBittorrent's "no limit".
+/// The transfer figures are the real ones, as in the listing (see qbitrow.rs
+/// for why they were zero until 4.4). `dl_limit` / `up_limit` are the
+/// torrent's own caps in bytes/s, -1 -- qBittorrent's "no limit" -- when it
+/// has none.
 async fn qbit_torrent_properties(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -8302,6 +8339,9 @@ async fn qbit_torrent_properties(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // The transfer figures from the listing's own builder, so the panel and
+    // `torrents/info` cannot report two ratios for one torrent.
+    let listed = crate::qbitrow::build(&native, &engine_id, now);
 
     Json(serde_json::json!({
         "addition_date": added,
@@ -8309,7 +8349,7 @@ async fn qbit_torrent_properties(
         "completion_date": native.get("completed_time").and_then(|v| v.as_i64()).unwrap_or(0),
         "created_by": "",
         "creation_date": added,
-        "dl_limit": -1,
+        "dl_limit": qbit_limit_field(torrent.rate_limits().1),
         "dl_speed": native.get("download_rate").and_then(|v| v.as_i64()).unwrap_or(0),
         "dl_speed_avg": 0,
         "eta": 8_640_000,
@@ -8319,18 +8359,18 @@ async fn qbit_torrent_properties(
         "peers_total": 0,
         "piece_size": torrent.meta.piece_length,
         "save_path": save_path,
-        "seeding_time": 0,
+        "seeding_time": listed["seeding_time"].clone(),
         "seeds": 0,
         "seeds_total": 0,
-        "share_ratio": 0,
+        "share_ratio": listed["ratio"].clone(),
         "time_elapsed": now - added,
-        "total_downloaded": 0,
-        "total_downloaded_session": 0,
+        "total_downloaded": listed["downloaded"].clone(),
+        "total_downloaded_session": torrent.session_downloaded(),
         "total_size": native.get("total_size").and_then(|v| v.as_i64()).unwrap_or(0),
-        "total_uploaded": 0,
-        "total_uploaded_session": 0,
+        "total_uploaded": listed["uploaded"].clone(),
+        "total_uploaded_session": torrent.session_uploaded(),
         "total_wasted": 0,
-        "up_limit": -1,
+        "up_limit": qbit_limit_field(torrent.rate_limits().0),
         "up_speed": native.get("upload_rate").and_then(|v| v.as_i64()).unwrap_or(0),
         "up_speed_avg": 0,
     }))
@@ -8859,7 +8899,21 @@ async fn post_settings(
                     .into_response()
             }
         };
-        match crate::tomledit::set_toml_value(&doc, &change.section, &change.key, &literal) {
+        // The one exception to "the key must already be there": the live
+        // engine keys, in [race] / [hoard]. Every file from before 4.4 lacks
+        // the rate caps and `choking`, and a refusal would make them settable
+        // nowhere; a name on this short list cannot be a typo.
+        let creatable = (change.section == "race" || change.section == "hoard")
+            && LIVE_SESSION_KEYS.contains(&change.key.as_str());
+        let edited = match crate::tomledit::set_toml_value(&doc, &change.section, &change.key, &literal) {
+            Err(_) if creatable => crate::tomledit::set_toml_table(
+                &doc,
+                &change.section,
+                &[(change.key.clone(), literal.clone())],
+            ),
+            other => other,
+        };
+        match edited {
             Ok(next) => doc = next,
             Err(message) => {
                 return (StatusCode::BAD_REQUEST,
@@ -8884,15 +8938,19 @@ async fn post_settings(
     if let Ok(reloaded) = toml::from_str::<Config>(&doc) {
         state.set_cfg(reloaded);
     }
+    // Rate caps, peer timeout and choker reach the running engines now.
+    let applied_live = state.engines.apply_config(&state.cfg());
 
     Json(serde_json::json!({
         "status": "ok",
         "changed": req.changes.len(),
         // One notification per local engine, as with the announce settings.
         "agents_notified": state.engines.engines().len(),
-        // A config edit lands in the file, not in the running engines: the UI
-        // says so rather than letting an operator believe the change is live.
-        "restart_required": true,
+        "applied_live": applied_live,
+        // Most config edits land in the file, not in the running engines: the
+        // UI says so rather than letting an operator believe the change is
+        // live. A batch made only of keys `apply_config` carries is live.
+        "restart_required": req.changes.iter().any(|c| !LIVE_SESSION_KEYS.contains(&c.key.as_str())),
     }))
     .into_response()
 }
@@ -9070,6 +9128,381 @@ struct DialLimits {
     max_dials_per_sec: Option<f64>,
     #[serde(default)]
     max_connections: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Rate caps
+//
+// Three levels, see `typhon_engine::torrent::ratelimit`: the client (qBit's
+// "global" limit, in the store), the engine (`upload_rate_limit` /
+// `download_rate_limit` in the TOML, bytes/s), the torrent (its resume record).
+// The native routes take KiB/s, in fields that say so (`up_kib`): it is what
+// a person types, and the name keeps the two units from being confused.
+// ---------------------------------------------------------------------------
+
+/// Store key of the client-wide caps, `{"up": bytes/s, "down": bytes/s}`.
+const CLIENT_RATE_LIMITS_KEY: &str = "client_rate_limits";
+
+/// The config keys a save applies to the running engines without a restart.
+const LIVE_SESSION_KEYS: &[&str] =
+    &["upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent"];
+
+/// Put the stored client-wide caps back on the engines. Called once at boot.
+pub fn restore_client_rate_limits(state: &AppState) {
+    let stored = state.store.read().ok().and_then(|s| s.setting(CLIENT_RATE_LIMITS_KEY).ok().flatten());
+    let v: serde_json::Value = stored.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let client = state.engines.client_rates();
+    client.up.set_rate(v.get("up").and_then(|x| x.as_u64()).unwrap_or(0));
+    client.down.set_rate(v.get("down").and_then(|x| x.as_u64()).unwrap_or(0));
+}
+
+/// Set one direction of the client-wide cap (bytes/s, 0 = none) and persist
+/// both. False when the store refused the write: the cap is live, but would
+/// not survive a restart, and the caller says so.
+fn set_client_rate_limit(state: &AppState, dir: typhon_engine::torrent::ratelimit::Dir, bytes: u64) -> bool {
+    let client = state.engines.client_rates();
+    client.get(dir).set_rate(bytes);
+    let doc = serde_json::json!({"up": client.up.rate(), "down": client.down.rate()}).to_string();
+    match state.store.lock() {
+        Ok(s) => s.put_setting(CLIENT_RATE_LIMITS_KEY, &doc).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Every local copy of a torrent, or the one `engine` names.
+fn torrent_copies(
+    state: &AppState,
+    hash: &str,
+    engine: &str,
+) -> Vec<(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)> {
+    let Ok(key) = typhon_engine::torrent::hex_decode(&hash.to_lowercase()) else {
+        return Vec::new();
+    };
+    state
+        .engines
+        .engines()
+        .iter()
+        .filter(|e| engine.is_empty() || e.id == engine)
+        .filter_map(|e| e.manager.get(&key).map(|t| (e.id.clone(), t)))
+        .collect()
+}
+
+fn torrent_limits_json(engine: &str, t: &typhon_engine::torrent::meta::TorrentState) -> serde_json::Value {
+    let (up, down) = t.rate_limits();
+    serde_json::json!({
+        "engine": engine,
+        "upload_limit": up,
+        "download_limit": down,
+        "up_kib": up / 1024,
+        "down_kib": down / 1024,
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TorrentLimitsBody {
+    #[serde(default)]
+    up_kib: Option<i64>,
+    #[serde(default)]
+    down_kib: Option<i64>,
+}
+
+/// One torrent's own rate caps, per local copy (`?engine=` for one).
+async fn get_torrent_limits(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let hash = {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+    };
+    let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
+    if copies.is_empty() {
+        return not_found();
+    }
+    let list: Vec<_> = copies.iter().map(|(e, t)| torrent_limits_json(e, t)).collect();
+    Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
+}
+
+/// Set one torrent's own rate caps: `{"up_kib": n, "down_kib": n}`, KiB/s,
+/// either optional, 0 (or negative) lifts it. Every local copy unless
+/// `?engine=` names one. Live and persisted with the torrent's resume record
+/// at once; answers what the engine now holds, read back.
+async fn post_torrent_limits(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let req: TorrentLimitsBody = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return bad_request(&format!("invalid body: {e}")),
+    };
+    if req.up_kib.is_none() && req.down_kib.is_none() {
+        return bad_request("need up_kib and/or down_kib (KiB/s, 0 = unlimited)");
+    }
+    let hash = {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+    };
+    let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
+    if copies.is_empty() {
+        return not_found();
+    }
+    let up = req.up_kib.map(typhon_engine::torrent::ratelimit::kib_to_bytes);
+    let down = req.down_kib.map(typhon_engine::torrent::ratelimit::kib_to_bytes);
+    let mut list = Vec::new();
+    for (engine, t) in &copies {
+        if let Some(e) = state.engines.get(engine) {
+            if let Err(msg) = e.manager.set_torrent_rate_limits(&t.info_hash, up, down) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg}))).into_response();
+            }
+        }
+        list.push(torrent_limits_json(engine, t));
+    }
+    Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EngineRateLimitsBody {
+    #[serde(default)]
+    upload_kib: Option<i64>,
+    #[serde(default)]
+    download_kib: Option<i64>,
+}
+
+fn engine_rate_limits_json(state: &AppState, id: &str) -> Option<serde_json::Value> {
+    let e = state.engines.get(id)?;
+    let rates = e.manager.rates();
+    let session = state.cfg().local_engines().into_iter().find(|l| l.id == id).map(|l| l.session);
+    Some(serde_json::json!({
+        "engine": id,
+        // What the config says (bytes/s there), in KiB/s.
+        "upload_kib": session.as_ref().map_or(0, |s| s.upload_rate_limit.max(0) / 1024),
+        "download_kib": session.as_ref().map_or(0, |s| s.download_rate_limit.max(0) / 1024),
+        // What the engine holds right now, bytes/s.
+        "upload_limit": rates.engine.up.rate(),
+        "download_limit": rates.engine.down.rate(),
+        // The client-wide cap above every engine (qBit's global limit).
+        "client_upload_limit": state.engines.client_rates().up.rate(),
+        "client_download_limit": state.engines.client_rates().down.rate(),
+    }))
+}
+
+/// One engine's rate caps.
+async fn get_engine_rate_limits(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    match engine_rate_limits_json(&state, &id) {
+        Some(v) => Json(v).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such engine"}))).into_response(),
+    }
+}
+
+/// Set one engine's rate caps, KiB/s, 0 = unlimited. Unlike the dial limits
+/// this IS a config write: the cap is a setting, and one that fell off at the
+/// next restart would be a cap nobody can rely on. Written where the engine
+/// reads it -- `[race]` / `[hoard]`, or the `session` of an `[[engine]]`
+/// block -- and created if the file has no such key yet (every file from
+/// before 4.4), then put on the running engine.
+async fn post_engine_rate_limits(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let req: EngineRateLimitsBody = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return bad_request(&format!("invalid body: {e}")),
+    };
+    if req.upload_kib.is_none() && req.download_kib.is_none() {
+        return bad_request("need upload_kib and/or download_kib (KiB/s, 0 = unlimited)");
+    }
+    if state.engines.get(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such engine"}))).into_response();
+    }
+    let mut kv: Vec<(String, String)> = Vec::new();
+    if let Some(v) = req.upload_kib {
+        kv.push(("upload_rate_limit".into(), typhon_engine::torrent::ratelimit::kib_to_bytes(v).to_string()));
+    }
+    if let Some(v) = req.download_kib {
+        kv.push(("download_rate_limit".into(), typhon_engine::torrent::ratelimit::kib_to_bytes(v).to_string()));
+    }
+    let ok = edit_config(&state, |doc| {
+        if id == "race" || id == "hoard" {
+            return crate::tomledit::set_toml_table(doc, &id, &kv);
+        }
+        let mut out = doc.to_string();
+        for (k, v) in &kv {
+            out = crate::tomledit::set_agent_session_key(&out, &id, k, v)
+                .ok_or_else(|| format!("no [[engine]] block for {id}"))?;
+        }
+        Ok(out)
+    });
+    if !ok {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "the config could not be written"})),
+        )
+            .into_response();
+    }
+    state.engines.apply_config(&state.cfg());
+    match engine_rate_limits_json(&state, &id) {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    }
+}
+
+// --- qBittorrent shim: speed limits -----------------------------------------
+//
+// qBit's units, from its WebUI API: bytes/s everywhere. Setting takes `limit`
+// with 0 (or anything negative) for "no limit"; `torrents/uploadLimit` and the
+// `transfer/*Limit` reads answer 0 for none, while `torrents/info` and
+// `properties` say -1. "Global" is the client-wide level: one cap over every
+// engine of this host, as qBittorrent has one session.
+
+/// The shim's form, from the body and the query alike: cross-seed and some
+/// scripts send the parameters in the URL even on a POST.
+fn shim_form(query: &str, body: &str) -> Fields {
+    let mut f: Fields = BTreeMap::new();
+    for src in [body, query] {
+        for pair in src.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                let v = percent_decode(v);
+                if !v.is_empty() {
+                    f.insert(percent_decode(k), v);
+                }
+            }
+        }
+    }
+    f
+}
+
+fn shim_limit(form: &Fields) -> Option<u64> {
+    let raw = form.get("limit")?;
+    let n: f64 = raw.trim().parse().ok()?;
+    Some(if n.is_finite() && n > 0.0 { n as u64 } else { 0 })
+}
+
+/// A torrent's own cap as qBit's lists show it: bytes/s, -1 for none.
+pub(crate) fn qbit_limit_field(bytes: u64) -> i64 {
+    if bytes == 0 { -1 } else { bytes.min(i64::MAX as u64) as i64 }
+}
+
+async fn qbit_transfer_limit_read(state: &AppState, query: &str, headers: &HeaderMap, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
+    let query = query.to_string();
+    guard!(*state, *headers, query);
+    (StatusCode::OK, state.engines.client_rates().get(dir).rate().to_string()).into_response()
+}
+
+async fn qbit_transfer_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+    qbit_transfer_limit_read(&state, &query.unwrap_or_default(), &headers, typhon_engine::torrent::ratelimit::Dir::Up).await
+}
+
+async fn qbit_transfer_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+    qbit_transfer_limit_read(&state, &query.unwrap_or_default(), &headers, typhon_engine::torrent::ratelimit::Dir::Down).await
+}
+
+async fn qbit_transfer_set_limit(state: &AppState, query: &str, headers: &HeaderMap, body: &str, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
+    let query = query.to_string();
+    guard!(*state, *headers, query);
+    let form = shim_form(&query, body);
+    let Some(limit) = shim_limit(&form) else {
+        return (StatusCode::BAD_REQUEST, "limit is required (bytes/s)").into_response();
+    };
+    if !set_client_rate_limit(state, dir, limit) {
+        tracing::warn!("client rate cap set but not persisted: the store refused the write");
+    }
+    qbit_ok()
+}
+
+async fn qbit_transfer_set_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    qbit_transfer_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Up).await
+}
+
+async fn qbit_transfer_set_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    qbit_transfer_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Down).await
+}
+
+/// The full hashes a shim call names, resolved; `all` is every torrent.
+fn shim_resolved_hashes(state: &AppState, form: &Fields) -> Vec<String> {
+    let wanted = qbit_hashes(state, form);
+    let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+    wanted.iter().filter_map(|p| store.resolve_hash(p)).collect()
+}
+
+async fn qbit_torrents_limit_read(state: &AppState, query: &str, headers: &HeaderMap, body: &str, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
+    let query = query.to_string();
+    guard!(*state, *headers, query);
+    let form = shim_form(&query, body);
+    let mut out = serde_json::Map::new();
+    for hash in shim_resolved_hashes(state, &form) {
+        if let Some((_, t)) = find_torrent(state, &hash) {
+            let (up, down) = t.rate_limits();
+            let v = if dir == typhon_engine::torrent::ratelimit::Dir::Up { up } else { down };
+            out.insert(hash, serde_json::json!(v));
+        }
+    }
+    Json(serde_json::Value::Object(out)).into_response()
+}
+
+async fn qbit_torrents_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    qbit_torrents_limit_read(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Up).await
+}
+
+async fn qbit_torrents_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    qbit_torrents_limit_read(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Down).await
+}
+
+/// Cap every local copy of each torrent, as the shim's other per-torrent
+/// verbs do: a qBit client names a hash, never an engine.
+fn shim_cap_torrents(state: &AppState, hashes: &[String], up: Option<u64>, down: Option<u64>) {
+    for hash in hashes {
+        for (engine, t) in torrent_copies(state, hash, "") {
+            if let Some(e) = state.engines.get(&engine) {
+                let _ = e.manager.set_torrent_rate_limits(&t.info_hash, up, down);
+            }
+        }
+    }
+}
+
+async fn qbit_torrents_set_limit(state: &AppState, query: &str, headers: &HeaderMap, body: &str, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
+    let query = query.to_string();
+    guard!(*state, *headers, query);
+    let form = shim_form(&query, body);
+    let Some(limit) = shim_limit(&form) else {
+        return (StatusCode::BAD_REQUEST, "limit is required (bytes/s)").into_response();
+    };
+    let hashes = shim_resolved_hashes(state, &form);
+    match dir {
+        typhon_engine::torrent::ratelimit::Dir::Up => shim_cap_torrents(state, &hashes, Some(limit), None),
+        typhon_engine::torrent::ratelimit::Dir::Down => shim_cap_torrents(state, &hashes, None, Some(limit)),
+    }
+    qbit_ok()
+}
+
+async fn qbit_torrents_set_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    qbit_torrents_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Up).await
+}
+
+async fn qbit_torrents_set_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    qbit_torrents_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Down).await
 }
 
 /// Outbound dial pacing for one engine.
@@ -9798,6 +10231,12 @@ fn detail_payload(
         "trackers": tracker_rows(torrent, admission),
         "upload_rate": i(&row, "upload_rate"),
         "uploads_limit": 0,
+        // Rate caps, bytes/s, 0 = none: this torrent's own, and the engine's
+        // above it -- the panel shows which one actually binds.
+        "upload_limit": torrent.rate_limits().0,
+        "download_limit": torrent.rate_limits().1,
+        "engine_upload_limit": torrent.engine_rates().engine.up.rate(),
+        "engine_download_limit": torrent.engine_rates().engine.down.rate(),
     })
 }
 
@@ -10054,6 +10493,8 @@ async fn qbit_torrent_add(
     // and treating it as false would re-hash every cross-seeded torrent.
     let mut seed_mode = false;
     let mut urls: Vec<String> = Vec::new();
+    let mut up_limit: Option<u64> = None;
+    let mut dl_limit: Option<u64> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or_default().to_string();
@@ -10071,6 +10512,9 @@ async fn qbit_torrent_add(
                     "tags" => tags = value,
                     "paused" | "stopped" => paused = value == "true" || value == "1",
                     "skip_checking" => seed_mode = value == "true" || value == "1",
+                    // Caps at add, bytes/s; 0 or negative = none.
+                    "upLimit" => up_limit = value.trim().parse::<i64>().ok().map(|v| v.max(0) as u64),
+                    "dlLimit" => dl_limit = value.trim().parse::<i64>().ok().map(|v| v.max(0) as u64),
                     // One link per line: magnets, or URLs of .torrent files.
                     // It is how autobrr, Sonarr and Radarr send a magnet.
                     "urls" => urls.extend(
@@ -10124,16 +10568,22 @@ async fn qbit_torrent_add(
         };
     }
     for bytes in &files {
-        if let Err(e) =
-            add_torrent_bytes(&state, bytes, &category, &save_path, &tags, paused, seed_mode, "")
-        {
+        match add_torrent_bytes(&state, bytes, &category, &save_path, &tags, paused, seed_mode, "") {
+            // upLimit / dlLimit land on the torrent the moment it exists, and
+            // persist with it. A magnet has no torrent yet to cap: its caps
+            // are not kept (set them once it has resolved).
+            Ok((hash, _)) => {
+                if up_limit.is_some() || dl_limit.is_some() {
+                    shim_cap_torrents(&state, &[hash], up_limit, dl_limit);
+                }
+            }
             // "already added" is not a failure to a client that retries a
             // release it has seen before; qBit answers Ok. for it too.
-            if e.contains("already added") {
-                continue;
+            Err(e) if e.contains("already added") => continue,
+            Err(e) => {
+                tracing::warn!(error = %e, "qbit add refused");
+                failed += 1;
             }
-            tracing::warn!(error = %e, "qbit add refused");
-            failed += 1;
         }
     }
 
@@ -11670,30 +12120,36 @@ async fn post_network_check(
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_ECHO_URL.to_string());
 
-    let mode = if cfg.hoard.gluetun_port_forward || cfg.race.gluetun_port_forward {
-        "gluetun"
-    } else if cfg.race.listen_port_proxy_v2 != 0 || cfg.hoard.listen_port_proxy_v2 != 0 {
-        "proxy_v2"
-    } else if !cfg.race.socks5_outbound_host.is_empty() {
-        "socks5"
-    } else {
-        "direct"
-    };
+    let mode = crate::netmode::current(&cfg);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .ok();
+    // Each probe leaves the way the traffic it stands for leaves: the
+    // announce probe through the engine's announce proxy, the peer probe
+    // through its SOCKS5. One direct client for all four answered the host's
+    // own address on a proxied engine -- the check said "leak" about a setup
+    // that had none, or worse, the opposite.
+    let probe_client = |proxy: Option<String>| -> Result<reqwest::Client, String> {
+        let mut b = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8));
+        if let Some(url) = proxy {
+            b = b.proxy(reqwest::Proxy::all(&url).map_err(|e| e.to_string())?);
+        }
+        b.build().map_err(|e| e.to_string())
+    };
 
     let mut results = Vec::new();
     let mut measured_any = false;
 
     for engine in ["race", "hoard"] {
+        let session = if engine == "race" { &cfg.race } else { &cfg.hoard };
         for (prefix, what) in [("announce", "trackers"), ("peer_egress", "peers")] {
             let label = format!("Address {what} see ({engine})");
-            let outcome = match &client {
-                Some(c) => c.get(&echo).send().await.map_err(|e| e.to_string()),
-                None => Err("no HTTP client".to_string()),
+            let proxy = if prefix == "announce" {
+                typhon_engine::tracker::http::effective_proxy(&crate::engines::session_http_proxy(session))
+            } else {
+                Some(crate::engines::session_socks5_url(session)).filter(|u| !u.is_empty())
+            };
+            let outcome = match probe_client(proxy) {
+                Ok(c) => c.get(&echo).send().await.map_err(|e| e.to_string()),
+                Err(e) => Err(format!("no HTTP client: {e}")),
             };
             match outcome {
                 Ok(response) => {
@@ -11928,7 +12384,6 @@ async fn post_network_mode(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    let _ = cfg;
 
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     let race_port = parsed
@@ -11984,55 +12439,116 @@ async fn post_network_mode(
             .into_response();
     }
 
-    let trusted = f
-        .get("proxy_v2_trusted_sources")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str())
-                .map(q)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
+    // The mode the operator picked, stored as picked. Absent = the one in
+    // force, so a client that never sent it keeps working.
+    let mode = match parsed.get("mode").and_then(|v| v.as_str()).map(str::trim) {
+        Some(m) if crate::netmode::MODES.contains(&m) => m.to_string(),
+        None | Some("") => crate::netmode::current(&cfg).to_string(),
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("unknown network mode {other:?}")})),
+            )
+                .into_response();
+        }
+    };
+    let bad = |msg: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg}))).into_response();
+    let proxied = mode == "socks5" || mode == "proxy_v2";
 
+    // Refused rather than written: SOCKS5 mode with no proxy host is direct
+    // mode under another name, and the page would go on saying "proxied".
+    let socks_host = txt("socks5_host").trim().to_string();
+    if mode == "socks5" && socks_host.is_empty() {
+        return bad("SOCKS5 mode needs the proxy host".into());
+    }
+    let socks_port = match num("socks5_port") {
+        0 => 1080,
+        p if (1..=65535).contains(&p) => p,
+        _ => return bad("the SOCKS5 port must be between 1 and 65535".into()),
+    };
+    let announce_proxy = txt("announce_proxy").trim().to_string();
+    if proxied && !announce_proxy.is_empty() && reqwest::Proxy::all(&announce_proxy).is_err() {
+        return bad("the announce proxy is not a proxy URL (socks5h://user:pass@host:port)".into());
+    }
+    let announce_ip = txt("announce_ip").trim().to_string();
+    if proxied && !announce_ip.is_empty() && announce_ip.parse::<std::net::IpAddr>().is_err() {
+        return bad("the announced IP is not an IP address".into());
+    }
+    let (race_pv2, hoard_pv2) = (num("race_proxy_v2_port"), num("hoard_proxy_v2_port"));
+    let mut trusted_list: Vec<String> = Vec::new();
+    if mode == "proxy_v2" {
+        for (name, p) in [("race", race_pv2), ("hoard", hoard_pv2)] {
+            if !(0..=65535).contains(&p) {
+                return bad(format!("the {name} PROXY-v2 port must be between 0 and 65535"));
+            }
+            if p != 0 && (p == race_port || p == hoard_port) {
+                return bad(format!("the {name} PROXY-v2 port is already a listen port"));
+            }
+        }
+        if race_pv2 == 0 && hoard_pv2 == 0 {
+            return bad("PROXY-v2 mode needs a PROXY-v2 port on at least one engine".into());
+        }
+        if race_pv2 != 0 && race_pv2 == hoard_pv2 {
+            return bad("race and hoard cannot share a PROXY-v2 port".into());
+        }
+        // Checked here because the engine drops what it cannot parse: a typo
+        // would leave the relay untrusted and every peer it sends refused.
+        for s in f.get("proxy_v2_trusted_sources").and_then(|v| v.as_array()).into_iter().flatten() {
+            let s = s.as_str().unwrap_or_default().trim();
+            if s.is_empty() {
+                continue;
+            }
+            if s.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_err() {
+                return bad(format!("trusted source {s:?} is not an IP address"));
+            }
+            trusted_list.push(q(s));
+        }
+    }
+    let trusted = trusted_list.join(", ");
+
+    // What every mode writes, then what THIS mode owns. The keys of the other
+    // modes are not carried along: they are removed below, which is what
+    // "pick one, saving clears the others" has promised since 4.0 and what
+    // the form never did -- it posted the old values back from hidden fields.
     let shared = |port: i64, iface: &str, pv2: i64| -> Vec<(String, String)> {
-        vec![
+        let mut kv: Vec<(String, String)> = vec![
             ("listen_port".into(), port.to_string()),
             ("bind_interface".into(), q(iface)),
             ("enable_ipv6".into(), flag("enable_ipv6").to_string()),
-            ("listen_port_proxy_v2".into(), pv2.to_string()),
-            ("listen_addr_proxy_v2".into(), q(&txt("proxy_v2_listen_addr"))),
-            ("proxy_v2_trusted_sources".into(), format!("[{trusted}]")),
-            ("socks5_outbound_host".into(), q(&txt("socks5_host"))),
-            ("socks5_outbound_port".into(), num("socks5_port").to_string()),
-            ("socks5_outbound_user".into(), q(&txt("socks5_user"))),
-            ("socks5_outbound_pass".into(), q(&txt("socks5_pass"))),
-        ]
+        ];
+        if proxied {
+            kv.push(("socks5_outbound_host".into(), q(&socks_host)));
+            kv.push(("socks5_outbound_port".into(), socks_port.to_string()));
+            kv.push(("socks5_outbound_user".into(), q(&txt("socks5_user"))));
+            kv.push(("socks5_outbound_pass".into(), q(&txt("socks5_pass"))));
+            kv.push(("announce_proxy".into(), q(&announce_proxy)));
+            kv.push(("announce_ip".into(), q(&announce_ip)));
+        }
+        if mode == "proxy_v2" {
+            kv.push(("listen_port_proxy_v2".into(), pv2.to_string()));
+            kv.push(("listen_addr_proxy_v2".into(), q(txt("proxy_v2_listen_addr").trim())));
+            kv.push(("proxy_v2_trusted_sources".into(), format!("[{trusted}]")));
+        }
+        kv
     };
 
-    let mut race_kv = shared(
-        race_port,
-        &txt("race_bind_interface"),
-        num("race_proxy_v2_port"),
-    );
-    let mut hoard_kv = shared(
-        hoard_port,
-        &txt("hoard_bind_interface"),
-        num("hoard_proxy_v2_port"),
-    );
+    let mut race_kv = shared(race_port, &txt("race_bind_interface"), race_pv2);
+    let mut hoard_kv = shared(hoard_port, &txt("hoard_bind_interface"), hoard_pv2);
     // Gluetun forwards one port, so it belongs to one engine. The other must be
     // written as OFF, or switching the choice would leave both following it.
-    let gl_engine = txt("gluetun_port_engine");
-    for (name, kv) in [("race", &mut race_kv), ("hoard", &mut hoard_kv)] {
-        let mine = gl_engine == name;
-        kv.push((
-            "gluetun_port_forward".into(),
-            (mine && flag("gluetun_port_forward")).to_string(),
-        ));
-        kv.push(("gluetun_url".into(), q(&txt("gluetun_url"))));
-        kv.push(("gluetun_api_key".into(), q(&txt("gluetun_api_key"))));
+    if mode == "gluetun" {
+        let gl_engine = txt("gluetun_port_engine");
+        for (name, kv) in [("race", &mut race_kv), ("hoard", &mut hoard_kv)] {
+            let mine = gl_engine == name;
+            kv.push((
+                "gluetun_port_forward".into(),
+                (mine && flag("gluetun_port_forward")).to_string(),
+            ));
+            kv.push(("gluetun_url".into(), q(&txt("gluetun_url"))));
+            kv.push(("gluetun_api_key".into(), q(&txt("gluetun_api_key"))));
+        }
     }
+    let cleared = crate::netmode::cleared_keys(&mode);
 
     let extras: Vec<serde_json::Value> = parsed
         .get("extra_engines")
@@ -12054,9 +12570,29 @@ async fn post_network_mode(
         }
     }
 
+    // Every local extra engine, whether or not the form listed it: an override
+    // of a cleared key in its own block would otherwise outlive the mode.
+    let extra_ids: Vec<String> = cfg
+        .local_engines()
+        .into_iter()
+        .map(|e| e.id)
+        .filter(|id| id != "race" && id != "hoard")
+        .collect();
+    let mode_value = q(&mode);
     let ok = edit_config(&state, |doc| {
         let mut out = crate::tomledit::set_toml_table(doc, "race", &race_kv)?;
         out = crate::tomledit::set_toml_table(&out, "hoard", &hoard_kv)?;
+        for key in &cleared {
+            for section in ["race", "hoard"] {
+                out = crate::tomledit::delete_toml_key(&out, section, key);
+            }
+            for id in &extra_ids {
+                if let Some(next) = crate::tomledit::delete_agent_session_key(&out, id, key) {
+                    out = next;
+                }
+            }
+        }
+        out = crate::tomledit::set_toml_table(&out, "network", &[("mode".to_string(), mode_value.clone())])?;
         for e in &extras {
             let Some(id) = e.get("id").and_then(|v| v.as_str()) else { continue };
             if let Some(p) = e.get("listen_port").and_then(|v| v.as_i64()) {
@@ -12085,8 +12621,22 @@ async fn post_network_mode(
         )
             .into_response();
     }
-    // Engines read their network once, at boot.
-    Json(serde_json::json!({"status": "ok", "restart_required": true})).into_response()
+    // Engines read their network once, at boot, so a restart is needed exactly
+    // when the file now asks a running engine for something it does not have.
+    // It said `true` for every save, including one that changed nothing.
+    let now = state.cfg();
+    let running: Vec<(String, crate::config::Session)> =
+        state.engines.engines().iter().map(|e| (e.id.clone(), e.session.clone())).collect();
+    let restart_required = crate::netmode::restart_required(&now, &running);
+    let warnings = crate::netmode::warnings(&now, &|id: &str| engine_lists_udp(&state, id));
+    tracing::info!(mode = %mode, restart_required, "network mode saved");
+    Json(serde_json::json!({
+        "status": "ok",
+        "mode": mode,
+        "restart_required": restart_required,
+        "warnings": warnings,
+    }))
+    .into_response()
 }
 
 // Until 4.4, `POST /api/arr-cleanup/execute` answered `{"removed":0}` without
@@ -13065,6 +13615,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/torrents/trackers", axum::routing::any(qbit_torrent_trackers))
         .route("/api/v2/torrents/properties", axum::routing::any(qbit_torrent_properties))
         .route("/api/v2/torrents/export", axum::routing::any(qbit_torrent_export))
+        // Speed limits. Reads on any verb (cross-seed POSTs its reads), writes
+        // on POST as qBittorrent has them.
+        .route("/api/v2/transfer/uploadLimit", axum::routing::any(qbit_transfer_upload_limit))
+        .route("/api/v2/transfer/downloadLimit", axum::routing::any(qbit_transfer_download_limit))
+        .route("/api/v2/transfer/setUploadLimit", axum::routing::post(qbit_transfer_set_upload_limit))
+        .route("/api/v2/transfer/setDownloadLimit", axum::routing::post(qbit_transfer_set_download_limit))
+        .route("/api/v2/torrents/uploadLimit", axum::routing::any(qbit_torrents_upload_limit))
+        .route("/api/v2/torrents/downloadLimit", axum::routing::any(qbit_torrents_download_limit))
+        .route("/api/v2/torrents/setUploadLimit", axum::routing::post(qbit_torrents_set_upload_limit))
+        .route("/api/v2/torrents/setDownloadLimit", axum::routing::post(qbit_torrents_set_download_limit))
+        .route("/api/torrents/:info_hash/limits", get(get_torrent_limits).post(post_torrent_limits))
+        .route("/api/engines/:id/rate-limits", get(get_engine_rate_limits).post(post_engine_rate_limits))
         .route("/api/torrents/:info_hash/files", get(get_torrent_files))
         .route("/api/torrents/:info_hash/torrent", get(get_torrent_file))
         .route("/api/torrents/:info_hash/peers", axum::routing::post(post_torrent_peers))
@@ -19035,6 +19597,146 @@ mod qbit_shim_post_tests {
         serde_json::from_slice(bytes).expect("json")
     }
 
+    fn listed<'a>(info: &'a serde_json::Value, hash: &str) -> &'a serde_json::Value {
+        info.as_array().unwrap().iter().find(|r| r["hash"] == hash).expect("listed")
+    }
+
+    /// ⭐⭐ A per-torrent cap set over POST, the hash in the BODY as cross-seed
+    /// and qBit's own WebUI send it: it reaches the engine (read back from
+    /// the torrent, not from the answer) and every read the shim has --
+    /// `torrents/uploadLimit`, `info`, `properties` -- reports it.
+    #[tokio::test]
+    async fn a_torrent_cap_set_over_post_reaches_the_engine_and_every_read() {
+        let (s, hash) = populated("shim-limit-torrent", &single_file_bytes());
+        let (st, _) = call(&s, "POST", "/api/v2/torrents/setUploadLimit", &format!("hashes={hash}&limit=51200")).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, t) = find_torrent(&s.state, &hash).unwrap();
+        assert_eq!(t.rate_limits(), (51_200, 0), "the engine holds the cap");
+        assert!(t.rate_chain(typhon_engine::torrent::ratelimit::Dir::Up).is_limited());
+
+        let (_, b) = call(&s, "POST", "/api/v2/torrents/uploadLimit", &format!("hashes={hash}")).await;
+        assert_eq!(json(&b)[&hash], 51_200);
+        let (_, b) = call(&s, "POST", "/api/v2/torrents/downloadLimit", &format!("hashes={hash}")).await;
+        assert_eq!(json(&b)[&hash], 0, "no download cap reads 0 here, as in qBit");
+        let (_, b) = call(&s, "POST", "/api/v2/torrents/info", "").await;
+        let row = json(&b);
+        assert_eq!(listed(&row, &hash)["up_limit"], 51_200);
+        assert_eq!(listed(&row, &hash)["dl_limit"], -1, "and -1 in the listing, as in qBit");
+        let (_, b) = call(&s, "POST", "/api/v2/torrents/properties", &format!("hash={hash}")).await;
+        assert_eq!(json(&b)["up_limit"], 51_200);
+        assert_eq!(json(&b)["dl_limit"], -1);
+
+        // 0 lifts it; so does any negative value.
+        call(&s, "POST", "/api/v2/torrents/setUploadLimit", &format!("hashes={hash}&limit=-1")).await;
+        assert_eq!(t.rate_limits(), (0, 0));
+        // A write is POST only, as qBittorrent has it; a GET changes nothing.
+        let (st, _) = call(&s, "GET", &format!("/api/v2/torrents/setUploadLimit?hashes={hash}&limit=1"), "").await;
+        assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(t.rate_limits(), (0, 0));
+        // No limit at all is refused rather than read as "lift".
+        let (st, _) = call(&s, "POST", "/api/v2/torrents/setUploadLimit", &format!("hashes={hash}")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// `hashes=all` caps every torrent, like the shim's other bulk verbs, and
+    /// the parameters may come in the query of a POST.
+    #[tokio::test]
+    async fn hashes_all_caps_every_torrent_from_the_query_of_a_post() {
+        let (s, a) = populated("shim-limit-all", &single_file_bytes());
+        let (b, _) = add_torrent_bytes(&s.state, &multi_file_bytes(), "", "/tmp", "", true, true, "race").unwrap();
+        let (st, _) = call(&s, "POST", "/api/v2/torrents/setDownloadLimit?hashes=all&limit=8192", "").await;
+        assert_eq!(st, StatusCode::OK);
+        for h in [&a, &b] {
+            assert_eq!(find_torrent(&s.state, h).unwrap().1.rate_limits(), (0, 8192), "{h}");
+        }
+    }
+
+    /// ⭐ The global cap: `transfer/set*Limit` moves the client-wide bucket
+    /// above every engine, and `transfer/*Limit`, `transfer/info` and
+    /// `preferences` all read it back, bytes/s.
+    #[tokio::test]
+    async fn the_global_cap_is_set_over_post_and_read_everywhere() {
+        let (s, _) = populated("shim-limit-global", &single_file_bytes());
+        let (st, _) = call(&s, "POST", "/api/v2/transfer/setUploadLimit", "limit=1048576").await;
+        assert_eq!(st, StatusCode::OK);
+        call(&s, "POST", "/api/v2/transfer/setDownloadLimit", "limit=524288").await;
+        assert_eq!(s.state.engines.client_rates().up.rate(), 1_048_576);
+        let race = s.state.engines.get("race").unwrap();
+        assert_eq!(race.manager.rates().client().unwrap().up.rate(), 1_048_576, "the engine is under it");
+
+        let (_, b) = call(&s, "POST", "/api/v2/transfer/uploadLimit", "").await;
+        assert_eq!(String::from_utf8(b).unwrap(), "1048576");
+        let (_, b) = call(&s, "GET", "/api/v2/transfer/downloadLimit", "").await;
+        assert_eq!(String::from_utf8(b).unwrap(), "524288");
+        let (_, b) = call(&s, "GET", "/api/v2/transfer/info", "").await;
+        assert_eq!(json(&b)["up_rate_limit"], 1_048_576);
+        assert_eq!(json(&b)["dl_rate_limit"], 524_288);
+        let (_, b) = call(&s, "GET", "/api/v2/app/preferences", "").await;
+        assert_eq!(json(&b)["up_limit"], 1_048_576);
+        assert_eq!(json(&b)["dl_limit"], 524_288);
+
+        // Persisted: a restart puts it back.
+        s.state.engines.client_rates().up.set_rate(0);
+        restore_client_rate_limits(&s.state);
+        assert_eq!(s.state.engines.client_rates().up.rate(), 1_048_576);
+
+        call(&s, "POST", "/api/v2/transfer/setUploadLimit", "limit=0").await;
+        let (_, b) = call(&s, "GET", "/api/v2/transfer/info", "").await;
+        assert_eq!(json(&b)["up_rate_limit"], 0, "0 = no limit");
+    }
+
+    /// ⭐ The engine keys are live: saving `upload_rate_limit` (bytes/s, the
+    /// unit the settings screen announces), `choking` and the slots moves the
+    /// RUNNING engine without a restart, and a file from before 4.4 that has
+    /// none of these keys accepts them. The native engine route writes the
+    /// same key, from KiB/s.
+    #[tokio::test]
+    async fn saving_the_engine_keys_moves_the_running_engine() {
+        let s = state_from("live-engine-keys", &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"));
+        let race = s.state.engines.get("race").unwrap();
+        assert!(!race.manager.policy().choking(), "off by default");
+        let body = serde_json::json!({"changes": [
+            {"section": "race", "key": "upload_rate_limit", "value": 65536},
+            {"section": "race", "key": "choking", "value": true},
+            {"section": "race", "key": "max_uploads_per_torrent", "value": 2},
+            {"section": "race", "key": "peer_timeout", "value": 600},
+        ]});
+        let (st, b) = call(&s, "POST", "/api/settings", &body.to_string()).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert_eq!(json(&b)["restart_required"], false, "every key of the batch is live");
+        assert_eq!(race.manager.rates().engine.up.rate(), 65_536);
+        assert!(race.manager.policy().choking());
+        assert_eq!(race.manager.policy().unchoke_slots(), Some(2));
+        assert_eq!(race.manager.policy().idle_timeout().as_secs(), 600);
+
+        let (st, b) = call(&s, "POST", "/api/engines/race/rate-limits", r#"{"upload_kib": 128, "download_kib": 0}"#).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert_eq!(race.manager.rates().engine.up.rate(), 131_072);
+        assert_eq!(json(&b)["upload_kib"], 128);
+        let file = std::fs::read_to_string(&s.state.config_path).unwrap();
+        assert!(file.contains("upload_rate_limit = 131072"), "{file}");
+    }
+
+    /// ⭐⭐ The REAL ratio: what the torrent uploaded and downloaded, in
+    /// `info` and in `properties`, and the two agree. Until 4.4 both said 0
+    /// for every torrent (see qbitrow.rs).
+    #[tokio::test]
+    async fn info_and_properties_report_the_real_ratio() {
+        let (s, hash) = populated("shim-real-ratio", &single_file_bytes());
+        let (_, t) = find_torrent(&s.state, &hash).unwrap();
+        t.restore_lifetime(30_000, 10_000);
+        let (_, b) = call(&s, "POST", "/api/v2/torrents/info", "").await;
+        let info = json(&b);
+        let row = listed(&info, &hash);
+        assert_eq!(row["uploaded"], 30_000);
+        assert_eq!(row["ratio"], serde_json::json!(3));
+        let (_, b) = call(&s, "POST", "/api/v2/torrents/properties", &format!("hash={hash}")).await;
+        let p = json(&b);
+        assert_eq!(p["total_uploaded"], 30_000);
+        assert_eq!(p["total_downloaded"], 10_000);
+        assert_eq!(p["share_ratio"], row["ratio"], "one ratio, whichever route asks");
+    }
+
     /// ⭐⭐ The bug as cross-seed met it: hash in the body, nothing on the URL.
     #[tokio::test]
     async fn the_detail_routes_read_the_hash_from_a_post_form() {
@@ -19112,5 +19814,120 @@ mod qbit_shim_post_tests {
         assert_eq!(shim_param("hash=", "hash=bb", "hash").as_deref(), Some("bb"));
         assert_eq!(shim_param("", "category=a%20b", "category").as_deref(), Some("a b"));
         assert_eq!(shim_param("", "", "hash"), None);
+    }
+}
+
+#[cfg(test)]
+mod network_mode_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    const SOCKS_FILE: &str = "[daemon]\napi_key = \"0123456789abcdef0123456789abcdef\"\n\n\
+        [race]\nlisten_port = 16171\nsocks5_outbound_host = \"10.0.0.1\"\nsocks5_outbound_port = 1080\n\
+        announce_ip = \"198.51.100.7\"\nlisten_port_proxy_v2 = 16271\n\n\
+        [hoard]\nlisten_port = 16172\nsocks5_outbound_host = \"10.0.0.1\"\n\n\
+        [[engine]]\nname = \"vpn1\"\nrole = \"hoard\"\nengine_id = \"vpn1\"\n  [engine.session]\n  listen_port = 16999\n  socks5_outbound_host = \"10.0.0.2\"\n";
+
+    const DIRECT_FILE: &str = "[daemon]\napi_key = \"0123456789abcdef0123456789abcdef\"\n\n\
+        [race]\nlisten_port = 16171\n\n[hoard]\nlisten_port = 16172\n";
+
+    async fn save(s: &AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let r = post_network_mode(State(s.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let status = r.status();
+        (status, body_json(r).await)
+    }
+
+    async fn load(s: &AppState) -> serde_json::Value {
+        body_json(get_network_mode(State(s.clone()), RawQuery(None), keyed(KEY)).await).await
+    }
+
+    fn form(mode: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut fields = serde_json::json!({"race_listen_port": 16171, "hoard_listen_port": 16172});
+        for (k, v) in extra.as_object().unwrap() {
+            fields[k] = v.clone();
+        }
+        serde_json::json!({"mode": mode, "fields": fields})
+    }
+
+    /// ⭐⭐ Leaving SOCKS5 for direct REMOVES the proxy keys -- from race, from
+    /// hoard, and from an extra engine's own block -- records the mode, reads
+    /// it back, and asks for a restart because the running engines still dial
+    /// through the proxy.
+    #[tokio::test]
+    async fn switching_from_socks5_to_direct_clears_the_proxy_everywhere() {
+        let s = state_from("netmode-socks-direct", SOCKS_FILE);
+        assert_eq!(load(&s).await["mode"], "proxy_v2", "an old file is still deduced");
+
+        let (st, body) = save(&s, form("direct", serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], true, "the running engines still use the proxy");
+
+        let text = std::fs::read_to_string(&s.config_path).unwrap();
+        for key in ["socks5_outbound_host", "socks5_outbound_port", "announce_ip", "listen_port_proxy_v2"] {
+            assert!(!text.contains(key), "{key} survived the switch:\n{text}");
+        }
+        assert!(text.contains("listen_port = 16999"), "the extra engine keeps the rest of its block:\n{text}");
+        let now = s.cfg();
+        assert_eq!(now.network.mode, "direct");
+        assert!(now.local_engines().iter().all(|e| e.session.socks5_outbound_host.is_empty()));
+        assert_eq!(load(&s).await["mode"], "direct", "read back as saved");
+    }
+
+    /// ⭐ `restart_required` is exact: a save that changes nothing an engine
+    /// reads at boot needs none, one that adds a proxy does.
+    #[tokio::test]
+    async fn restart_required_follows_what_actually_changes() {
+        let s = state_from("netmode-restart", DIRECT_FILE);
+        let (st, body) = save(&s, form("direct", serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], false, "same network, nothing to restart: {body}");
+
+        let (st, body) = save(&s, form("socks5", serde_json::json!({"socks5_host": "10.0.0.1", "socks5_port": 1080}))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], true);
+        assert_eq!(load(&s).await["mode"], "socks5");
+        assert_eq!(load(&s).await["fields"]["socks5_host"], "10.0.0.1");
+
+        // Undone before any restart: the running engines never had it.
+        let (_, body) = save(&s, form("direct", serde_json::json!({}))).await;
+        assert_eq!(body["restart_required"], false, "{body}");
+    }
+
+    /// ⭐ Said when it is asked for: a proxy with UDP trackers on is a proxy
+    /// under which those trackers go silent, and the save answers so.
+    #[tokio::test]
+    async fn saving_a_proxy_warns_that_udp_trackers_will_not_be_announced() {
+        let s = state_from("netmode-udp", DIRECT_FILE);
+        let (_, body) = save(&s, form("socks5", serde_json::json!({"socks5_host": "10.0.0.1"}))).await;
+        let warned = body["warnings"].as_array().unwrap().iter().any(|w| w == crate::netmode::UDP_BEHIND_PROXY);
+        assert!(warned, "{body}");
+        let page = load(&s).await;
+        assert!(page["warnings"].as_array().unwrap().iter().any(|w| w == crate::netmode::UDP_BEHIND_PROXY), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_mode_without_its_essentials_is_refused() {
+        let s = state_from("netmode-refuse", DIRECT_FILE);
+        let (st, _) = save(&s, form("socks5", serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "SOCKS5 with no host is direct under another name");
+        let (st, _) = save(&s, form("proxy_v2", serde_json::json!({"race_proxy_v2_port": 16271, "proxy_v2_trusted_sources": ["not-an-ip"]}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = save(&s, form("teleport", serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(s.cfg().network.mode.is_empty(), "nothing was written");
+    }
+
+    /// The gluetun engine is read from the file, not answered as "hoard".
+    #[tokio::test]
+    async fn the_gluetun_engine_is_read_back() {
+        let s = state_from("netmode-gluetun", DIRECT_FILE);
+        let (st, body) = save(&s, form("gluetun", serde_json::json!({"gluetun_port_forward": true, "gluetun_port_engine": "race"}))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let page = load(&s).await;
+        assert_eq!(page["mode"], "gluetun");
+        assert_eq!(page["fields"]["gluetun_port_engine"], "race");
+        assert_eq!(page["fields"]["gluetun_port_forward"], true);
     }
 }

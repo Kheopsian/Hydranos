@@ -33,6 +33,11 @@ pub struct Policy {
     /// The engine's `bind_interface`: announces leave by it or not at all.
     /// Empty = the default route.
     pub device: String,
+    /// The engine's announce proxy URL (`EngineConfig::http_proxy`): its
+    /// `announce_proxy`, else its SOCKS5 peer proxy. Empty = the process-wide
+    /// `TYPHON_ANNOUNCE_PROXY` fallback, or direct. Per engine, like `device`:
+    /// one engine can announce through a VPS while the other goes direct.
+    pub proxy: String,
     /// The engine's `enable_ipv6 = false`: every tracker is announced over
     /// IPv4 only (4.3 announced `auto` trackers over both regardless). Named
     /// for what it does when set, like `skip_udp`, so a default policy keeps
@@ -100,6 +105,8 @@ pub struct Request {
     pub udp: Option<typhon_engine::tracker::udp::UdpAnnounce>,
     /// The interface to announce from (the engine's `bind_interface`).
     pub device: String,
+    /// The proxy to announce through (`Policy::proxy`).
+    pub proxy: String,
 }
 
 /// The peer id this policy sends. One identity, the same to every tracker and
@@ -161,7 +168,7 @@ pub fn prepare(
     if policy.no_ipv6 {
         ip_mode = typhon_engine::tracker::http::IpMode::V4;
     }
-    Some(Request { url: primary, user_agent, ip_mode, udp, device: policy.device.clone() })
+    Some(Request { url: primary, user_agent, ip_mode, udp, device: policy.device.clone(), proxy: policy.proxy.clone() })
 }
 
 /// The BEP 15 form of one announce.

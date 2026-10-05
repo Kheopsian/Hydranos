@@ -32,6 +32,12 @@ fn classify(err: &str) -> &'static str {
         Some(i) => &err[..i],
         None => err,
     };
+    // Not a fault of the tracker or of the network: our own refusal to send a
+    // UDP announce around the engine's proxy. Its own class, so the Trackers
+    // tab says that instead of filing it under "other".
+    if primary == typhon_engine::tracker::udp::UDP_PROXIED_REFUSAL {
+        return "udp_proxied";
+    }
     let e = primary.to_ascii_lowercase();
     if e.contains("429") || e.contains("too many requests") {
         "rate_limited"
@@ -164,8 +170,8 @@ pub async fn depart(torrent: Arc<typhon_engine::torrent::meta::TorrentState>, po
             continue;
         };
         let result = match &req.udp {
-            Some(u) => typhon_engine::tracker::udp::send_announce_on(u, req.ip_mode, &req.device).await,
-            None => typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device).await,
+            Some(u) => typhon_engine::tracker::udp::send_announce_on(u, req.ip_mode, &req.device, &req.proxy).await,
+            None => typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device, &req.proxy).await,
         };
         if result.is_ok() {
             acknowledged += 1;
@@ -441,8 +447,8 @@ pub(super) async fn announce_one(
                     break;
                 };
                 let result = match &req.udp {
-                    Some(u) => typhon_engine::tracker::udp::send_announce_on(u, req.ip_mode, &req.device).await,
-                    None => typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device).await,
+                    Some(u) => typhon_engine::tracker::udp::send_announce_on(u, req.ip_mode, &req.device, &req.proxy).await,
+                    None => typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device, &req.proxy).await,
                 };
                 {
                     let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
@@ -858,6 +864,8 @@ mod classify_tests {
     fn each_class_is_recognised_from_what_a_tracker_actually_says() {
         assert_eq!(classify("HTTP 429"), "rate_limited");
         assert_eq!(classify("too many requests"), "rate_limited");
+        // Our own refusal behind a proxy is named as such on the Trackers tab.
+        assert_eq!(classify(typhon_engine::tracker::udp::UDP_PROXIED_REFUSAL), "udp_proxied");
         assert_eq!(classify("operation timed out"), "timeout");
         assert_eq!(classify("connection timeout"), "timeout");
         assert_eq!(classify("invalid passkey"), "invalid_passkey");

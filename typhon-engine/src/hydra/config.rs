@@ -77,8 +77,29 @@ pub struct Session {
     pub aio_threads: Option<usize>,
     #[serde(default)]
     pub active_downloads: i64,
+    /// Unchoke slots per seeding torrent, read only while `choking` is on.
+    /// 0 / absent = 4, negative = unlimited. Live, NOT a dead key.
     #[serde(default)]
     pub max_uploads_per_torrent: i64,
+    /// Run the choker. Off unless set: it was removed in 2.4.13 after it
+    /// churned a hoard's peers into a fraction of their upload, and is back
+    /// as an opt-in for an uplink that is the bottleneck. Applied live.
+    #[serde(default)]
+    pub choking: bool,
+    /// Engine-wide upload cap in BYTES per second, the unit the settings
+    /// screen has always announced and the one 3.x handed its engine as is.
+    /// 0 (or negative) = unlimited. Applied at start and live when the
+    /// settings are saved.
+    #[serde(default)]
+    pub upload_rate_limit: i64,
+    /// Engine-wide download cap, bytes/s. 0 = unlimited.
+    #[serde(default)]
+    pub download_rate_limit: i64,
+    /// Seconds a peer may send nothing useful before it is dropped. 0 /
+    /// absent = 300, under 120 is raised to 120 (see
+    /// `PeerPolicy::set_idle_timeout_secs`). Applied live.
+    #[serde(default)]
+    pub peer_timeout: u64,
     #[serde(default)]
     pub enable_ipv6: bool,
     #[serde(default)]
@@ -101,6 +122,27 @@ pub struct Session {
     pub socks5_outbound_user: String,
     #[serde(default)]
     pub socks5_outbound_pass: String,
+    /// Proxy URL for this engine's tracker announces and webseed fetches,
+    /// when they must go another way than the peers. Empty = the SOCKS5 peer
+    /// proxy above (`socks5h://`), or direct when there is none.
+    #[serde(default)]
+    pub announce_proxy: String,
+    /// The address trackers are asked to list for us: BEP 7 `ip=` over HTTP,
+    /// the `ip` field over UDP (IPv4 only, BEP 15 has no room for more).
+    /// Empty = not sent, the tracker uses the address the announce came from.
+    #[serde(default)]
+    pub announce_ip: String,
+}
+
+/// `[network]`: how the engines reach the network, as the Network tab saved it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Network {
+    /// "direct", "wireguard", "gluetun", "socks5" or "proxy_v2". Stored rather
+    /// than deduced: WireGuard leaves no trace in [race]/[hoard] for a
+    /// deduction to find, so the tab reopened on another mode than the one
+    /// picked. Empty (a file from before 4.4) = deduced as before.
+    #[serde(default)]
+    pub mode: String,
 }
 
 impl Session {
@@ -116,6 +158,12 @@ impl Session {
     /// engine's own default so an unset config behaves identically.
     pub fn file_pool_size(&self) -> usize {
         self.aio_threads.unwrap_or(256)
+    }
+
+    /// `(upload, download)` caps as the engine takes them: bytes/s, a
+    /// negative value read as 0 (unlimited).
+    pub fn rate_caps(&self) -> (u64, u64) {
+        (self.upload_rate_limit.max(0) as u64, self.download_rate_limit.max(0) as u64)
     }
 }
 
@@ -331,6 +379,9 @@ pub struct Config {
 
     #[serde(default)]
     pub race_drain: RaceDrain,
+
+    #[serde(default)]
+    pub network: Network,
 
     /// The agent endpoint, `/mcp`.
     #[serde(default)]
@@ -596,7 +647,21 @@ impl Config {
                 tracing::warn!("a local agent has neither engine_id nor name: skipped");
                 continue;
             }
-            let session = merge_session(profile, &agent.session);
+            let mut session = merge_session(profile, &agent.session);
+            // An extra engine inherits its role's way OUT -- the SOCKS5 proxy,
+            // the announce proxy -- which any number of engines can share, as
+            // 3.x had it. Not the two things that exist once per host: the
+            // PROXY v2 listen port (a second bind fails) and the gluetun
+            // forwarded port (one port, one engine). Those it gets only by
+            // naming them in its own session. A block that REPLACES race or
+            // hoard is that engine, not an extra one, and keeps both.
+            let extra = id != "race" && id != "hoard";
+            if extra && !agent.session.contains_key("listen_port_proxy_v2") {
+                session.listen_port_proxy_v2 = 0;
+            }
+            if extra && !agent.session.contains_key("gluetun_port_forward") {
+                session.gluetun_port_forward = false;
+            }
             let engine = LocalEngine { id: id.clone(), role: agent.role.trim().to_string(), session };
             match out.iter().position(|e| e.id == id) {
                 Some(i) => out[i] = engine,
@@ -689,6 +754,29 @@ mod agent_tests {
         );
         let ids: Vec<String> = c.local_engines().iter().map(|e| e.id.clone()).collect();
         assert_eq!(ids, ["race", "hoard"]);
+    }
+
+    /// An extra engine shares its role's proxy (any number of engines can go
+    /// out through one SOCKS5) but not its PROXY v2 port or its gluetun
+    /// forward, which exist once per host: inheriting them made two engines
+    /// bind one relay port, and the second never listened.
+    #[test]
+    fn an_extra_engine_inherits_the_proxy_but_not_the_one_per_host_ports() {
+        let c = cfg(
+            "[race]\nlisten_port = 1\nsocks5_outbound_host = \"10.0.0.1\"\nlisten_port_proxy_v2 = 16271\n\
+             gluetun_port_forward = true\n\n[hoard]\nlisten_port = 2\n\n\
+             [[engine]]\nname = \"vpn7\"\nrole = \"race\"\n[engine.session]\nlisten_port = 26991\n\n\
+             [[engine]]\nname = \"vpn8\"\nrole = \"race\"\n[engine.session]\nlisten_port = 26992\nlisten_port_proxy_v2 = 16281\n",
+        );
+        let e = c.local_engines();
+        let vpn7 = e.iter().find(|e| e.id == "vpn7").unwrap();
+        assert_eq!(vpn7.session.socks5_outbound_host, "10.0.0.1", "the way out is shared");
+        assert_eq!(vpn7.session.listen_port_proxy_v2, 0, "the relay port is not");
+        assert!(!vpn7.session.gluetun_port_forward, "nor the forwarded port");
+        let vpn8 = e.iter().find(|e| e.id == "vpn8").unwrap();
+        assert_eq!(vpn8.session.listen_port_proxy_v2, 16281, "unless the engine names its own");
+        let race = e.iter().find(|e| e.id == "race").unwrap();
+        assert_eq!(race.session.listen_port_proxy_v2, 16271);
     }
 
     /// A node overriding its own race engine replaces it rather than ending up

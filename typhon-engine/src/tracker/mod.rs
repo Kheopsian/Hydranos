@@ -465,69 +465,115 @@ use tokio::net::{TcpSocket, TcpStream};
 use crate::peer::transport::PeerTransport;
 use crate::crypto::stream::CryptoStream;
 
-// Try TCP first, fall back to uTP if it fails (NAT-bound peers).
+/// One TCP connection to `dest`, leaving by the egress the engine was given.
+///
+/// `dest` is the peer itself, or the SOCKS5 proxy when the engine has one:
+/// either way the socket that leaves this host is pinned and marked, so a
+/// proxy reached through a tunnel is reached through THAT tunnel and not by
+/// the default route.
+async fn steered_connect(
+    dest: std::net::SocketAddr,
+    egress: &crate::netpin::Egress,
+) -> Option<TcpStream> {
+    #[cfg(unix)]
+    use std::os::unix::io::AsRawFd;
+    // Multi-tunnel path: set SO_MARK on the socket so the kernel's
+    // `ip rule fwmark X lookup tableX` policy steers outbound through
+    // the right WG interface. Source IP becomes 10.2.0.2 automatically
+    // (the only address bound on every wg-hy* iface, per Proton's
+    // shared-Address scheme).
+    // A device pin and/or a fwmark both need the socket before connect().
+    // The device is what steers a Proton-style setup, where every tunnel
+    // shares 10.2.0.2 and a source address decides nothing.
+    #[cfg(unix)]
+    if egress.is_steered() {
+        let socket = if dest.is_ipv4() {
+            TcpSocket::new_v4().ok()?
+        } else {
+            TcpSocket::new_v6().ok()?
+        };
+        if crate::netpin::pin_fd(socket.as_raw_fd(), egress).is_err() {
+            // Fail the dial rather than let it leave by the default route.
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        if egress.fwmark != 0 {
+            let mark_val: libc::c_int = egress.fwmark as libc::c_int;
+            let rc = unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_MARK,
+                    &mark_val as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if rc != 0 {
+                return None;
+            }
+        }
+        // No SO_MARK here: a mark that cannot be applied fails the dial
+        // rather than being dropped on the floor.
+        #[cfg(not(target_os = "linux"))]
+        if egress.fwmark != 0 {
+            return None;
+        }
+        return socket.connect(dest).await.ok();
+    }
+    TcpStream::connect(dest).await.ok()
+}
+
+/// A peer connection through the engine's SOCKS5 proxy.
+///
+/// None means the dial failed, and that is the WHOLE answer: the caller must
+/// not try the peer any other way. The proxy is configured so that no peer
+/// sees this host's address; a fallback to a direct dial when it is down
+/// would show it to exactly the peers it was hiding it from, at the moment
+/// nobody is watching.
+async fn socks5_connect(
+    addr: std::net::SocketAddr,
+    proxy: &crate::peer::Socks5Config,
+    egress: &crate::netpin::Egress,
+) -> Option<TcpStream> {
+    let (host, port, auth) = proxy;
+    // The proxy's own name, resolved here: it is our infrastructure, not a
+    // peer. A literal address (the usual case) costs no lookup at all.
+    let proxy_addr = tokio::net::lookup_host((host.as_str(), *port)).await.ok()?.next()?;
+    let to_proxy = steered_connect(proxy_addr, egress).await?;
+    let target = (addr.ip(), addr.port());
+    let stream = match auth {
+        Some((u, pw)) => {
+            tokio_socks::tcp::Socks5Stream::connect_with_password_and_socket(to_proxy, target, u, pw).await
+        }
+        None => tokio_socks::tcp::Socks5Stream::connect_with_socket(to_proxy, target).await,
+    };
+    match stream {
+        Ok(s) => Some(s.into_inner()),
+        Err(_) => {
+            DIAL_SOCKS_REFUSED.fetch_add(1, AtomicOrdering::Relaxed);
+            None
+        }
+    }
+}
+
+/// Peer dials the engine's SOCKS5 proxy did not carry: refused, or the proxy
+/// itself unreachable. Each one is a dial that did NOT happen, by design.
+pub static DIAL_SOCKS_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+// Try TCP first, fall back to uTP if it fails (NAT-bound peers). With a
+// SOCKS5 proxy there is no fallback: see `open_peer`.
 async fn try_tcp(
     addr: std::net::SocketAddr,
     egress: &crate::netpin::Egress,
 ) -> Option<PeerTransport> {
-    #[cfg(unix)]
-    use std::os::unix::io::AsRawFd;
     // 3s — on a reachable LAN/WAN peer, TCP connect succeeds in ≤300ms.
     let connect_fut = async move {
-        // Route v6 outbound via SOCKS5 if configured (avoids leaking Free IP).
-        // SOCKS5 client doesn't expose fwmark here; the multi-binding case
-        // (Proton WG) doesn't use SOCKS5 and falls through to direct.
-        {
-            if let Some((host, port, auth)) = egress.socks5.as_deref() {
-                let target = (addr.ip().to_string(), addr.port());
-                let stream_res = match auth {
-                    Some((u, pw)) => tokio_socks::tcp::Socks5Stream::connect_with_password(
-                        (host.as_str(), *port), target, u, pw,
-                    ).await,
-                    None => tokio_socks::tcp::Socks5Stream::connect(
-                        (host.as_str(), *port), target,
-                    ).await,
-                };
-                return stream_res.ok().map(|s| s.into_inner());
-            }
+        // Every peer, v4 and v6, through the proxy when there is one. Never
+        // a direct attempt after it: `socks5_connect` failing ends the dial.
+        if let Some(proxy) = egress.socks5.as_deref() {
+            return socks5_connect(addr, proxy, egress).await;
         }
-        // Multi-tunnel path: set SO_MARK on the socket so the kernel's
-        // `ip rule fwmark X lookup tableX` policy steers outbound through
-        // the right WG interface. Source IP becomes 10.2.0.2 automatically
-        // (the only address bound on every wg-hy* iface, per Proton's
-        // shared-Address scheme).
-        // A device pin and/or a fwmark both need the socket before connect().
-        // The device is what steers a Proton-style setup, where every tunnel
-        // shares 10.2.0.2 and a source address decides nothing.
-        #[cfg(unix)]
-        if egress.is_steered() {
-            let socket = if addr.is_ipv4() {
-                TcpSocket::new_v4().ok()?
-            } else {
-                TcpSocket::new_v6().ok()?
-            };
-            if crate::netpin::pin_fd(socket.as_raw_fd(), egress).is_err() {
-                // Fail the dial rather than let it leave by the default route.
-                return None;
-            }
-            if egress.fwmark != 0 {
-                let mark_val: libc::c_int = egress.fwmark as libc::c_int;
-                let rc = unsafe {
-                    libc::setsockopt(
-                        socket.as_raw_fd(),
-                        libc::SOL_SOCKET,
-                        libc::SO_MARK,
-                        &mark_val as *const _ as *const libc::c_void,
-                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    )
-                };
-                if rc != 0 {
-                    return None;
-                }
-            }
-            return socket.connect(addr).await.ok();
-        }
-        TcpStream::connect(addr).await.ok()
+        steered_connect(addr, egress).await
     };
     match tokio::time::timeout(Duration::from_secs(3), connect_fut).await {
         Ok(Some(s)) => {
@@ -683,6 +729,14 @@ pub(crate) async fn open_peer(
                 }
             }
         }
+    }
+    // Never uTP behind a SOCKS5 proxy. uTP is raw UDP from our own socket,
+    // and SOCKS5 without UDP ASSOCIATE (tokio-socks has none) cannot carry
+    // it: falling back to it after the proxied TCP legs failed was a direct
+    // dial, showing this host's address to the very peer the proxy hid it
+    // from. A dial the proxy cannot make is a dial that does not happen.
+    if egress.socks5.is_some() {
+        return None;
     }
     if let Some(sock) = utp_socket.as_ref() {
         // uTP plaintext (preferred)
@@ -996,5 +1050,108 @@ mod per_engine_dial_tests {
         assert_eq!(rx_b.try_recv().unwrap().1.info_hash, [2u8; 20]);
         enqueue_dial(peer, torrent_of(&a, 1));
         assert_eq!(rx_a.try_recv().unwrap().1.info_hash, [1u8; 20]);
+    }
+}
+
+#[cfg(test)]
+mod socks_dial_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A SOCKS5 server on loopback that records every CONNECT target and
+    /// answers each with `reply` (0 = granted, anything else = refused).
+    /// Granted connections are held open and never spoken to again.
+    async fn fake_socks5(reply: u8) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<std::net::SocketAddr>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<std::net::SocketAddr>>> = Default::default();
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else { return };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut hdr = [0u8; 2];
+                    s.read_exact(&mut hdr).await.ok()?;
+                    let mut methods = vec![0u8; hdr[1] as usize];
+                    s.read_exact(&mut methods).await.ok()?;
+                    s.write_all(&[5, 0]).await.ok()?;
+                    let mut req = [0u8; 4];
+                    s.read_exact(&mut req).await.ok()?;
+                    let ip: std::net::IpAddr = match req[3] {
+                        1 => { let mut b = [0u8; 4]; s.read_exact(&mut b).await.ok()?; b.into() }
+                        4 => { let mut b = [0u8; 16]; s.read_exact(&mut b).await.ok()?; b.into() }
+                        _ => return None,
+                    };
+                    let mut port = [0u8; 2];
+                    s.read_exact(&mut port).await.ok()?;
+                    log.lock().unwrap().push((ip, u16::from_be_bytes(port)).into());
+                    s.write_all(&[5, reply, 0, 1, 0, 0, 0, 0, 0, 0]).await.ok()?;
+                    if reply == 0 {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                    Some(())
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    fn proxied(proxy: std::net::SocketAddr) -> crate::netpin::Egress {
+        crate::netpin::Egress {
+            socks5: Some(Arc::new((proxy.ip().to_string(), proxy.port(), None))),
+            ..Default::default()
+        }
+    }
+
+    /// ⭐ The dial reaches the peer THROUGH the proxy: the proxy is asked for
+    /// the peer's address, and no socket goes to the peer itself. v4 and v6
+    /// alike -- this was documented as "v6 dials" and never wired at all.
+    #[tokio::test]
+    async fn a_peer_dial_goes_through_the_proxy() {
+        let (proxy, seen) = fake_socks5(0).await;
+        for peer in ["203.0.113.9:6881", "[2001:db8::9]:6881"] {
+            let peer: std::net::SocketAddr = peer.parse().unwrap();
+            let t = try_tcp(peer, &proxied(proxy)).await;
+            assert!(t.is_some(), "the proxy granted {peer}, the dial must succeed");
+            assert!(seen.lock().unwrap().contains(&peer), "the proxy was asked for {peer}: {:?}", seen.lock().unwrap());
+        }
+    }
+
+    /// ⭐⭐ Fail closed. The proxy refuses, and NOTHING leaves for the peer
+    /// directly: no TCP connection reaches its listener, no uTP SYN reaches
+    /// its UDP port. Before 4.4 a refused SOCKS dial fell through to uTP in
+    /// the clear -- the home address handed to exactly the peers the proxy
+    /// was hiding it from.
+    #[tokio::test]
+    async fn a_refused_dial_is_never_retried_directly() {
+        let (proxy, seen) = fake_socks5(2).await;
+        // The peer: a TCP listener and a UDP socket on one port, both counting.
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = tcp.local_addr().unwrap();
+        let udp = tokio::net::UdpSocket::bind(peer).await.unwrap();
+        let utp = librqbit_utp::UtpSocketUdp::new_udp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let policy = crate::peer::extension::PeerPolicy::default();
+        let out = open_peer(peer, &Some(utp), &[7u8; 20], &[8u8; 20], &proxied(proxy), &policy, false).await;
+        assert!(out.is_none(), "the proxy refused: the dial has failed");
+        assert!(!seen.lock().unwrap().is_empty(), "the attempt went to the proxy");
+
+        let quiet = Duration::from_millis(500);
+        assert!(tokio::time::timeout(quiet, tcp.accept()).await.is_err(), "a direct TCP dial reached the peer");
+        let mut buf = [0u8; 64];
+        assert!(tokio::time::timeout(quiet, udp.recv_from(&mut buf)).await.is_err(), "a direct uTP packet reached the peer");
+    }
+
+    /// The control for the test above: the same peer, no proxy, and the
+    /// listener DOES see the dial. Without it, "nothing arrived" could just
+    /// mean the fixture cannot receive anything.
+    #[tokio::test]
+    async fn without_a_proxy_the_same_peer_is_dialled_directly() {
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = tcp.local_addr().unwrap();
+        let dial = tokio::spawn(async move { try_tcp(peer, &crate::netpin::Egress::default()).await.is_some() });
+        assert!(tokio::time::timeout(Duration::from_secs(3), tcp.accept()).await.is_ok());
+        assert!(dial.await.unwrap());
     }
 }

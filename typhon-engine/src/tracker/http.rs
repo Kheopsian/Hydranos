@@ -22,39 +22,68 @@ fn fmt_err_chain<E: StdError + ?Sized>(e: &E) -> String {
     out
 }
 
-/// Primary reqwest client — can optionally route through a SOCKS5 proxy
-/// via env `TYPHON_ANNOUNCE_PROXY`. Lets us kill
-/// the IPv6 Freebox leak: without this, the default reqwest client would
-/// dial tracker.example.net AAAA straight from the styx netns source
-/// (2a01:e0a:dba:d12::3) — visible in tracker peer lists.
-static PRIMARY_PROXY: OnceLock<Option<reqwest::Proxy>> = OnceLock::new();
-
-fn primary_proxy() -> Option<&'static reqwest::Proxy> {
-    PRIMARY_PROXY
-        .get_or_init(|| {
-            let url = std::env::var("TYPHON_ANNOUNCE_PROXY").ok()?;
-            if url.is_empty() {
-                eprintln!("[tracker] TYPHON_ANNOUNCE_PROXY empty — primary announce goes direct (leak risk)");
-                return None;
-            }
-            match reqwest::Proxy::all(&url) {
-                Ok(p) => {
-                    eprintln!("[tracker] primary announce proxied via {}", url);
-                    Some(p)
-                }
-                Err(e) => {
-                    eprintln!("[tracker] TYPHON_ANNOUNCE_PROXY parse failed ({}): {}", url, e);
-                    None
-                }
-            }
-        })
-        .as_ref()
+/// The process-wide announce proxy, `TYPHON_ANNOUNCE_PROXY`, read once.
+///
+/// Kept as a FALLBACK only: an engine's own `announce_proxy` (or its SOCKS5
+/// peer proxy) wins, and this applies to an engine that has neither. It
+/// predates the per-engine key and still sits in the environment of
+/// installs that relied on it; dropping it would turn their proxied
+/// announces into direct ones at the upgrade, silently -- the one failure a
+/// proxy setting must never have. One process can carry several engines,
+/// which is why it cannot be more than a fallback any more.
+fn env_proxy() -> Option<&'static str> {
+    static ENV: OnceLock<Option<String>> = OnceLock::new();
+    ENV.get_or_init(|| {
+        std::env::var("TYPHON_ANNOUNCE_PROXY")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+    .as_deref()
 }
 
-/// Whether announces go through `TYPHON_ANNOUNCE_PROXY`. A UDP announce
+/// `TYPHON_ANNOUNCE_PROXY`, as the environment set it. For the Network tab.
+pub fn env_announce_proxy() -> Option<&'static str> {
+    env_proxy()
+}
+
+/// The proxy one engine's HTTP traffic goes through: what the engine was
+/// configured with (`EngineConfig::http_proxy`), else the environment
+/// fallback, else none.
+pub fn effective_proxy(configured: &str) -> Option<String> {
+    let configured = configured.trim();
+    if !configured.is_empty() {
+        return Some(configured.to_string());
+    }
+    env_proxy().map(str::to_string)
+}
+
+/// A proxy URL without its credentials, for a log line or an error.
+pub fn redact_proxy(url: &str) -> String {
+    match (url.find("://"), url.rfind('@')) {
+        (Some(scheme), Some(at)) if at > scheme => format!("{}://***@{}", &url[..scheme], &url[at + 1..]),
+        _ => url.to_string(),
+    }
+}
+
+/// The reqwest proxy for an engine, or None for a direct engine.
+///
+/// A URL that does not parse is an ERROR, not "no proxy": the operator asked
+/// for one, and announcing directly instead would publish exactly the address
+/// they set it up to hide.
+fn proxy_for(configured: &str) -> Result<Option<reqwest::Proxy>, String> {
+    let Some(url) = effective_proxy(configured) else {
+        return Ok(None);
+    };
+    reqwest::Proxy::all(&url)
+        .map(Some)
+        .map_err(|e| format!("announce proxy {} is not usable: {}", redact_proxy(&url), e))
+}
+
+/// Whether this engine's announces go through a proxy. A UDP announce
 /// cannot, and must not go out beside it.
-pub(crate) fn announces_proxied() -> bool {
-    primary_proxy().is_some()
+pub(crate) fn announces_proxied(configured: &str) -> bool {
+    effective_proxy(configured).is_some()
 }
 
 #[derive(Debug)]
@@ -145,7 +174,7 @@ pub async fn announce(
     left: u64,
     event: &str,
 ) -> Result<AnnounceResponse, String> {
-    announce_on(tracker_url, info_hash, peer_id, port, uploaded, downloaded, left, event, "").await
+    announce_on(tracker_url, info_hash, peer_id, port, uploaded, downloaded, left, event, "", "").await
 }
 
 /// Pin a client builder to an interface, or refuse where that is impossible.
@@ -165,7 +194,8 @@ fn pin_builder(builder: reqwest::ClientBuilder, device: &str) -> Result<reqwest:
     }
 }
 
-/// `announce` from an interface. Empty = the default route.
+/// `announce` from an interface, through a proxy. Empty device = the default
+/// route; empty proxy = the `TYPHON_ANNOUNCE_PROXY` fallback, or direct.
 #[allow(clippy::too_many_arguments)]
 pub async fn announce_on(
     tracker_url: &str,
@@ -177,6 +207,7 @@ pub async fn announce_on(
     left: u64,
     event: &str,
     device: &str,
+    proxy: &str,
 ) -> Result<AnnounceResponse, String> {
     // URL-encode info_hash and peer_id (binary -> %XX)
     let ih_encoded = url_encode_binary(info_hash);
@@ -216,16 +247,15 @@ pub async fn announce_on(
         if event.is_empty() { String::new() } else { format!("&event={}", event) },
     );
 
-    // HTTP GET with timeout. Route via TYPHON_ANNOUNCE_PROXY if set to
-    // avoid leaking the styx-netns v6 source IP on AAAA-only trackers.
+    // HTTP GET with timeout, through the engine's proxy when it has one.
     let mut builder = pin_builder(
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .user_agent(crate::config::user_agent()),
         device,
     )?;
-    if let Some(px) = primary_proxy() {
-        builder = builder.proxy(px.clone());
+    if let Some(px) = proxy_for(proxy)? {
+        builder = builder.proxy(px);
     }
     let client = builder
         .build()
@@ -433,37 +463,49 @@ impl IpMode {
 /// saw the host's address, not the tunnel's. A pinned client binds its
 /// sockets to the device (SO_BINDTODEVICE), so a tunnel that is down makes
 /// the announce FAIL rather than leave another way.
-static ANNOUNCE_CLIENTS: OnceLock<std::sync::Mutex<std::collections::HashMap<(String, bool), reqwest::Client>>> =
+///
+/// And by proxy: two engines on one interface can still be sent out two
+/// different ways, and a client cached for one must never carry the other's
+/// announces -- a direct engine's client handed to a proxied one is the
+/// home address published by a cache hit.
+static ANNOUNCE_CLIENTS: OnceLock<std::sync::Mutex<std::collections::HashMap<(String, String, bool), reqwest::Client>>> =
     OnceLock::new();
 
-fn family_client(v6: bool, device: &str) -> Result<reqwest::Client, String> {
+fn family_client(v6: bool, device: &str, proxy: &str) -> Result<reqwest::Client, String> {
     let device = device.trim();
+    let proxy = proxy.trim();
+    let key = (device.to_string(), proxy.to_string(), v6);
     let map = ANNOUNCE_CLIENTS.get_or_init(Default::default);
     let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(c) = map.get(&(device.to_string(), v6)) {
+    if let Some(c) = map.get(&key) {
         return Ok(c.clone());
     }
-    let bind = if v6 {
-        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-    } else {
-        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-    };
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .http1_only()
-        .pool_max_idle_per_host(64)
-        .local_address(bind);
+        .pool_max_idle_per_host(64);
+    match proxy_for(proxy)? {
+        // Through a proxy, no family bind: the socket we open goes to the
+        // PROXY, and the tracker sees the proxy's exit whatever family that
+        // socket is. Binding it to v4 would only fail against a v6 proxy.
+        Some(px) => builder = builder.proxy(px),
+        None => {
+            let bind = if v6 {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+            } else {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+            };
+            builder = builder.local_address(bind);
+        }
+    }
     // No per-socket interface pin on some platforms: refused there rather
     // than announcing from the default route while the operator believes the
-    // engine is pinned.
+    // engine is pinned. With a proxy, it pins the connection to the proxy.
     builder = pin_builder(builder, device)?;
-    if let Some(px) = primary_proxy() {
-        builder = builder.proxy(px.clone());
-    }
     let client = builder
         .build()
         .map_err(|e| format!("announce client for {device:?}: {e}"))?;
-    map.insert((device.to_string(), v6), client.clone());
+    map.insert(key, client.clone());
     Ok(client)
 }
 
@@ -473,8 +515,9 @@ async fn send_announce_family(
     user_agent: &str,
     v6: bool,
     device: &str,
+    proxy: &str,
 ) -> Result<AnnounceResponse, String> {
-    let resp = family_client(v6, device)?
+    let resp = family_client(v6, device, proxy)?
         .get(url)
         .header(reqwest::header::USER_AGENT, user_agent)
         .send()
@@ -522,25 +565,35 @@ pub async fn send_announce(
     user_agent: &str,
     mode: IpMode,
 ) -> Result<AnnounceResponse, String> {
-    send_announce_on(url, user_agent, mode, "").await
+    send_announce_on(url, user_agent, mode, "", "").await
 }
 
-/// `send_announce` from the engine's interface. Empty = the default route.
+/// `send_announce` from the engine's interface and through its proxy. Empty
+/// device = the default route; empty proxy = the `TYPHON_ANNOUNCE_PROXY`
+/// fallback, or direct.
 pub async fn send_announce_on(
     url: &str,
     user_agent: &str,
     mode: IpMode,
     device: &str,
+    proxy: &str,
 ) -> Result<AnnounceResponse, String> {
+    // Through a proxy there is ONE announce. The tracker sees the proxy's
+    // exit, whatever family we reach the proxy by, so a second request from
+    // the other family would only report the same address twice -- and fail
+    // outright when the proxy listens on one family only.
+    if announces_proxied(proxy) {
+        return send_announce_family(url, user_agent, false, device, proxy).await;
+    }
     match mode {
-        IpMode::V4 => return send_announce_family(url, user_agent, false, device).await,
-        IpMode::V6 => return send_announce_family(url, user_agent, true, device).await,
+        IpMode::V4 => return send_announce_family(url, user_agent, false, device, proxy).await,
+        IpMode::V6 => return send_announce_family(url, user_agent, true, device, proxy).await,
         IpMode::Auto => {}
     }
     // Same peer id on both, as libtorrent does: one peer, two addresses.
     let (a, b) = tokio::join!(
-        send_announce_family(url, user_agent, false, device),
-        send_announce_family(url, user_agent, true, device),
+        send_announce_family(url, user_agent, false, device, proxy),
+        send_announce_family(url, user_agent, true, device, proxy),
     );
     return merge_announce(a, b);
 }

@@ -5,6 +5,7 @@ pub mod piece_picker;
 pub mod fastresume;
 pub mod statedb;
 pub mod rate;
+pub mod ratelimit;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -207,6 +208,8 @@ pub struct TorrentManager {
     completed_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<InfoHash>>>,
     /// Dial ceilings and gauges for this engine.
     limiter: Arc<crate::tracker::dial_limiter::DialLimiter>,
+    /// Byte-rate caps for this engine, and the client pair above them.
+    rates: Arc<ratelimit::EngineRates>,
     /// Asks the announcer to announce one torrent now, because it owes its
     /// trackers an event. Set by the announcer, which lives in the binary and
     /// cannot be named from here; unset, events wait for the next scheduled
@@ -377,6 +380,11 @@ impl TorrentManager {
         &self.limiter
     }
 
+    /// This engine's byte-rate caps.
+    pub fn rates(&self) -> &Arc<ratelimit::EngineRates> {
+        &self.rates
+    }
+
     /// This engine's PEX / IPv6 policy.
     pub fn policy(&self) -> &Arc<crate::peer::extension::PeerPolicy> {
         &self.policy
@@ -469,6 +477,7 @@ impl TorrentManager {
             completed_tx,
             completed_rx: std::sync::Mutex::new(Some(completed_rx)),
             limiter: Default::default(),
+            rates: Default::default(),
             announce_hook: std::sync::OnceLock::new(),
             completion_hook: std::sync::OnceLock::new(),
             state_db,
@@ -774,6 +783,8 @@ impl TorrentManager {
             bitfield: String::new(),
             trackers: state.live_trackers.read().clone(),
             seed_secs: 0,
+            up_limit: 0,
+            down_limit: 0,
         };
         self.persist(&ih, &rd);
 
@@ -1100,6 +1111,7 @@ impl TorrentManager {
     fn adopt(&self, state: &meta::TorrentState) {
         let _ = state.policy.set(self.policy.clone());
         let _ = state.limiter.set(self.limiter.clone());
+        let _ = state.rates.set(self.rates.clone());
         let _ = state.completed_tx.set(self.completed_tx.clone());
         if let Some(src) = self.blob_source.read().ok().and_then(|s| s.clone()) {
             let _ = state.blob_source.set(src);
@@ -1271,6 +1283,9 @@ impl TorrentManager {
             // Restored BEFORE the status is derived below: the fold that the
             // first sweep performs must find the carried-over total, not zero.
             state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
+            // Its own rate caps, if it had any. Nothing is allocated for the
+            // (nearly all) torrents that have none.
+            state.set_rate_limits(Some(rd.up_limit), Some(rd.down_limit));
             // History, not this session's traffic: the counted mark moves too.
             state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
             // The lifetime totals are ours; what a tracker is told starts
@@ -1542,7 +1557,30 @@ impl TorrentManager {
             bitfield,
             trackers: t.live_trackers.read().clone(),
             seed_secs: t.seed_time_now(crate::torrent::meta::now_secs()),
+            up_limit: t.rate_limits().0,
+            down_limit: t.rate_limits().1,
         }
+    }
+
+    /// Set one torrent's own rate caps (bytes/s; `None` keeps a direction, 0
+    /// lifts it) and persist them at once, like `set_trackers`: a cap that
+    /// waited for the sweep would be lost by a crash in between, and an
+    /// operator who set it has no way to see that it was.
+    pub fn set_torrent_rate_limits(
+        &self,
+        info_hash: &InfoHash,
+        up: Option<u64>,
+        down: Option<u64>,
+    ) -> Result<(u64, u64), String> {
+        let t = self.get(info_hash).ok_or("torrent not found")?;
+        let before = t.rate_limits();
+        t.set_rate_limits(up, down);
+        let after = t.rate_limits();
+        if after != before {
+            let rd = Self::build_resume_data(&t);
+            self.persist(info_hash, &rd);
+        }
+        Ok(after)
     }
 
     /// Swap the in-memory save_path for a running torrent and flush
@@ -1665,6 +1703,8 @@ impl TorrentManager {
         // Carried across an engine move: this is what makes "48 hours of
         // seeding" mean the same thing on both sides of a graduation.
         state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
+        // A cap set on the torrent travels with it, like its tracker edits.
+        state.set_rate_limits(Some(rd.up_limit), Some(rd.down_limit));
         // The source engine counted these bytes when it moved them, and
         // settles the rest when it lets go: this side counts from here on.
         state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
@@ -1735,6 +1775,8 @@ fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
         // restart loses up to an hour of credit -- an UNDER-count, which
         // delays a deletion rather than bringing it forward.
         seed_hours: t.seed_time_now(crate::torrent::meta::now_secs()) / 3600,
+        up_limit: t.rate_limits().0,
+        down_limit: t.rate_limits().1,
     }
 }
 
@@ -2009,6 +2051,8 @@ impl TorrentManager {
             // seeded whatever it seeded, and re-verifying its pieces says
             // nothing about that.
             seed_secs: t.seed_time_now(crate::torrent::meta::now_secs()),
+            up_limit: t.rate_limits().0,
+            down_limit: t.rate_limits().1,
         };
         self.persist(&ih, &rd);
         info!(
@@ -2997,6 +3041,38 @@ mod manager_tests {
         assert_eq!(t.session_downloaded(), 0);
         t.total_uploaded.fetch_add(4096, Ordering::Relaxed);
         assert_eq!(t.session_uploaded(), 4096, "and counts what this session moves");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A torrent's own rate caps survive a restart, WITHOUT a sweep: the
+    /// setter persists at once, so a crash right after setting one keeps it.
+    /// And a torrent with no cap allocates no bucket, before or after.
+    #[test]
+    fn a_torrent_rate_cap_survives_a_restart() {
+        let (mgr, root) = manager("resume-ratecap");
+        let ih = add(&mgr, "alpha");
+        let other = add(&mgr, "beta");
+        assert_eq!(mgr.set_torrent_rate_limits(&ih, Some(51_200), Some(8_192)), Ok((51_200, 8_192)));
+        // Lifting a cap that was never set is a no-op, not an allocation.
+        assert_eq!(mgr.set_torrent_rate_limits(&other, Some(0), Some(0)), Ok((0, 0)));
+        assert!(mgr.set_torrent_rate_limits(&[9u8; 20], Some(1), None).is_err(), "unknown hash");
+
+        let again = Arc::new(TorrentManager::new(
+            root.join("data").to_string_lossy().into_owned(),
+            root.join("resume").to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        let blob_b = torrent_bytes("beta", &["https://tracker.example/announce"]);
+        let (ha, hb) = (hex_encode(&ih), hex_encode(&other));
+        again.set_blob_source(Arc::new(move |hash: &str| {
+            if hash == ha { Some(blob.clone()) } else if hash == hb { Some(blob_b.clone()) } else { None }
+        }));
+        assert_eq!(again.load_resume_data(), 2);
+        let t = again.get(&ih).unwrap();
+        assert_eq!(t.rate_limits(), (51_200, 8_192), "the cap came back");
+        assert!(t.rate_chain(ratelimit::Dir::Up).is_limited(), "and it is enforced, not only reported");
+        assert_eq!(again.get(&other).unwrap().rate_limits(), (0, 0));
         let _ = std::fs::remove_dir_all(root);
     }
 

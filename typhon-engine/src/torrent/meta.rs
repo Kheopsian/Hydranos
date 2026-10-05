@@ -428,6 +428,13 @@ pub struct TorrentState {
     /// The dial ceilings of the engine that owns this torrent. Unset for a
     /// torrent built outside a manager, which falls back to unlimited.
     pub limiter: std::sync::OnceLock<Arc<crate::tracker::dial_limiter::DialLimiter>>,
+    /// The byte-rate caps of the engine that owns this torrent (and of the
+    /// client above it). Unset outside a manager, which reads as unlimited.
+    pub rates: std::sync::OnceLock<Arc<crate::torrent::ratelimit::EngineRates>>,
+    /// This torrent's own caps. Allocated the first time a limit is set on it
+    /// and never otherwise: on a million-torrent hoard almost none carries
+    /// one, and an empty `OnceLock<Box<_>>` is all the rest pay.
+    own_rates: std::sync::OnceLock<Box<crate::torrent::ratelimit::RatePair>>,
     /// Where this torrent reports that it finished downloading, so its engine
     /// can persist the fact at once.
     pub completed_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<InfoHash>>,
@@ -736,6 +743,43 @@ impl TorrentState {
             .unwrap_or(&crate::tracker::dial_limiter::DEFAULT_LIMITER)
     }
 
+    /// The engine (and client) caps this torrent runs under.
+    pub fn engine_rates(&self) -> &crate::torrent::ratelimit::EngineRates {
+        self.rates
+            .get()
+            .map(|r| r.as_ref())
+            .unwrap_or(&crate::torrent::ratelimit::UNLIMITED)
+    }
+
+    /// Every bucket a block of this torrent has to clear, narrowest first.
+    pub fn rate_chain(&self, dir: crate::torrent::ratelimit::Dir) -> crate::torrent::ratelimit::Chain<'_> {
+        crate::torrent::ratelimit::Chain::new(self.own_rates.get().map(|b| b.as_ref()), self.engine_rates(), dir)
+    }
+
+    /// This torrent's own caps in bytes/s, `(up, down)`. 0 = none.
+    pub fn rate_limits(&self) -> (u64, u64) {
+        self.own_rates.get().map_or((0, 0), |p| (p.up.rate(), p.down.rate()))
+    }
+
+    /// Set this torrent's own caps in bytes/s; `None` leaves a direction as it
+    /// is, 0 lifts it. Clearing a torrent that never had a cap allocates
+    /// nothing -- a bulk "unlimited" over the whole hoard must not build a
+    /// million empty buckets.
+    pub fn set_rate_limits(&self, up: Option<u64>, down: Option<u64>) {
+        let wants = up.is_some_and(|v| v > 0) || down.is_some_and(|v| v > 0);
+        let pair = match self.own_rates.get() {
+            Some(p) => p,
+            None if wants => self.own_rates.get_or_init(Default::default),
+            None => return,
+        };
+        if let Some(v) = up {
+            pair.up.set_rate(v);
+        }
+        if let Some(v) = down {
+            pair.down.set_rate(v);
+        }
+    }
+
     pub fn policy(&self) -> &crate::peer::extension::PeerPolicy {
         self.policy
             .get()
@@ -966,6 +1010,8 @@ impl TorrentState {
             pex_peers_discovered: AtomicU64::new(0),
             policy: std::sync::OnceLock::new(),
             limiter: std::sync::OnceLock::new(),
+            rates: std::sync::OnceLock::new(),
+            own_rates: std::sync::OnceLock::new(),
             completed_tx: std::sync::OnceLock::new(),
             blob_source: std::sync::OnceLock::new(),
             is_paused: AtomicBool::new(false),

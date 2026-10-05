@@ -7,7 +7,7 @@
 //! engine decide for the other.
 
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::EngineConfig;
 use crate::disk::DiskManager;
@@ -30,6 +30,11 @@ pub async fn start(
     // owns, so two engines in one process keep opposite settings.
     mgr.policy().set_pex(config.pex_enabled);
     mgr.policy().set_ipv6(config.enable_ipv6);
+    mgr.policy().set_idle_timeout_secs(config.peer_timeout);
+    // Engine-wide byte-rate caps, bytes/s (0 = none). Read by nobody until
+    // 4.4; the RPC and the binary move them live afterwards.
+    mgr.rates().engine.up.set_rate(config.upload_limit);
+    mgr.rates().engine.down.set_rate(config.download_limit);
     if !config.pex_enabled {
         info!("[engine] PEX disabled by config: ut_pex is not advertised, and an incoming PEX message is ignored");
     }
@@ -77,9 +82,46 @@ pub async fn start(
     if let Some(dev) = egress.device() {
         info!("[engine] every socket is pinned to device {}", dev);
     }
-    // TYPHON_DISABLE_UTP=1 skips uTP entirely. uTP is raw UDP, cannot route via
-    // SOCKS5_OUTBOUND, and so leaks the netns default-route source IP to peers.
-    // Set this when SOCKS5_OUTBOUND is the only sanctioned egress (no FOU/WG L3 tunnel).
+    // Said once, at startup, because the consequences are not visible
+    // anywhere else: a peer the proxy cannot reach is simply never dialled.
+    if !config.socks5_outbound_host.trim().is_empty() {
+        info!(
+            "[engine] every outbound peer connection goes through SOCKS5 {}:{}; a dial the proxy refuses is dropped, never retried directly",
+            config.socks5_outbound_host, config.socks5_outbound_port
+        );
+        info!("[engine] outbound uTP is OFF for this engine: SOCKS5 without UDP ASSOCIATE cannot carry it (incoming uTP still accepted)");
+        if config.dht_enabled {
+            warn!("[engine] DHT is on and is plain UDP: it does not go through the SOCKS5 proxy and shows this host's address to DHT nodes; set enable_dht = false if that address must stay hidden");
+        }
+    }
+    let http_proxy = config.http_proxy();
+    if !http_proxy.is_empty() {
+        info!("[engine] tracker announces and webseed fetches go through {}; udp:// trackers are skipped (the proxy carries TCP only)", crate::tracker::http::redact_proxy(&http_proxy));
+    }
+
+    // The PROXY v2 allowlist belongs to the engine: set here, where both the
+    // standalone binary and Hydra bring an engine up, so neither can forget
+    // it. Hydra did: its listener never started, and had it started it would
+    // have trusted nothing but the built-in private ranges.
+    let trusted: Vec<std::net::IpAddr> = config
+        .proxy_v2_trusted_sources
+        .iter()
+        .filter_map(|s| match s.trim().trim_start_matches('[').trim_end_matches(']').parse() {
+            Ok(ip) => Some(ip),
+            Err(_) => {
+                warn!("[engine] proxy_v2_trusted_sources: {:?} is not an IP address, ignored", s);
+                None
+            }
+        })
+        .collect();
+    if !trusted.is_empty() {
+        info!("[engine] trusting {} extra PROXY v2 source(s): {:?}", trusted.len(), trusted);
+        mgr.set_trusted_proxy_sources(trusted);
+    }
+    // TYPHON_DISABLE_UTP=1 skips uTP entirely, incoming included. An engine
+    // with a SOCKS5 proxy no longer needs it to stay hidden: its OUTBOUND uTP
+    // is refused in `tracker::open_peer` whatever this says. What is left is
+    // incoming uTP, which only answers a peer that already found us.
     let utp_socket = if std::env::var("TYPHON_DISABLE_UTP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
         info!("[engine] uTP disabled via TYPHON_DISABLE_UTP — TCP-only dial+listen");
         None
@@ -151,15 +193,21 @@ pub async fn start(
         }
     });
 
-    // Optional PROXY v2 listener (for v6 bypass via VPS haproxy)
-    if let Some(pv2_port) = config.listen_port_proxy_v2 {
+    // Optional PROXY v2 listener: a relay (haproxy on a VPS, say) forwards
+    // incoming peers here with their real address in a PROXY v2 header.
+    // It presents the FIRST binding's peer id and leaves by its egress: the
+    // peer reached us through the same engine the tracker lists, so it must
+    // see the same identity, and the replies must take the same tunnel.
+    // `config.peer_id()` was right only for an engine without bindings.
+    if let (Some(pv2_port), Some(first)) = (config.listen_port_proxy_v2.filter(|p| *p != 0), resolved_bindings.first()) {
         let tm = mgr.clone();
         let dm = disk.clone();
-        let pid = config.peer_id();
+        let pid = first.peer_id;
+        let pv2_egress = first.egress.clone();
         let u = utp_socket.clone();
         let bind_addr = config.listen_addr_proxy_v2.clone().unwrap_or_default();
         tokio::spawn(async move {
-            if let Err(e) = crate::peer::listen_proxy_v2(bind_addr, pv2_port, tm, dm, pid, u).await {
+            if let Err(e) = crate::peer::listen_proxy_v2(bind_addr, pv2_port, tm, dm, pid, pv2_egress, u).await {
                 error!("[engine] proxy-v2 listener failed: {}", e);
             }
         });
@@ -179,17 +227,21 @@ pub async fn start(
     mgr.limiter().set_max_dials_per_sec(config.max_dials_per_sec);
     crate::tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp_socket.clone(), config.max_dials_per_sec, mgr.limiter().clone());
 
-    // Choking engine DISABLED (2.4.13-typhon).
-    // Le loop tickait toutes les 10s et chokait tous les peers sauf top-4 par
-    // torrent sur tous les torrents seeding (~13k hoard). Resultat: churn
-    // massif des peers, plafond ~300 tw/p au lieu de ~11k sustained.
-    // Pour re-activer: bump max_unchoked_per_torrent et tick_interval dans
-    // crate::peer::choking::ChokingConfig::default().
+    // The choker: spawned always, OFF unless `choking = true`. It was removed
+    // outright in 2.4.13-typhon -- ticking every 10 s and choking all but the
+    // top four peers of every seeding torrent (~13k on the hoard) churned the
+    // peers into a ~300 ceiling instead of ~11k sustained -- and is back as
+    // an opt-in, read live each tick (see `choking::choking_loop`).
+    mgr.policy().set_choking(config.choking);
+    mgr.policy().set_unchoke_slots(config.max_uploads_per_torrent as i64);
+    tokio::spawn(crate::peer::choking::choking_loop(mgr.clone()));
 
     info!(
-        "[engine] session started, listen={}, max_uploads/torrent={}, resume_dir={}",
+        "[engine] session started, listen={}, upload_limit={} B/s, download_limit={} B/s, peer_timeout={}s, resume_dir={}",
         config.listen_addr(),
-        config.max_uploads_per_torrent,
+        config.upload_limit,
+        config.download_limit,
+        mgr.policy().idle_timeout().as_secs(),
         config.resume_dir,
     );
 

@@ -2181,6 +2181,7 @@ async function refreshDetail() {
         renderPieceMap(d.pieces_have, d.pieces_avail, "detail-pieces-canvas", "detail-pieces-info");
         document.getElementById("detail-dl-speed").textContent = formatSpeed(d.download_rate);
         document.getElementById("detail-ul-speed").textContent = formatSpeed(d.upload_rate);
+        document.getElementById("detail-limits").textContent = _limitsText(d);
         document.getElementById("detail-avg-dl").textContent = formatSpeed(d.avg_download_rate || 0);
         document.getElementById("detail-avg-ul").textContent = formatSpeed(d.avg_upload_rate || 0);
         document.getElementById("detail-peers-count").textContent = d.num_peers;
@@ -2331,7 +2332,11 @@ function trackerRowHtml(tr) {
     // `status`: no error meant OK there, and pretending otherwise would make
     // every row of an older node say "not announced yet".
     const status = ep.status || ((ep.last_error && ep.last_error !== "Success") ? "error" : "ok");
-    const msg = ep.message || ep.last_error || "";
+    // Through t(): the one message Hydranos writes itself (a UDP tracker not
+    // announced behind a proxy) reads in the operator's language; a tracker's
+    // own words have no translation and come back unchanged.
+    const rawMsg = ep.message || ep.last_error || "";
+    const msg = rawMsg ? t(rawMsg) : "";
     const nextAnn = ep.next_announce !== undefined ? ep.next_announce : -1;
     const lastAnn = ep.last_announce !== undefined ? ep.last_announce : -1;
     const etaMax = ep.next_announce_eta_max !== undefined ? ep.next_announce_eta_max : -1;
@@ -4587,6 +4592,82 @@ async function _setLocationSelected() {
     updateRaceTorrents();
 }
 
+// ── Speed limits ──────────────────────────────────────────────────────────
+//
+// A torrent's own caps, in KiB/s here (bytes/s on the wire and in the qBit
+// shim). The engine's cap sits above them and the narrower one binds, so the
+// detail panel says which.
+
+// "↑ 100 KiB/s · ↓ unlimited", from a detail payload (bytes/s, 0 = none).
+function _limitsText(d) {
+    const one = (own, engine) => {
+        if (own > 0 && (!engine || own <= engine)) return formatSpeed(own);
+        if (engine > 0) return formatSpeed(engine) + " (" + t("engine") + ")";
+        return t("unlimited");
+    };
+    return "↑ " + one(d.upload_limit || 0, d.engine_upload_limit || 0) +
+        " · ↓ " + one(d.download_limit || 0, d.engine_download_limit || 0);
+}
+
+// Two KiB/s fields, upload and download. Resolves to {up, down} -- each the
+// text typed, "" meaning "leave as it is" -- or null when cancelled.
+function _hydraPromptLimits(title, body, up, down) {
+    const shown = hydraDialog(title, body, [
+        { label: t("Apply"), value: true, kind: "keep" },
+        { label: t("Cancel"), value: false, kind: "cancel" },
+    ]);
+    const field = (label, value) => {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = "display:block;margin-top:10px";
+        wrap.textContent = label;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = "0";
+        input.step = "1";
+        input.value = value;
+        input.style.cssText = "display:block;width:100%;box-sizing:border-box;margin-top:4px;font-family:monospace";
+        input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); _hydraModalClose(true); } });
+        wrap.appendChild(input);
+        document.getElementById("hydra-modal-body").appendChild(wrap);
+        return input;
+    };
+    const u = field(t("Upload limit (KiB/s)"), up);
+    const d = field(t("Download limit (KiB/s)"), down);
+    u.focus();
+    u.select();
+    return shown.then(v => v === true ? { up: u.value.trim(), down: d.value.trim() } : null);
+}
+
+async function _limitRateSelected() {
+    _hideCtxMenu();
+    const count = _selCount();
+    if (count === 0) return;
+    // One torrent: start from its current caps. Several: they need not share
+    // one, so the fields start empty, which leaves each torrent's as it is.
+    let up = "", down = "";
+    if (!_selAll && count === 1) {
+        const h = _selHash([..._selected.values()][0]);
+        try {
+            const r = await api(`/api/torrents/${encodeURIComponent(h)}/limits`);
+            const c = (r.copies || [])[0];
+            if (c) { up = String(c.up_kib); down = String(c.down_kib); }
+        } catch (_) { /* a remote row: start empty */ }
+    }
+    const label = t("Limit rate");
+    const v = await _hydraPromptLimits(
+        label + ": " + tp(count, "{n} torrent", "{n} torrents"),
+        t("This torrent's own cap, in KiB/s. 0 = no cap of its own (the engine's still applies). Leave a field empty to keep its current value."),
+        up, down);
+    if (v === null) return;
+    const num = s => (s === "" ? null : Math.max(0, Math.floor(Number(s))));
+    const params = {};
+    if (v.up !== "" && Number.isFinite(Number(v.up))) params.up_kib = num(v.up);
+    if (v.down !== "" && Number.isFinite(Number(v.down))) params.down_kib = num(v.down);
+    if (!("up_kib" in params) && !("down_kib" in params)) return;
+    const j = await _runSelection("limits", params, label);
+    if (j) _bulkNote(j, "");
+}
+
 document.addEventListener("click", e => {
     if (!e.target.closest("#ctx-menu") && !e.target.closest("#ctx-submenu")) _hideCtxMenu();
 });
@@ -4853,6 +4934,7 @@ async function refreshHoardDetail() {
         renderPieceMap(d.pieces_have, d.pieces_avail, "h-detail-pieces-canvas", "h-detail-pieces-info", "h-detail-pieces-card");
         document.getElementById("h-detail-dl-speed").textContent = formatSpeed(d.download_rate);
         document.getElementById("h-detail-ul-speed").textContent = formatSpeed(d.upload_rate);
+        document.getElementById("h-detail-limits").textContent = _limitsText(d);
         document.getElementById("h-detail-avg-ul").textContent = formatSpeed(d.avg_upload_rate || 0);
         document.getElementById("h-detail-peers-count").textContent = d.num_peers;
         document.getElementById("h-detail-seeds-count").textContent = d.num_seeds;
@@ -7198,20 +7280,22 @@ const _SETTINGS_DESC = {
     listen_port_proxy_v2: "Extra listener expecting HAProxy PROXY-protocol v2 (real peer IP). 0 = off.",
     listen_addr_proxy_v2: "Explicit bind address for the PROXY-v2 listener. Empty = [::] wildcard.",
     proxy_v2_trusted_sources: "Source IPs allowed to send PROXY-v2 headers.",
-    socks5_outbound_host: "SOCKS5 proxy host for this session's outbound peer connections.",
+    socks5_outbound_host: "SOCKS5 proxy every outbound peer connection of this session goes through. A dial the proxy refuses is dropped, never retried directly.",
     socks5_outbound_port: "SOCKS5 proxy port for outbound peer connections.",
     socks5_outbound_user: "SOCKS5 username (if authenticated).",
     socks5_outbound_pass: "SOCKS5 password (if authenticated).",
-    announce_proxy: "SOCKS5 proxy for this session's TRACKER ANNOUNCES (socks5h://user:pass@host:port). Separate from socks5_outbound_*, which only covers peer connections: without this, announces leave directly and the tracker records this host's own address. UDP trackers are skipped while it is set.",
-    announce_ip: "Address advertised in the BEP-7 ip= announce parameter. Empty = omit it and let the tracker observe the source address (correct for almost every setup).",
+    announce_proxy: "Proxy for this session's tracker announces and webseed downloads (socks5h://user:pass@host:port). Empty = the SOCKS5 peer proxy, when there is one. UDP trackers are not announced while a proxy is in use.",
+    announce_ip: "Address advertised in the BEP-7 ip= announce parameter (and the BEP-15 ip field, IPv4 only). Empty = omit it and let the tracker observe the source address (correct for almost every setup).",
     max_connections: "Global cap on simultaneous peer connections for this session.",
-    max_uploads_per_torrent: "Max simultaneous upload slots per torrent (-1 = unlimited).",
-    peer_timeout: "Seconds of inactivity before disconnecting a peer.",
+    max_uploads_per_torrent: "Unchoke slots per seeding torrent, used only while choking is on (-1 = unlimited, 0 = 4). Applied live.",
+    choking: "Run the choker: only max_uploads_per_torrent peers per seeding torrent are served, re-ranked every 10 s. Off by default, and best left off: on a large library it churns the peers and can cut total upload by an order of magnitude. Turn it on only when the uplink itself is the bottleneck. Applied live.",
+    peer_timeout: "Seconds a peer may send nothing useful (keep-alives do not count) before it is dropped. 0 = 300; under 120 is raised to 120. Applied live.",
     inactivity_timeout: "Seconds before an idle peer is considered inactive.",
     active_seeds: "Max torrents actively seeding (-1 = unlimited).",
     active_limit: "Max active torrents overall (-1 = unlimited).",
     active_downloads: "Max torrents actively downloading at once.",
-    upload_rate_limit: "Upload speed cap in bytes/s (0 = unlimited).",
+    upload_rate_limit: "Upload speed cap for this engine, in bytes/s (0 = unlimited; 1048576 = 1 MiB/s). Applied live, no restart.",
+    download_rate_limit: "Download speed cap for this engine, in bytes/s (0 = unlimited). Applied live, no restart.",
     announce_rate_limit: "Cap on outbound tracker announces for this session, in announces per second. 0 = unlimited. Use it when a VPN or a firewall drops the burst a large library sends at once: the same announces then go out spread over time. Fractional values allowed (0.5 = one announce every 2 seconds).",
     // [vpn_speedtest]
     iperf3_server: "iperf3 server used to measure peer-facing bandwidth.",
@@ -7233,9 +7317,11 @@ const _SETTINGS_COMMON = new Set([
     "auth::username", "auth::password_hash",
     // Connection + Speed + Queueing, per engine (race & hoard)
     "race::listen_port", "race::bind_interface", "race::enable_ipv6", "race::max_connections", "race::max_uploads_per_torrent",
-    "race::upload_rate_limit", "race::active_downloads", "race::active_seeds", "race::active_limit",
+    "race::upload_rate_limit", "race::download_rate_limit", "race::choking",
+    "race::active_downloads", "race::active_seeds", "race::active_limit",
     "hoard::listen_port", "hoard::bind_interface", "hoard::enable_ipv6", "hoard::max_connections", "hoard::max_uploads_per_torrent",
-    "hoard::upload_rate_limit", "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit",
+    "hoard::upload_rate_limit", "hoard::download_rate_limit", "hoard::choking",
+    "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit",
     // Peer sources: not advanced tuning. Someone on a private tracker has to
     // be able to find these without hunting through the advanced list.
     "race::enable_dht", "race::enable_pex", "hoard::enable_dht", "hoard::enable_pex",
@@ -7269,18 +7355,35 @@ const _SETTINGS_DEFAULT = {
     "race::enable_udp_trackers": true, "hoard::enable_udp_trackers": true,
     "race::listen_port": 16171, "race::max_connections": 4000,
     "race::max_uploads_per_torrent": 100,
-    "race::peer_timeout": 30,
+    "race::peer_timeout": 300,
     "race::inactivity_timeout": 20,
     "race::active_seeds": 50, "race::active_limit": 100, "race::active_downloads": 20,
     "hoard::listen_port": 16172, "hoard::max_connections": 8000,
     "hoard::max_uploads_per_torrent": 20,
-    "hoard::peer_timeout": 90,
+    "hoard::peer_timeout": 300,
     "hoard::inactivity_timeout": 90,
     "hoard::active_seeds": -1, "hoard::active_limit": -1, "hoard::active_downloads": -1,
+    "race::upload_rate_limit": 0, "race::download_rate_limit": 0, "race::choking": false,
+    "hoard::upload_rate_limit": 0, "hoard::download_rate_limit": 0, "hoard::choking": false,
     "race_drain::enabled": true, "race_drain::check_interval_seconds": 60,
     "race_drain::high_watermark_pct": 95, "race_drain::low_watermark_pct": 85,
 };
 const _SETTINGS_ENUM = {};
+
+// Engine keys the daemon applies live and creates when the file lacks them
+// (LIVE_SESSION_KEYS in api.rs). The editor lists what the file holds, so a
+// file from before 4.4 -- which has none of the speed caps or the choker --
+// would offer no way to set them: they are shown at their default instead.
+const _LIVE_ENGINE_KEY_DEFAULTS = { upload_rate_limit: 0, download_rate_limit: 0, choking: false };
+function _withLiveEngineKeys(cfg) {
+    for (const sec of ["race", "hoard"]) {
+        if (!_isObj(cfg[sec])) continue;
+        for (const [k, d] of Object.entries(_LIVE_ENGINE_KEY_DEFAULTS)) {
+            if (!(k in cfg[sec])) cfg[sec][k] = d;
+        }
+    }
+    return cfg;
+}
 
 function genApiKey(id) {
     const el = document.getElementById(id);
@@ -7379,7 +7482,7 @@ async function updateSettings() {
     // rather than on a timer: the counts only move when torrents are added.
     loadDedup();
     try {
-        const cfg = await api("/api/settings");
+        const cfg = _withLiveEngineKeys(await api("/api/settings"));
         _settingsOrig = {};
         try { _detectedIfaces = (await api("/api/network/interfaces")).interfaces || []; } catch (e) { _detectedIfaces = []; }
 
@@ -7538,13 +7641,17 @@ function _readSettingField(id, orig) {
 }
 
 // Which restart a setting needs:
-//   hot    = applied live, no restart (currently: listen_port)
-//   engine = the torrent engines must restart (all [race]/[hoard] knobs)
+//   hot    = applied live, no restart (listen_port, and the keys the daemon
+//            puts on the running engines when it saves: speed caps, choker,
+//            peer timeout -- LIVE_SESSION_KEYS in api.rs)
+//   engine = the torrent engines must restart (the other [race]/[hoard] knobs)
 //   full   = the whole daemon restarts ([daemon], [auth], services)
+const _LIVE_ENGINE_KEYS = new Set(["upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent"]);
 function _settingTier(section, key) {
     if (section === "daemon" || section === "auth") return "full";
     if (section === "race" || section === "hoard" || section.startsWith("race.") || section.startsWith("hoard.")) {
         if (key === "listen_port") return "hot";
+        if ((section === "race" || section === "hoard") && _LIVE_ENGINE_KEYS.has(key)) return "hot";
         return "engine";
     }
     return "full";
@@ -8017,8 +8124,11 @@ async function updateTrackers() {
             const counts = hh ? Object.entries(hh.errors).sort((a, b) => b[1] - a[1]) : [];
             // The breakdown replaces the last error when there is one: it says
             // strictly more, and the raw message stays in the tooltip.
+            // `udp_proxied` is no fault to triage but our own refusal to send
+            // a UDP announce around the engine's proxy: said in full, in the
+            // words the Network tab warned with when the proxy was saved.
             const err = counts.length
-                ? esc(counts.map(([c, n]) => c + " x" + n).join(", "))
+                ? esc(counts.map(([c, n]) => (c === "udp_proxied" ? t(UDP_PROXIED_MSG) : c) + " x" + n).join(", "))
                 : (r.last_error ? esc(r.last_error) : "-");
             // Read-only here on purpose: this row carries a torrent count and a
             // last-announce time, so it is rewritten on every poll. A control
@@ -8046,7 +8156,8 @@ async function updateTrackers() {
             const rowTip = SEV[sev]
                 ? esc(incoTracker(r.host) + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
-            return `<tr title="${rowTip}"><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(incoMsg(r.last_error) || "")}">${counts.length ? `<a href="#" class="trk-err-link" onclick="showTrackerErrors('${esc(r.host)}');return false">${err}</a>` : err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
+            const errTip = counts.some(([c]) => c === "udp_proxied") ? t(UDP_PROXIED_MSG) : (incoMsg(r.last_error) || "");
+            return `<tr title="${rowTip}"><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(errTip)}">${counts.length ? `<a href="#" class="trk-err-link" onclick="showTrackerErrors('${esc(r.host)}');return false">${err}</a>` : err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
         }).join("");
         updateTabBadges();
         if (_thtml === _trackersSig) return;
@@ -9147,6 +9258,35 @@ const NET_MODES = [
 
 let _netState = null;
 
+// The daemon's own words (tracker::udp::UDP_PROXIED_REFUSAL), byte for byte:
+// the Network tab warns with them when a proxy is saved, and the Trackers tab
+// files the refused UDP announces under them.
+const UDP_PROXIED_MSG = "UDP trackers do not go through a SOCKS5 proxy (no UDP ASSOCIATE): they will not be announced while this proxy is active";
+
+// The fields each mode owns. A save sends the others EMPTY, so nothing typed
+// while trying another mode goes out with this one; the daemon removes the
+// keys of the modes not chosen. Ports, IPv6 and interfaces belong to all.
+const _NET_MODE_FIELDS = {
+    socks: ["socks5_host", "socks5_port", "socks5_user", "socks5_pass", "announce_proxy", "announce_ip"],
+    proxy_v2: ["race_proxy_v2_port", "hoard_proxy_v2_port", "proxy_v2_listen_addr", "proxy_v2_trusted_sources"],
+    gluetun: ["gluetun_port_forward", "gluetun_url", "gluetun_api_key", "gluetun_port_engine"],
+};
+function _netOwnedFields(mode, fields) {
+    const owns = {
+        socks: mode === "socks5" || mode === "proxy_v2",
+        proxy_v2: mode === "proxy_v2",
+        gluetun: mode === "gluetun",
+    };
+    const out = Object.assign({}, fields);
+    for (const [group, keys] of Object.entries(_NET_MODE_FIELDS)) {
+        if (owns[group]) continue;
+        for (const k of keys) {
+            out[k] = Array.isArray(out[k]) ? [] : (typeof out[k] === "number" ? 0 : (typeof out[k] === "boolean" ? false : ""));
+        }
+    }
+    return out;
+}
+
 function _netField(id, label, type, value, hint, extra) {
     const attrs = extra || "";
     const v = value === undefined || value === null ? "" : String(value);
@@ -9257,11 +9397,14 @@ function _netExtras() {
 
 function _netSocksHTML(f) {
     return `<div class="settings-section"><div class="settings-section-title">${t("SOCKS5 proxy")}</div>
-        <p class="sr-desc" style="margin:.2em 0 .8em">${t("This proxy carries everything that leaves Hydranos: the connections to peers and the announces to trackers. Both go through it, so neither can reveal your real address.")}</p>
+        <p class="sr-desc" style="margin:.2em 0 .8em">${t("This proxy carries the connections to peers, the announces to trackers and the webseed downloads. A peer the proxy cannot reach is not dialled at all, never directly.")}</p>
+        <p class="sr-desc" style="margin:.2em 0 .8em">${t("UDP cannot go through it: UDP trackers are not announced while the proxy is active, and the DHT, if on, still shows this host's address to DHT nodes.")}</p>
         ${_netField("net-socks-host", "Proxy host", "text", f.socks5_host, "IP or hostname of the SOCKS5 server.")}
         ${_netField("net-socks-port", "Proxy port", "number", f.socks5_port || "", "")}
         ${_netField("net-socks-user", "Username", "text", f.socks5_user, "Leave both credentials empty for an open proxy.")}
         ${_netField("net-socks-pass", "Password", "password", f.socks5_pass, "")}
+        ${_netField("net-announce-proxy", "Announce proxy (optional)", "text", f.announce_proxy, "Empty: announces go through the SOCKS5 proxy above. Set a proxy URL (socks5h://user:pass@host:port) only to send them another way.")}
+        ${_netField("net-announce-ip", "Address announced to trackers (optional)", "text", f.announce_ip, "Sent as ip= to the trackers. Empty: the tracker records the address the announce comes from, which is right for almost every setup.")}
     </div>`;
 }
 
@@ -9312,12 +9455,16 @@ function netModeRender() {
         // in would offer a value that is overwritten at the next boot.
         fields += `<div id="net-wg-body"><p class="sr-desc">${t("Loading…")}</p></div>`;
     }
-    if (mode === "direct" || mode === "gluetun") {
+    if (mode === "direct" || mode === "gluetun" || mode === "socks5" || mode === "proxy_v2") {
         // One interface per engine. The two engines are independent network
         // identities, and a single shared field could not say so: it put both
-        // on one tunnel while the page implied otherwise.
+        // on one tunnel while the page implied otherwise. Shown with a proxy
+        // too: the connection TO the proxy is pinned to it, and the field was
+        // hidden while still in force.
         const list = (_detectedIfaces || []).map(i => (i.name || i));
-        const hint = "The interface this engine leaves by. Peer connections AND tracker announces are both bound to it, so neither can travel outside it. Empty means the host's default route.";
+        const hint = (mode === "socks5" || mode === "proxy_v2")
+            ? "The interface this engine reaches the proxy by. Empty means the host's default route."
+            : "The interface this engine leaves by. Peer connections AND tracker announces are both bound to it, so neither can travel outside it. Empty means the host's default route.";
         fields += `<div class="settings-section"><div class="settings-section-title">${t("Interface per engine")}</div>
             ${_netSelect("net-race-iface", "Race engine interface", f.race_bind_interface, list, hint)}
             ${_netSelect("net-hoard-iface", "Hoard engine interface", f.hoard_bind_interface, list, hint)}
@@ -9342,7 +9489,7 @@ function netModeRender() {
             ${_netField("net-race-pv2", "Race PROXY-v2 port", "number", f.race_proxy_v2_port || "", "0 to leave this agent without a PROXY-v2 listener.")}
             ${_netField("net-hoard-pv2", "Hoard PROXY-v2 port", "number", f.hoard_proxy_v2_port || "", "")}
             ${_netField("net-pv2-addr", "Bind address", "text", f.proxy_v2_listen_addr, "Empty means every address.")}
-            ${_netField("net-pv2-trusted", "Trusted sources", "text", (f.proxy_v2_trusted_sources || []).join(", "), "Addresses allowed to send PROXY-v2 headers, comma separated. Required: with none, whoever reaches that port can claim to be any peer.")}
+            ${_netField("net-pv2-trusted", "Trusted sources", "text", (f.proxy_v2_trusted_sources || []).join(", "), "Addresses allowed to send PROXY-v2 headers, comma separated. Loopback and private ranges are always trusted; a relay on a public address must be listed, or every peer it forwards is refused.")}
         </div>`;
     }
     const wgAuto = mode === "wireguard" ? _wgAgentsWithProviderPort() : {};
@@ -9420,6 +9567,8 @@ function netModeCollect() {
         gluetun_url: document.getElementById("net-gluetun-url") ? str("net-gluetun-url") : (prev.gluetun_url || ""),
         gluetun_api_key: document.getElementById("net-gluetun-key") ? str("net-gluetun-key") : (prev.gluetun_api_key || ""),
         gluetun_port_engine: document.getElementById("net-gluetun-engine") ? str("net-gluetun-engine") : (prev.gluetun_port_engine || "hoard"),
+        announce_proxy: document.getElementById("net-announce-proxy") ? str("net-announce-proxy") : (prev.announce_proxy || ""),
+        announce_ip: document.getElementById("net-announce-ip") ? str("net-announce-ip") : (prev.announce_ip || ""),
         proxy_v2_trusted_sources: document.getElementById("net-pv2-trusted")
             ? str("net-pv2-trusted").split(",").map(s => s.trim()).filter(Boolean)
             : (prev.proxy_v2_trusted_sources || []),
@@ -9444,8 +9593,13 @@ function netModeCollectExtras() {
 
 async function netModeSave() {
     const out = document.getElementById("net-mode-result");
-    const fields = netModeCollect();
-    if (!fields) return;
+    const collected = netModeCollect();
+    if (!collected) return;
+    // What the chosen mode owns, and nothing of the others: netModeCollect
+    // keeps every value typed so far so that flicking between cards loses
+    // nothing, and posting that whole set is how a SOCKS5 host used to
+    // survive a switch to Direct.
+    const fields = _netOwnedFields(_netState.mode, collected);
     _netState.fields = fields;
     const extra_engines = netModeCollectExtras();
     _netState.extra_engines = extra_engines;
@@ -9456,13 +9610,14 @@ async function netModeSave() {
         });
         let extra = "";
         for (const w of (r.warnings || [])) extra += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
+        _netState.warnings = r.warnings || [];
         _netOrig = _stableJson({ mode: _netState.mode, fields: fields });
-        // Only a listen port still needs a restart -- it is the one setting a
-        // running engine keeps across a config apply. Everything else on this
-        // page reaches the engines in seconds, and a banner shown anyway taught
-        // people to restart for changes that were already live.
+        // The daemon compares the file with what each engine was started
+        // with, so this is exact: every key on this page is read when an
+        // engine joins the network, and a save that changes none of them
+        // (the same values, or a change undone) needs no restart.
         if (r.restart_required) {
-            _setRestartBanner(t("Saved. The engines need a restart to pick up the new listen port.") +
+            _setRestartBanner(t("Saved. The engines need a restart to apply the new network settings.") +
                 ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`);
         } else {
             extra = `<div class="result-msg success" style="margin:.3em 0">${esc(t("Saved and applied, no restart needed."))}</div>` + extra;

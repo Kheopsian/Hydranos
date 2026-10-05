@@ -107,6 +107,22 @@ pub struct EngineHost {
     /// link scanner only. Apart from `link_summary` because a workflow pass
     /// publishes that one too, and must not wipe a figure it does not compute.
     catalogue_usage: std::sync::RwLock<Option<(crate::linkindex::DiskUsage, i64)>>,
+    /// The client-wide rate caps -- qBittorrent's "global" limit, which the
+    /// shim's `transfer/*` routes move -- above every engine of this host.
+    client_rates: Arc<typhon_engine::torrent::ratelimit::RatePair>,
+}
+
+/// The per-engine settings a RUNNING engine takes without a restart: the rate
+/// caps, the peer idle timeout and the choker. Called when the engine is built
+/// and again whenever the settings are saved; `engine_config` hands the same
+/// values to `session::start`, so the two paths cannot disagree.
+pub fn apply_live_settings(manager: &TorrentManager, session: &crate::config::Session) {
+    let (up, down) = session.rate_caps();
+    manager.rates().engine.up.set_rate(up);
+    manager.rates().engine.down.set_rate(down);
+    manager.policy().set_idle_timeout_secs(session.peer_timeout);
+    manager.policy().set_choking(session.choking);
+    manager.policy().set_unchoke_slots(session.max_uploads_per_torrent);
 }
 
 impl EngineHost {
@@ -124,6 +140,7 @@ impl EngineHost {
         // told nobody. Unbounded, and cheap: the receiver buffers whatever
         // arrives before it is taken.
         let (completed_tx, completed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let client_rates: Arc<typhon_engine::torrent::ratelimit::RatePair> = Default::default();
 
         // Whatever this node hosts, not a fixed race and hoard: an install
         // can run one engine per tunnel, each presenting as its own agent.
@@ -204,6 +221,10 @@ impl EngineHost {
                 }
             }
 
+            // Before resume, so no torrent ever runs a moment uncapped.
+            manager.rates().set_client(client_rates.clone());
+            apply_live_settings(&manager, session);
+
             let loaded = manager.load_resume_data();
             tracing::info!(engine = id, torrents = loaded, "engine state loaded");
             {
@@ -239,7 +260,28 @@ impl EngineHost {
             completions: std::sync::Mutex::new(Some(completed_rx)),
             link_summary: Default::default(),
             catalogue_usage: Default::default(),
+            client_rates,
         }
+    }
+
+    /// The client-wide rate caps, bytes/s.
+    pub fn client_rates(&self) -> &Arc<typhon_engine::torrent::ratelimit::RatePair> {
+        &self.client_rates
+    }
+
+    /// Put a (re)loaded config's live settings on the engines already
+    /// running. Answers how many engines took them. An engine added to the
+    /// file since boot is not running and is skipped: it needs a restart
+    /// whatever this does.
+    pub fn apply_config(&self, config: &Config) -> usize {
+        let mut n = 0;
+        for local in config.local_engines() {
+            if let Some(e) = self.get(&local.id) {
+                apply_live_settings(&e.manager, &local.session);
+                n += 1;
+            }
+        }
+        n
     }
 
     /// The last published hardlink summary. Empty until the first one: every
@@ -321,25 +363,7 @@ impl EngineHost {
                     // Without this the engine seeds, listens and connects, and
                     // every tracker forgets the whole catalogue within one
                     // announce interval.
-                    // The id the listeners present in every handshake, so the
-                    // peer a tracker lists is the peer that connects. The
-                    // config draws it once; asking again returns the same.
-                    let peer_id = engine_cfg
-                        .resolved_bindings()
-                        .first()
-                        .map(|b| b.peer_id)
-                        .unwrap_or_else(|| engine_cfg.peer_id());
-                    let mut first = crate::announce::policy_from_config(
-                        config,
-                        String::from_utf8_lossy(&peer_id).into_owned(),
-                        String::new(),
-                    );
-                    // Per engine, from its own section: one engine can keep
-                    // to HTTP trackers while another announces everywhere.
-                    first.skip_udp = !session.udp_trackers();
-                    first.device = session.bind_interface.trim().to_string();
-                    first.no_ipv6 = !session.enable_ipv6;
-                    first.registration_window = std::time::Duration::from_secs(session.registration_retry_minutes() * 60);
+                    let first = announce_policy(config, session, &engine_cfg);
                     let policy: crate::announce::PolicyHandle =
                         std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(first)));
                     let _ = engine.announce_policy.set(policy.clone());
@@ -675,6 +699,56 @@ fn networking_enabled() -> bool {
     )
 }
 
+/// The announce policy an engine starts with.
+fn announce_policy(
+    config: &Config,
+    session: &crate::config::Session,
+    engine_cfg: &typhon_engine::config::EngineConfig,
+) -> crate::announce::policy::Policy {
+    // The id the listeners present in every handshake, so the
+    // peer a tracker lists is the peer that connects. The
+    // config draws it once; asking again returns the same.
+    let peer_id = engine_cfg
+        .resolved_bindings()
+        .first()
+        .map(|b| b.peer_id)
+        .unwrap_or_else(|| engine_cfg.peer_id());
+    // `announce_ip` only when written: an empty one sends no `ip=` and the
+    // tracker keeps the source address. It was always passed as "" here, so
+    // the key in the template was a comment that did nothing.
+    let mut first = crate::announce::policy_from_config(
+        config,
+        String::from_utf8_lossy(&peer_id).into_owned(),
+        session.announce_ip.trim().to_string(),
+    );
+    // The same derivation the engine's webseeds and magnets use, so the
+    // three cannot leave by different doors.
+    first.proxy = engine_cfg.http_proxy();
+    // Per engine, from its own section: one engine can keep
+    // to HTTP trackers while another announces everywhere.
+    first.skip_udp = !session.udp_trackers();
+    first.device = session.bind_interface.trim().to_string();
+    first.no_ipv6 = !session.enable_ipv6;
+    first.registration_window = std::time::Duration::from_secs(session.registration_retry_minutes() * 60);
+    first
+}
+
+/// The proxy one session's announces and webseeds go through, as the engine
+/// will derive it (`EngineConfig::http_proxy`): the tab's warnings and the
+/// network check must not keep a second copy of that rule. Empty = none
+/// configured (the transport may still apply `TYPHON_ANNOUNCE_PROXY`).
+pub(crate) fn session_http_proxy(session: &crate::config::Session) -> String {
+    let dir = std::path::Path::new("");
+    engine_config(session, dir, dir).map(|c| c.http_proxy()).unwrap_or_default()
+}
+
+/// The same session's peer SOCKS5 proxy as a URL. Empty = peers dialled
+/// directly.
+pub(crate) fn session_socks5_url(session: &crate::config::Session) -> String {
+    let dir = std::path::Path::new("");
+    engine_config(session, dir, dir).map(|c| c.socks5_url()).unwrap_or_default()
+}
+
 /// The engine-side config for one session.
 ///
 /// Built through serde rather than a struct literal on purpose: `EngineConfig`
@@ -686,7 +760,11 @@ fn engine_config(
     data_dir: &std::path::Path,
     resume_dir: &std::path::Path,
 ) -> Option<typhon_engine::config::EngineConfig> {
-    serde_json::from_value(serde_json::json!({
+    // 0 and "" are how the file says "none": the engine's Options say it
+    // with None, and a Some(0) would bind a PROXY v2 listener on a random port.
+    let pv2_port = Some(session.listen_port_proxy_v2).filter(|p| *p != 0);
+    let pv2_addr = Some(session.listen_addr_proxy_v2.trim()).filter(|a| !a.is_empty());
+    let mut v = serde_json::json!({
         "data_dir": data_dir.to_string_lossy(),
         "resume_dir": resume_dir.to_string_lossy(),
         "listen_port": session.listen_port,
@@ -696,9 +774,210 @@ fn engine_config(
         "enable_webseed": session.enable_webseed,
         "enable_ipv6": session.enable_ipv6,
         "max_connections": session.max_connections.max(0),
-        "max_uploads_per_torrent": session.max_uploads_per_torrent,
+        "max_uploads_per_torrent": session.max_uploads_per_torrent.clamp(i32::MIN as i64, i32::MAX as i64),
+        // Rate caps, the idle timeout and the choker: the same values
+        // `apply_live_settings` puts on the running engine, so a start and a
+        // hot reload cannot disagree. Bytes/s on both sides.
+        "choking": session.choking,
+        "upload_limit": session.rate_caps().0,
+        "download_limit": session.rate_caps().1,
+        "peer_timeout": session.peer_timeout,
         "file_pool_size": session.file_pool_size(),
-    }))
-    .ok()
+        // The proxy and the PROXY v2 relay. Typed in the session and never
+        // passed on, so the engine dialled every peer directly and started no
+        // relay listener while the config and the Network tab said otherwise.
+        "socks5_outbound_host": session.socks5_outbound_host.trim(),
+        "socks5_outbound_user": session.socks5_outbound_user,
+        "socks5_outbound_pass": session.socks5_outbound_pass,
+        "announce_proxy": session.announce_proxy.trim(),
+        "listen_port_proxy_v2": pv2_port,
+        "listen_addr_proxy_v2": pv2_addr,
+        "proxy_v2_trusted_sources": session.proxy_v2_trusted_sources,
+    });
+    // An unwritten port keeps the engine's own default (1080) rather than 0,
+    // which no SOCKS5 server listens on.
+    if session.socks5_outbound_port != 0 {
+        v["socks5_outbound_port"] = serde_json::json!(session.socks5_outbound_port);
+    }
+    serde_json::from_value(v).ok()
 }
 
+
+#[cfg(test)]
+mod network_wiring_tests {
+    use super::*;
+    use crate::config::Session;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn session(toml_text: &str) -> Session {
+        toml::from_str(toml_text).expect("session parses")
+    }
+
+    fn cfg_of(s: &Session) -> typhon_engine::config::EngineConfig {
+        let dir = std::path::Path::new("/tmp");
+        engine_config(s, dir, dir).expect("engine config builds")
+    }
+
+    /// ⭐ The keys reach the engine. `engine_config` passed none of them, so a
+    /// configured proxy dialled every peer directly and a configured relay
+    /// never listened, while the file and the Network tab said otherwise.
+    #[test]
+    fn the_proxy_and_relay_keys_reach_the_engine() {
+        let c = cfg_of(&session(
+            "socks5_outbound_host = \"10.0.0.1\"\nsocks5_outbound_user = \"u\"\nsocks5_outbound_pass = \"p\"\n\
+             listen_port_proxy_v2 = 16271\nlisten_addr_proxy_v2 = \"[2001:db8::2]\"\n\
+             proxy_v2_trusted_sources = [\"203.0.113.20\"]\nannounce_proxy = \"socks5h://10.9.9.9:9050\"\n",
+        ));
+        assert_eq!(c.socks5_outbound_host, "10.0.0.1");
+        assert_eq!(c.socks5_outbound_port, 1080, "an unwritten port is the SOCKS default, not 0");
+        assert!(c.resolved_bindings().iter().all(|b| b.egress.socks5.is_some()), "every dial is proxied");
+        assert_eq!(c.listen_port_proxy_v2, Some(16271));
+        assert_eq!(c.listen_addr_proxy_v2.as_deref(), Some("[2001:db8::2]"));
+        assert_eq!(c.proxy_v2_trusted_sources, vec!["203.0.113.20".to_string()]);
+        assert_eq!(c.http_proxy(), "socks5h://10.9.9.9:9050");
+
+        // 0 and "" mean "none", not "port 0" and "address \"\"".
+        let off = cfg_of(&session("listen_port_proxy_v2 = 0\nlisten_addr_proxy_v2 = \"\"\n"));
+        assert_eq!(off.listen_port_proxy_v2, None);
+        assert_eq!(off.listen_addr_proxy_v2, None);
+        assert!(off.resolved_bindings().iter().all(|b| b.egress.socks5.is_none()));
+    }
+
+    /// A SOCKS5 server that is also the tracker: it records the CONNECT
+    /// target (host NAME, as socks5h sends it) and the HTTP request line, and
+    /// answers a bencoded announce.
+    async fn proxy_tracker() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut b = [0u8; 2];
+                    s.read_exact(&mut b).await.ok()?;
+                    let mut m = vec![0u8; b[1] as usize];
+                    s.read_exact(&mut m).await.ok()?;
+                    s.write_all(&[5, 0]).await.ok()?;
+                    let mut req = [0u8; 4];
+                    s.read_exact(&mut req).await.ok()?;
+                    let target = match req[3] {
+                        3 => {
+                            let mut n = [0u8; 1];
+                            s.read_exact(&mut n).await.ok()?;
+                            let mut name = vec![0u8; n[0] as usize];
+                            s.read_exact(&mut name).await.ok()?;
+                            format!("name:{}", String::from_utf8_lossy(&name))
+                        }
+                        1 => { let mut a = [0u8; 4]; s.read_exact(&mut a).await.ok()?; format!("ip:{:?}", a) }
+                        _ => { let mut a = [0u8; 16]; s.read_exact(&mut a).await.ok()?; format!("ip:{:?}", a) }
+                    };
+                    let mut p = [0u8; 2];
+                    s.read_exact(&mut p).await.ok()?;
+                    log.lock().unwrap().push(format!("{target}:{}", u16::from_be_bytes(p)));
+                    s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.ok()?;
+                    let mut http = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !http.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = s.read(&mut buf).await.ok()?;
+                        if n == 0 { return None; }
+                        http.extend_from_slice(&buf[..n]);
+                    }
+                    let line = String::from_utf8_lossy(&http).lines().next().unwrap_or_default().to_string();
+                    log.lock().unwrap().push(line);
+                    let body: &[u8] = b"d8:completei1e10:incompletei0e8:intervali1800e5:peers0:e";
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    s.write_all(head.as_bytes()).await.ok()?;
+                    s.write_all(body).await.ok()?;
+                    Some(())
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    const IH: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// ⭐⭐ An announce goes through the engine's proxy, by NAME: socks5h, so
+    /// the tracker's DNS is resolved at the proxy and nothing about it leaves
+    /// from here. And `announce_ip`, written, is in the request the tracker
+    /// receives. Built the way `connect` builds it, from the session.
+    #[tokio::test]
+    async fn an_announce_goes_through_the_proxy_by_name_and_carries_announce_ip() {
+        let (port, seen) = proxy_tracker().await;
+        let s = session(&format!(
+            "socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = {port}\nannounce_ip = \"198.51.100.7\"\n"
+        ));
+        let policy = announce_policy(&Config::default(), &s, &cfg_of(&s));
+        assert_eq!(policy.proxy, format!("socks5h://127.0.0.1:{port}"), "announces default to the peer proxy");
+        let req = crate::announce::policy::prepare(&policy, "http://tracker.invalid/announce", IH, 16171, 0, 0, 5, "started", None, None)
+            .expect("request");
+        let out = typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device, &req.proxy).await;
+        assert!(out.is_ok(), "the tracker behind the proxy answered: {out:?}");
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.iter().any(|l| l == "name:tracker.invalid:80"), "the proxy got the NAME: {seen:?}");
+        assert!(seen.iter().any(|l| l.starts_with("GET /announce?") && l.contains("&ip=198.51.100.7")), "ip= sent: {seen:?}");
+    }
+
+    /// Unwritten, `announce_ip` sends no `ip=` at all: the tracker keeps the
+    /// address the announce came from. The UDP form leaves its field at 0.
+    #[test]
+    fn an_unwritten_announce_ip_sends_nothing() {
+        let s = session("");
+        let policy = announce_policy(&Config::default(), &s, &cfg_of(&s));
+        let http = crate::announce::policy::prepare(&policy, "http://t.example/announce", IH, 1, 0, 0, 0, "", None, None).unwrap();
+        assert!(!http.url.contains("&ip="), "{}", http.url);
+        let udp = crate::announce::policy::prepare(&policy, "udp://t.example:6969/announce", IH, 1, 0, 0, 0, "", None, None).unwrap();
+        assert_eq!(udp.udp.unwrap().ip, 0);
+
+        let s = session("announce_ip = \"198.51.100.7\"\n");
+        let policy = announce_policy(&Config::default(), &s, &cfg_of(&s));
+        let udp = crate::announce::policy::prepare(&policy, "udp://t.example:6969/announce", IH, 1, 0, 0, 0, "", None, None).unwrap();
+        assert_eq!(udp.udp.unwrap().ip, u32::from(std::net::Ipv4Addr::new(198, 51, 100, 7)), "BEP 15 `ip` field");
+    }
+
+    /// ⭐ A UDP tracker behind a proxy is refused with the reason, the same
+    /// words the Network tab warns with, and never sent around the proxy.
+    #[tokio::test]
+    async fn a_udp_tracker_behind_the_proxy_is_refused_with_the_reason() {
+        let s = session("socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = 9\n");
+        let policy = announce_policy(&Config::default(), &s, &cfg_of(&s));
+        let req = crate::announce::policy::prepare(&policy, "udp://127.0.0.1:9/announce", IH, 1, 0, 0, 0, "", None, None).unwrap();
+        let out = typhon_engine::tracker::udp::send_announce_on(req.udp.as_ref().unwrap(), req.ip_mode, &req.device, &req.proxy).await;
+        assert_eq!(out.unwrap_err(), crate::netmode::UDP_BEHIND_PROXY);
+    }
+
+    /// ⭐ The relay listener starts, and with the allowlist set. Both were
+    /// done only by the standalone binary: in Hydra the listener never bound
+    /// and the trusted sources were never handed to the engine.
+    #[tokio::test]
+    async fn the_proxy_v2_listener_starts_with_its_trusted_sources() {
+        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (listen, pv2) = (free(), free());
+        let s = session(&format!(
+            "listen_port = {listen}\nenable_dht = false\nenable_webseed = false\n\
+             listen_port_proxy_v2 = {pv2}\nlisten_addr_proxy_v2 = \"127.0.0.1\"\n\
+             proxy_v2_trusted_sources = [\"203.0.113.20\"]\n"
+        ));
+        let dir = std::env::temp_dir().join(format!("hydra-pv2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let c = engine_config(&s, &dir, &dir.join("resume")).unwrap();
+        let disk = Arc::new(DiskManager::new(16));
+        let mgr = Arc::new(TorrentManager::new(dir.to_string_lossy().into_owned(), dir.join("resume").to_string_lossy().into_owned(), disk.clone()));
+        typhon_engine::session::start(mgr.clone(), disk, &c, Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+
+        let want: std::net::IpAddr = "203.0.113.20".parse().unwrap();
+        assert_eq!(mgr.trusted_proxy_sources(), &[want], "the allowlist reached the engine");
+        let mut up = false;
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", pv2)).await.is_ok() {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(up, "the PROXY v2 listener is bound on {pv2}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
