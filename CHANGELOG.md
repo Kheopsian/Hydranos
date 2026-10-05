@@ -40,6 +40,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   resolved by the proxy); `TYPHON_ANNOUNCE_PROXY` stays as a global fallback.
 
 ### Fixed
+- **A torrent's Content tab shows what each file has downloaded and what is
+  missing.** It listed paths and sizes only. Unfinished files come first; the
+  qBittorrent API's `torrents/files` progress uses the same per-file count,
+  by bytes rather than by whole pieces. The summary line no longer says
+  "seeding, no piece map" on every torrent, downloading ones included.
 - **The SOCKS5 proxy (`socks5_outbound_*`) was never handed to the engine**:
   every peer connection left directly. It now covers every outgoing
   connection, IPv4 and IPv6.
