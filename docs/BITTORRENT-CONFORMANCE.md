@@ -182,9 +182,10 @@ session (`TrackerSlot`), and derives every event from it:
   often reaches the client before the tracker has finished taking the upload,
   and the tracker answers with a `failure reason` ("unregistered torrent").
   While a race still downloading gets only such refusals, it re-announces every
-  7 seconds, 50 times at most, and stops at the first tracker that registers
-  it. This is autobrr's reannounce action with its defaults, which trackers
-  already see from every racing qBittorrent. No `min interval` is crossed,
+  5 seconds for 6 minutes at most (`[race] registration_retry_minutes`), and
+  stops at the first tracker that registers it; from then on the tracker's own
+  interval applies. This is the cadence trackers already see from every racing
+  qBittorrent driven by autobrr. No `min interval` is crossed,
   because a tracker that refuses a torrent has set none for it. A 429, a
   timeout or a tracker that does not answer at all is never retried this way.
 - **Tier order is respected** (BEP 12). The first tracker in the tier list that
@@ -344,7 +345,7 @@ interoperability suite, which needs Docker.
 | An absent `min interval` is not a floor of zero | BEP 3 | `bep3_an_absent_min_interval_is_not_a_floor_of_zero` |
 | `min interval` is a floor for the schedule, races and internal re-announces | BEP 3 | `min_interval_is_a_hard_floor`, `min_interval_holds_back_bumps_and_races_alike` |
 | A re-announce a person forces crosses it, like qBittorrent's; a tracker's `retry in`/`Retry-After` is never crossed | — | `a_forced_reannounce_crosses_min_interval_but_not_a_retry_hint`, `a_forced_reannounce_crosses_min_interval_like_qbittorrent`, `a_person_s_bump_is_forced_and_an_internal_one_is_not` |
-| A race the tracker has not registered is retried every 7 s, 50 times at most | — | `an_unregistered_race_is_retried_in_seconds`, `registration_retries_are_bounded_and_end_on_registration`, `only_a_registration_retry_may_wait_under_a_minute` |
+| A race the tracker has not registered is retried every 5 s, for 6 minutes at most (`[race] registration_retry_minutes`); any other wait under a minute is raised to a minute | — | `an_unregistered_race_is_retried_in_seconds`, `registration_retries_are_bounded_and_end_on_registration`, `only_a_registration_retry_may_wait_under_a_minute_and_short_waits_are_a_minute` |
 | A tracker that does not answer is not retried in seconds | — | `a_tracker_that_does_not_answer_is_not_retried_in_seconds` |
 | Events are not held by the floor | BEP 3 | `events_are_not_held_by_the_floor` |
 | `retry in` minutes, and `never` | BEP 31 | `bep31_retry_in_is_read_from_a_refusal`, `bep31_retry_in_is_obeyed`, `bep31_never_means_never` |
