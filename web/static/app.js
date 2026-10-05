@@ -4159,8 +4159,13 @@ async function _showEnginePicker(ev, then) {
     });
     // Where the selection sits, when it agrees on one place.
     const only = sources.size === 1 ? [...sources][0] : "";
-    const fromNode = (!allHere && only) ? only.split("-")[0] : "";
-    const fromEngine = only.includes("-") ? only.slice(only.indexOf("-") + 1) : "";
+    // The node is the longest declared name the agent starts with: a node
+    // called "nas-2" was split at its first hyphen and looked up as "nas".
+    const _nodeOf = a => (nodes || []).map(n => String(n.name))
+        .filter(n => a.startsWith(n + "-")).sort((x, y) => y.length - x.length)[0] || "";
+    const fromNode = (!allHere && only) ? _nodeOf(only) : "";
+    const fromEngine = fromNode ? only.slice(fromNode.length + 1)
+        : (only.startsWith("local-") ? only.slice(6) : "");
 
     const localTargets = (locals || []).filter(e => !sources.has("local-" + e.id));
     if (localTargets.length) {
@@ -4419,10 +4424,14 @@ async function _showCategoryPicker(ev, move) {
     }).join("");
     const verb = move ? t("Move to category") : t("Set category (no move)");
     const label = verb + ": " + tp(_selCount(), "{n} torrent", "{n} torrents");
+    // Clearing the label had no control at all in 4.3. Only without a move:
+    // "no category" names no save path to move to.
+    const none = move ? "" :
+        `<div class="ctx-item" onclick="_changeCategorySelected('', false)"><i>${t("No category")}</i></div>`;
     _openCtxSubmenu(
         `<div class="ctx-label">${label}</div>` +
         `<div class="ctx-separator"></div>` +
-        `<div class="ctx-scroll">${items}</div>`, anchor);
+        `<div class="ctx-scroll">${none}${items}</div>`, anchor);
 }
 
 // _runMoveSelection runs a selection action that may move data (`category`,
@@ -4481,14 +4490,23 @@ async function _changeCategorySelected(catName, move) {
     const j = await _runMoveSelection("category", params, label);
     if (!j) return;
     const moving = (j.tally && j.tally.moving) || 0;
+    const graduating = (j.tally && j.tally.graduating) || 0;
     // Failures and their errors are on the progress panel already.
-    if (moving > 0) {
+    if (moving > 0 || graduating > 0) {
         // A move runs in the background and can take hours, so say so rather
-        // than leaving the row looking like nothing happened.
-        _bulkNote(j, tp(moving,
+        // than leaving the row looking like nothing happened. A change of
+        // engine (a graduation) stops the torrent while its data is copied;
+        // 4.3 said it kept seeding in both cases.
+        const parts = [];
+        if (moving > 0) parts.push(tp(moving,
             "Moving {n} torrent to \"{cat}\" in the background. It keeps seeding while its data is copied; follow it in Jobs.",
             "Moving {n} torrents to \"{cat}\" in the background. They keep seeding while their data is copied; follow them in Jobs.",
             { n: moving, cat: catName }));
+        if (graduating > 0) parts.push(tp(graduating,
+            "Moving {n} torrent to \"{cat}\", which runs in another engine: it stops seeding while its data is copied, then carries on there as it was. Follow it in Jobs.",
+            "Moving {n} torrents to \"{cat}\", which runs in another engine: they stop seeding while their data is copied, then carry on there as they were. Follow them in Jobs.",
+            { n: graduating, cat: catName }));
+        _bulkNote(j, parts.join(" "));
     } else {
         _bulkNote(j, "");
     }
