@@ -540,6 +540,10 @@ fn bool_of(f: &Facts, field: &str) -> Option<bool> {
         "user_paused" => f.user_paused,
         "multi_file" => f.multi_file,
         "private" => f.private,
+        // Offered in the picker and filled by the link index, but missing
+        // here: in 4.3 the condition never matched, and NOT of it matched
+        // every torrent.
+        "data_missing" => f.data_missing,
         _ => return None,
     })
 }
@@ -677,8 +681,13 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
             }
             Action::SetLocation { to, .. } => {
                 let p = std::path::Path::new(to.trim());
+                // A drive or UNC prefix is part of a plain absolute path on
+                // Windows: 4.3 refused `D:\data` and every other path there.
                 let plain = p.components().all(|c| {
-                    matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_))
+                    matches!(
+                        c,
+                        std::path::Component::Prefix(_) | std::path::Component::RootDir | std::path::Component::Normal(_)
+                    )
                 });
                 if !p.is_absolute() || !plain {
                     return Err(CompileError::BadLocation(to.clone()));
@@ -763,6 +772,19 @@ pub fn already_satisfied(action: &Action, f: &Facts) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `data_missing` is read like every other flag: 4.3 offered it and
+    /// answered None for it, so it never matched and its NOT matched all.
+    #[test]
+    fn data_missing_matches_a_torrent_whose_files_are_gone() {
+        let cond = |v: &str| Node::Cond(Cond { field: "data_missing".into(), op: Op::Eq, value: v.into() });
+        let m = compile(&cond("true")).unwrap();
+        let gone = Facts { data_missing: true, ..Default::default() };
+        assert!(m(&gone));
+        assert!(!m(&Facts::default()));
+        let not = compile(&Node::Not { of: Box::new(cond("true")) }).unwrap();
+        assert!(not(&Facts::default()) && !not(&gone));
+    }
 
     #[test]
     fn a_move_is_done_once_the_torrent_is_in_the_folder() {

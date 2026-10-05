@@ -9773,7 +9773,9 @@ async function loadJobs() {
     if (!Array.isArray(jobs)) jobs = [];
     const activeOnly = document.getElementById("jobs-active-only");
     if (activeOnly && activeOnly.checked) {
-        jobs = jobs.filter(j => j.state === "pending" || j.state === "running" || j.state === "verifying");
+        // "queued" is what the daemon calls a job waiting its turn; 4.3
+        // looked for "pending" and hid every queued job.
+        jobs = jobs.filter(j => ["queued", "pending", "running", "verifying", "cancelling"].includes(j.state));
     }
     if (jobs.length === 0) {
         tbody.innerHTML = `<tr><td colspan="7">${t("Nothing running.")}</td></tr>`;
@@ -9783,7 +9785,7 @@ async function loadJobs() {
         ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
     tbody.innerHTML = jobs.map(j => {
         const pct = Math.min(100, Math.max(0, j.percent || 0));
-        const running = j.state === "pending" || j.state === "running" || j.state === "verifying";
+        const running = ["queued", "pending", "running", "verifying"].includes(j.state);
         const target = (j.params && j.params.target) || "";
         // The error is the whole story on a failed job, so it replaces the
         // progress bar rather than hiding in a tooltip.
@@ -9808,7 +9810,7 @@ async function loadJobs() {
 }
 
 async function cancelJob(id) {
-    if (!await hydraConfirm(t("Cancel this job? A move stops where it is; the data stays where the torrent is seeding from."))) return;
+    if (!await hydraConfirm(t("Cancel this job? A waiting job is dropped. A move to another engine stops after the current file and is put back as it was; another running move cannot be interrupted and finishes."))) return;
     try {
         const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, {
             method: "DELETE",
@@ -10306,6 +10308,7 @@ async function netWgSave() {
 
 let _wfFields = null;
 let _wfEditing = null;
+let _wfEditingEnabled = false;
 
 async function loadWorkflowFields() {
     if (_wfFields) return _wfFields;
@@ -10340,7 +10343,7 @@ async function updateWorkflows() {
                     <td><input type="checkbox" ${w.enabled ? "checked" : ""}
                         onchange="toggleWorkflow('${esc(w.id)}', this.checked)"></td>
                     <td><strong>${esc(w.name)}</strong></td>
-                    <td>${onEvent ? esc(t("on completion")) : `${esc(String(w.interval_secs))}s`}</td>
+                    <td>${w.trigger === "added" ? esc(t("when added")) : onEvent ? esc(t("on completion")) : `${esc(String(w.interval_secs))}s`}</td>
                     <td>${esc(last)}</td>
                     <td>${esc(acts)}</td>
                     <td>${runs}
@@ -10403,6 +10406,7 @@ async function loadWorkflowActivity() {
 }
 
 function newWorkflow() {
+    _wfEditingEnabled = false;
     _wfEditing = null;
     document.getElementById("wf-name").value = "";
     document.getElementById("wf-trigger").value = "schedule";
@@ -10547,7 +10551,7 @@ function addGroupRow(node, wrap) {
     wrap = wrap || document.querySelector("#wf-conds .wf-kids");
     const div = document.createElement("div");
     div.className = "wf-group";
-    const kind = node && node.kind === "any" ? "any" : "all";
+    const kind = node && (node.kind === "any" || node.kind === "none") ? node.kind : "all";
     // The kind drives the colour of the rule running down the left, so the
     // operator and everything it governs are one shape rather than a select
     // sitting above an unrelated pile.
@@ -10557,6 +10561,7 @@ function addGroupRow(node, wrap) {
             <select class="wf-g-kind">
                 <option value="all" ${kind === "all" ? "selected" : ""}>${esc(t("all of these (AND)"))}</option>
                 <option value="any" ${kind === "any" ? "selected" : ""}>${esc(t("any of these (OR)"))}</option>
+                <option value="none" ${kind === "none" ? "selected" : ""}>${esc(t("none of these (NOT)"))}</option>
             </select>
             <button class="btn-cancel wf-g-del">${esc(t("Remove"))}</button>
         </div>
@@ -10591,9 +10596,13 @@ function wfRenderNode(node, wrap) {
     if (!node) return;
     if (node.kind === "all" || node.kind === "any") return addGroupRow(node, wrap);
     if (node.kind === "not") {
-        // Read back as the group it wraps. Nothing in the form builds a `not`,
-        // so this only has to avoid losing one written elsewhere.
-        return wfRenderNode(node.of, wrap);
+        // Shown as a "none of these" group. 4.3 read it back as the group it
+        // wrapped and dropped the negation, so saving the form inverted the
+        // rule. NOT(any of X) is "none of X"; anything else under the NOT is
+        // kept whole as the one child of the group.
+        const inner = node.of || {};
+        const kids = inner.kind === "any" ? inner.of : [inner];
+        return addGroupRow({ kind: "none", of: kids }, wrap);
     }
     return addCondRow(node, wrap);
 }
@@ -10620,7 +10629,9 @@ function wfCollectNode(groupEl) {
         }
     }
     if (!of.length) return null;
-    return { kind: groupEl.querySelector(".wf-g-kind").value, of };
+    const kind = groupEl.querySelector(".wf-g-kind").value;
+    if (kind === "none") return { kind: "not", of: { kind: "any", of } };
+    return { kind, of };
 }
 
 // The operators offered follow the field's kind, so a duration never gets
@@ -10680,7 +10691,11 @@ const WF_ACTIONS = [
 /// things the action wanted, and to spell it.
 function _wfArgControl(type, value, act) {
     if (type === "set_location") {
-        return `<input type="text" class="wf-a-arg" placeholder="/data/complete" value="${esc(value || "")}" autocomplete="off">`;
+        const allow = !!(act && act.allow_breaking_hardlinks);
+        return `<span class="wf-a-arg-wrap" style="display:flex;flex-direction:column;gap:4px;flex:1">`
+            + `<input type="text" class="wf-a-arg" placeholder="/data/complete" value="${esc(value || "")}" autocomplete="off">`
+            + `<label class="sr-desc"><input type="checkbox" class="wf-a-allow" ${allow ? "checked" : ""}> ${esc(t("copy hardlinked files across disks anyway (breaks the link, uses the space twice)"))}</label>`
+            + `</span>`;
     }
     if (type === "add_trackers") {
         const urls = (act && act.urls) || [];
@@ -10719,7 +10734,7 @@ function _wfArgControl(type, value, act) {
 function _wfActionNote(type) {
     if (type === "delete") return t("delete must be the only action in a workflow");
     if (type === "webhook") return t("POSTs the torrent as JSON; Discord, Slack and Gotify read it as is. On a timer, it goes out when another action changes the torrent.");
-    if (type === "set_location") return t("Moves the data as Set location does, category unchanged. Hardlinked files are not copied across disks: such a torrent is reported as failed.");
+    if (type === "set_location") return t("Moves the data as Set location does, category unchanged. Hardlinked files are not copied across disks unless the box is ticked: such a torrent is reported as failed.");
     if (type === "add_trackers") return t("Never applied to a private torrent. Every tracker added learns this node's IP for the torrent.");
     if (type === "set_category") return t("Changes the label only; use \"move files to a folder\" to move the data.");
     return "";
@@ -10769,7 +10784,9 @@ function _wfCollect() {
         if (type === "delete") return { type, with_files: !!(el && el.checked) };
         const arg = (el && el.value ? el.value : "").trim();
         if (type === "set_category") return { type, to: arg };
-        if (type === "set_location") return { type, to: arg };
+        // The checkbox is the only way to keep this: 4.3 had no control and
+        // every save through the editor reset it to false.
+        if (type === "set_location") return { type, to: arg, allow_breaking_hardlinks: !!r.querySelector(".wf-a-allow")?.checked };
         if (type === "add_trackers") {
             const list = (r.querySelector(".wf-a-arg2")?.value || "").trim();
             return { type, urls: arg.split(/\s+/).map(s => s.trim()).filter(Boolean), list_url: list };
@@ -10783,7 +10800,10 @@ function _wfCollect() {
     return {
         id: _wfEditing || "",
         name: document.getElementById("wf-name").value.trim(),
-        enabled: false,
+        // 4.3 sent false here, so saving an edit switched the workflow off.
+        // A new workflow is saved off, to be previewed and switched on; an
+        // edited one keeps its state.
+        enabled: !!_wfEditingEnabled,
         trigger: document.getElementById("wf-trigger").value,
         interval_secs: parseInt(document.getElementById("wf-interval").value, 10) || 900,
         cap: parseInt(document.getElementById("wf-cap").value, 10) || 500,
@@ -10861,6 +10881,7 @@ async function editWorkflow(id) {
     if (!w) return;
     newWorkflow();
     _wfEditing = id;
+    _wfEditingEnabled = !!w.enabled;
     document.getElementById("wf-name").value = w.name;
     document.getElementById("wf-trigger").value = ["completed", "added"].includes(w.trigger) ? w.trigger : "schedule";
     _wfSyncTrigger();

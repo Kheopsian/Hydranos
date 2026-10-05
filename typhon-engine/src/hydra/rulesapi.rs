@@ -132,7 +132,7 @@ pub async fn fields(
                     "external_links" => "0 means only Hydranos points at these files, so deleting them loses nothing",
                     "freeable_bytes" => "only files nothing else points at; deleting a shared one frees nothing",
                     "data_missing" => "the torrent is seeding data it cannot read",
-                    "seeding_time" => "counted since the torrent completed, pauses included",
+                    "seeding_time" => "time actually spent seeding since the torrent completed; stopped time is not counted",
                     "ratio" => "uploaded divided by downloaded, or by the data held when under 1% of it was downloaded (a cross-seed); 0 when nothing is held or downloaded",
                     _ => match kind {
                         rules::Kind::Duration => "2d, 36h, 90m, or seconds",
@@ -176,7 +176,7 @@ fn field_label(name: &str) -> String {
         "upload_rate" => "upload rate",
         "download_rate" => "download rate",
         "num_peers" => "connected peers",
-        "num_seeds" => "connected seeds",
+        "num_seeds" => "seeds the tracker reports",
         "swarm_seeds" => "seeds in swarm",
         "swarm_leechers" => "leechers in swarm",
         "added_age" => "time since added",
