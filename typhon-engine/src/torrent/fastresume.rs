@@ -37,6 +37,15 @@ pub struct ResumeData {
     /// restart the count from zero, which under-reports rather than over.
     #[serde(default)]
     pub seed_secs: i64,
+    /// This torrent's own upload cap, bytes/s. 0 = none. Kept in the record
+    /// so it survives a restart AND an engine move, exactly like the edited
+    /// tracker list: a cap that silently fell off at the next boot would be a
+    /// setting that works until nobody is watching.
+    #[serde(default)]
+    pub up_limit: u64,
+    /// This torrent's own download cap, bytes/s. 0 = none.
+    #[serde(default)]
+    pub down_limit: u64,
 }
 
 /// Save resume data for a torrent.

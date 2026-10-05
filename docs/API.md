@@ -115,6 +115,7 @@ Status: ✓ works · ◐ works with a caveat. Stub routes appear only in *Routes
 | `/api/torrents/:info_hash/trackers` | GET, POST | Read / edit (saved at once). POST `{"op":"add"\|"remove","urls":[...]}`, `{"op":"replace","from","to"}` or `{"op":"set","tiers":[ ["u1"], ["u2"] ]}`. `.../add-tracker` takes `{"url"}`. | ✓ |
 | `/api/torrents/:info_hash/reannounce` | POST | Announce now, one copy only: the `?engine=` one, else the first engine holding it. `429` in the 60 s cooldown. | ✓ |
 | `/api/torrents/:info_hash/peers` | POST | `{"peers":["203.0.113.5:16172"]}`: dial these peers. | ✓ |
+| `/api/torrents/:info_hash/limits` | GET, POST | The torrent's own speed caps, per local copy (`?engine=` for one): `{"info_hash","copies":[{"engine","upload_limit","download_limit","up_kib","down_kib"}]}` (`*_limit` in bytes/s, 0 = none). POST `{"up_kib","down_kib"}` (KiB/s, either optional, 0 or negative = no cap of its own): live at once and saved with the torrent, so it survives a restart and an engine move; answers what the engine now holds. Neither field → 400; unknown hash → 404. The engine's cap still applies above it: the narrower one binds. New in 4.4. | ✓ |
 | `/api/torrents/:info_hash/copy` | POST | `{"engine":"vpn1"}`: add a second copy in another engine, same files. | ✓ |
 | `/api/torrents/:info_hash/engine` | POST | `{"engine":"vpn1"}`: move the torrent to another engine, files stay where they are. `?engine=` names the source copy. The target adopts the source's state (pieces, trackers, counters, stopped) before the source lets go; if either refuses, nothing changes. | ✓ |
 | `/api/torrents/:info_hash/graduate` | POST | `{"engine","category","save_path","allow_breaking_hardlinks":false}`: queue a `graduate` job (data move + engine change). `save_path` defaults to the category's. Same checks as a category change (unsafe path, shared files, hardlinks, free space: 409 with `reason`); a failure moves the files back. | ✓ |
@@ -150,9 +151,10 @@ Each `/api/engines/:id/...` row also answers as `/api/hoard/...` and `/api/race/
 | `/api/engines/:id/{pause-all,resume-all}` | POST | Stop / start every torrent of the engine. | ✓ |
 | `/api/engines/:id/listen-port` | POST | `{"port":16172}`: rebind the TCP listener live; announces carry the new port. Answers `"persisted": false`. | ◐ not persisted; uTP keeps the startup port |
 | `/api/engines/:id/dial-limits` | POST | `{"max_dials_per_sec","max_connections"}` (0 = unlimited). | ◐ not persisted |
+| `/api/engines/:id/rate-limits` | GET, POST | The engine's speed caps. GET `{"engine","upload_kib","download_kib"` (config) `,"upload_limit","download_limit"` (live, bytes/s) `,"client_upload_limit","client_download_limit"}` (the qBit-shim global cap above every engine). POST `{"upload_kib","download_kib"}` (KiB/s, either optional, 0 = unlimited): written to the config as `upload_rate_limit` / `download_rate_limit` in **bytes/s** (in `[race]`/`[hoard]` or the `[[engine]]` block's `session`, created if absent) and applied live. Unknown engine → 404. New in 4.4. | ✓ |
 | `/api/hoard/stats` | GET | Totals. | ✓ |
 | `/api/hoard/download-slots` | GET | Configured `active_downloads`; other counters are zeros. | ◐ |
-| `/api/race/settings` | GET | Race settings echo. | ◐ |
+| `/api/race/settings` | GET | Race settings echo; `upload_rate_limit` / `download_rate_limit` are the configured caps in bytes/s (constant 0 up to 4.3.1). | ◐ |
 | `/api/startup-pause`, `/api/startup-pause/release` | GET, POST | Startup gate: `{"held":[engines],"holding"}`; POST releases it and answers `released`. With `start_paused`, a held engine makes no dial and no announce until released ([Engines: Race and Hoard](https://github.com/Kheopsian/Hydranos/wiki/Engines-Race-and-Hoard)). | ✓ |
 
 **Paging parameters** of `.../page`: `offset` (default 0), `limit` (default 500, clamped to 1–5000), `sort` (a row field, default `added_time`), `order=asc` (default descending), `facets=1` (adds category/tag/tracker counts), `fields=hash` (hashes only). Filters: `search` (words ANDed, or a hex hash prefix of 6+ characters), `category`, `tag`, `tracker`, `error_class` and their `_not` variants (comma-separated lists, `__none__` = without one), `state` (a row state such as `seeding`, or `__active__`, `__error__`, `__tracker_err__`, `__pinned__`). The answer is `{"total","filtered","offset","limit","rows","facets"}`. A page also merges the other local engines of the same role and the rows of declared nodes. The same filters apply to `GET /api/{hoard,race}/torrents` and `/api/engines/:id/torrents`.
@@ -177,6 +179,7 @@ Body: `{"selection": ..., "params": {...}}`, strict (unknown keys → 400).
 | `handoff` | `{"node","engine","then":"keep"\|"remove"}` |
 | `node-fetch` | `{"node","from_engine","engine"}` |
 | `node-move` | `{"node","engine"}` |
+| `limits` | `{"up_kib","down_kib"}`: each torrent's own speed caps, KiB/s, either optional, 0 = no cap of its own (see `/api/torrents/:info_hash/limits`). Neither → 400. New in 4.4. |
 
 ## Categories and tags
 
@@ -259,8 +262,8 @@ Import wizard: [Migrating from qBittorrent](https://github.com/Kheopsian/Hydrano
 | Route | Method | Purpose | Status |
 |---|---|---|---|
 | `/api/network/{interfaces,engines}`, `/api/public-ip` | GET | Interfaces that are up; exit IP per engine (`?refresh=1`); process exit IP. | ✓ |
-| `/api/network/mode` | GET, POST | Network tab: POST writes ports, interfaces and other keys, `restart_required`. A port outside 1–65535 → 400. Several modes are not implemented. | ◐ |
-| `/api/network/check` | POST | Partly constant results. | ◐ |
+| `/api/network/mode` | GET, POST | Network tab. GET: `mode` as saved in `[network] mode` (a file never saved by the tab: deduced from the keys), `fields` (incl. `announce_proxy`, `announce_ip`, `gluetun_port_engine` read from the file), `warnings`, `env_overrides` (`TYPHON_ANNOUNCE_PROXY`, credentials redacted). POST `{"mode","fields","extra_engines"}`: writes the chosen mode's keys and REMOVES the other modes' keys (`socks5_*`/`announce_proxy`/`announce_ip` outside `socks5` and `proxy_v2`, `*_proxy_v2` outside `proxy_v2`, `gluetun_*` outside `gluetun`) from race, hoard and every extra engine; answers `{"status","mode","restart_required","warnings"}`. `restart_required` is true only when a running engine was started with different network keys. `warnings` includes the UDP-trackers-not-announced notice when an engine with a proxy has `enable_udp_trackers` on or holds a `udp://` tracker. Unknown mode, SOCKS5 without host, PROXY-v2 without a port or with a non-IP trusted source, a port outside 1–65535 → 400. | ✓ |
+| `/api/network/check` | POST | Exit address per engine, each probe through the engine's own path (announce probe through its announce proxy, peer probe through its SOCKS5). Inbound checks are reported as not tested when the outbound address could not be measured. | ◐ |
 | `/api/ipfilter` | GET, PUT | Status / `{"enabled","sources":[...],"refresh_hours"}`. | ✓ |
 | `/api/ipfilter/bans`, `/api/ipfilter/reload` | POST, DELETE | Ban `{"ip","reason"}` / unban `{"ip"}`; POST reload reloads block lists. | ✓ |
 
@@ -273,7 +276,7 @@ What works and what does not on the Network tab: [Networking](https://github.com
 | `/api/setup` | GET, POST | First run: `{"needs_setup","network_storage",...}` (`network_storage` is `"network share"` when `data_dir` is on NFS, SMB or FUSE, where the database cannot use WAL; `""` otherwise; always `""` up to 4.3.1) / create the admin `{"username","password"}` (8+ chars) → API key. Public, loopback or private network only. | ✓ |
 | `/api/login` | POST | `{"username","password"}` → `{"api_key"}`. Public. | ✓ |
 | `/api/auth/password` | POST | `{"password"}` (8+ chars): stored hashed in `[auth] password_hash`, as setup does. | ✓ |
-| `/api/settings` | GET, POST | Whole config as JSON, **secrets included** / `{"changes":[{"section","key","value"}]}` edits existing keys only. | ✓ |
+| `/api/settings` | GET, POST | Whole config as JSON, **secrets included** / `{"changes":[{"section","key","value"}]}` edits existing keys only, except the live engine keys of `[race]`/`[hoard]` (`upload_rate_limit`, `download_rate_limit`, `peer_timeout`, `choking`, `max_uploads_per_torrent`), which are created when absent. Those are put on the running engines at once; the answer carries `applied_live` (engines updated) and `restart_required` (false when every change is one of them). | ✓ |
 | `/api/settings/reset` | POST | Reset to defaults (keeps login, key, data dir). | ✓ |
 | `/api/settings/restart`, `/api/restart` | POST | Answer, then stop cleanly (the same path as SIGTERM: `stopped` to trackers, resume data flushed) and exit with code **75** for the supervisor to restart (systemd `Restart=on-failure` included). | ✓ |
 | `/api/fs/browse?path=` | GET | List folders on the Hydranos host. | ✓ |
@@ -324,6 +327,16 @@ Documented on [qBittorrent Shim and Automation](https://github.com/Kheopsian/Hyd
 - `torrents/categories` and `torrents/tags` answer POST as well as GET.
 - `torrents/export` serves the stored `.torrent` of `hash`.
 - `torrents/info` lists every engine, each torrent once, with `tracker` filled; `hashes=all` means every torrent on the write endpoints; `torrents/files` gives real piece ranges and progress, with the torrent's folder in multi-file names.
+
+Changes in 4.4:
+
+- **Real transfer figures.** `torrents/info` reports the real `uploaded`, `downloaded`, `ratio` and `seeding_time`; `torrents/properties` the real `total_uploaded`, `total_downloaded`, `share_ratio` and `seeding_time`, computed the same way (a finished torrent with nothing downloaded counts its size as downloaded, so a cross-seed's ratio is upload / size). Up to 4.3.1 every one of them was 0, for every torrent: *arr seeding goals and autobrr ratio rules now see the truth.
+- **Speed limits**, in bytes/s as qBittorrent has them. Parameters in the query string or the form body.
+  - `POST torrents/setUploadLimit`, `torrents/setDownloadLimit`: `hashes` (`|`-separated, or `all`) and `limit` (0 or negative = no limit). Every local copy of each hash. Persisted with the torrent.
+  - `torrents/uploadLimit`, `torrents/downloadLimit` (any method): `{"<hash>": <bytes/s>}`, 0 = none.
+  - `POST transfer/setUploadLimit`, `transfer/setDownloadLimit`: `limit`. The global cap: one bucket above every engine of this host, persisted in the store. `transfer/uploadLimit`, `transfer/downloadLimit` (any method) answer it as a plain number, 0 = none.
+  - `torrents/add` takes `upLimit` / `dlLimit` (bytes/s) for a `.torrent` file; a magnet has no torrent to cap yet and ignores them.
+  - `up_limit` / `dl_limit` in `torrents/info` and `torrents/properties` are the torrent's own caps, -1 = none; `up_rate_limit` / `dl_rate_limit` in `transfer/info` and `up_limit` / `dl_limit` in `app/preferences` are the global cap, 0 = none.
 
 ## Routes that are stubs in 4.3.1
 

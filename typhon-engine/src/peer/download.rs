@@ -140,6 +140,17 @@ impl DownloadState {
     /// piece) — otherwise only the first 16 blocks were ever requested and
     /// pieces never completed.
     pub fn get_requests(&mut self) -> Vec<(u32, u32, u32)> {
+        self.get_requests_gated(|_| true)
+    }
+
+    /// `get_requests`, asking `admit` before each block goes into the batch.
+    ///
+    /// This is where a download cap bites: the first block `admit` refuses
+    /// goes back to the FRONT of the queue -- it is the next one owed, and its
+    /// piece must still be finished before another is started -- and the batch
+    /// stops there. The pipeline is then refilled when the cap allows, instead
+    /// of being sized by a number the cap knows nothing about.
+    pub fn get_requests_gated(&mut self, mut admit: impl FnMut(u32) -> bool) -> Vec<(u32, u32, u32)> {
         // A paused torrent asks for nothing. This is the single choke point
         // for the download side: `stop_torrent` sets the flag and untracks the
         // DHT, but it does not tear down sessions that are already connected,
@@ -166,6 +177,10 @@ impl DownloadState {
         while self.pending_requests < MAX_PIPELINE {
             // Drain queue first.
             if let Some(req) = self.pending_block_queue.pop_front() {
+                if !admit(req.2) {
+                    self.pending_block_queue.push_front(req);
+                    break;
+                }
                 requests.push(req);
                 self.pending_requests += 1;
                 continue;

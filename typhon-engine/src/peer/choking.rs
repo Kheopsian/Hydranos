@@ -23,47 +23,90 @@ use tracing::{debug, info};
 use crate::torrent::TorrentManager;
 use crate::torrent::meta::{TorrentState, TorrentStatus};
 
-#[derive(Clone, Debug)]
-pub struct ChokingConfig {
-    pub max_unchoked_per_torrent: usize,
-    pub tick_interval: Duration,
-}
+/// How often the choker re-ranks. Ten seconds is BEP 3's suggestion and what
+/// the loop always used.
+pub const CHOKE_TICK: Duration = Duration::from_secs(10);
 
-impl Default for ChokingConfig {
-    fn default() -> Self {
-        Self {
-            max_unchoked_per_torrent: 4,
-            tick_interval: Duration::from_secs(10),
-        }
-    }
-}
-
-pub async fn choking_loop(torrent_mgr: Arc<TorrentManager>, cfg: ChokingConfig) {
-    info!(
-        "[choking] loop started: max_unchoked_per_torrent={}, tick={:?}",
-        cfg.max_unchoked_per_torrent, cfg.tick_interval
-    );
-    let mut ticker = time::interval(cfg.tick_interval);
+/// The choker of one engine.
+///
+/// Spawned for every engine and OFF unless `choking = true`: each tick reads
+/// the engine's `PeerPolicy`, so the switch and the slot count move live, and
+/// an engine with the choker off pays one atomic load every ten seconds.
+///
+/// Off by default because of what it did the one time it ran on a hoard
+/// (2.4.13-typhon): re-ranking ~13k seeding torrents every tick and choking
+/// all but the top four peers of each churned the peers so hard that upload
+/// fell to a ceiling of ~300 transfers per peer-set instead of ~11k sustained.
+/// A seedbox wants every interested peer served; a choker only pays when the
+/// uplink is the bottleneck and a few fast peers should have it.
+///
+/// Switched off while running, it unchokes every peer it had choked -- leaving
+/// them choked would turn "off" into "frozen in the last ranking".
+pub async fn choking_loop(torrent_mgr: Arc<TorrentManager>) {
+    let mut ticker = time::interval(CHOKE_TICK);
     // First tick fires immediately; skip it so peer tasks have time to register.
     ticker.tick().await;
+    let mut was_active = false;
     loop {
         ticker.tick().await;
-        let mut total_unchoked = 0usize;
-        let mut total_choked = 0usize;
-        let mut torrents_with_interested = 0usize;
-        for t in torrent_mgr.all() {
-            let (u, c, had_interested) = tick_torrent(&t, cfg.max_unchoked_per_torrent);
-            total_unchoked += u;
-            total_choked += c;
-            if had_interested {
-                torrents_with_interested += 1;
-            }
-        }
-        debug!(
-            "[choking] tick: +{} unchoke -{} choke across {} torrents (interested on {})",
-            total_unchoked, total_choked, torrent_mgr.count(), torrents_with_interested
-        );
+        was_active = choke_pass(torrent_mgr.policy(), || torrent_mgr.all(), was_active);
     }
+}
+
+/// One tick of the choker under `policy`. `was_active` is whether the last
+/// tick ranked; answers whether this one did. The torrent list is asked for
+/// only when there is something to do, so an engine with the choker off
+/// never walks its library.
+fn choke_pass(
+    policy: &crate::peer::extension::PeerPolicy,
+    torrents: impl FnOnce() -> Vec<Arc<TorrentState>>,
+    was_active: bool,
+) -> bool {
+    let slots = if policy.choking() { policy.unchoke_slots() } else { None };
+    match slots {
+        Some(max_unchoked) => {
+            if !was_active {
+                info!("[choking] on: {} unchoke slots per seeding torrent", max_unchoked);
+            }
+            let all = torrents();
+            let mut total_unchoked = 0usize;
+            let mut total_choked = 0usize;
+            let mut torrents_with_interested = 0usize;
+            for t in &all {
+                let (u, c, had_interested) = tick_torrent(t, max_unchoked);
+                total_unchoked += u;
+                total_choked += c;
+                if had_interested {
+                    torrents_with_interested += 1;
+                }
+            }
+            debug!(
+                "[choking] tick: +{} unchoke -{} choke across {} torrents (interested on {})",
+                total_unchoked, total_choked, all.len(), torrents_with_interested
+            );
+            true
+        }
+        None if was_active => {
+            let released: usize = torrents().iter().map(|t| release_torrent(t)).sum();
+            info!("[choking] off: {} choked peers unchoked", released);
+            false
+        }
+        None => false,
+    }
+}
+
+/// Unchoke every peer of a torrent the choker had choked. Answers how many.
+fn release_torrent(t: &TorrentState) -> usize {
+    let mut n = 0;
+    for e in t.peer_stats.iter() {
+        let s = e.value();
+        if s.choked.swap(false, Ordering::Relaxed) {
+            s.choking_gen.fetch_add(1, Ordering::Relaxed);
+            s.punch_wake.notify_one();
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Returns (newly_unchoked, newly_choked, had_any_interested_peer).
@@ -125,10 +168,18 @@ fn tick_torrent(t: &TorrentState, max_unchoked: usize) -> (usize, usize, bool) {
         if should_unchoke && was_choking {
             c.stats.choked.store(false, Ordering::Relaxed);
             c.stats.choking_gen.fetch_add(1, Ordering::Relaxed);
+            // A seeding session keeps no timer (its choke tick is disabled),
+            // so it only turns its loop -- where `choking_gen` is flushed to
+            // the wire -- when something wakes it. A choked peer waiting for
+            // its unchoke sends nothing, and without this it would wait for
+            // its own idle timeout. `punch_wake`'s arm falls through to the
+            // top of the loop with nothing to send when its outbox is empty.
+            c.stats.punch_wake.notify_one();
             newly_unchoked += 1;
         } else if !should_unchoke && !was_choking {
             c.stats.choked.store(true, Ordering::Relaxed);
             c.stats.choking_gen.fetch_add(1, Ordering::Relaxed);
+            c.stats.punch_wake.notify_one();
             newly_choked += 1;
         }
         // Reset delta for the next tick window.
@@ -309,6 +360,84 @@ mod tests {
         assert!(had);
         assert_eq!(unchoked, 1);
         assert!(!p.choked.load(Ordering::Relaxed));
+    }
+
+    /// ⭐ A decision reaches an IDLE seeding session: its choke tick is
+    /// disabled, so the choker has to wake it, or a choked peer waiting for
+    /// its unchoke would sit there until its own idle timeout.
+    #[tokio::test]
+    async fn a_decision_wakes_the_session_that_must_send_it() {
+        let t = seeding(100);
+        let p = peer(&t, 1, 0, true, 0);
+        p.choked.store(true, Ordering::Relaxed);
+        tick_torrent(&t, 4);
+        tokio::time::timeout(std::time::Duration::from_millis(100), p.punch_wake.notified())
+            .await
+            .expect("the unchoke must wake the session");
+    }
+
+    /// ⭐ Turning the choker off releases every peer it had choked. Left as
+    /// they were, "off" would mean "frozen in the last ranking".
+    #[test]
+    fn switching_the_choker_off_unchokes_everyone() {
+        let t = seeding(100);
+        let peers: Vec<_> = (1..=5).map(|i| peer(&t, i, i as u32 * 10, true, 0)).collect();
+        tick_torrent(&t, 1);
+        assert_eq!(peers.iter().filter(|p| p.choked.load(Ordering::Relaxed)).count(), 4);
+        assert_eq!(release_torrent(&t), 4);
+        assert!(peers.iter().all(|p| !p.choked.load(Ordering::Relaxed)));
+        assert_eq!(release_torrent(&t), 0, "a second release changes nothing");
+    }
+
+    /// The policy knob: off by default, 0 = the default four slots, negative =
+    /// unlimited (the choker then has nothing to do).
+    #[test]
+    fn the_choker_is_off_by_default_and_slots_read_as_documented() {
+        let p = crate::peer::extension::PeerPolicy::default();
+        assert!(!p.choking(), "off unless asked");
+        assert_eq!(p.unchoke_slots(), Some(4));
+        p.set_unchoke_slots(0);
+        assert_eq!(p.unchoke_slots(), Some(4));
+        p.set_unchoke_slots(-1);
+        assert_eq!(p.unchoke_slots(), None);
+        p.set_unchoke_slots(12);
+        assert_eq!(p.unchoke_slots(), Some(12));
+    }
+
+    /// ⭐ The switch, tick by tick, as the loop runs it. Off (the default):
+    /// nobody is choked and the library is never even listed. On with two
+    /// slots: all but two interested peers are choked. Off again: every one
+    /// of them is released. Slots = -1 with the switch on chokes nobody.
+    #[test]
+    fn the_choker_switch_off_on_off() {
+        let t = Arc::new(seeding(100));
+        let peers: Vec<_> = (1..=5).map(|i| peer(&t, i, i as u32 * 10, true, 0)).collect();
+        // What a session does with the choker off: it unchokes whoever is
+        // interested, itself.
+        peers.iter().for_each(|p| p.choked.store(false, Ordering::Relaxed));
+        let choked = || peers.iter().filter(|p| p.choked.load(Ordering::Relaxed)).count();
+        let policy = crate::peer::extension::PeerPolicy::default();
+        let mut listed = 0;
+
+        let active = choke_pass(&policy, || { listed += 1; vec![t.clone()] }, false);
+        assert!(!active);
+        assert_eq!((choked(), listed), (0, 0), "off: no choke, no walk of the library");
+
+        policy.set_choking(true);
+        policy.set_unchoke_slots(2);
+        let active = choke_pass(&policy, || vec![t.clone()], active);
+        assert!(active);
+        assert_eq!(choked(), 3, "on, two slots");
+
+        policy.set_choking(false);
+        let active = choke_pass(&policy, || vec![t.clone()], active);
+        assert!(!active);
+        assert_eq!(choked(), 0, "off again: released");
+
+        policy.set_choking(true);
+        policy.set_unchoke_slots(-1);
+        choke_pass(&policy, || vec![t.clone()], false);
+        assert_eq!(choked(), 0, "unlimited slots choke nobody");
     }
 
     // -----------------------------------------------------------------------

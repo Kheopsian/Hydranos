@@ -77,7 +77,12 @@ pub struct EngineConfig {
     /// FW must restrict inbound 16271/16272 to these sources only.
     #[serde(default)]
     pub proxy_v2_trusted_sources: Vec<String>,
-    /// SOCKS5 outbound proxy for v6 peer dials (VPS bypass). Empty = disabled.
+    /// SOCKS5 proxy EVERY outbound peer connection of this engine goes
+    /// through, v4 and v6 alike. Empty = disabled, peers are dialled directly.
+    ///
+    /// Fail-closed: with a proxy set, a dial the proxy refuses is a failed
+    /// dial, never a direct one, and outbound uTP is off (SOCKS5 without UDP
+    /// ASSOCIATE cannot carry it). See `tracker::try_tcp` and `open_peer`.
     #[serde(default)]
     pub socks5_outbound_host: String,
     #[serde(default = "default_socks5_port")]
@@ -86,6 +91,11 @@ pub struct EngineConfig {
     pub socks5_outbound_user: String,
     #[serde(default)]
     pub socks5_outbound_pass: String,
+    /// Proxy URL for this engine's HTTP traffic that is not a peer: tracker
+    /// announces and webseed fetches. Empty = the SOCKS5 proxy above, as a
+    /// `socks5h://` URL (see `http_proxy`).
+    #[serde(default)]
+    pub announce_proxy: String,
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
     /// Cap on new outbound peer dials, in dials per second. 0 = unlimited
@@ -95,14 +105,26 @@ pub struct EngineConfig {
     /// that actually bounds them. See `tracker::dial_limiter`.
     #[serde(default)]
     pub max_dials_per_sec: f64,
+    /// Run the choker. Off by default, and deliberately: see
+    /// `peer::choking::choking_loop` for what it did to a hoard.
+    #[serde(default)]
+    pub choking: bool,
+    /// Unchoke slots per seeding torrent while `choking` is on. 0 = the
+    /// default (4), negative = unlimited (the choker then chokes nobody).
     #[serde(default = "default_max_uploads_per_torrent")]
     pub max_uploads_per_torrent: i32,
+    /// Seconds a peer may send nothing useful before it is dropped. Was read
+    /// by nobody while every session used a hard-coded 300 s; see
+    /// `PeerPolicy::set_idle_timeout_secs` for the floor.
     #[serde(default = "default_peer_timeout")]
     pub peer_timeout: u64,
     #[serde(default = "default_peer_timeout")]
     pub inactivity_timeout: u64,
+    /// Engine-wide upload cap, BYTES per second. 0 = unlimited. Hydra fills
+    /// it from `upload_rate_limit`, in the same unit. See `torrent::ratelimit`.
     #[serde(default)]
     pub upload_limit: u64,
+    /// Engine-wide download cap, bytes per second. 0 = unlimited.
     #[serde(default)]
     pub download_limit: u64,
     #[serde(default = "default_file_pool_size")]
@@ -173,6 +195,21 @@ fn default_max_uploads_per_torrent() -> i32 { -1 }
 fn default_peer_timeout() -> u64 { 300 }
 fn default_file_pool_size() -> usize { 5000 }
 fn default_socks5_port() -> u16 { 1080 }
+
+/// Percent-encode a SOCKS5 user name or password for a URL's userinfo. A
+/// password holding `@`, `:` or `/` would otherwise be cut at that character
+/// and the proxy would refuse every announce with an authentication error
+/// that names nothing.
+fn userinfo_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
 /// The fallback fingerprint, used only when nothing supplies a real one.
 ///
 /// It says 2.4.3.0 and has done since the first public commit, on a daemon  // leak-ok: a version
@@ -353,14 +390,52 @@ impl EngineConfig {
         }
     }
 
-    /// Bindings as configured, plus the `[::]` listener when `enable_ipv6` is
-    /// on. The v6 listener is added rather than substituted: the v4 one keeps
-    /// every v4 peer, so no address changes shape (see `only_v6`). If a v6
-    /// binding was configured by hand we add nothing, the operator already
-    /// said what they wanted.
-    /// The outbound SOCKS5 this engine dials v6 peers through, if configured.
+    /// Where this engine's announces and webseed fetches go, as a proxy URL.
+    /// Empty = nowhere in particular: the transport then applies the
+    /// process-wide `TYPHON_ANNOUNCE_PROXY` fallback, or goes direct.
+    ///
+    /// `announce_proxy` when written, otherwise the peer SOCKS5 proxy. The
+    /// default matters: an operator who proxies the peers and forgets the
+    /// announces has the tracker publish this host's address next to a swarm
+    /// connection that carefully hides it, which defeats the proxy entirely.
+    /// `socks5h`, not `socks5`: the tracker's name is resolved by the proxy,
+    /// so not even the DNS query leaves from here.
+    pub fn http_proxy(&self) -> String {
+        let explicit = self.announce_proxy.trim();
+        if !explicit.is_empty() {
+            return explicit.to_string();
+        }
+        self.socks5_url()
+    }
+
+    /// The peer SOCKS5 proxy as a `socks5h://` URL, credentials escaped.
+    /// Empty when the engine dials its peers directly.
+    pub fn socks5_url(&self) -> String {
+        let host = self.socks5_outbound_host.trim();
+        if host.is_empty() {
+            return String::new();
+        }
+        let auth = if self.socks5_outbound_user.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{}:{}@",
+                userinfo_escape(&self.socks5_outbound_user),
+                userinfo_escape(&self.socks5_outbound_pass)
+            )
+        };
+        // A bare v6 literal needs brackets to be a URL authority.
+        let host = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        };
+        format!("socks5h://{auth}{host}:{}", self.socks5_outbound_port)
+    }
+
+    /// The outbound SOCKS5 this engine dials every peer through, if configured.
     fn socks5_outbound(&self) -> Option<std::sync::Arc<crate::peer::Socks5Config>> {
-        if self.socks5_outbound_host.is_empty() {
+        if self.socks5_outbound_host.trim().is_empty() {
             return None;
         }
         let auth = if self.socks5_outbound_user.is_empty() {
@@ -375,6 +450,11 @@ impl EngineConfig {
         )))
     }
 
+    /// Bindings as configured, plus the `[::]` listener when `enable_ipv6` is
+    /// on. The v6 listener is added rather than substituted: the v4 one keeps
+    /// every v4 peer, so no address changes shape (see `only_v6`). If a v6
+    /// binding was configured by hand we add nothing, the operator already
+    /// said what they wanted.
     pub fn resolved_bindings(&self) -> Vec<ResolvedBinding> {
         let mut out = self.configured_bindings();
         if !self.enable_ipv6 || out.iter().any(|b| b.addr.is_ipv6()) {
@@ -484,4 +564,50 @@ pub struct ResolvedBinding {
     /// downstream (dedup, allowlists, stats). Bindings configured explicitly
     /// keep the previous dual-stack behaviour.
     pub only_v6: bool,
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::EngineConfig;
+
+    fn config(json: &str) -> EngineConfig {
+        serde_json::from_str(json).expect("config parses")
+    }
+
+    /// ⭐ Announces follow the peers by default. Proxying the swarm and
+    /// announcing directly is the setup where the tracker publishes the very
+    /// address the proxy hides; `socks5h` so the tracker's name is resolved
+    /// by the proxy as well.
+    #[test]
+    fn announces_default_to_the_peer_proxy_as_socks5h() {
+        let c = config(r#"{"socks5_outbound_host":"10.0.0.1","socks5_outbound_port":1080}"#);
+        assert_eq!(c.http_proxy(), "socks5h://10.0.0.1:1080");
+        assert!(config("{}").http_proxy().is_empty(), "no proxy, no URL");
+    }
+
+    #[test]
+    fn an_explicit_announce_proxy_wins() {
+        let c = config(r#"{"socks5_outbound_host":"10.0.0.1","announce_proxy":"socks5h://10.9.9.9:9050"}"#);
+        assert_eq!(c.http_proxy(), "socks5h://10.9.9.9:9050");
+        assert_eq!(c.socks5_url(), "socks5h://10.0.0.1:1080", "the peers keep theirs");
+    }
+
+    /// A password with URL syntax in it must survive the trip into a URL, or
+    /// the proxy refuses every announce with an error that names nothing.
+    #[test]
+    fn credentials_are_escaped_and_v6_hosts_bracketed() {
+        let c = config(r#"{"socks5_outbound_host":"fd00::1","socks5_outbound_port":1081,
+            "socks5_outbound_user":"me","socks5_outbound_pass":"p@ss:w/rd"}"#);
+        assert_eq!(c.http_proxy(), "socks5h://me:p%40ss%3Aw%2Frd@[fd00::1]:1081");
+        assert!(reqwest::Proxy::all(c.http_proxy()).is_ok(), "reqwest accepts it");
+    }
+
+    /// Every binding carries the proxy: there is no "v6 only" any more.
+    #[test]
+    fn every_binding_dials_through_the_proxy() {
+        let c = config(r#"{"socks5_outbound_host":"10.0.0.1","enable_ipv6":true}"#);
+        let b = c.resolved_bindings();
+        assert_eq!(b.len(), 2, "v4 and the added v6 listener");
+        assert!(b.iter().all(|b| b.egress.socks5.is_some()));
+    }
 }

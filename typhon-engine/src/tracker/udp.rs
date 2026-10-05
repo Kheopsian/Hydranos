@@ -446,22 +446,30 @@ static CLIENT: OnceLock<Client> = OnceLock::new();
 
 /// Announce to a `udp://` tracker.
 ///
-/// ⚠️ Refused while announces are proxied. `TYPHON_ANNOUNCE_PROXY` exists so
-/// no tracker sees this host's own address, and a SOCKS proxy carries TCP:
-/// sending the UDP announce directly would publish exactly what the proxy is
-/// there to hide.
+/// ⚠️ Refused while announces are proxied. The proxy exists so no tracker
+/// sees this host's own address, and it carries TCP only: tokio-socks has no
+/// UDP ASSOCIATE, so sending the UDP announce directly would publish exactly
+/// what the proxy is there to hide.
 pub async fn send_announce(a: &UdpAnnounce, mode: IpMode) -> Result<AnnounceResponse, String> {
-    send_announce_on(a, mode, "").await
+    send_announce_on(a, mode, "", "").await
 }
+
+/// What a `udp://` tracker records when the engine's announces are proxied.
+/// Shown as-is on the Trackers tab, so it says what happened, why, and that
+/// it is deliberate -- a bare "skipped" reads like a bug to fix.
+pub const UDP_PROXIED_REFUSAL: &str = "UDP trackers do not go through a SOCKS5 proxy (no UDP ASSOCIATE): \
+     they will not be announced while this proxy is active";
 
 /// One client per interface: connection ids and sockets belong to the path
 /// they were obtained on.
 static PINNED: OnceLock<Mutex<std::collections::HashMap<String, Arc<Client>>>> = OnceLock::new();
 
-/// `send_announce` from the engine's interface. Empty = the default route.
-pub async fn send_announce_on(a: &UdpAnnounce, mode: IpMode, device: &str) -> Result<AnnounceResponse, String> {
-    if super::http::announces_proxied() {
-        return Err("udp tracker skipped: announces are proxied and UDP cannot follow the proxy".into());
+/// `send_announce` from the engine's interface. Empty device = the default
+/// route. `proxy` is the engine's announce proxy (empty = the environment
+/// fallback): when there is one, the announce is refused, never sent around it.
+pub async fn send_announce_on(a: &UdpAnnounce, mode: IpMode, device: &str, proxy: &str) -> Result<AnnounceResponse, String> {
+    if super::http::announces_proxied(proxy) {
+        return Err(UDP_PROXIED_REFUSAL.into());
     }
     let device = device.trim();
     if device.is_empty() {

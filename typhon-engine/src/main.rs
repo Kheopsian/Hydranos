@@ -211,13 +211,8 @@ async fn async_main(workers: usize) {
         config.socket_path = socket_override;
     }
 
-    // Parsed here, applied once the manager exists: the allowlist belongs to
-    // the engine, not to the process.
-    let proxy_v2_extras: Vec<std::net::IpAddr> = config
-        .proxy_v2_trusted_sources
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    // The PROXY v2 allowlist is applied by `session::start`, which Hydra
+    // shares: it lived here, and Hydra never set it.
 
     // Seed the self-dial IP filter from env; Go refreshes it at runtime with the
     // observed public IP via the set_self_ips RPC (no more hard-coded staleness).
@@ -233,14 +228,8 @@ async fn async_main(workers: usize) {
         }
     });
 
-    // The outbound SOCKS5 for v6 dials is carried by each binding's Egress
-    // (see Config::socks5_outbound); nothing to install here.
-    if !config.socks5_outbound_host.is_empty() {
-        info!(
-            "[engine] v6 outbound dials via SOCKS5 {}:{}",
-            config.socks5_outbound_host, config.socks5_outbound_port
-        );
-    }
+    // The outbound SOCKS5 is carried by each binding's Egress (see
+    // Config::socks5_outbound) and announced by `session::start`.
 
     // IPv6: opt-in. Gates the extra [::] listener (added in resolved_bindings)
     // and the v6 peer sources, so that off is byte-for-byte the old behaviour.
@@ -299,15 +288,6 @@ async fn async_main(workers: usize) {
         config.resume_dir.clone(),
         disk_mgr.clone(),
     ));
-
-    if !proxy_v2_extras.is_empty() {
-        info!(
-            "[engine] trusting {} extra PROXY v2 source(s): {:?}",
-            proxy_v2_extras.len(),
-            proxy_v2_extras
-        );
-        torrent_mgr.set_trusted_proxy_sources(proxy_v2_extras);
-    }
 
     // Load resume data
     let loaded = torrent_mgr.load_resume_data();

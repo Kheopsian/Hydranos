@@ -1963,13 +1963,13 @@ mod one_number_tests {
         assert_eq!(ratio_of(&two), 2.0);
         assert_eq!(ratio_of(&one), 1.0);
 
-        // The qBittorrent API is deliberately NOT part of this: it still answers
-        // 0 (the 3.x key spelling it reproduces, see qbitrow.rs). *arr can act
-        // on a ratio -- removing torrents once a seed goal is met -- so real
-        // figures there are their own decision and their own release.
+        // And the qBittorrent API, since 4.4: it answered 0 for every torrent
+        // until then (the 3.x key spelling it reproduced, see qbitrow.rs).
+        // *arr acts on this number, so it is the same one as everywhere else.
         let qbit = serde_json::Value::Array(crate::api::engine_qbit_rows(&s.state, "hoard", 0, None, None));
         let qbit = by_hash(&qbit, "hash");
-        assert_eq!(qbit[&xseed]["ratio"], serde_json::json!(0));
+        assert_eq!(qbit[&xseed]["ratio"], serde_json::json!(3));
+        assert_eq!(qbit[&two]["ratio"], serde_json::json!(2));
     }
 
     /// ⭐ The "Hardlinks" column and a workflow condition on `external_links`
