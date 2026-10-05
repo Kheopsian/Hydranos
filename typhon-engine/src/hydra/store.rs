@@ -659,6 +659,7 @@ impl Store {
         self.ensure_workflows_table()?;
         self.ensure_content_index()?;
         self.ensure_link_index()?;
+        self.ensure_share_limits_table()?;
         // After the tables exist, and before anything reads them.
         self.migrate_composite_key()?;
         Ok(())
@@ -785,6 +786,102 @@ impl Store {
                 .execute_batch("ALTER TABLE magnets ADD COLUMN seed_mode INTEGER NOT NULL DEFAULT 0;")?;
         }
         Ok(())
+    }
+
+    /// Per-torrent share limits, qBittorrent's `setShareLimits`.
+    ///
+    /// SPARSE, one row per torrent that has a limit of its own, keyed by hash
+    /// and not by copy (a qBit client names a hash, never an engine). A
+    /// torrent that follows its engine has no row, so the share-limit worker
+    /// and the listings read a table of a few rows, not one per torrent of a
+    /// million-torrent library. -2 = follow the engine, -1 = no limit.
+    ///
+    /// Additive: a rollback opens the same database and never looks here.
+    fn ensure_share_limits_table(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS share_limits (
+                 info_hash TEXT PRIMARY KEY,
+                 ratio REAL NOT NULL DEFAULT -2,
+                 seeding_minutes INTEGER NOT NULL DEFAULT -2,
+                 inactive_minutes INTEGER NOT NULL DEFAULT -2);",
+        )?;
+        Ok(())
+    }
+
+    /// Every torrent's own share limits, by hash. A store without the table
+    /// (a read-only bench copy) answers an error the callers read as "none".
+    pub fn share_limits_all(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<String, crate::sharelimits::TorrentShareLimits>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT info_hash, ratio, seeding_minutes, inactive_minutes FROM share_limits")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                crate::sharelimits::TorrentShareLimits {
+                    ratio: r.get(1)?,
+                    seeding_minutes: r.get(2)?,
+                    inactive_minutes: r.get(3)?,
+                },
+            ))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// One torrent's own share limits; all -2 when it has none.
+    pub fn share_limits_of(&self, info_hash: &str) -> crate::sharelimits::TorrentShareLimits {
+        self.conn
+            .query_row(
+                "SELECT ratio, seeding_minutes, inactive_minutes FROM share_limits WHERE info_hash = ?1",
+                [info_hash],
+                |r| {
+                    Ok(crate::sharelimits::TorrentShareLimits {
+                        ratio: r.get(0)?,
+                        seeding_minutes: r.get(1)?,
+                        inactive_minutes: r.get(2)?,
+                    })
+                },
+            )
+            .unwrap_or_default()
+    }
+
+    /// Set share limits on a set of torrents, in ONE transaction (`hashes=all`
+    /// over a large library is one call). `None` keeps a field as it is; a
+    /// row back to all -2 is deleted, so the table stays as sparse as the
+    /// limits are.
+    pub fn set_share_limits_batch(
+        &self,
+        hashes: &[String],
+        ratio: Option<f64>,
+        seeding_minutes: Option<i64>,
+        inactive_minutes: Option<i64>,
+    ) -> Result<usize, rusqlite::Error> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0usize;
+        {
+            let mut upsert = tx.prepare_cached(
+                "INSERT INTO share_limits (info_hash, ratio, seeding_minutes, inactive_minutes)
+                 VALUES (?1, COALESCE(?2, -2), COALESCE(?3, -2), COALESCE(?4, -2))
+                 ON CONFLICT(info_hash) DO UPDATE SET
+                     ratio = COALESCE(?2, ratio),
+                     seeding_minutes = COALESCE(?3, seeding_minutes),
+                     inactive_minutes = COALESCE(?4, inactive_minutes)",
+            )?;
+            let mut prune = tx.prepare_cached(
+                "DELETE FROM share_limits WHERE info_hash = ?1
+                 AND ratio = -2 AND seeding_minutes = -2 AND inactive_minutes = -2",
+            )?;
+            for hash in hashes {
+                n += upsert.execute(rusqlite::params![hash, ratio, seeding_minutes, inactive_minutes])?;
+                prune.execute([hash])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     /// A setting the UI writes (JSON). Kept here rather than in the TOML,
@@ -2397,6 +2494,8 @@ impl Store {
         let n = self
             .conn
             .execute("DELETE FROM torrents WHERE info_hash = ?1", [info_hash])?;
+        // Its share limits go with it: a re-add starts on the engine's.
+        let _ = self.conn.execute("DELETE FROM share_limits WHERE info_hash = ?1", [info_hash]);
         Ok(n > 0)
     }
 
@@ -2555,6 +2654,12 @@ impl Store {
             "DELETE FROM torrents WHERE info_hash = ?1 AND session = ?2",
             rusqlite::params![info_hash, session],
         )?;
+        // The limits are the torrent's, not the copy's: they go with the last.
+        let _ = self.conn.execute(
+            "DELETE FROM share_limits WHERE info_hash = ?1
+             AND NOT EXISTS (SELECT 1 FROM torrents WHERE info_hash = ?1)",
+            [info_hash],
+        );
         Ok(n > 0)
     }
 

@@ -2198,6 +2198,8 @@ async function refreshDetail() {
         document.getElementById("detail-dl-speed").textContent = formatSpeed(d.download_rate);
         document.getElementById("detail-ul-speed").textContent = formatSpeed(d.upload_rate);
         document.getElementById("detail-limits").textContent = _limitsText(d);
+        const _dsl = document.getElementById("detail-share-limits");
+        if (_dsl) _dsl.textContent = _shareLimitsText(d.share_limits);
         document.getElementById("detail-avg-dl").textContent = formatSpeed(d.avg_download_rate || 0);
         document.getElementById("detail-avg-ul").textContent = formatSpeed(d.avg_upload_rate || 0);
         document.getElementById("detail-peers-count").textContent = d.num_peers;
@@ -4684,6 +4686,80 @@ async function _limitRateSelected() {
     if (j) _bulkNote(j, "");
 }
 
+// ── Share limits ──────────────────────────────────────────────────────────
+//
+// qBittorrent's: a ratio and two times in minutes, past any of which the
+// engine's share_limit_action applies. A torrent's own value: -2 = its
+// engine's, -1 = none. The detail panel shows what is in force.
+
+// "ratio 2 · 1440 min · inactive: none (stop)", from `share_limits` of a
+// detail payload. Empty when it has none (an older node).
+function _shareLimitsText(s) {
+    if (!s || !s.effective) return "";
+    const e = s.effective;
+    const own = (v) => (v === -2 ? " (" + t("engine") + ")" : "");
+    const parts = [];
+    parts.push(t("ratio") + " " + (e.ratio >= 0 ? String(e.ratio) : t("none")) + own(s.ratio_limit));
+    parts.push(t("seeding") + " " + (e.seeding_time >= 0 ? e.seeding_time + " min" : t("none")) + own(s.seeding_time_limit));
+    parts.push(t("inactive") + " " + (e.inactive_seeding_time >= 0 ? e.inactive_seeding_time + " min" : t("none")) + own(s.inactive_seeding_time_limit));
+    const any = e.ratio >= 0 || e.seeding_time >= 0 || e.inactive_seeding_time >= 0;
+    return parts.join(" · ") + (any ? " → " + t(s.action || "stop") : "");
+}
+
+async function _shareLimitsSelected() {
+    _hideCtxMenu();
+    const count = _selCount();
+    if (count === 0) return;
+    let cur = { ratio_limit: "", seeding_time_limit: "", inactive_seeding_time_limit: "" };
+    if (!_selAll && count === 1) {
+        const h = _selHash([..._selected.values()][0]);
+        try {
+            const r = await api(`/api/torrents/${encodeURIComponent(h)}/share-limits`);
+            const c = (r.copies || [])[0];
+            if (c) cur = { ratio_limit: String(c.ratio_limit), seeding_time_limit: String(c.seeding_time_limit), inactive_seeding_time_limit: String(c.inactive_seeding_time_limit) };
+        } catch (_) { /* a remote row: start empty */ }
+    }
+    const label = t("Share limits");
+    const shown = hydraDialog(label + ": " + tp(count, "{n} torrent", "{n} torrents"),
+        t("This torrent's own limits. -2 = its engine's, -1 = no limit. Times in minutes. Leave a field empty to keep its current value. A seed still owing its tracker's minimum seeding time is never stopped or removed."), [
+        { label: t("Apply"), value: true, kind: "keep" },
+        { label: t("Cancel"), value: false, kind: "cancel" },
+    ]);
+    const field = (lbl, value, step) => {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = "display:block;margin-top:10px";
+        wrap.textContent = lbl;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = "-2";
+        input.step = step;
+        input.value = value;
+        input.style.cssText = "display:block;width:100%;box-sizing:border-box;margin-top:4px;font-family:monospace";
+        input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); _hydraModalClose(true); } });
+        wrap.appendChild(input);
+        document.getElementById("hydra-modal-body").appendChild(wrap);
+        return input;
+    };
+    const r = field(t("Ratio limit"), cur.ratio_limit, "0.01");
+    const s = field(t("Seeding time limit (minutes)"), cur.seeding_time_limit, "1");
+    const i = field(t("Inactive seeding time limit (minutes)"), cur.inactive_seeding_time_limit, "1");
+    r.focus();
+    r.select();
+    if ((await shown) !== true) return;
+    const params = {};
+    const read = (input, key, int) => {
+        const v = input.value.trim();
+        if (v === "" || !Number.isFinite(Number(v))) return;
+        params[key] = int ? Math.trunc(Number(v)) : Number(v);
+    };
+    read(r, "ratio_limit", false);
+    read(s, "seeding_time_limit", true);
+    read(i, "inactive_seeding_time_limit", true);
+    if (Object.keys(params).length === 0) return;
+    const j = await _runSelection("share_limits", params, label);
+    if (j) _bulkNote(j, "");
+}
+
 document.addEventListener("click", e => {
     if (!e.target.closest("#ctx-menu") && !e.target.closest("#ctx-submenu")) _hideCtxMenu();
 });
@@ -4951,6 +5027,8 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-dl-speed").textContent = formatSpeed(d.download_rate);
         document.getElementById("h-detail-ul-speed").textContent = formatSpeed(d.upload_rate);
         document.getElementById("h-detail-limits").textContent = _limitsText(d);
+        const _hsl = document.getElementById("h-detail-share-limits");
+        if (_hsl) _hsl.textContent = _shareLimitsText(d.share_limits);
         document.getElementById("h-detail-avg-ul").textContent = formatSpeed(d.avg_upload_rate || 0);
         document.getElementById("h-detail-peers-count").textContent = d.num_peers;
         document.getElementById("h-detail-seeds-count").textContent = d.num_seeds;
@@ -7307,9 +7385,14 @@ const _SETTINGS_DESC = {
     choking: "Run the choker: only max_uploads_per_torrent peers per seeding torrent are served, re-ranked every 10 s. Off by default, and best left off: on a large library it churns the peers and can cut total upload by an order of magnitude. Turn it on only when the uplink itself is the bottleneck. Applied live.",
     peer_timeout: "Seconds a peer may send nothing useful (keep-alives do not count) before it is dropped. 0 = 300; under 120 is raised to 120. Applied live.",
     inactivity_timeout: "Seconds before an idle peer is considered inactive.",
-    active_seeds: "Max torrents actively seeding (-1 = unlimited).",
-    active_limit: "Max active torrents overall (-1 = unlimited).",
-    active_downloads: "Max torrents actively downloading at once.",
+    active_seeds: "Max torrents seeding at once, read only while queueing is on (-1 = unlimited). Applied live.",
+    active_limit: "Max torrents running at once, downloads and seeds together, read only while queueing is on (-1 = unlimited). Applied live.",
+    active_downloads: "Max torrents actively downloading at once (0 or -1 = unlimited). Applied live.",
+    queueing: "qBittorrent's queue: enforce active_seeds and active_limit. Seeds past the ceiling are stopped, oldest kept first, and started again when a slot frees. Off by default. Applied live.",
+    max_ratio: "Share limit: a seed whose ratio reaches this is stopped or removed (share_limit_action). -1 = off. Never before the tracker's minimum seeding time: a tracker without one declared is left alone. Applied live.",
+    max_seeding_time: "Share limit: minutes of seeding after which a seed is stopped or removed. -1 = off. Applied live.",
+    max_inactive_seeding_time: "Share limit: minutes a seed may upload nothing before it is stopped or removed. Counted from the daemon's start. -1 = off. Applied live.",
+    share_limit_action: "What happens to a seed that reaches a share limit: stop, remove (the files stay) or remove_with_files. Applied live.",
     upload_rate_limit: "Upload speed cap for this engine, in bytes/s (0 = unlimited; 1048576 = 1 MiB/s). Applied live, no restart.",
     download_rate_limit: "Download speed cap for this engine, in bytes/s (0 = unlimited). Applied live, no restart.",
     announce_rate_limit: "Cap on outbound tracker announces for this session, in announces per second. 0 = unlimited. Use it when a VPN or a firewall drops the burst a large library sends at once: the same announces then go out spread over time. Fractional values allowed (0.5 = one announce every 2 seconds).",
@@ -7334,10 +7417,12 @@ const _SETTINGS_COMMON = new Set([
     // Connection + Speed + Queueing, per engine (race & hoard)
     "race::listen_port", "race::bind_interface", "race::enable_ipv6", "race::max_connections", "race::max_uploads_per_torrent",
     "race::upload_rate_limit", "race::download_rate_limit", "race::choking",
-    "race::active_downloads", "race::active_seeds", "race::active_limit",
+    "race::active_downloads", "race::active_seeds", "race::active_limit", "race::queueing",
+    "race::max_ratio", "race::max_seeding_time", "race::max_inactive_seeding_time", "race::share_limit_action",
     "hoard::listen_port", "hoard::bind_interface", "hoard::enable_ipv6", "hoard::max_connections", "hoard::max_uploads_per_torrent",
     "hoard::upload_rate_limit", "hoard::download_rate_limit", "hoard::choking",
-    "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit",
+    "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit", "hoard::queueing",
+    "hoard::max_ratio", "hoard::max_seeding_time", "hoard::max_inactive_seeding_time", "hoard::share_limit_action",
     // Peer sources: not advanced tuning. Someone on a private tracker has to
     // be able to find these without hunting through the advanced list.
     "race::enable_dht", "race::enable_pex", "hoard::enable_dht", "hoard::enable_pex",
@@ -7373,24 +7458,34 @@ const _SETTINGS_DEFAULT = {
     "race::max_uploads_per_torrent": 100,
     "race::peer_timeout": 300,
     "race::inactivity_timeout": 20,
-    "race::active_seeds": 50, "race::active_limit": 100, "race::active_downloads": 20,
+    // -1 and not 3.x's 50 / 100: shown as a default, they read as a value to
+    // copy, and under `queueing` they would stop all but 50 seeds.
+    "race::active_seeds": -1, "race::active_limit": -1, "race::active_downloads": 0,
     "hoard::listen_port": 16172, "hoard::max_connections": 8000,
     "hoard::max_uploads_per_torrent": 20,
     "hoard::peer_timeout": 300,
     "hoard::inactivity_timeout": 90,
-    "hoard::active_seeds": -1, "hoard::active_limit": -1, "hoard::active_downloads": -1,
+    "hoard::active_seeds": -1, "hoard::active_limit": -1, "hoard::active_downloads": 10,
+    "race::queueing": false, "hoard::queueing": false,
+    "race::max_ratio": -1, "race::max_seeding_time": -1, "race::max_inactive_seeding_time": -1, "race::share_limit_action": "stop",
+    "hoard::max_ratio": -1, "hoard::max_seeding_time": -1, "hoard::max_inactive_seeding_time": -1, "hoard::share_limit_action": "stop",
     "race::upload_rate_limit": 0, "race::download_rate_limit": 0, "race::choking": false,
     "hoard::upload_rate_limit": 0, "hoard::download_rate_limit": 0, "hoard::choking": false,
     "race_drain::enabled": true, "race_drain::check_interval_seconds": 60,
     "race_drain::high_watermark_pct": 95, "race_drain::low_watermark_pct": 85,
 };
-const _SETTINGS_ENUM = {};
+const _SETTINGS_ENUM = { share_limit_action: ["stop", "remove", "remove_with_files"] };
 
 // Engine keys the daemon applies live and creates when the file lacks them
 // (LIVE_SESSION_KEYS in api.rs). The editor lists what the file holds, so a
 // file from before 4.4 -- which has none of the speed caps or the choker --
 // would offer no way to set them: they are shown at their default instead.
-const _LIVE_ENGINE_KEY_DEFAULTS = { upload_rate_limit: 0, download_rate_limit: 0, choking: false };
+const _LIVE_ENGINE_KEY_DEFAULTS = {
+    upload_rate_limit: 0, download_rate_limit: 0, choking: false,
+    // The queue and the share limits, off.
+    queueing: false, active_seeds: -1, active_limit: -1,
+    max_ratio: -1, max_seeding_time: -1, max_inactive_seeding_time: -1, share_limit_action: "stop",
+};
 function _withLiveEngineKeys(cfg) {
     for (const sec of ["race", "hoard"]) {
         if (!_isObj(cfg[sec])) continue;
@@ -7662,7 +7757,9 @@ function _readSettingField(id, orig) {
 //            peer timeout -- LIVE_SESSION_KEYS in api.rs)
 //   engine = the torrent engines must restart (the other [race]/[hoard] knobs)
 //   full   = the whole daemon restarts ([daemon], [auth], services)
-const _LIVE_ENGINE_KEYS = new Set(["upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent"]);
+const _LIVE_ENGINE_KEYS = new Set(["upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent",
+    "active_downloads", "queueing", "active_seeds", "active_limit",
+    "max_ratio", "max_seeding_time", "max_inactive_seeding_time", "share_limit_action"]);
 function _settingTier(section, key) {
     if (section === "daemon" || section === "auth") return "full";
     if (section === "race" || section === "hoard" || section.startsWith("race.") || section.startsWith("hoard.")) {
@@ -9443,8 +9540,18 @@ async function netModeInit() {
     netModeRender();
 }
 
+// _netWgRefusal is the daemon's reason this host cannot bring a tunnel up
+// (no NET_ADMIN, not Linux, no `wg`), or "" when it can. The card is greyed
+// with that sentence on it: picking it would only earn the same refusal at
+// save time, after the operator had filled in the rest.
+function _netWgRefusal() {
+    const wg = (_netState && _netState.wireguard) || {};
+    return wg.supported === false ? (wg.reason || "Managed WireGuard is not available on this host.") : "";
+}
+
 function netModeSelect(mode) {
     if (!_netState) return;
+    if (mode === "wireguard" && _netWgRefusal() && _netState.mode !== "wireguard") return;
     _netState.fields = netModeCollect() || _netState.fields;
     _netState.mode = mode;
     netModeRender();
@@ -9458,9 +9565,11 @@ function netModeRender() {
 
     let cards = "";
     for (const m of NET_MODES) {
-        cards += `<button type="button" class="net-mode-card${m.id === mode ? " active" : ""}" onclick="netModeSelect('${m.id}')">
+        const refused = m.id === "wireguard" ? _netWgRefusal() : "";
+        cards += `<button type="button" class="net-mode-card${m.id === mode ? " active" : ""}" onclick="netModeSelect('${m.id}')"${
+            refused ? ` aria-disabled="true" title="${esc(t(refused))}" style="opacity:.55;cursor:not-allowed"` : ""}>
             <span class="nm-title">${esc(t(m.label))}</span>
-            <span class="nm-blurb">${esc(t(m.blurb))}</span>
+            <span class="nm-blurb">${esc(t(refused || m.blurb))}</span>
         </button>`;
     }
 
@@ -10090,7 +10199,9 @@ function netWgRender() {
                 <div class="sr-label"><span class="sr-key">${esc(_wgAgentName(tn.engine))}</span>
                 <span class="sr-desc">${esc(tn.device)} · ${esc(tn.provider_label || tn.provider || "")}</span></div>
                 <div class="sr-field" style="flex-direction:column;align-items:flex-end;gap:2px">
-                    <span class="${cls}">${esc(tn.up ? t("carrying traffic") : t("no recent handshake"))}${degraded}</span>
+                    <span class="${cls}">${esc(tn.up ? t("carrying traffic")
+                        : (tn.created === false || tn.present === false) ? t("down: this engine reaches nobody")
+                        : t("no recent handshake"))}${degraded}</span>
                     <span class="sr-desc">${esc(facts)}</span>
                     ${tn.last_error ? `<span class="sr-desc net-fail" title="${esc(tn.last_error)}">${esc(t("last attempt failed"))}</span>` : ""}
                 </div>

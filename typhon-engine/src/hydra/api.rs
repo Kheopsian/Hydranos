@@ -4585,7 +4585,47 @@ async fn get_network_mode(
         env_overrides: Option<serde_json::Value>,
         warnings: Option<serde_json::Value>,
         extra_engines: Vec<serde_json::Value>,
+        /// Whether managed WireGuard can work on this host, and why not.
+        wireguard: serde_json::Value,
+        /// What each RUNNING engine actually does: its DHT and its tunnel.
+        /// Not the file: a save asks for a restart before any of it changes.
+        engine_state: Vec<serde_json::Value>,
     }
+
+    let wg_support = crate::wgtunnel::support();
+    let wireguard = serde_json::json!({
+        "supported": wg_support.is_ok(),
+        "reason": wg_support.err(),
+    });
+    let engine_state: Vec<serde_json::Value> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| {
+            // The engine's own decision, from the config it was started with.
+            let dht_note = match e.engine_config.get().map(typhon_engine::dht::dht_policy) {
+                None => "offline",
+                Some(typhon_engine::dht::Discovery::On) => "",
+                Some(typhon_engine::dht::Discovery::Off(why)) => why,
+            };
+            let tunnel = state.engines.wireguard().get(&e.id).map(|t| {
+                serde_json::json!({
+                    "device": t.device,
+                    "created": t.created,
+                    "forwarded_port": t.forwarded_port,
+                    "last_error": t.last_error,
+                })
+            });
+            serde_json::json!({
+                "id": e.id,
+                "bind_interface": e.session.bind_interface,
+                "dht_running": e.manager.dht().is_some(),
+                "dht_note": dht_note,
+                "port_pending": e.manager.port_pending(),
+                "tunnel": tunnel,
+            })
+        })
+        .collect();
 
     // Every engine that is neither race nor hoard. This was a `vec![]` literal,
     // so a node running one engine per tunnel -- the entire point of the model
@@ -4624,6 +4664,8 @@ async fn get_network_mode(
         env_overrides,
         warnings: (!warnings.is_empty()).then(|| serde_json::json!(warnings)),
         extra_engines,
+        wireguard,
+        engine_state,
     })
     .into_response()
 }
@@ -5748,56 +5790,30 @@ async fn get_bench_compare(
 }
 
 
-/// The VPN providers Hydra knows how to ask for a forwarded port.
-///
-/// Field names are capitalised because the Go struct carries no json tags, and
-/// the list is ordered by LABEL, not by id -- that is what the picker shows.
-#[derive(serde::Serialize)]
-struct WgProvider {
-    #[serde(rename = "ID")]
-    id: &'static str,
-    #[serde(rename = "Label")]
-    label: &'static str,
-    #[serde(rename = "PortForward")]
-    port_forward: &'static str,
-    #[serde(rename = "Note")]
-    note: &'static str,
-}
-
-fn wg_providers() -> Vec<WgProvider> {
-    let mut list = vec![
-        WgProvider { id: "proton", label: "Proton VPN", port_forward: "natpmp",
-            note: "The port is obtained by NAT-PMP and renewed continuously. Use a server marked P2P." },
-        WgProvider { id: "airvpn", label: "AirVPN", port_forward: "manual",
-            note: "AirVPN assigns the port in the client area. Create it there, then type it here." },
-        WgProvider { id: "mullvad", label: "Mullvad", port_forward: "none",
-            note: "Mullvad removed port forwarding in 2023. This engine will take no incoming peer connections." },
-        WgProvider { id: "pia", label: "Private Internet Access", port_forward: "manual",
-            note: "PIA forwards ports through its own API, which needs the account credentials as well as the config. Not automated yet: set the port by hand, or run PIA behind gluetun." },
-        WgProvider { id: "windscribe", label: "Windscribe", port_forward: "manual",
-            note: "Windscribe assigns an ephemeral or static port on its web panel." },
-        WgProvider { id: "natpmp", label: "Other (NAT-PMP capable)", port_forward: "natpmp",
-            note: "For any provider whose gateway answers NAT-PMP, the way Proton does." },
-        WgProvider { id: "generic", label: "Other / none", port_forward: "none",
-            note: "The tunnel is brought up, no port is requested. Set a port by hand if the provider forwards one." },
-    ];
-    list.sort_by_key(|p| p.label);
-    list
-}
-
 #[derive(serde::Serialize)]
 struct WireGuardStatus {
+    /// The stored provider files: name, address, endpoint, peer public key.
+    /// Never a private or preshared key (`wgtunnel::list_confs`).
     configs: Vec<serde_json::Value>,
     directory: String,
+    /// What the config asks of each local engine.
     engines: serde_json::Map<String, serde_json::Value>,
-    providers: Vec<WgProvider>,
+    providers: Vec<crate::wgtunnel::Provider>,
     supported: bool,
     /// null, not []: no tunnel has been declared, and 3.x marshals its nil
     /// slice. A client testing `tunnels === null` would take [] for "one tunnel
     /// list that happens to be empty".
     tunnels: Option<Vec<serde_json::Value>>,
+    /// Why `supported` is false, naming what to change. null when it is true.
+    unsupported_reason: Option<&'static str>,
 }
 
+/// Managed WireGuard: the stored files, what each engine is asked to use,
+/// and what the tunnels are doing right now.
+///
+/// "Right now" is asked of `wg` at each call -- the newest handshake and the
+/// endpoint -- because a tunnel that came up at boot can have stopped
+/// carrying anything since, and the page exists to show that.
 async fn get_wireguard(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -5807,21 +5823,292 @@ async fn get_wireguard(
     guard!(state, headers, query);
     let cfg = state.cfg();
 
-    let directory = std::path::Path::new(&cfg.daemon.data_dir)
-        .join("wireguard")
-        .to_string_lossy()
-        .into_owned();
+    let dir = crate::wgtunnel::conf_dir(&cfg.daemon.data_dir);
+    let directory = dir.to_string_lossy().into_owned();
+    let support = crate::wgtunnel::support();
 
-    // A struct all the way down. Putting WgProvider inside json! would sort its
-    // fields to ID, Label, Note, PortForward -- same 1263 bytes, wrong order.
+    let mut engines = serde_json::Map::new();
+    for e in cfg.local_engines() {
+        let s = &e.session;
+        engines.insert(
+            e.id.clone(),
+            serde_json::json!({
+                "enabled": s.wireguard_enabled,
+                "config_file": s.wireguard_config,
+                "provider": s.wireguard_provider,
+                "manual_port": s.wireguard_port,
+                "port_forward": s.wireguard_port_forward,
+                "device": crate::wgtunnel::device_name(&e.id),
+            }),
+        );
+    }
+
+    let known = state.engines.wireguard().all();
+    let tunnels = if known.is_empty() {
+        None
+    } else {
+        let live = tokio::task::spawn_blocking(move || {
+            known
+                .into_iter()
+                .map(|t| {
+                    let now = crate::wgtunnel::live(&mut crate::wgtunnel::System, &t.device);
+                    (t, now)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        Some(
+            live.into_iter()
+                .map(|(t, now)| {
+                    let (age, endpoint) = now.clone().unwrap_or((None, String::new()));
+                    serde_json::json!({
+                        "engine": t.engine,
+                        "device": t.device,
+                        "provider": t.provider,
+                        "provider_label": t.provider_label,
+                        "config_file": t.config_file,
+                        "created": t.created,
+                        "present": now.is_some(),
+                        "up": age.is_some_and(|a| a < crate::wgtunnel::HANDSHAKE_FRESH_SECS),
+                        "handshake_age_seconds": age,
+                        "endpoint": endpoint,
+                        "forwarded_port": t.forwarded_port,
+                        "port_forward": t.port_forward,
+                        "degraded": t.degraded,
+                        "last_error": t.last_error,
+                    })
+                })
+                .collect(),
+        )
+    };
+
+    // A struct all the way down. Putting the providers inside json! would
+    // sort their fields to ID, Label, Note, PortForward -- right bytes, wrong
+    // order.
     Json(WireGuardStatus {
-        configs: vec![],
+        configs: crate::wgtunnel::list_confs(&dir),
         directory,
-        engines: serde_json::Map::new(),
-        providers: wg_providers(),
-        supported: true,
-        tunnels: None,
+        engines,
+        providers: crate::wgtunnel::providers(),
+        supported: support.is_ok(),
+        tunnels,
+        unsupported_reason: support.err(),
     })
+    .into_response()
+}
+
+/// Store a provider `.conf`: multipart (field `file`, its file name kept) or
+/// a raw body with `?name=provider.conf`.
+///
+/// Parsed before it is written, stored at 0600 in `<data_dir>/wireguard`, and
+/// never sent back: the answer carries the address and the endpoint, the
+/// keys stay on disk. Storing needs no privilege, so it is accepted even
+/// where tunnels cannot be brought up: the file is then ready for a host
+/// that can.
+async fn post_wireguard_config_upload(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let cfg = state.cfg();
+    let bad = |msg: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg}))).into_response();
+
+    let multipart = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("multipart/"));
+    let (name, bytes) = if multipart {
+        use axum::extract::FromRequest;
+        let Ok(mut form) = axum::extract::Multipart::from_request(request, &()).await else {
+            return bad("the upload is not a readable multipart form".into());
+        };
+        let mut found = None;
+        while let Ok(Some(field)) = form.next_field().await {
+            if field.name() == Some("file") {
+                let name = field.file_name().unwrap_or_default().to_string();
+                match field.bytes().await {
+                    Ok(b) => found = Some((name, b.to_vec())),
+                    Err(e) => return bad(format!("the file could not be read: {e}")),
+                }
+                break;
+            }
+        }
+        match found {
+            Some(f) => f,
+            None => return bad("no file in the form: send it as the field \"file\"".into()),
+        }
+    } else {
+        let name = query_param(&query, "name").unwrap_or_default();
+        match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+            Ok(b) => (name, b.to_vec()),
+            Err(_) => return bad("the file is larger than 64 KiB: not a WireGuard config".into()),
+        }
+    };
+    if name.trim().is_empty() {
+        return bad("no file name: pass ?name=provider.conf or upload a named file".into());
+    }
+    if bytes.len() > 64 * 1024 {
+        return bad("the file is larger than 64 KiB: not a WireGuard config".into());
+    }
+
+    let dir = crate::wgtunnel::conf_dir(&cfg.daemon.data_dir);
+    match crate::wgtunnel::store_conf(&dir, &name, &bytes) {
+        Ok((name, conf)) => {
+            let r = crate::wgtun::redacted(&conf);
+            tracing::info!(file = %name, "wireguard: provider file stored");
+            Json(serde_json::json!({
+                "status": "ok",
+                "name": name,
+                "address": r.addresses.join(", "),
+                "endpoint": r.peers.first().map(|p| p.endpoint.clone()).unwrap_or_default(),
+                "note": "Stored. Pick it for an engine below, then save the tunnels.",
+            }))
+            .into_response()
+        }
+        Err(e) => bad(e),
+    }
+}
+
+/// Assign tunnels to engines: `{"engines":[{"engine_id","enabled",
+/// "config_file","provider","manual_port","port_forward"}]}`.
+///
+/// Written to each engine's section (`wireguard_*`), and the node switched
+/// to the WireGuard mode when any tunnel is on -- which removes the keys of
+/// the other modes, as saving a mode always does. Refused, with the reason,
+/// on a host that cannot bring a tunnel up: answering 200 there would leave
+/// an engine pinned to a device that will never exist.
+async fn post_wireguard_engines(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let cfg = state.cfg();
+    let bad = |status: StatusCode, msg: String| (status, Json(serde_json::json!({"error": msg}))).into_response();
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let Some(list) = parsed.get("engines").and_then(|v| v.as_array()).filter(|l| !l.is_empty()) else {
+        return bad(StatusCode::BAD_REQUEST, "no engines in the request".into());
+    };
+    let local: Vec<String> = cfg.local_engines().into_iter().map(|e| e.id).collect();
+    let dir = crate::wgtunnel::conf_dir(&cfg.daemon.data_dir);
+
+    let mut rows: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    let mut files_in_use: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let q = crate::tomledit::quote_toml_key;
+    for e in list {
+        let txt = |k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+        let id = txt("engine_id");
+        if !local.contains(&id) {
+            return bad(StatusCode::BAD_REQUEST, format!("unknown engine {id:?}"));
+        }
+        let enabled = e.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let file = txt("config_file");
+        let provider = txt("provider");
+        let mode = txt("port_forward").to_ascii_lowercase();
+        let port = e.get("manual_port").and_then(|v| v.as_i64()).unwrap_or(0);
+        if !(0..=65535).contains(&port) {
+            return bad(StatusCode::BAD_REQUEST, format!("the {id} port must be between 1 and 65535"));
+        }
+        if !["", "manual", "off", "none", "natpmp"].contains(&mode.as_str()) {
+            return bad(StatusCode::BAD_REQUEST, format!("unknown port forwarding {mode:?}"));
+        }
+        if enabled {
+            if file.is_empty() {
+                return bad(StatusCode::BAD_REQUEST, format!("{id}: pick a configuration file"));
+            }
+            if let Err(err) = crate::wgtunnel::load_conf(&dir, &file) {
+                return bad(StatusCode::BAD_REQUEST, format!("{id}: {err}"));
+            }
+            if crate::wgtunnel::provider(&provider).is_none() {
+                return bad(StatusCode::BAD_REQUEST, format!("{id}: pick the provider the file comes from"));
+            }
+            // One file, one tunnel: two engines on one file share an address
+            // and a forwarded port, and the provider sees one client twice.
+            if files_in_use.contains(&file) {
+                return bad(StatusCode::BAD_REQUEST, format!("{file} is already used by another engine: one file per engine"));
+            }
+            files_in_use.push(file.clone());
+            let pf = crate::wgtunnel::port_forward_of(&provider, &mode);
+            if pf == crate::wgtunnel::PortForward::Manual && port == 0 {
+                warnings.push(format!("{id}: no port typed. This engine takes no incoming connection until the provider's port is entered."));
+            }
+            if pf == crate::wgtunnel::PortForward::None {
+                warnings.push(format!("{id}: no port is forwarded for this provider. This engine takes no incoming connection."));
+            }
+        }
+        rows.push((
+            id,
+            vec![
+                ("wireguard_enabled".into(), enabled.to_string()),
+                ("wireguard_config".into(), q(&file)),
+                ("wireguard_provider".into(), q(&provider)),
+                ("wireguard_port".into(), port.to_string()),
+                ("wireguard_port_forward".into(), q(&mode)),
+            ],
+        ));
+    }
+    let any_on = !files_in_use.is_empty();
+    if any_on {
+        if let Err(why) = crate::wgtunnel::support() {
+            return bad(StatusCode::CONFLICT, why.to_string());
+        }
+    }
+
+    let extra_ids: Vec<String> = local.iter().filter(|id| *id != "race" && *id != "hoard").cloned().collect();
+    let ok = edit_config(&state, |doc| {
+        let mut out = doc.to_string();
+        for (id, kv) in &rows {
+            if id == "race" || id == "hoard" {
+                out = crate::tomledit::set_toml_table(&out, id, kv)?;
+            } else {
+                for (k, v) in kv {
+                    if let Some(next) = crate::tomledit::set_agent_session_key(&out, id, k, v) {
+                        out = next;
+                    }
+                }
+            }
+        }
+        if any_on {
+            for key in crate::netmode::cleared_keys("wireguard") {
+                for section in ["race", "hoard"] {
+                    out = crate::tomledit::delete_toml_key(&out, section, key);
+                }
+                for id in &extra_ids {
+                    if let Some(next) = crate::tomledit::delete_agent_session_key(&out, id, key) {
+                        out = next;
+                    }
+                }
+            }
+            out = crate::tomledit::set_toml_table(&out, "network", &[("mode".to_string(), q("wireguard"))])?;
+        }
+        Ok(out)
+    });
+    if !ok {
+        return bad(StatusCode::INTERNAL_SERVER_ERROR, "the config could not be written".into());
+    }
+    let now = state.cfg();
+    let running: Vec<(String, crate::config::Session)> =
+        state.engines.engines().iter().map(|e| (e.id.clone(), e.session.clone())).collect();
+    let restart_required = crate::netmode::restart_required(&now, &running);
+    tracing::info!(tunnels = files_in_use.len(), restart_required, "wireguard: tunnel assignments saved");
+    Json(serde_json::json!({
+        "status": "ok",
+        "restart_required": restart_required,
+        "warnings": warnings,
+        "note": if restart_required {
+            "Saved. The tunnels come up at the next restart, before the engines start."
+        } else {
+            "Saved. Nothing changes for the running engines."
+        },
+    }))
     .into_response()
 }
 
@@ -7320,8 +7607,12 @@ async fn qbit_preferences(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
+    // The queue as the race engine runs it, once `queueing` is on; until then
+    // the figures this page has always answered, which no client acts on.
+    let queueing = cfg.race.queueing.unwrap_or(false);
+    let queue_cap = |v: Option<i64>, shown: i64| if queueing { v.filter(|n| *n > 0).unwrap_or(-1) } else { shown };
 
-    Json(serde_json::json!({
+    let mut prefs = serde_json::json!({
         "add_trackers_enabled": false,
         "alternative_webui_enabled": false,
         "create_subfolder_enabled": cfg.daemon.create_torrent_folder,
@@ -7331,8 +7622,8 @@ async fn qbit_preferences(
         "locale": "en",
         "lsd": false,
         "max_active_downloads": 20,
-        "max_active_torrents": 100,
-        "max_active_uploads": 50,
+        "max_active_torrents": queue_cap(cfg.race.active_limit, 100),
+        "max_active_uploads": queue_cap(cfg.race.active_seeds, 50),
         "max_connec": cfg.race.max_connections,
         "max_uploads_per_torrent": cfg.race.max_uploads_per_torrent,
         "pex": cfg.race.enable_pex,
@@ -7341,12 +7632,21 @@ async fn qbit_preferences(
         // by 1024 to display them), and that is what clients read.
         "up_limit": state.engines.client_rates().up.rate(),
         "dl_limit": state.engines.client_rates().down.rate(),
-        "queueing_enabled": false,
+        "queueing_enabled": queueing,
         "save_path": "/downloads",
         "temp_path_enabled": false,
         "web_ui_port": cfg.daemon.api_port,
-    }))
-    .into_response()
+    });
+    // Share limits: qBittorrent has one session, so this page speaks for one
+    // engine (see `sharelimits::preferences_engine`); a write goes to all.
+    let share = crate::sharelimits::qbit_preferences(&crate::sharelimits::engine_limits_in(
+        &cfg,
+        &crate::sharelimits::preferences_engine(&state),
+    ));
+    if let (Some(obj), serde_json::Value::Object(fields)) = (prefs.as_object_mut(), share) {
+        obj.extend(fields);
+    }
+    Json(prefs).into_response()
 }
 
 async fn qbit_transfer_info(
@@ -7620,6 +7920,11 @@ pub(crate) fn engine_qbit_rows(
     let agent = local_agent(engine_id);
     let empty = crate::row::StoreFacts::default();
     let mut rows = Vec::new();
+    // Share limits: the engine's, once, and the sparse per-torrent table,
+    // once -- never a store read per row.
+    let share_engine = crate::sharelimits::engine_limits(state, engine_id);
+    let share_own = crate::sharelimits::overrides(state);
+    let share_follow = crate::sharelimits::TorrentShareLimits::default();
 
     // *arr asks by category and nothing else, over and over. Walking the whole
     // catalogue to keep one category cost 1.5 s per poll on a 300k library:
@@ -7657,6 +7962,7 @@ pub(crate) fn engine_qbit_rows(
         let (up_cap, down_cap) = torrent.rate_limits();
         row["up_limit"] = qbit_limit_field(up_cap).into();
         row["dl_limit"] = qbit_limit_field(down_cap).into();
+        crate::sharelimits::fill_qbit_row(&mut row, share_own.get(hash.as_str()).unwrap_or(&share_follow), &share_engine);
         rows.push(row);
         }
         return rows;
@@ -7698,6 +8004,7 @@ pub(crate) fn engine_qbit_rows(
         let (up_cap, down_cap) = torrent.rate_limits();
         row["up_limit"] = qbit_limit_field(up_cap).into();
         row["dl_limit"] = qbit_limit_field(down_cap).into();
+        crate::sharelimits::fill_qbit_row(&mut row, share_own.get(hash.as_str()).unwrap_or(&share_follow), &share_engine);
         rows.push(row);
     }
     rows
@@ -8395,8 +8702,14 @@ async fn qbit_torrent_properties(
     // The transfer figures from the listing's own builder, so the panel and
     // `torrents/info` cannot report two ratios for one torrent.
     let listed = crate::qbitrow::build(&native, &engine_id, now);
+    let share_own = state
+        .store
+        .read()
+        .map(|s| s.share_limits_of(&typhon_engine::torrent::hex_encode(&torrent.info_hash)))
+        .unwrap_or_default();
+    let share = crate::sharelimits::qbit_fields(&share_own, &crate::sharelimits::engine_limits(&state, &engine_id));
 
-    Json(serde_json::json!({
+    let mut props = serde_json::json!({
         "addition_date": added,
         "comment": "",
         "completion_date": native.get("completed_time").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -8426,8 +8739,11 @@ async fn qbit_torrent_properties(
         "up_limit": qbit_limit_field(torrent.rate_limits().0),
         "up_speed": native.get("upload_rate").and_then(|v| v.as_i64()).unwrap_or(0),
         "up_speed_avg": 0,
-    }))
-    .into_response()
+    });
+    if let (Some(obj), serde_json::Value::Object(fields)) = (props.as_object_mut(), share) {
+        obj.extend(fields);
+    }
+    Json(props).into_response()
 }
 
 /// Trackers of one torrent, qBittorrent shape.
@@ -9197,8 +9513,14 @@ struct DialLimits {
 const CLIENT_RATE_LIMITS_KEY: &str = "client_rate_limits";
 
 /// The config keys a save applies to the running engines without a restart.
-const LIVE_SESSION_KEYS: &[&str] =
-    &["upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent"];
+/// The queue and the share limits are on the list because their workers read
+/// the live config on every pass (`workers::spawn_download_slots`,
+/// `workers::spawn_share_limits`), not because `apply_config` carries them.
+const LIVE_SESSION_KEYS: &[&str] = &[
+    "upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent",
+    "active_downloads", "queueing", "active_seeds", "active_limit",
+    "max_ratio", "max_seeding_time", "max_inactive_seeding_time", "share_limit_action",
+];
 
 /// Put the stored client-wide caps back on the engines. Called once at boot.
 pub fn restore_client_rate_limits(state: &AppState) {
@@ -9556,6 +9878,165 @@ async fn qbit_torrents_set_upload_limit(State(state): State<AppState>, RawQuery(
 
 async fn qbit_torrents_set_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
     qbit_torrents_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Down).await
+}
+
+// --- Share limits (see `sharelimits`) ---------------------------------------
+//
+// qBittorrent's units: a ratio, and MINUTES for both times. Per torrent -2
+// follows the engine and -1 is no limit; the engine level is -1 = off.
+
+/// qBittorrent's `torrents/setShareLimits`: `hashes` (or `all`), `ratioLimit`
+/// and `seedingTimeLimit` required as in qBittorrent, which answers 400
+/// without them; `inactiveSeedingTimeLimit` optional, -2 when absent (its
+/// default since 4.6). Query and body alike, POST only.
+async fn qbit_set_share_limits(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let form = shim_form(&query, &body);
+    let num = |k: &str| form.get(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite());
+    let (Some(ratio), Some(seeding)) = (num("ratioLimit"), num("seedingTimeLimit")) else {
+        return (StatusCode::BAD_REQUEST, "ratioLimit and seedingTimeLimit are required").into_response();
+    };
+    let inactive = num("inactiveSeedingTimeLimit").unwrap_or(crate::sharelimits::FOLLOW_ENGINE as f64);
+    let hashes = shim_resolved_hashes(&state, &form);
+    match crate::sharelimits::set_torrent_limits(&state, &hashes, Some(ratio), Some(seeding as i64), Some(inactive as i64)) {
+        Ok(_) => qbit_ok(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+fn torrent_share_limits_json(state: &AppState, hash: &str, copies: &[(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)]) -> serde_json::Value {
+    let own = state.store.read().map(|s| s.share_limits_of(hash)).unwrap_or_default();
+    let list: Vec<_> = copies
+        .iter()
+        .map(|(e, _)| crate::sharelimits::native_json(e, &own, &crate::sharelimits::engine_limits(state, e)))
+        .collect();
+    serde_json::json!({"info_hash": hash, "copies": list})
+}
+
+/// One torrent's share limits: its own (-2 = its engine's, -1 = none) and,
+/// per local copy, the ones in force and the engine's action.
+async fn get_torrent_share_limits(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let hash = {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+    };
+    let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
+    if copies.is_empty() {
+        return not_found();
+    }
+    Json(torrent_share_limits_json(&state, &hash, &copies)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TorrentShareLimitsBody {
+    #[serde(default)]
+    ratio_limit: Option<f64>,
+    #[serde(default)]
+    seeding_time_limit: Option<i64>,
+    #[serde(default)]
+    inactive_seeding_time_limit: Option<i64>,
+}
+
+/// Set one torrent's own share limits: `{"ratio_limit": 2.0,
+/// "seeding_time_limit": 1440, "inactive_seeding_time_limit": -2}`, each
+/// optional (absent = unchanged), -2 = follow the engine, -1 = no limit,
+/// times in minutes. The limits belong to the torrent, so every copy has
+/// them. Answers what is now stored, read back.
+async fn post_torrent_share_limits(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let req: TorrentShareLimitsBody = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return bad_request(&format!("invalid body: {e}")),
+    };
+    if req.ratio_limit.is_none() && req.seeding_time_limit.is_none() && req.inactive_seeding_time_limit.is_none() {
+        return bad_request("need ratio_limit, seeding_time_limit and/or inactive_seeding_time_limit (-2 = the engine's, -1 = none)");
+    }
+    let hash = {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+    };
+    let copies = torrent_copies(&state, &hash, "");
+    if copies.is_empty() {
+        return not_found();
+    }
+    if let Err(e) = crate::sharelimits::set_torrent_limits(
+        &state,
+        std::slice::from_ref(&hash),
+        req.ratio_limit,
+        req.seeding_time_limit,
+        req.inactive_seeding_time_limit,
+    ) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    Json(torrent_share_limits_json(&state, &hash, &copies)).into_response()
+}
+
+/// One engine's share limits (-1 = off) and the action taken at a limit.
+async fn get_engine_share_limits(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    if state.engines.get(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such engine"}))).into_response();
+    }
+    Json(crate::sharelimits::engine_json(&id, &crate::sharelimits::engine_limits(&state, &id))).into_response()
+}
+
+/// Set one engine's share limits: `max_ratio`, `max_seeding_time`,
+/// `max_inactive_seeding_time` (minutes, -1 = off) and `share_limit_action`
+/// (`stop` | `remove` | `remove_with_files`), each optional. A config write,
+/// read by the worker on its next pass.
+async fn post_engine_share_limits(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let change: crate::sharelimits::EngineChange = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return bad_request(&format!("invalid body: {e}")),
+    };
+    if change.is_empty() {
+        return bad_request("need max_ratio, max_seeding_time, max_inactive_seeding_time and/or share_limit_action");
+    }
+    if state.engines.get(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such engine"}))).into_response();
+    }
+    if let Err(e) = change.pairs() {
+        return bad_request(&e);
+    }
+    if let Err(e) = crate::sharelimits::write_engine_limits(&state, &id, &change) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    Json(crate::sharelimits::engine_json(&id, &crate::sharelimits::engine_limits(&state, &id))).into_response()
 }
 
 /// Outbound dial pacing for one engine.
@@ -9969,45 +10450,11 @@ struct ClientBulk {
 
 /// Apply one client identity to several trackers at once.
 
-// ---------------------------------------------------------------------------
-// Validation-only ports
-// ---------------------------------------------------------------------------
-//
-// ⚠ HONESTY MARKER. Everything in this block reproduces the REFUSAL path of a
-// route whose success path is not ported yet. The refusals are exact and the
-// bench exercises them, but a caller sending a VALID request gets an answer
-// this build cannot yet honour.
-//
-// They are grouped here, and named, so the coverage figure cannot be mistaken
-// for completeness. Each one gets its success path with the slice that owns it.
-// What is left is the managed WireGuard uploads, kept for the chantier that
-// brings it back. The agent routes and move-remote that used to sit here
-// answer 410 now (`agents_gone`, `move_remote_gone`): their success path is
-// not coming, it already exists under /api/engines, /api/nodes and
-// /api/selection.
-
-macro_rules! refuse {
-    ($name:ident, $status:expr, $message:expr) => {
-        async fn $name(
-            State(state): State<AppState>,
-            RawQuery(query): RawQuery,
-            headers: HeaderMap,
-            _body: String,
-        ) -> Response {
-            let query = query.unwrap_or_default();
-            guard!(state, headers, query);
-            let cfg = state.cfg();
-            let _ = cfg;
-            ($status, Json(serde_json::json!({"error": $message}))).into_response()
-        }
-    };
-}
-
-refuse!(post_wireguard_engines, StatusCode::BAD_REQUEST, "no agents in the request");
-refuse!(post_wireguard_config_upload, StatusCode::BAD_REQUEST,
-        "no file name: pass ?name=provider.conf or upload a named file");
-
-
+// The validation-only block that stood here is gone: its last two routes, the
+// managed WireGuard uploads, have their success path (`post_wireguard_*`).
+// The agent routes and move-remote answer 410 (`agents_gone`,
+// `move_remote_gone`): their success path exists under /api/engines,
+// /api/nodes and /api/selection.
 
 /// Per-tracker announce state, in the shape the detail panel expects.
 ///
@@ -10290,6 +10737,12 @@ fn detail_payload(
         "download_limit": torrent.rate_limits().1,
         "engine_upload_limit": torrent.engine_rates().engine.up.rate(),
         "engine_download_limit": torrent.engine_rates().engine.down.rate(),
+        // Share limits: its own, the ones in force, and the engine's action.
+        "share_limits": crate::sharelimits::native_json(
+            engine_id,
+            &state.store.read().map(|s| s.share_limits_of(hash)).unwrap_or_default(),
+            &crate::sharelimits::engine_limits(state, engine_id),
+        ),
     })
 }
 
@@ -10548,6 +11001,10 @@ async fn qbit_torrent_add(
     let mut urls: Vec<String> = Vec::new();
     let mut up_limit: Option<u64> = None;
     let mut dl_limit: Option<u64> = None;
+    // Share limits at add, `setShareLimits`' encoding: -2 follow, -1 none.
+    let mut ratio_limit: Option<f64> = None;
+    let mut seeding_limit: Option<i64> = None;
+    let mut inactive_limit: Option<i64> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or_default().to_string();
@@ -10568,6 +11025,11 @@ async fn qbit_torrent_add(
                     // Caps at add, bytes/s; 0 or negative = none.
                     "upLimit" => up_limit = value.trim().parse::<i64>().ok().map(|v| v.max(0) as u64),
                     "dlLimit" => dl_limit = value.trim().parse::<i64>().ok().map(|v| v.max(0) as u64),
+                    "ratioLimit" => ratio_limit = value.trim().parse::<f64>().ok().filter(|v| v.is_finite()),
+                    "seedingTimeLimit" => seeding_limit = value.trim().parse::<f64>().ok().map(|v| v as i64),
+                    "inactiveSeedingTimeLimit" => {
+                        inactive_limit = value.trim().parse::<f64>().ok().map(|v| v as i64)
+                    }
                     // One link per line: magnets, or URLs of .torrent files.
                     // It is how autobrr, Sonarr and Radarr send a magnet.
                     "urls" => urls.extend(
@@ -10583,14 +11045,28 @@ async fn qbit_torrent_add(
         return (StatusCode::BAD_REQUEST, "Bad request").into_response();
     }
 
+    // Sonarr and Radarr send their indexer's seed goal here (ratioLimit,
+    // seedingTimeLimit in minutes): it lands on the torrent's own limits.
+    let share_at_add = std::sync::Arc::new(move |st: &AppState, hash: String| {
+        if ratio_limit.is_some() || seeding_limit.is_some() || inactive_limit.is_some() {
+            if let Err(e) = crate::sharelimits::set_torrent_limits(st, &[hash], ratio_limit, seeding_limit, inactive_limit) {
+                tracing::warn!("qbit add: share limits not stored: {e}");
+            }
+        }
+    });
     let mut failed = 0;
     let mut url_failed = 0;
     for u in &urls {
         let outcome = if u.len() > 8 && u[..8].eq_ignore_ascii_case("magnet:?") {
             let (st, u2) = (state.clone(), u.clone());
             let (c, sp, tg) = (category.clone(), save_path.clone(), tags.clone());
+            let shared = share_at_add.clone();
             tokio::task::spawn_blocking(move || {
-                crate::magnets::request_with(&st, &u2, &c, &sp, &tg, paused, seed_mode, "").map(|_| ())
+                crate::magnets::request_with(&st, &u2, &c, &sp, &tg, paused, seed_mode, "").map(|hash| {
+                    // Keyed by hash, so a magnet's limits wait for it in the
+                    // store and apply once it has resolved.
+                    shared(&st, hash);
+                })
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
@@ -10626,6 +11102,7 @@ async fn qbit_torrent_add(
             // persist with it. A magnet has no torrent yet to cap: its caps
             // are not kept (set them once it has resolved).
             Ok((hash, _)) => {
+                share_at_add(&state, hash.clone());
                 if up_limit.is_some() || dl_limit.is_some() {
                     shim_cap_torrents(&state, &[hash], up_limit, dl_limit);
                 }
@@ -12507,6 +12984,14 @@ async fn post_network_mode(
     };
     let bad = |msg: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg}))).into_response();
     let proxied = mode == "socks5" || mode == "proxy_v2";
+    // Refused with the reason on a host that cannot bring a tunnel up:
+    // saved, every engine given a tunnel would be pinned to a device that
+    // never appears.
+    if mode == "wireguard" {
+        if let Err(why) = crate::wgtunnel::support() {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({"error": why}))).into_response();
+        }
+    }
 
     // Refused rather than written: SOCKS5 mode with no proxy host is direct
     // mode under another name, and the page would go on saying "proxied".
@@ -12682,12 +13167,21 @@ async fn post_network_mode(
         state.engines.engines().iter().map(|e| (e.id.clone(), e.session.clone())).collect();
     let restart_required = crate::netmode::restart_required(&now, &running);
     let warnings = crate::netmode::warnings(&now, &|id: &str| engine_lists_udp(&state, id));
-    tracing::info!(mode = %mode, restart_required, "network mode saved");
+    // Another mode switches the tunnels off now, not at the next boot: the
+    // engines pinned to them stop reaching anybody until the restart this
+    // save asks for, and never fall back to the host's route meanwhile.
+    let tunnels_down = if mode != "wireguard" && !state.engines.wireguard().all().is_empty() {
+        state.engines.wireguard_down().await
+    } else {
+        0
+    };
+    tracing::info!(mode = %mode, restart_required, tunnels_down, "network mode saved");
     Json(serde_json::json!({
         "status": "ok",
         "mode": mode,
         "restart_required": restart_required,
         "warnings": warnings,
+        "tunnels_down": tunnels_down,
     }))
     .into_response()
 }
@@ -12725,6 +13219,25 @@ async fn qbit_set_preferences(
             "expected a `json` form field or a JSON body: EOF",
         )
             .into_response();
+    }
+    // The share limits are the keys this page writes; the rest is accepted
+    // and ignored as before. Every local engine: a qBit client has one
+    // session in mind and means all of it.
+    let doc: serde_json::Value = if has_form_json {
+        form_field(&body, "json").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+    } else {
+        serde_json::from_str(&body).unwrap_or_default()
+    };
+    let change = crate::sharelimits::change_from_qbit_preferences(&doc);
+    let shown = crate::sharelimits::engine_limits(&state, &crate::sharelimits::preferences_engine(&state));
+    if !change.is_empty() && !change.is_noop_for(&shown) {
+        let ids: Vec<String> = state.cfg().local_engines().into_iter().map(|l| l.id).collect();
+        for id in ids {
+            if let Err(e) = crate::sharelimits::write_engine_limits(&state, &id, &change) {
+                tracing::warn!(engine = %id, "setPreferences: share limits not written: {e}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+            }
+        }
     }
     qbit_ok()
 }
@@ -13055,7 +13568,11 @@ async fn delete_engine(
     Json(serde_json::json!({"status": "ok", "restart_required": true})).into_response()
 }
 
-/// Removing a WireGuard config echoes the name back.
+/// Remove a stored provider file, echoing its name.
+///
+/// An engine still assigned to it keeps the assignment and does not come up
+/// at the next boot (its tunnel fails, the engine reaches nobody) until
+/// another file is chosen: the page says so before asking.
 async fn delete_wireguard_config(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -13065,8 +13582,15 @@ async fn delete_wireguard_config(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    let _ = cfg;
-    Json(serde_json::json!({"removed": name})).into_response()
+    let dir = crate::wgtunnel::conf_dir(&cfg.daemon.data_dir);
+    match crate::wgtunnel::delete_conf(&dir, &name) {
+        Ok(true) => {
+            tracing::info!(file = %name, "wireguard: provider file removed");
+            Json(serde_json::json!({"removed": name})).into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("no file {name:?}")}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
 }
 
 /// What a "Move to category" would do, without doing it.
@@ -13680,6 +14204,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/torrents/setDownloadLimit", axum::routing::post(qbit_torrents_set_download_limit))
         .route("/api/torrents/:info_hash/limits", get(get_torrent_limits).post(post_torrent_limits))
         .route("/api/engines/:id/rate-limits", get(get_engine_rate_limits).post(post_engine_rate_limits))
+        .route("/api/v2/torrents/setShareLimits", axum::routing::post(qbit_set_share_limits))
+        .route("/api/torrents/:info_hash/share-limits", get(get_torrent_share_limits).post(post_torrent_share_limits))
+        .route("/api/engines/:id/share-limits", get(get_engine_share_limits).post(post_engine_share_limits))
         .route("/api/torrents/:info_hash/files", get(get_torrent_files))
         .route("/api/torrents/:info_hash/torrent", get(get_torrent_file))
         .route("/api/torrents/:info_hash/peers", axum::routing::post(post_torrent_peers))
@@ -20009,5 +20536,197 @@ mod network_mode_tests {
         assert_eq!(page["mode"], "gluetun");
         assert_eq!(page["fields"]["gluetun_port_engine"], "race");
         assert_eq!(page["fields"]["gluetun_port_forward"], true);
+    }
+}
+
+#[cfg(test)]
+mod wireguard_route_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    const CONF: &str = "[Interface]\nPrivateKey = aPrivateKeyValue=\nAddress = 10.2.0.2/32\nDNS = 10.2.0.1\n\n\
+                        [Peer]\nPublicKey = aPublicKeyValue=\nPresharedKey = aPresharedValue=\n\
+                        AllowedIPs = 0.0.0.0/0\nEndpoint = 192.0.2.10:51820\n";
+
+    /// A node whose data_dir is its own temporary directory, with a SOCKS5
+    /// proxy on race so a switch to WireGuard has something to clear.
+    fn node(tag: &str) -> TestState {
+        let data = std::env::temp_dir().join(format!("hydra-wg-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        state_from(
+            tag,
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n\n\
+                 [race]\nlisten_port = 16171\nsocks5_outbound_host = \"10.0.0.1\"\n\n\
+                 [hoard]\nlisten_port = 16172\n",
+                data.display()
+            ),
+        )
+    }
+
+    async fn upload_raw(s: &AppState, name: &str, text: &str) -> (StatusCode, serde_json::Value) {
+        let req = axum::extract::Request::builder().body(axum::body::Body::from(text.to_string())).unwrap();
+        let r = post_wireguard_config_upload(State(s.clone()), RawQuery(Some(format!("name={name}"))), keyed(KEY), req).await;
+        let st = r.status();
+        (st, body_json(r).await)
+    }
+
+    async fn status(s: &AppState) -> String {
+        let r = get_wireguard(State(s.clone()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        String::from_utf8(axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap()
+    }
+
+    async fn assign(s: &AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let r = post_wireguard_engines(State(s.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let st = r.status();
+        (st, body_json(r).await)
+    }
+
+    fn race_on(file: &str) -> serde_json::Value {
+        serde_json::json!({"engines": [
+            {"engine_id": "race", "enabled": true, "config_file": file, "provider": "proton", "manual_port": 0, "port_forward": ""},
+            {"engine_id": "hoard", "enabled": false, "config_file": "", "provider": "", "manual_port": 0, "port_forward": ""},
+        ]})
+    }
+
+    /// ⭐ Stored, listed, never served back: no private or preshared key in
+    /// any answer, the file at 0600, and a file that would not bring a
+    /// tunnel up refused before it is written.
+    #[tokio::test]
+    async fn a_conf_is_stored_listed_and_never_served_back() {
+        let s = node("wg-upload");
+        let (st, body) = upload_raw(&s, "proton-ch.conf", CONF).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["address"], "10.2.0.2/32");
+        let page = status(&s).await;
+        for secret in ["aPrivateKeyValue", "aPresharedValue"] {
+            assert!(!body.to_string().contains(secret) && !page.contains(secret), "{secret} left the process:\n{page}");
+        }
+        assert!(page.contains("\"name\":\"proton-ch.conf\"") && page.contains("192.0.2.10:51820"), "{page}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = crate::wgtunnel::conf_dir(&s.cfg().daemon.data_dir);
+            assert_eq!(std::fs::metadata(dir.join("proton-ch.conf")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let (st, body) = upload_raw(&s, "broken.conf", "[Interface]\nAddress = 10.0.0.2/32\n").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("PrivateKey"), "{body}");
+        let (st, _) = upload_raw(&s, "", CONF).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "no name");
+    }
+
+    /// The page uploads with FormData: the multipart path, file name kept.
+    #[tokio::test]
+    async fn a_conf_is_accepted_from_the_pages_form() {
+        let s = node("wg-multipart");
+        let boundary = "hyboundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"mine.conf\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n{CONF}\r\n--{boundary}--\r\n"
+        );
+        let ct = format!("multipart/form-data; boundary={boundary}");
+        let req = axum::extract::Request::builder()
+            .header("content-type", &ct)
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let mut headers = keyed(KEY);
+        headers.insert("content-type", ct.parse().unwrap());
+        let r = post_wireguard_config_upload(State(s.state.clone()), RawQuery(None), headers, req).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(status(&s).await.contains("\"name\":\"mine.conf\""));
+    }
+
+    #[tokio::test]
+    async fn a_conf_is_removed_once() {
+        let s = node("wg-delete");
+        upload_raw(&s, "gone.conf", CONF).await;
+        let del = |n: &str| delete_wireguard_config(State(s.state.clone()), Path(n.to_string()), RawQuery(None), keyed(KEY));
+        assert_eq!(del("gone.conf").await.status(), StatusCode::OK);
+        assert_eq!(del("gone.conf").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(del("..%2Fdefault.toml").await.status(), StatusCode::BAD_REQUEST);
+        assert!(!status(&s).await.contains("gone.conf"));
+    }
+
+    /// ⭐ Without the privilege, the mode and the assignment are refused with
+    /// the reason, nothing is written, and the page is told why.
+    #[tokio::test]
+    async fn without_net_admin_the_tunnels_are_refused_with_the_reason() {
+        crate::wgtunnel::force_support(Some(Err(crate::wgtunnel::NEEDS_NET_ADMIN)));
+        let s = node("wg-refused");
+        upload_raw(&s, "a.conf", CONF).await;
+        let before = std::fs::read_to_string(&s.config_path).unwrap();
+        let (st, body) = assign(&s, race_on("a.conf")).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], crate::wgtunnel::NEEDS_NET_ADMIN);
+        let form = serde_json::json!({"mode": "wireguard", "fields": {"race_listen_port": 16171, "hoard_listen_port": 16172}});
+        let r = post_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY), form.to_string()).await;
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        assert_eq!(std::fs::read_to_string(&s.config_path).unwrap(), before, "nothing written");
+
+        let page: serde_json::Value = serde_json::from_str(&status(&s).await).unwrap();
+        assert_eq!(page["supported"], false);
+        assert_eq!(page["unsupported_reason"], crate::wgtunnel::NEEDS_NET_ADMIN);
+        let mode = body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert_eq!(mode["wireguard"]["supported"], false);
+        assert_eq!(mode["wireguard"]["reason"], crate::wgtunnel::NEEDS_NET_ADMIN);
+        crate::wgtunnel::force_support(None);
+    }
+
+    /// ⭐⭐ Assigned: written per engine, the node switched to WireGuard, the
+    /// proxy keys of the mode it left removed, the engine pinned to its
+    /// device, and a restart asked for. Then leaving the mode clears them.
+    #[tokio::test]
+    async fn an_assignment_switches_the_node_to_wireguard_and_another_mode_clears_it() {
+        crate::wgtunnel::force_support(Some(Ok(())));
+        let s = node("wg-assign");
+        upload_raw(&s, "a.conf", CONF).await;
+        let (st, body) = assign(&s, race_on("a.conf")).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], true);
+        let cfg = s.cfg();
+        assert_eq!(cfg.network.mode, "wireguard");
+        let race = cfg.local_engines().into_iter().find(|e| e.id == "race").unwrap();
+        assert!(race.session.wireguard_enabled);
+        assert_eq!(race.session.wireguard_config, "a.conf");
+        assert_eq!(race.session.bind_interface, "wg-race", "pinned to its device");
+        assert!(race.session.socks5_outbound_host.is_empty(), "the SOCKS5 mode's keys are gone");
+        let page: serde_json::Value = serde_json::from_str(&status(&s).await).unwrap();
+        assert_eq!(page["engines"]["race"]["config_file"], "a.conf");
+        assert_eq!(page["engines"]["race"]["device"], "wg-race");
+
+        // One file, one engine.
+        let mut both = race_on("a.conf");
+        both["engines"][1] = serde_json::json!({"engine_id": "hoard", "enabled": true, "config_file": "a.conf", "provider": "proton"});
+        assert_eq!(assign(&s, both).await.0, StatusCode::BAD_REQUEST);
+        // A file that is not there, an engine that is not there.
+        assert_eq!(assign(&s, race_on("missing.conf")).await.0, StatusCode::BAD_REQUEST);
+        let ghost = serde_json::json!({"engines": [{"engine_id": "ghost", "enabled": false}]});
+        assert_eq!(assign(&s, ghost).await.0, StatusCode::BAD_REQUEST);
+
+        let form = serde_json::json!({"mode": "direct", "fields": {"race_listen_port": 16171, "hoard_listen_port": 16172}});
+        let r = post_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY), form.to_string()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let text = std::fs::read_to_string(&s.config_path).unwrap();
+        assert!(!text.contains("wireguard_"), "a tunnel outlived the mode:\n{text}");
+        let race = s.cfg().local_engines().into_iter().find(|e| e.id == "race").unwrap();
+        assert_eq!(race.session.bind_interface, "");
+        crate::wgtunnel::force_support(None);
+    }
+
+    /// The running engines' DHT and tunnel, as they are, on the Network tab.
+    #[tokio::test]
+    async fn the_network_mode_reports_what_each_engine_runs() {
+        let s = node("wg-state");
+        let mode = body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let rows = mode["engine_state"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let race = rows.iter().find(|r| r["id"] == "race").unwrap();
+        assert_eq!(race["dht_running"], false);
+        assert_eq!(race["dht_note"], "offline", "an engine not on the network says so");
+        assert!(mode["warnings"].to_string().contains("DHT is off behind the SOCKS5 proxy"), "{mode}");
     }
 }

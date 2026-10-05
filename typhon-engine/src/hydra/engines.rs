@@ -110,6 +110,12 @@ pub struct EngineHost {
     /// The client-wide rate caps -- qBittorrent's "global" limit, which the
     /// shim's `transfer/*` routes move -- above every engine of this host.
     client_rates: Arc<typhon_engine::torrent::ratelimit::RatePair>,
+    /// The managed WireGuard tunnels of this process, by engine. Filled by
+    /// `connect`, read by the Network tab, emptied at shutdown.
+    wireguard: Arc<crate::wgtunnel::Registry>,
+    /// `<data_dir>/wireguard`: the provider files and the list of devices
+    /// this node made.
+    wireguard_dir: std::path::PathBuf,
 }
 
 /// The per-engine settings a RUNNING engine takes without a restart: the rate
@@ -261,7 +267,27 @@ impl EngineHost {
             link_summary: Default::default(),
             catalogue_usage: Default::default(),
             client_rates,
+            wireguard: Default::default(),
+            wireguard_dir: crate::wgtunnel::conf_dir(&config.daemon.data_dir),
         }
+    }
+
+    /// The managed WireGuard tunnels, as this process brought them up.
+    pub fn wireguard(&self) -> &Arc<crate::wgtunnel::Registry> {
+        &self.wireguard
+    }
+
+    /// Take every managed tunnel down: at shutdown, and when another network
+    /// mode is saved. Engines pinned to them reach nobody until restarted,
+    /// which is the point -- they must not fall back to the default route.
+    pub async fn wireguard_down(&self) -> usize {
+        let reg = self.wireguard.clone();
+        let dir = self.wireguard_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::wgtunnel::down_all(&mut crate::wgtunnel::System, &dir, &reg)
+        })
+        .await
+        .unwrap_or(0)
     }
 
     /// The client-wide rate caps, bytes/s.
@@ -329,6 +355,16 @@ impl EngineHost {
 
     /// Put every engine that asks for it on the network.
     async fn connect(&self, config: &Config, config_dir: &std::path::Path) {
+        // The tunnels first: an engine pinned to a device that is not there
+        // yet would fail its listener and its uTP socket for good.
+        let wants = crate::wgtunnel::wanted(crate::netmode::current(config), &config.local_engines());
+        if networking_enabled() {
+            let (reg, dir, w) = (self.wireguard.clone(), self.wireguard_dir.clone(), wants.clone());
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::wgtunnel::reconcile(&mut crate::wgtunnel::System, &dir, &w, &reg)
+            })
+            .await;
+        }
         for engine in &self.engines {
             // The engine's own merged session. NOT config.race / config.hoard:
             // an engine that is neither is a legitimate configuration.
@@ -342,7 +378,15 @@ impl EngineHost {
             }
             let data_dir = config_dir.join(&engine.id);
             let resume_dir = data_dir.join("resume");
-            match engine_config(session, &data_dir, &resume_dir) {
+            // A NAT-PMP tunnel: ask for the port before the engine binds, so
+            // its listener AND its uTP socket are born on it. Not granted in
+            // time, the follower keeps asking and the announces wait.
+            let follow = self.natpmp_follow(wants.iter().find(|w| w.engine == engine.id), session.listen_port).await;
+            let mut born = session.clone();
+            if let Some((_, Some(m))) = &follow {
+                born.listen_port = m.external_port;
+            }
+            match engine_config(&born, &data_dir, &resume_dir) {
                 Some(engine_cfg) => {
                     let _ = engine.engine_config.set(engine_cfg.clone());
                     // The startup gate: no dial and no announce until it is
@@ -375,6 +419,17 @@ impl EngineHost {
                             engine.manager.clone(),
                             session.gluetun_url.clone(),
                             session.gluetun_api_key.clone(),
+                        );
+                    }
+                    if let Some((gateway, initial)) = follow {
+                        crate::portfwd::spawn_follower(
+                            engine.id.clone(),
+                            engine.manager.clone(),
+                            gateway,
+                            session.bind_interface.clone(),
+                            session.listen_port,
+                            initial,
+                            Arc::new(TunnelPort { registry: self.wireguard.clone(), engine: engine.id.clone() }),
                         );
                     }
                     let bump = crate::announce::runner::start(
@@ -434,6 +489,51 @@ impl EngineHost {
                 }
             }
         }
+    }
+
+    /// Where to ask for this engine's port, and the first grant if one came
+    /// in time. `None` for an engine with no NAT-PMP tunnel.
+    ///
+    /// A tunnel that did not come up gets no follower: there is no gateway
+    /// to reach. Its engine is pinned to the missing device and reaches
+    /// nobody either way.
+    async fn natpmp_follow(
+        &self,
+        want: Option<&crate::wgtunnel::Want>,
+        listen_port: u16,
+    ) -> Option<(std::net::IpAddr, Option<crate::portfwd::Mapping>)> {
+        let w = want.filter(|w| w.port_forward == crate::wgtunnel::PortForward::NatPmp)?;
+        if !self.wireguard.get(&w.engine).is_some_and(|t| t.created) {
+            return None;
+        }
+        let conf = crate::wgtunnel::load_conf(&self.wireguard_dir, &w.config_file).ok()?;
+        let Some(gateway) = crate::wgtunnel::natpmp_gateway(&w.provider, &conf) else {
+            let e = format!("{}: no NAT-PMP gateway known (no IPv4 DNS in the file); no port is asked for", w.config_file);
+            tracing::warn!(engine = %w.engine, "wireguard: {e}");
+            self.wireguard.update(&w.engine, |t| t.last_error = e);
+            return None;
+        };
+        // Two tries: at boot, before the engine binds, a gateway that is slow
+        // to answer costs seconds of startup per engine, not a minute. The
+        // configured port as both internal and suggested: internal 0 is
+        // reserved by RFC 6886, and a gateway that honours the suggestion
+        // then maps the port straight through.
+        let initial = match crate::portfwd::map_both(gateway, &w.device, listen_port, listen_port, 2).await {
+            Ok((m, udp)) => {
+                if let Some(e) = udp {
+                    tracing::warn!(engine = %w.engine, "wireguard port forward: {e}");
+                }
+                tracing::info!(engine = %w.engine, port = m.external_port, "wireguard: port forwarded before the engine starts");
+                self.wireguard.update(&w.engine, |t| t.forwarded_port = m.external_port);
+                Some(m)
+            }
+            Err(e) => {
+                tracing::warn!(engine = %w.engine, error = %e, "wireguard: no port yet; the engine starts with its announces held");
+                self.wireguard.update(&w.engine, |t| t.last_error = e);
+                None
+            }
+        };
+        Some((gateway, initial))
     }
 
     /// Send `stopped` for every torrent that announced `started`, on every
@@ -697,6 +797,26 @@ fn networking_enabled() -> bool {
         std::env::var("HYDRANOS_ENGINE_NET").as_deref(),
         Ok("0") | Ok("false") | Ok("off")
     )
+}
+
+/// Writes a tunnel's forwarded port, or why there is none, where the
+/// Network tab reads it.
+struct TunnelPort {
+    registry: Arc<crate::wgtunnel::Registry>,
+    engine: String,
+}
+
+impl crate::portfwd::PortSink for TunnelPort {
+    fn forwarded(&self, port: u16) {
+        self.registry.update(&self.engine, |t| {
+            t.forwarded_port = port;
+            t.last_error.clear();
+        });
+    }
+
+    fn failed(&self, error: String) {
+        self.registry.update(&self.engine, |t| t.last_error = error);
+    }
 }
 
 /// The announce policy an engine starts with.
@@ -978,6 +1098,85 @@ mod network_wiring_tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(up, "the PROXY v2 listener is bound on {pv2}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bring one engine up from a session, the way `connect` does.
+    async fn started(tag: &str, toml_text: &str) -> Arc<TorrentManager> {
+        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let s = session(&format!("listen_port = {}\nenable_webseed = false\n{toml_text}", free()));
+        let dir = std::env::temp_dir().join(format!("hydra-dht-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let c = engine_config(&s, &dir, &dir.join("resume")).unwrap();
+        let disk = Arc::new(DiskManager::new(16));
+        let mgr = Arc::new(TorrentManager::new(dir.to_string_lossy().into_owned(), dir.join("resume").to_string_lossy().into_owned(), disk.clone()));
+        typhon_engine::session::start(mgr.clone(), disk, &c, Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        mgr
+    }
+
+    /// ⭐ An engine behind the SOCKS5 proxy starts no DHT node, even with
+    /// `enable_dht = true`: the node would be plain UDP from the host's own
+    /// address. The control is the same engine without the proxy, which does
+    /// start one -- pinned to loopback, so the test talks to nobody.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_proxied_engine_starts_no_dht() {
+        let pinned = "bind_interface = \"lo\"\nenable_dht = true\n";
+        let control = started("direct", pinned).await;
+        assert!(control.dht().is_some(), "the control engine must run a DHT, or the next assert proves nothing");
+        let proxied = started("socks", &format!("{pinned}socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = 9\n")).await;
+        assert!(proxied.dht().is_none(), "a DHT node started behind the SOCKS5 proxy");
+    }
+
+    /// ⭐⭐ Fail closed. A tunnel that did not come up leaves its engine
+    /// pinned to a device that is not there, and then NOTHING leaves: no
+    /// listener, no DHT node, no announce, no peer dial -- each fails rather
+    /// than falling back to the host's default route. The control for the
+    /// announce is the same request unpinned, which does reach the tracker.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_engine_whose_tunnel_is_down_reaches_nobody() {
+        const GONE: &str = "wg-hy-gone";
+        let listening = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let s = session(&format!("listen_port = {}\nenable_webseed = false\nenable_dht = true\nbind_interface = \"{GONE}\"\n", free()));
+        let dir = std::env::temp_dir().join(format!("hydra-closed-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let c = engine_config(&s, &dir, &dir.join("resume")).unwrap();
+        let disk = Arc::new(DiskManager::new(16));
+        let mgr = Arc::new(TorrentManager::new(dir.to_string_lossy().into_owned(), dir.join("resume").to_string_lossy().into_owned(), disk.clone()));
+        typhon_engine::session::start(mgr.clone(), disk, &c, listening.clone()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!listening.load(std::sync::atomic::Ordering::Relaxed), "a listener came up on a missing device");
+        assert!(mgr.dht().is_none(), "a DHT node started on a missing device");
+
+        // The tracker is on loopback and answers: only the pin can stop it.
+        let tracker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://127.0.0.1:{}/announce", tracker.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = tracker.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let body: &[u8] = b"d8:intervali1800e5:peers0:e";
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+            }
+        });
+        let policy = announce_policy(&Config::default(), &s, &c);
+        assert_eq!(policy.device, GONE);
+        let req = crate::announce::policy::prepare(&policy, &url, IH, 1, 0, 0, 0, "started", None, None).unwrap();
+        let pinned = typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device, &req.proxy).await;
+        assert!(pinned.is_err(), "an announce left without its tunnel: {pinned:?}");
+        let open = typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, "", &req.proxy).await;
+        assert!(open.is_ok(), "the control announce must reach the tracker, or the assert above proves nothing: {open:?}");
+
+        // A peer dial goes through the same pin, and fails the same way.
+        let egress = typhon_engine::netpin::Egress { device: GONE.into(), ..Default::default() };
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        use std::os::fd::AsRawFd;
+        assert!(typhon_engine::netpin::pin_fd(sock.as_raw_fd(), &egress).is_err(), "a dial socket pinned to nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

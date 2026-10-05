@@ -45,21 +45,35 @@ pub async fn start(
     // Skipping start() is the whole switch: DHT.get() then stays None, so the
     // track_torrent calls that fire later on add/start/magnet return early by
     // themselves. Nothing else in the engine has to test this flag.
-    if config.dht_enabled {
-        if let Some(session) = crate::dht::DhtSession::start().await {
-            mgr.set_dht(session);
-        }
-        for t in mgr.all().iter() {
-            // Stopped torrents stay off the DHT until they are started again;
-            // tracking them here would resurrect the very tasks stop_torrent kills.
-            if t.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                continue;
+    //
+    // Off behind a SOCKS5 proxy whatever `dht_enabled` says (see
+    // `dht::dht_policy`); pinned to the engine's device otherwise, so an
+    // engine in a tunnel runs its DHT through that tunnel.
+    match crate::dht::dht_policy(config) {
+        crate::dht::Discovery::On => {
+            let device = Some(config.bind_device.trim()).filter(|d| !d.is_empty());
+            if let Some(session) = crate::dht::DhtSession::start(device).await {
+                mgr.set_dht(session);
             }
-            mgr.track_in_dht(t.clone());
+            for t in mgr.all().iter() {
+                // Stopped torrents stay off the DHT until they are started again;
+                // tracking them here would resurrect the very tasks stop_torrent kills.
+                if t.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+                mgr.track_in_dht(t.clone());
+            }
         }
-    } else {
-        info!("[engine] DHT disabled by config: no bootstrap, no get_peers, no peer discovery outside the trackers");
+        crate::dht::Discovery::Off(why) if why == crate::dht::OFF_BY_CONFIG => {
+            info!("[engine] DHT disabled by config: no bootstrap, no get_peers, no peer discovery outside the trackers");
+        }
+        crate::dht::Discovery::Off(why) => {
+            warn!("[engine] DHT {}; PEX stays on (it rides the proxied peer connections)", why);
+        }
     }
+    // Local Service Discovery does not exist in this engine. When it does, it
+    // starts here and only if `crate::dht::lsd_policy(config)` says so: it is
+    // UDP multicast, which no SOCKS5 proxy carries.
 
     // BEP 19 webseed. Started after the resume load so the very first scan
     // already sees the whole catalogue.
@@ -90,9 +104,6 @@ pub async fn start(
             config.socks5_outbound_host, config.socks5_outbound_port
         );
         info!("[engine] outbound uTP is OFF for this engine: SOCKS5 without UDP ASSOCIATE cannot carry it (incoming uTP still accepted)");
-        if config.dht_enabled {
-            warn!("[engine] DHT is on and is plain UDP: it does not go through the SOCKS5 proxy and shows this host's address to DHT nodes; set enable_dht = false if that address must stay hidden");
-        }
     }
     let http_proxy = config.http_proxy();
     if !http_proxy.is_empty() {

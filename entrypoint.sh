@@ -68,9 +68,11 @@ if [ -n "$PUID" ] || [ -n "$PGID" ]; then
                 echo "hydranos: could not chown $CFG_DIR, continuing"
         fi
         echo "hydranos: dropping privileges to $RUN_UID:$RUN_GID ($EXIST_USR:$EXIST_GRP)"
-        # Fwmark-based VPN routing sets SO_MARK, which needs CAP_NET_ADMIN. It is
-        # lost when we drop privileges, so keep it as an ambient capability only
-        # when asked for (HYDRANOS_CAP_NET_ADMIN=1) -- it is not needed otherwise.
+        # Managed WireGuard (the Network tab's WireGuard mode) runs `ip` and
+        # `wg`, and fwmark-based VPN routing sets SO_MARK: both need
+        # CAP_NET_ADMIN. It is lost when we drop privileges, so keep it as an
+        # AMBIENT capability -- inherited by `ip` and `wg` -- only when asked
+        # for (HYDRANOS_CAP_NET_ADMIN=1). It is not needed otherwise.
         if [ "$HYDRANOS_CAP_NET_ADMIN" = "1" ] && command -v capsh >/dev/null 2>&1; then
             # The container only has CAP_NET_ADMIN if it was granted one
             # (--cap-add=NET_ADMIN or --privileged). Probe before exec'ing, so a
@@ -81,7 +83,7 @@ if [ -n "$PUID" ] || [ -n "$PGID" ]; then
                     --keep=1 --user="$EXIST_USR" --addamb=cap_net_admin \
                     -- -c 'exec hydranos "$@"' hydranos "$@"
             fi
-            echo "hydranos: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN to keep fwmark routing"
+            echo "hydranos: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN for managed WireGuard and fwmark routing"
         fi
         exec gosu "$RUN_UID:$RUN_GID" hydranos "$@"
     fi

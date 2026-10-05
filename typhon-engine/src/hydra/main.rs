@@ -47,6 +47,7 @@ mod dedup;
 mod deadkeys;
 mod export;
 mod selection;
+mod sharelimits;
 mod store;
 mod tomledit;
 mod trackeredit;
@@ -66,6 +67,7 @@ mod importer;
 mod jobs;
 mod jobsrun;
 mod wgtun;
+mod wgtunnel;
 mod volumes;
 mod workers;
 mod portfwd;
@@ -589,6 +591,12 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     if config.auto_port_forward {
         let mut asked = std::collections::BTreeSet::new();
         for engine in engine_host.engines() {
+            // A tunnelled engine's port is asked of its tunnel's gateway
+            // (`portfwd::spawn_follower`); a home-router mapping for it
+            // would open a port the engine does not even listen on.
+            if engine_host.wireguard().get(&engine.id).is_some() {
+                continue;
+            }
             if engine.listen_port != 0 && asked.insert(engine.listen_port) {
                 portmap::spawn(engine.listen_port);
             }
@@ -696,15 +704,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         if restored > 0 {
             tracing::info!(engine = %engine.id, restored, "pause: restored user intent");
         }
-        workers::spawn_download_slots(
-            engine.manager.clone(),
-            engine.announce_cache.clone(),
-            engine.session.active_downloads,
-            shared_store.clone(),
-            engine.id.clone(),
-        );
-        // Here and not in engines.rs for the same reason as the slot manager:
-        // the store does not exist yet when the engines are built.
+        // Here and not in engines.rs for the same reason as the queue (spawned
+        // with the live config below): the store does not exist yet when the
+        // engines are built.
         workers::spawn_seed_time_sync(
             engine.manager.clone(),
             shared_store.clone(),
@@ -854,6 +856,25 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         );
     }
 
+    // The queue (active_downloads, and active_seeds / active_limit under
+    // `queueing`) and the share limits, per engine, on the LIVE config: a
+    // limit saved in the settings applies on the next pass, no restart.
+    for engine in state.engines.engines().iter() {
+        workers::spawn_download_slots(
+            engine.manager.clone(),
+            engine.announce_cache.clone(),
+            state.config_handle(),
+            state.store.clone(),
+            engine.id.clone(),
+        );
+        workers::spawn_share_limits(
+            state.clone(),
+            engine.manager.clone(),
+            state.config_handle(),
+            engine.id.clone(),
+        );
+    }
+
     // The job runner. One task, one job at a time -- see the module header for
     // why concurrency buys nothing here.
     jobsrun::spawn(state.clone());
@@ -957,6 +978,12 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // is going away. 4.3 sent none.
     engines_for_shutdown.depart_all(std::time::Duration::from_secs(5)).await;
     flush_on_shutdown(&engines_for_shutdown, stop_budget);
+    // After the flush, not before: the departures above leave through the
+    // tunnels. Under --network host the devices would outlive the process.
+    let tunnels = engines_for_shutdown.wireguard_down().await;
+    if tunnels > 0 {
+        tracing::info!(tunnels, "wireguard: tunnels taken down");
+    }
     if shutdown::restart_requested() {
         shutdown::exit_for_restart();
     }
