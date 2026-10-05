@@ -303,6 +303,13 @@ impl EngineHost {
             match engine_config(session, &data_dir, &resume_dir) {
                 Some(engine_cfg) => {
                     let _ = engine.engine_config.set(engine_cfg.clone());
+                    // The startup gate: no dial and no announce until it is
+                    // released from the UI or the API. 4.3 showed the banner
+                    // and held nothing.
+                    if engine.start_paused {
+                        engine.manager.limiter().set_dials_paused(true);
+                        tracing::warn!(engine = %engine.id, "start_paused: holding dials and announces until released");
+                    }
                     typhon_engine::session::start(
                         engine.manager.clone(),
                         engine.disk.clone(),
@@ -492,6 +499,9 @@ impl EngineHost {
         let mut released = self.released.lock().unwrap();
         for scope in &freed {
             released.insert(scope.clone());
+            if let Some(e) = self.engines.iter().find(|e| &e.id == scope) {
+                e.manager.limiter().set_dials_paused(false);
+            }
         }
         freed
     }

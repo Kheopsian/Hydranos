@@ -3665,8 +3665,38 @@ async fn get_race_torrents(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(engine_rows(&state, "race")).into_response()
+    // Every engine with the race role, as the Race tab means: 4.3 listed the
+    // engine named "race" only, and an extra race engine's torrents appeared
+    // in no list at all.
+    let ids: Vec<String> = state.engines.engines().iter().filter(|e| e.role == "race").map(|e| e.id.clone()).collect();
+    let mut rows = Vec::new();
+    for id in ids {
+        rows.extend(list_rows(&state, &id, &query).await);
+    }
+    Json(rows).into_response()
+}
+
+/// A list route's rows: the page filters applied when the query has any.
+/// 4.3 ignored every filter on these routes and returned the whole engine.
+async fn list_rows(state: &AppState, engine_id: &str, query: &str) -> Vec<serde_json::Value> {
+    let filtered = crate::selection::FILTER_KEYS.iter().any(|k| query_param(query, k).is_some_and(|v| !v.is_empty()));
+    if !filtered {
+        return engine_rows(state, engine_id);
+    }
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let q = format!("{query}&offset={offset}&limit=5000");
+        let v = engine_page_value(state, engine_id, &q).await;
+        let rows = v["rows"].as_array().cloned().unwrap_or_default();
+        let n = rows.len();
+        out.extend(rows);
+        if n < 5000 {
+            break;
+        }
+        offset += n;
+    }
+    out
 }
 
 async fn get_hoard_torrents(
@@ -3676,8 +3706,7 @@ async fn get_hoard_torrents(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(engine_rows(&state, "hoard")).into_response()
+    Json(list_rows(&state, "hoard", &query).await).into_response()
 }
 
 
@@ -12504,6 +12533,18 @@ async fn delete_engine(
         )
             .into_response();
     }
+    // An engine that still holds torrents is not removed: 4.3 removed its
+    // section and left it seeding until the next restart, after which its
+    // torrents had a store row and no engine at all. Move or remove them
+    // first; an empty engine only keeps its listener until the restart.
+    let held = state.engines.get(&id).map(|e| e.manager.len()).unwrap_or(0);
+    if held > 0 {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("{id} still holds {held} torrent(s): move them to another engine or remove them first")})),
+        )
+            .into_response();
+    }
     let mut found = false;
     let ok = edit_config(&state, |doc| match crate::tomledit::delete_agent_block(doc, &id) {
         Some(edited) => {
@@ -12829,7 +12870,7 @@ async fn get_engine_torrents(
         Ok(id) => id,
         Err(refusal) => return refusal,
     };
-    Json(engine_rows(&state, &id)).into_response()
+    Json(list_rows(&state, &id, &query).await).into_response()
 }
 
 // ---------------------------------------------------------------------------
