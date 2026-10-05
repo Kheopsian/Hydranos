@@ -3222,6 +3222,8 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     background: var(--accent-blue);
     height: 100%;
 }
+/* A finished file reads at a glance from the unfinished ones. */
+.tc-bar-fill.tc-bar-done { background: var(--accent-green); }
 
 
 /* Language picker on the first-run screen. */

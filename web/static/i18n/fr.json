@@ -673,7 +673,6 @@
   "and {n} more file": "et {n} fichier de plus",
   "and {n} more files": "et {n} fichiers de plus",
   "any moment": "d'un instant à l'autre",
-  "availability n/a (seeding, no piece map)": "disponibilité indisponible (en partage, pas de carte des pièces)",
   "availability {range} (avg {avg} over {pieces} pieces)": "disponibilité {range} (moyenne {avg} sur {pieces} pièces)",
   "bearer, optional": "bearer, facultatif",
   "burst": "rafale",
@@ -926,5 +925,7 @@
   "of quota used": "du quota utilisés",
   "Quota": "Quota",
   "On a shared disk (a seedbox slot), the space you are allowed rather than the disk's size. The percentages and the drain then count the data of this engine's torrents against it. Empty: the whole disk.": "Sur un disque partagé (un slot de seedbox), l'espace qui vous est alloué plutôt que la taille du disque. Les pourcentages et la vidange comptent alors les données des torrents de cet engine par rapport à ce quota. Vide : le disque entier.",
-  "whole disk": "disque entier"
+  "whole disk": "disque entier",
+  "{done} downloaded": "{done} téléchargés",
+  "{missing} missing": "{missing} manquants"
 }
