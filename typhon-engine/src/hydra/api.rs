@@ -706,9 +706,23 @@ async fn post_node_register(
         return bad("a node cannot register itself at a loopback address");
     }
 
-    // Spent BEFORE anything else is decided: a token must burn even on a
-    // request that then turns out to be a duplicate name, or it could be
-    // retried until one lands.
+    // A name already taken is refused BEFORE the token is spent: 4.3 burned
+    // it first, so a node whose hostname matched an existing one could never
+    // enrol with that token, and the operator had to issue a new one to try
+    // `--name`. The token still enrols one node at most -- spending it is
+    // atomic -- and the name is checked again after, against a race.
+    let taken_before = {
+        let store = state.store.lock().unwrap();
+        store.node(&name).ok().flatten().is_some()
+    };
+    if taken_before {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("a node named {name} already exists; the token is still valid, try --name")})),
+        )
+            .into_response();
+    }
+
     let spent = {
         let store = state.store.lock().unwrap();
         store.consume_enrol_token(&token).unwrap_or(false)

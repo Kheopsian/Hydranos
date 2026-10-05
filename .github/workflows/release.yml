@@ -168,7 +168,6 @@ jobs:
           # never replace itself: an install would be stuck on whatever
           # version of hydranos-update it first unpacked.
           cp hydranos-update "$DIR"/hydranos-update
-          cp typhon-engine/target/${{ matrix.target }}/release/typhon-engine "$DIR"/hydranos-engine
           cp configs/default.toml "$DIR"/default.toml.example
           cp packaging/hydranos.service "$DIR"/hydranos.service
           cp packaging/install.sh "$DIR"/install.sh
@@ -248,7 +247,6 @@ jobs:
           $DIR = "hydranos-$VER-windows-amd64"
           New-Item -ItemType Directory -Force -Path $DIR | Out-Null
           Copy-Item typhon-engine/target/release/hydranos.exe "$DIR/hydranos.exe"
-          Copy-Item typhon-engine/target/release/typhon-engine.exe "$DIR/hydranos-engine.exe"
           # ⚠ In the archive it installs, so it can replace itself.
           Copy-Item typhon-engine/target/release/hydranos-update.exe "$DIR/hydranos-update.exe"
           Copy-Item configs/default.toml "$DIR/default.toml.example"
