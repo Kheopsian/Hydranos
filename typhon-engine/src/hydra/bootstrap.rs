@@ -21,10 +21,26 @@ pub async fn setup_status(State(state): State<AppState>) -> Response {
         "needs_setup": cfg.auth.password_hash.is_empty(),
         // Empty unless data_dir sits on network storage. The warning lives
         // where a user looks; a line in the startup log scrolls away forever.
-        "network_storage": "",
+        // Same test, on the same directory, as the one that keeps hydra.db out
+        // of WAL (`Store::open`), so the banner appears exactly when what it
+        // says is true. Until 4.4 this was a constant "" and the page's banner
+        // and first-run warning could never show.
+        "network_storage": network_storage(&cfg.daemon.data_dir),
         "store_repair": false,
     }))
     .into_response()
+}
+
+/// What the page names in its network-storage warning, or "" on a local disk.
+///
+/// The page keys its "Got it" on this string, so it must stay stable from one
+/// boot to the next: a generic label, not the mount it happened to resolve.
+fn network_storage(data_dir: &str) -> &'static str {
+    if crate::platform::is_network_fs(std::path::Path::new(data_dir)) {
+        "network share"
+    } else {
+        ""
+    }
 }
 
 /// Create the admin account, first run only.
@@ -280,5 +296,15 @@ mod tests {
         assert!(!is_local_request(public, &h), "a forged header does not make a public peer local");
         let mapped: std::net::IpAddr = "::ffff:192.168.1.20".parse().unwrap();
         assert!(is_local_request(mapped, &HeaderMap::new()), "an IPv4-mapped LAN peer is local");
+    }
+
+    /// A local disk must answer "", or every install would show the
+    /// network-storage banner. A directory that does not exist is not a share
+    /// either: statfs fails and the answer stays empty rather than alarming.
+    #[test]
+    fn a_local_data_dir_is_not_network_storage() {
+        let dir = std::env::temp_dir();
+        assert_eq!(network_storage(&dir.to_string_lossy()), "");
+        assert_eq!(network_storage("/no/such/data_dir"), "");
     }
 }
