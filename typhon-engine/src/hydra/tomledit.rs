@@ -419,6 +419,63 @@ pub fn set_agent_session_key(doc: &str, id: &str, key: &str, value: &str) -> Opt
     None
 }
 
+/// Remove one key from the session sub-table of an engine block, so the
+/// engine goes back to inheriting it from its role profile. Idempotent: a
+/// block without the key, or without a sub-table, comes back unchanged.
+///
+/// Returns None when no block declares `id`, like `set_agent_session_key`.
+pub fn delete_agent_session_key(doc: &str, id: &str, key: &str) -> Option<String> {
+    let lines: Vec<&str> = doc.split('\n').collect();
+    // Same block boundaries and the same id rule as `set_agent_session_key`:
+    // `engine_id` first, `name` second.
+    let mut blocks: Vec<(usize, usize, &str)> = Vec::new();
+    let mut start: Option<(usize, &str)> = None;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if t == "[[agent]]" || t == "[[engine]]" {
+            if let Some((s, name)) = start {
+                blocks.push((s, i, name));
+            }
+            start = Some((i, if t == "[[agent]]" { "agent" } else { "engine" }));
+        } else if is_table_header(line) && !t.starts_with("[agent.") && !t.starts_with("[engine.") {
+            if let Some((s, name)) = start.take() {
+                blocks.push((s, i, name));
+            }
+        }
+    }
+    if let Some((s, name)) = start {
+        blocks.push((s, lines.len(), name));
+    }
+    for (s, e, name) in blocks {
+        let field = |k: &str| {
+            lines[s..e].iter().find_map(|l| {
+                let t = l.trim();
+                let eq = key_end(t)?;
+                (t[..eq].trim() == k).then(|| t[eq + 1..].trim().trim_matches('"').to_string())
+            })
+        };
+        let declared = field("engine_id").filter(|v| !v.is_empty()).or_else(|| field("name"));
+        if declared.as_deref() != Some(id) {
+            continue;
+        }
+        let header = format!("[{name}.session]");
+        let Some(h) = (s..e).find(|&i| lines[i].trim() == header) else {
+            return Some(doc.to_string());
+        };
+        let kept: Vec<&str> = lines
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| {
+                let in_session = *i > h && *i < e && !l.trim().starts_with('#');
+                !(in_session && key_end(l).is_some_and(|eq| unquote_key(&l[..eq]) == unquote_key(key)))
+            })
+            .map(|(_, l)| *l)
+            .collect();
+        return Some(kept.join("\n"));
+    }
+    None
+}
+
 /// Render a JSON value as a TOML literal.
 ///
 /// Only scalars and flat arrays: the settings screen edits leaves, and letting

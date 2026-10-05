@@ -87,22 +87,15 @@ pub fn build(native: &Value, engine_name: &str, now: i64) -> Value {
     );
 
     let total_size = i(native, "total_size");
-    // ⚠⚠ BUG DE 3.x REPRODUIT TEL QUEL.
-    //
-    // The Go shim reads "total_downloaded" and "total_uploaded"; the native row
-    // it is handed carries "total_download" and "total_upload". The keys do not
-    // exist, so every qBittorrent client sees uploaded = 0 and ratio = 0 for
-    // the whole library -- measured here on 486 real torrents, where the true
-    // ratio is 4.2 and the shim reports 0.
-    //
-    // Reproduced because *arr, cross-seed and autobrr have been reading zeros
-    // for as long as this shim has existed, and some of them act on ratio.
-    // Publishing the real figure would change their behaviour on the day of an
-    // upgrade that is supposed to change nothing. Worth fixing on purpose, in
-    // its own release, with a note -- exactly like the tag registry and the
-    // pin/unpin asymmetry.
-    let mut downloaded = i(native, "total_downloaded");
-    let uploaded = i(native, "total_uploaded");
+    // The real lifetime figures. 3.x read "total_downloaded" / "total_uploaded"
+    // off a native row that carries "total_download" / "total_upload", so
+    // every qBittorrent client saw uploaded = 0 and ratio = 0 for the whole
+    // library (measured on 486 torrents whose true ratio was 4.2). 4.x kept
+    // the zeros on purpose so an upgrade would change no client's behaviour;
+    // 4.4 publishes the truth, on the maintainer's call and with a changelog
+    // note, because *arr seeding goals and autobrr's ratio rules act on it.
+    let mut downloaded = i(native, "total_download");
+    let uploaded = i(native, "total_upload");
 
     // A finished torrent reports zero bytes downloaded, because the engine only
     // counts this session. Left alone, *arr sees a complete torrent that never
@@ -179,6 +172,12 @@ pub fn build(native: &Value, engine_name: &str, now: i64) -> Value {
         "num_complete": i(native, "num_seeds"),
         "num_incomplete": i(native, "num_peers"),
         "ratio": crate::row::num_json(ratio),
+        "seeding_time": i(native, "seeding_time"),
+        // This torrent's own caps, bytes/s, -1 = none (qBittorrent's
+        // spelling). The listing fills them from the engine; a row built
+        // without one reports none.
+        "up_limit": -1,
+        "dl_limit": -1,
         "eta": eta,
         "added_on": added_on,
         "completion_on": i(native, "completed_time"),
@@ -233,7 +232,7 @@ mod tests {
     #[test]
     fn a_finished_torrent_reports_its_full_size_as_downloaded() {
         let row = build(
-            &json!({"progress": 1.0, "total_size": 1000, "total_downloaded": 0, "state": "seeding"}),
+            &json!({"progress": 1.0, "total_size": 1000, "total_download": 0, "state": "seeding"}),
             "race", 0,
         );
         assert_eq!(row["downloaded"], 1000);
@@ -243,11 +242,11 @@ mod tests {
 
     #[test]
     fn eta_is_infinite_when_nothing_is_moving() {
-        let row = build(&json!({"total_size": 1000, "total_downloaded": 10}), "race", 0);
+        let row = build(&json!({"total_size": 1000, "total_download": 10}), "race", 0);
         assert_eq!(row["eta"], ETA_INFINITE);
 
         let row = build(
-            &json!({"total_size": 1000, "total_downloaded": 100, "download_rate": 90}),
+            &json!({"total_size": 1000, "total_download": 100, "download_rate": 90}),
             "race", 0,
         );
         assert_eq!(row["eta"], 10, "900 bytes left at 90 per second");
@@ -275,20 +274,30 @@ mod tests {
 
     #[test]
     fn ratio_is_rounded_to_two_decimals() {
-        let row = build(&json!({"total_uploaded": 1000, "total_downloaded": 300}), "race", 0);
+        let row = build(&json!({"total_upload": 1000, "total_download": 300}), "race", 0);
         assert_eq!(row["ratio"], json!(3.33));
     }
 
-    // The bug above, pinned so nobody "fixes" it by accident: a native row uses
-    // total_upload / total_download, and the shim reads the -ed spellings, so
-    // the figures come out zero.
+    // ⭐ The real figures reach the client: a native row's total_upload /
+    // total_download become uploaded / downloaded and the ratio, which 3.x and
+    // 4.x up to 4.3 reported as zeros (they read the "-ed" spellings).
     #[test]
-    fn the_shim_reads_the_ed_spelling_and_therefore_reports_zero() {
+    fn the_shim_reports_the_real_upload_and_ratio() {
         let row = build(
-            &json!({"total_upload": 999, "total_download": 500, "total_size": 500}),
+            &json!({"total_upload": 1500, "total_download": 500, "total_size": 500,
+                    "progress": 1.0, "seeding_time": 7200}),
             "race", 0,
         );
-        assert_eq!(row["uploaded"], 0, "3.x reports 0 here; see the comment in build()");
-        assert_eq!(row["ratio"], json!(0));
+        assert_eq!(row["uploaded"], 1500);
+        assert_eq!(row["downloaded"], 500);
+        assert_eq!(row["ratio"], json!(3));
+        assert_eq!(row["seeding_time"], 7200);
+        // A cross-seeded torrent downloaded nothing: its ratio is against its
+        // size, as qBittorrent computes it, not a division by zero.
+        let row = build(
+            &json!({"total_upload": 2000, "total_download": 0, "total_size": 1000, "progress": 1.0}),
+            "race", 0,
+        );
+        assert_eq!(row["ratio"], json!(2));
     }
 }

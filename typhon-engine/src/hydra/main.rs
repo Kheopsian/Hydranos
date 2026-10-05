@@ -57,6 +57,7 @@ mod web;
 mod benchdb;
 mod benchsampler;
 mod netprobe;
+mod netmode;
 mod nodes;
 mod bootstrap;
 mod announce;
@@ -807,6 +808,10 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         bench,
         sessions: Default::default(),
     };
+    // The client-wide rate caps (qBittorrent's global limit) live in the
+    // store, not the TOML: a qBit client sets them over the shim, and the
+    // TOML editor refuses keys a file does not already have.
+    api::restore_client_rate_limits(&state);
     // Roll the day counters on a timer, not only when somebody asks. 3.x reset
     // on the first request of the new day, so a dashboard opened in the
     // afternoon had been showing yesterday's baseline until that moment.

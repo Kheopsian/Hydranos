@@ -52,6 +52,9 @@ pub struct Fingerprint {
     /// Seed time in HOURS. See `fingerprint_of`: seconds here would mark every
     /// seeding torrent dirty at every sweep.
     pub seed_hours: i64,
+    /// This torrent's own rate caps: setting one must reach the record.
+    pub up_limit: u64,
+    pub down_limit: u64,
 }
 
 pub struct StateDb {
@@ -71,7 +74,9 @@ CREATE TABLE IF NOT EXISTS torrent_state (
     completed_time   INTEGER NOT NULL DEFAULT 0,
     bitfield         TEXT NOT NULL DEFAULT '',
     trackers         TEXT NOT NULL DEFAULT '',
-    seed_secs        INTEGER NOT NULL DEFAULT 0
+    seed_secs        INTEGER NOT NULL DEFAULT 0,
+    up_limit         INTEGER NOT NULL DEFAULT 0,
+    down_limit       INTEGER NOT NULL DEFAULT 0
 );
 ";
 
@@ -99,6 +104,11 @@ impl StateDb {
         // column name", which is the success case here and is why the error is
         // dropped rather than propagated.
         let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN seed_secs INTEGER NOT NULL DEFAULT 0", []);
+        // Per-torrent rate caps (bytes/s, 0 = none), added the same way. An
+        // older binary reading this file ignores the columns; a rollback loses
+        // the caps and nothing else.
+        let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN up_limit INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN down_limit INTEGER NOT NULL DEFAULT 0", []);
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -181,7 +191,7 @@ impl StateDb {
         let mut stmt = match conn.prepare(
             "SELECT info_hash, save_path, seed_mode, paused,
                     total_uploaded, total_downloaded, added_time, completed_time,
-                    bitfield, trackers, seed_secs
+                    bitfield, trackers, seed_secs, up_limit, down_limit
              FROM torrent_state",
         ) {
             Ok(s) => s,
@@ -204,6 +214,8 @@ impl StateDb {
                 bitfield: row.get(8)?,
                 trackers: decode_trackers(&trackers_json),
                 seed_secs: row.get(10).unwrap_or(0),
+                up_limit: row.get::<_, i64>(11).unwrap_or(0).max(0) as u64,
+                down_limit: row.get::<_, i64>(12).unwrap_or(0).max(0) as u64,
             })
         });
         let rows = match rows {
@@ -256,8 +268,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
         "INSERT INTO torrent_state
             (info_hash, save_path, seed_mode, paused,
              total_uploaded, total_downloaded, added_time, completed_time,
-             bitfield, trackers, seed_secs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             bitfield, trackers, seed_secs, up_limit, down_limit)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(info_hash) DO UPDATE SET
             save_path=excluded.save_path,
             seed_mode=excluded.seed_mode,
@@ -268,7 +280,9 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             completed_time=excluded.completed_time,
             bitfield=excluded.bitfield,
             trackers=excluded.trackers,
-            seed_secs=excluded.seed_secs",
+            seed_secs=excluded.seed_secs,
+            up_limit=excluded.up_limit,
+            down_limit=excluded.down_limit",
         params![
             rd.info_hash,
             rd.save_path,
@@ -281,6 +295,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             rd.bitfield,
             encode_trackers(&rd.trackers),
             rd.seed_secs,
+            rd.up_limit.min(i64::MAX as u64) as i64,
+            rd.down_limit.min(i64::MAX as u64) as i64,
         ],
     )?;
     Ok(())
@@ -317,6 +333,8 @@ mod tests {
             bitfield: "ff00".into(),
             trackers: vec![vec!["http://t/announce".into()]],
             seed_secs: 0,
+            up_limit: 51_200,
+            down_limit: 0,
         }
     }
 
@@ -345,6 +363,7 @@ mod tests {
         assert_eq!(r.completed_time, 200);
         assert_eq!(r.bitfield, "ff00");
         assert_eq!(r.trackers, vec![vec!["http://t/announce".to_string()]]);
+        assert_eq!((r.up_limit, r.down_limit), (51_200, 0), "the rate caps come back");
         std::fs::remove_file(&path).ok();
     }
 

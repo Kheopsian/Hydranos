@@ -339,3 +339,122 @@ fn bep27_a_private_torrent_dials_no_peer_a_hole_punch_names() {
         assert_eq!(punched(private_seed(8)).await, 0, "a private torrent dials nobody a peer names");
     });
 }
+
+// ---------------------------------------------------------------------------
+// Upload rate cap
+// ---------------------------------------------------------------------------
+
+/// A seeding torrent with a real payload on disk, so requests are actually
+/// served: `pieces` blocks of 16 KiB in one file.
+fn seeding_with_payload(tag: &str, pieces: u32) -> (Arc<TorrentState>, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("peer-session-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let len = pieces as u64 * 16384;
+    std::fs::write(dir.join("payload.bin"), vec![0x5Au8; len as usize]).unwrap();
+    let mut m = meta(pieces);
+    m.name = "payload.bin".into();
+    m.files = vec![typhon_engine::torrent::meta::FileEntry {
+        path: PathBuf::from("payload.bin"),
+        offset: 0,
+        length: len,
+    }];
+    let t = Arc::new(TorrentState::new(m, dir.clone(), true));
+    t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+    (t, dir)
+}
+
+/// Ask for every block, then count the payload bytes that arrive within
+/// `window`, and the Rejects.
+async fn pull(peer: &mut Framed<CryptoStream, BtCodec>, pieces: u32, window: Duration) -> (u64, u32) {
+    wait_for(peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+    peer.send(Message::Interested).await.expect("sent");
+    for i in 0..pieces {
+        peer.feed(Message::Request { index: i, begin: 0, length: 16384 }).await.expect("fed");
+    }
+    peer.flush().await.expect("flushed");
+    let deadline = tokio::time::Instant::now() + window;
+    let (mut bytes, mut rejects) = (0u64, 0u32);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, peer.next()).await {
+            Ok(Some(Ok(Message::Piece { data, .. }))) => {
+                bytes += data.len() as u64;
+                if bytes >= pieces as u64 * 16384 {
+                    break;
+                }
+            }
+            Ok(Some(Ok(Message::Reject { .. }))) => rejects += 1,
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(e))) => panic!("unreadable: {e}"),
+            Ok(None) => panic!("the session hung up"),
+            Err(_) => break,
+        }
+    }
+    (bytes, rejects)
+}
+
+/// ⭐⭐ The cap is MEASURED on the wire: a torrent capped at 256 KiB/s sends,
+/// over three seconds, 768 KiB give or take the burst -- not the 2 MiB the
+/// peer asked for, which the uncapped control delivers in well under that.
+/// Before 4.4 the setting existed and capped nothing.
+#[test]
+fn an_upload_cap_holds_on_the_wire() {
+    rt().block_on(async {
+        const PIECES: u32 = 128; // 2 MiB
+        // Control: uncapped, everything arrives at once.
+        let (t, dir) = seeding_with_payload("uncapped", PIECES);
+        let (ours, theirs) = pair().await;
+        let mut peer = start(t, true, ours, theirs);
+        let (bytes, _) = pull(&mut peer, PIECES, Duration::from_secs(3)).await;
+        assert_eq!(bytes, PIECES as u64 * 16384, "control: uncapped, the whole 2 MiB arrives");
+        let _ = std::fs::remove_dir_all(dir);
+
+        // Capped at 256 KiB/s.
+        let (t, dir) = seeding_with_payload("capped", PIECES);
+        t.set_rate_limits(Some(256 * 1024), None);
+        let (ours, theirs) = pair().await;
+        let mut peer = start(t, true, ours, theirs);
+        let (bytes, rejects) = pull(&mut peer, PIECES, Duration::from_secs(3)).await;
+        let kib = bytes / 1024;
+        // 3 s x 256 KiB/s = 768 KiB, plus the 64 KiB burst and the block in
+        // hand. -15% / +15% around that.
+        assert!((650..=900).contains(&kib), "256 KiB/s over 3 s sent {kib} KiB");
+        assert_eq!(rejects, 0, "a capped request is deferred, not refused");
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+/// ⭐ A capped session keeps READING: a Cancel sent while its requests wait
+/// on the cap is acted on at once (BEP 6: answered with a Reject), instead of
+/// sitting in the socket until the queue ahead of it has drained.
+#[test]
+fn a_capped_session_still_hears_the_peer() {
+    rt().block_on(async {
+        const PIECES: u32 = 32;
+        let (t, dir) = seeding_with_payload("cancel", PIECES);
+        t.set_rate_limits(Some(16 * 1024), None); // one block a second
+        let (ours, theirs) = pair().await;
+        let mut peer = start(t, true, ours, theirs);
+        wait_for(&mut peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+        peer.send(Message::Interested).await.expect("sent");
+        for i in 0..PIECES {
+            peer.feed(Message::Request { index: i, begin: 0, length: 16384 }).await.expect("fed");
+        }
+        peer.flush().await.expect("flushed");
+        let last = PIECES - 1;
+        peer.send(Message::Cancel { index: last, begin: 0, length: 16384 }).await.expect("sent");
+        // At 16 KiB/s the last block is ~30 s away; its Reject must come now.
+        let started = tokio::time::Instant::now();
+        let m = wait_for(&mut peer, "reject of the cancelled block", |m| {
+            matches!(m, Message::Reject { index, .. } if *index == last)
+        })
+        .await;
+        assert!(matches!(m, Message::Reject { .. }));
+        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}

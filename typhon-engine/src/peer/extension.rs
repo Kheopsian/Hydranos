@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::collections::BTreeMap;
 
@@ -219,7 +219,38 @@ pub struct PeerPolicy {
     pex: AtomicBool,
     ipv6: AtomicBool,
     block_mse: AtomicBool,
+    /// Seconds a peer may send us nothing useful before it is dropped
+    /// (`peer_timeout`). Read by every session on every turn, so a new value
+    /// reaches the connections already open.
+    idle_timeout_secs: AtomicU64,
+    /// Run the choker (`choking`). Off by default: see `choking::choking_loop`
+    /// for what it cost the one time it ran on a hoard.
+    choking: AtomicBool,
+    /// Unchoke slots per seeding torrent while the choker runs
+    /// (`max_uploads_per_torrent`). `usize::MAX` = unlimited, which is the
+    /// choker off by another name.
+    unchoke_slots: AtomicUsize,
 }
+
+/// Unchoke slots when `max_uploads_per_torrent` is unset (or 0): the four of
+/// BEP 3 and of the choker's own history.
+pub const DEFAULT_UNCHOKE_SLOTS: usize = 4;
+
+/// The idle timeout an engine runs with when nothing sets one. Five minutes is
+/// what every session used, hard-coded, before `peer_timeout` was read.
+pub const DEFAULT_PEER_IDLE_TIMEOUT_SECS: u64 = 300;
+/// Floor on `peer_timeout`. BEP 3 keep-alives are not activity (see
+/// `session::pushes_idle_deadline`), and a peer that has what it needs from
+/// the swarm may legitimately say nothing for a while; a timeout of a few
+/// seconds would turn every quiet connection into a reconnect storm.
+///
+/// Two minutes -- BEP 3's keep-alive cadence, and libtorrent's own default --
+/// rather than anything lower, because of the files already out there: the
+/// template shipped `peer_timeout = 30` / `20` for years while nothing read
+/// the key, and every session ran 300 s. Honoured as written, the day the key
+/// went live would have cut every hoard's quiet peers ten times sooner than
+/// the day before.
+pub const MIN_PEER_IDLE_TIMEOUT_SECS: u64 = 120;
 
 impl Default for PeerPolicy {
     /// PEX on, IPv6 off: what every install has run with.
@@ -228,6 +259,9 @@ impl Default for PeerPolicy {
             pex: AtomicBool::new(true),
             ipv6: AtomicBool::new(false),
             block_mse: AtomicBool::new(false),
+            idle_timeout_secs: AtomicU64::new(DEFAULT_PEER_IDLE_TIMEOUT_SECS),
+            choking: AtomicBool::new(false),
+            unchoke_slots: AtomicUsize::new(DEFAULT_UNCHOKE_SLOTS),
         }
     }
 }
@@ -267,6 +301,44 @@ impl PeerPolicy {
 
     pub fn set_block_mse(&self, on: bool) {
         self.block_mse.store(on, Ordering::Relaxed);
+    }
+
+    /// Set the idle timeout. 0 means the default; anything under the floor is
+    /// raised to it.
+    pub fn set_idle_timeout_secs(&self, secs: u64) {
+        let v = if secs == 0 { DEFAULT_PEER_IDLE_TIMEOUT_SECS } else { secs.max(MIN_PEER_IDLE_TIMEOUT_SECS) };
+        self.idle_timeout_secs.store(v, Ordering::Relaxed);
+    }
+
+    pub fn idle_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.idle_timeout_secs.load(Ordering::Relaxed))
+    }
+
+    pub fn set_choking(&self, on: bool) {
+        self.choking.store(on, Ordering::Relaxed);
+    }
+
+    pub fn choking(&self) -> bool {
+        self.choking.load(Ordering::Relaxed)
+    }
+
+    /// `max_uploads_per_torrent`: a positive number of slots, 0 for the
+    /// default (4), negative for unlimited.
+    pub fn set_unchoke_slots(&self, n: i64) {
+        let v = match n {
+            0 => DEFAULT_UNCHOKE_SLOTS,
+            n if n < 0 => usize::MAX,
+            n => n as usize,
+        };
+        self.unchoke_slots.store(v, Ordering::Relaxed);
+    }
+
+    /// The slots the choker grants, `None` = unlimited (nobody is ever choked).
+    pub fn unchoke_slots(&self) -> Option<usize> {
+        match self.unchoke_slots.load(Ordering::Relaxed) {
+            usize::MAX => None,
+            n => Some(n),
+        }
     }
 }
 
@@ -386,6 +458,21 @@ fn encode_compact_v4(addrs: &[SocketAddr]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⭐ `peer_timeout`: absent / 0 = the 300 s every session ran before the
+    /// key was read, and the template's old 30 / 20 are raised to the floor
+    /// rather than cutting quiet peers ten times sooner on upgrade.
+    #[test]
+    fn peer_timeout_defaults_to_300_and_is_floored() {
+        let p = PeerPolicy::default();
+        assert_eq!(p.idle_timeout().as_secs(), 300);
+        p.set_idle_timeout_secs(0);
+        assert_eq!(p.idle_timeout().as_secs(), 300);
+        p.set_idle_timeout_secs(20);
+        assert_eq!(p.idle_timeout().as_secs(), MIN_PEER_IDLE_TIMEOUT_SECS);
+        p.set_idle_timeout_secs(900);
+        assert_eq!(p.idle_timeout().as_secs(), 900);
+    }
 
     /// Both directions of the PEX switch. They used to have to share one test
     /// because ENABLE_PEX was a process-wide static and two tests toggling it

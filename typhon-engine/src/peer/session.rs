@@ -40,7 +40,7 @@ fn we_are_complete(t: &std::sync::Arc<crate::torrent::meta::TorrentState>) -> bo
 /// Does this frame count as the peer being alive, for the idle timeout?
 ///
 /// Everything except a keep-alive. BEP 3 has a client send one every ~2 min to
-/// hold a connection open, which is well inside `PEER_IDLE_TIMEOUT`; treating
+/// hold a connection open, which is well inside the idle timeout; treating
 /// it as activity made the deadline unreachable and every peer immortal. The
 /// timeout exists to drop peers that do nothing, and a peer whose entire
 /// contribution is "still here" is doing nothing.
@@ -54,7 +54,13 @@ fn pushes_idle_deadline(m: &Message) -> bool {
 /// turned the loop, so a non-seeding session reset its own 300s timeout every
 /// 10 seconds and never hit it. Seeding sessions are unaffected -- their choke
 /// arm is disabled, so only peer traffic ever turned their loop.
-const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+///
+/// The length is the engine's `peer_timeout`. It was a constant 300 s while
+/// the config key was read by nobody; it is now read on every reset, so a new
+/// value reaches the connections already open.
+fn peer_idle_timeout(torrent: &TorrentState) -> Duration {
+    torrent.policy().idle_timeout()
+}
 /// Granularity for pushing out the idle deadline.
 ///
 /// Resetting a `tokio::time::Sleep` removes and re-inserts an entry in the
@@ -67,6 +73,11 @@ const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEADLINE_GRANULARITY: Duration = Duration::from_secs(1);
 /// Cadence at which a downloading session wakes to flush choking decisions.
 const CHOKE_TICK: Duration = Duration::from_secs(10);
+/// Most block requests a session holds back while an upload cap makes them
+/// wait. Clients pipeline a few hundred at most (libtorrent's default ceiling
+/// is 500); beyond this one is refused rather than queued, so a peer that
+/// floods requests cannot make us buffer an unbounded list on its behalf.
+const MAX_DEFERRED_REQUESTS: usize = 512;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -85,6 +96,7 @@ use crate::peer::download::DownloadState;
 use crate::peer::extension::{self, PeerExt, OUR_UT_PEX_ID};
 use crate::peer::message::Message;
 use crate::torrent::meta::{PeerGuard, PeerStats, TorrentState, TorrentStatus};
+use crate::torrent::ratelimit::{Admit, Dir, Gate};
 use crate::wire::codec::BtCodec;
 
 /// Build the BEP 9 reply for one requested block, or a reject if we cannot
@@ -114,6 +126,111 @@ fn serve_metadata_block(torrent: &Arc<TorrentState>, piece: u32) -> Vec<u8> {
     }
     let end = (offset + extension::METADATA_BLOCK).min(total);
     extension::build_metadata_data(piece, total, &dict[offset..end])
+}
+
+/// Whether a block request may be served now.
+///
+/// Checked when the request arrives AND again when a deferred one finally goes
+/// out: a torrent paused, or a peer choked, while a request waited behind the
+/// upload cap must not be served it afterwards.
+fn may_serve(torrent: &TorrentState, stats: &PeerStats, index: u32, length: u32) -> bool {
+    // Serve a piece we actually have, even while still downloading
+    // (tit-for-tat). Seeding => we have all; downloading => check the
+    // picker (verified pieces only). Without this, leechers on a hot
+    // release we're still racing get every Request rejected until we
+    // hit 100% — huge lost upload/ratio on exactly the hottest swarms.
+    let have_requested = torrent.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8
+        || torrent
+            .picker
+            .get()
+            .map_or(false, |pk| pk.lock().unwrap().has_piece(index));
+    have_requested
+        && length <= 16384
+        && !stats.choked.load(Ordering::Relaxed)
+        && !torrent.serving_suspended.load(Ordering::Relaxed)
+        // A paused torrent serves nothing either. Same gap as the request
+        // side: the flag was set and never read here, so a paused seed kept
+        // uploading to the peers it was already connected to.
+        && !torrent.is_paused.load(Ordering::Relaxed)
+}
+
+/// Read one block and put it on the wire, by sendfile when it can and the
+/// buffered path otherwise. Answers false when the connection is broken and
+/// the session must end.
+#[allow(clippy::too_many_arguments)]
+async fn serve_block(
+    framed: &mut Framed<CryptoStream, BtCodec>,
+    torrent: &Arc<TorrentState>,
+    disk: &DiskManager,
+    stats: &PeerStats,
+    addr: SocketAddr,
+    serve_zerocopy: bool,
+    fast_ext: bool,
+    index: u32,
+    begin: u32,
+    length: u32,
+) -> bool {
+    // Zero-copy sendfile fast-path: plaintext TCP peer whose
+    // block lives in a single file. Splices from the page cache
+    // to the socket, skipping the userspace copies the buffered
+    // path pays. Any decline falls back to read_block below.
+    if serve_zerocopy {
+        if let Some((file, foff)) = disk.block_file(torrent, index, begin, length) {
+            if crate::disk::is_block_resident(&file, foff) {
+                if framed.flush().await.is_err() {
+                    tracing::debug!("[peer-debug] {} BREAK flush-before-sendfile failed", addr);
+                    return false;
+                }
+                let served = match framed.get_ref().plain_tcp() {
+                    Some(sock) => crate::disk::serve_block_sendfile(
+                        sock, &file, foff, index, begin, length as usize,
+                    ).await,
+                    None => Ok(false),
+                };
+                match served {
+                    Ok(true) => {
+                        let len = length as u64;
+                        torrent.total_uploaded.fetch_add(len, Ordering::Relaxed);
+                        stats.total_uploaded.fetch_add(len, Ordering::Relaxed);
+                        stats.uploaded_last_tick.fetch_add(len, Ordering::Relaxed);
+                        return true;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {
+                        tracing::debug!("[peer-debug] {} BREAK sendfile mid-stream", addr);
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    match disk.read_block(torrent, index, begin, length).await {
+        Ok(data) => {
+            let len = data.len() as u64;
+            if framed
+                .send(Message::Piece { index, begin, data })
+                .await
+                .is_err()
+            {
+                tracing::debug!("[peer-debug] {} BREAK send-piece failed (idx={}, begin={}, len={})", addr, index, begin, len);
+                return false;
+            }
+            torrent.total_uploaded.fetch_add(len, Ordering::Relaxed);
+            stats.total_uploaded.fetch_add(len, Ordering::Relaxed);
+            stats
+                .uploaded_last_tick
+                .fetch_add(len, Ordering::Relaxed);
+        }
+        Err(_) => {
+            if fast_ext {
+                framed
+                    .send(Message::Reject { index, begin, length })
+                    .await
+                    .ok();
+            }
+        }
+    }
+    true
 }
 
 pub async fn run(
@@ -199,7 +316,7 @@ pub async fn run(
     // (`tokio::runtime::time::Inner`) is one mutex for the whole process, and
     // with 67k sessions on 12 worker threads the contention measured ~30% of
     // the engine's CPU -- more than any BitTorrent work it was doing.
-    let deadline = tokio::time::sleep(PEER_IDLE_TIMEOUT);
+    let deadline = tokio::time::sleep(peer_idle_timeout(&torrent));
     tokio::pin!(deadline);
     // Last time the idle deadline was actually pushed out; see DEADLINE_GRANULARITY.
     let mut deadline_set_at = tokio::time::Instant::now();
@@ -211,6 +328,31 @@ pub async fn run(
     tokio::pin!(choke_poll);
     // The filter generation this session last checked its peer against.
     let mut filter_gen = crate::ipfilter::generation();
+
+    // ── Rate caps ──────────────────────────────────────────────────────────
+    // Waiting for upload tokens INSIDE the request arm would hold the whole
+    // loop: this task is also the only reader of the socket, so a capped seed
+    // would stop reading the peer's Cancels, Haves and -- when we download
+    // from the same peer -- its Pieces, throttling our download by our upload
+    // cap and leaving a fast-extension peer without the answer it is owed.
+    // Rejecting what cannot go now would be wrong the other way: the peer
+    // asks again at once, and a Reject storm is all a cap would produce.
+    //
+    // So a request the cap holds back is queued here, in order, and served
+    // from the top of the loop when its slot comes, while messages keep being
+    // read. The slot is BOOKED (see `ratelimit`), so a session sleeps once per
+    // block, never in a retry loop. Nothing here is allocated or armed for an
+    // uncapped session: the queue stays empty and the timer stays `None`.
+    let mut ul_gate = Gate::default();
+    let mut ul_queue: std::collections::VecDeque<(u32, u32, u32)> = std::collections::VecDeque::new();
+    let mut ul_wait: Option<tokio::time::Instant> = None;
+    // The download side gates the REQUESTS we send: a block is booked when it
+    // is asked for, which is when its bytes are decided, and the pipeline is
+    // simply not refilled while the cap says wait.
+    let mut dl_gate = Gate::default();
+    let mut dl_wait: Option<tokio::time::Instant> = None;
+    let mut rate_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+    let mut rate_timer_at: Option<tokio::time::Instant> = None;
 
     loop {
         // A ban has to reach the peers already connected, not only the next
@@ -243,16 +385,60 @@ pub async fn run(
             }
         }
 
+        // Deferred uploads whose slot has come.
+        if !ul_queue.is_empty() && ul_wait.map_or(true, |t| tokio::time::Instant::now() >= t) {
+            ul_wait = None;
+            let mut broken = false;
+            while let Some(&(index, begin, length)) = ul_queue.front() {
+                if !may_serve(&torrent, &stats, index, length) {
+                    ul_queue.pop_front();
+                    if fast_ext && framed.send(Message::Reject { index, begin, length }).await.is_err() {
+                        broken = true;
+                        break;
+                    }
+                    continue;
+                }
+                match ul_gate.admit(length as u64, &torrent.rate_chain(Dir::Up)) {
+                    Admit::Now => {
+                        ul_queue.pop_front();
+                        if !serve_block(&mut framed, &torrent, &disk, &stats, addr, serve_zerocopy, fast_ext, index, begin, length).await {
+                            broken = true;
+                            break;
+                        }
+                    }
+                    Admit::Wait(t) => {
+                        ul_wait = Some(t);
+                        break;
+                    }
+                }
+            }
+            if broken {
+                break;
+            }
+        }
+
         if dl.is_downloading() && !dl.am_interested && dl.should_be_interested() {
             dl.am_interested = true;
             framed.send(Message::Interested).await.ok();
         }
-        if dl.is_downloading() && !dl.peer_choking {
+        if dl.is_downloading()
+            && !dl.peer_choking
+            && dl_wait.map_or(true, |t| tokio::time::Instant::now() >= t)
+        {
+            dl_wait = None;
+            let chain = torrent.rate_chain(Dir::Down);
+            let requests = dl.get_requests_gated(|len| match dl_gate.admit(len as u64, &chain) {
+                Admit::Now => true,
+                Admit::Wait(t) => {
+                    dl_wait = Some(t);
+                    false
+                }
+            });
             // SinkExt::send flushes after every message, so a pipelined peer
             // cost one write() syscall and a full task wake-up per 17-byte
             // Request. Feed the whole batch, then flush once.
             let mut queued = false;
-            for (idx, off, len) in dl.get_requests() {
+            for (idx, off, len) in requests {
                 if framed
                     .feed(Message::Request { index: idx, begin: off, length: len })
                     .await
@@ -268,7 +454,37 @@ pub async fn run(
             }
         }
 
+        // One timer for both caps, armed only while one of them makes us wait,
+        // and moved only when the instant changes: resetting a Sleep is a
+        // timer-wheel operation (see DEADLINE_GRANULARITY). A wait already in
+        // the past is not re-armed -- it would fire at once, every turn.
+        let now = tokio::time::Instant::now();
+        let next = [if ul_queue.is_empty() { None } else { ul_wait }, dl_wait]
+            .into_iter()
+            .flatten()
+            .filter(|t| *t > now)
+            .min();
+        if next != rate_timer_at {
+            rate_timer_at = next;
+            if let Some(at) = next {
+                match rate_timer.as_mut() {
+                    Some(t) => t.as_mut().reset(at),
+                    None => rate_timer = Some(Box::pin(tokio::time::sleep_until(at))),
+                }
+            }
+        }
+
         tokio::select! {
+            // A capped block's slot has come; the top of the loop sends it.
+            _ = async {
+                match rate_timer.as_mut() {
+                    Some(t) => t.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            }, if rate_timer_at.is_some() => {
+                rate_timer_at = None;
+                continue;
+            }
             // Another peer's task asked us to introduce this one. Woken rather
             // than polled: an idle seeding session registers no timer, and a
             // hole left unmentioned for a minute has closed long before.
@@ -316,7 +532,7 @@ pub async fn run(
                             let now = tokio::time::Instant::now();
                             if now.duration_since(deadline_set_at) >= DEADLINE_GRANULARITY {
                                 deadline_set_at = now;
-                                deadline.as_mut().reset(now + PEER_IDLE_TIMEOUT);
+                                deadline.as_mut().reset(now + peer_idle_timeout(&torrent));
                             }
                         }
                         match message {
@@ -377,29 +593,7 @@ pub async fn run(
                                 }
                             }
                             Message::Request { index, begin, length } => {
-                                let cur_status = torrent.status.load(Ordering::Relaxed);
-                                let we_choke = stats.choked.load(Ordering::Relaxed);
-                                // Serve a piece we actually have, even while still downloading
-                                // (tit-for-tat). Seeding => we have all; downloading => check the
-                                // picker (verified pieces only). Without this, leechers on a hot
-                                // release we're still racing get every Request rejected until we
-                                // hit 100% — huge lost upload/ratio on exactly the hottest swarms.
-                                let have_requested = cur_status == TorrentStatus::Seeding as u8
-                                    || torrent
-                                        .picker
-                                        .get()
-                                        .map_or(false, |pk| pk.lock().unwrap().has_piece(index));
-                                if !have_requested
-                                    || length > 16384
-                                    || we_choke
-                                    || torrent.serving_suspended.load(Ordering::Relaxed)
-                                    // A paused torrent serves nothing either.
-                                    // Same gap as the request side: the flag
-                                    // was set and never read here, so a paused
-                                    // seed kept uploading to the peers it was
-                                    // already connected to.
-                                    || torrent.is_paused.load(Ordering::Relaxed)
-                                {
+                                if !may_serve(&torrent, &stats, index, length) {
                                     if fast_ext {
                                         framed
                                             .send(Message::Reject { index, begin, length })
@@ -408,64 +602,53 @@ pub async fn run(
                                     }
                                     continue;
                                 }
-                                // Zero-copy sendfile fast-path: plaintext TCP peer whose
-                                // block lives in a single file. Splices from the page cache
-                                // to the socket, skipping the userspace copies the buffered
-                                // path pays. Any decline falls back to read_block below.
-                                if serve_zerocopy {
-                                    if let Some((file, foff)) = disk.block_file(&torrent, index, begin, length) {
-                                        if crate::disk::is_block_resident(&file, foff) {
-                                            if framed.flush().await.is_err() {
-                                                tracing::debug!("[peer-debug] {} BREAK flush-before-sendfile failed", addr);
-                                                break;
+                                // Behind requests already waiting on the cap:
+                                // queued after them, so blocks go out in the
+                                // order they were asked for.
+                                let admit = if ul_queue.is_empty() {
+                                    ul_gate.admit(length as u64, &torrent.rate_chain(Dir::Up))
+                                } else {
+                                    Admit::Wait(ul_wait.unwrap_or_else(tokio::time::Instant::now))
+                                };
+                                match admit {
+                                    Admit::Now => {
+                                        if !serve_block(&mut framed, &torrent, &disk, &stats, addr, serve_zerocopy, fast_ext, index, begin, length).await {
+                                            break;
+                                        }
+                                    }
+                                    Admit::Wait(t) => {
+                                        if ul_queue.len() >= MAX_DEFERRED_REQUESTS {
+                                            // Over the ceiling: refused, which
+                                            // a fast peer is told and a plain
+                                            // one finds out by its own timeout.
+                                            if fast_ext {
+                                                framed
+                                                    .send(Message::Reject { index, begin, length })
+                                                    .await
+                                                    .ok();
                                             }
-                                            let served = match framed.get_ref().plain_tcp() {
-                                                Some(sock) => crate::disk::serve_block_sendfile(
-                                                    sock, &file, foff, index, begin, length as usize,
-                                                ).await,
-                                                None => Ok(false),
-                                            };
-                                            match served {
-                                                Ok(true) => {
-                                                    let len = length as u64;
-                                                    torrent.total_uploaded.fetch_add(len, Ordering::Relaxed);
-                                                    stats.total_uploaded.fetch_add(len, Ordering::Relaxed);
-                                                    stats.uploaded_last_tick.fetch_add(len, Ordering::Relaxed);
-                                                    continue;
-                                                }
-                                                Ok(false) => {}
-                                                Err(_) => {
-                                                    tracing::debug!("[peer-debug] {} BREAK sendfile mid-stream", addr);
-                                                    break;
-                                                }
+                                        } else {
+                                            ul_queue.push_back((index, begin, length));
+                                            if ul_wait.is_none() {
+                                                ul_wait = Some(t);
                                             }
                                         }
                                     }
                                 }
-                                match disk.read_block(&torrent, index, begin, length).await {
-                                    Ok(data) => {
-                                        let len = data.len() as u64;
-                                        if framed
-                                            .send(Message::Piece { index, begin, data })
+                            }
+                            // BEP 3 cancel. Only a request still waiting on the
+                            // upload cap can be withdrawn -- anything else was
+                            // served the moment it arrived. BEP 6 owes a fast
+                            // peer exactly one answer per request, so the
+                            // withdrawn one is answered with a Reject.
+                            Message::Cancel { index, begin, length } => {
+                                if let Some(i) = ul_queue.iter().position(|r| *r == (index, begin, length)) {
+                                    ul_queue.remove(i);
+                                    if fast_ext {
+                                        framed
+                                            .send(Message::Reject { index, begin, length })
                                             .await
-                                            .is_err()
-                                        {
-                                            tracing::debug!("[peer-debug] {} BREAK send-piece failed (idx={}, begin={}, len={})", addr, index, begin, len);
-                                            break;
-                                        }
-                                        torrent.total_uploaded.fetch_add(len, Ordering::Relaxed);
-                                        stats.total_uploaded.fetch_add(len, Ordering::Relaxed);
-                                        stats
-                                            .uploaded_last_tick
-                                            .fetch_add(len, Ordering::Relaxed);
-                                    }
-                                    Err(_) => {
-                                        if fast_ext {
-                                            framed
-                                                .send(Message::Reject { index, begin, length })
-                                                .await
-                                                .ok();
-                                        }
+                                            .ok();
                                     }
                                 }
                             }
@@ -613,7 +796,7 @@ pub async fn run(
                     // `.ok()` that became a select! arm ready on every single
                     // turn, and the body's `if let Some` silently swallowed it
                     // without disarming -- a busy loop for the rest of the
-                    // session's life (up to PEER_IDLE_TIMEOUT, 300 s).
+                    // session's life (up to the idle timeout, 300 s by default).
                     // Measured in prod 2026-09-13: `broadcast::recv_ref` was
                     // 5.3% of all CPU, ~11M recv/s against a legitimate Have
                     // rate of ~10^3/s.

@@ -265,6 +265,8 @@ pub enum Action {
     Handoff { node: String, engine: String, then: String },
     NodeFetch { node: String, from_engine: String, engine: String },
     NodeMove { node: String, engine: String },
+    /// Rate caps, KiB/s; `None` keeps a direction, 0 lifts it.
+    Limits { up_kib: Option<i64>, down_kib: Option<i64> },
 }
 
 fn params<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, Refusal> {
@@ -333,6 +335,15 @@ struct FetchParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LimitParams {
+    #[serde(default)]
+    up_kib: Option<i64>,
+    #[serde(default)]
+    down_kib: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NodeMoveParams {
     node: String,
     engine: String,
@@ -395,6 +406,13 @@ impl Action {
             "node-fetch" => {
                 let f: FetchParams = params(p)?;
                 Action::NodeFetch { node: f.node, from_engine: f.from_engine, engine: f.engine }
+            }
+            "limits" => {
+                let l: LimitParams = params(p)?;
+                if l.up_kib.is_none() && l.down_kib.is_none() {
+                    return Err(Refusal::bad("params needs up_kib and/or down_kib (KiB/s, 0 = unlimited)"));
+                }
+                Action::Limits { up_kib: l.up_kib, down_kib: l.down_kib }
             }
             "node-move" => {
                 let m: NodeMoveParams = params(p)?;
@@ -630,6 +648,11 @@ async fn remote_action(state: &AppState, t: &Target, action: &Action) -> Outcome
             format!("/api/engines/{e}/pause"),
             Some(json!({"hashes": [h], "paused": p})),
         ),
+        Action::Limits { up_kib, down_kib } => (
+            reqwest::Method::POST,
+            format!("/api/torrents/{h}/limits?engine={e}"),
+            Some(json!({"up_kib": up_kib, "down_kib": down_kib})),
+        ),
         Action::Remove { delete_files } => (
             reqwest::Method::DELETE,
             format!("/api/torrents/{h}?delete_files={delete_files}&engine={e}"),
@@ -786,6 +809,21 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
                 Method::POST,
                 &format!("/api/nodes/{}/fetch", enc(node)),
                 Some(json!({"info_hash": h, "engine": engine, "from_engine": from, "category": ""})),
+                h,
+                "ok",
+            )
+            .await
+        }
+        Action::Limits { up_kib, down_kib } => {
+            if !t.is_local() {
+                return remote_action(state, t, action).await;
+            }
+            // The copy the row is, like a category move: the same hash in
+            // another engine keeps its own caps.
+            c.simple(
+                Method::POST,
+                &format!("/api/torrents/{h}/limits?engine={}", enc(&t.engine())),
+                Some(json!({"up_kib": up_kib, "down_kib": down_kib})),
                 h,
                 "ok",
             )
@@ -1177,6 +1215,32 @@ mod tests {
         assert!(tags_of(&s, &h[0]).contains(&"noHL".to_string()));
         assert!(tags_of(&s, &h[1]).contains(&"noHL".to_string()));
         assert!(!tags_of(&s, &h[2]).contains(&"noHL".to_string()), "series was not selected");
+    }
+
+    /// ⭐ `limits` by filter caps exactly the filtered torrents, in the engine
+    /// itself (read back from the torrent, not from the job's tally), and an
+    /// empty params is refused rather than read as "lift everything".
+    #[tokio::test]
+    async fn limits_by_filter_cap_exactly_the_filtered_torrents() {
+        let (s, h) = library("sel-limits");
+        let (st, _) = start(&s, "limits", json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "no direction given");
+        let (st, v) = start(
+            &s,
+            "limits",
+            json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {"up_kib": 100, "down_kib": 0}}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+        let j = wait(&s, v["job"].as_str().unwrap()).await;
+        assert_eq!((j["done"].as_u64(), j["failed"].as_u64()), (Some(2), Some(0)), "{j}");
+        let hoard = s.state.engines.get("hoard").unwrap();
+        let caps = |hash: &str| {
+            hoard.manager.get(&typhon_engine::torrent::hex_decode(hash).unwrap()).unwrap().rate_limits()
+        };
+        assert_eq!(caps(&h[0]), (102_400, 0));
+        assert_eq!(caps(&h[1]), (102_400, 0));
+        assert_eq!(caps(&h[2]), (0, 0), "series was not selected");
     }
 
     #[tokio::test]

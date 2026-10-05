@@ -33,8 +33,8 @@ pub fn dispatch(
         "list_torrents" => list_torrents(params, torrent_mgr),
         "get_peers" => get_peers(params, torrent_mgr),
         "add_peers" => add_peers(params, torrent_mgr),
-        "set_upload_limit" => json!({"ok": true}), // TODO
-        "set_download_limit" => json!({"ok": true}), // TODO
+        "set_upload_limit" => set_rate_limit(params, torrent_mgr, crate::torrent::ratelimit::Dir::Up),
+        "set_download_limit" => set_rate_limit(params, torrent_mgr, crate::torrent::ratelimit::Dir::Down),
         "get_session_stats" => get_session_stats(torrent_mgr),
         "get_trackers" => get_trackers(params, torrent_mgr),
         "set_trackers" => set_trackers(params, torrent_mgr),
@@ -724,6 +724,15 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
             "peer_timeout": config.peer_timeout,
             "engine": "typhon",
         },
+        // The live caps, bytes/s (0 = none), which after a hot change are not
+        // what `settings` would echo from the file.
+        "rate_limits": {
+            "upload": mgr.rates().engine.up.rate(),
+            "download": mgr.rates().engine.down.rate(),
+            "client_upload": mgr.rates().client().map_or(0, |c| c.up.rate()),
+            "client_download": mgr.rates().client().map_or(0, |c| c.down.rate()),
+            "peer_timeout_secs": mgr.policy().idle_timeout().as_secs(),
+        },
         // Live view of the dial governor: what the ceiling is, how close we
         // are to it, and how much work each control is shedding. `skipped_*`
         // climbing is the signal that a limit is set too tight.
@@ -892,6 +901,37 @@ fn set_dials_paused(params: &Value, torrent_mgr: &Arc<TorrentManager>) -> Value 
     torrent_mgr.limiter().set_dials_paused(paused);
     info!("[peer] outbound dials {}", if paused { "PAUSED (startup pause held)" } else { "resumed" });
     json!({"ok": true, "paused": paused})
+}
+
+/// `set_upload_limit` / `set_download_limit`: `{"limit": <bytes/s>}` for the
+/// engine, plus `"info_hash"` for one torrent. 0 or a negative value lifts the
+/// cap. Answers with the cap the engine now HOLDS, read back, not the request.
+///
+/// These answered `{"ok":true}` and did nothing until 4.4.
+fn set_rate_limit(params: &Value, torrent_mgr: &Arc<TorrentManager>, dir: crate::torrent::ratelimit::Dir) -> Value {
+    use crate::torrent::ratelimit::Dir;
+    let limit = match params.get("limit").and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))) {
+        Some(l) => l.max(0) as u64,
+        None => return json!({"error": "missing limit (bytes/s, 0 = unlimited)"}),
+    };
+    if let Some(hex) = params.get("info_hash").and_then(|v| v.as_str()) {
+        let ih = match hex_decode(hex) {
+            Ok(h) => h,
+            Err(e) => return json!({"error": e}),
+        };
+        let (up, down) = match dir {
+            Dir::Up => (Some(limit), None),
+            Dir::Down => (None, Some(limit)),
+        };
+        return match torrent_mgr.set_torrent_rate_limits(&ih, up, down) {
+            Ok((u, d)) => json!({"ok": true, "info_hash": hex.to_lowercase(), "limit": if dir == Dir::Up { u } else { d }}),
+            Err(e) => json!({"error": e}),
+        };
+    }
+    let bucket = torrent_mgr.rates().engine.get(dir);
+    bucket.set_rate(limit);
+    info!("[peer] engine {:?} rate cap set to {} B/s (0 = unlimited)", dir, limit);
+    json!({"ok": true, "limit": bucket.rate()})
 }
 
 /// Hot-sets the dial governor: rate ceiling and/or live-connection ceiling.
@@ -1363,6 +1403,26 @@ mod verb_tests {
             let out = call(&mgr, method, serde_json::json!({}));
             assert!(out.get("error").is_some(), "{method} accepted no arguments: {out}");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ The verbs MOVE the caps now: read back from the engine, not from
+    /// the answer. They were `{"ok":true}` stubs that set nothing.
+    #[test]
+    fn the_limit_verbs_move_the_live_caps() {
+        let (mgr, root) = manager("ratecaps");
+        let out = call(&mgr, "set_upload_limit", serde_json::json!({"limit": 51200}));
+        assert!(out.get("error").is_none(), "{out}");
+        assert_eq!(mgr.rates().engine.up.rate(), 51200, "the engine upload cap did not move");
+        let out = call(&mgr, "set_download_limit", serde_json::json!({"limit": 4096}));
+        assert!(out.get("error").is_none(), "{out}");
+        assert_eq!(mgr.rates().engine.down.rate(), 4096);
+        // A negative limit lifts it, as zero does.
+        call(&mgr, "set_upload_limit", serde_json::json!({"limit": -1}));
+        assert_eq!(mgr.rates().engine.up.rate(), 0);
+        // Per torrent: an unknown hash is refused, not silently accepted.
+        let out = call(&mgr, "set_upload_limit", serde_json::json!({"limit": 1, "info_hash": "0".repeat(40)}));
+        assert!(out.get("error").is_some(), "a hash this engine does not hold: {out}");
         let _ = std::fs::remove_dir_all(root);
     }
 
