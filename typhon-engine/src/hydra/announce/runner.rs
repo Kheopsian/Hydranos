@@ -322,6 +322,11 @@ pub(super) async fn announce_one(
     // hands its address to leechers it will refuse; it leaves the swarm the
     // way a stopped one does, and comes back with `started` once a recheck
     // finds the data.
+    // Held at startup (`start_paused`): not a word to any tracker until the
+    // gate is released; come back shortly to check.
+    if manager.limiter().dials_paused() {
+        return Outcome { next_in: Duration::from_secs(15), gone: false, ..gone };
+    }
     let silent = torrent.is_paused.load(Ordering::Relaxed) || status == TorrentStatus::Error as u8;
 
     // BEP 3's counters are the SESSION's: bytes moved since `started`. The
