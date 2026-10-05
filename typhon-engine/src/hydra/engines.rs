@@ -395,6 +395,69 @@ impl EngineHost {
         }
     }
 
+    /// Send `stopped` for every torrent that announced `started`, on every
+    /// engine, race engines first, within `budget`. For a clean stop: what is
+    /// not sent in time is left to the trackers' own timeouts, which is what
+    /// libtorrent does with its 5-second `stop_tracker_timeout`.
+    pub async fn depart_all(&self, budget: std::time::Duration) -> usize {
+        let mut work: Vec<(std::sync::Arc<typhon_engine::torrent::meta::TorrentState>, std::sync::Arc<crate::announce::policy::Policy>, u16)> = Vec::new();
+        let mut engines: Vec<&Engine> = self.engines().iter().collect();
+        engines.sort_by_key(|e| e.role != "race");
+        for engine in engines {
+            let Some(handle) = engine.announce_policy.get() else { continue };
+            let policy = handle.read().unwrap_or_else(|p| p.into_inner()).clone();
+            for t in engine.manager.all() {
+                let started = t.announce_book.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|s| s.started);
+                if started {
+                    work.push((t, policy.clone(), engine.session.listen_port));
+                }
+            }
+        }
+        if work.is_empty() {
+            return 0;
+        }
+        let total = work.len();
+        // 64 workers pulling from one list, not one task per torrent: a
+        // million-torrent hoard must not spawn a million tasks on its way out.
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(work.into_iter()));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..64 {
+            let queue = queue.clone();
+            let done = done.clone();
+            set.spawn(async move {
+                loop {
+                    let next = queue.lock().unwrap_or_else(|p| p.into_inner()).next();
+                    let Some((t, policy, port)) = next else { break };
+                    crate::announce::runner::depart(t, policy, port).await;
+                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        let _ = tokio::time::timeout(budget, async { while set.join_next().await.is_some() {} }).await;
+        set.abort_all();
+        let done = done.load(std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(departed = done, of = total, "stopped sent to the trackers");
+        done
+    }
+
+    /// Send `stopped` for one torrent leaving this engine, in the background.
+    pub fn spawn_departure(&self, engine_id: &str, t: std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) {
+        let Some(engine) = self.engines().iter().find(|e| e.id == engine_id) else { return };
+        let Some(handle) = engine.announce_policy.get() else { return };
+        let policy = handle.read().unwrap_or_else(|p| p.into_inner()).clone();
+        let port = engine.session.listen_port;
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(20),
+                    crate::announce::runner::depart(t, policy, port),
+                )
+                .await;
+            });
+        }
+    }
+
     pub fn engines(&self) -> &[Engine] {
         &self.engines
     }
