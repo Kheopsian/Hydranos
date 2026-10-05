@@ -21,6 +21,241 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## v4.3.1 -- cross-seed sees the library
+
+A patch ahead of Saturday's release. It started with a move from qBittorrent
+with cross-seed pointed at the qBittorrent API: cross-seed reported "all 0
+torrents" on a full library. Following that thread turned up a run of places
+where 4.3 answered "ok" and did nothing, and they are fixed together here.
+
+### Behaviour changes
+What a script, a supervisor or a habit may notice after upgrading.
+- **Removing an engine that still holds torrents is refused (409)** with the
+  count. 4.3 dropped its section and left it seeding until the next restart,
+  after which its torrents had a row and no engine.
+- **Creating a category that exists is a 409**, natively and through the
+  qBittorrent API's `createCategory`, as qBittorrent answers. 4.3 overwrote it
+  (the shim reset it to hoard). Renaming onto an existing name is a 409 too,
+  and `mode` must be `race` or `hoard` (lower-cased first; anything else is a
+  400): "Hoard" from a script used to route to race.
+- **`hashes=all` on the qBittorrent API's write endpoints means every
+  torrent** -- pause, resume, tags, setCategory, reannounce, recheck, and
+  delete. 4.3 took it as a hash named "all", matched nothing and answered 200,
+  so a script sending it did nothing; it now does what qBittorrent does.
+- **`start_paused` holds the engine for real**: no dial and no announce until
+  the gate is released from the UI or the API. 4.3 showed the "Startup pause"
+  banner and held nothing.
+- **An engine with `bind_interface` announces from that interface or not at
+  all.** HTTP and UDP announces are bound to it; when the tunnel is down the
+  announce fails instead of leaving by the default route. Where a socket
+  cannot be pinned to an interface (Windows; UDP trackers on any platform but
+  Linux), such an engine refuses to announce. If `bind_interface` names an
+  interface missing at startup, uTP is off for that run.
+- **`enable_ipv6 = false` announces over IPv4 only**; "auto" trackers were
+  still reached over IPv6.
+- **Trackers hear `stopped` when a torrent is removed and when the daemon
+  stops.** A clean stop spends up to 5 seconds on them, race engines first,
+  before the resume flush.
+- **A race announces on a new cadence.** While a tracker answers
+  "unregistered", the torrent is retried every 5 s for 6 minutes
+  (`[race] registration_retry_minutes`), replacing 4.3's 7 s x 50; once
+  accepted, the tracker's own interval applies. An interval under a minute is
+  raised to a minute (4.3 replaced it with 30 minutes, which is why a race
+  announced once and came back half an hour later).
+- **"Take the listen port from gluetun" now does something**, and holds every
+  announce of that engine until gluetun has given a first port. An engine
+  with it set and no reachable gluetun control server announces nothing.
+- **Restart (UI, API, rescue mode) exits with code 75, not 0**, after the
+  same drain and flush as SIGTERM, so a `Restart=on-failure` unit brings it
+  back. The drain is bounded to 5 s, and `HYDRANOS_STOP_TIMEOUT` is enforced:
+  past it the daemon leaves with what is saved.
+- **Missing config keys take their documented defaults.** A `[race]`/`[hoard]`
+  section without `enable_dht`, `enable_pex` or `enable_webseed` now has them
+  on (4.3 turned them off); one without `listen_port` listens on 16171 (race)
+  or 16172 (hoard), or the next free port with a warning, instead of a random
+  one.
+- **Releases no longer ship `hydranos-engine`**, a 3.x leftover nothing
+  started. `packaging/install.sh` stops installing it, and the systemd unit
+  drops `HYDRANOS_ENGINE_BIN`, which nothing read.
+- **`min_age_minutes` is gone from the config template**: no code read it. An
+  existing value is harmless.
+- **The qBittorrent API's `torrents/trackers` answers 404 for an unknown
+  hash**, as qBittorrent does, instead of a 200 with no tracker.
+- **An unknown command-line argument is reported on stderr**, and the daemon
+  starts anyway. `--agent-only` and `--front-only` say the mode is gone in 4.x
+  and point to nodes (`install.sh --register-to`).
+- **Adding a torrent through `POST /api/torrents` applies what is sent**
+  (`mode`, `create_subfolder`, `seed_mode`/`skip_recheck`, `stopped`), and a
+  refusal is a 400, 404, 409 or 500 with the reason, not always a 500.
+- **Two workflow conditions now match what they say**, so an existing rule on
+  them may start acting: `data_missing` was never read (it matched nothing,
+  and its NOT everything), and `progress` is the share of the payload held,
+  no longer downloaded / size (about 0 % for a torrent added over its data).
+- **A new password needs 8 characters**, at setup and when changed (the UI
+  said 6).
+- **On Windows, without `--config`, the config is read beside
+  `hydranos.exe`**, as the Windows README says, not from `\config` on the
+  current drive. An existing `\config` is still used.
+- **`POST /api/torrents/:hash/graduate` runs the checks a category move
+  runs** -- unsafe path, files another torrent reads, hardlinks
+  (`allow_breaking_hardlinks`), free space -- and can be refused by them.
+
+### Added
+- **The race drain can take a per-volume quota.** On a shared seedbox slot
+  `statvfs` sees every tenant's data, so the drain fired on an empty slot or
+  never on a full one. With a quota (in GB in the drain panel; 0 removes it),
+  used is the data Hydranos wrote there and free is the smaller of what the
+  quota and the disk leave; the drain, the add refusal and the panel all read
+  the same figure, and the logs say "of N TB quota" or "of disk". Without a
+  quota nothing changes.
+- **`install.sh --user` installs a node without root.** The binary goes in
+  `~/.local/bin`, config and data under XDG, and a systemd user unit (linger
+  checked); without `systemd --user` it starts under `nohup` and prints the
+  line to ask the host for. Chosen on its own when there is neither root nor
+  Docker, where `--register-to` used to refuse.
+- **A failed qBittorrent import can be retried** without typing the password
+  again: failures are listed with their reason and kept for
+  `POST /api/import/retry`. The password is held in memory only, taken by the
+  retry, and kept by "Back" in the wizard. Exports are retried on a dropped
+  connection, a 5xx or a 429 (4 attempts, with backoff), the session is
+  renewed if it expires mid-import, and a 409 (a magnet with no metadata yet)
+  is not retried.
+- **`hydranos reset-password <password> [config]` and `hydranos
+  hash-password <password>`.** The first-run screen and the packaging
+  pointed to a command that did not exist. Also `--config=PATH`, `--help` and
+  `-V`.
+- **`torrents/export` on the qBittorrent API** serves the stored `.torrent`.
+- **"No category" in the category submenu**, and a third workflow group kind,
+  "none of these (NOT)".
+
+### Security
+- **Announces and dials left by the wrong interface.** HTTP and UDP announces
+  used one client per address family for the whole process, so every engine
+  announced by the default route whatever its `bind_interface` said, and the
+  tracker recorded the host's address instead of the tunnel's. The outbound
+  dial queue was one per process too: every engine dialled with the first
+  engine's binding, peer id, uTP socket and limits. And a `bind_interface`
+  missing at startup logged "refusing to open" the uTP socket, then opened it
+  unpinned. Each engine now has its own announce clients and dial queue, bound
+  to its interface; see *Behaviour changes* for what fails closed.
+- **First-run setup could be claimed from the internet.** The guard read only
+  `X-Forwarded-For` and took a request without it as local, so a forwarded
+  port let a direct call through. The socket peer decides first, and a private
+  peer's forwarding header must name a private client too.
+- **Changing the password changed nothing.** Config > Account answered
+  "Password changed." and wrote nothing: the old password kept working. It is
+  now hashed and stored as first-run setup does.
+
+### Fixed
+- **cross-seed sees the library.** cross-seed sends every call as a POST
+  form, and `torrents/files`, `properties` and `trackers` read `hash` from the
+  query string only: each answered 404, and cross-seed reported "all 0
+  torrents". They read the body too now, as `torrents/info` already did, and
+  `categories` and `tags` answer a POST.
+- **`torrents/files` describes files the way qBittorrent does**: a multi-file
+  torrent's files are named under its folder (without it every candidate
+  looked like another layout), and piece ranges account for BEP 47 padding.
+  4.3 also reported every file at 100 % on piece range [0, 0]; each file has
+  its own range and the share of it held.
+- **`torrents/info` lists every engine, each torrent once, with its
+  `tracker`.** It listed race and hoard only, a torrent held by both twice,
+  and `tracker` was always empty, so cross-seed and the *arrs could not tell
+  trackers apart.
+- **`deleteTags` deletes the tag**, from the list and from every torrent; a
+  3.x bug had been kept on purpose. `removeCategories` clears the label from
+  its torrents, as qBittorrent does. `addTrackers` announces to the new
+  trackers at once, and `transfer/info` reports the engines' rates instead of
+  0.
+- **The qBittorrent import summary separates what it did**: complete with
+  data found, to check or download, added stopped. "7821 seeding" was printed
+  over torrents all added stopped.
+- **A move between engines arrives as it left, or not at all.** *Move to
+  engine* removed the source, then re-added the `.torrent` in seed mode: a
+  refusing target left the torrent in no engine, an incomplete one arrived
+  marked complete, and edited trackers, counters and the stopped state were
+  lost. Moves and graduations now carry the source's resume record; a move
+  adopts in the target before releasing the source, and a failed graduation
+  moves the files back and re-adopts the torrent where it was.
+- **Every stop flushes resume data.** A restart from the UI or the API exited
+  without flushing, and a graceful stop waited forever on the UI's two
+  never-ending connections (event stream, log tail), so with a tab open the
+  supervisor's SIGKILL came first.
+- **Windows stops cleanly** on closing the console, Ctrl+Break, sign-out and
+  system shutdown (4.3 heard only Ctrl+C and the tray), and the updater
+  reaches the running instance through a named event instead of a `taskkill`
+  that could not.
+- **Rescue mode binds `api_host`/`api_port`**, not `0.0.0.0:8199` whatever
+  they said.
+- **Purging a race removes the race copy.** The purge (and MCP `purge_race`)
+  deleted every store row of the hash and left the engines holding the
+  torrent; the post-restore reconcile deleted other engines' rows with its
+  own. Each now touches this engine's copy only.
+- **A tracker edit is saved at once**, not at the next periodic resume save,
+  which a kill could beat.
+- **"+ Manual host" no longer releases a tracker to the drain.** The form
+  opened with Minimum seed at 0, and saving it declared "this tracker asks for
+  nothing", letting the drain delete every torrent of that tracker. It opens
+  blank. The Host hint describes the real match (the host in the Tracker
+  column, subdomains included).
+- **A rebound listen port is the one announced.** A rebind, from gluetun or
+  `POST /api/{engine}/listen-port`, moved the listener while every announce
+  and `stopped` kept the old port: trackers handed peers a port nothing
+  listened on.
+- **The Add tab's options are applied** (see *Behaviour changes*); a
+  `torrent_url` is fetched; picking a category always replaces the save path;
+  the success line no longer reads "-> undefined"; the engine group of the
+  context menu shows as soon as there are two local engines.
+- **Categories: rename, delete and orphans work.** A rename wrote the edit
+  under the old name; it moves the definition and relabels its torrents. A
+  delete left the label on every torrent and answered `"cleared": 0`.
+  `GET /api/categories/orphans` was always empty, so "Adopt" never appeared.
+- **Bulk actions act on the row's own copy.** An extra engine's row in a
+  category or location move hit the hoard or race copy of the same hash; rows
+  from another node went to a stub or to this node's copy. They are relayed
+  to the node that holds them (node names with a hyphen matched whole), bulk
+  recheck covers race copies, and a move that changes engine says the torrent
+  stops seeding while its data is copied.
+- **The Race tab lists every race-role engine**, not only the one named
+  "race", and the per-engine torrent lists apply the page's filters instead
+  of returning the whole engine.
+- **The workflow editor keeps what it shows.** Saving an edit switched the
+  workflow off; a NOT group was read back as the group it wrapped, so saving
+  inverted the rule; "move files to a folder" lost `allow_breaking_hardlinks`
+  on every save, and refused every path on Windows. The Every column says
+  "when added" for those workflows, and two hints are corrected.
+- **Cancelling a job cancels it.** It answered ok and did nothing: a queued
+  job is cancelled, a running graduation stops between two files and is put
+  back, other running moves are refused with the reason, and an unknown id is
+  a 404. "Active only" no longer hides every queued job.
+- **Advanced settings can save the tracker tables** (passkeys, IP modes,
+  minimum seed, muted, hidden): their quoted host-name keys answered "key not
+  found". An extra engine's out-of-range port is refused with a 400 instead of
+  a 200 that kept the old value.
+- **`HYDRANOS_STOP_TIMEOUT` reads `60s` and `2m` again** (also `120`,
+  `1m30s`, `1h`). Only bare seconds parsed, so the compose file's own `60s`
+  fell back to 120 s silently; a value it cannot read is now warned about at
+  startup.
+- **Node enrolment and packaging do what they claim.** `install.sh` asked
+  for an archive name no release has; its Docker path removed any container
+  named `hydranos` (the controller itself, on the same machine) and a re-run
+  went to `:latest`. Only a container the script labelled is replaced,
+  `--container` names another, and the node runs the controller's version. A
+  node name already taken is refused before the enrolment token is spent.
+  The bare-binary config no longer points `data_dir` at `/configs`, and the
+  system unit and `docker run` get a stop timeout that covers the flush.
+- **`hydranos.log` is rotated** at 128 MiB, four old files kept; it grew
+  forever while the compose file said it rotated.
+- **The update check and "Report issue" use the repository's current name.**
+
+### Changed
+- **`packaging/install.sh` installs the updater** and keeps an edited unit,
+  putting the shipped one beside it as `.new`; the unit stops within 150 s.
+- **`docker-compose.yml` matches the daemon**: no "temporary admin password"
+  (the first-run screen sets it), `HYDRANOS_STOP_TIMEOUT` in seconds and 120
+  by default, the log file named `hydranos.log`.
+- **The 3.x agent/front design notes are removed** from `docs/`, and the
+  Windows README no longer lists `hydranos-engine.exe`.
+
 ## v4.3.0 -- magnets, UDP trackers, BitTorrent v2 and an IP filter
 
 ### Added
