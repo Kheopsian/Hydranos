@@ -178,14 +178,17 @@ pub async fn announce(
 }
 
 /// Pin a client builder to an interface, or refuse where that is impossible.
-fn pin_builder(builder: reqwest::ClientBuilder, device: &str) -> Result<reqwest::ClientBuilder, String> {
+pub(crate) fn pin_builder(builder: reqwest::ClientBuilder, device: &str) -> Result<reqwest::ClientBuilder, String> {
     let device = device.trim();
     if device.is_empty() {
         return Ok(builder);
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        Ok(builder.interface(device))
+        // The tracker's NAME too: in a managed tunnel it is asked of the
+        // tunnel's DNS server through the tunnel, not of the host's resolver
+        // (`tunneldns`). Through a proxy it is never resolved here at all.
+        Ok(builder.interface(device).dns_resolver(crate::tunneldns::Resolver::new(device)))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -708,6 +711,23 @@ mod announce_wire_tests {
         assert_eq!(resp.peers.len(), 1, "got {:?}", resp.peers);
         assert_eq!(resp.peers[0].to_string(), "93.184.216.34:6881");
         assert!(resp.failure.is_none());
+    }
+
+    /// An engine in a managed tunnel asks the TUNNEL's DNS server for its
+    /// tracker's name, from a socket pinned to the tunnel; the host's
+    /// resolver never sees it. `lo` stands in for `wg-<engine>`.
+    #[tokio::test]
+    async fn a_tunnel_engine_resolves_its_tracker_through_the_tunnel_dns() {
+        let _one = crate::tunneldns::tests::LO.lock().await;
+        let t = fake_tracker(OK_BODY).await;
+        let (dns, asked) = crate::tunneldns::tests::fake_server([127, 0, 0, 1]).await;
+        crate::tunneldns::tests::register("lo", dns);
+        let url = t.url.replace("127.0.0.1", "tracker.tunnel-dns.invalid");
+        let resp = announce_on(&url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "", "lo", "").await;
+        crate::tunneldns::forget("lo");
+        let resp = resp.expect("resolved by the tunnel server, then announced on lo");
+        assert_eq!(resp.complete, 5);
+        assert!(asked.lock().unwrap().iter().any(|n| n == "tracker.tunnel-dns.invalid"));
     }
 
     /// ⭐ A tracker refusing us answers 200 with a `failure reason`. Treating

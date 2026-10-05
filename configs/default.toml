@@ -7,6 +7,23 @@ api_port = 8199
 api_key = ""
 data_dir = "/config"
 create_torrent_folder = false
+# The daemon's OWN requests (tracker lists, ipfilter lists, the update check,
+# webhooks, .torrent URLs) leave by this interface, or through [proxy] below.
+# Empty: the default route. The engines have their own, in [race]/[hoard].
+# bind_interface = "wg0"
+# Kill switch: nothing leaves outside the interface or proxy configured. The
+# daemon's requests are refused when neither is set or usable (never sent by
+# the default route); an engine with no interface and no proxy is named at
+# startup and on the Network tab as NOT covered.
+# kill_switch = false
+
+# SOCKS5 proxy for the daemon's own requests (socks5h: names are resolved by
+# the proxy). The engines' proxy is socks5_outbound_* in [race]/[hoard].
+# [proxy]
+# socks5_host = "10.0.0.1"
+# socks5_port = 1080
+# socks5_user = ""
+# socks5_pass = ""
 
 # ─────────────────────────────────────────────
 # RACE SESSION - maximum aggressiveness (hot downloads)
@@ -31,6 +48,12 @@ enable_ipv6 = false
 # them off to make this engine reach nothing but its trackers.
 enable_dht = true
 enable_pex = true
+# Local Service Discovery (BEP 14): announce the torrents this engine is
+# downloading, or has peers for, to the LAN by multicast, and take the LAN
+# peers announcing the same ones. At most one ~1 KB datagram a second whatever
+# the size of the library; never a `private` torrent; off behind a SOCKS5
+# proxy. On by default for race, as in qBittorrent.
+enable_lsd = true
 max_connections = 4000
 # Speed caps for this engine, in BYTES per second. 0 = unlimited. Applied live
 # when saved. A torrent can carry its own cap on top (right-click > Limit rate).
@@ -110,6 +133,9 @@ enable_ipv6 = false
 # them off to make this engine reach nothing but its trackers.
 enable_dht = true
 enable_pex = true
+# Local Service Discovery (see [race]). Off by default here: a seedbox of
+# mostly private torrents downloads little and LSD never announces those.
+enable_lsd = false
 max_connections = 12000
 # Speed caps, bytes/s, 0 = unlimited (see [race]).
 upload_rate_limit = 0

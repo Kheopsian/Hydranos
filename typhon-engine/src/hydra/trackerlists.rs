@@ -76,16 +76,16 @@ pub fn get(url: &str) -> Result<Vec<String>, String> {
     }
 }
 
-fn fetch(url: &str) -> Result<Vec<String>, String> {
-    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .user_agent(typhon_engine::config::user_agent())
-            .build()
-            .unwrap_or_default()
-    });
-    let resp = client.get(url).send().map_err(|e| format!("tracker list {url}: {e}"))?;
+pub(crate) fn fetch(url: &str) -> Result<Vec<String>, String> {
+    // The daemon's own way out (`[proxy]`, `[daemon] bind_interface`), not
+    // the default route: the list host would otherwise see the home address
+    // of a node whose engines all sit in a tunnel.
+    let client = typhon_engine::egress::blocking_client().map_err(|e| format!("tracker list {url}: {e}"))?;
+    let resp = client
+        .get(url)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .map_err(|e| format!("tracker list {url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("tracker list {url}: HTTP {}", resp.status().as_u16()));
     }

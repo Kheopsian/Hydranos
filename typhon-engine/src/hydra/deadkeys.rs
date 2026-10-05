@@ -349,6 +349,8 @@ mod tests {
         let cfg: crate::config::Config = toml::from_str(TEMPLATE).expect("default.toml parses");
         assert_eq!(cfg.race.listen_port, 16171);
         assert_eq!(cfg.hoard.listen_port, 16172);
+        // LSD is read, and written out as the documented per-role default.
+        assert_eq!((cfg.race.enable_lsd, cfg.hoard.enable_lsd), (Some(true), Some(false)));
     }
 
     /// A file carried over from 3.x: every dead key it holds is named once,

@@ -29,6 +29,30 @@ pub struct Daemon {
     pub create_torrent_folder: bool,
     #[serde(default)]
     pub update_check_disabled: bool,
+    /// The interface the daemon's OWN requests leave by (tracker lists,
+    /// ipfilter lists, the update check, webhooks, `.torrent` URLs). Empty =
+    /// the default route. Not the engines': each has its own in its section.
+    #[serde(default)]
+    pub bind_interface: String,
+    /// Nothing the daemon sends leaves outside `[proxy]` / `bind_interface`:
+    /// with neither, it sends nothing at all. See `egress`.
+    #[serde(default)]
+    pub kill_switch: bool,
+}
+
+/// `[proxy]`: the SOCKS5 proxy the daemon's own requests go through. The
+/// section and its keys are 3.x's, where they carried the public-IP lookup
+/// and the speed test; an old file keeps meaning what it said.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Proxy {
+    #[serde(default)]
+    pub socks5_host: String,
+    #[serde(default)]
+    pub socks5_port: u16,
+    #[serde(default)]
+    pub socks5_user: String,
+    #[serde(default)]
+    pub socks5_pass: String,
 }
 
 impl Session {
@@ -73,6 +97,11 @@ pub struct Session {
     /// is built by `Default`, which would have said no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_udp_trackers: Option<bool>,
+    /// Local Service Discovery (BEP 14). Absent means the role's default
+    /// (`lsd_on`), not false: an Option for the same reason as
+    /// `enable_udp_trackers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_lsd: Option<bool>,
     #[serde(default)]
     pub aio_threads: Option<usize>,
     #[serde(default)]
@@ -198,6 +227,21 @@ impl Session {
     /// that is present but empty.
     pub fn with_defaults() -> Session {
         Session { enable_dht: true, enable_pex: true, enable_webseed: true, ..Default::default() }
+    }
+
+    /// Whether this engine runs Local Service Discovery: `enable_lsd` when
+    /// written, else on for race and off for anything else.
+    ///
+    /// qBittorrent turns LSD on by default, and race is the engine that
+    /// downloads, which is what LSD helps: a LAN peer with the same public
+    /// torrent serves pieces at LAN speed. A hoard is a seedbox of mostly
+    /// private torrents -- LSD never announces those -- that downloads little;
+    /// LSD there buys nothing, so it stays off unless asked for. A file from
+    /// before LSD existed keeps that same split: hoard is unchanged, and race
+    /// only starts announcing its active public torrents, at most one
+    /// datagram a second on the LAN (`lsd::MAX_MESSAGES_PER_ROUND`).
+    pub fn lsd_on(&self, role: &str) -> bool {
+        self.enable_lsd.unwrap_or(role == "race")
     }
 
     /// How many file descriptors the engine's disk pool keeps open.
@@ -430,6 +474,10 @@ pub struct Config {
 
     #[serde(default)]
     pub network: Network,
+
+    /// The daemon's own SOCKS5 proxy (`egress`).
+    #[serde(default)]
+    pub proxy: Proxy,
 
     /// The agent endpoint, `/mcp`.
     #[serde(default)]
@@ -863,6 +911,10 @@ mod default_tests {
         let cfg: Config = toml::from_str("[race]\n[[agent]]\nname = \"vpn1\"\nrole = \"race\"\n").unwrap();
         assert!(cfg.race.enable_dht && cfg.race.enable_pex && cfg.race.enable_webseed);
         assert!(cfg.hoard.enable_dht, "a missing section too");
+        // LSD: race on, hoard off, when the file says nothing (`lsd_on`).
+        assert!(cfg.race.lsd_on("race") && !cfg.hoard.lsd_on("hoard"));
+        let off: Config = toml::from_str("[race]\nenable_lsd = false\n[hoard]\nenable_lsd = true\n").unwrap();
+        assert!(!off.race.lsd_on("race") && off.hoard.lsd_on("hoard"), "a written key wins");
         let engines = cfg.local_engines();
         let ports: Vec<u16> = engines.iter().map(|e| e.session.listen_port).collect();
         assert_eq!(&ports[..2], &[16171, 16172]);

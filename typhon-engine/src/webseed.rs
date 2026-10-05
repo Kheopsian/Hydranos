@@ -683,6 +683,11 @@ fn build_client(cfg: &EngineConfig) -> Result<reqwest::Client, String> {
         b = b.proxy(p);
         info!("[webseed] fetches proxied via {}", shown);
     }
+    // Pinned like the announces: the connection (to the mirror, or to the
+    // proxy) is bound to the engine's device, and in a managed tunnel the
+    // mirror's name is resolved by the tunnel's DNS server. Refused, not
+    // unpinned, where the platform cannot bind a request to a device.
+    b = crate::tracker::http::pin_builder(b, &cfg.bind_device)?;
     b.build().map_err(|e| e.to_string())
 }
 
@@ -693,19 +698,11 @@ pub fn start(mgr: Arc<TorrentManager>, cfg: &EngineConfig) {
         info!("[webseed] disabled by config: url-list is parsed but never fetched");
         return;
     }
-    let proxied = crate::tracker::http::effective_proxy(&cfg.http_proxy()).is_some();
-    if !cfg.bind_device.is_empty() && !proxied {
-        // SO_BINDTODEVICE is applied to the sockets this engine opens itself;
-        // reqwest opens its own, so a device-pinned engine with no proxy would
-        // fetch straight out of the default route and publish the host IP to
-        // the mirror. Refusing is the only safe answer.
-        warn!(
-            "[webseed] DISABLED: engine is pinned to '{}' but has no announce proxy — \
-             an HTTP fetch would bypass the pin and expose the host address",
-            cfg.bind_device
-        );
-        return;
-    }
+    // The client is bound to the engine's device (`build_client`), so a
+    // pinned engine fetches from inside its tunnel. It used to be disabled
+    // outright: reqwest opened its own unpinned sockets, which would have
+    // published the host address to the mirror. Where a request cannot be
+    // pinned, `build_client` fails and the webseeds stay off.
     let client = match build_client(cfg) {
         Ok(c) => c,
         Err(e) => {

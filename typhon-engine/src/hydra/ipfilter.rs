@@ -107,14 +107,16 @@ fn decompress(bytes: Vec<u8>) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
-async fn fetch(source: &str) -> Result<Vec<u8>, String> {
+pub(crate) async fn fetch(source: &str) -> Result<Vec<u8>, String> {
     if source.starts_with("http://") || source.starts_with("https://") {
-        let client = reqwest::Client::builder()
+        // The daemon's own way out (`typhon_engine::egress`).
+        let client = typhon_engine::egress::client()?;
+        let resp = client
+            .get(source)
             .timeout(Duration::from_secs(120))
-            .user_agent(typhon_engine::config::user_agent())
-            .build()
-            .map_err(|e| e.to_string())?;
-        let resp = client.get(source).send().await.map_err(|e| format!("download: {e}"))?;
+            .send()
+            .await
+            .map_err(|e| format!("download: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!("download: HTTP {}", resp.status().as_u16()));
         }

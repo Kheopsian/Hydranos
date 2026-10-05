@@ -71,9 +71,11 @@ pub async fn start(
             warn!("[engine] DHT {}; PEX stays on (it rides the proxied peer connections)", why);
         }
     }
-    // Local Service Discovery does not exist in this engine. When it does, it
-    // starts here and only if `crate::dht::lsd_policy(config)` says so: it is
-    // UDP multicast, which no SOCKS5 proxy carries.
+    // Local Service Discovery (BEP 14), only if `dht::lsd_policy` says so: it
+    // is UDP multicast, which no SOCKS5 proxy carries. Pinned to the engine's
+    // device like the DHT; a socket that cannot join leaves LSD off, nothing
+    // else.
+    crate::lsd::start(mgr.clone(), config).await;
 
     // BEP 19 webseed. Started after the resume load so the very first scan
     // already sees the whole catalogue.

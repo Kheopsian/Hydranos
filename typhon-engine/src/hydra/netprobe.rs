@@ -43,9 +43,12 @@ pub fn spawn(engines: Arc<EngineHost>, snapshot: Snapshot, public_ip: crate::api
 
 /// Take one measurement pass now.
 pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: &crate::api::PublicIp) {
-    // The process's own exit, for the header's fallback line and /api/public-ip.
-    let proc_v4 = echo(None, ECHO_V4).await;
-    let proc_v6 = echo(None, ECHO_V6).await;
+    // The process's own exit, for the header's fallback line and /api/public-ip:
+    // the DAEMON's way out (`[proxy]`, `[daemon] bind_interface`), which is
+    // what 3.x measured too, and refused under a kill switch with none.
+    let proc_v4 = echo_daemon(ECHO_V4).await;
+    let proc_v6 = echo_daemon(ECHO_V6).await;
+    let daemon_route = typhon_engine::egress::route();
     {
         let mut cache = public_ip.lock().await;
         // Only overwrite on success: a failed lookup means "we did not find
@@ -62,10 +65,16 @@ pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: 
     for engine in engines.engines() {
         let iface = engine.bind_interface.clone();
         let bound = if iface.is_empty() { None } else { Some(iface.as_str()) };
-        // An unbound engine leaves through the default route, which the process
-        // probe already measured -- no reason to ask the echo a second time.
+        // An unbound engine leaves through the default route. When the daemon
+        // does too, the process probe already measured it; when the daemon
+        // goes another way, the engine is measured on its own -- unless the
+        // kill switch is on, which sends nothing by the default route, not
+        // even a probe (the engine shows no address, and the report says it
+        // is not covered).
         let (v4, v6) = match bound {
-            None => (proc_v4.clone(), proc_v6.clone()),
+            None if daemon_route.is_direct() => (proc_v4.clone(), proc_v6.clone()),
+            None if daemon_route.kill_switch => (None, None),
+            None => (echo(None, ECHO_V4).await, echo(None, ECHO_V6).await),
             Some(_) => (echo(bound, ECHO_V4).await, echo(bound, ECHO_V6).await),
         };
 
@@ -105,6 +114,23 @@ pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: 
         .unwrap_or(0);
     let mut slot = snapshot.lock().await;
     *slot = (rows, now);
+}
+
+/// Ask one echo service what address the daemon's own requests leave with.
+async fn echo_daemon(url: &str) -> Option<String> {
+    let body = typhon_engine::egress::client()
+        .ok()?
+        .get(url)
+        .timeout(ATTEMPT)
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let ip = body.trim().to_string();
+    ip.parse::<std::net::IpAddr>().ok()?;
+    Some(ip)
 }
 
 /// Ask one echo service what address it saw, optionally out through `device`.

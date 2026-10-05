@@ -380,13 +380,14 @@ impl Client {
         if let Some(hit) = self.dns.get(&key).filter(|e| e.1.elapsed() < DNS_TTL) {
             return Ok(hit.0);
         }
-        let found: Vec<SocketAddr> = match host.parse::<IpAddr>() {
-            Ok(ip) => vec![SocketAddr::new(ip, port)],
-            Err(_) => tokio::net::lookup_host((host, port))
-                .await
-                .map_err(|e| format!("udp: dns lookup of {host} failed: {e}"))?
-                .collect(),
-        };
+        // Through the tunnel's DNS server when the engine is in a managed
+        // tunnel, the host's resolver otherwise (`tunneldns`).
+        let found: Vec<SocketAddr> = crate::tunneldns::resolve(&self.device, host)
+            .await
+            .map_err(|e| format!("udp: dns lookup of {host} failed: {e}"))?
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, port))
+            .collect();
         let addr = found
             .into_iter()
             .find(|a| a.is_ipv6() == v6)
@@ -488,6 +489,19 @@ pub async fn send_announce_on(a: &UdpAnnounce, mode: IpMode, device: &str, proxy
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The UDP announcer resolves through the tunnel's DNS server too.
+    #[tokio::test]
+    async fn a_tunnel_engine_resolves_a_udp_tracker_through_the_tunnel_dns() {
+        let _one = crate::tunneldns::tests::LO.lock().await;
+        let (dns, asked) = crate::tunneldns::tests::fake_server([127, 0, 0, 9]).await;
+        crate::tunneldns::tests::register("lo", dns);
+        let c = Client { device: "lo".into(), ..Default::default() };
+        let got = c.resolve("udp.tunnel-dns.invalid", 1337, false).await;
+        crate::tunneldns::forget("lo");
+        assert_eq!(got.unwrap(), "127.0.0.9:1337".parse::<SocketAddr>().unwrap());
+        assert!(asked.lock().unwrap().iter().any(|n| n == "udp.tunnel-dns.invalid"));
+    }
 
     fn req(tracker: &str) -> UdpAnnounce {
         UdpAnnounce {

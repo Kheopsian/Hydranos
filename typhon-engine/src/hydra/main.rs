@@ -73,6 +73,7 @@ mod workers;
 mod portfwd;
 mod gluetun;
 mod igd;
+mod killswitch;
 mod portmap;
 mod raceevents;
 mod reconnect;
@@ -523,6 +524,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Keys the file holds and nothing reads: said once, never fatal -- an old
     // config must still start, but its owner must not believe it acts.
     deadkeys::warn_config(&config_path);
+    // The daemon's own way out, before anything it fetches: tracker lists,
+    // ipfilter lists and the update check all start below.
+    killswitch::apply(&config);
 
     // ⚠ Create data_dir HERE, before anything opens a database in it. SQLite
     // makes the FILE but never the DIRECTORY: a data_dir that does not exist
@@ -573,6 +577,12 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         Err(e) => return rescue(&store_path, &config_path, &addr, &e.to_string()).await,
     };
     tracing::info!(torrents = engine_host.total_torrents(), "engines up");
+    // What the kill switch covers and what it does not, once the tunnels are
+    // up and their DNS is known.
+    {
+        let tunnels = engine_host.wireguard().clone();
+        killswitch::log_startup(&config, &|id: &str| tunnels.get(id).filter(|t| t.created).map(|t| t.dns_leak));
+    }
     // Categories live in the store, not the TOML, so their 3.x routing fields
     // are checked here. Same two sources as api::categories_map, same order.
     {
@@ -590,11 +600,18 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // race and hoard listen on different ones.
     if config.auto_port_forward {
         let mut asked = std::collections::BTreeSet::new();
+        let mode = netmode::current(&config);
+        let default_iface = portmap::default_interface();
         for engine in engine_host.engines() {
-            // A tunnelled engine's port is asked of its tunnel's gateway
-            // (`portfwd::spawn_follower`); a home-router mapping for it
-            // would open a port the engine does not even listen on.
-            if engine_host.wireguard().get(&engine.id).is_some() {
+            // Only an engine that leaves by the home router's own network is
+            // mapped there. A tunnelled one asks its tunnel's gateway
+            // (`portfwd::spawn_follower`); a pinned or proxied one would get a
+            // port on the HOST's address that it does not even listen behind.
+            let tunnelled = engine_host.wireguard().get(&engine.id).is_some();
+            if let Some(why) =
+                killswitch::home_mapping_refusal(mode, &engine.session, tunnelled, default_iface.as_deref())
+            {
+                tracing::info!(engine = %engine.id, "port mapping: no UPnP/NAT-PMP request to the home router: {why}");
                 continue;
             }
             if engine.listen_port != 0 && asked.insert(engine.listen_port) {
