@@ -17,6 +17,10 @@ create_torrent_folder = false
 # ─────────────────────────────────────────────
 [race]
 listen_port = 16171
+# While a tracker answers "unregistered torrent" (the upload is not in yet),
+# re-announce every 5 seconds for this many minutes; then the tracker's own
+# interval. The same bound autobrr applies to qBittorrent.
+registration_retry_minutes = 6
 # Pin this engine's peer sockets to one host interface (optional).
 #   bind_interface    = "wg0"          # by NAME, resolved to its IP at start (survives VPN IP changes)
 #   listen_interfaces = "10.0.0.2:PORT" # by IP (advanced; comma-separated for multi-home)

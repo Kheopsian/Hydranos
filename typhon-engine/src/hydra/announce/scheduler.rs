@@ -159,13 +159,18 @@ const BUMP_COOLDOWN: Duration = Duration::from_secs(60);
 /// How long a torrent waits after an announce, given what the runner asked.
 ///
 /// Under a minute is not an honest gap between two announces of one torrent
-/// and falls back to the default -- except a registration retry, which is
-/// bounded by the runner and floored here.
+/// and is raised to a minute; no answer at all (zero) takes the default. A
+/// registration retry is bounded by the runner and floored here.
 fn wait_after(outcome: &Outcome) -> Duration {
     if outcome.registration_retry {
         outcome.next_in.max(REGISTRATION_RETRY_FLOOR)
-    } else if outcome.next_in < MIN_INTERVAL {
+    } else if outcome.next_in.is_zero() {
         DEFAULT_INTERVAL
+    } else if outcome.next_in < MIN_INTERVAL {
+        // A tracker asking for less than a minute gets a minute. 4.3 sent it
+        // to the 30-minute default instead, which is also what silenced the
+        // race cadence it was meant to protect.
+        MIN_INTERVAL
     } else {
         outcome.next_in
     }
@@ -1390,9 +1395,10 @@ mod tests {
     }
 
     /// Only a registration retry comes back in seconds; any other sub-minute
-    /// request still becomes the default, and the retry has its own floor.
+    /// request is raised to a minute (4.3 stretched it to the 30-minute
+    /// default), no answer takes the default, and the retry has its own floor.
     #[test]
-    fn only_a_registration_retry_may_wait_under_a_minute() {
+    fn only_a_registration_retry_may_wait_under_a_minute_and_short_waits_are_a_minute() {
         let o = |secs: u64, retry: bool| Outcome {
             next_in: Duration::from_secs(secs),
             registration_retry: retry,
@@ -1400,7 +1406,8 @@ mod tests {
         };
         assert_eq!(wait_after(&o(7, true)), Duration::from_secs(7));
         assert_eq!(wait_after(&o(1, true)), REGISTRATION_RETRY_FLOOR, "never a spin");
-        assert_eq!(wait_after(&o(7, false)), DEFAULT_INTERVAL);
+        assert_eq!(wait_after(&o(7, false)), MIN_INTERVAL);
+        assert_eq!(wait_after(&o(0, false)), DEFAULT_INTERVAL);
         assert_eq!(wait_after(&o(900, false)), Duration::from_secs(900));
     }
 

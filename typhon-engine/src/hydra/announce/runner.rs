@@ -92,17 +92,6 @@ pub enum Mode {
     Race,
 }
 
-/// Race phase one: every 5 seconds for the first minute after the torrent
-/// appears. A race is decided in that minute.
-const RACE_FAST: Duration = Duration::from_secs(5);
-const RACE_FAST_FOR: Duration = Duration::from_secs(60);
-/// Race phase two: every 30 seconds while it is still downloading.
-///
-/// The rule used to be "stop once we have a peer", which killed the loop on the
-/// first announce: a private-tracker race rarely has more than five peers at
-/// all. It keeps feeding the swarm instead.
-const RACE_SUSTAINED: Duration = Duration::from_secs(30);
-
 /// The engine's live torrent list, seen by the scheduler.
 struct EngineCatalogue {
     manager: Arc<TorrentManager>,
@@ -226,39 +215,18 @@ fn seed_numwant(verify: Option<&Verify>, sampled: bool) -> Option<u32> {
     }
 }
 
-/// When to come back, given what this announce learned.
+/// When to announce again after a pass that went through.
 ///
-/// Pulled out of `announce_one` so it can be tested: reaching it through the
-/// real function means a tracker, a socket and a torrent on disk, which is why
-/// the unbounded fast phase below survived as long as it did.
-fn next_announce_in(
-    mode: Mode,
-    interval: Duration,
-    left: i64,
-    first: bool,
-    fast_window_open: bool,
-    uploading: bool,
-) -> Duration {
-    match mode {
-        Mode::Hoard => interval,
-        // A complete race torrent is a seed like any other and falls back to
-        // what the tracker asked for.
-        Mode::Race if left == 0 => interval,
-        Mode::Race if first && fast_window_open => RACE_FAST,
-        Mode::Race => {
-            if uploading {
-                RACE_SUSTAINED
-            } else if fast_window_open {
-                RACE_FAST
-            } else {
-                // Past the first minute: keep feeding the swarm at the sustained
-                // rate rather than falling silent. Stopping at the first peer was
-                // tried and reverted -- see RACE_SUSTAINED -- because a private
-                // tracker race rarely has more than five peers at all.
-                RACE_SUSTAINED
-            }
-        }
-    }
+/// The tracker's interval, for a race as for the hoard: a race comes back
+/// sooner only while a tracker still refuses an unregistered torrent (see
+/// `book::REGISTRATION_RETRY`). That is what qBittorrent with autobrr and
+/// Deluge with libtorrent do -- autobrr stops retrying once the tracker
+/// answers OK, and neither re-announces faster than the interval after that.
+/// 4.3 meant to announce every 5 s for a minute then every 30 s, but the
+/// scheduler turned any wait under a minute into 30 minutes, so what it did
+/// was announce once and come back half an hour later.
+fn next_announce_in(interval: Duration) -> Duration {
+    interval
 }
 
 pub(super) async fn announce_one(
@@ -610,43 +578,7 @@ pub(super) async fn announce_one(
         *torrent.announced_peer_id.write() = Some((sent, now));
     }
 
-    // ⚠⚠ THE FAST PHASE IS BOUNDED IN TIME. It was not, for the whole life of
-    // this code: `RACE_FAST_FOR` was declared, documented as "every 5 seconds
-    // for the first minute", and never read -- the compiler said so
-    // ("constant RACE_FAST_FOR is never used") and nobody was listening. What
-    // actually ran was 5s FOR AS LONG AS THE TORRENT HAD NOT UPLOADED, so a
-    // race downloading for half an hour announced ~360 times.
-    //
-    // For scale: autobrr's default action reannounces every 7s, 25 times, then
-    // stops. Five seconds for a minute sits inside what the ecosystem does; an
-    // unbounded loop does not, and it is the one number a tracker can spot.
-    //
-    // Measured on 288 races the same day: 74% find their first peer within 15s
-    // and 91% within 60s. Widening to three minutes would buy five points and
-    // triple the announces for everyone.
-    //
-    // Age is counted from `added_time`, NOT from the first announce of this
-    // process: every torrent is `job.first` again after a restart, and a race
-    // added two hours ago has no business re-entering a burst because the
-    // daemon was restarted.
-    //
-    // Whatever the phase wants, no tracker is asked inside its `min interval`:
-    // the book skips a floored tracker, so a fast phase against a tracker that
-    // states a floor costs no request at all.
-    let fast_window_open = {
-        let added = torrent.added_time;
-        // An unknown or absurd added_time (0, or in the future) must not grant
-        // an unbounded burst: treat it as outside the window.
-        added > 0 && typhon_engine::torrent::meta::now_secs().saturating_sub(added) < RACE_FAST_FOR.as_secs() as i64
-    };
-    let mut next_in = next_announce_in(
-        mode,
-        interval,
-        left,
-        job.first,
-        fast_window_open,
-        announced_at_all && torrent.total_uploaded.load(Ordering::Relaxed) > 0,
-    );
+    let mut next_in = next_announce_in(interval);
     // A race the tracker has not registered yet: the .torrent reached us
     // before the tracker finished taking the upload, and it answers
     // "unregistered torrent". Retried every 7 seconds, 50 times at most --
@@ -661,7 +593,12 @@ pub(super) async fn announce_one(
         && !timed_out
         && {
             let book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
-            book::registration_pending(&book)
+            let window = if policy.registration_window.is_zero() {
+                book::REGISTRATION_WINDOW
+            } else {
+                policy.registration_window
+            };
+            book::registration_pending(&book, book::registration_attempts(window))
         };
     if registration_retry {
         next_in = book::REGISTRATION_RETRY;
@@ -733,59 +670,12 @@ mod tests {
         assert!(!b.allows("dead.example", now), "a tracker that does not answer is still spared");
     }
 
-    /// ⭐ THE FAST PHASE MUST END. `RACE_FAST_FOR` was declared, documented as
-    /// "every 5 seconds for the first minute", and never read: what ran was 5s
-    /// for as long as the torrent had not uploaded. A race downloading for half
-    /// an hour announced ~360 times, where autobrr's default stops at 25.
+    /// A race that the tracker accepted waits the tracker's interval, like
+    /// the hoard: no client trackers accept re-announces faster than that.
     #[test]
-    fn a_race_leaves_the_fast_phase_after_the_first_minute() {
+    fn an_accepted_race_waits_the_trackers_interval() {
         let tracker = Duration::from_secs(1800);
-        // Inside the window, nothing uploaded yet: burst.
-        assert_eq!(
-            next_announce_in(Mode::Race, tracker, 100, true, true, false),
-            RACE_FAST
-        );
-        // Same torrent, same state, one minute later: the burst is over.
-        assert_eq!(
-            next_announce_in(Mode::Race, tracker, 100, true, false, false),
-            RACE_SUSTAINED,
-            "past the window a race must not keep announcing every 5s"
-        );
-        assert_eq!(
-            next_announce_in(Mode::Race, tracker, 100, false, false, false),
-            RACE_SUSTAINED
-        );
-    }
-
-    /// Uploading means the swarm found us; the burst has done its job.
-    #[test]
-    fn a_race_that_uploads_drops_to_the_sustained_rate() {
-        let tracker = Duration::from_secs(1800);
-        assert_eq!(
-            next_announce_in(Mode::Race, tracker, 100, false, true, true),
-            RACE_SUSTAINED
-        );
-    }
-
-    /// A finished race is a seed like any other: whatever the tracker asked for.
-    #[test]
-    fn a_complete_race_obeys_the_tracker() {
-        let tracker = Duration::from_secs(1800);
-        assert_eq!(
-            next_announce_in(Mode::Race, tracker, 0, true, true, false),
-            tracker,
-            "left == 0 wins over the fast window"
-        );
-    }
-
-    /// The hoard never bursts, whatever the window says.
-    #[test]
-    fn the_hoard_always_obeys_the_tracker() {
-        let tracker = Duration::from_secs(1800);
-        assert_eq!(
-            next_announce_in(Mode::Hoard, tracker, 100, true, true, false),
-            tracker
-        );
+        assert_eq!(next_announce_in(tracker), tracker);
     }
 
     /// ⭐ A tracker URL carries the passkey in its path. reqwest puts the
