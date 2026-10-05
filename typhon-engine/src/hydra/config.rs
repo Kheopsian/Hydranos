@@ -59,11 +59,13 @@ pub struct Session {
     pub start_paused: bool,
     #[serde(default)]
     pub max_connections: i64,
-    #[serde(default)]
+    // On unless switched off, as the template and the documentation say: in
+    // 4.3 a section without these keys turned DHT, PEX and webseeds off.
+    #[serde(default = "default_true")]
     pub enable_dht: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enable_pex: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enable_webseed: bool,
     /// Announce to `udp://` trackers (BEP 15). Absent means yes: a tracker a
     /// torrent lists is one it expects to hear from. An Option rather than a
@@ -102,6 +104,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// A section the file does not have at all: the same defaults as one
+    /// that is present but empty.
+    pub fn with_defaults() -> Session {
+        Session { enable_dht: true, enable_pex: true, enable_webseed: true, ..Default::default() }
+    }
+
     /// How many file descriptors the engine's disk pool keeps open.
     ///
     /// 3.x derives it from aio_threads when set; the fallback matches the
@@ -312,10 +320,10 @@ pub struct Config {
     #[serde(default)]
     pub vpn_speedtest: VpnSpeedtest,
 
-    #[serde(default)]
+    #[serde(default = "Session::with_defaults")]
     pub race: Session,
 
-    #[serde(default)]
+    #[serde(default = "Session::with_defaults")]
     pub hoard: Session,
 
     #[serde(default)]
@@ -528,6 +536,34 @@ impl Config {
     /// one rather than colliding with it, so a node can override its own race
     /// engine without restating the rest.
     pub fn local_engines(&self) -> Vec<LocalEngine> {
+        let mut out = self.local_engines_as_written();
+        // A port nobody wrote, or one another engine already has, is given a
+        // free one: 4.3 listened on port 0 (a random port no tracker was told
+        // about) for a section without `listen_port`, and an extra engine
+        // without its own took its role's port and failed to bind it.
+        let mut used: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        for e in out.iter_mut() {
+            let want = if e.session.listen_port != 0 {
+                e.session.listen_port
+            } else if e.role == "hoard" {
+                16172
+            } else {
+                16171
+            };
+            let mut port = want;
+            while used.contains(&port) {
+                port = port.wrapping_add(1).max(1024);
+            }
+            if port != e.session.listen_port {
+                tracing::warn!(engine = %e.id, written = e.session.listen_port, port, "listen_port missing or taken: using a free one");
+                e.session.listen_port = port;
+            }
+            used.insert(port);
+        }
+        out
+    }
+
+    fn local_engines_as_written(&self) -> Vec<LocalEngine> {
         let mut out = vec![
             LocalEngine { id: "race".into(), role: "race".into(), session: self.race.clone() },
             LocalEngine { id: "hoard".into(), role: "hoard".into(), session: self.hoard.clone() },
@@ -663,5 +699,28 @@ mod agent_tests {
         let engines = c.local_engines();
         assert_eq!(engines.len(), 2, "replaced, not added");
         assert_eq!(engines[0].session.listen_port, 9999);
+    }
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+
+    /// A config that says nothing about discovery or ports gets what the
+    /// template and the documentation promise: DHT, PEX and webseeds on, and
+    /// a real port for every engine, none shared.
+    #[test]
+    fn an_unwritten_key_takes_the_documented_default() {
+        let cfg: Config = toml::from_str("[race]\n[[agent]]\nname = \"vpn1\"\nrole = \"race\"\n").unwrap();
+        assert!(cfg.race.enable_dht && cfg.race.enable_pex && cfg.race.enable_webseed);
+        assert!(cfg.hoard.enable_dht, "a missing section too");
+        let engines = cfg.local_engines();
+        let ports: Vec<u16> = engines.iter().map(|e| e.session.listen_port).collect();
+        assert_eq!(&ports[..2], &[16171, 16172]);
+        assert!(!ports.contains(&0));
+        let mut unique = ports.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ports.len(), "no two engines share a port: {ports:?}");
     }
 }
