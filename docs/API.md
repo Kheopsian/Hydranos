@@ -235,7 +235,7 @@ See [Race Drain, Graduation and Seed Obligations](https://github.com/Kheopsian/H
 | `/node/:name/open` | GET | Redirect to the node's UI with its key. | ✓ |
 | `/install.sh` | GET | Enrolment script (public). | ✓ |
 
-Legacy 3.x routes `/api/agents*` are still routed: `GET /api/agents` lists the local engines as `local-<id>`, the others are stubs (fixed 400/404, empty list, or 200 doing nothing). Use `/api/engines` and `/api/nodes` ([Upgrading from 3.x](https://github.com/Kheopsian/Hydranos/wiki/Upgrading-from-3x)).
+The legacy 3.x routes `/api/agents*` were removed in 4.4. Any path under `/api/agents` and any method gets `410 Gone` with `{"error":"…","see":["/api/engines","/api/nodes"]}`. Up to 4.3.1, `GET /api/agents` listed the local engines as `local-<id>`, and the other agent routes were stubs. Use `/api/engines` for the engines on this machine and `/api/nodes` for other machines ([Upgrading from 3.x](https://github.com/Kheopsian/Hydranos/wiki/Upgrading-from-3x)).
 
 ## Magnets, watched folders, import, dedup
 
@@ -270,7 +270,7 @@ What works and what does not on the Network tab: [Networking](https://github.com
 
 | Route | Method | Purpose | Status |
 |---|---|---|---|
-| `/api/setup` | GET, POST | First run: `{"needs_setup",...}` / create the admin `{"username","password"}` (8+ chars) → API key. Public, loopback or private network only. | ✓ |
+| `/api/setup` | GET, POST | First run: `{"needs_setup","network_storage",...}` (`network_storage` is `"network share"` when `data_dir` is on NFS, SMB or FUSE, where the database cannot use WAL; `""` otherwise; always `""` up to 4.3.1) / create the admin `{"username","password"}` (8+ chars) → API key. Public, loopback or private network only. | ✓ |
 | `/api/login` | POST | `{"username","password"}` → `{"api_key"}`. Public. | ✓ |
 | `/api/auth/password` | POST | `{"password"}` (8+ chars): stored hashed in `[auth] password_hash`, as setup does. | ✓ |
 | `/api/settings` | GET, POST | Whole config as JSON, **secrets included** / `{"changes":[{"section","key","value"}]}` edits existing keys only. | ✓ |
@@ -331,16 +331,26 @@ These routes answer but do not do what their name says. The live listen-port and
 
 | Route | What it answers | Use instead |
 |---|---|---|
-| `GET\|POST\|DELETE /api/hoard/download-slots` | The configured `active_downloads` and zeros; writes change nothing. | `active_downloads` in the config, restart ([Configuration: Engines and Race Drain](https://github.com/Kheopsian/Hydranos/wiki/Configuration-Engines)). |
-| `POST /api/race/settings` | Echoes the current config, ignores the body. | `POST /api/settings`, then restart. |
-| `GET\|POST /api/opt/flags` | GET returns constants; POST always `400 unknown flag`. | — |
-| `GET /api/race/choking` | Always `null`. | — |
-| `POST /api/hoard/verify-downloading` | `{"verified":0}`, does nothing. | `POST /api/selection/recheck`. |
-| `POST /api/hoard/restart-stuck` | `{"restarted":0}`, does nothing. | `stop` then `start` through `/api/selection/*`. |
-| `GET /api/arr-cleanup/scan`, `POST /api/arr-cleanup/execute` | Empty scan; `{"errors":null,"removed":0}`. | — |
-| `POST /api/jobs/move-remote` | Always 400. | `POST /api/selection/handoff`. |
+| `GET /api/hoard/download-slots` | The configured `active_downloads` and zeros. | `active_downloads` in the config, restart ([Configuration: Engines and Race Drain](https://github.com/Kheopsian/Hydranos/wiki/Configuration-Engines)). |
+| `GET /api/arr-cleanup/scan` | An empty scan. | — |
 | `/api/network/wireguard*`, `/api/vpn-speedtest/*`, `/api/benchmark/compare`, `/api/benchmark/race-snapshots/:info_hash`, `GET /api/port-forward` (ports and IPs real, reachability constant) | Constants, empty lists, or a fixed 400. | — |
 
 > **Known limitation in 4.3.1:** a live listen-port or dial-limit change answers OK and applies at once (the TCP listener moves and announces carry the new port) — it is lost at the next restart, and uTP keeps the port it was opened on at startup — change `listen_port` (or the dial limits) in the config and restart to make it permanent (details on [Networking](https://github.com/Kheopsian/Hydranos/wiki/Networking-Modes)).
 
 > **Known limitation in 4.3.1:** `GET /api/provenance` is not written by any 4.x import, so after a 4.3.x import it answers `{"present":false}` (a 3.x import's record is still shown).
+
+## Routes removed in 4.4
+
+These were stubs up to 4.3.1: they returned a success-shaped answer and did nothing. No screen called them. They are gone now. A removed path returns `404`. A removed method on a path that keeps its `GET` returns `405`.
+
+| Route | Up to 4.3.1 | Since 4.4 | Use instead |
+|---|---|---|---|
+| `POST\|DELETE /api/hoard/download-slots` | Echoed the GET, changed nothing. | 405 | `active_downloads` in the config, restart. |
+| `POST /api/race/settings` | Echoed the config, ignored the body. | 405 | `POST /api/settings`, then restart. |
+| `GET\|POST /api/opt/flags` | 3.x constants; POST always `400 unknown flag`. | 404 | — |
+| `GET /api/race/choking` | Always `null`. | 404 | — |
+| `POST /api/hoard/verify-downloading` | `{"verified":0}`, did nothing. | 404 | `POST /api/selection/recheck`. |
+| `POST /api/hoard/restart-stuck` | `{"restarted":0}`, did nothing. | 404 | `stop` then `start` through `/api/selection/*`. |
+| `POST /api/arr-cleanup/execute` | `{"errors":null,"removed":0}`. | 404 | — |
+| `/api/agents`, `/api/agents/*` (every method) | See *Nodes* above. | 410, body names `/api/engines` and `/api/nodes` | `/api/engines`, `/api/nodes`. |
+| `POST /api/jobs/move-remote` | Always 400. | 410, body names `/api/selection/handoff` | `POST /api/selection/handoff`. |

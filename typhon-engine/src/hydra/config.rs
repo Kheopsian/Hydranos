@@ -23,8 +23,8 @@ pub struct Daemon {
     pub api_key: String,
     #[serde(default)]
     pub data_dir: String,
-    #[serde(default)]
-    pub agent_token: String,
+    // No `agent_token`: the 3.x agent channel it guarded is gone, and a key
+    // still in an old file is named at startup by `deadkeys`.
     #[serde(default)]
     pub create_torrent_folder: bool,
     #[serde(default)]
@@ -130,6 +130,9 @@ pub struct Agent {
     /// far side.
     #[serde(default)]
     pub addr: String,
+    /// `token` and `tls_ca` belonged to the 3.x agent channel and are read by
+    /// nothing; they stay typed so a rollback finds them, and `deadkeys`
+    /// warns about them at startup.
     #[serde(default)]
     pub token: String,
     #[serde(default)]

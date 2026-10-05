@@ -5,10 +5,6 @@ api_host = "0.0.0.0"
 api_port = 8199
 # auto-generated on first start when empty
 api_key = ""
-# Shared bearer token the HydraAgent gRPC data-plane requires from a front
-# (--agent-addr / --agent-only). Empty = no auth: fine on a private LAN, not
-# fine anywhere else. Overridden by $HYDRANOS_AGENT_TOKEN, then by --agent-token.
-agent_token = ""
 data_dir = "/config"
 create_torrent_folder = false
 
@@ -21,11 +17,9 @@ listen_port = 16171
 # re-announce every 5 seconds for this many minutes; then the tracker's own
 # interval. The same bound autobrr applies to qBittorrent.
 registration_retry_minutes = 6
-# Pin this engine's peer sockets to one host interface (optional).
-#   bind_interface    = "wg0"          # by NAME, resolved to its IP at start (survives VPN IP changes)
-#   listen_interfaces = "10.0.0.2:PORT" # by IP (advanced; comma-separated for multi-home)
+# Pin this engine's peer sockets to one host interface (optional), by NAME,
+# e.g. "wg0": resolved to its IP at start, so it survives VPN IP changes.
 bind_interface = ""
-listen_interfaces = ""
 # Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX
 # offer. Off = IPv4 only, which is the long-standing behaviour. Only turn it on
 # if this host really has working IPv6 connectivity.
@@ -53,25 +47,14 @@ inactivity_timeout = 20
 # let the tracker observe the source address (right for almost every setup).
 # announce_ip = ""
 
-
-[race.custom_choking]
-enabled = true
-tick_interval_seconds = 2
-strategy = "rarity_captive"
-max_unchoked = 30
-rarity_weight = 0.7
-speed_weight = 0.3
-
 # ─────────────────────────────────────────────
 # HOARD SESSION - upload-optimized (long-term seeding)
 # ─────────────────────────────────────────────
 [hoard]
 listen_port = 16172
-# Pin this engine's peer sockets to one host interface (optional).
-#   bind_interface    = "wg0"          # by NAME, resolved to its IP at start (survives VPN IP changes)
-#   listen_interfaces = "10.0.0.2:PORT" # by IP (advanced; comma-separated for multi-home)
+# Pin this engine's peer sockets to one host interface (optional), by NAME,
+# e.g. "wg0": resolved to its IP at start, so it survives VPN IP changes.
 bind_interface = ""
-listen_interfaces = ""
 # Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX
 # offer. Off = IPv4 only, which is the long-standing behaviour. Only turn it on
 # if this host really has working IPv6 connectivity.
@@ -104,41 +87,13 @@ active_downloads = 10
 # announce_ip = ""
 
 # ─────────────────────────────────────────────
-# BENCH / TELEMETRY DB (bench.db)
-# ─────────────────────────────────────────────
-# race_snapshots holds one row per racing torrent per sampling tick, so it
-# outgrows every other table by orders of magnitude and gets its own, much
-# shorter retention window. Every key below is optional; the defaults shown
-# are what applies when the section is absent.
-[bench]
-# false stops all bench recording (samples, race snapshots, events, tracker
-# samples). Retention keeps running so an existing file still shrinks.
-enabled = true
-# Window for the low-rate tables (bench_samples, vpn_speedtest, race_events,
-# tracker_samples). 0 = 365. Negative = never prune.
-retention_days = 365
-# Window for race_snapshots. 0 = 7. Negative = never prune.
-race_snapshot_retention_days = 7
-# Race sampling cadence in seconds. 0 = 5.
-snapshot_interval_secs = 5
-# How often retention runs, in minutes. 0 = 60. A prune also runs at boot.
-prune_interval_mins = 60
-# Reclaim the file after a prune that deleted rows. Off by default: VACUUM
-# rewrites the whole database and needs as much free space again.
-vacuum = false
-
-# ─────────────────────────────────────────────
 # VPN SPEEDTEST
 # ─────────────────────────────────────────────
 [vpn_speedtest]
 enabled = true
 # Public target: measures real peer-facing capacity (against a public iperf3
-# server) instead of a VPS loopback that over-estimates. The code auto-retries
-# on basePort..+8 when the server is busy.
+# server) instead of a VPS loopback that over-estimates.
 iperf3_server = "ping.online.net"
-iperf3_port = 5201
-interval_secs = 3600
-duration_secs = 10
 
 # ─────────────────────────────────────────────
 # RACE DRAIN - automatic NVMe purge (hand back space)
@@ -162,43 +117,19 @@ username = "admin"
 password_hash = ""
 
 # ─────────────────────────────────────────────
-# AGENTS - remote nodes this instance configures and drives
+# EXTRA ENGINES on this machine (optional)
 # ─────────────────────────────────────────────
-# An agent (started with --agent-only) knows only its own identity: for each
-# engine an id, a role, a listen port and whether IPv6 is on, given through
-# --engine or $HYDRANOS_ENGINE_ID / $HYDRANOS_ENGINE_ROLE / $HYDRANOS_ENGINE_LISTEN_PORT
-# / $HYDRANOS_ENGINE_ENABLE_IPV6. It needs no config file of its own. Everything
-# else is composed here and pushed to it over the gRPC channel: [race] and
-# [hoard] above double as the FLEET PROFILES for remote engines of that role.
+# [race] and [hoard] above are this node's two engines, and the profiles an
+# extra engine inherits by role. An extra engine (one per VPN tunnel, say) is
+# a block holding only what differs from its role's profile:
 #
-# listen_port and enable_ipv6 are never taken from here for a remote engine.
-# They describe the agent's own machine, and the agent reapplies its own values
-# over whatever arrives.
+# [[engine]]
+# name = "vpn7"                  # its id, as the UI shows it
+# role = "race"                  # "race" or "hoard": the profile it inherits
+# [engine.session]
+# listen_port = 26991
+# bind_interface = "wg7"
 #
-# [[agent]]
-# name  = "de-1"                 # how this node is named in the UI
-# addr  = "10.0.0.5:9090"        # its --agent-addr, reachable from here
-# token = ""                     # must match the agent's $HYDRANOS_AGENT_TOKEN
-# tls_ca = ""                    # path to the CA cert when the agent serves TLS
-#
-# A sparse exception to the role profile, for one engine, keyed by the id the
-# agent declares. Only the keys written here are overridden.
-#   [[agent.engine]]
-#   id = "race-0"
-#   announce_proxy = "socks5h://user:pass@127.0.0.1:1080"
-
-# --- Advanced: per-disk seed-slot regulation (HDD quiet mode) ---------------
-# Off by default. Bounds concurrent active uploaders per disk so spinning
-# drives stay quiet. Uncomment and list your disks (Windows drive letters).
-# type="ssd" = never capped. Only listed disks are regulated.
-# [hoard.disk_slots]
-# enabled = true
-# default_max_active = 10
-# [[hoard.disk_slots.disk]]
-# key = "D:"
-# type = "hdd"
-# max_active = 10
-# wake_below = 5
-# [[hoard.disk_slots.disk]]
-# key = "C:"
-# type = "ssd"
+# Other machines are not declared here: each runs its own Hydranos and joins
+# as a node (install.sh --register-to <url> --token <token>; the Nodes page
+# gives the full command).

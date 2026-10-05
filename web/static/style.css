@@ -1004,7 +1004,6 @@ input[type="file"] {
     color: var(--accent-red);
 }
 
-/* Seedbox badge */
 /* Tracker severity: a bare dot, never a letter inside it, with the wording
    next to it. A glyph in a 9px circle reads as a lottery ball. */
 /* Search and the state filter share one line: the states are a single
@@ -1132,24 +1131,6 @@ input[type="file"] {
 }
 .tab-badge.red { background: var(--accent-red); color: #fff; }
 .tab-badge.amber { background: var(--accent-yellow); color: #241a00; }
-
-.badge-seedbox, .badge-no {
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: help;
-    white-space: pre-line;
-}
-
-.badge-seedbox {
-    background: rgba(188, 140, 255, 0.15);
-    color: var(--accent-purple);
-}
-
-.badge-no {
-    color: var(--text-muted);
-}
 
 /* Filesystem Dropdown */
 .fs-dropdown {

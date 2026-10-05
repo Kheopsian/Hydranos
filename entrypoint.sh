@@ -4,36 +4,32 @@ set -e
 # Defaults to /config (linuxserver/*arr convention). Override with
 # HYDRANOS_CONFIG_DIR to relocate it (e.g. legacy setups mounting /configs).
 CFG_DIR="${HYDRANOS_CONFIG_DIR:-/config}"
-# An agent that was given its identity in the environment needs no config file:
-# it takes its whole session config, and its tracker spoofing, from the front it
-# is attached to. Seeding a template into its volume would leave a file that
-# reads like the node's settings while the node ignores every line of it.
-if [ -n "$HYDRANOS_ENGINE_ID" ] || [ -n "$HYDRANOS_ENGINES" ]; then
+# 3.x agent containers took their engine identity from these variables and ran
+# with no config file. 4.x has no agent mode: dropping --config for them started
+# a daemon on built-in defaults, with no file to show for it and nothing said.
+# They are refused -- named, not honoured -- and the container starts as a
+# normal instance on its own config, which is what the binary does with the
+# matching 3.x flags (--agent-only and friends).
+refuse_legacy_env() {
+    echo "hydranos: ignoring $1: the 3.x agent mode was removed in 4.x and Hydranos" \
+         "now runs as one process. Starting a normal instance on $CFG_DIR/default.toml." \
+         "To spread torrents over several machines, enrol each one as a node instead" \
+         "(install.sh --register-to <url> --token <token>; the Nodes page gives the full" \
+         "command). Remove $1 from the container's environment to silence this." >&2
+}
+if [ -n "$HYDRANOS_ENGINE_ID" ]; then refuse_legacy_env HYDRANOS_ENGINE_ID; fi
+if [ -n "$HYDRANOS_ENGINES" ]; then refuse_legacy_env HYDRANOS_ENGINES; fi
+# First run: seed the config so an empty volume just works.
+if [ ! -f "$CFG_DIR/default.toml" ]; then
     mkdir -p "$CFG_DIR"
-    echo "hydranos: engine identity from the environment, running without a config file"
-    CFG_FILE=""
-else
-    # First run: seed the config so an empty volume just works.
-    if [ ! -f "$CFG_DIR/default.toml" ]; then
-        mkdir -p "$CFG_DIR"
-        cp /app/configs/default.toml "$CFG_DIR/default.toml"
-        # Keep data_dir consistent with the chosen config directory.
-        sed -i "s#^data_dir = .*#data_dir = \"$CFG_DIR\"#" "$CFG_DIR/default.toml"
-        echo "hydranos: seeded $CFG_DIR/default.toml from image defaults (first run)"
-    fi
-    CFG_FILE="$CFG_DIR/default.toml"
+    cp /app/configs/default.toml "$CFG_DIR/default.toml"
+    # Keep data_dir consistent with the chosen config directory.
+    sed -i "s#^data_dir = .*#data_dir = \"$CFG_DIR\"#" "$CFG_DIR/default.toml"
+    echo "hydranos: seeded $CFG_DIR/default.toml from image defaults (first run)"
 fi
-# One --config, built once, so the three exec paths below cannot disagree about
-# whether this container has a config file. Built with an if rather than
-# ${CFG_FILE:+...}: that expansion cannot be quoted as a whole, so a config
-# directory containing a space would split into two argv entries and hydranos
-# would start on a truncated path instead of failing loudly.
-if [ -n "$CFG_FILE" ]; then
-    set -- --config "$CFG_FILE" "$@"
-fi
-# data_dir has no config file to come from in the environment-driven case.
-: "${HYDRANOS_DATA_DIR:=$CFG_DIR}"
-export HYDRANOS_DATA_DIR
+# Always a --config, quoted as one argv entry: a config directory containing a
+# space must not split into two arguments and start hydranos on a truncated path.
+set -- --config "$CFG_DIR/default.toml" "$@"
 # One socket per torrent -> raise the fd limit (needs privileged / SYS_RESOURCE;
 # falls back quietly otherwise). Done before dropping privileges so the limit is
 # inherited by the unprivileged process.
