@@ -6,8 +6,6 @@ Native Windows build. This archive contains:
   one process. **This is the one you run.**
 - `hydranos-update.exe` - the updater. You do not normally run it yourself;
   the tray starts it for you.
-- `hydranos-engine.exe` - the engine as a standalone binary, for multi-node
-  setups (`--agent-only`). A single-machine install never needs it.
 - `default.toml.example` - a starting configuration.
 
 ## Run
