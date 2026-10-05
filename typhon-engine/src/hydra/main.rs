@@ -786,6 +786,10 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         }
     }
 
+    // Departures before the flush, bounded like libtorrent's
+    // stop_tracker_timeout: trackers stop sending leechers to a client that
+    // is going away. 4.3 sent none.
+    engines_for_shutdown.depart_all(std::time::Duration::from_secs(5)).await;
     flush_on_shutdown(&engines_for_shutdown);
     if shutdown::restart_requested() {
         shutdown::exit_for_restart();

@@ -10287,6 +10287,9 @@ fn remove_one_inner(
         // 2026-10-02 a bulk delete took 1 376 uploads' books with their source
         // torrents, and they went on "seeding" empty folders.
         let spare = if keep { Default::default() } else { crate::jobsrun::files_read_by_others(state, &torrent) };
+        // Before the engine lets go: the departure needs the torrent's own
+        // book and counters, and nothing else would tell the trackers.
+        state.engines.spawn_departure(session, torrent.clone());
         let (removed, engine_tm) = engine.manager.remove_torrent_sparing(&torrent.info_hash, keep, &spare);
         if engine_tm.spared > 0 {
             tracing::info!(hash = %hash, session, spared = engine_tm.spared, "files kept: another torrent reads them");
@@ -10740,6 +10743,7 @@ fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bo
             if let Some(copy) = engine.manager.get(&ih) {
                 copies -= 1;
                 let keep = keep_data || copies > 0;
+                state.engines.spawn_departure(&engine.id, copy.clone());
                 if let Err(e) = engine.manager.remove_torrent_sparing(&ih, keep, &spare).0 {
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
                     return;
