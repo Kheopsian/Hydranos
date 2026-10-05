@@ -1969,33 +1969,20 @@ fn race_admission(
     // The volume this torrent is about to land on, taken from its own save
     // path. Asking a global path -- or the emptiest disk -- answers for a disk
     // that may hold none of this download.
+    //
+    // Measured by `volumes::volume_at`, the same constructor the drain and the
+    // panel read: free is the quota's when the volume has one, the disk's
+    // otherwise, and `committed` is what the catalogue has promised to write on
+    // THIS volume only.
     let target = std::path::Path::new(save_path);
-    let mount = crate::volumes::mount_point_of(target);
-    let (Some((_, _, free)), Some(dev)) = (
-        crate::volumes::usage(&mount),
-        crate::volumes::device_of_nearest(target),
-    ) else {
+    let Some(volume) = crate::volumes::volume_at(state, &engine.manager, target, d) else {
         // Unreadable is not a reason to start refusing every race: that would
         // take the node off the air over a typo.
         tracing::warn!(path = %save_path, "race admission: cannot read that volume, letting it through");
         return Ok(());
     };
-    let free = free as i64;
-
-    // What the catalogue has promised to write but has not written yet, counted
-    // on THIS volume only.
-    let mut committed: i64 = 0;
-    for t in engine.manager.all() {
-        let path = t.save_path.read().clone();
-        if crate::volumes::device_of_nearest(&path) != Some(dev) {
-            continue;
-        }
-        let core = typhon_engine::rpc::dispatch::torrent_core(&t);
-        let remaining = t.meta.total_size as i64 - core.total_done as i64;
-        if remaining > 0 {
-            committed += remaining;
-        }
-    }
+    let free = volume.free as i64;
+    let committed = volume.committed as i64;
     let reserve = d.reserve_free_gb.max(0) * 1_000_000_000;
     let projected = free - committed - reserve;
     if projected < incoming {
@@ -2004,11 +1991,13 @@ fn race_admission(
             free_gb = (free as f64 / 1e9).round(),
             committed_gb = (committed as f64 / 1e9).round(),
             reserve_gb = d.reserve_free_gb,
+            basis = %volume.basis(),
             "race refused: not enough projected space"
         );
         return Err(format!(
-            "race disk full: {} GB free, {} GB already promised to downloads in flight, {} GB reserved; this torrent needs {} GB",
+            "race disk full: {} GB free {}, {} GB already promised to downloads in flight, {} GB reserved; this torrent needs {} GB",
             free / 1_000_000_000,
+            volume.basis(),
             committed / 1_000_000_000,
             d.reserve_free_gb,
             incoming / 1_000_000_000
@@ -3945,7 +3934,7 @@ async fn get_drain_status(
         for v in crate::volumes::discover(&state, &engine.manager, d) {
             match merged.get_mut(&v.id) {
                 Some((acc, engines)) => {
-                    acc.torrents += v.torrents;
+                    acc.merge_engine(&v);
                     engines.push(engine.id.clone());
                 }
                 None => {
@@ -3969,6 +3958,13 @@ async fn get_drain_status(
                 "committed": v.committed,
                 "alloc_pct": crate::row::num_json(v.alloc_pct()),
                 "torrents": v.torrents,
+                // total/used/free above are on the quota when one is set;
+                // the disk under it is still shown, it is still a hard limit.
+                "quota": v.quota,
+                "basis": if v.quota.is_some() { "quota" } else { "disk" },
+                "disk_total": v.disk_total,
+                "disk_used": v.disk_used,
+                "disk_free": v.disk_free,
                 "enabled": v.policy.enabled,
                 "high_watermark": v.policy.high,
                 "low_watermark": v.policy.low,
@@ -4004,6 +4000,10 @@ struct VolumePolicyBody {
     high_watermark: Option<i64>,
     #[serde(default)]
     low_watermark: Option<i64>,
+    /// Declared capacity in GB (10^9, like `reserve_free_gb`); 0 drops it.
+    /// Independent of `inherit`: the slot's size is not a drain rule.
+    #[serde(default)]
+    quota_gb: Option<f64>,
 }
 
 async fn set_volume_policy(
@@ -4018,11 +4018,30 @@ async fn set_volume_policy(
         return bad_request("volume is required");
     }
     let cfg = state.cfg();
+    let mut quota = crate::volumes::quota_for(&state, &body.volume);
+    if let Some(gb) = body.quota_gb {
+        if !gb.is_finite() || gb < 0.0 {
+            return bad_request("quota_gb is a size in GB, 0 to remove it");
+        }
+        quota = Some((gb * 1e9) as u64).filter(|q| *q > 0);
+        if let Err(e) = crate::volumes::save_quota(&state, &body.volume, quota) {
+            return bad_request(&format!("could not save the quota: {e}"));
+        }
+        // A quota alone must not turn the watermarks into an override: saving
+        // the policy below would freeze today's defaults onto this volume.
+        if !body.inherit
+            && body.enabled.is_none()
+            && body.high_watermark.is_none()
+            && body.low_watermark.is_none()
+        {
+            return Json(serde_json::json!({"status": "ok", "quota": quota})).into_response();
+        }
+    }
     if body.inherit {
         if let Err(e) = crate::volumes::clear_policy(&state, &body.volume) {
             return bad_request(&format!("could not clear: {e}"));
         }
-        return Json(serde_json::json!({"status": "ok", "inherited": true})).into_response();
+        return Json(serde_json::json!({"status": "ok", "inherited": true, "quota": quota})).into_response();
     }
     let mut p = crate::volumes::policy_for(&state, &body.volume, &cfg.race_drain);
     if let Some(v) = body.enabled {
@@ -4050,6 +4069,7 @@ async fn set_volume_policy(
         "high_watermark": p.high,
         "low_watermark": p.low,
         "inherited": false,
+        "quota": quota,
     }))
     .into_response()
 }
