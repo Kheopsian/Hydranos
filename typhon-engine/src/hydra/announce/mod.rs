@@ -55,6 +55,7 @@ pub fn refresh_policies(config: &Config, engines: &[crate::engines::Engine]) -> 
         next.skip_udp = old.skip_udp;
         next.device = old.device.clone();
         next.no_ipv6 = old.no_ipv6;
+        next.registration_window = old.registration_window;
         *slot = Arc::new(next);
         done += 1;
     }
@@ -83,6 +84,7 @@ pub fn policy_from_config(config: &Config, peer_id: String, public_ip: String) -
         skip_udp: false,
         device: String::new(),
         no_ipv6: false,
+        registration_window: std::time::Duration::ZERO,
     }
 }
 
