@@ -4074,24 +4074,10 @@ async fn set_volume_policy(
     .into_response()
 }
 
-macro_rules! empty_list_route {
-    ($name:ident) => {
-        async fn $name(
-            State(state): State<AppState>,
-            RawQuery(query): RawQuery,
-            headers: HeaderMap,
-        ) -> Response {
-            let query = query.unwrap_or_default();
-            guard!(state, headers, query);
-    let cfg = state.cfg();
-            Json(serde_json::Value::Array(vec![])).into_response()
-        }
-    };
-}
+// `empty_list_route!` stamped out handlers that always answered `[]`. Its last
+// two users, `/api/agents/removed` and `/api/agents/torrents`, went with the
+// rest of the 3.x agent API in 4.4 (see `agents_gone`).
 
-// Subsystems whose listing is empty until they have run or been configured.
-// They are separate handlers rather than one shared one so that each can grow
-// its own body when its slice is ported, without touching the others.
 /// Past drain passes, newest first.
 ///
 /// WARNING Until 2026-09-13 this was `empty_list_route!`: the History button
@@ -4212,7 +4198,6 @@ fn checked_category(mut incoming: serde_json::Value) -> Result<serde_json::Value
     obj.insert("mode".into(), serde_json::Value::String(mode));
     Ok(incoming)
 }
-empty_list_route!(get_agents_removed);
 
 async fn get_arr_cleanup_scan(
     State(state): State<AppState>,
@@ -4274,18 +4259,6 @@ async fn get_download_slots(
         stopped: 0,
     })
     .into_response()
-}
-
-async fn get_race_choking(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    // null when the custom choker is off, which is the shipped default.
-    Json(serde_json::Value::Null).into_response()
 }
 
 async fn get_qbit_import_status(
@@ -4732,8 +4705,6 @@ async fn get_bench_records(
     Json(cached.unwrap_or(empty)).into_response()
 }
 
-empty_list_route!(get_agents_torrents);
-
 /// Performance samples over a window, for the benchmark graphs.
 async fn get_bench_range(
     State(state): State<AppState>,
@@ -4878,36 +4849,56 @@ async fn get_network_interfaces(
     Json(serde_json::json!({"interfaces": interfaces()})).into_response()
 }
 
-/// One agent per local engine.
+/// Everything under `/api/agents`, any verb: 410 Gone.
 ///
-/// "local" stopped being a name in 3.138.0: a node with race and hoard presents
-/// itself as local-race and local-hoard, each owning its engine.
-async fn get_agents(
+/// 3.x addressed engines and remote machines as "agents". 4.x splits them into
+/// engines (`/api/engines`) and nodes (`/api/nodes`), and until 4.4 the agent
+/// routes stayed as stubs: the list echoed the local engines, every write
+/// answered a fixed 400 or a 200 that did nothing. A script written for 3.x
+/// therefore saw success and changed nothing. Gone, with the two replacements
+/// named, is the answer it can act on; a bare 404 would read as a typo.
+///
+/// Behind the key like every other route: an unauthenticated caller learns
+/// nothing about what this instance used to serve.
+async fn agents_gone(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
+    (
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "error": "the 3.x agent API was removed in 4.4: engines on this machine are \
+                      /api/engines, other machines are /api/nodes",
+            "see": ["/api/engines", "/api/nodes"],
+        })),
+    )
+        .into_response()
+}
 
-    let ifaces = interfaces();
-    let agents: Vec<serde_json::Value> = state
-        .engines
-        .engines()
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": local_agent(&e.id),
-                "kind": "local",
-                "online": true,
-                "engines": [{"id": e.id, "role": e.role, "online": true}],
-                "ipv6_wanted": e.enable_ipv6,
-                "interfaces": ifaces,
-            })
-        })
-        .collect();
-    Json(agents).into_response()
+/// `/api/jobs/move-remote`, any verb: 410 Gone.
+///
+/// It refused every request with a 400 since 4.0, so nothing could have been
+/// relying on it working. Moving torrents to another machine is a selection
+/// job now (`POST /api/selection/handoff`, which names a node and an engine).
+async fn move_remote_gone(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    (
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "error": "move-remote was removed in 4.4: use POST /api/selection/handoff \
+                      with a node from /api/nodes and one of its engines",
+            "see": ["/api/selection/handoff", "/api/nodes", "/api/engines"],
+        })),
+    )
+        .into_response()
 }
 
 async fn get_network_engines(
@@ -5681,50 +5672,11 @@ async fn get_port_forward(
     .into_response()
 }
 
-
-/// Runtime tuning flags.
-///
-/// ⚠ Several of these describe machinery that 4.0.0 deletes: `gogc` is the Go
-/// collector's target, and ipc_frame / ipc_prealloc / ipc_route / list_cache /
-/// qbit_snapshot are all properties of the socket between the two processes
-/// there is no longer. They are published unchanged so a 3.x client keeps
-/// working, and they are the first thing the 4.0 API notes should retire --
-/// reporting a garbage-collector setting from a binary with no garbage
-/// collector is a lie the UI would render as fact.
-async fn get_opt_flags(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-
-    // session_runtimes is a fixed 128, not aio_threads: tying it to the config
-    // was a guess, and the reference answers 128 on both engines whatever
-    // aio_threads says (32 for hoard, 16 for race in this config).
-    let engine_flags = || {
-        serde_json::json!({
-            "block_mse": false,
-            "session_pinning": false,
-            "session_runtimes": 128,
-        })
-    };
-
-    Json(serde_json::json!({
-        "engine_flags": {
-            "hoard": engine_flags(),
-            "race": engine_flags(),
-        },
-        "flags": {
-            "ipc_frame": true, "ipc_prealloc": true, "ipc_route": true,
-            "list_cache": true, "qbit_snapshot": true, "totals_cache": true,
-        },
-        "gogc": 100,
-        "list_cache_ttl_ms": 9000,
-    }))
-    .into_response()
-}
+// `/api/opt/flags` was here until 4.4: GET published 3.x tuning constants (the
+// Go collector's target, flags of the socket between two processes that no
+// longer exist) and POST refused every flag. No screen read it, and reporting
+// a garbage-collector setting from a binary with no garbage collector was a
+// lie, so the route is gone (404) rather than kept for a 3.x client.
 
 /// Metrics compared between two periods.
 ///
@@ -7099,64 +7051,11 @@ async fn set_hoard_listen_port(
     set_listen_port(&state, "hoard", &body).await
 }
 
-#[derive(serde::Deserialize)]
-struct SlotsBody {
-    #[serde(default)]
-    max_slots: i64,
-}
-
-/// Cap on how many hoard torrents may download at once.
-///
-/// ⚠ NOT ROUTED YET, same reason as the listen port: 3.x answers the whole
-/// slots payload from the live manager and does not write the config.
-#[allow(dead_code)]
-async fn set_download_slots(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-
-    let Ok(req) = serde_json::from_str::<SlotsBody>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
-    };
-    let pairs = vec![("active_downloads".to_string(), req.max_slots.to_string())];
-    let persisted = edit_config(&state, move |doc| {
-        crate::tomledit::set_toml_table(doc, "hoard", &pairs)
-    });
-    Json(serde_json::json!({
-        "status": "ok", "max_slots": req.max_slots, "persisted": persisted,
-    }))
-    .into_response()
-}
-
-/// Remove the cap: -1 is "no limit" in this config, not 0, which would mean
-/// "never download anything".
-#[allow(dead_code)]
-async fn clear_download_slots(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-
-    let pairs = vec![("active_downloads".to_string(), "-1".to_string())];
-    let persisted = edit_config(&state, move |doc| {
-        crate::tomledit::set_toml_table(doc, "hoard", &pairs)
-    });
-    Json(serde_json::json!({
-        "status": "ok", "max_slots": -1, "persisted": persisted,
-    }))
-    .into_response()
-}
+// Writes to `/api/hoard/download-slots` (POST to set, DELETE to clear) were
+// here until 4.4: the routed pair echoed the GET and changed nothing, and an
+// unrouted pair that rewrote `[hoard] active_downloads` was never wired. No
+// screen called either. The GET stays; the cap is `active_downloads` in the
+// config, read at boot.
 
 
 #[derive(serde::Deserialize)]
@@ -9281,35 +9180,11 @@ async fn race_dial_limits(
 // dial-limits. What they answer here is what they answer in production: the
 // bench runs the same two hydra-engine processes.
 
-macro_rules! simple_post {
-    ($name:ident, $body:expr) => {
-        async fn $name(
-            State(state): State<AppState>,
-            RawQuery(query): RawQuery,
-            headers: HeaderMap,
-        ) -> Response {
-            let query = query.unwrap_or_default();
-            guard!(state, headers, query);
-            let cfg = state.cfg();
-            let _ = cfg;
-            let build: fn(&AppState) -> serde_json::Value = $body;
-            Json(build(&state)).into_response()
-        }
-    };
-}
-
-/// Re-verify every torrent that is still downloading.
-///
-/// Answers the COUNT it started, which is zero on a library that is only
-/// seeding -- the number is what tells an operator the request did something.
-simple_post!(hoard_verify_downloading, |_s: &AppState| {
-    serde_json::json!({"status": "ok", "verified": 0})
-});
-
-/// Restart torrents the engine considers stuck.
-simple_post!(hoard_restart_stuck, |_s: &AppState| {
-    serde_json::json!({"status": "ok", "restarted": 0})
-});
+// `POST /api/hoard/verify-downloading` and `POST /api/hoard/restart-stuck` were
+// here until 4.4. Both answered a count of 0 without touching a torrent, a
+// shape that reads like a result; no screen called them. Removed (404): a
+// recheck is `POST /api/selection/recheck`, a restart is stop then start
+// through `/api/selection/*`.
 
 /// Run the race drain now instead of waiting for its interval.
 ///
@@ -9613,13 +9488,17 @@ struct ClientBulk {
 // ---------------------------------------------------------------------------
 //
 // ⚠ HONESTY MARKER. Everything in this block reproduces the REFUSAL path of a
-// route whose success path is not ported yet: creating an agent needs the agent
-// wire, an import needs the import machinery, moving to a remote node needs
-// both. The refusals are exact and the bench exercises them, but a caller
-// sending a VALID request gets an answer this build cannot yet honour.
+// route whose success path is not ported yet. The refusals are exact and the
+// bench exercises them, but a caller sending a VALID request gets an answer
+// this build cannot yet honour.
 //
 // They are grouped here, and named, so the coverage figure cannot be mistaken
 // for completeness. Each one gets its success path with the slice that owns it.
+// What is left is the managed WireGuard uploads, kept for the chantier that
+// brings it back. The agent routes and move-remote that used to sit here
+// answer 410 now (`agents_gone`, `move_remote_gone`): their success path is
+// not coming, it already exists under /api/engines, /api/nodes and
+// /api/selection.
 
 macro_rules! refuse {
     ($name:ident, $status:expr, $message:expr) => {
@@ -9638,93 +9517,9 @@ macro_rules! refuse {
     };
 }
 
-refuse!(post_agent_create, StatusCode::BAD_REQUEST, "name and addr are required");
-refuse!(post_move_remote, StatusCode::BAD_REQUEST, "info_hash is required");
 refuse!(post_wireguard_engines, StatusCode::BAD_REQUEST, "no agents in the request");
-
-/// Agent update. `addr` is the one field that cannot be defaulted: an agent
-/// without an address is a row the UI shows and nothing can reach.
-async fn put_agent(
-    State(state): State<AppState>,
-    Path(_name): Path<String>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    _body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "addr is required"})))
-        .into_response()
-}
-
-
-refuse!(post_agent_test, StatusCode::BAD_REQUEST, "addr is required");
 refuse!(post_wireguard_config_upload, StatusCode::BAD_REQUEST,
         "no file name: pass ?name=provider.conf or upload a named file");
-
-/// Restore an agent that was removed. 404 when it is not in the removed list --
-/// there is nothing to bring back, and saying so beats a silent success.
-async fn post_agent_restore(
-    State(state): State<AppState>,
-    Path(_name): Path<String>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    _body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not in removed list"})))
-        .into_response()
-}
-
-/// Per-torrent action routed to an agent.
-async fn post_agent_action(
-    State(state): State<AppState>,
-    Path(_name): Path<String>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    _body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({"error": "info_hash and action are required"})),
-    )
-        .into_response()
-}
-
-/// The slot accounting, echoed after a set or a clear.
-///
-/// Both verbs answer the same payload the GET does, because what the caller
-/// needs to know is the state that resulted -- not that the request was
-/// received. On this engine client the cap does not move, so the numbers come
-/// back unchanged.
-async fn download_slots_write(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(DownloadSlots {
-        max_slots: cfg.hoard.active_downloads,
-        active_slots: 0,
-        total_incomplete: 0,
-        activity_demoted: 0,
-        cooldown: 0,
-        started: 0,
-        stopped: 0,
-    })
-    .into_response()
-}
 
 
 
@@ -11413,11 +11208,13 @@ const DEFAULT_CONFIG_TOML: &str = include_str!("../../../configs/default.toml");
 /// Credentials and the data directory: wiping those would lock the operator
 /// out of the instance they were trying to fix, and point it at the wrong
 /// disk. Everything else is meant to go back to the template.
+///
+/// No `daemon.agent_token`: it guards nothing in 4.x, and carrying it over
+/// would write a dead key back into the template a reset is meant to restore.
 const RESET_PRESERVED: &[(&str, &str)] = &[
     ("auth", "username"),
     ("auth", "password_hash"),
     ("daemon", "api_key"),
-    ("daemon", "agent_token"),
     ("daemon", "data_dir"),
 ];
 
@@ -12119,29 +11916,6 @@ async fn post_password(
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
-/// Toggle one runtime flag. An unknown name is refused, and the message
-/// includes it -- an empty name reads as "unknown flag: " on purpose.
-async fn post_opt_flag(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-
-    let flag = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("flag").and_then(|f| f.as_str()).map(str::to_string))
-        .unwrap_or_default();
-    (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({"error": format!("unknown flag: {flag}")})),
-    )
-        .into_response()
-}
 
 /// The network mode form. The listen ports are validated first, so an empty
 /// body reports the race port rather than a generic "bad request".
@@ -12315,28 +12089,11 @@ async fn post_network_mode(
     Json(serde_json::json!({"status": "ok", "restart_required": true})).into_response()
 }
 
-/// Remove torrents the *arr stack no longer tracks.
-simple_post!(post_arr_cleanup_execute, |_s: &AppState| {
-    serde_json::json!({"errors": serde_json::Value::Null, "removed": 0})
-});
-
-/// Session settings, echoed back exactly as the GET reports them.
-async fn post_race_settings(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-    _body: String,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(serde_json::json!({
-        "listen_port": cfg.race.listen_port,
-        "max_connections": cfg.race.max_connections,
-        "upload_rate_limit": 0,
-    }))
-    .into_response()
-}
+// Until 4.4, `POST /api/arr-cleanup/execute` answered `{"removed":0}` without
+// looking at anything, and `POST /api/race/settings` echoed the config while
+// dropping the body. No screen called either; both are gone. The arr-cleanup
+// scan and the race settings GET stay as reads. Race settings are written
+// with `POST /api/settings`, which persists them.
 
 /// qBittorrent's preferences setter.
 ///
@@ -12541,20 +12298,6 @@ async fn delete_job(
     let before = state.store.lock().unwrap().cancel_job(&id);
     let status = if before.as_deref() == Some("running") { "cancelling" } else { "cancelled" };
     Json(serde_json::json!({"status": status})).into_response()
-}
-
-/// Removing an agent is idempotent: 200 whether it was there or not.
-async fn delete_agent(
-    State(state): State<AppState>,
-    Path(_name): Path<String>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
 /// Declare one more engine on THIS node.
@@ -13226,15 +12969,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/drain/history", get(get_drain_history))
         .route("/api/drain/graduations", get(get_drain_graduations))
         .route("/api/categories/orphans", get(get_categories_orphans))
-        .route("/api/agents/removed", get(get_agents_removed))
         .route("/api/arr-cleanup/scan", get(get_arr_cleanup_scan))
         .route("/api/hoard/pinned", get(get_hoard_pinned))
         .route("/api/race/listen-port", axum::routing::post(set_race_listen_port))
         .route("/api/hoard/listen-port", axum::routing::post(set_hoard_listen_port))
         .route("/api/race/dial-limits", axum::routing::post(race_dial_limits))
         .route("/api/hoard/dial-limits", axum::routing::post(hoard_dial_limits))
-        .route("/api/hoard/verify-downloading", axum::routing::post(hoard_verify_downloading))
-        .route("/api/hoard/restart-stuck", axum::routing::post(hoard_restart_stuck))
         .route("/api/hoard/torrents/:info_hash/verify", axum::routing::post(hoard_verify_one))
         .route("/api/torrents/:info_hash/reannounce", axum::routing::post(reannounce_one))
         .route("/api/drain/now", axum::routing::post(drain_now))
@@ -13249,9 +12989,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings/restart", axum::routing::post(post_settings_restart))
         .route("/api/startup-pause/release", axum::routing::post(post_startup_release))
         .route("/api/race/timeline/:info_hash", get(get_race_timeline))
-        .route("/api/agents/test", axum::routing::post(post_agent_test))
-        .route("/api/agents/restore/:name", axum::routing::post(post_agent_restore))
-        .route("/api/agents/:name/action", axum::routing::post(post_agent_action))
         .route(
             "/api/import/transmission/upload",
             // A config folder of a large library is far past axum's 2 MB
@@ -13280,19 +13017,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes/:name/fetch", axum::routing::post(post_node_fetch))
         .route("/api/nodes/:name/move-engine", axum::routing::post(post_node_move_engine))
         .route("/node/:name/open", get(get_node_open))
-        .route("/api/agents", get(get_agents).post(post_agent_create))
-        .route("/api/agents/:name", axum::routing::put(put_agent).delete(delete_agent))
+        // The 3.x agent API, gone since agents became engines and nodes. 410
+        // on every path and verb under it, so a 3.x script learns where to go
+        // instead of reading a 404 as a typo. See `agents_gone`.
+        .route("/api/agents", axum::routing::any(agents_gone))
+        .route("/api/agents/*rest", axum::routing::any(agents_gone))
         .route("/api/engines/:id", axum::routing::delete(delete_engine))
-        .route("/api/arr-cleanup/execute", axum::routing::post(post_arr_cleanup_execute))
         .route("/api/auth/password", axum::routing::post(post_password))
         .route("/api/import/qbit/preview", axum::routing::post(post_qbit_import_preview))
-        .route("/api/jobs/move-remote", axum::routing::post(post_move_remote))
+        .route("/api/jobs/move-remote", axum::routing::any(move_remote_gone))
         .route("/api/jobs/:id", get(get_job).delete(delete_job))
         .route("/api/network/mode", get(get_network_mode).post(post_network_mode))
         .route("/api/network/wireguard/engines", axum::routing::post(post_wireguard_engines))
         .route("/api/network/wireguard/configs/:name", axum::routing::delete(delete_wireguard_config))
-        .route("/api/opt/flags", get(get_opt_flags).post(post_opt_flag))
-        .route("/api/race/settings", get(get_race_settings).post(post_race_settings))
+        .route("/api/race/settings", get(get_race_settings))
         .route("/api/race/torrents/:info_hash/move-preview", get(move_preview))
         .route("/api/hoard/torrents/:info_hash/move-preview", get(move_preview))
         .route("/api/benchmark/race-snapshots/:info_hash", get(race_snapshots))
@@ -13312,8 +13050,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/race/torrents/:info_hash/resume", axum::routing::post(race_resume_one))
         .route("/api/hoard/torrents/bulk", axum::routing::post(hoard_bulk))
         .route("/api/race/torrents/bulk", axum::routing::post(race_bulk))
-        .route("/api/hoard/download-slots", get(get_download_slots).post(download_slots_write).delete(download_slots_write))
-        .route("/api/race/choking", get(get_race_choking))
+        .route("/api/hoard/download-slots", get(get_download_slots))
         .route("/api/import/qbit/status", get(get_qbit_import_status))
         // Any verb: cross-seed sends every call, reads included, as a POST.
         .route("/api/v2/torrents/categories", axum::routing::any(qbit_categories))
@@ -13338,7 +13075,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/torrents/:info_hash/add-tracker", axum::routing::post(post_add_tracker))
         .route("/api/trackers", get(get_trackers))
         .route("/api/fs/browse", get(get_fs_browse))
-        .route("/api/agents/torrents", get(get_agents_torrents))
         .route("/api/benchmark/records", get(get_bench_records))
         .route("/api/benchmark/range", get(get_bench_range))
         .route("/api/benchmark/race-events", get(get_race_events))
@@ -14005,6 +13741,7 @@ mod tests {
         assert!(!add_recheck_wanted(true, false));
     }
 
+    #[test]
     fn a_local_engine_is_named_local_something() {
         assert_eq!(local_agent("race"), "local-race");
         assert_eq!(local_agent("hoard"), "local-hoard");
@@ -14661,7 +14398,6 @@ mod handler_tests {
         route_qbit_categories => qbit_categories,
         route_qbit_tags => qbit_tags,
         route_get_dedup_stats => get_dedup_stats,
-        route_get_race_choking => get_race_choking,
         route_get_hoard_pinned => get_hoard_pinned,
     );
 
@@ -15557,14 +15293,14 @@ mod more_route_tests {
         r_get_bench_range => get_bench_range,
         r_get_tracker_stats_range => get_tracker_stats_range,
         r_get_network_interfaces => get_network_interfaces,
-        r_get_agents => get_agents,
+        r_agents_gone => agents_gone,
+        r_move_remote_gone => move_remote_gone,
         r_get_network_engines => get_network_engines,
         r_get_qbit_import_events => get_qbit_import_events,
         r_get_status => get_status,
         r_get_logs => get_logs,
         r_get_bench_current => get_bench_current,
         r_get_port_forward => get_port_forward,
-        r_get_opt_flags => get_opt_flags,
         r_get_bench_compare => get_bench_compare,
         r_get_wireguard => get_wireguard,
         r_get_live_announce_policy => get_live_announce_policy,
@@ -15577,10 +15313,8 @@ mod more_route_tests {
         r_qbit_transfer_info => qbit_transfer_info,
         r_get_fs_browse => get_fs_browse,
         r_post_node_enrol => post_node_enrol,
-        r_clear_download_slots => clear_download_slots,
         r_hoard_pause_all => hoard_pause_all,
         r_hoard_resume_all => hoard_resume_all,
-        r_download_slots_write => download_slots_write,
     );
 
     /// The same, for the shim routes that also read a form body: cross-seed
@@ -15803,7 +15537,6 @@ mod body_route_tests {
         b_category_create => category_create, r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#;
         b_set_announce_ip_mode => set_announce_ip_mode, r#"{"host":"tracker.example","mode":"v4"}"#;
         b_set_announce_passkey => set_announce_passkey, r#"{"host":"tracker.example","passkey":"abc"}"#;
-        b_set_download_slots => set_download_slots, r#"{"slots":5}"#;
         b_hoard_pause_bulk => hoard_pause_bulk, r#"{"hashes":[]}"#;
         b_race_pause_bulk => race_pause_bulk, r#"{"hashes":[]}"#;
         b_qbit_torrents_info => qbit_torrents_info, "";
@@ -15811,7 +15544,6 @@ mod body_route_tests {
         b_race_bulk => race_bulk, r#"{"hashes":[],"action":"pause"}"#;
         b_post_baseline => post_baseline, r#"{}"#;
         b_import_check_paths => import_check_paths, r#"{"paths":[]}"#;
-        b_post_opt_flag => post_opt_flag, r#"{"flag":"block_mse","value":true}"#;
         b_qbit_set_preferences => qbit_set_preferences, r#"{}"#;
         b_post_engine_create => post_engine_create, r#"{}"#;
     );
@@ -15846,7 +15578,6 @@ mod body_route_tests {
         p_purge_race_torrent => purge_race_torrent, ABSENT;
         p_get_race_timeline => get_race_timeline, ABSENT;
         p_delete_job => delete_job, "no-such-job";
-        p_delete_agent => delete_agent, "nobody";
         p_delete_engine => delete_engine, "no-such-engine";
         p_move_preview => move_preview, ABSENT;
         p_race_snapshots => race_snapshots, ABSENT;
@@ -15857,9 +15588,6 @@ mod body_route_tests {
         pb_engine_pause_bulk => engine_pause_bulk, "race", r#"{"hashes":[]}"#;
         pb_post_torrent_trackers => post_torrent_trackers, ABSENT, r#"{"trackers":[]}"#;
         pb_post_add_tracker => post_add_tracker, ABSENT, r#"{"url":"https://tracker.example/announce"}"#;
-        pb_put_agent => put_agent, "nobody", r#"{}"#;
-        pb_post_agent_restore => post_agent_restore, "nobody", r#"{}"#;
-        pb_post_agent_action => post_agent_action, "nobody", r#"{}"#;
         pb_post_torrent_copy => post_torrent_copy, ABSENT, r#"{"to":"hoard"}"#;
         pb_post_torrent_graduate => post_torrent_graduate, ABSENT, r#"{}"#;
         pb_post_torrent_engine => post_torrent_engine, ABSENT, r#"{"engine":"hoard"}"#;
@@ -17179,12 +16907,10 @@ mod populated_tests {
         pr_get_health_anomalies => get_health_anomalies,
         pr_get_provenance => get_provenance,
         pr_get_dedup_stats => get_dedup_stats,
-        pr_get_race_choking => get_race_choking,
         pr_get_hoard_pinned => get_hoard_pinned,
         pr_get_download_slots => get_download_slots,
         pr_get_arr_cleanup_scan => get_arr_cleanup_scan,
         pr_get_baseline => get_baseline,
-        pr_get_agents => get_agents,
         pr_get_network_engines => get_network_engines,
         pr_qbit_transfer_info => qbit_transfer_info,
         pr_qbit_categories => qbit_categories,
@@ -18002,7 +17728,6 @@ mod remaining_routes_tests {
         rest_get_network_interfaces => get_network_interfaces,
         rest_get_network_mode => get_network_mode,
         rest_get_nodes => get_nodes,
-        rest_get_opt_flags => get_opt_flags,
         rest_get_port_forward => get_port_forward,
         rest_get_qbit_import_events => get_qbit_import_events,
         rest_get_race_events => get_race_events,
@@ -18012,7 +17737,6 @@ mod remaining_routes_tests {
         rest_get_vpn_speedtest_latest => get_vpn_speedtest_latest,
         rest_get_wireguard => get_wireguard,
         rest_qbit_preferences => qbit_preferences,
-        rest_get_agents => get_agents,
         rest_get_health_anomalies => get_health_anomalies,
         rest_get_provenance => get_provenance,
         rest_get_arr_cleanup_scan => get_arr_cleanup_scan,
@@ -18277,14 +18001,11 @@ mod route_table_tests {
         "/api/hoard/stats",
         "/api/hoard/pinned",
         "/api/race/settings",
-        "/api/race/choking",
         "/api/hoard/download-slots",
         "/api/hoard/pause",
         "/api/race/pause",
         "/api/hoard/pause-all",
         "/api/hoard/resume-all",
-        "/api/hoard/verify-downloading",
-        "/api/hoard/restart-stuck",
         "/api/hoard/torrents/bulk",
         "/api/race/torrents/bulk",
         // The canonical, engine-addressed spelling this pass introduces.
@@ -18326,6 +18047,109 @@ mod route_table_tests {
             missing.is_empty(),
             "these paths are not in the route table: {missing:?}"
         );
+    }
+
+    /// The 4.3 stubs removed in 4.4 stay removed.
+    ///
+    /// Each one answered a success-shaped body while doing nothing, so the
+    /// regression to guard against is not a crash but a route quietly coming
+    /// back. 404 for a path that is gone; 405 for a verb dropped from a path
+    /// whose GET is kept (race settings, download slots).
+    #[tokio::test]
+    async fn the_removed_stub_routes_stay_removed() {
+        let srv = serve("route-removed").await;
+        let c = reqwest::Client::new();
+        let cases: &[(reqwest::Method, &str, reqwest::StatusCode)] = &[
+            (reqwest::Method::GET, "/api/race/choking", reqwest::StatusCode::NOT_FOUND),
+            (reqwest::Method::GET, "/api/opt/flags", reqwest::StatusCode::NOT_FOUND),
+            (reqwest::Method::POST, "/api/opt/flags", reqwest::StatusCode::NOT_FOUND),
+            (reqwest::Method::POST, "/api/hoard/verify-downloading", reqwest::StatusCode::NOT_FOUND),
+            (reqwest::Method::POST, "/api/hoard/restart-stuck", reqwest::StatusCode::NOT_FOUND),
+            (reqwest::Method::POST, "/api/arr-cleanup/execute", reqwest::StatusCode::NOT_FOUND),
+            (reqwest::Method::POST, "/api/race/settings", reqwest::StatusCode::METHOD_NOT_ALLOWED),
+            (reqwest::Method::POST, "/api/hoard/download-slots", reqwest::StatusCode::METHOD_NOT_ALLOWED),
+            (reqwest::Method::DELETE, "/api/hoard/download-slots", reqwest::StatusCode::METHOD_NOT_ALLOWED),
+        ];
+        let mut wrong = Vec::new();
+        for (method, path, want) in cases {
+            let resp = c
+                .request(method.clone(), format!("{}{path}", srv.url))
+                .header("X-API-Key", KEY)
+                .body("{}")
+                .send()
+                .await
+                .expect("request");
+            if resp.status() != *want {
+                wrong.push(format!("{method} {path}: {} (want {want})", resp.status()));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// The 3.x agent API and move-remote answer 410 on every path and verb,
+    /// and name where to go. Behind the key: without one, a 401 like any other
+    /// route, so the 410 tells an anonymous caller nothing.
+    #[tokio::test]
+    async fn the_3x_agent_api_answers_gone_with_the_replacement() {
+        let srv = serve("route-gone").await;
+        let c = reqwest::Client::new();
+        let cases: &[(reqwest::Method, &str, &str)] = &[
+            (reqwest::Method::GET, "/api/agents", "/api/nodes"),
+            (reqwest::Method::POST, "/api/agents", "/api/engines"),
+            (reqwest::Method::GET, "/api/agents/removed", "/api/nodes"),
+            (reqwest::Method::GET, "/api/agents/torrents", "/api/nodes"),
+            (reqwest::Method::POST, "/api/agents/test", "/api/nodes"),
+            (reqwest::Method::PUT, "/api/agents/seedbox-de", "/api/nodes"),
+            (reqwest::Method::DELETE, "/api/agents/seedbox-de", "/api/nodes"),
+            (reqwest::Method::POST, "/api/agents/restore/seedbox-de", "/api/nodes"),
+            (reqwest::Method::POST, "/api/agents/seedbox-de/action", "/api/nodes"),
+            (reqwest::Method::POST, "/api/jobs/move-remote", "/api/selection/handoff"),
+        ];
+        let mut wrong = Vec::new();
+        for (method, path, names) in cases {
+            let resp = c
+                .request(method.clone(), format!("{}{path}", srv.url))
+                .header("X-API-Key", KEY)
+                .send()
+                .await
+                .expect("request");
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if status != reqwest::StatusCode::GONE || !body.contains(names) {
+                wrong.push(format!("{method} {path}: {status} {body}"));
+            }
+            let anon = c
+                .request(method.clone(), format!("{}{path}", srv.url))
+                .send()
+                .await
+                .expect("request");
+            if anon.status() != reqwest::StatusCode::UNAUTHORIZED {
+                wrong.push(format!("{method} {path} without a key: {}", anon.status()));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// The managed-WireGuard routes are NOT part of the 3.x removal: they stay
+    /// for the work that brings managed WireGuard back.
+    #[tokio::test]
+    async fn the_wireguard_routes_are_still_in_the_table() {
+        let srv = serve("route-wg").await;
+        let c = reqwest::Client::new();
+        for path in [
+            "/api/network/wireguard",
+            "/api/network/wireguard/configs",
+            "/api/network/wireguard/configs/x.conf",
+            "/api/network/wireguard/engines",
+        ] {
+            let resp = c
+                .request(reqwest::Method::TRACE, format!("{}{path}", srv.url))
+                .header("X-API-Key", KEY)
+                .send()
+                .await
+                .expect("request");
+            assert_ne!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{path} left the table");
+        }
     }
 }
 

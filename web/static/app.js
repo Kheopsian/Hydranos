@@ -395,7 +395,7 @@ function _interfacesCardHTML(list) {
         : `<div class="settings-row"><div class="sr-desc">${t("No non-loopback interfaces detected.")}</div></div>`;
     return `<div class="settings-section" style="margin-bottom:18px">
         <div class="settings-section-title">${t("Network interfaces")}</div>
-        <div class="sr-desc" style="padding:0 0 8px">${t("Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard], or <code>listen_interfaces</code> to <code>ip:port</code>.")}</div>
+        <div class="sr-desc" style="padding:0 0 8px">${t("Detected on this host. To pin an engine to one, set <code>bind_interface</code> to its <b>name</b> (survives VPN IP changes) under [race]/[hoard].")}</div>
         ${rows}
     </div>`;
 }
@@ -2191,10 +2191,6 @@ async function refreshDetail() {
         document.getElementById("detail-piece-size").textContent = formatBytes(d.piece_length);
         document.getElementById("detail-active-time").textContent = _addedAgo(d.added_time);
         document.getElementById("detail-seeding-time").textContent = formatDuration(d.seeding_time);
-
-        // Choking
-        document.getElementById("detail-choking-scored").textContent = d.choking?.num_scored ?? "-";
-        document.getElementById("detail-choking-unchoked").textContent = d.choking?.num_unchoked ?? "-";
 
         // Peers table
         renderPeerRows("detail-peers-table", d.peers);
@@ -4880,55 +4876,9 @@ async function refreshHoardDetail() {
     }
 }
 
-// ─── Seedbox badge ──────────────────────────────────────
-
-function buildSeedboxBadge(p) {
-    const speedOk = p.avg_speed > 10_000_000;
-    const reliabilityOk = p.reliability > 0.8;
-    const sessionsOk = p.num_sessions > 10;
-
-    const checks = [
-        (speedOk ? "" : "✗ ") + t("Avg speed > 10 MB/s ({v})", { v: formatSpeed(p.avg_speed) }),
-        (reliabilityOk ? "" : "✗ ") + t("Reliability > 80% ({v}%)", { v: (p.reliability * 100).toFixed(0) }),
-        (sessionsOk ? "" : "✗ ") + t("Sessions > 10 ({v})", { v: p.num_sessions }),
-    ].join("\n");
-
-    if (p.is_seedbox) {
-        return `<span class="badge-seedbox" title="${esc(checks)}">SEEDBOX ℹ</span>`;
-    }
-    const failed = [!speedOk && "speed", !reliabilityOk && "reliability", !sessionsOk && "sessions"].filter(Boolean).join(", ");
-    return `<span class="badge-no" title="${esc(checks)}">✗ ${failed}</span>`;
-}
-
-// ─── Remove torrent ─────────────────────────────────────
-
-function removeTorrent(infoHash) {
-    const modal = document.getElementById("remove-modal");
-    modal.dataset.hash = infoHash;
-    modal.style.display = "flex";
-}
-
-function closeRemoveModal() {
-    document.getElementById("remove-modal").style.display = "none";
-}
-
-async function confirmRemove(deleteFiles) {
-    const modal = document.getElementById("remove-modal");
-    const infoHash = modal.dataset.hash;
-    modal.style.display = "none";
-
-    try {
-        await fetch(`/api/torrents/${infoHash}?delete_files=${deleteFiles}`, {
-            method: "DELETE",
-            headers: { "X-Api-Key": API_KEY },
-        });
-        if (selectedTorrent === infoHash) closeDetail();
-        updateRaceTorrents();
-        updateOverview();
-    } catch (e) {
-        hydraNotify(t("Failed to remove: {msg}", { msg: e.message }));
-    }
-}
+// A SEEDBOX peer badge and a single-torrent Remove dialog used to sit here.
+// Nothing called either: no peer carries `is_seedbox`, and removal goes
+// through the context menu's Remove group, which runs as a selection job.
 
 // ─── Add torrent ────────────────────────────────────────
 
@@ -7190,7 +7140,7 @@ function esc(s) {
     return String(s).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 }
 // Regroupement des sections toml par domaine (ordre = ordre d'affichage).
-// `tops` = sections toml de 1er niveau ; les sous-tables (race.custom_choking...) heritent du top.
+// `tops` = sections toml de 1er niveau ; les sous-tables (race.foo...) heritent du top.
 // Keys the Network tab owns. Shown there, hidden from the flat lists, because
 // the Network tab writes them as a set: editing one of them on its own can
 // produce a combination the tab would have refused.
@@ -7201,12 +7151,35 @@ const NET_OWNED_KEYS = new Set([
     "socks5_outbound_pass", "announce_proxy", "announce_ip",
 ]);
 
+// Keys and sections nothing reads ("section::key", or a whole "section" and its
+// sub-tables). A file carried over from 3.x still holds them, and listed here
+// with an editable field they looked like live settings. The daemon names each
+// one in its startup log with the reason and the replacement; the table it
+// reads is DEAD_KEYS in typhon-engine/src/hydra/deadkeys.rs, whose tests check
+// that every entry there is hidden here.
+const _DEAD_SETTINGS = new Set([
+    "daemon::agent_token",
+    "race::listen_interfaces", "hoard::listen_interfaces",
+    "race::file_pool_size", "hoard::file_pool_size",
+    "race.custom_choking", "hoard.custom_choking",
+    "race.disk_slots", "hoard.disk_slots",
+    "bench", "metrics", "peer_intel", "arr_cleanup", "notify",
+    "vpn_speedtest::iperf3_port", "vpn_speedtest::interval_secs", "vpn_speedtest::duration_secs",
+    "race_drain::min_age_minutes",
+]);
+function _isDeadSetting(path, k) {
+    if (_DEAD_SETTINGS.has(path + "::" + k)) return true;
+    for (let p = path; p; p = p.includes(".") ? p.slice(0, p.lastIndexOf(".")) : "") {
+        if (_DEAD_SETTINGS.has(p)) return true;
+    }
+    return false;
+}
+
 const SETTINGS_DOMAINS = [
     { id: "daemon",   label: "General",              icon: "\u2699\uFE0F", tops: ["daemon"] },
     { id: "race",     label: "Session Race", icon: "\u{1F3C1}",     tops: ["race", "race_drain"] },
     { id: "hoard",    label: "Session Hoard",          icon: "\u{1F4E6}",     tops: ["hoard"] },
     { id: "trackers", label: "Trackers & Network",             icon: "\u{1F310}",     tops: ["announce_passkeys", "announce_ip_modes"] },
-    { id: "observ",   label: "Observability",                 icon: "\u{1F4CA}",     tops: ["metrics", "peer_intel"] },
     { id: "maint",    label: "Maintenance",                   icon: "\u{1F9F9}",     tops: ["vpn_speedtest"] },
 ];
 const _SETTINGS_DESC = {
@@ -7214,12 +7187,10 @@ const _SETTINGS_DESC = {
     api_host: "IP the HTTP API/WebUI binds to (0.0.0.0 = all interfaces).",
     api_port: "TCP port for the HTTP API and WebUI.",
     api_key: "Secret required in the X-API-Key header to call the API.",
-    agent_token: "Shared bearer token a front must present to drive this node's agent (gRPC) data-plane. Empty = no auth, which is only safe on a private LAN. $HYDRANOS_AGENT_TOKEN overrides this, and --agent-token overrides both.",
     data_dir: "Root directory for daemon state (categories, DBs, configs).",
     create_torrent_folder: "Create a per-torrent subfolder for single-file torrents (like qBittorrent's subfolder option). Off = single files saved directly in the category folder; multi-file torrents always keep their own folder. Applies to newly added torrents only.",
     // session (race/hoard)
     listen_port: "TCP/UDP port this session listens on for incoming peers.",
-    listen_interfaces: "Comma-separated ip:port bind list (multi-homing).",
     enable_ipv6: "Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX offer. Off = IPv4 only. Only enable it if this host has working IPv6, otherwise you announce an address nobody can reach.",
     enable_dht: "Find peers through the global DHT (BEP 5) on top of the trackers. Private torrents are never announced to it either way. Off, this engine bootstraps no DHT node at all and reaches nothing but its trackers.",
     enable_udp_trackers: "Announce to udp:// trackers (BEP 15) as well as http(s):// ones. Most public torrents list only UDP trackers. Off, they are left alone -- not contacted, and not reported as failing. Takes effect at the next start of the engine.",
@@ -7240,26 +7211,10 @@ const _SETTINGS_DESC = {
     active_seeds: "Max torrents actively seeding (-1 = unlimited).",
     active_limit: "Max active torrents overall (-1 = unlimited).",
     active_downloads: "Max torrents actively downloading at once.",
-    file_pool_size: "Max file handles kept open by the disk cache.",
     upload_rate_limit: "Upload speed cap in bytes/s (0 = unlimited).",
     announce_rate_limit: "Cap on outbound tracker announces for this session, in announces per second. 0 = unlimited. Use it when a VPN or a firewall drops the burst a large library sends at once: the same announces then go out spread over time. Fractional values allowed (0.5 = one announce every 2 seconds).",
-    // [race.custom_choking]
-    tick_interval_seconds: "How often the custom choker re-evaluates peers (seconds).",
-    strategy: "Custom choking strategy name.",
-    max_unchoked: "Max peers unchoked by the custom choker.",
-    rarity_weight: "Weight given to piece rarity when ranking peers (0-1).",
-    speed_weight: "Weight given to peer speed when ranking peers (0-1).",
-    // [arr_cleanup]
-    radarr_url: "Radarr base URL for the cleanup integration.",
-    radarr_api_key: "Radarr API key.",
-    sonarr_url: "Sonarr base URL.",
-    sonarr_api_key: "Sonarr API key.",
-    min_score: "Minimum custom-format score to keep a release.",
     // [vpn_speedtest]
     iperf3_server: "iperf3 server used to measure peer-facing bandwidth.",
-    iperf3_port: "iperf3 server port (retries base..+8 if busy).",
-    interval_secs: "Seconds between speedtest runs.",
-    duration_secs: "Duration of each iperf3 run (seconds).",
     // [proxy]
     socks5_host: "SOCKS5 host used by the orchestrator (public IP + speedtest).",
     socks5_port: "SOCKS5 port.",
@@ -7269,8 +7224,6 @@ const _SETTINGS_DESC = {
     check_interval_seconds: "How often disk usage is checked (seconds).",
     high_watermark_pct: "Disk-usage % that triggers purging old race data.",
     low_watermark_pct: "Purge stops once disk usage drops to this %.",
-    // [notify]
-    webhook_url: "Discord webhook URL for notifications.",
     // generique
     enabled: "Enable this feature.",
 };
@@ -7319,23 +7272,15 @@ const _SETTINGS_DEFAULT = {
     "race::peer_timeout": 30,
     "race::inactivity_timeout": 20,
     "race::active_seeds": 50, "race::active_limit": 100, "race::active_downloads": 20,
-    "race::file_pool_size": 500,
-    "race.custom_choking::enabled": true, "race.custom_choking::tick_interval_seconds": 2,
-    "race.custom_choking::strategy": "rarity_captive", "race.custom_choking::max_unchoked": 30,
-    "race.custom_choking::rarity_weight": 0.7, "race.custom_choking::speed_weight": 0.3,
     "hoard::listen_port": 16172, "hoard::max_connections": 8000,
     "hoard::max_uploads_per_torrent": 20,
     "hoard::peer_timeout": 90,
     "hoard::inactivity_timeout": 90,
     "hoard::active_seeds": -1, "hoard::active_limit": -1, "hoard::active_downloads": -1,
-    "hoard::file_pool_size": 5000,
-    "arr_cleanup::min_score": 0.6,
     "race_drain::enabled": true, "race_drain::check_interval_seconds": 60,
     "race_drain::high_watermark_pct": 95, "race_drain::low_watermark_pct": 85,
 };
-const _SETTINGS_ENUM = {
-    strategy: ["rarity_captive"],
-};
+const _SETTINGS_ENUM = {};
 
 function genApiKey(id) {
     const el = document.getElementById(id);
@@ -7475,6 +7420,7 @@ async function updateSettings() {
                 let rows = "";
                 for (const [k, v] of scalars) {
                     if (NET_OWNED_KEYS.has(k) && (path === "race" || path === "hoard")) continue;
+                    if (_isDeadSetting(path, k)) continue;
                     const id = "set__" + path + "__" + k;
                     if (!Array.isArray(v)) _settingsOrig[id] = { section: path, key: k, value: v };
                     const search = (path + " " + k).toLowerCase();
@@ -7779,204 +7725,11 @@ if (API_KEY) maybeOfferImport();
 
 
 // ─── Agents ─────────────────────────────────────────
-let _editingAgent = null;
-// One table, because there is one thing.
-//
-// This page used to show an Agents table and an "Agents on this machine"
-// table, which listed the SAME rows twice with different columns -- and the two
-// disagreed on what could be done to them: an agent could not be deleted, the
-// engine behind it could. Since one agent is one engine, that split described a
-// distinction that no longer exists. The row carries the engine's role and
-// port, and its delete button removes the thing itself.
-async function updateAgents() {
-    updateRemovedAgents();
-    try {
-        // The ports are the reason for the extra calls: /api/agents names the
-        // engines, /api/engines carries the live port of the ones started here,
-        // and port-forward carries the primaries' -- which move on their own in
-        // gluetun mode, so the config would be the wrong place to read them.
-        const results = await Promise.all([
-            api("/api/agents"),
-            api("/api/engines").catch(function () { return []; }),
-            api("/api/port-forward").catch(function () { return null; }),
-        ]);
-        const agents = results[0] || [];
-        const extras = results[1] || [];
-        const pf = results[2];
-        const tbody = document.getElementById("agents-tbody");
-        if (!agents.length) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty">' + t("No agents") + '</td></tr>';
-            return;
-        }
-        const extraById = {};
-        extras.forEach(function (e) { extraById[e.id] = e; });
-
-        tbody.innerHTML = agents.map(a => {
-            const dot = a.online
-                ? '<span class="mode-tag mode-hoard">' + t("online") + '</span>'
-                : '<span class="mode-tag mode-race">' + t("offline") + '</span>';
-            const local = a.kind === "local";
-            const engines = a.engines || [];
-            const deletable = local && engines.length === 1 && !!extraById[engines[0].id];
-            let actions;
-            if (deletable) {
-                actions = `<button class="btn-small btn-danger" onclick="deleteEngine('${esc(engines[0].id)}')">${t("Delete")}</button>`;
-            } else if (local) {
-                // The two engines this daemon is built around. Removing one is
-                // not an Agents-page action: it is a different daemon.
-                actions = '<span class="sr-desc">' + t("built-in") + '</span>';
-            } else {
-                actions = `<button class="btn-small" onclick="editAgent('${esc(a.name)}','${esc(a.addr || "")}')">${t("Edit")}</button> <button class="btn-small btn-danger" onclick="deleteAgent('${esc(a.name)}')">${t("Delete")}</button>`;
-            }
-            const engineCell = engines.map(function (e) {
-                let port = 0;
-                if (extraById[e.id]) port = extraById[e.id].listen_port;
-                else if (pf && local) port = e.role === "race" ? pf.race_port : (e.role === "hoard" ? pf.hoard_port : 0);
-                const iface = extraById[e.id] && extraById[e.id].bind_interface;
-                const bits = [esc(e.role || "")];
-                if (port) bits.push('<span class="mono">' + port + "</span>");
-                if (iface) bits.push('<span class="mono">' + esc(iface) + "</span>");
-                return "<strong>" + esc(e.id) + "</strong> <span class=\"sr-desc\">" + bits.join(" &middot; ") + "</span>" + (e.online ? "" : " \u26a0");
-            }).join("<br>") || '<span class="sr-desc">' + t("no agent") + "</span>";
-            const where = local
-                ? '<span class="sr-desc">' + t("this machine") + "</span>"
-                : '<span class="mono" style="font-size:12px">' + esc(a.addr || "\u2014") + "</span>";
-            const ifTip = (a.interfaces||[]).map(i=>i.name+": "+incoIP(i.ip)+(i.up?"":" " + t("(down)"))).join("\n");
-            const exit = _exitIPMarkup(a.exit_ip, a.exit_ip_v6, !!a.ipv6_wanted);
-            const exitTip = [exit.title, ifTip].filter(Boolean).join("\n");
-            return `<tr><td><strong>${esc(a.name)}</strong></td><td>${engineCell}</td><td>${where}</td><td class="mono exit-ip-cell" style="font-size:12px" title="${esc(exitTip)}">${exit.html}</td><td>${dot}</td><td>${actions}</td></tr>`;
-        }).join("");
-    } catch (e) { console.error("Failed to update agents:", e); }
-}
-function showAgentForm(name = null, addr = "") {
-    _editingAgent = name;
-    const n = document.getElementById("ag-name");
-    n.value = name || ""; n.disabled = !!name;
-    document.getElementById("ag-addr").value = addr || "";
-    document.getElementById("ag-token").value = "";
-    document.getElementById("ag-tlsca").value = "";
-    document.getElementById("ag-result").style.display = "none";
-    // Editing only ever applies to a dialled node: a local engine's identity is
-    // its id, and renaming it would orphan every torrent row naming it.
-    const kind = document.getElementById("ag-kind");
-    if (kind) { kind.value = "remote"; kind.disabled = !!name; }
-    agentKindChanged();
-    document.getElementById("agent-form").style.display = "block";
-}
-function hideAgentForm() { document.getElementById("agent-form").style.display = "none"; _editingAgent = null; }
-
-// One form, two kinds of node. "This machine" starts an engine here; "another
-// machine" registers one that is already running elsewhere. They were two
-// separate screens -- an Agents form that could only ever be remote because it
-// demanded an address, and an Add engine form that never said the word agent --
-// which left no way to create a local agent at all, and no hint that an engine
-// and an agent are now the same thing.
-function agentKindChanged() {
-    const local = document.getElementById("ag-kind").value === "local";
-    document.querySelectorAll(".ag-local-only").forEach(function (el) { el.style.display = local ? "" : "none"; });
-    document.querySelectorAll(".ag-remote-only").forEach(function (el) { el.style.display = local ? "none" : ""; });
-    const n = document.getElementById("ag-name");
-    n.placeholder = local ? "vpn7" : "seedbox-de";
-    const hint = document.getElementById("ag-name-hint");
-    if (hint) {
-        // Say the resulting agent name outright: the engine id is what the user
-        // types, but the name every screen shows is the prefixed one.
-        hint.textContent = local
-            ? t("agent id — it will be listed as local-<id>")
-            : t("the name this node is shown under in Move to engine");
-    }
-    const testBtn = document.getElementById("ag-test-btn");
-    if (testBtn) testBtn.style.display = local ? "none" : ""; // nothing to dial
-}
-function editAgent(name, addr) { showAgentForm(name, addr); }
-function _agentPayload() {
-    return {
-        name: document.getElementById("ag-name").value.trim(),
-        addr: document.getElementById("ag-addr").value.trim(),
-        token: document.getElementById("ag-token").value.trim(),
-        tls_ca: document.getElementById("ag-tlsca").value.trim(),
-    };
-}
-function _agResult(msg, ok) {
-    const r = document.getElementById("ag-result");
-    r.textContent = msg;
-    r.className = "result-msg " + (ok ? "success" : "error");
-    r.style.display = "block";
-}
-async function testAgent() {
-    const p = _agentPayload();
-    if (!p.addr) { _agResult(t("Address required"), false); return; }
-    try {
-        const res = await api("/api/agents/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
-        if (res.online) _agResult(t("✓ reachable"), true);
-        else _agResult(t("✗ unreachable: {err}", { err: res.error || "" }), false);
-    } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
-}
-async function saveAgent() {
-    const kindEl = document.getElementById("ag-kind");
-    if (kindEl && kindEl.value === "local" && !_editingAgent) {
-        const id = document.getElementById("ag-name").value.trim();
-        if (!id) { _agResult(t("Agent id required"), false); return; }
-        const role = document.getElementById("ag-role").value;
-        const port = parseInt(document.getElementById("ag-port").value) || 0;
-        // Starting an engine takes a few seconds -- a Typhon process, a store
-        // to open, torrents to reload -- so say what is happening instead of
-        // leaving a dead-looking button, and refuse a second click meanwhile.
-        const btn = document.getElementById("ag-save-btn");
-        const btnLabel = btn ? btn.textContent : "";
-        if (btn) { btn.disabled = true; btn.textContent = t("Starting..."); }
-        _agResult(t("Starting the agent, this takes a few seconds..."), true);
-        try {
-            const res = await api("/api/engines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, role: role, listen_port: port }) });
-            hideAgentForm();
-            // No restart any more: the daemon starts the engine and registers
-            // it as its own agent before answering. A node with no agent host
-            // (front-only) still answers restart_required, so honour it.
-            if (res && res.restart_required) {
-                const banner = document.getElementById("restart-banner");
-                if (banner) banner.style.display = "block";
-            } else {
-                hydraNotify(t("Agent {agent} is running.", { id: id, agent: (res && res.agent) || ("local-" + id) }));
-            }
-            await updateAgents();
-        } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
-        finally { if (btn) { btn.disabled = false; btn.textContent = btnLabel; } }
-        return;
-    }
-    const p = _agentPayload();
-    if (!p.name || !p.addr) { _agResult(t("Name and address required"), false); return; }
-    try {
-        if (_editingAgent) {
-            await api(`/api/agents/${encodeURIComponent(_editingAgent)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
-        } else {
-            await api("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
-        }
-        hideAgentForm();
-        await updateAgents();
-    } catch (e) { _agResult(t("Error: {msg}", { msg: e.message }), false); }
-}
-async function deleteAgent(name) {
-    if (!await hydraConfirm(t("Delete agent \"{name}\"?", { name: name }))) return;
-    try { await api(`/api/agents/${encodeURIComponent(name)}`, { method: "DELETE" }); await updateAgents(); }
-    catch (e) { hydraNotify(t("Error: {msg}", { msg: e.message })); }
-}
-
-// Soft-delete safety: an accidentally removed agent stays here for one-click
-// restore (its config is parked server-side; the remote agent never stops).
-async function updateRemovedAgents() {
-    const box = document.getElementById("agents-removed");
-    if (!box) return;
-    try {
-        const rm = await api("/api/agents/removed");
-        if (!rm || !rm.length) { box.innerHTML = ""; return; }
-        box.innerHTML = '<div class="sr-desc" style="margin-top:12px">' + t("Recently removed, restore in one click") + '</div>' +
-            rm.map(a => `<div class="cat-agent-row"><span class="cat-agent-lbl"><strong>${esc(a.name)}</strong></span><span class="mono" style="font-size:12px">${esc(a.addr || "")}</span> <button class="btn-small" onclick="restoreAgent('${esc(a.name)}')">${t("Restore")}</button></div>`).join("");
-    } catch (e) { box.innerHTML = ""; }
-}
-async function restoreAgent(name) {
-    try { await api(`/api/agents/restore/${encodeURIComponent(name)}`, { method: "POST" }); await updateAgents(); }
-    catch (e) { hydraNotify(t("Error: {msg}", { msg: e.message })); }
-}
+// The 3.x Agents screen lived here: a table fed by `/api/agents`, a form
+// posting to its stub sub-routes, and a "recently removed" list. Its markup
+// left the page before 4.3, so none of it could run; the routes now answer
+// 410 and point to `/api/engines` and `/api/nodes`, which the Nodes screen and
+// the "Move to engine" picker use.
 
 
 // ─── Trackers ───────────────────────────────────────────
@@ -8609,24 +8362,9 @@ async function clearTrackerPasskey() {
     catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
 }
 
-// --- Local engines ---
+// Local engines are added and deleted from the Nodes screen (the engine rows
+// under this node); the Agents-table copy of that button went with its table.
 
-// updateEngines and its table are gone: the Agents table above lists these
-// engines, because each one IS an agent. Two tables for one thing is what made
-// the page read as a distinction between agents and engines that the daemon
-// stopped making in 3.138.0.
-
-async function deleteEngine(id){
-    // Named as the agent, because that is the row the button sits in.
-    if(!await hydraConfirm(t("Delete engine {id}? It stops seeding right away.", { id: id }))) return;
-    hydraNotify(t("Stopping engine {id}...", { id: id }));
-    try{
-        const res = await api("/api/engines/" + encodeURIComponent(id), {method:"DELETE"});
-        // Only a node that could not stop it asks for a restart now.
-        if(res && res.restart_required) document.getElementById("restart-banner").style.display="block";
-        await updateAgents();
-    }catch(err){ hydraNotify(t("Delete failed: {err}", { err: err })); }
-}
 async function restartHydra(){
     if(!await hydraConfirm(t("Restart Hydranos to apply the changes? (~40s)"))) return;
     try{ await api("/api/restart", {method:"POST"}); }catch(err){}
@@ -9964,15 +9702,6 @@ function hydraPrompt(title, body, value, okLabel) {
     return shown.then(v => v === true ? input.value : null);
 }
 
-// _agentAction runs one action on a torrent that lives on an agent. Local rows
-// keep their own endpoints; only the remote ones need the node named.
-function _agentAction(agent, engine, action, hash, extra) {
-    return fetch(`/api/agents/${encodeURIComponent(agent)}/action`, {
-        method: "POST",
-        headers: { "X-Api-Key": API_KEY, "Content-Type": "application/json" },
-        body: JSON.stringify(Object.assign({ engine: engine, action: action, info_hash: hash }, extra || {})),
-    });
-}
 
 // ── Live refresh for agent rows ─────────────────────────────────────────────
 //

@@ -44,6 +44,7 @@ mod qbitrow;
 mod row;
 mod speedtest;
 mod dedup;
+mod deadkeys;
 mod export;
 mod selection;
 mod store;
@@ -516,6 +517,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // otherwise answer every caller who sends no key. See config::ensure_api_key.
     config::ensure_api_key(&mut config, &config_path);
     let config = config;
+    // Keys the file holds and nothing reads: said once, never fatal -- an old
+    // config must still start, but its owner must not believe it acts.
+    deadkeys::warn_config(&config_path);
 
     // ⚠ Create data_dir HERE, before anything opens a database in it. SQLite
     // makes the FILE but never the DIRECTORY: a data_dir that does not exist
@@ -566,6 +570,15 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         Err(e) => return rescue(&store_path, &config_path, &addr, &e.to_string()).await,
     };
     tracing::info!(torrents = engine_host.total_torrents(), "engines up");
+    // Categories live in the store, not the TOML, so their 3.x routing fields
+    // are checked here. Same two sources as api::categories_map, same order.
+    {
+        let doc = store
+            .meta_doc("categories")
+            .filter(|d| !d.is_empty())
+            .or_else(|| std::fs::read_to_string(std::path::Path::new(&cfg_data_dir).join("categories.json")).ok());
+        deadkeys::warn_categories(doc.as_deref());
+    }
 
     // Get the listen port forwarded. `portfwd` has been able to do this since
     // it was written and was never once called -- `mod portfwd;` and no call
