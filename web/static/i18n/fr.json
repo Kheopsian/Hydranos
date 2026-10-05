@@ -913,5 +913,8 @@
   "or the URL of a list, e.g. https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt": "ou l'URL d'une liste, ex. https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt",
   "Moves the data as Set location does, category unchanged. Hardlinked files are not copied across disks: such a torrent is reported as failed.": "Déplace les données comme « Set location », catégorie inchangée. Les fichiers hardlinkés ne sont pas copiés vers un autre disque : un tel torrent est signalé en échec.",
   "Never applied to a private torrent. Every tracker added learns this node's IP for the torrent.": "Jamais appliqué à un torrent privé. Chaque tracker ajouté apprend l'IP de ce nœud pour ce torrent.",
-  "Changes the label only; use \"move files to a folder\" to move the data.": "Change seulement l'étiquette ; utilisez « déplacer les fichiers vers un dossier » pour déplacer les données."
+  "Changes the label only; use \"move files to a folder\" to move the data.": "Change seulement l'étiquette ; utilisez « déplacer les fichiers vers un dossier » pour déplacer les données.",
+  "No category": "Aucune catégorie",
+  "Moving {n} torrent to \"{cat}\", which runs in another engine: it stops seeding while its data is copied, then carries on there as it was. Follow it in Jobs.": "Déplacement de {n} torrent vers « {cat} », qui tourne dans un autre engine : il cesse de seeder pendant la copie de ses données, puis reprend là-bas tel qu'il était. Suivez-le dans Jobs.",
+  "Moving {n} torrents to \"{cat}\", which runs in another engine: they stop seeding while their data is copied, then carry on there as they were. Follow them in Jobs.": "Déplacement de {n} torrents vers « {cat} », qui tourne dans un autre engine : ils cessent de seeder pendant la copie de leurs données, puis reprennent là-bas tels qu'ils étaient. Suivez-les dans Jobs."
 }

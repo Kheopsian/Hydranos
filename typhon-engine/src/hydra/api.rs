@@ -1886,7 +1886,7 @@ pub(crate) fn placement(state: &AppState, category: &str, engine_override: &str)
     match categories_map(state).get(category) {
         Some(cat) => {
             let engine =
-                if cat.mode == "hoard" { "hoard".to_string() } else { "race".to_string() };
+                if cat.mode.trim().eq_ignore_ascii_case("hoard") { "hoard".to_string() } else { "race".to_string() };
             (engine, cat.save_path.clone())
         }
         None => ("race".to_string(), String::new()),
@@ -4082,7 +4082,60 @@ async fn get_drain_graduations(
     }
     Json(serde_json::Value::Array(out)).into_response()
 }
-empty_list_route!(get_categories_orphans);
+/// Labels the torrents wear that match no configured category, with what the
+/// torrents wearing them do: how many, the engine role most of them run in,
+/// and the save path most of them use -- what "Adopt" fills the form from.
+/// 4.3 answered an empty list, so the Categories tab never showed one.
+async fn get_categories_orphans(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let configured = categories_map(&state);
+    let usage = {
+        let store = state.store.lock().unwrap();
+        store.category_usage().unwrap_or_default()
+    };
+    let roles: std::collections::HashMap<String, String> =
+        state.engines.engines().iter().map(|e| (e.id.clone(), e.role.clone())).collect();
+    // name -> (total, role -> n, save_path -> n)
+    let mut by: std::collections::BTreeMap<String, (i64, std::collections::HashMap<String, i64>, std::collections::HashMap<String, i64>)> =
+        Default::default();
+    for (cat, session, path, n) in usage {
+        if configured.contains_key(&cat) {
+            continue;
+        }
+        let e = by.entry(cat).or_default();
+        e.0 += n;
+        *e.1.entry(roles.get(&session).cloned().unwrap_or_default()).or_default() += n;
+        *e.2.entry(path).or_default() += n;
+    }
+    let top = |m: &std::collections::HashMap<String, i64>| {
+        m.iter().max_by_key(|(_, n)| **n).map(|(k, _)| k.clone()).unwrap_or_default()
+    };
+    let out: Vec<serde_json::Value> = by
+        .into_iter()
+        .map(|(name, (total, modes, paths))| {
+            serde_json::json!({"name": name, "torrents": total, "mode": top(&modes), "save_path": top(&paths)})
+        })
+        .collect();
+    Json(out).into_response()
+}
+
+/// A category as the API receives it, checked: `mode` is `race` or `hoard`
+/// in lower case. 4.3 stored whatever came, and any value other than exactly
+/// "hoard" -- "Hoard" from a script, say -- routed the category to race.
+fn checked_category(mut incoming: serde_json::Value) -> Result<serde_json::Value, String> {
+    let obj = incoming.as_object_mut().ok_or("the body must be a JSON object")?;
+    let mode = obj.get("mode").and_then(|m| m.as_str()).unwrap_or("race").trim().to_ascii_lowercase();
+    if mode != "race" && mode != "hoard" {
+        return Err(format!("mode must be race or hoard, not {mode:?}"));
+    }
+    obj.insert("mode".into(), serde_json::Value::String(mode));
+    Ok(incoming)
+}
 empty_list_route!(get_agents_removed);
 
 async fn get_arr_cleanup_scan(
@@ -5844,6 +5897,12 @@ async fn qbit_create_category(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "category name is empty").into_response();
     }
+    // qBittorrent answers 409 for a name that exists. 4.3 overwrote it as a
+    // hoard category with the given path, so a tool re-creating its category
+    // on every start reset the operator's mode and path each time.
+    if categories_map(&state).contains_key(&name) {
+        return (StatusCode::CONFLICT, "Category already exists").into_response();
+    }
     let save_path = form.get("savePath").cloned().unwrap_or_default();
     let _ = edit_categories(&state, |doc| {
         doc.insert(name, serde_json::json!({"save_path": save_path, "mode": "hoard"}));
@@ -5904,6 +5963,13 @@ async fn qbit_remove_categories(
             doc.remove(name);
         }
     });
+    // qBittorrent clears the label from the torrents too.
+    {
+        let store = state.store.lock().unwrap();
+        for name in &names {
+            let _ = store.relabel_category(name, "");
+        }
+    }
     qbit_ok()
 }
 
@@ -6549,11 +6615,23 @@ async fn category_create(
         .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or("")
+        .trim()
         .to_string();
     if name.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "name is required"})),
+        )
+            .into_response();
+    }
+    let incoming = match checked_category(incoming) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    if categories_map(&state).contains_key(&name) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("category {name:?} already exists")})),
         )
             .into_response();
     }
@@ -6576,12 +6654,40 @@ async fn category_update(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     let incoming: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let incoming = match checked_category(incoming) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    // A rename: the body names the category differently from the path. 4.3
+    // wrote the body under the OLD name, so a rename changed nothing visible
+    // and the new name never existed.
+    let new_name = incoming
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| name.clone());
+    if new_name != name && categories_map(&state).contains_key(&new_name) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("category {new_name:?} already exists")})),
+        )
+            .into_response();
+    }
+    let (old, new) = (name.clone(), new_name.clone());
     let _ = edit_categories(&state, |doc| {
-        doc.insert(name, incoming.clone());
+        if old != new {
+            doc.remove(&old);
+        }
+        doc.insert(new, incoming.clone());
     });
-    Json(serde_json::json!({"status": "ok"})).into_response()
+    let relabelled = if new_name != name {
+        state.store.lock().unwrap().relabel_category(&name, &new_name).unwrap_or(0)
+    } else {
+        0
+    };
+    Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": relabelled})).into_response()
 }
 
 async fn category_delete(
@@ -6592,14 +6698,15 @@ async fn category_delete(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
+    let was_orphan = !categories_map(&state).contains_key(&name);
     let _ = edit_categories(&state, |doc| {
         doc.remove(&name);
     });
-    // The counts say how many torrents lost the category, in the engines and in
-    // the store; was_orphan reports a category that no longer existed.
+    // The label goes with the category: 4.3 kept it on every torrent and
+    // answered "cleared": 0, leaving labels no category matched.
+    let cleared = state.store.lock().unwrap().relabel_category(&name, "").unwrap_or(0);
     Json(serde_json::json!({
-        "cleared": 0, "cleared_stored": 0, "status": "ok", "was_orphan": false,
+        "cleared": cleared, "cleared_stored": cleared, "status": "ok", "was_orphan": was_orphan,
     }))
     .into_response()
 }
@@ -15613,6 +15720,56 @@ mod body_route_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod category_lifecycle_tests {
+    use super::testing::*;
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn labelled(s: &TestState, hash: &str, cat: &str) {
+        s.state.store.lock().unwrap().insert_torrent(hash, "hoard", b"d4:infod4:name1:xee", "/data", cat, 0.0, false, "").unwrap();
+    }
+    fn label_of(s: &TestState, hash: &str) -> String {
+        s.state.store.lock().unwrap().category_of(hash, "hoard").unwrap_or_default()
+    }
+
+    /// Rename moves the definition AND the torrents' labels; delete clears
+    /// the labels; a mode in another case is normalised, an unknown one
+    /// refused; an orphaned label is listed with what its torrents do.
+    #[tokio::test]
+    async fn a_category_lives_and_dies_with_its_labels() {
+        let s = state_from("cat-life", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let h1 = "a".repeat(40);
+        let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"Hoard"}"#.into()).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        assert_eq!(categories_map(&s.state)["films"].mode, "hoard", "normalised");
+        let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
+            r#"{"name":"x","save_path":"/x","mode":"turbo"}"#.into()).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+        labelled(&s, &h1, "films");
+        let r = category_update(State(s.state.clone()), Path("films".into()), RawQuery(None), keyed(KEY),
+            r#"{"name":"movies","save_path":"/data/films","mode":"hoard"}"#.into()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(categories_map(&s.state).contains_key("movies") && !categories_map(&s.state).contains_key("films"));
+        assert_eq!(label_of(&s, &h1), "movies");
+
+        let v = body_json(category_delete(State(s.state.clone()), Path("movies".into()), RawQuery(None), keyed(KEY)).await).await;
+        assert_eq!(v["cleared"], 1);
+        assert_eq!(label_of(&s, &h1), "");
+
+        let h2 = "b".repeat(40);
+        labelled(&s, &h2, "ghost");
+        let v = body_json(get_categories_orphans(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert_eq!(v[0]["name"], "ghost");
+        assert_eq!(v[0]["torrents"], 1);
+        assert_eq!(v[0]["mode"], "hoard");
+        assert_eq!(v[0]["save_path"], "/data");
     }
 }
 
