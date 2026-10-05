@@ -26,6 +26,62 @@ use tracing::{info, warn};
 
 use crate::torrent::meta::{InfoHash, TorrentState};
 
+/// Whether an engine may run a DHT node, and why not when it may not.
+///
+/// Decided in one place for the two discovery mechanisms that speak plain UDP
+/// to strangers -- the DHT, and Local Service Discovery once there is one --
+/// because they share the reason to be off: the SOCKS5 proxy here has no UDP
+/// ASSOCIATE, so neither can go through it. A DHT node behind the proxy would
+/// leave by the host's route and hand its real address to every node in the
+/// routing table, which is exactly what the proxy was set up to hide. qBittorrent
+/// does the same: with a proxy for peers, DHT and LSD are off.
+///
+/// PEX is NOT covered: it rides the peer connections, which are proxied.
+///
+/// A tunnel is not a proxy. An engine pinned to a WireGuard device keeps its
+/// DHT, pinned to the same device (`DhtSession::start`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Discovery {
+    On,
+    /// Off, with the sentence the log and the API say it with.
+    Off(&'static str),
+}
+
+pub const OFF_BY_CONFIG: &str = "disabled by config";
+pub const OFF_BEHIND_PROXY: &str =
+    "off behind the SOCKS5 proxy: the DHT is plain UDP, the proxy carries no UDP, and DHT nodes would see this host's address";
+
+impl Discovery {
+    pub fn is_on(&self) -> bool {
+        matches!(self, Discovery::On)
+    }
+}
+
+/// The DHT decision for one engine.
+pub fn dht_policy(config: &crate::config::EngineConfig) -> Discovery {
+    if !config.dht_enabled {
+        Discovery::Off(OFF_BY_CONFIG)
+    } else if !config.socks5_outbound_host.trim().is_empty() {
+        Discovery::Off(OFF_BEHIND_PROXY)
+    } else {
+        Discovery::On
+    }
+}
+
+/// The Local Service Discovery (BEP 14) decision, for when LSD exists.
+///
+/// There is no LSD in this engine yet. This is the hook it must go through
+/// when it arrives: multicast on the LAN, never through a proxy, so it is off
+/// behind one for the same reason as the DHT. Kept separate from
+/// `dht_policy` so an LSD switch of its own slots in without touching the DHT.
+pub fn lsd_policy(config: &crate::config::EngineConfig) -> Discovery {
+    if !config.socks5_outbound_host.trim().is_empty() {
+        Discovery::Off(OFF_BEHIND_PROXY)
+    } else {
+        Discovery::On
+    }
+}
+
 /// One DHT node, owned by one engine.
 ///
 /// This used to be a set of `OnceLock` statics, which was sound while one
@@ -47,10 +103,22 @@ pub struct DhtSession {
 impl DhtSession {
     /// Bootstrap a node. None when bootstrap fails, which is not fatal: the
     /// engine keeps announcing to its trackers.
-    pub async fn start() -> Option<Arc<Self>> {
-        match DhtBuilder::new().await {
+    ///
+    /// `device` pins the node's socket like every other socket of the engine.
+    /// It was built on the default route whatever `bind_interface` said, so an
+    /// engine behind a tunnel ran its DHT from the host's own address. A pin
+    /// that fails is a DHT that does not start, never one that runs unpinned.
+    pub async fn start(device: Option<&str>) -> Option<Arc<Self>> {
+        let config = librqbit_dht::DhtConfig {
+            bind_device: device.map(str::to_string),
+            ..Default::default()
+        };
+        match DhtBuilder::with_config(config).await {
             Ok(dht) => {
-                info!("[dht] bootstrapped");
+                match device {
+                    Some(d) => info!("[dht] bootstrapped, pinned to device {}", d),
+                    None => info!("[dht] bootstrapped"),
+                }
                 Some(Arc::new(Self {
                     dht,
                     tracked: DashMap::new(),
@@ -60,7 +128,7 @@ impl DhtSession {
                 }))
             }
             Err(e) => {
-                warn!("[dht] bootstrap failed: {}", e);
+                warn!("[dht] bootstrap failed: {:#}", e);
                 None
             }
         }
@@ -137,5 +205,44 @@ impl DhtSession {
             handle.abort();
             self.torrents_tracked.fetch_sub(1, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(json: &str) -> crate::config::EngineConfig {
+        serde_json::from_str(json).expect("engine config")
+    }
+
+    /// ⭐ Behind the SOCKS5 proxy the DHT is off whatever `dht_enabled` says,
+    /// and LSD with it; without a proxy the switch is the operator's.
+    #[test]
+    fn a_proxied_engine_runs_no_dht_and_no_lsd() {
+        let proxied = config(r#"{"socks5_outbound_host":"10.0.0.1","dht_enabled":true}"#);
+        assert_eq!(dht_policy(&proxied), Discovery::Off(OFF_BEHIND_PROXY));
+        assert_eq!(lsd_policy(&proxied), Discovery::Off(OFF_BEHIND_PROXY));
+
+        let direct = config(r#"{"dht_enabled":true}"#);
+        assert!(dht_policy(&direct).is_on());
+        assert!(lsd_policy(&direct).is_on());
+        let off = config(r#"{"dht_enabled":false}"#);
+        assert_eq!(dht_policy(&off), Discovery::Off(OFF_BY_CONFIG));
+    }
+
+    /// A tunnel is not a proxy: an engine pinned to a device keeps its DHT.
+    #[test]
+    fn a_pinned_engine_keeps_its_dht() {
+        let pinned = config(r#"{"bind_device":"wg-race","dht_enabled":true}"#);
+        assert!(dht_policy(&pinned).is_on());
+    }
+
+    /// A device that does not exist is a DHT that does not start, never one
+    /// that falls back to the default route.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_dht_pinned_to_a_missing_device_does_not_start() {
+        assert!(DhtSession::start(Some("hy-nodev0")).await.is_none());
     }
 }

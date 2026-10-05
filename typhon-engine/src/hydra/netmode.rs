@@ -26,6 +26,16 @@ pub const SOCKS5_KEYS: [&str; 6] = [
 ];
 pub const PROXY_V2_KEYS: [&str; 3] = ["listen_port_proxy_v2", "listen_addr_proxy_v2", "proxy_v2_trusted_sources"];
 pub const GLUETUN_KEYS: [&str; 3] = ["gluetun_port_forward", "gluetun_url", "gluetun_api_key"];
+/// The tunnel assignments. Cleared by any other mode: a tunnel left enabled
+/// would keep being built at each boot under a page saying the node is not
+/// using one.
+pub const WIREGUARD_KEYS: [&str; 5] = [
+    "wireguard_enabled",
+    "wireguard_config",
+    "wireguard_provider",
+    "wireguard_port",
+    "wireguard_port_forward",
+];
 
 /// The mode as saved, or as deduced for a file the tab never saved.
 ///
@@ -66,6 +76,9 @@ pub fn cleared_keys(mode: &str) -> Vec<&'static str> {
     if mode != "gluetun" {
         out.extend(GLUETUN_KEYS);
     }
+    if mode != "wireguard" {
+        out.extend(WIREGUARD_KEYS);
+    }
     out
 }
 
@@ -73,11 +86,11 @@ pub fn cleared_keys(mode: &str) -> Vec<&'static str> {
 /// network, and that the tab can change. Two equal fingerprints need no
 /// restart; anything else does, because none of these is applied live: the
 /// listener, the proxy in each binding's egress, the announce policy's proxy
-/// and `ip=`, the PROXY v2 listener and the gluetun follower are all set up
-/// in `engines::connect`.
+/// and `ip=`, the PROXY v2 listener, the gluetun follower and the WireGuard
+/// tunnel are all set up in `engines::connect`.
 fn fingerprint(s: &Session) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
         s.listen_port,
         s.bind_interface.trim(),
         s.enable_ipv6,
@@ -93,6 +106,11 @@ fn fingerprint(s: &Session) -> String {
         s.gluetun_port_forward,
         s.gluetun_url.trim(),
         s.gluetun_api_key,
+        s.wireguard_enabled,
+        s.wireguard_config.trim(),
+        s.wireguard_provider.trim(),
+        s.wireguard_port,
+        s.wireguard_port_forward.trim(),
     )
 }
 
@@ -118,6 +136,11 @@ pub fn restart_required(cfg: &Config, running: &[(String, Session)]) -> bool {
 /// then carry on the Trackers tab, so the two are recognisably one fact.
 pub const UDP_BEHIND_PROXY: &str = typhon_engine::tracker::udp::UDP_PROXIED_REFUSAL;
 
+/// The warning for an engine behind the SOCKS5 proxy that has DHT switched
+/// on: the engine turns it off itself (`typhon_engine::dht::dht_policy`), and
+/// the operator hears it when saving rather than finding fewer peers later.
+pub const DHT_OFF_BEHIND_PROXY: &str = "DHT is off behind the SOCKS5 proxy: it is plain UDP, which the proxy does not carry, and DHT nodes would see this host's address. Peer exchange (PEX) stays on, it goes through the proxied peer connections.";
+
 /// What the operator should know about the config now on disk, said when
 /// they save it rather than discovered later on the Trackers tab.
 ///
@@ -131,7 +154,19 @@ pub fn warnings(cfg: &Config, has_udp: &dyn Fn(&str) -> bool) -> Vec<String> {
     if udp_behind_proxy {
         out.push(UDP_BEHIND_PROXY.to_string());
     }
+    if cfg
+        .local_engines()
+        .iter()
+        .any(|e| e.session.enable_dht && !e.session.socks5_outbound_host.trim().is_empty())
+    {
+        out.push(DHT_OFF_BEHIND_PROXY.to_string());
+    }
     let mode = current(cfg);
+    if mode == "wireguard" {
+        if let Err(why) = crate::wgtunnel::support() {
+            out.push(why.to_string());
+        }
+    }
     if mode == "proxy_v2" && cfg.race.socks5_outbound_host.trim().is_empty() {
         out.push("No SOCKS5 proxy is set: incoming peers come through the relay, but outgoing connections and announces leave directly.".to_string());
     }
@@ -176,6 +211,35 @@ mod tests {
         assert!(pv2.contains(&"gluetun_url"));
         let gl = cleared_keys("gluetun");
         assert!(!gl.contains(&"gluetun_url") && gl.contains(&"socks5_outbound_host"));
+        // Any mode but WireGuard switches the tunnels off.
+        for m in ["direct", "gluetun", "socks5", "proxy_v2"] {
+            assert!(WIREGUARD_KEYS.iter().all(|k| cleared_keys(m).contains(k)), "{m} keeps a tunnel");
+        }
+        assert!(!cleared_keys("wireguard").contains(&"wireguard_config"));
+    }
+
+    /// A tunnel assigned, moved to another file or switched off is a
+    /// restart: the tunnel is built before the engine starts.
+    #[test]
+    fn a_tunnel_change_asks_for_a_restart() {
+        let before = cfg("[network]\nmode = \"wireguard\"\n[race]\nlisten_port = 16171\n[hoard]\nlisten_port = 16172\n");
+        let run = running(&before);
+        let on = cfg("[network]\nmode = \"wireguard\"\n[race]\nlisten_port = 16171\nwireguard_enabled = true\n\
+                      wireguard_config = \"a.conf\"\n[hoard]\nlisten_port = 16172\n");
+        assert!(restart_required(&on, &run));
+        assert!(!restart_required(&on, &running(&on)));
+    }
+
+    /// ⭐ Saving the SOCKS5 mode with DHT on says the DHT goes off, the way
+    /// the UDP tracker warning does; without a proxy nothing is said.
+    #[test]
+    fn the_dht_going_off_behind_the_proxy_is_said_when_saved() {
+        let none = |_: &str| false;
+        let proxied = cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\n");
+        assert!(warnings(&proxied, &none).iter().any(|w| w == DHT_OFF_BEHIND_PROXY));
+        let no_dht = cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\nenable_dht = false\n[hoard]\nenable_dht = false\n");
+        assert!(!warnings(&no_dht, &none).iter().any(|w| w == DHT_OFF_BEHIND_PROXY), "nothing to turn off");
+        assert!(!warnings(&cfg(""), &none).iter().any(|w| w == DHT_OFF_BEHIND_PROXY));
     }
 
     /// ⭐ Exact, both ways: an unchanged network needs no restart, any

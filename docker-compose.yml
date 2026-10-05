@@ -16,6 +16,17 @@ services:
     stop_grace_period: 150s
     ulimits:
       nofile: { soft: 1048576, hard: 1048576 }
+    # Network mode "WireGuard, managed by Hydranos": Hydranos creates one
+    # tunnel per engine (wg-<engine>), with its own routing table, and needs
+    # NET_ADMIN for that. Without it the mode is refused with this reason.
+    # The host's default route is never changed. Keep both IPv4 and IPv6 of a
+    # dual-stack provider file with the sysctl (Docker defaults new
+    # interfaces to IPv6 off, and it cannot be changed from inside).
+    # With PUID/PGID below, also set HYDRANOS_CAP_NET_ADMIN: 1.
+    # cap_add:
+    #   - NET_ADMIN
+    # sysctls:
+    #   net.ipv6.conf.default.disable_ipv6: 0
     ports:
       - "8199:8199"          # web UI + REST API
       - "16171:16171/tcp"    # race engine BT listen

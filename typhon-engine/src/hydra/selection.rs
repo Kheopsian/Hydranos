@@ -267,6 +267,9 @@ pub enum Action {
     NodeMove { node: String, engine: String },
     /// Rate caps, KiB/s; `None` keeps a direction, 0 lifts it.
     Limits { up_kib: Option<i64>, down_kib: Option<i64> },
+    /// Share limits, `setShareLimits`' encoding (-2 follow the engine, -1
+    /// none, minutes); `None` keeps a field.
+    ShareLimits { ratio: Option<f64>, seeding: Option<i64>, inactive: Option<i64> },
 }
 
 fn params<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, Refusal> {
@@ -344,6 +347,17 @@ struct LimitParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ShareLimitParams {
+    #[serde(default)]
+    ratio_limit: Option<f64>,
+    #[serde(default)]
+    seeding_time_limit: Option<i64>,
+    #[serde(default)]
+    inactive_seeding_time_limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NodeMoveParams {
     node: String,
     engine: String,
@@ -413,6 +427,20 @@ impl Action {
                     return Err(Refusal::bad("params needs up_kib and/or down_kib (KiB/s, 0 = unlimited)"));
                 }
                 Action::Limits { up_kib: l.up_kib, down_kib: l.down_kib }
+            }
+            "share_limits" => {
+                let l: ShareLimitParams = params(p)?;
+                if l.ratio_limit.is_none() && l.seeding_time_limit.is_none() && l.inactive_seeding_time_limit.is_none() {
+                    return Err(Refusal::bad(
+                        "params needs ratio_limit, seeding_time_limit and/or inactive_seeding_time_limit \
+                         (-2 = the engine's, -1 = none, times in minutes)",
+                    ));
+                }
+                Action::ShareLimits {
+                    ratio: l.ratio_limit,
+                    seeding: l.seeding_time_limit,
+                    inactive: l.inactive_seeding_time_limit,
+                }
             }
             "node-move" => {
                 let m: NodeMoveParams = params(p)?;
@@ -690,7 +718,7 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
     let h = t.hash.as_str();
     match action {
         Action::Pause(_) => unreachable!("set-based"),
-        Action::Pin(_) | Action::Tags { .. } => unreachable!("set-based"),
+        Action::Pin(_) | Action::Tags { .. } | Action::ShareLimits { .. } => unreachable!("set-based"),
         Action::Category { .. } | Action::Location { .. } => {
             // A row from another node is that node's torrent; the local
             // routes would act on this node's copy of the same hash. Relayed
@@ -857,6 +885,8 @@ enum SetEdit {
     Pinned(bool),
     Category(String),
     Tags { tags: Vec<String>, add: bool },
+    /// One row per TORRENT, not per copy: the limits are the torrent's.
+    ShareLimits { ratio: Option<f64>, seeding: Option<i64>, inactive: Option<i64> },
 }
 
 impl SetEdit {
@@ -874,6 +904,9 @@ impl SetEdit {
             // category of the OTHER mode hands the torrent over: both stay on
             // the per-torrent route, which decides between them.
             Action::Category { category, move_files: false, .. } => Some(SetEdit::Category(category.clone())),
+            Action::ShareLimits { ratio, seeding, inactive } => {
+                Some(SetEdit::ShareLimits { ratio: *ratio, seeding: *seeding, inactive: *inactive })
+            }
             _ => None,
         }
     }
@@ -882,7 +915,7 @@ impl SetEdit {
     fn applies(&self, t: &Target) -> bool {
         match self {
             SetEdit::Pinned(_) | SetEdit::Tags { .. } => t.mode == "hoard",
-            SetEdit::Paused(_) | SetEdit::Category(_) => true,
+            SetEdit::Paused(_) | SetEdit::Category(_) | SetEdit::ShareLimits { .. } => true,
         }
     }
 }
@@ -920,6 +953,16 @@ async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, ta
         }
         let (st, rows, e) = (state.clone(), chunk.to_vec(), edit.clone());
         let res = tokio::task::spawn_blocking(move || {
+            if let SetEdit::ShareLimits { ratio, seeding, inactive } = &e {
+                let mut hashes: Vec<String> = rows.iter().map(|(h, _)| h.clone()).collect();
+                hashes.sort();
+                hashes.dedup();
+                // Counted per row, like the other set-based edits: every copy
+                // of a torrent now has these limits.
+                return crate::sharelimits::set_torrent_limits(&st, &hashes, *ratio, *seeding, *inactive)
+                    .map(|_| rows.len())
+                    .map_err(|e| anyhow::anyhow!(e));
+            }
             let changed = {
                 let mut store = st.store.lock().unwrap_or_else(|p| p.into_inner());
                 let edit = match &e {
@@ -927,6 +970,7 @@ async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, ta
                     SetEdit::Pinned(p) => crate::store::BulkEdit::Pinned(*p),
                     SetEdit::Category(cat) => crate::store::BulkEdit::Category(cat),
                     SetEdit::Tags { tags, add } => crate::store::BulkEdit::Tags { tags, add: *add },
+                    SetEdit::ShareLimits { .. } => unreachable!("written above"),
                 };
                 store.bulk_edit(&rows, edit)
             };
@@ -1241,6 +1285,28 @@ mod tests {
         assert_eq!(caps(&h[0]), (102_400, 0));
         assert_eq!(caps(&h[1]), (102_400, 0));
         assert_eq!(caps(&h[2]), (0, 0), "series was not selected");
+    }
+
+    /// `share_limits` by filter is a store write on exactly the filtered
+    /// torrents; an empty params is refused.
+    #[tokio::test]
+    async fn share_limits_by_filter_reach_exactly_the_filtered_torrents() {
+        let (s, h) = library("sel-share");
+        let (st, _) = start(&s, "share_limits", json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, v) = start(
+            &s,
+            "share_limits",
+            json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {"ratio_limit": 2.5, "seeding_time_limit": -1}}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+        let j = wait(&s, v["job"].as_str().unwrap()).await;
+        assert_eq!((j["done"].as_u64(), j["failed"].as_u64()), (Some(2), Some(0)), "{j}");
+        let own = |hash: &str| s.store.read().unwrap().share_limits_of(hash);
+        assert_eq!((own(&h[0]).ratio, own(&h[0]).seeding_minutes, own(&h[0]).inactive_minutes), (2.5, -1, -2));
+        assert_eq!(own(&h[1]).ratio, 2.5);
+        assert_eq!(own(&h[2]), crate::sharelimits::TorrentShareLimits::default(), "series was not selected");
     }
 
     #[tokio::test]

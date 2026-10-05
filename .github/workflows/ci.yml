@@ -97,8 +97,8 @@ jobs:
   #
   # No container and no capability juggling: the hosted runner is a VM with
   # passwordless sudo, so the test simply runs as root. No provider is
-  # involved -- the peer endpoint is TEST-NET-1 and never answers. The
-  # handshake is not what is under test; the routing table is.
+  # involved: the test builds two network namespaces and plays the provider
+  # in the second, so the handshake is real and the host is never touched.
   wireguard:
     # This built ./internal/wgtun (Go) and the Go tree is gone. The tunnel was
     # ported -- typhon-engine/src/hydra/wgtun.rs, with its own tests -- so the
@@ -124,8 +124,10 @@ jobs:
             | python3 -c "import json,sys;print([json.loads(l)['executable'] for l in sys.stdin if l.strip().startswith('{') and json.loads(l).get('executable')][-1])" \
             > /tmp/wgtun-test-path
           cp "$(cat /tmp/wgtun-test-path)" ../wgtun.test
+      # --ignored: the root test is #[ignore] so an unprivileged `cargo test`
+      # skips it. Without the flag this step ran zero tests and passed.
       - name: Bring a tunnel up for real
-        run: sudo HYDRANOS_WG_ROOT_TEST=1 ./wgtun.test --test-threads=1 wgtun
+        run: sudo HYDRANOS_WG_ROOT_TEST=1 ./wgtun.test --test-threads=1 --ignored wgtunnel::root
 
   rust:
     runs-on: ubuntu-latest

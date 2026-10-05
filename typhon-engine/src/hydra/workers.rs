@@ -51,28 +51,60 @@ pub fn spawn_verify_throttle(manager: Arc<TorrentManager>) {
 }
 
 /// Keep the number of actively downloading torrents under the configured
-/// ceiling, and pick which ones get the slots.
+/// ceiling, and pick which ones get the slots -- and, with `queueing` on, the
+/// seeds and the total under `active_seeds` / `active_limit`, qBittorrent's
+/// queue.
 ///
 /// Ranked by the swarm's seeder count, from the announce cache. Ranking by
 /// connected peers -- which is what the engine itself knows -- made the
 /// priority effectively random: a torrent nobody is talking to yet reports
 /// none, and those are exactly the ones asking for a slot.
+///
+/// The limits are read from the live config on every pass, so a save in the
+/// settings applies on the next one. A pass with nothing to enforce walks
+/// nothing.
 pub fn spawn_download_slots(
     manager: Arc<TorrentManager>,
     cache: Arc<Cache>,
-    max_slots: i64,
+    cfg_handle: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
     store: Arc<crate::store::StoreLock>,
     engine_id: String,
 ) {
-    if max_slots <= 0 {
-        tracing::info!("download slots: no ceiling configured, every torrent may download");
-        return;
+    let limits_now = {
+        let cfg_handle = cfg_handle.clone();
+        let engine_id = engine_id.clone();
+        move || -> QueueLimits {
+            let cfg = match cfg_handle.read() {
+                Ok(g) => g.clone(),
+                Err(e) => e.into_inner().clone(),
+            };
+            cfg.local_engines()
+                .into_iter()
+                .find(|l| l.id == engine_id)
+                .map(|l| QueueLimits::from_session(&l.session))
+                .unwrap_or_default()
+        }
+    };
+    let first = limits_now();
+    if first.is_empty() {
+        tracing::info!(engine = %engine_id, "queue: no ceiling configured, every torrent may run");
     }
     tokio::spawn(async move {
         tokio::time::sleep(SETTLE).await;
-        tracing::info!(max = max_slots, "download slot manager started");
+        if !first.is_empty() {
+            tracing::info!(engine = %engine_id, downloads = ?first.downloads, seeds = ?first.seeds,
+                total = ?first.total, "queue manager started");
+        }
+        // Seeds THIS loop stopped. Only those are ever started again by it: a
+        // seed stopped by anything else (an operator, `start_paused`) is not
+        // the queue's to resume.
+        let mut parked: std::collections::HashSet<typhon_engine::torrent::meta::InfoHash> = Default::default();
         loop {
             tokio::time::sleep(DOWNLOAD_SLOT_INTERVAL).await;
+            let limits = limits_now();
+            if limits.is_empty() && parked.is_empty() {
+                continue;
+            }
             // Read once per pass, not once per torrent: this is a ceiling of a
             // few dozen slots against a catalogue of hundreds of thousands.
             let paused: std::collections::HashSet<String> = match store.read() {
@@ -83,9 +115,55 @@ pub fn spawn_download_slots(
                     .collect(),
                 Err(_) => Default::default(),
             };
-            enforce_download_slots(&manager, &cache, max_slots as usize, &paused);
+            enforce_queue(&manager, &cache, &limits, &paused, &mut parked);
         }
     });
+}
+
+/// The three ceilings of one engine, `None` = not enforced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueueLimits {
+    pub downloads: Option<usize>,
+    pub seeds: Option<usize>,
+    pub total: Option<usize>,
+}
+
+impl QueueLimits {
+    /// `active_downloads` as it always was: > 0 is a ceiling, anything else
+    /// none. `active_seeds` / `active_limit` only under `queueing = true`
+    /// (see `config::Session::queueing` for why the switch exists), and only
+    /// when > 0: qBittorrent's -1 is "unlimited", and a 0 that stops every
+    /// seed of the library is never what a file that says 0 meant.
+    pub fn from_session(s: &crate::config::Session) -> QueueLimits {
+        let cap = |v: i64| (v > 0).then_some(v as usize);
+        let queueing = s.queueing.unwrap_or(false);
+        QueueLimits {
+            downloads: cap(s.active_downloads),
+            seeds: if queueing { s.active_seeds.and_then(cap) } else { None },
+            total: if queueing { s.active_limit.and_then(cap) } else { None },
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.downloads.is_none() && self.seeds.is_none() && self.total.is_none()
+    }
+}
+
+/// Has this torrent all of its data? Read without the picker lock whenever
+/// the status already says so.
+fn holds_everything(t: &typhon_engine::torrent::meta::TorrentState) -> bool {
+    let status = t.status.load(Ordering::Relaxed);
+    if status == TorrentStatus::Seeding as u8 {
+        return true;
+    }
+    if status == TorrentStatus::Downloading as u8 {
+        return false;
+    }
+    // No picker = added in seed mode, its data trusted whole.
+    match t.picker.get() {
+        None => true,
+        Some(p) => p.lock().map(|p| p.is_complete()).unwrap_or(false),
+    }
 }
 
 /// One pass: start the best candidates, stop the excess.
@@ -98,52 +176,322 @@ pub fn spawn_download_slots(
 /// Skipping it is not a nicety. This loop used to call `start_torrent` on any
 /// incomplete torrent inside the ceiling without asking whose decision stopped
 /// it, so it undid every manual pause within one interval, silently.
-fn enforce_download_slots(
+///
+/// Downloads take their slots first, then seeds fill what `active_limit`
+/// leaves, as in qBittorrent. Seeds keep their place by age (oldest first,
+/// qBittorrent's queue order) rather than by a swarm figure: a ranking that
+/// moves would stop and start seeds every pass, and every stop is a
+/// `stopped` announce.
+fn enforce_queue(
     manager: &Arc<TorrentManager>,
     cache: &Cache,
-    max_slots: usize,
+    limits: &QueueLimits,
     user_paused: &std::collections::HashSet<String>,
+    parked: &mut std::collections::HashSet<typhon_engine::torrent::meta::InfoHash>,
 ) {
-    let mut incomplete: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, i64, bool)> = manager
-        .all()
-        .into_iter()
-        .filter(|t| {
-            let status = t.status.load(Ordering::Relaxed);
-            status != TorrentStatus::Seeding as u8 && status != TorrentStatus::Error as u8
-        })
-        .filter(|t| {
-            let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
-            !user_paused.contains(&hash)
-        })
-        .filter(|t| {
-            t.total_downloaded.load(Ordering::Relaxed) < t.meta.total_size
-        })
-        .map(|t| {
-            let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
-            let seeds = cache.swarm_seeds(&hash);
-            let active = !t.is_paused.load(Ordering::Relaxed)
-                && t.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8;
-            (t, seeds, active)
-        })
-        .collect();
-
-    // Most seeders first: the torrent likeliest to finish gets the slot, so a
-    // slot is held for the shortest time and freed for the next one.
-    incomplete.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let mut running = 0usize;
-    for (torrent, _, active) in &incomplete {
-        if running < max_slots {
-            if !active {
-                let _ = manager.start_torrent(&torrent.info_hash);
-            }
-            running += 1;
-        } else if *active {
-            // Over the ceiling: park it. It keeps its progress and comes back
-            // when a slot frees, which is what a queue is.
-            let _ = manager.stop_torrent(&torrent.info_hash);
+    let manage_downloads = limits.downloads.is_some() || limits.total.is_some();
+    let manage_seeds = limits.seeds.is_some() || limits.total.is_some();
+    // A parked seed the operator (or a share limit) has since stopped is
+    // theirs now: lifting the ceiling must not start it again.
+    parked.retain(|ih| !user_paused.contains(&typhon_engine::torrent::hex_encode(ih)));
+    if !manage_seeds && !parked.is_empty() {
+        // The seed ceiling was lifted: what this loop parked runs again, and
+        // nothing else is touched.
+        for ih in parked.drain() {
+            let _ = manager.start_torrent(&ih);
         }
     }
+    if !manage_downloads && !manage_seeds {
+        return;
+    }
+
+    let mut incomplete: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, i64, bool)> = Vec::new();
+    let mut seeds: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, bool)> = Vec::new();
+    for t in manager.all() {
+        let status = t.status.load(Ordering::Relaxed);
+        if status == TorrentStatus::Error as u8 {
+            continue;
+        }
+        let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
+        if user_paused.contains(&hash) {
+            continue;
+        }
+        let running = !t.is_paused.load(Ordering::Relaxed);
+        let checking = status == TorrentStatus::Checking as u8;
+        // A check holds a download slot, as it always has here.
+        if status != TorrentStatus::Seeding as u8
+            && t.total_downloaded.load(Ordering::Relaxed) < t.meta.total_size
+            && (checking || !holds_everything(&t))
+        {
+            if manage_downloads {
+                let seeds_n = cache.swarm_seeds(&hash);
+                let active = running && status == TorrentStatus::Downloading as u8;
+                incomplete.push((t, seeds_n, active));
+            }
+        } else if manage_seeds && !checking {
+            // A seed is a candidate when it runs, or when THIS loop parked it.
+            if running || parked.contains(&t.info_hash) {
+                seeds.push((t, running));
+            }
+        }
+    }
+
+    let mut running_downloads = 0usize;
+    if manage_downloads {
+        // Most seeders first: the torrent likeliest to finish gets the slot, so a
+        // slot is held for the shortest time and freed for the next one.
+        incomplete.sort_by(|a, b| b.1.cmp(&a.1));
+        let ceiling = limits.downloads.unwrap_or(usize::MAX).min(limits.total.unwrap_or(usize::MAX));
+        for (torrent, _, active) in &incomplete {
+            if running_downloads < ceiling {
+                if !active {
+                    let _ = manager.start_torrent(&torrent.info_hash);
+                }
+                running_downloads += 1;
+            } else if *active {
+                // Over the ceiling: park it. It keeps its progress and comes back
+                // when a slot frees, which is what a queue is.
+                let _ = manager.stop_torrent(&torrent.info_hash);
+            }
+        }
+    }
+
+    if manage_seeds {
+        seeds.sort_by_key(|(t, _)| t.added_time);
+        let ceiling = limits
+            .seeds
+            .unwrap_or(usize::MAX)
+            .min(limits.total.unwrap_or(usize::MAX).saturating_sub(running_downloads));
+        let (mut started, mut stopped) = (0usize, 0usize);
+        for (i, (torrent, running)) in seeds.iter().enumerate() {
+            if i < ceiling {
+                if !running {
+                    let _ = manager.start_torrent(&torrent.info_hash);
+                    parked.remove(&torrent.info_hash);
+                    started += 1;
+                }
+            } else if *running {
+                let _ = manager.stop_torrent(&torrent.info_hash);
+                parked.insert(torrent.info_hash);
+                stopped += 1;
+            }
+        }
+        // A parked seed that left the catalogue is not ours to remember.
+        parked.retain(|ih| manager.get(ih).is_some());
+        if started + stopped > 0 {
+            tracing::info!(started, stopped, queued = parked.len(), ceiling, "queue: seeds");
+        }
+    }
+}
+
+// --- share limits ------------------------------------------------------------
+
+const SHARE_LIMIT_INTERVAL: Duration = Duration::from_secs(120);
+/// At most this many stops or removals per pass. A ratio limit turned on over
+/// a large library is reached by most of it at once: the work is spread over
+/// passes instead of holding the store and the disk for an hour in one.
+const SHARE_LIMIT_MAX_ACTIONS: usize = 500;
+
+/// What the share-limit worker remembers between passes.
+#[derive(Default)]
+pub struct ShareLimitBook {
+    /// Per torrent watched for inactivity: the upload total last seen and
+    /// when it last moved. Only torrents with an inactivity limit have an
+    /// entry (~50 bytes each), and the clock starts when the worker first
+    /// sees them -- so a restart grants a full inactivity period again
+    /// rather than acting on a figure it never measured.
+    idle: std::collections::HashMap<typhon_engine::torrent::meta::InfoHash, (u64, i64, u32)>,
+    /// Pass counter: an `idle` entry not stamped by the current pass is
+    /// dropped at its end, without a second set the size of the library.
+    pass: u32,
+    /// Torrents already reported as held by their tracker's minimum, so the
+    /// log says it once and not every two minutes.
+    held: std::collections::HashSet<typhon_engine::torrent::meta::InfoHash>,
+}
+
+/// What one pass did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShareLimitOutcome {
+    pub stopped: usize,
+    pub removed: usize,
+    /// Reached a limit but still owed seeding time to its tracker.
+    pub held: usize,
+}
+
+/// Apply the share limits of one engine (qBittorrent's `max_ratio`,
+/// `max_seeding_time`, `max_inactive_seeding_time`, and the torrents' own).
+///
+/// ⚠ Cost, at a million torrents. The pass walks the WHOLE engine only when
+/// the engine itself has a limit on, which is the only case where every
+/// torrent is concerned; otherwise it reads the store's sparse per-torrent
+/// table (the torrents that have a limit of their own, a handful) and looks
+/// those up by hash. With no limit anywhere -- the default -- it reads that
+/// table and stops. A full walk is a few atomics per torrent, every two
+/// minutes, off the request path; nothing is copied into the store.
+pub fn spawn_share_limits(
+    state: crate::api::AppState,
+    manager: Arc<TorrentManager>,
+    cfg_handle: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
+    engine_id: String,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(SETTLE + Duration::from_secs(60)).await;
+        let book = Arc::new(std::sync::Mutex::new(ShareLimitBook::default()));
+        loop {
+            let cfg = match cfg_handle.read() {
+                Ok(g) => g.clone(),
+                Err(e) => e.into_inner().clone(),
+            };
+            let (st, mgr, id, book2) = (state.clone(), manager.clone(), engine_id.clone(), book.clone());
+            // Blocking: a removal unlinks files.
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut b = book2.lock().unwrap_or_else(|p| p.into_inner());
+                share_limits_pass(&st, &mgr, &cfg, &id, typhon_engine::torrent::meta::now_secs(), &mut b)
+            })
+            .await;
+            tokio::time::sleep(SHARE_LIMIT_INTERVAL).await;
+        }
+    });
+}
+
+/// One pass over one engine. See `spawn_share_limits`.
+///
+/// Never touches a torrent that is downloading, checking, in error, or that
+/// the operator stopped (the store's intent): only a seed. And never before
+/// its tracker's minimum (`seed_obligation_met`, the race drain's own test):
+/// a seed that still owes its tracker seeding time is left seeding whatever
+/// the limit says, for every action, `stop` included -- a stopped torrent is
+/// what Sonarr's "Remove Completed" deletes next, so a stop before the
+/// minimum is the same hit-and-run as a removal. A tracker with NO
+/// declaration is held the same way, as the drain holds it: an unknown rule
+/// is not "no rule". The operator opts a tracker in by declaring its hours,
+/// 0 included.
+pub fn share_limits_pass(
+    state: &crate::api::AppState,
+    manager: &Arc<TorrentManager>,
+    cfg: &crate::config::Config,
+    engine_id: &str,
+    now: i64,
+    book: &mut ShareLimitBook,
+) -> ShareLimitOutcome {
+    use crate::sharelimits::{effective, reached, Action};
+    let engine = crate::sharelimits::engine_limits_in(cfg, engine_id);
+    let overrides = crate::sharelimits::overrides(state);
+    let mut out = ShareLimitOutcome::default();
+    let candidates: Vec<Arc<typhon_engine::torrent::meta::TorrentState>> = if engine.any() {
+        manager.all()
+    } else {
+        overrides
+            .iter()
+            .filter(|(_, own)| effective(own, &engine).any())
+            .filter_map(|(h, _)| typhon_engine::torrent::hex_decode(h).ok())
+            .filter_map(|ih| manager.get(&ih))
+            .collect()
+    };
+    if candidates.is_empty() {
+        book.idle.clear();
+        book.held.clear();
+        return out;
+    }
+    let paused: std::collections::HashSet<String> = state
+        .store
+        .read()
+        .ok()
+        .and_then(|s| s.paused_hashes(engine_id).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let follow = crate::sharelimits::TorrentShareLimits::default();
+    book.pass = book.pass.wrapping_add(1);
+    let stamp = book.pass;
+    let mut actions = 0usize;
+    for t in candidates {
+        if t.is_removed.load(Ordering::Relaxed) {
+            continue;
+        }
+        let status = t.status.load(Ordering::Relaxed);
+        // A seed, running or parked by the queue. Downloading, checking,
+        // moving into place or in error is not a seed yet.
+        if status != TorrentStatus::Seeding as u8
+            && !(status == TorrentStatus::Stopped as u8 && holds_everything(&t))
+        {
+            continue;
+        }
+        let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
+        if paused.contains(&hash) {
+            continue;
+        }
+        let eff = effective(overrides.get(&hash).unwrap_or(&follow), &engine);
+        if !eff.any() {
+            continue;
+        }
+        let idle = if eff.inactive_minutes >= 0 {
+            let up = t.total_uploaded.load(Ordering::Relaxed);
+            let e = book.idle.entry(t.info_hash).or_insert((up, now, stamp));
+            if e.0 != up {
+                *e = (up, now, stamp);
+            }
+            e.2 = stamp;
+            Some(now - e.1)
+        } else {
+            None
+        };
+        let Some(why) = reached(&eff, || crate::row::torrent_ratio(&t), t.seed_time_now(now), idle) else {
+            continue;
+        };
+        let (met, host, hours) = seed_obligation_met(&t, cfg, now);
+        if !met {
+            out.held += 1;
+            if book.held.insert(t.info_hash) {
+                if hours < 0 {
+                    tracing::info!(engine = %engine_id, name = %t.meta.name, tracker = %host, reason = %why,
+                        "share limit reached, held: the tracker declares no minimum seeding time \
+                         (announce_min_seed_hours), so it is not known to be free to go -- declare one, 0 included");
+                } else {
+                    tracing::info!(engine = %engine_id, name = %t.meta.name, tracker = %host, owed_hours = hours,
+                        reason = %why, "share limit reached, held: the tracker's minimum seeding time is not served yet");
+                }
+            }
+            continue;
+        }
+        if actions >= SHARE_LIMIT_MAX_ACTIONS {
+            continue;
+        }
+        match engine.action {
+            Action::Stop => {
+                if let Ok(store) = state.store.lock() {
+                    let _ = store.set_paused(&hash, engine_id, true);
+                }
+                crate::api::apply_pause_to_engine(state, engine_id, &hash, true);
+                out.stopped += 1;
+                tracing::info!(engine = %engine_id, name = %t.meta.name, reason = %why, "share limit reached: stopped");
+            }
+            Action::Remove | Action::RemoveWithFiles => {
+                let with_files = engine.action == Action::RemoveWithFiles;
+                // The API's own path: the trackers hear `stopped`, the store
+                // row goes, and the files only with the last copy.
+                match crate::api::remove_one_torrent(state, &hash, &[engine_id.to_string()], engine_id, with_files) {
+                    Ok(_) => {
+                        out.removed += 1;
+                        tracing::info!(engine = %engine_id, name = %t.meta.name, reason = %why, with_files,
+                            "share limit reached: removed");
+                    }
+                    Err(e) => tracing::warn!(engine = %engine_id, name = %t.meta.name,
+                        "share limit reached but the removal failed: {e}"),
+                }
+            }
+        }
+        actions += 1;
+        book.idle.remove(&t.info_hash);
+        book.held.remove(&t.info_hash);
+    }
+    // Forget what no longer has an inactivity limit, or no longer exists.
+    book.idle.retain(|_, e| e.2 == stamp);
+    if out.stopped + out.removed > 0 {
+        tracing::info!(engine = %engine_id, stopped = out.stopped, removed = out.removed, held = out.held,
+            "share limits applied");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1283,7 +1631,9 @@ mod drain_tests {
         let cache = Cache::default();
         let paused = std::collections::HashSet::new();
         // Must not panic, and must not stop anything on an empty library.
-        enforce_download_slots(&mgr, &cache, 0, &paused);
+        let zero = QueueLimits::from_session(&toml::from_str("active_downloads = 0").unwrap());
+        assert!(zero.is_empty());
+        enforce_queue(&mgr, &cache, &zero, &paused, &mut Default::default());
         assert_eq!(mgr.count(), 0);
     }
 
@@ -1293,7 +1643,8 @@ mod drain_tests {
         let mgr = race_manager(&s);
         let cache = Cache::default();
         let paused = std::collections::HashSet::new();
-        enforce_download_slots(&mgr, &cache, 5, &paused);
+        let five = QueueLimits { downloads: Some(5), ..Default::default() };
+        enforce_queue(&mgr, &cache, &five, &paused, &mut Default::default());
         assert!(mgr.all().is_empty());
     }
 }
@@ -1496,5 +1847,121 @@ mod drain_policy_gate_tests {
         if out.deleted == 0 {
             assert_eq!(out.freed_bytes, 0, "nothing deleted, nothing freed");
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn manager(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "hydra-queue-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let (data, resume) = (root.join("data"), root.join("resume"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(typhon_engine::disk::DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        piece[0] = name.as_bytes()[0];
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let mut out = b"d4:info".to_vec();
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// Three running seeds, oldest first.
+    fn seeds(mgr: &Arc<TorrentManager>) -> Vec<Arc<typhon_engine::torrent::meta::TorrentState>> {
+        ["a", "b", "c"]
+            .iter()
+            .map(|n| {
+                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                let t = mgr.get(&ih).unwrap();
+                t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.is_paused.store(false, Ordering::Relaxed);
+                t
+            })
+            .collect()
+    }
+
+    fn limits(toml_src: &str) -> QueueLimits {
+        QueueLimits::from_session(&toml::from_str(toml_src).unwrap())
+    }
+
+    /// ⭐⭐ `active_seeds` is read only under `queueing = true`: a file that
+    /// carries 3.x's built-in `active_seeds = 50` (or any small value) does
+    /// not stop the library at the upgrade.
+    #[test]
+    fn active_seeds_without_queueing_limits_nothing() {
+        assert!(limits("active_seeds = 1\nactive_limit = 1").is_empty());
+        assert!(limits("").is_empty());
+        assert!(limits("queueing = true\nactive_seeds = -1\nactive_limit = -1").is_empty());
+        assert_eq!(limits("active_downloads = 10").downloads, Some(10), "active_downloads works as before");
+    }
+
+    #[test]
+    fn the_seed_queue_keeps_the_oldest_and_parks_the_rest_then_lets_them_go() {
+        let (mgr, root) = manager("seeds");
+        let all = seeds(&mgr);
+        let cache = Cache::default();
+        let mut parked = HashSet::new();
+        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &mut parked);
+        let running: Vec<bool> = all.iter().map(|t| !t.is_paused.load(Ordering::Relaxed)).collect();
+        assert_eq!(running.iter().filter(|r| **r).count(), 1, "one seed slot");
+        assert_eq!(parked.len(), 2);
+        // Stable: a second pass moves nothing.
+        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &mut parked);
+        assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 1);
+        // A parked seed the operator then stops stays stopped when the
+        // ceiling is lifted; the others come back.
+        let operator: HashSet<String> = all
+            .iter()
+            .filter(|t| t.is_paused.load(Ordering::Relaxed))
+            .take(1)
+            .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
+            .collect();
+        enforce_queue(&mgr, &cache, &QueueLimits::default(), &operator, &mut parked);
+        assert!(parked.is_empty());
+        assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `active_limit` counts downloads and seeds together.
+    #[test]
+    fn active_limit_caps_seeds_too() {
+        let (mgr, root) = manager("total");
+        let all = seeds(&mgr);
+        let mut parked = HashSet::new();
+        enforce_queue(&mgr, &Cache::default(), &limits("queueing = true\nactive_limit = 2"), &HashSet::new(), &mut parked);
+        assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The download ceiling alone never touches a seed.
+    #[test]
+    fn a_download_ceiling_leaves_the_seeds_alone() {
+        let (mgr, root) = manager("dl-only");
+        let all = seeds(&mgr);
+        let mut parked = HashSet::new();
+        enforce_queue(&mgr, &Cache::default(), &limits("active_downloads = 1"), &HashSet::new(), &mut parked);
+        assert!(all.iter().all(|t| !t.is_paused.load(Ordering::Relaxed)));
+        assert!(parked.is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

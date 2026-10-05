@@ -24,6 +24,26 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- 4.4
 
 ### Added
+- **Share limits, as in qBittorrent.** Per engine (`max_ratio`,
+  `max_seeding_time`, `max_inactive_seeding_time`, `share_limit_action` =
+  stop / remove / remove with files) and per torrent (right-click > Share
+  limits…, `/api/torrents/:h/share-limits`, selection action `share_limits`,
+  qBittorrent `setShareLimits` and `ratioLimit`/`seedingTimeLimit` on add).
+  Off by default. A limit never acts before the tracker's declared minimum
+  seed time (`announce_min_seed_hours`), not even to stop: a client that
+  removes stopped torrents would otherwise turn it into a hit-and-run.
+- **Queueing, as in qBittorrent**: `queueing = true` turns on `active_seeds`
+  and `active_limit`; seeds are queued oldest first and only the ones the
+  queue parked are restarted. Off by default, so a 3.x file carrying
+  `active_seeds = 50` does not stop a whole library. `active_downloads` now
+  applies live.
+- **Managed WireGuard.** Upload a `.conf` (stored 0600, its keys never sent
+  back), give each engine its tunnel: an interface `wg-<engine>` with its own
+  routing table, and only that engine's sockets in it. NAT-PMP port
+  forwarding (Proton and generic) with announces held until the first port
+  is known, TCP and UDP mapped, renewed at half-lease. A tunnel that is down
+  leaves its engine with no network, never on the default route. Needs Linux
+  and `NET_ADMIN`; refused with the reason otherwise.
 - **Speed limits that actually limit.** `upload_rate_limit` and
   `download_rate_limit` per engine (bytes/s, applied live), a cap per torrent
   (right-click > Limit rate…, `/api/torrents/:h/limits`, selection action
@@ -63,6 +83,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - The engine RPC `set_upload_limit` / `set_download_limit` did nothing.
 
 ### Changed
+- **Behind a SOCKS5 proxy the DHT is off**, as in qBittorrent: it is plain
+  UDP and would publish the host's address. PEX stays on. The Network tab
+  says so when the proxy is saved. The DHT socket is now pinned to the
+  engine's interface when one is set; it always used the default route.
 - **The qBittorrent API reports the real `uploaded`, `ratio`, `share_ratio`,
   `total_uploaded`, `total_downloaded` and `seeding_time`.** They were 0 for
   every torrent. A Sonarr/Radarr seeding goal or an autobrr ratio rule will

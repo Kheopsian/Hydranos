@@ -48,6 +48,22 @@ max_uploads_per_torrent = 100
 peer_timeout = 300
 inactivity_timeout = 20
 
+# The queue, qBittorrent's. active_downloads (0 or -1 = unlimited) always
+# applies; active_seeds and active_limit (downloads + seeds) only with
+# queueing = true, -1 = unlimited. Read live, no restart.
+queueing = false
+active_seeds = -1
+active_limit = -1
+# Share limits, qBittorrent's: a seed that reaches ANY of them is stopped, or
+# removed (share_limit_action = "stop" | "remove" | "remove_with_files").
+# -1 = off; times in minutes. A torrent can carry its own (setShareLimits,
+# right-click > Share limits). Never before the tracker's minimum: a seed whose
+# tracker has no announce_min_seed_hours, or has not served it, is left alone.
+max_ratio = -1.0
+max_seeding_time = -1
+max_inactive_seeding_time = -1
+share_limit_action = "stop"
+
 # --- Advanced: proxy and relay (the Network tab writes these as one set) ----
 # Every outbound PEER connection through a SOCKS5 proxy, v4 and v6 alike. A dial
 # the proxy refuses is dropped, never retried directly, and outbound uTP is off
@@ -104,9 +120,16 @@ max_uploads_per_torrent = -1
 peer_timeout = 300
 inactivity_timeout = 20
 
+# The queue (see [race]); 10 downloads at a time, seeds unlimited.
+active_downloads = 10
+queueing = false
 active_seeds = -1
 active_limit = -1
-active_downloads = 10
+# Share limits (see [race]), off.
+max_ratio = -1.0
+max_seeding_time = -1
+max_inactive_seeding_time = -1
+share_limit_action = "stop"
 
 # --- Advanced: proxy and relay (the Network tab writes these as one set) ----
 # Every outbound PEER connection through a SOCKS5 proxy, v4 and v6 alike. A dial
