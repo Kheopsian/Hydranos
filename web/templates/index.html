@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.20">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.21">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -336,7 +336,7 @@
                         <canvas id="detail-pieces-canvas" height="40" style="width:100%;image-rendering:pixelated"></canvas>
                     </div>
                 </div>
-                    <table id="detail-peers-table">
+                    <div class="peers-scroll"><table id="detail-peers-table">
                         <thead>
                             <tr>
                                 <th>IP</th>
@@ -352,7 +352,7 @@
                         </thead>
                         <tbody id="detail-peers-tbody">
                         </tbody>
-                    </table>
+                    </table></div>
                 </div>
 
                 <div class="card" style="margin-top:16px">
@@ -574,13 +574,13 @@
                         <canvas id="h-detail-pieces-canvas" height="40" style="width:100%;image-rendering:pixelated"></canvas>
                     </div>
                 </div>
-                    <table id="h-detail-peers-table">
+                    <div class="peers-scroll"><table id="h-detail-peers-table">
                         <thead><tr>
                             <th>IP</th><th>Client</th><th>Progress</th>
                             <th>Down</th><th>Up</th><th>Downloaded</th><th>Uploaded</th><th>Flags</th><th></th>
                         </tr></thead>
                         <tbody id="h-detail-peers-tbody"></tbody>
-                    </table>
+                    </table></div>
                 </div>
                 <div class="card" style="margin-top:16px">
                     <div class="card-head-row">
@@ -1535,6 +1535,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.77"></script>
+    <script src="/static/app.js?v=1.6.78"></script>
 </body>
 </html>

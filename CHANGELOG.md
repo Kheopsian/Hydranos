@@ -110,6 +110,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   resolved by the proxy); `TYPHON_ANNOUNCE_PROXY` stays as a global fallback.
 
 ### Fixed
+- The detail panel's peer list no longer runs off its card: nine columns are
+  wider than the panel, and the Uploaded, Flags and Ban columns were cut off
+  with no way to reach them. It scrolls inside the card, one line per cell,
+  and fitting the columns no longer cuts uppercase headers ("PROGRE...").
 - **`/health` always said `healthy`.** It checks the store and the
   engines' listeners: `healthy`, `degraded`, `unhealthy` (503), or `starting`
   (200) while loading. `install.sh` waits past `starting` before enrolling.
