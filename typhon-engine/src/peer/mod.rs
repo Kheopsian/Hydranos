@@ -887,6 +887,9 @@ async fn handle_incoming(
     };
 
     let framed = Framed::new(crypto_stream, BtCodec::new());
+    // What the peer is told to call back on (BEP 10 `p`): read now, so it is
+    // the public port behind a translating NAT and the new one after a rebind.
+    let advertised = torrent_mgr.announced_port(listen_port);
     session::run(
         framed,
         addr,
@@ -898,7 +901,7 @@ async fn handle_incoming(
         fast_ext,
         lt_ext,
         utp_socket,
-        listen_port,
+        advertised,
     )
     .await;
 }

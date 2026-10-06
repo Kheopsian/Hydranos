@@ -95,7 +95,8 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   (`assignment` on `/api/network/wireguard/engines`); a tunnel chosen without
   its file blocks the engine too. A NAT-PMP port is TRANSLATED by the
   gateway (Proton sends the public port to the port asked for): the engine
-  keeps listening on its own port and tells trackers the public one, and a
+  keeps listening on its own port and tells trackers -- and peers, in the
+  BEP 10 handshake -- the public one, and a
   renewal asks for the same mapping, so the port no longer changes every 30
   seconds. What the kernel answers on its own for the tunnel's address (a TCP
   reset on a closed port, an ICMP reply) goes back through the tunnel, never
@@ -118,6 +119,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   resolved by the proxy); `TYPHON_ANNOUNCE_PROXY` stays as a global fallback.
 
 ### Fixed
+- `POST /api/network/mode` keeps the fields it is not sent. They were read as
+  0 or empty: a client sending only what it changed was refused (race port 0)
+  or emptied the proxy. The Network tab sends every field and was not hit.
+- The port peers are told to call back on (BEP 10 `p`) is read when the
+  connection opens. It was the port of the first bind, so after a listen-port
+  change (gluetun's rotation included) peers learnt by PEX dialled the old one.
 - The detail panel's peer list no longer runs off its card: nine columns are
   wider than the panel, and the Uploaded, Flags and Ban columns were cut off
   with no way to reach them. It scrolls inside the card, one line per cell,
