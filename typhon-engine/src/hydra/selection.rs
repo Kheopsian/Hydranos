@@ -822,12 +822,16 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             }
             // The category travels with it: the far side routes by category.
             let category = category_of(state, h);
+            // A move is not done when the node took the metainfo: the local
+            // copy goes once the node holds all of it, a job on the Jobs tab.
+            // 4.3 counted it "done" here.
+            let key = if then == "remove" { "waiting_node" } else { "ok" };
             c.simple(
                 Method::POST,
                 &format!("/api/nodes/{}/handoff", enc(node)),
                 Some(json!({"info_hash": h, "engine": engine, "category": category, "then": then})),
                 h,
-                "ok",
+                key,
             )
             .await
         }

@@ -83,6 +83,11 @@ pub struct Session {
     pub start_paused: bool,
     #[serde(default)]
     pub max_connections: i64,
+    /// New outbound peer dials per second, 0 = unlimited. Written by the
+    /// dial-limits route; until 4.4 nothing read it from the file, so the
+    /// route's change was the only way to set it and a restart lost it.
+    #[serde(default)]
+    pub max_dials_per_sec: f64,
     // On unless switched off, as the template and the documentation say: in
     // 4.3 a section without these keys turned DHT, PEX and webseeds off.
     #[serde(default = "default_true")]
@@ -508,7 +513,7 @@ pub const PLACEHOLDER_API_KEY: &str = "change-me-in-production";
 ///
 /// Same shape and same source as `install.sh` uses when it enrols a node
 /// (`head -c 24 /dev/urandom`), so a key looks the same whichever path made it.
-fn fresh_api_key() -> String {
+pub(crate) fn fresh_api_key() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 24];
     rand::rngs::OsRng.fill_bytes(&mut bytes);

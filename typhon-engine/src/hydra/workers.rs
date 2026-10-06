@@ -700,38 +700,55 @@ mod disk_usage_tests {
 /// runs every five minutes, as 3.x did, and the route serves whatever the last
 /// pass found rather than scanning on request. A panel refresh must not be
 /// able to walk 244k torrents.
-pub fn spawn_health_scan(
-    engines: Arc<crate::engines::EngineHost>,
-    last: Arc<std::sync::RwLock<Option<crate::health::Report>>>,
-) {
+///
+/// ⚠ Written in 3.x's image and never spawned until 4.4: the anomaly route
+/// answered zeros for every invariant this checks. It now runs, on a
+/// blocking thread (the pass stats directories and locks pickers), and
+/// publishes to `health::latest`.
+pub fn spawn_health_scan(engines: Arc<crate::engines::EngineHost>) {
     tokio::spawn(async move {
+        // Not at boot: the first minutes of a process are the announce burst
+        // and the store's busiest, and nothing here is urgent.
+        tokio::time::sleep(Duration::from_secs(120)).await;
         let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
         loop {
             tick.tick().await;
-            let mut report = crate::health::Report::default();
-            let mut per_engine = Vec::new();
-            for engine in engines.engines() {
-                let torrents = engine.manager.all();
-                let cache = engine.announce_cache.clone();
-                crate::health::scan_engine(
-                    &engine.id,
-                    &torrents,
-                    |hash| cache.swarm_seeds(hash),
-                    // Outage is a host-level fact and the breaker owns it; the
-                    // scan does not second-guess it from here.
-                    |_host| false,
-                    &mut report,
-                );
-                per_engine.push((engine.id.clone(), torrents));
-            }
-            crate::health::scan_dual_seed(&per_engine, &mut report);
-            let found = report.anomalies.len();
-            *last.write().unwrap() = Some(report);
-            if found > 0 {
-                tracing::info!(anomalies = found, "health scan found something");
-            }
+            let engines = engines.clone();
+            let _ = tokio::task::spawn_blocking(move || health_pass(&engines)).await;
         }
     });
+}
+
+/// One anomaly pass over every engine, published when done.
+pub fn health_pass(engines: &crate::engines::EngineHost) {
+    let started = std::time::Instant::now();
+    let mut report = crate::health::Report::default();
+    report.skip_outage = true;
+    let mut per_engine = Vec::new();
+    for engine in engines.engines() {
+        let torrents = engine.manager.all();
+        let cache = engine.announce_cache.clone();
+        crate::health::scan_engine(
+            &engine.id,
+            &torrents,
+            |hash| cache.swarm_seeds(hash),
+            // Outage is a host-level fact and the breaker owns it; the
+            // scan does not second-guess it from here.
+            |_host| false,
+            &mut report,
+        );
+        per_engine.push((engine.id.clone(), torrents, engine.manager.clone()));
+    }
+    crate::health::scan_dual_seed_live(&per_engine, &mut report);
+    let found: i64 = report.counts.values().sum();
+    if found > 0 {
+        tracing::info!(anomalies = found, "health scan found something");
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::health::publish(now, started.elapsed().as_millis() as u64, report);
 }
 
 /// Copy each torrent's seed counter from the engine into the store.

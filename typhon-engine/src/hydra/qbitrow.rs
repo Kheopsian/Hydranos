@@ -203,10 +203,45 @@ pub fn build(native: &Value, engine_name: &str, now: i64) -> Value {
     })
 }
 
+/// The three facts `torrents/properties` reads off the .torrent itself:
+/// `creation date`, `created by`, `comment`. Absent keys are `None`, not
+/// invented: 4.3 answered the addition date as the creation date and empty
+/// strings for the rest, whatever the file said.
+pub fn metainfo_extras(blob: &[u8]) -> (Option<i64>, String, String) {
+    let Ok(v) = typhon_engine::torrent::metainfo::bencode_decode(blob) else {
+        return (None, String::new(), String::new());
+    };
+    let Some(d) = v.as_dict() else {
+        return (None, String::new(), String::new());
+    };
+    // Latin-1 for a non-UTF-8 comment, as the name decoder does: dropping it
+    // would read as "no comment".
+    let text = |k: &str| {
+        d.get(k)
+            .and_then(|x| x.as_bytes())
+            .map(|b| match std::str::from_utf8(b) {
+                Ok(s) => s.to_string(),
+                Err(_) => b.iter().map(|&c| c as char).collect(),
+            })
+            .unwrap_or_default()
+    };
+    let created = d.get("creation date").and_then(|x| x.as_int()).filter(|t| *t > 0);
+    (created, text("created by"), text("comment"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_metainfo_extras_come_from_the_file_and_absent_ones_stay_absent() {
+        let with = b"d7:comment5:hello10:created by9:mktorrent13:creation datei1700000000e4:infod4:name1:xee";
+        assert_eq!(metainfo_extras(with), (Some(1_700_000_000), "mktorrent".into(), "hello".into()));
+        let without = b"d4:infod4:name1:xee";
+        assert_eq!(metainfo_extras(without), (None, String::new(), String::new()));
+        assert_eq!(metainfo_extras(b"not bencode"), (None, String::new(), String::new()));
+    }
 
     // The pair a client acts on: stopped means a human decided, queued means a
     // scheduler is holding it. Confusing them makes an *arr either give up on a

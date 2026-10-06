@@ -346,8 +346,10 @@ fn tools(with_destructive: bool) -> Value {
              unknown category goes to race, so check here first.",
             obj(json!({}), &[]), read_only("Categories")),
         tool("health",
-            "The anomaly scan: torrents seeding without data, stuck, re-downloading, ghost or \
-             orphan files, tracker outages, and the efficiency figure. Takes a few seconds.",
+            "The anomaly report: torrents whose data is missing, ghost save paths, seeds without \
+             their pieces, starved downloads, re-downloads, hashes seeded twice (from a background \
+             pass every 5 minutes, `generated_at`), plus live counts of failing trackers, late \
+             announces, held engines and disks low on space, per engine. Instant.",
             obj(json!({}), &[]), read_only("Health")),
         tool("drain",
             "The volume drain: per volume, used and allocated space against its watermarks, and \
@@ -366,6 +368,7 @@ fn tools(with_destructive: bool) -> Value {
             obj(json!({
                 "level": {"type": "string", "enum": ["ERROR", "WARN", "INFO", "DEBUG"], "description": "Minimum level. Default WARN."},
                 "contains": {"type": "string", "description": "Case-insensitive text the line must contain."},
+                "module": {"type": "string", "description": "Case-insensitive part of the module path, e.g. `announce` or `store`."},
                 "limit": limit(50, 500),
             }), &[]),
             read_only("Logs")),
@@ -829,6 +832,7 @@ async fn logs(state: &AppState, args: &Value) -> Result<Value, String> {
     let limit = arg_usize(args, "limit").unwrap_or(50).clamp(1, 500);
     let min = level_rank(&arg_str(args, "level").unwrap_or_else(|| "WARN".into()));
     let needle = arg_str(args, "contains").map(|s| s.to_lowercase());
+    let module = arg_str(args, "module").map(|s| s.to_lowercase());
     let v = get_json(state, "/api/logs").await?;
     let mut lines: Vec<Value> = v
         .get("entries")
@@ -839,6 +843,10 @@ async fn logs(state: &AppState, args: &Value) -> Result<Value, String> {
         .filter(|e| level_rank(e["level"].as_str().unwrap_or("")) >= min)
         .filter(|e| match &needle {
             Some(n) => e["msg"].as_str().unwrap_or("").to_lowercase().contains(n),
+            None => true,
+        })
+        .filter(|e| match &module {
+            Some(m) => e["module"].as_str().unwrap_or("").to_lowercase().contains(m),
             None => true,
         })
         .collect();

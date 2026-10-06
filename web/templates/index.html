@@ -90,6 +90,11 @@
                  engine added from the Agents page had no dot at all. -->
             <button id="net-poly" class="net-poly" type="button" onclick="openNetPanel(this)"
                     aria-label="Network of the engines" title="Network"></button>
+            <!-- Sign out: forgets the key this browser holds and asks for
+                 the password again. -->
+            <button id="logout-btn" type="button" onclick="logout()" aria-label="Sign out" title="Sign out" style="background:none;border:none;cursor:pointer;color:#ffffff;padding:4px;display:flex;align-items:center">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            </button>
         </div>
     </header>
 
@@ -185,6 +190,11 @@
                     </div>
                 </div>
 
+                <!-- One card per engine beyond race and hoard ([[engine]] blocks),
+                     drawn by _updateExtraEngines. display:contents keeps them
+                     cells of the grid. -->
+                <div id="ov-extra-engines" style="display:contents"></div>
+
                 <!-- Storage: seed size (tracker pass) against the space it takes (link scanner) -->
                 <div class="card">
                     <h3>Storage <span class="tag" style="color:var(--accent-blue)">hardlinks</span></h3>
@@ -201,13 +211,10 @@
                 <!-- Records (all-time, bench.db) -->
                 <div class="card">
                     <h3>Records <span class="tag" style="color:var(--accent-purple)">all-time</span></h3>
+                    <!-- Empty until the server answers: the figures that sat here
+                         were one node's, shown to every install as if its own. -->
                     <div class="card-body">
-                        <div class="metric"><span>Peak upload <small>Jul 8</small></span><span class="hi">5.01 Gbps</span></div>
-                        <div class="metric"><span>Peak download <small>Jul 4</small></span><span>2.72 Gbps</span></div>
-                        <div class="metric"><span>Peak swarm peers <small>Jun 29</small></span><span>21,027</span></div>
-                        <div class="metric"><span>Best upload day <small>Jul 8</small></span><span class="hi">9.7 TiB</span></div>
-                        <div class="metric"><span>Peak live seeds <small>Jul 7</small></span><span>494</span></div>
-                        <div class="metric"><span>Best line test <small>Jul 6</small></span><span>4.96 Gbps</span></div>
+                        <div class="metric"><span>Not measured yet</span><span>-</span></div>
                     </div>
                 </div>
 
@@ -705,7 +712,7 @@
                     </div>
                     <div class="cat-form-actions">
                         <button class="btn-small" onclick="testNode()">Test</button>
-                        <button class="btn-primary" onclick="saveNode()">Add</button>
+                        <button class="btn-primary" id="nd-save" onclick="saveNode()">Add</button>
                         <button class="btn-cancel" onclick="hideNodeForm()">Cancel</button>
                     </div>
                     <div id="nd-result" class="result-msg"></div>
@@ -1114,6 +1121,10 @@
                 </div>
             </div>
 
+            <!-- Engines beyond race and hoard: upload, download and peers each,
+                 filled by _renderExtraBenchCards. Hidden when there are none. -->
+            <div class="bm-metrics-grid" id="bm-extra-engines" style="display:none"></div>
+
             <!-- Is the announce schedule keeping up? Figures, not a chart: on a
                  healthy node lateness is zero, and a chart of zeros is noise.
                  The history lives in the Announce Rate chart below. -->
@@ -1399,12 +1410,11 @@
             <div class="add-form-container">
                 <h2>Logs</h2>
                 <div class="logs-controls">
-                    <select id="logs-source">
-                        <option value="">All sources</option>
-                        <option value="go">go</option>
-                        <option value="gin">gin (http)</option>
-                        <option value="engine:race">engine:race</option>
-                        <option value="engine:hoard">engine:hoard</option>
+                    <!-- Modules, filled from the lines the server holds. The
+                         3.x sources listed here (go, gin, engine:*) matched
+                         nothing in a one-process daemon. -->
+                    <select id="logs-source" title="Module">
+                        <option value="">All modules</option>
                     </select>
                     <select id="logs-level">
                         <option value="">All levels</option>
@@ -1525,6 +1535,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.72"></script>
+    <script src="/static/app.js?v=1.6.75"></script>
 </body>
 </html>
