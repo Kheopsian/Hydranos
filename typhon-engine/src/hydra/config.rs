@@ -34,10 +34,15 @@ pub struct Daemon {
     /// the default route. Not the engines': each has its own in its section.
     #[serde(default)]
     pub bind_interface: String,
-    /// Nothing the daemon sends leaves outside `[proxy]` / `bind_interface`:
-    /// with neither, it sends nothing at all. See `egress`.
+    /// The kill switch, as written. Absent = deduced from `[network] mode`:
+    /// armed in every mode but direct (`killswitch::armed`). `false` disarms
+    /// it on purpose; `true` arms it even in direct mode.
     #[serde(default)]
-    pub kill_switch: bool,
+    pub kill_switch: Option<bool>,
+    /// Where the daemon's own requests go: "auto" (empty, follows the mode),
+    /// "direct", "proxy" (`[proxy]`) or "engine:<id>". See `egress::resolve`.
+    #[serde(default)]
+    pub egress: String,
 }
 
 /// `[proxy]`: the SOCKS5 proxy the daemon's own requests go through. The
@@ -199,8 +204,18 @@ pub struct Session {
     pub announce_ip: String,
     /// Managed WireGuard (`[network] mode = "wireguard"`): bring a tunnel up
     /// for this engine and pin it there. See `wgtunnel`.
+    ///
+    /// Kept as written: `Some(false)` is a file saved by the tab when it had
+    /// a tick box, with this engine left unticked -- on the default route on
+    /// purpose, which `killswitch` reads as `allow_direct`. Absent is an
+    /// engine nobody has assigned yet, which the kill switch blocks.
     #[serde(default)]
-    pub wireguard_enabled: bool,
+    pub wireguard_enabled: Option<bool>,
+    /// This engine leaves by the host's default route ON PURPOSE: the kill
+    /// switch lets it, and says so. Without it, an engine with no tunnel, no
+    /// interface and no proxy is blocked in every armed mode.
+    #[serde(default)]
+    pub allow_direct: bool,
     /// The provider file, by NAME, in `<data_dir>/wireguard`. Never its
     /// contents: the private key stays out of the config tree.
     #[serde(default)]
@@ -771,7 +786,13 @@ impl Config {
             // by one address with one forwarded port, which is what a tunnel
             // per engine exists to avoid -- and both would claim one device.
             if extra && !agent.session.contains_key("wireguard_enabled") {
-                session.wireguard_enabled = false;
+                session.wireguard_enabled = None;
+            }
+            // Nor its role's "direct on purpose": an engine added later is
+            // unassigned until someone says where it goes, and the kill
+            // switch blocks it meanwhile.
+            if extra && !agent.session.contains_key("allow_direct") {
+                session.allow_direct = false;
             }
             let engine = LocalEngine { id: id.clone(), role: agent.role.trim().to_string(), session };
             match out.iter().position(|e| e.id == id) {

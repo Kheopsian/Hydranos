@@ -159,6 +159,17 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
                     "detail": format!("engine {} is not listening for peers (port {} not bound, or its tunnel is down)", e.id, e.listen_port),
                 }));
             }
+            // Kept off the network by the kill switch: the others still
+            // seed, and a restart changes nothing until the config does, so
+            // `degraded` and never `unhealthy` -- not even when it is every
+            // engine (none of them counts as "online" below).
+            let blocked = e.blocked.get();
+            if let Some(why) = blocked {
+                problems.push(serde_json::json!({
+                    "check": "engine", "engine": e.id, "severity": "warn",
+                    "detail": format!("engine {} is blocked by the kill switch: {why}", e.id),
+                }));
+            }
             if held {
                 problems.push(serde_json::json!({
                     "check": "engine", "engine": e.id, "severity": "warn",
@@ -167,7 +178,7 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
             }
             serde_json::json!({
                 "id": e.id, "torrents": e.manager.len(), "online": online(e),
-                "listening": listening, "held": held,
+                "listening": listening, "held": held, "blocked": blocked,
             })
         })
         .collect();
@@ -678,6 +689,26 @@ mod tests {
         assert_eq!(v["checks"]["store"], "ok");
         assert_eq!(v["checks"]["engines"].as_array().unwrap().len(), 3);
         assert!(v["version"].is_string(), "the page reads its version labels here");
+    }
+
+    /// An engine the kill switch keeps off the network is `degraded`, still
+    /// 200: a restart would not bring it back, and an orchestrator restarting
+    /// "unhealthy" containers would only cost the other engines their swarms.
+    #[tokio::test]
+    async fn an_engine_blocked_by_the_kill_switch_is_degraded_not_unhealthy() {
+        let (s, _) = three_engines("obs-health-blocked");
+        let vpn = s.state.engines.get("vpn7").unwrap();
+        vpn.blocked.set("not assigned to a tunnel".into()).unwrap();
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "degraded", "{v:#}");
+        let p = &v["problems"][0];
+        assert_eq!(p["engine"], "vpn7");
+        assert!(p["detail"].as_str().unwrap().contains("kill switch"), "{v:#}");
+        let e = v["checks"]["engines"].as_array().unwrap().iter().find(|e| e["id"] == "vpn7").unwrap().clone();
+        assert_eq!(e["blocked"], "not assigned to a tunnel");
+        assert_eq!(e["online"], false, "never put on the network");
     }
 
     /// #89: a torrent whose data is gone is counted and listed, from the

@@ -31,6 +31,10 @@ pub struct Route {
     pub interface: String,
     /// Nothing leaves outside the route above; no route = nothing leaves.
     pub kill_switch: bool,
+    /// The way out the configuration asks for exists but cannot be used (a
+    /// tunnel nobody was given, an engine that is blocked): every request is
+    /// refused with this reason. Empty = no refusal.
+    pub refusal: String,
 }
 
 /// The refusal when the kill switch is on and nothing says where to go.
@@ -57,7 +61,12 @@ impl Route {
             let port = if socks5_port == 0 { 1080 } else { socks5_port };
             format!("socks5h://{auth}{host}:{port}")
         };
-        Route { proxy, interface: interface.trim().to_string(), kill_switch }
+        Route { proxy, interface: interface.trim().to_string(), kill_switch, refusal: String::new() }
+    }
+
+    /// A route that sends nothing, and says why.
+    pub fn refused(reason: impl Into<String>) -> Route {
+        Route { kill_switch: true, refusal: reason.into(), ..Route::default() }
     }
 
     /// No proxy, no interface: the default route.
@@ -74,6 +83,9 @@ impl Route {
         if !self.interface.is_empty() {
             parts.push(format!("interface {}", self.interface));
         }
+        if !self.refusal.is_empty() {
+            return format!("nothing ({})", self.refusal);
+        }
         if parts.is_empty() {
             parts.push("the default route".into());
         }
@@ -84,12 +96,20 @@ impl Route {
         s
     }
 
+    /// `describe` without the kill switch's mention.
+    pub fn describe_bare(&self) -> String {
+        Route { kill_switch: false, ..self.clone() }.describe()
+    }
+
     /// Whether a request may leave by this route right now; why not otherwise.
     ///
     /// Checked before every client is handed out, not only when it is built:
     /// a tunnel can go away under a cached client, and the error then names
     /// the reason instead of a bare "connection refused".
     pub fn preflight(&self) -> Result<(), String> {
+        if !self.refusal.is_empty() {
+            return Err(self.refusal.clone());
+        }
         if self.kill_switch && self.is_direct() {
             return Err(NO_ROUTE.into());
         }
@@ -103,6 +123,198 @@ impl Route {
         }
         Ok(())
     }
+}
+
+/// What `[daemon] egress` can say: where the daemon's own requests go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Setting {
+    /// Follow the network mode (the default).
+    Auto,
+    /// The host's default route, or `[daemon] bind_interface` when set.
+    Direct,
+    /// `[proxy]`, its socket bound to `[daemon] bind_interface` when set.
+    Proxy,
+    /// The same way out as this engine: its tunnel, interface or proxy.
+    Engine(String),
+}
+
+impl Setting {
+    /// Anything unreadable is refused by `resolve` rather than taken for
+    /// `auto`: a typo must not quietly pick a way the operator did not write.
+    pub fn parse(text: &str) -> Result<Setting, String> {
+        let t = text.trim();
+        match t.to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Setting::Auto),
+            "direct" => Ok(Setting::Direct),
+            "proxy" => Ok(Setting::Proxy),
+            _ => match t.split_once(':') {
+                Some((k, id)) if k.eq_ignore_ascii_case("engine") && !id.trim().is_empty() => {
+                    Ok(Setting::Engine(id.trim().to_string()))
+                }
+                _ => Err(format!(
+                    "[daemon] egress = {t:?} is not auto, direct, proxy or engine:<id>; nothing is sent until it is"
+                )),
+            },
+        }
+    }
+}
+
+/// One engine's way out, as the daemon may borrow it.
+#[derive(Debug, Clone, Default)]
+pub struct EngineExit {
+    pub id: String,
+    /// Its tunnel, interface and/or proxy. `None`: it has none of its own.
+    pub route: Option<Route>,
+    /// The route is a managed WireGuard tunnel.
+    pub tunnelled: bool,
+    /// Blocked by the kill switch, and why. Its way out is no way out.
+    pub blocked: Option<String>,
+}
+
+/// The daemon's way out, and what it is in words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub route: Route,
+    /// "direct", "proxy", "engine_tunnel", "engine_interface", "engine_proxy",
+    /// "engine_direct", "gluetun" or "refused": the page builds its sentence
+    /// from this, in its own language.
+    pub kind: &'static str,
+    /// The engine whose way out is borrowed, if any.
+    pub engine: String,
+    /// One line for a log, credentials removed.
+    pub via: String,
+}
+
+/// Where the daemon's own requests go, from the mode, `[daemon] egress` and
+/// the engines' own ways out.
+///
+/// `proxy` is `[proxy]` with `[daemon] bind_interface`, as `Route::new` builds
+/// it. Armed (the kill switch in force), a way out that resolves to nothing
+/// usable REFUSES: never the default route in its place. The two explicit
+/// directs -- `egress = "direct"`, an engine marked direct -- are a choice and
+/// are not refused; nor is gluetun, whose network namespace is the tunnel.
+pub fn resolve(mode: &str, armed: bool, setting: &str, proxy: &Route, engines: &[EngineExit]) -> Resolved {
+    let done = |route: Route, kind: &'static str, engine: &str, via: String| Resolved {
+        route,
+        kind,
+        engine: engine.to_string(),
+        via,
+    };
+    let refuse = |why: String| Resolved {
+        route: Route::refused(why.clone()),
+        kind: "refused",
+        engine: String::new(),
+        via: format!("nothing: {why}"),
+    };
+    let direct = |kind: &'static str, via: &str| {
+        let r = Route { proxy: String::new(), interface: proxy.interface.clone(), kill_switch: false, refusal: String::new() };
+        let via = if r.interface.is_empty() { via.to_string() } else { format!("{via}, bound to {}", r.interface) };
+        done(r, kind, "", via)
+    };
+    let borrow = |e: &EngineExit| -> Resolved {
+        if let Some(why) = &e.blocked {
+            return refuse(format!("engine {} is blocked by the kill switch ({why})", e.id));
+        }
+        match &e.route {
+            Some(r) => {
+                let r = Route { kill_switch: armed, ..r.clone() };
+                let (kind, via) = if e.tunnelled {
+                    ("engine_tunnel", format!("the WireGuard tunnel of engine {} ({})", e.id, r.interface))
+                } else if !r.proxy.is_empty() {
+                    ("engine_proxy", format!("the proxy of engine {} ({})", e.id, r.describe_bare()))
+                } else {
+                    ("engine_interface", format!("the interface of engine {} ({})", e.id, r.interface))
+                };
+                done(r, kind, &e.id, via)
+            }
+            // An engine marked direct: borrowing its way out is choosing it.
+            None => done(Route::default(), "engine_direct", &e.id, format!("direct, like engine {}", e.id)),
+        }
+    };
+    let setting = match Setting::parse(setting) {
+        Ok(s) => s,
+        Err(e) => return refuse(e),
+    };
+    match setting {
+        Setting::Direct => direct("direct", "direct (the host's default route)"),
+        Setting::Proxy => {
+            if proxy.proxy.is_empty() {
+                return refuse("[daemon] egress = \"proxy\" but [proxy] socks5_host is empty".into());
+            }
+            let r = Route { kill_switch: armed, ..proxy.clone() };
+            let via = format!("the [proxy] SOCKS5 proxy ({})", r.describe_bare());
+            done(r, "proxy", "", via)
+        }
+        Setting::Engine(id) => match engines.iter().find(|e| e.id == id) {
+            Some(e) => borrow(e),
+            None => refuse(format!("[daemon] egress names engine {id:?}, which this node does not run")),
+        },
+        Setting::Auto => {
+            // The race engine first: it is the one the operator watches.
+            let pick = |want: &dyn Fn(&EngineExit) -> bool| {
+                engines.iter().find(|e| e.id == "race" && want(e)).or_else(|| engines.iter().find(|e| want(e)))
+            };
+            match mode {
+                "socks5" | "proxy_v2" => {
+                    let has_proxy = |e: &EngineExit| e.blocked.is_none() && e.route.as_ref().is_some_and(|r| !r.proxy.is_empty());
+                    match pick(&has_proxy) {
+                        Some(e) => borrow(e),
+                        None if armed => refuse(format!("{mode} mode, and no engine has a SOCKS5 proxy to lend")),
+                        None => direct("direct", "direct (no engine has a proxy to lend)"),
+                    }
+                }
+                "wireguard" => {
+                    let tunnelled = |e: &EngineExit| e.blocked.is_none() && e.tunnelled;
+                    match pick(&tunnelled) {
+                        Some(e) => borrow(e),
+                        None if armed => refuse("WireGuard mode, and no engine has a tunnel to lend".into()),
+                        None => direct("direct", "direct (no engine has a tunnel to lend)"),
+                    }
+                }
+                "gluetun" => direct("gluetun", "direct, inside gluetun's network"),
+                _ if armed && proxy.interface.is_empty() => refuse(NO_ROUTE_DIRECT.into()),
+                _ => {
+                    let mut d = direct("direct", "direct (the host's default route)");
+                    d.route.kill_switch = armed;
+                    d
+                }
+            }
+        }
+    }
+}
+
+/// The refusal for `kill_switch = true` in direct mode with nothing set.
+pub const NO_ROUTE_DIRECT: &str = "kill switch on in direct mode: set [daemon] egress (\"proxy\" with a [proxy] \
+     section, or \"engine:<id>\"), or [daemon] bind_interface; nothing is sent by the default route";
+
+/// A managed WireGuard tunnel's device: `wg-<engine>`, at most 15 bytes.
+///
+/// Here rather than in the daemon so `hydranos-update` names the same device
+/// when it borrows an engine's tunnel. A long or exotic engine id is cut and
+/// given a short hash of the whole id, so two ids sharing their first
+/// characters still get two devices. Anything outside `[A-Za-z0-9_-]` becomes
+/// `_`: a `/` or a space is not a valid interface name, and `ip` would refuse
+/// it after the engine was told to bind there.
+pub fn tunnel_device(engine_id: &str) -> String {
+    const PREFIX: &str = "wg-";
+    const IFNAMSIZ_MAX: usize = 15;
+    let clean: String = engine_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let room = IFNAMSIZ_MAX - PREFIX.len();
+    if clean.len() <= room && clean == engine_id {
+        return format!("{PREFIX}{clean}");
+    }
+    // FNV-1a: stable across builds and platforms, which a std hasher is not.
+    let mut h: u32 = 0x811c_9dc5;
+    for b in engine_id.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    let tag = format!("{:04x}", h & 0xffff);
+    let keep = room.min(clean.len()).min(room - tag.len() - 1);
+    format!("{PREFIX}{}-{tag}", &clean[..keep])
 }
 
 /// The interface exists here, and requests can be bound to it.
@@ -345,6 +557,35 @@ mod tests {
         let r = Route::new("::1", 0, "us er", "p@ss:w", "", false);
         assert_eq!(r.proxy, "socks5h://us%20er:p%40ss%3Aw@[::1]:1080");
         assert!(!r.describe().contains("p%40ss"), "{}", r.describe());
+    }
+
+    /// A way out that resolved to nothing usable refuses every request with
+    /// its reason, kill switch or not, and a typo in `[daemon] egress` is no
+    /// `auto`.
+    #[test]
+    fn a_refused_route_refuses_with_its_reason() {
+        let r = Route::refused("engine vpn1 is blocked");
+        assert_eq!(client_for(&r).err().as_deref(), Some("engine vpn1 is blocked"));
+        assert_eq!(blocking_client_for(&r).err().as_deref(), Some("engine vpn1 is blocked"));
+        assert!(r.describe().starts_with("nothing"));
+        assert_eq!(Setting::parse(" Engine:race "), Ok(Setting::Engine("race".into())));
+        assert_eq!(Setting::parse(""), Ok(Setting::Auto));
+        assert!(Setting::parse("engine:").is_err() && Setting::parse("wireguard").is_err());
+        // Resolved with nothing to lend while armed: refused, not direct.
+        let none = resolve("wireguard", true, "auto", &Route::default(), &[]);
+        assert_eq!(none.kind, "refused");
+        assert!(client_for(&none.route).is_err());
+        let off = resolve("wireguard", false, "auto", &Route::default(), &[]);
+        assert!(off.route.is_direct() && client_for(&off.route).is_ok());
+    }
+
+    #[test]
+    fn the_tunnel_device_fits_ifnamsiz() {
+        assert_eq!(tunnel_device("race"), "wg-race");
+        let long = tunnel_device("a-very-long-engine-name");
+        assert!(long.len() <= 15 && long.starts_with("wg-"), "{long}");
+        assert_ne!(tunnel_device("a-very-long-engine-one"), tunnel_device("a-very-long-engine-two"));
+        assert_eq!(tunnel_device("a b"), tunnel_device("a b"), "stable");
     }
 
     #[test]

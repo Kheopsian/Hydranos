@@ -7,18 +7,34 @@ api_port = 8199
 api_key = ""
 data_dir = "/config"
 create_torrent_folder = false
-# The daemon's OWN requests (tracker lists, ipfilter lists, the update check,
-# webhooks, .torrent URLs) leave by this interface, or through [proxy] below.
-# Empty: the default route. The engines have their own, in [race]/[hoard].
+# where the daemon's own requests (tracker lists, IP filter lists, update check, webhooks, .torrent URLs) go:
+#   "auto"        follow the network mode (default): direct in direct mode and
+#                 inside gluetun; behind SOCKS5 / PROXY v2 the proxy of the race
+#                 engine, else of the first engine that has one; in WireGuard
+#                 mode the tunnel of the race engine, else of the first
+#                 tunnelled one
+#   "direct"      the host's default route (bound to bind_interface below if set)
+#   "proxy"       the [proxy] section below
+#   "engine:<id>" the same way out as that engine: its tunnel, interface or proxy
+# With the kill switch armed, a way out that is missing or unusable REFUSES the
+# request; it is never sent by the default route instead.
+# egress = "auto"
+# Interface the daemon's own requests are bound to when they go "direct" or
+# through "proxy". The engines have their own, in [race]/[hoard].
 # bind_interface = "wg0"
-# Kill switch: nothing leaves outside the interface or proxy configured. The
-# daemon's requests are refused when neither is set or usable (never sent by
-# the default route); an engine with no interface and no proxy is named at
-# startup and on the Network tab as NOT covered.
+# Kill switch. Absent = follows the network mode: off in direct mode, ON in
+# every other (socks5, proxy_v2, wireguard, gluetun). Armed, an engine with no
+# tunnel, no interface and no proxy is BLOCKED -- never put on the network,
+# said at startup, on the Network tab and as `degraded` on /health -- unless
+# its section says `allow_direct = true`; and the daemon's requests are
+# refused when their way out is not usable.
+#   false  disarm it: leaks accepted knowingly, every engine runs
+#   true   arm it even in direct mode: nothing without a way out leaves
 # kill_switch = false
 
-# SOCKS5 proxy for the daemon's own requests (socks5h: names are resolved by
-# the proxy). The engines' proxy is socks5_outbound_* in [race]/[hoard].
+# SOCKS5 proxy for the daemon's own requests with egress = "proxy" (socks5h:
+# names are resolved by the proxy). The engines' proxy is socks5_outbound_* in
+# [race]/[hoard].
 # [proxy]
 # socks5_host = "10.0.0.1"
 # socks5_port = 1080
@@ -37,6 +53,12 @@ registration_retry_minutes = 6
 # Pin this engine's peer sockets to one host interface (optional), by NAME,
 # e.g. "wg0": resolved to its IP at start, so it survives VPN IP changes.
 bind_interface = ""
+# This engine leaves by the host's default route ON PURPOSE. With the kill
+# switch armed (any network mode but direct), an engine with no tunnel, no
+# interface and no proxy is blocked unless this is true. In WireGuard mode it
+# is the "Direct (default interface)" choice of the Network tab. An extra
+# [[engine]] does not inherit it from its role.
+# allow_direct = false
 # Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX
 # offer. Off = IPv4 only, which is the long-standing behaviour. Only turn it on
 # if this host really has working IPv6 connectivity.
@@ -122,6 +144,12 @@ listen_port = 16172
 # Pin this engine's peer sockets to one host interface (optional), by NAME,
 # e.g. "wg0": resolved to its IP at start, so it survives VPN IP changes.
 bind_interface = ""
+# This engine leaves by the host's default route ON PURPOSE. With the kill
+# switch armed (any network mode but direct), an engine with no tunnel, no
+# interface and no proxy is blocked unless this is true. In WireGuard mode it
+# is the "Direct (default interface)" choice of the Network tab. An extra
+# [[engine]] does not inherit it from its role.
+# allow_direct = false
 # Also listen for peers over IPv6, and accept the IPv6 peers trackers and PEX
 # offer. Off = IPv4 only, which is the long-standing behaviour. Only turn it on
 # if this host really has working IPv6 connectivity.

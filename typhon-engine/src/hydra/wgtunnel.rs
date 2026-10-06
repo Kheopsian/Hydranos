@@ -31,8 +31,6 @@ use crate::wgtun::{self, Conf};
 
 /// Every device this module creates starts with this.
 pub const PREFIX: &str = "wg-";
-/// Linux interface names are at most 15 bytes (IFNAMSIZ - 1).
-const IFNAMSIZ_MAX: usize = 15;
 /// Routing tables, one per tunnel, from here. Far from 51820, which is the
 /// table AND fwmark `wg-quick` picks by default: under `--network host` a
 /// tunnel of the host's own lives there, and it is not ours to touch.
@@ -46,31 +44,10 @@ pub const HANDSHAKE_FRESH_SECS: u64 = 180;
 /// The default MTU of `wg-quick`, for a `.conf` that does not say.
 const DEFAULT_MTU: u32 = 1420;
 
-/// The device for an engine: `wg-<engine>`, at most 15 bytes.
-///
-/// A long or exotic engine id is cut and given a short hash of the whole id,
-/// so two ids sharing their first characters still get two devices. Anything
-/// outside `[A-Za-z0-9_-]` becomes `_`: a `/` or a space is not a valid
-/// interface name, and `ip` would refuse it after the engine was told to bind
-/// there.
+/// The device for an engine: `wg-<engine>`, at most 15 bytes. Named in the
+/// lib (`egress::tunnel_device`) so `hydranos-update` finds the same device.
 pub fn device_name(engine_id: &str) -> String {
-    let clean: String = engine_id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    let room = IFNAMSIZ_MAX - PREFIX.len();
-    if clean.len() <= room && clean == engine_id {
-        return format!("{PREFIX}{clean}");
-    }
-    // FNV-1a: stable across builds and platforms, which a std hasher is not.
-    let mut h: u32 = 0x811c_9dc5;
-    for b in engine_id.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    let tag = format!("{:04x}", h & 0xffff);
-    let keep = room.min(clean.len()).min(room - tag.len() - 1);
-    format!("{PREFIX}{}-{tag}", &clean[..keep])
+    typhon_engine::egress::tunnel_device(engine_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +152,7 @@ pub fn wanted(mode: &str, engines: &[crate::config::LocalEngine]) -> Vec<Want> {
     engines
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.session.wireguard_enabled && !e.session.wireguard_config.trim().is_empty())
+        .filter(|(_, e)| e.session.wireguard_enabled == Some(true) && !e.session.wireguard_config.trim().is_empty())
         .map(|(slot, e)| Want {
             engine: e.id.clone(),
             device: device_name(&e.id),
@@ -1065,7 +1042,7 @@ Endpoint = 192.0.2.10:51820
              [[engine]]\nengine_id = \"vpn1\"\nrole = \"race\"\n[engine.session]\nlisten_port = 26991\n",
         );
         let vpn1 = e.iter().find(|e| e.id == "vpn1").unwrap();
-        assert!(!vpn1.session.wireguard_enabled);
+        assert_eq!(vpn1.session.wireguard_enabled, None, "an extra engine arrives unassigned");
         assert_eq!(vpn1.session.bind_interface, "");
         let w = wanted("wireguard", &e);
         assert_eq!(w.len(), 1);

@@ -14,9 +14,9 @@
 //!   hydranos-update --dir . --yes           no confirmation prompt
 //!   hydranos-update --dir . --tag v4.1.7    a specific release
 //!
-//! Its requests leave the way the daemon's do: `[proxy]` and `[daemon]
-//! bind_interface` / `kill_switch` of the config file (`--config`, default
-//! `default.toml` in `--dir`), through `typhon_engine::egress`.
+//! Its requests leave the way the daemon's do: `[daemon] egress` and the
+//! kill switch of the config file (`--config`, default `default.toml` in
+//! `--dir`), resolved by the daemon's own rule in `typhon_engine::egress`.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -72,8 +72,9 @@ hydranos-update -- replace the daemon's binaries with a newer release
   --check          report the latest release and exit
   --dir <path>     the folder holding hydranos (default: .)
   --tag <vX.Y.Z>   a specific release instead of the latest
-  --config <file>  the daemon's config, for its [proxy] and [daemon]
-                   bind_interface / kill_switch (default: <dir>/default.toml)
+  --config <file>  the daemon's config, for the way its requests leave
+                   ([daemon] egress, the kill switch, the network mode)
+                   (default: <dir>/default.toml)
   --yes            do not ask before replacing
 
 Nothing is replaced unless the archive downloads AND its SHA-256 matches the
@@ -234,26 +235,110 @@ fn expected_sha(r: &Release, archive: &str) -> Result<String, String> {
 /// The way out, read once from the config file.
 static ROUTE: std::sync::OnceLock<typhon_engine::egress::Route> = std::sync::OnceLock::new();
 
-/// The daemon's route as its config file describes it. No file is the
-/// default route; a file that does not parse is refused, since it may be the
-/// one holding a kill switch.
+/// The daemon's route as its config file describes it: `[daemon] egress`,
+/// the kill switch as written or deduced from `[network] mode`, and the
+/// engines' own ways out, put together by the daemon's own rule
+/// (`egress::resolve`). No file is the default route; a file that does not
+/// parse is refused, since it may be the one holding a kill switch.
+///
+/// The engines are read from the file the simple way -- `[race]`, `[hoard]`
+/// and the local `[[engine]]`/`[[agent]]` blocks over their role -- which is
+/// all a way out needs.
 fn route_from(path: &Path) -> Result<typhon_engine::egress::Route, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(_) => return Ok(typhon_engine::egress::Route::default()),
     };
     let v: toml::Value = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    let s = |t: &str, k: &str| v.get(t).and_then(|t| t.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let port = v.get("proxy").and_then(|t| t.get("socks5_port")).and_then(|x| x.as_integer()).unwrap_or(0);
-    let kill = v.get("daemon").and_then(|t| t.get("kill_switch")).and_then(|x| x.as_bool()).unwrap_or(false);
-    Ok(typhon_engine::egress::Route::new(
-        &s("proxy", "socks5_host"),
-        u16::try_from(port).unwrap_or(0),
-        &s("proxy", "socks5_user"),
-        &s("proxy", "socks5_pass"),
-        &s("daemon", "bind_interface"),
-        kill,
-    ))
+    Ok(resolve_file(&v).route)
+}
+
+fn resolve_file(v: &toml::Value) -> typhon_engine::egress::Resolved {
+    use typhon_engine::egress::{EngineExit, Route};
+    let s = |t: &toml::Value, k: &str| t.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let n = |t: &toml::Value, k: &str| t.get(k).and_then(|x| x.as_integer()).unwrap_or(0);
+    let b = |t: &toml::Value, k: &str| t.get(k).and_then(|x| x.as_bool());
+    let empty = toml::Value::Table(Default::default());
+    let section = |k: &str| v.get(k).cloned().unwrap_or_else(|| empty.clone());
+    let (daemon, proxy, race, hoard) = (section("daemon"), section("proxy"), section("race"), section("hoard"));
+
+    // The mode as saved, else the daemon's pre-4.4 deduction.
+    let saved = v.get("network").map(|t| s(t, "mode")).unwrap_or_default();
+    let mode = if ["direct", "wireguard", "gluetun", "socks5", "proxy_v2"].contains(&saved.as_str()) {
+        saved
+    } else if b(&race, "gluetun_port_forward") == Some(true) || b(&hoard, "gluetun_port_forward") == Some(true) {
+        "gluetun".into()
+    } else if n(&race, "listen_port_proxy_v2") != 0 || n(&hoard, "listen_port_proxy_v2") != 0 {
+        "proxy_v2".into()
+    } else if !s(&race, "socks5_outbound_host").is_empty() || !s(&hoard, "socks5_outbound_host").is_empty() {
+        "socks5".into()
+    } else {
+        "direct".into()
+    };
+    let armed = b(&daemon, "kill_switch").unwrap_or(mode != "direct");
+
+    // The engines: race, hoard, then the local blocks over their role.
+    let mut engines: Vec<(String, toml::Value)> = vec![("race".into(), race.clone()), ("hoard".into(), hoard.clone())];
+    for list in ["agent", "engine"] {
+        for a in v.get(list).and_then(|x| x.as_array()).into_iter().flatten() {
+            let role = s(a, "role");
+            if !s(a, "addr").is_empty() || (role != "race" && role != "hoard") {
+                continue;
+            }
+            let id = if s(a, "engine_id").is_empty() { s(a, "name") } else { s(a, "engine_id") };
+            if id.is_empty() {
+                continue;
+            }
+            let mut merged = if role == "race" { race.clone() } else { hoard.clone() };
+            let own = a.get("session").and_then(|x| x.as_table()).cloned().unwrap_or_default();
+            if let Some(m) = merged.as_table_mut() {
+                // An extra engine has neither its role's tunnel nor its
+                // role's "direct on purpose" (`Config::local_engines`).
+                if id != "race" && id != "hoard" {
+                    m.remove("wireguard_enabled");
+                    m.remove("allow_direct");
+                }
+                m.extend(own);
+            }
+            match engines.iter().position(|(e, _)| *e == id) {
+                Some(i) => engines[i].1 = merged,
+                None => engines.push((id, merged)),
+            }
+        }
+    }
+    let exits: Vec<EngineExit> = engines
+        .iter()
+        .map(|(id, t)| {
+            let tunnelled = mode == "wireguard" && b(t, "wireguard_enabled") == Some(true) && !s(t, "wireguard_config").is_empty();
+            let iface = if tunnelled { typhon_engine::egress::tunnel_device(id) } else { s(t, "bind_interface") };
+            let host = s(t, "socks5_outbound_host");
+            let route = (tunnelled || !iface.is_empty() || !host.is_empty()).then(|| {
+                Route::new(
+                    &host,
+                    u16::try_from(n(t, "socks5_outbound_port")).unwrap_or(0),
+                    &s(t, "socks5_outbound_user"),
+                    &s(t, "socks5_outbound_pass"),
+                    &iface,
+                    false,
+                )
+            });
+            let direct = b(t, "allow_direct") == Some(true) || (mode == "wireguard" && b(t, "wireguard_enabled") == Some(false));
+            let blocked = (armed
+                && !direct
+                && if mode == "wireguard" { !tunnelled } else { route.is_none() && mode != "gluetun" })
+                .then(|| "no way out of its own, and not marked direct".to_string());
+            EngineExit { id: id.clone(), route, tunnelled, blocked }
+        })
+        .collect();
+    let proxy_route = Route::new(
+        &s(&proxy, "socks5_host"),
+        u16::try_from(n(&proxy, "socks5_port")).unwrap_or(0),
+        &s(&proxy, "socks5_user"),
+        &s(&proxy, "socks5_pass"),
+        &s(&daemon, "bind_interface"),
+        false,
+    );
+    typhon_engine::egress::resolve(&mode, armed, &s(&daemon, "egress"), &proxy_route, &exits)
 }
 
 fn client() -> Result<reqwest::blocking::Client, String> {
@@ -502,7 +587,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("hydranos-update-route-{}.toml", std::process::id()));
         std::fs::write(
             &path,
-            "[daemon]\nbind_interface = \"wg0\"\nkill_switch = true\n[proxy]\nsocks5_host = \"10.0.0.1\"\nsocks5_port = 1080\n",
+            "[daemon]\negress = \"proxy\"\nbind_interface = \"wg0\"\nkill_switch = true\n[proxy]\nsocks5_host = \"10.0.0.1\"\nsocks5_port = 1080\n",
         )
         .unwrap();
         let r = route_from(&path).unwrap();
@@ -519,5 +604,32 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         // No file: the default route, as before.
         assert!(route_from(Path::new("/nonexistent/default.toml")).unwrap().is_direct());
+    }
+
+    fn resolved(text: &str) -> typhon_engine::egress::Resolved {
+        resolve_file(&toml::from_str(text).unwrap())
+    }
+
+    /// `auto` follows the mode exactly as the daemon does: the race engine's
+    /// tunnel or proxy, direct in direct mode, and a refusal -- never the
+    /// default route -- when the mode's way out is missing.
+    #[test]
+    fn the_updater_follows_the_network_mode_like_the_daemon() {
+        // A production-like file: no mode, no kill switch. Direct, as before.
+        let r = resolved("[daemon]\napi_port = 8199\n[race]\nlisten_port = 16171\n[hoard]\nlisten_port = 16172\n");
+        assert_eq!(r.kind, "direct");
+        assert!(r.route.is_direct() && !r.route.kill_switch);
+        let wg = resolved(
+            "[network]\nmode = \"wireguard\"\n[race]\nwireguard_enabled = true\nwireguard_config = \"a.conf\"\n",
+        );
+        assert_eq!((wg.kind, wg.route.interface.as_str()), ("engine_tunnel", "wg-race"));
+        assert!(wg.route.kill_switch);
+        let socks = resolved("[network]\nmode = \"socks5\"\n[hoard]\nsocks5_outbound_host = \"10.0.0.2\"\n");
+        assert_eq!(socks.route.proxy, "socks5h://10.0.0.2:1080", "the first engine with a proxy");
+        let none = resolved("[network]\nmode = \"wireguard\"\n");
+        assert_eq!(none.kind, "refused");
+        assert!(typhon_engine::egress::blocking_client_for(&none.route).is_err());
+        let disarmed = resolved("[network]\nmode = \"wireguard\"\n[daemon]\nkill_switch = false\n");
+        assert!(disarmed.route.is_direct() && disarmed.route.preflight().is_ok());
     }
 }
