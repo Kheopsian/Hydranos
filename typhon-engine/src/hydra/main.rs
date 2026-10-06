@@ -686,6 +686,10 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         let mode = netmode::current(&config);
         let default_iface = portmap::default_interface();
         for engine in engine_host.engines() {
+            // Kept off the network by the kill switch: no listener to map.
+            if engine.blocked.get().is_some() {
+                continue;
+            }
             // Only an engine that leaves by the home router's own network is
             // mapped there. A tunnelled one asks its tunnel's gateway
             // (`portfwd::spawn_follower`); a pinned or proxied one would get a

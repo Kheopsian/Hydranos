@@ -72,6 +72,9 @@ pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: 
         // even a probe (the engine shows no address, and the report says it
         // is not covered).
         let (v4, v6) = match bound {
+            // Kept off the network by the kill switch: nothing to measure,
+            // and no probe sent on its behalf.
+            _ if engine.blocked.get().is_some() => (None, None),
             None if daemon_route.is_direct() => (proc_v4.clone(), proc_v6.clone()),
             None if daemon_route.kill_switch => (None, None),
             None => (echo(None, ECHO_V4).await, echo(None, ECHO_V6).await),

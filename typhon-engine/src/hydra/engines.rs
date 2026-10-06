@@ -88,6 +88,10 @@ pub struct Engine {
     /// network. Magnet resolution dials from its bindings: an engine that is
     /// not on the network has none, and no business dialling at all.
     pub engine_config: std::sync::OnceLock<typhon_engine::config::EngineConfig>,
+    /// Kept off the network by the kill switch, and why (`killswitch`): no
+    /// listener, no dial, no announce, no DHT, no LSD. Decided once, in
+    /// `connect`, like everything else about the engine's network.
+    pub blocked: std::sync::OnceLock<String>,
 }
 
 pub struct EngineHost {
@@ -260,6 +264,7 @@ impl EngineHost {
                 announce_policy: std::sync::OnceLock::new(),
                 admission: Default::default(),
                 engine_config: std::sync::OnceLock::new(),
+                blocked: std::sync::OnceLock::new(),
             });
         }
 
@@ -369,10 +374,21 @@ impl EngineHost {
             })
             .await;
         }
+        // Which engines the kill switch keeps off the network. Before the
+        // switch below, so a bench run with the network off still says it.
+        let plan = crate::killswitch::plan(config);
         for engine in &self.engines {
             // The engine's own merged session. NOT config.race / config.hoard:
             // an engine that is neither is a legitimate configuration.
             let session = &engine.session;
+            if let Some(why) = plan.blocked(&engine.id) {
+                tracing::warn!(
+                    engine = %engine.id,
+                    "kill switch: BLOCKED, kept off the network (no listener, no dial, no announce, no DHT, no LSD): {why}"
+                );
+                let _ = engine.blocked.set(why);
+                continue;
+            }
             if !networking_enabled() {
                 tracing::warn!(
                     engine = %engine.id,
@@ -772,6 +788,42 @@ mod tests {
         let hoard = host.engines().iter().find(|e| e.id == "hoard").unwrap();
         assert_ne!(vpn1.session.listen_port, hoard.session.listen_port);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⭐ WireGuard mode, no engine assigned: the kill switch keeps every one
+    /// off the network. `start` -- the production path, not `offline` --
+    /// gives none of them a config, a listener, an announce loop or a bound
+    /// port, and each says why.
+    #[tokio::test]
+    async fn an_unassigned_engine_is_blocked_and_opens_no_socket() {
+        let dir = std::env::temp_dir().join(format!("hydra-engtest-blocked-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // Free ports, so "nobody bound it" is checked on ports nobody else holds.
+        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let text = format!(
+            "[daemon]\ndata_dir = {:?}\n[network]\nmode = \"wireguard\"\n[race]\nlisten_port = {}\n[hoard]\nlisten_port = {}\n",
+            dir.to_string_lossy(),
+            free(),
+            free()
+        );
+        let config: Config = toml::from_str(&text).unwrap();
+        // `start` moves the process-wide startup phase: put it back.
+        let phase = crate::startup::phase();
+        let host = EngineHost::start(&config, &dir).await;
+        crate::startup::set_phase(phase);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        for e in host.engines() {
+            let why = e.blocked.get().unwrap_or_else(|| panic!("{} was not blocked", e.id));
+            assert!(why.contains("not assigned"), "{why}");
+            assert!(e.engine_config.get().is_none(), "{}: no network config, so no dial and no magnet", e.id);
+            assert!(e.bump.get().is_none() && e.announce_policy.get().is_none(), "{}: no announce loop", e.id);
+            assert!(!e.listening.load(std::sync::atomic::Ordering::Relaxed), "{}: no listener", e.id);
+            assert!(e.manager.dht().is_none(), "{}: no DHT", e.id);
+            // Its port is free: nothing bound it, on any address.
+            std::net::TcpListener::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: port {} taken: {err}", e.id, e.listen_port));
+            std::net::UdpSocket::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: UDP {} taken: {err}", e.id, e.listen_port));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
