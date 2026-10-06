@@ -119,7 +119,7 @@ fn row(engine: &crate::engines::Engine, bound: bool, v4: Option<String>, v6: Opt
         row.insert("bind_interface".into(), engine.bind_interface.clone().into());
     }
     // The port the listener holds now, a live change included.
-    let port = engine.manager.announced_port(engine.listen_port);
+    let port = engine.manager.listen_port_now(engine.listen_port);
     if port != 0 {
         row.insert("listen_port".into(), port.into());
     }

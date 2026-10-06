@@ -414,8 +414,9 @@ pub async fn start(mgr: Arc<TorrentManager>, config: &crate::config::EngineConfi
         loop {
             tick.tick().await;
             let plan = schedule.plan(&candidates(&m), Instant::now());
-            // The port a rebind moved the listener to, as the trackers get it.
-            let port = m.announced_port(configured_port);
+            // The port the listener holds: a LAN peer connects to it directly,
+            // never through the VPN's translated port.
+            let port = m.listen_port_now(configured_port);
             for message in plan {
                 s.announce(port, &message).await;
                 // Spread over the round rather than a burst of 60 datagrams.

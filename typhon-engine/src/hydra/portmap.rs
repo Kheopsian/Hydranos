@@ -238,7 +238,7 @@ pub async fn map_once(internal_port: u16) -> Result<Granted, String> {
 pub fn spawn(engine: String, manager: std::sync::Arc<typhon_engine::torrent::TorrentManager>, configured_port: u16) {
     tokio::spawn(async move {
         loop {
-            let internal_port = manager.announced_port(configured_port);
+            let internal_port = manager.listen_port_now(configured_port);
             let outcome = map_once(internal_port).await;
             record(&engine, internal_port, &outcome);
             let wait = match &outcome {
@@ -271,7 +271,7 @@ pub fn spawn(engine: String, manager: std::sync::Arc<typhon_engine::torrent::Tor
             let until = tokio::time::Instant::now() + wait;
             while tokio::time::Instant::now() < until {
                 tokio::time::sleep(PORT_WATCH.min(until - tokio::time::Instant::now())).await;
-                if manager.announced_port(configured_port) != internal_port {
+                if manager.listen_port_now(configured_port) != internal_port {
                     break;
                 }
             }
