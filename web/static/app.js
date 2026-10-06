@@ -6794,10 +6794,13 @@ function _rpVolCard(v, i) {
         + '<div class="rp2-f">' + t("down to") + ' <input type="number" min="1" max="100" value="' + (v.low_watermark || 0)
         + '" onchange="_rpVolSave(' + i + ',\'low_watermark\',parseInt(this.value))">%</div>'
         + '<span class="abs">' + t("that is {at}, back to {back}", { at: at, back: back }) + "</span>"
-        + "</div></div>"
-        + '<div class="rp2-row"><div class="rp2-lbl">' + t("Quota")
-        + '<span class="rp2-info">i<span class="rp2-tip">' + esc(t("On a shared disk (a seedbox slot), the space you are allowed rather than the disk's size. The percentages and the drain then count the data of this engine's torrents against it. Empty: the whole disk.")) + "</span></span></div>"
-        + '<div class="rp2-body"><div class="rp2-f"><input type="number" min="0" step="1" placeholder="' + t("whole disk") + '" value="'
+        + "</div>"
+        // Same row as the thresholds, outside their `inh` block: a quota is
+        // never inherited, so it must not take their dashed border.
+        + '<div class="rp2-spacer"></div>'
+        + '<div class="rp2-body"><div class="rp2-f">' + t("Quota")
+        + '<span class="rp2-info">i<span class="rp2-tip" style="left:auto;right:0">' + esc(t("On a shared disk (a seedbox slot), the space you are allowed rather than the disk's size. The percentages and the drain then count the data of this engine's torrents against it. Empty: the whole disk.")) + "</span></span>"
+        + '<input type="number" min="0" step="1" style="width:90px" placeholder="' + t("whole disk") + '" value="'
         + (v.quota ? Math.round(v.quota / 1e9) : "") + '" onchange="_rpVolSave(' + i + ',\'quota_gb\',parseFloat(this.value)||0)"> GB</div></div></div>'
         + '<div class="rp2-row rp2-drain-result" id="rp-res-' + i + '" style="display:none"></div>'
         + '<div class="rp2-hist" id="rp-hist-' + i + '" style="display:none"></div>'
@@ -8861,11 +8864,22 @@ function initResizableColumns(table, key) {
 
     // Fit every column to its content and keep the result, as a drag does.
     const fitAll = () => {
-        const widths = _fitToWidth(ths.map((th, i) => _fitColWidth(table, th, i)),
-            (table.parentElement || table).clientWidth);
-        ths.forEach((th, i) => { th.style.width = widths[i] + "px"; });
+        const box = table.parentElement || table;
+        const grow = ths.findIndex(th => colKey(th) === "name");
+        const widths = _fitToWidth(ths.map((th, i) => _fitColWidth(table, th, i)), box.clientWidth, grow);
+        const apply = () => {
+            ths.forEach((th, i) => { th.style.width = widths[i] + "px"; });
+            table.style.width = widths.reduce((a, b) => a + b, 0) + "px";
+        };
         table.style.tableLayout = "fixed";
-        table.style.width = widths.reduce((a, b) => a + b, 0) + "px";
+        apply();
+        // Measured, not computed: borders and rounding put a filled table a
+        // pixel past its container, and that pixel is a horizontal scrollbar.
+        const over = table.offsetWidth - box.clientWidth;
+        if (grow >= 0 && over > 0 && over < widths[grow] - _FIT_MIN) {
+            widths[grow] -= over;
+            apply();
+        }
         table._colFixed = true;
         const s = JSON.parse(localStorage.getItem(key) || "{}");
         ths.forEach((th, i) => { s[colKey(th)] = widths[i]; });
@@ -8960,6 +8974,9 @@ function _fitColWidth(table, th, i) {
     return Math.round(Math.min(_FIT_MAX, Math.max(_FIT_MIN, w)));
 }
 /// Shrink fitted widths into `room` pixels, taking only from the long columns.
+/// When they come to LESS than the room, column `grow` (the name) takes the
+/// rest: a fitted table narrower than the screen left an empty band on the
+/// right, and the name is the one column that always has more to show.
 ///
 /// Every column at its content width can come to far more than the screen (a
 /// name and a path at their cap alone are 1 100px). The short columns -- a
@@ -8967,9 +8984,13 @@ function _fitColWidth(table, th, i) {
 /// excess comes out of what sits above `_FIT_KEEP`, in proportion to how far
 /// above it each one is. When even that is not enough the table scrolls.
 const _FIT_KEEP = 200;
-function _fitToWidth(widths, room) {
+function _fitToWidth(widths, room, grow) {
     const total = widths.reduce((a, b) => a + b, 0);
-    if (!room || total <= room) return widths;
+    if (!room || total === room) return widths;
+    if (total < room) {
+        if (grow == null || grow < 0) return widths;
+        return widths.map((w, i) => i === grow ? w + room - total : w);
+    }
     const spare = widths.map(w => Math.max(0, w - _FIT_KEEP));
     const pool = spare.reduce((a, b) => a + b, 0);
     if (!pool) return widths;
