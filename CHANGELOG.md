@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- 4.4
+## v4.3.2 -- managed WireGuard that holds, a kill switch that follows the mode
 
 ### Added
 - **Prometheus `/metrics` is a real exporter**: per engine (extra engines
