@@ -581,6 +581,11 @@ th {
 
 #hoard-table thead th.sort-asc::after { content: " ▲"; color: var(--accent-hoard); }
 #hoard-table thead th.sort-desc::after { content: " ▼"; color: var(--accent-hoard); }
+/* A detail card clips (overflow: hidden), and nine peer columns are wider
+   than the panel: without this the Uploaded column was cut off with no way
+   to reach it. The table scrolls inside its card, one line per cell. */
+.peers-scroll { overflow-x: auto; }
+.peers-scroll th, .peers-scroll td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #detail-peers-table thead th.sort-asc::after { content: " ▲"; color: var(--accent-race); }
 #detail-peers-table thead th.sort-desc::after { content: " ▼"; color: var(--accent-race); }
 #h-detail-peers-table thead th.sort-asc::after { content: " ▲"; color: var(--accent-hoard); }

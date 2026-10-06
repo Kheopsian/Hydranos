@@ -8866,7 +8866,8 @@ function initResizableColumns(table, key) {
     // Fit every column to its content and keep the result, as a drag does.
     const fitAll = () => {
         const box = table.parentElement || table;
-        const grow = ths.findIndex(th => colKey(th) === "name");
+        // The name where there is one; otherwise the first column (a peer's IP).
+        const grow = Math.max(0, ths.findIndex(th => colKey(th) === "name"));
         const widths = _fitToWidth(ths.map((th, i) => _fitColWidth(table, th, i)), box.clientWidth, grow);
         const apply = () => {
             ths.forEach((th, i) => { th.style.width = widths[i] + "px"; });
@@ -8947,10 +8948,15 @@ function _fitColWidth(table, th, i) {
         let inline = 0, block = 0;
         for (const n of el.childNodes) {
             if (n.nodeType === Node.TEXT_NODE) {
-                const s = n.textContent.replace(/\s+/g, " ");
+                let s = n.textContent.replace(/\s+/g, " ");
                 if (!s.trim()) continue;
+                // What CSS draws, not what the DOM holds: headers are
+                // uppercased and letter-spaced, and measuring "Progress" for
+                // "PROGRESS" cut it to "PROGRE...".
+                if (cs.textTransform === "uppercase") s = s.toUpperCase();
+                else if (cs.textTransform === "lowercase") s = s.toLowerCase();
                 ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-                inline += ctx.measureText(s).width;
+                inline += ctx.measureText(s).width + s.length * (px(cs.letterSpacing) || 0);
             } else if (n.nodeType === Node.ELEMENT_NODE) {
                 const ccs = getComputedStyle(n);
                 if (ccs.display === "none" || n.classList.contains("col-grip")) continue;
@@ -9078,7 +9084,7 @@ function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
 // column must not widen every existing table on upgrade.
 function PEER_COLS() {
     return [
-        { id: "ip", label: "IP", sort: "ip", mobile: true, render: p => `<td>${incoIP(p.ip)}:${p.port}</td>` },
+        { id: "ip", label: "IP", sort: "ip", mobile: true, render: p => `<td title="${esc(incoIP(p.ip) + ":" + p.port)}">${esc(incoIP(p.ip))}:${p.port}</td>` },
         { id: "client", label: "Client", sort: "client", render: p => `<td>${esc(p.client || "-")}</td>` },
         { id: "progress", label: "Progress", sort: "progress", mobile: true, render: p => `<td>${((p.progress || 0) * 100).toFixed(0)}%</td>` },
         { id: "dl", label: "Down", sort: "dl", mobile: true, render: p => `<td>${formatSpeed(peerRate(p, "dl"))}</td>` },
