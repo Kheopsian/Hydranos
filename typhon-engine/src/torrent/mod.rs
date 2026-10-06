@@ -214,6 +214,10 @@ pub struct TorrentManager {
     /// socket while every announce kept handing out the old port, and peers
     /// dialled a port nothing listened on.
     live_port: std::sync::atomic::AtomicU16,
+    /// The port the outside reaches the listener on, when a NAT in between
+    /// translates it (NAT-PMP through a VPN tunnel: public 45133 -> our 16171).
+    /// 0 = no translation: peers are told the port we listen on.
+    external_port: std::sync::atomic::AtomicU16,
     /// Inbound peers from outside since start (`note_inbound_peer`).
     inbound_peers: std::sync::atomic::AtomicU64,
     /// No announce until a port is known: set while a forwarded port (gluetun)
@@ -403,13 +407,29 @@ impl TorrentManager {
         self.inbound_peers.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The port to announce: the one a rebind moved the listener to, or the
-    /// configured one when nothing has.
-    pub fn announced_port(&self, configured: u16) -> u16 {
+    /// The port the listener holds: the one a rebind moved it to, or the
+    /// configured one when nothing has. What a LAN peer (LSD), the home
+    /// router's mapping and a port-conflict check need.
+    pub fn listen_port_now(&self, configured: u16) -> u16 {
         match self.live_port.load(std::sync::atomic::Ordering::Relaxed) {
             0 => configured,
             p => p,
         }
+    }
+
+    /// The port to announce: the one the outside reaches us on. Behind a
+    /// translating NAT that is NOT the port we listen on, and announcing the
+    /// listen port there hands every peer a port nobody forwards.
+    pub fn announced_port(&self, configured: u16) -> u16 {
+        match self.external_port.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => self.listen_port_now(configured),
+            p => p,
+        }
+    }
+
+    /// Set (or clear, with 0) the port a translating NAT gives the outside.
+    pub fn set_external_port(&self, port: u16) {
+        self.external_port.store(port, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Hold (or release) every announce until the listen port is known.
@@ -532,6 +552,7 @@ impl TorrentManager {
             trusted_proxy_sources: std::sync::OnceLock::new(),
             rebind_tx: std::sync::OnceLock::new(),
             live_port: std::sync::atomic::AtomicU16::new(0),
+            external_port: std::sync::atomic::AtomicU16::new(0),
             inbound_peers: std::sync::atomic::AtomicU64::new(0),
             port_pending: std::sync::atomic::AtomicBool::new(false),
             bus: Default::default(),

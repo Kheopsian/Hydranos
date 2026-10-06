@@ -398,14 +398,15 @@ impl EngineHost {
             }
             let data_dir = config_dir.join(&engine.id);
             let resume_dir = data_dir.join("resume");
-            // A NAT-PMP tunnel: ask for the port before the engine binds, so
-            // its listener AND its uTP socket are born on it. Not granted in
-            // time, the follower keeps asking and the announces wait.
+            // A NAT-PMP tunnel: ask for the port before the engine starts, so
+            // its very first announce carries it. Not granted in time, the
+            // follower keeps asking and the announces wait.
+            // ⚠ The engine is born on its CONFIGURED port, not the granted one:
+            // the gateway translates public `external_port` to that internal
+            // port (measured on Proton), so the listener belongs there and only
+            // the announced port is the external one (`set_external_port`).
             let follow = self.natpmp_follow(wants.iter().find(|w| w.engine == engine.id), session.listen_port).await;
             let mut born = session.clone();
-            if let Some((_, Some(m))) = &follow {
-                born.listen_port = m.external_port;
-            }
             // LSD's default depends on the role, which the session alone
             // does not carry: resolved here, written out for the engine.
             born.enable_lsd = Some(session.lsd_on(&engine.role));
