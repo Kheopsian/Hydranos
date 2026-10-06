@@ -146,6 +146,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   network filesystem; the server never reported it.
 
 ### Changed
+- Double-clicking a column edge to fit every column no longer leaves an
+  empty band on the right when the columns need less than the screen: the
+  Name column takes the rest.
+- Race tab: a volume's quota sits at the end of its Auto drain line instead
+  of on a line of its own.
 - **`bind_interface` is Linux-only.** On Windows and macOS peer
   connections left by the default route; it is now refused with the reason,
   hidden in the Network tab, and an engine whose file still sets it stays off
