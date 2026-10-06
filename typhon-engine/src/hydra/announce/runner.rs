@@ -1818,6 +1818,26 @@ mod announce_one_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// ⭐ Behind a translating NAT (NAT-PMP through a VPN), the tracker is told
+    /// the EXTERNAL port while the listener stays on its own. Proton sends
+    /// public 45133 to our 16171; announcing 16171 -- or moving the listener
+    /// to 45133 -- leaves every peer dialling a port that leads nowhere.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn behind_a_translating_nat_the_external_port_is_announced() {
+        let (url, seen) = udp_tracker(1234).await;
+        let (mgr, root) = manager("udpnat");
+        let hash = add(&mgr, "udpnat", &url);
+        mgr.set_live_port(16171);
+        mgr.set_external_port(45133);
+        assert_eq!(mgr.listen_port_now(1), 16171, "the listener does not move");
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(&got[0][96..98], &45133u16.to_be_bytes(), "the port the outside reaches us on");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// While the forwarded port is unknown, not a packet leaves.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn nothing_is_announced_while_the_port_is_pending() {

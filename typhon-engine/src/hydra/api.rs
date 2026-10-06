@@ -6126,7 +6126,7 @@ fn port_forward_rows(state: &AppState, cfg: &Config) -> Vec<serde_json::Value> {
     let mut rows = Vec::new();
     for e in state.engines.engines().iter() {
         let listening = e.listening.load(std::sync::atomic::Ordering::Relaxed);
-        let port = e.manager.announced_port(e.listen_port);
+        let port = e.manager.listen_port_now(e.listen_port);
         let inbound = e.manager.inbound_peers();
         let reachable = if inbound > 0 {
             "yes"
@@ -7790,7 +7790,7 @@ async fn set_listen_port(state: &AppState, engine: &str, body: &str) -> Response
         return (StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"error": "agent unavailable"}))).into_response();
     };
-    let was = eng.manager.announced_port(eng.listen_port);
+    let was = eng.manager.listen_port_now(eng.listen_port);
     let conflict = |error: String| {
         (StatusCode::CONFLICT, Json(serde_json::json!({"error": error, "engine": engine, "port": was})))
             .into_response()
@@ -7803,7 +7803,7 @@ async fn set_listen_port(state: &AppState, engine: &str, body: &str) -> Response
     // Two engines on one port: the second would get a free one at the next
     // start (`Config::local_engines`), so the file would lie by then.
     for other in state.engines.engines().iter() {
-        if other.id != engine && other.manager.announced_port(other.listen_port) == req.port {
+        if other.id != engine && other.manager.listen_port_now(other.listen_port) == req.port {
             return conflict(format!("port {} is {}'s listen port", req.port, other.id));
         }
     }

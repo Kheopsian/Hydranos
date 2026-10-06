@@ -93,7 +93,15 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   and `NET_ADMIN`; refused with the reason otherwise. Each engine gets a
   tunnel, **Direct (default interface)**, or nothing, which blocks it
   (`assignment` on `/api/network/wireguard/engines`); a tunnel chosen without
-  its file blocks the engine too.
+  its file blocks the engine too. A NAT-PMP port is TRANSLATED by the
+  gateway (Proton sends the public port to the port asked for): the engine
+  keeps listening on its own port and tells trackers the public one, and a
+  renewal asks for the same mapping, so the port no longer changes every 30
+  seconds. What the kernel answers on its own for the tunnel's address (a TCP
+  reset on a closed port, an ICMP reply) goes back through the tunnel, never
+  by the host's default route. Tested end to end against Proton: the
+  forwarded port reachable from outside, nothing leaving by the default route
+  with the tunnel up, blocked or removed.
 - **Speed limits that actually limit.** `upload_rate_limit` and
   `download_rate_limit` per engine (bytes/s, applied live), a cap per torrent
   (right-click > Limit rate…, `/api/torrents/:h/limits`, selection action

@@ -38,6 +38,9 @@ pub const TABLE_BASE: u32 = 0x4859_0000;
 /// Rule preference, one per tunnel. Before `main` (32766), so the tunnel's
 /// table is the one a bound socket meets first.
 pub const PREF_BASE: u32 = 5100;
+/// Source-address rules, one per tunnel, after the `oif` ones and before
+/// `main`. They catch what no socket routed: see [`source_steps`].
+pub const SRC_PREF_BASE: u32 = 6100;
 /// A handshake older than this and the tunnel is not carrying anything:
 /// WireGuard re-handshakes every two minutes while traffic flows.
 pub const HANDSHAKE_FRESH_SECS: u64 = 180;
@@ -286,6 +289,71 @@ pub fn up_plan(w: &Want, conf: &Conf) -> Result<Vec<Step>, String> {
         plan.push(s);
     }
     Ok(plan)
+}
+
+/// Route by the tunnel's SOURCE address what no socket pinned.
+///
+/// ⚠ The `oif` rule only catches packets whose socket is bound to the device.
+/// The kernel answers on its own for what has no socket -- a TCP RST to a
+/// connection on a port nobody listens on (a forwarded port the engine left),
+/// an ICMP echo reply to the gateway -- and those carry the tunnel's address
+/// but no `oif`: they fell through to `main` and left by the host's default
+/// route, i.e. FROM THE HOME ADDRESS after NAT. Measured on 2026-10-06 behind
+/// Proton: RSTs to swarm peers on eth0 with source 10.2.0.2. A `from` rule
+/// sends them back through the tunnel they came in by.
+///
+/// Not posed when another, unmanaged interface already holds that address
+/// (`--network host` next to the host's own tunnel: every Proton file says
+/// 10.2.0.2): there the rule would pull the host's own connections into this
+/// tunnel. The caller checks and warns.
+pub fn source_steps(w: &Want, conf: &Conf) -> Vec<Step> {
+    let slot = w.pref.saturating_sub(PREF_BASE);
+    let pref = (SRC_PREF_BASE + slot).to_string();
+    let table = w.table.to_string();
+    let mut out = Vec::new();
+    for fam in ["-4", "-6"] {
+        let addrs: Vec<&str> = conf
+            .addresses
+            .iter()
+            .map(|a| a.split('/').next().unwrap_or(a).trim())
+            .filter(|a| (fam == "-6") == is_v6(a))
+            .collect();
+        if addrs.is_empty() {
+            continue;
+        }
+        // A rule left by an earlier run of this slot: one per slot, never two.
+        let mut del = step(&["ip", fam, "rule", "del", "pref", &pref], OnFail::Ignore);
+        del.repeat = true;
+        out.push(del);
+        for a in addrs {
+            let on_fail = if fam == "-6" { OnFail::DropV6 } else { OnFail::Abort };
+            let mut s = step(&["ip", fam, "rule", "add", "from", a, "lookup", &table, "pref", &pref], on_fail);
+            s.v6 = fam == "-6";
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Addresses held by interfaces this module did not create, from
+/// `ip -o addr show`. A tunnel address among them must not get a `from` rule.
+pub fn foreign_addresses(ip_o_addr: &str) -> Vec<String> {
+    ip_o_addr
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let _idx = it.next()?;
+            let dev = it.next()?.trim_end_matches(':');
+            if dev.starts_with(PREFIX) {
+                return None;
+            }
+            let fam = it.next()?;
+            if fam != "inet" && fam != "inet6" {
+                return None;
+            }
+            Some(it.next()?.split('/').next()?.to_string())
+        })
+        .collect()
 }
 
 /// Runs one command. The real one spawns it; the tests record it.
@@ -726,8 +794,30 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
         };
         let conf = supported.map_err(String::from).and_then(|()| load_conf(dir, &w.config_file));
         let dns = conf.as_ref().map(dns_servers).unwrap_or_default();
+        let foreign = runner
+            .run(&["ip".into(), "-o".into(), "addr".into(), "show".into()], None)
+            .map(|o| foreign_addresses(&o))
+            .unwrap_or_default();
         let result = conf
-            .and_then(|conf| up_plan(w, &conf))
+            .and_then(|conf| {
+                let mut plan = up_plan(w, &conf)?;
+                let clash: Vec<&String> = conf
+                    .addresses
+                    .iter()
+                    .filter(|a| foreign.iter().any(|f| f == a.split('/').next().unwrap_or(a).trim()))
+                    .collect();
+                if clash.is_empty() {
+                    plan.extend(source_steps(w, &conf));
+                } else {
+                    tracing::warn!(
+                        engine = %w.engine, device = %w.device, addresses = ?clash,
+                        "wireguard: another interface already holds this tunnel's address, so the kernel's own \
+                         replies (TCP resets, ICMP) on it are not routed back through the tunnel and may leave by \
+                         the default route; run Hydranos in its own network namespace (not --network host) to close this"
+                    );
+                }
+                Ok(plan)
+            })
             .and_then(|plan| {
                 // Recorded before running: a plan that dies halfway still
                 // leaves a device that must be taken down later.
@@ -804,6 +894,34 @@ PublicKey = aPublicKeyValue=
 AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = 192.0.2.10:51820
 ";
+
+    /// ⭐ What the kernel sends on its own (RST, ICMP) leaves by the tunnel:
+    /// one `from` rule per address, into this tunnel's table, before `main`,
+    /// and the slot's previous rule removed first so restarts never stack them.
+    #[test]
+    fn the_tunnel_address_is_routed_back_through_the_tunnel() {
+        let w = want("race");
+        let conf = wgtun::parse(CONF).unwrap();
+        let lines: Vec<String> = source_steps(&w, &conf).iter().map(|s| s.argv.join(" ")).collect();
+        let pref = SRC_PREF_BASE + (w.pref - PREF_BASE);
+        assert!(pref < 32766, "before main");
+        assert_eq!(lines[0], format!("ip -4 rule del pref {pref}"));
+        assert!(lines.contains(&format!("ip -4 rule add from 10.2.0.2 lookup {} pref {pref}", w.table)), "{lines:#?}");
+        assert!(lines.contains(&format!("ip -6 rule add from fd00::2 lookup {} pref {pref}", w.table)), "{lines:#?}");
+    }
+
+    /// Only interfaces this module did not create count as a clash.
+    #[test]
+    fn a_foreign_interface_holding_the_address_is_found() {
+        let out = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n\
+                   3: wg0    inet 10.2.0.2/32 scope global wg0\\       valid_lft forever\n\
+                   9: wg-race    inet 10.2.0.2/32 scope global wg-race\\       valid_lft forever\n\
+                   2: eth0    inet6 fe80::1/64 scope link \\       valid_lft forever\n";
+        let f = foreign_addresses(out);
+        assert!(f.contains(&"10.2.0.2".to_string()), "the host's own wg0: {f:?}");
+        assert_eq!(f.iter().filter(|a| *a == "10.2.0.2").count(), 1, "our own wg-race is not foreign: {f:?}");
+        assert!(f.contains(&"fe80::1".to_string()));
+    }
 
     fn want(engine: &str) -> Want {
         Want {

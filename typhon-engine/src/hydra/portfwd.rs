@@ -158,6 +158,20 @@ pub async fn map_both(
     Ok((tcp, udp))
 }
 
+/// The `(internal, suggested)` ports of a renewal.
+///
+/// ⚠ The internal port is the mapping's KEY, so it never moves: always the
+/// configured port, the one the boot request used. It used to be the port the
+/// listener held -- which, after the first grant, IS the external port. Proton
+/// keys a mapping on its internal port, so every renewal (each 30 s) asked for
+/// a new mapping, got a new port, moved the listener there and asked again:
+/// measured on 2026-10-06, 45133 -> 37956 -> 50418 -> 46869, a tracker always
+/// holding a dead port, and the orphaned mappings ran the gateway out of them
+/// (result code 4). Only the suggestion follows what was granted.
+pub fn renewal_ports(configured: u16, applied: u16) -> (u16, u16) {
+    (configured, if applied != 0 { applied } else { configured })
+}
+
 /// What the follower reports, for the tunnel's status line.
 pub trait PortSink: Send + Sync + 'static {
     fn forwarded(&self, port: u16);
@@ -168,9 +182,9 @@ pub trait PortSink: Send + Sync + 'static {
 ///
 /// The engine's announces are held (`set_port_pending`) until the first port
 /// is known, as with gluetun: the configured port is a guess, and a tracker
-/// told a guess hands it to every peer for a whole interval. When the gateway
-/// grants a different port at a renewal, the listener moves there and the
-/// announces follow (`request_listen_rebind`).
+/// told a guess hands it to every peer for a whole interval. The listener
+/// stays on the configured (internal) port; trackers are told the external
+/// port the gateway granted (`set_external_port`), and a new one at a renewal.
 ///
 /// `initial` is a grant obtained before the engine started, so it was born on
 /// the right port; it is applied first, then renewed.
@@ -193,8 +207,7 @@ pub fn spawn_follower(
             let granted = match pending.take() {
                 Some(m) => Ok((m, None)),
                 None => {
-                    let internal = manager.announced_port(configured_port);
-                    let suggested = if applied != 0 { applied } else { internal };
+                    let (internal, suggested) = renewal_ports(configured_port, applied);
                     map_both(gateway, &device, internal, suggested, ATTEMPTS).await
                 }
             };
@@ -204,31 +217,21 @@ pub fn spawn_follower(
                         tracing::warn!(engine = %engine, "wireguard port forward: {e}");
                     }
                     if m.external_port != applied {
-                        // The listener task may not have registered its
-                        // rebind channel yet on the first grant: retried for
-                        // a few seconds rather than a whole renewal.
-                        // Awaited, so announces are released only once the
-                        // port is really bound.
-                        let mut moved = Err(String::new());
-                        for _ in 0..50 {
-                            moved = manager.rebind_listener(m.external_port).await;
-                            if moved.is_ok() {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                        }
-                        match moved {
-                            Ok(_) => {
-                                tracing::info!(engine = %engine, from = applied, to = m.external_port, "wireguard port forward: listening on the forwarded port");
-                                applied = m.external_port;
-                                manager.set_port_pending(false);
-                                sink.forwarded(applied);
-                            }
-                            Err(e) => {
-                                tracing::warn!(engine = %engine, port = m.external_port, error = %e, "wireguard port forward: the listener did not move, announces stay held");
-                                sink.failed(format!("forwarded port {} not listened on: {e}", m.external_port));
-                            }
-                        }
+                        // ⚠ The listener STAYS on the internal port. NAT-PMP
+                        // translates (RFC 6886): the gateway sends public
+                        // `external_port` to our `internal` port, and Proton
+                        // does exactly that -- measured on 2026-10-06, a SYN to
+                        // public 45133 arrived on 10.2.0.2:16171. Moving the
+                        // listener to the external number (what this did)
+                        // left the forwarded port leading nowhere. Only the
+                        // ANNOUNCED port changes.
+                        tracing::info!(engine = %engine, from = applied, to = m.external_port,
+                            listening_on = m.internal_port,
+                            "wireguard port forward: announcing the forwarded port");
+                        applied = m.external_port;
+                        manager.set_external_port(applied);
+                        manager.set_port_pending(false);
+                        sink.forwarded(applied);
                     }
                     last_error.clear();
                     renew_interval(m.lifetime)
@@ -405,6 +408,15 @@ mod follower_tests {
             }
         });
         (addr, ops)
+    }
+
+    /// ⭐ A renewal asks for the SAME mapping: the internal port is the one the
+    /// boot request used, never the port the listener moved to.
+    #[test]
+    fn a_renewal_keeps_the_mapping_key_and_suggests_the_granted_port() {
+        assert_eq!(renewal_ports(16171, 0), (16171, 16171), "first request");
+        assert_eq!(renewal_ports(16171, 45133), (16171, 45133), "after the listener moved to 45133");
+        assert_ne!(renewal_ports(16171, 45133).0, 45133, "the external port must not become the key");
     }
 
     /// ⭐ TCP and UDP are both asked for, the same port, and the grant is read.
