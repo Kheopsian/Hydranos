@@ -4828,53 +4828,40 @@ async fn get_trackers(
     Json(rows).into_response()
 }
 
-/// How the engines reach the network, and with what.
-///
-/// The mode is the one the tab saved (`[network] mode`), and deduced from the
-/// keys only for a file it never saved: see `netmode::current`. The deduction
-/// alone reopened a WireGuard setup on another mode, since WireGuard leaves
-/// nothing in [race]/[hoard] for it to find.
-async fn get_network_mode(
-    State(state): State<AppState>,
-    RawQuery(query): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let query = query.unwrap_or_default();
-    guard!(state, headers, query);
-    let cfg = state.cfg();
+/// The Network tab's fields as the file says them now: what `GET
+/// /api/network/mode` answers, and what a `POST` starts from, so a field it
+/// does not send keeps its value instead of being written as 0 or empty.
+#[derive(serde::Serialize)]
+struct NetworkFields<'a> {
+    race_listen_port: u16,
+    hoard_listen_port: u16,
+    enable_ipv6: bool,
+    race_bind_interface: &'a str,
+    hoard_bind_interface: &'a str,
+    socks5_host: &'a str,
+    socks5_port: u16,
+    socks5_user: &'a str,
+    socks5_pass: &'a str,
+    race_proxy_v2_port: u16,
+    hoard_proxy_v2_port: u16,
+    proxy_v2_listen_addr: &'a str,
+    proxy_v2_trusted_sources: &'a [String],
+    gluetun_port_forward: bool,
+    gluetun_url: &'a str,
+    gluetun_api_key: &'a str,
+    gluetun_port_engine: &'a str,
+    announce_proxy: &'a str,
+    announce_ip: &'a str,
+}
 
+fn network_fields(cfg: &Config) -> NetworkFields<'_> {
     let race = &cfg.race;
     let hoard = &cfg.hoard;
-    let mode = crate::netmode::current(&cfg);
     // The engine that follows the gluetun port, read from the file: it was
     // answered as "hoard" whatever the file said, so a race-forwarding setup
     // reopened on hoard and the next save moved the port.
     let gluetun = if race.gluetun_port_forward && !hoard.gluetun_port_forward { race } else { hoard };
-
-    #[derive(serde::Serialize)]
-    struct Fields<'a> {
-        race_listen_port: u16,
-        hoard_listen_port: u16,
-        enable_ipv6: bool,
-        race_bind_interface: &'a str,
-        hoard_bind_interface: &'a str,
-        socks5_host: &'a str,
-        socks5_port: u16,
-        socks5_user: &'a str,
-        socks5_pass: &'a str,
-        race_proxy_v2_port: u16,
-        hoard_proxy_v2_port: u16,
-        proxy_v2_listen_addr: &'a str,
-        proxy_v2_trusted_sources: &'a [String],
-        gluetun_port_forward: bool,
-        gluetun_url: &'a str,
-        gluetun_api_key: &'a str,
-        gluetun_port_engine: &'a str,
-        announce_proxy: &'a str,
-        announce_ip: &'a str,
-    }
-
-    let fields = Fields {
+    NetworkFields {
         race_listen_port: race.listen_port,
         hoard_listen_port: hoard.listen_port,
         enable_ipv6: race.enable_ipv6,
@@ -4894,7 +4881,28 @@ async fn get_network_mode(
         gluetun_port_engine: if std::ptr::eq(gluetun, race) { "race" } else { "hoard" },
         announce_proxy: &race.announce_proxy,
         announce_ip: &race.announce_ip,
-    };
+    }
+}
+
+/// How the engines reach the network, and with what.
+///
+/// The mode is the one the tab saved (`[network] mode`), and deduced from the
+/// keys only for a file it never saved: see `netmode::current`. The deduction
+/// alone reopened a WireGuard setup on another mode, since WireGuard leaves
+/// nothing in [race]/[hoard] for it to find.
+async fn get_network_mode(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let cfg = state.cfg();
+
+    let race = &cfg.race;
+    let hoard = &cfg.hoard;
+    let mode = crate::netmode::current(&cfg);
+    let fields = network_fields(&cfg);
 
     // The OUTER object is a struct too, so its key order is mode, fields,
     // env_overrides, warnings, extra_engines -- not the alphabetical order a
@@ -4904,7 +4912,7 @@ async fn get_network_mode(
     #[derive(serde::Serialize)]
     struct NetworkMode<'a> {
         mode: &'a str,
-        fields: Fields<'a>,
+        fields: NetworkFields<'a>,
         env_overrides: Option<serde_json::Value>,
         warnings: Option<serde_json::Value>,
         extra_engines: Vec<serde_json::Value>,
@@ -13679,9 +13687,22 @@ async fn post_network_mode(
     guard!(state, headers, query);
     let cfg = state.cfg();
 
-    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let mut parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     if let Err(e) = interface_pin_allowed(typhon_engine::netpin::DEVICE_PIN_SUPPORTED, &parsed) {
         return bad_request(&e);
+    }
+    // What is not sent keeps its current value. Every field used to default to
+    // 0 / "" / false, so a client sending only the keys it changes (anything
+    // but the tab, which sends them all) wiped the rest -- or was refused,
+    // a race listen port of 0 being out of range.
+    let mut merged = serde_json::to_value(network_fields(&cfg)).unwrap_or_default();
+    if let (Some(m), Some(sent)) = (merged.as_object_mut(), parsed.get("fields").and_then(|f| f.as_object())) {
+        for (k, v) in sent {
+            m.insert(k.clone(), v.clone());
+        }
+    }
+    if parsed.is_object() || parsed.is_null() {
+        parsed["fields"] = merged;
     }
     let race_port = parsed
         .get("fields")
@@ -22109,6 +22130,21 @@ mod network_mode_tests {
             fields[k] = v.clone();
         }
         serde_json::json!({"mode": mode, "fields": fields})
+    }
+
+    /// ⭐ A save that sends only what it changes keeps everything else. Absent
+    /// fields used to be read as 0 / "": a race port of 0 refused the save,
+    /// and an absent proxy host emptied the proxy.
+    #[tokio::test]
+    async fn a_partial_save_keeps_the_fields_it_does_not_send() {
+        let s = state_from("netmode-partial", SOCKS_FILE);
+        let (status, body) = save(&s, serde_json::json!({"mode": "socks5", "fields": {"socks5_port": 1081}})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let f = &load(&s).await["fields"];
+        assert_eq!(f["socks5_port"], 1081, "the field sent is written");
+        assert_eq!(f["socks5_host"], "10.0.0.1", "the proxy host it did not send is kept");
+        assert_eq!(f["race_listen_port"], 16171, "and the listen ports");
+        assert_eq!(f["hoard_listen_port"], 16172);
     }
 
     /// ⭐⭐ Leaving SOCKS5 for direct REMOVES the proxy keys -- from race, from

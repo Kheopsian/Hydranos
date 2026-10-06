@@ -237,7 +237,7 @@ pub async fn start(
     // effect -- it starts biting at this upgrade.
     mgr.limiter().set_max_connections(config.max_connections);
     mgr.limiter().set_max_dials_per_sec(config.max_dials_per_sec);
-    crate::tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp.clone(), config.max_dials_per_sec, mgr.limiter().clone());
+    crate::tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp.clone(), config.max_dials_per_sec, mgr.limiter().clone(), mgr.clone());
 
     // The choker: spawned always, OFF unless `choking = true`. It was removed
     // outright in 2.4.13-typhon -- ticking every 10 s and choking all but the

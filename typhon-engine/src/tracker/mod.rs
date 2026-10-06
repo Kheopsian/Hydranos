@@ -392,6 +392,7 @@ pub fn start_announce_loop(
     utp: crate::peer::UtpHandle,
     max_dials_per_sec: f64,
     limiter: Arc<dial_limiter::DialLimiter>,
+    mgr: Arc<crate::torrent::TorrentManager>,
 ) {
     if bindings.is_empty() {
         warn!("[tracker] start_announce_loop called with no bindings — dials will use kernel default");
@@ -414,6 +415,7 @@ pub fn start_announce_loop(
         let disk_c = disk_mgr.clone();
         let utp_c = utp;
         let bindings_c = bindings.clone();
+        let mgr_c = mgr;
         // This loop is the single chokepoint every outbound dial goes through
         // -- tracker peers, PEX, DHT and the orchestrator's `add_peers` all
         // arrive here -- which is why the pacing, the connection ceiling and
@@ -449,8 +451,13 @@ pub fn start_announce_loop(
                 // and the next dial must leave from the new port.
                 let u = utp_c.get();
                 let b = pick_binding_for_dial(&bindings_c, addr);
+                // The port peers are told to call back on (BEP 10 `p`) and the
+                // one a self-dial carries: read now, from the manager. The
+                // binding's copy is the port of the first bind -- stale after
+                // a rebind, and never the public port behind a translating NAT.
+                let port = mgr_c.announced_port(b.addr.port());
                 tokio::spawn(async move {
-                    dial_peer(addr, t, d, b.peer_id, u, b.addr.port(), &b.egress).await;
+                    dial_peer(addr, t, d, b.peer_id, u, port, &b.egress).await;
                 });
             }
         });
