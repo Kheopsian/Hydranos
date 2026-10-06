@@ -351,48 +351,157 @@ pub async fn handoff(
     }))
 }
 
-/// Poll a node until it reports the torrent complete.
+/// How long a move to a node waits for the far side to hold a full copy.
 ///
-/// Used by a MOVE: the target has the metainfo long before it has the bytes, so
-/// nothing local may be deleted until the far side actually holds a full copy.
+/// Six hours: long enough for a large payload over a home link, short enough
+/// that a forgotten wait does not outlive the reason for it. Counted from the
+/// handoff and stored with the job, so a restart does not start it over.
+pub const HANDOFF_WAIT_SECS: i64 = 6 * 3600;
+
+/// Ask a node, once, how far it is with a torrent.
 ///
-/// Bounded and fail-safe. On a timeout, a network fault, or a restart of this
-/// process, the answer is "not confirmed" and the caller keeps its copy -- a
-/// duplicate to clean up is recoverable, a deletion is not.
-pub async fn wait_until_complete(
+/// `Ok(Some(progress))` (0.0..=1.0) when one of its engines lists the hash,
+/// `Ok(None)` when none does yet, `Err` when the node did not answer. Used by
+/// a MOVE: the target has the metainfo long before it has the bytes, so
+/// nothing local may be deleted until the far side holds a full copy.
+///
+/// Asked per engine through `/api/engines/<id>/page`. 4.3 polled
+/// `/api/<engine>/page`, a route that exists for `race` and `hoard` only, so a
+/// move to a node's third engine (`vpn1`) was never confirmed and the local
+/// copy stayed forever. With no engine named, every engine of the node is
+/// asked: the far side's category decided where the torrent went, and the
+/// hoard-only default missed every handoff it routed to race.
+pub async fn remote_progress(
     url: &str,
     api_key: &str,
     info_hash: &str,
     engine: &str,
-) -> Result<bool, String> {
+) -> Result<Option<f64>, String> {
     let base = url.trim_end_matches('/');
-    let engine = if engine.is_empty() { "hoard" } else { engine };
-    // Six hours at half a minute: long enough for a large payload over a home
-    // link, short enough that a forgotten task does not outlive the reason.
-    let deadline = std::time::Instant::now() + Duration::from_secs(6 * 3600);
-    while std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_secs(30)).await;
+    let engines: Vec<String> = if engine.is_empty() {
+        let list: serde_json::Value = client()
+            .get(format!("{base}/api/engines"))
+            .header("X-API-Key", api_key)
+            .send()
+            .await
+            .map_err(|_| "the node is unreachable".to_string())?
+            .json()
+            .await
+            .map_err(|_| "the node's engine list did not parse".to_string())?;
+        list.as_array()
+            .map(|a| a.iter().filter_map(|e| e.get("id").and_then(|v| v.as_str())).map(String::from).collect())
+            .unwrap_or_default()
+    } else {
+        vec![engine.to_string()]
+    };
+    let mut best: Option<f64> = None;
+    let mut answered = false;
+    for e in &engines {
         let res = client()
-            .get(format!(
-                "{base}/api/{engine}/page?limit=1&search={info_hash}"
-            ))
+            .get(format!("{base}/api/engines/{e}/page?limit=1&search={info_hash}"))
             .header("X-API-Key", api_key)
             .send()
             .await;
         let Ok(res) = res else { continue };
-        let Ok(body) = res.json::<serde_json::Value>().await else { continue };
-        let Some(row) = body.get("rows").and_then(|r| r.as_array()).and_then(|a| a.first())
-        else {
-            // Not listed there: the torrent went to another engine, or was
-            // removed on the far side. Either way this is not a confirmation.
+        if !res.status().is_success() {
             continue;
-        };
-        let progress = row.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        if progress >= 1.0 {
-            return Ok(true);
+        }
+        let Ok(body) = res.json::<serde_json::Value>().await else { continue };
+        answered = true;
+        // The search also matches names, so the row must carry OUR hash: a
+        // torrent whose name happens to contain these hex digits is not ours.
+        let row = body.get("rows").and_then(|r| r.as_array()).and_then(|a| {
+            a.iter().find(|r| {
+                r.get("info_hash").and_then(|h| h.as_str()).map(|h| h.eq_ignore_ascii_case(info_hash)).unwrap_or(false)
+            })
+        });
+        if let Some(row) = row {
+            let p = row.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            best = Some(best.map_or(p, |b: f64| b.max(p)));
         }
     }
-    Ok(false)
+    if !answered {
+        return Err("the node did not answer for any engine".into());
+    }
+    Ok(best)
+}
+
+// ---------------------------------------------------------------------------
+// Key rotation
+// ---------------------------------------------------------------------------
+//
+// Two steps, so that no moment exists where neither side holds a working key.
+// The controller asks the node for a NEW key, authenticated with the old one;
+// the node generates it (the controller never chooses another machine's
+// secret) and keeps it PENDING, in memory, beside the old one. The controller
+// then confirms by presenting the new key: only that call makes it the node's
+// key, on disk and live, and from then on the old one is refused.
+//
+// A controller that dies between the two leaves the node on its old key, the
+// pending one forgotten after `PENDING_KEY_TTL` or a restart, and the
+// controller's stored key still valid. Nothing to repair.
+
+/// How long a pending key waits for its confirmation.
+pub const PENDING_KEY_TTL: Duration = Duration::from_secs(600);
+
+static PENDING_KEY: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// Node side: mint a pending key, replacing any earlier one.
+pub fn begin_local_rotation() -> String {
+    let key = crate::config::fresh_api_key();
+    *PENDING_KEY.lock().unwrap_or_else(|p| p.into_inner()) = Some((key.clone(), std::time::Instant::now()));
+    key
+}
+
+/// Node side: is `presented` the pending key, still in time? Consumes it when
+/// it is, so a confirmation cannot be replayed.
+pub fn take_pending_key(presented: &str) -> Option<String> {
+    let mut g = PENDING_KEY.lock().unwrap_or_else(|p| p.into_inner());
+    let (key, at) = g.as_ref()?;
+    if at.elapsed() > PENDING_KEY_TTL {
+        *g = None;
+        return None;
+    }
+    if presented.is_empty() || !crate::api::constant_time_eq(presented.as_bytes(), key.as_bytes()) {
+        return None;
+    }
+    g.take().map(|(k, _)| k)
+}
+
+/// Controller side: rotate a node's key. Returns the new key, already the
+/// only one the node accepts.
+pub async fn rotate_key(url: &str, old_key: &str) -> Result<String, String> {
+    let base = url.trim_end_matches('/');
+    let res = client()
+        .post(format!("{base}/api/auth/api-key/rotate"))
+        .header("X-API-Key", old_key)
+        .send()
+        .await
+        .map_err(|_| "the node is unreachable".to_string())?;
+    match res.status().as_u16() {
+        200 => {}
+        401 | 403 => return Err("the node refused the current key: declare it again with its key".into()),
+        404 | 405 => return Err("the node is too old to rotate its key (needs 4.4)".into()),
+        s => return Err(format!("the node refused the rotation: HTTP {s}")),
+    }
+    let v: serde_json::Value = res.json().await.map_err(|_| "the node's answer did not parse".to_string())?;
+    let new_key = v.get("pending_key").and_then(|k| k.as_str()).unwrap_or_default().to_string();
+    if new_key.len() < 16 {
+        return Err("the node answered no usable key".into());
+    }
+    let res = client()
+        .post(format!("{base}/api/auth/api-key/confirm"))
+        .header("X-API-Key", &new_key)
+        .send()
+        .await
+        .map_err(|_| "the node stopped answering before the confirmation; it keeps its old key".to_string())?;
+    if !res.status().is_success() {
+        return Err(format!(
+            "the node did not confirm the new key (HTTP {}); it keeps its old key",
+            res.status().as_u16()
+        ));
+    }
+    Ok(new_key)
 }
 
 /// Fetch a node's copy of a .torrent, and the port the engine holding it

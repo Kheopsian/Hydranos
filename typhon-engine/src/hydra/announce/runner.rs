@@ -457,7 +457,7 @@ pub(super) async fn announce_one(
                 match result {
                     Ok(resp) => {
                         breaker.record(&host, true, std::time::Instant::now());
-                        cache.count_ok();
+                        cache.count_ok(&host);
                         if let Some(w) = &resp.warning {
                             // Accepted, with a remark. Worth an operator's eye,
                             // not an error: the announce counted.
@@ -1808,9 +1808,8 @@ mod announce_one_tests {
         let (url, seen) = udp_tracker(1234).await;
         let (mgr, root) = manager("udprebind");
         let hash = add(&mgr, "udprebind", &url);
-        let (tx, _rx) = tokio::sync::watch::channel(0u16);
-        mgr.set_rebind_tx(tx);
-        assert!(mgr.request_listen_rebind(40123));
+        // What the listener does once the new port is bound (`peer::listen`).
+        mgr.set_live_port(40123);
         let (policy, breaker, cache) = parts();
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         let got = seen.lock().unwrap().clone();

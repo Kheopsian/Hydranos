@@ -31,9 +31,10 @@ pub type Socks5Config = (String, u16, Option<(String, String)>);
 // `Config::socks5_outbound`), not in a global: it decides which address a peer
 // sees, and one process can carry two engines sent out different ways.
 
-/// Runtime listen-port rebind signal. The RPC `set_listen_port` sends the new
-/// port here; the supervisor in `listen()` rebinds the TCP accept socket(s)
-/// without restarting the engine (torrents + live peer connections untouched).
+// Runtime listen-port rebind: `TorrentManager::rebind_listener` sends the new
+// port; the supervisor in `listen()` moves the TCP accept socket(s) and the
+// uTP socket without restarting the engine (torrents and live TCP peers
+// untouched), and keeps the old port when the new one cannot be bound.
 // The rebind channel lives on the TorrentManager: one listener per engine, so
 // one channel per engine. See `TorrentManager::request_listen_rebind`.
 use std::time::Duration;
@@ -66,148 +67,59 @@ pub async fn listen(
     default_port: u16,
     torrent_mgr: Arc<TorrentManager>,
     disk_mgr: Arc<DiskManager>,
-    utp_socket: Option<Arc<UtpSocketUdp>>,
+    utp: UtpHandle,
     listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if bindings.is_empty() {
         return Err("no bindings to listen on (config error)".into());
     }
-
-    // Hot-rebind channel: `set_listen_port` RPC pushes a new port here and the
-    // supervisor loop below re-binds the TCP accept socket(s) without dropping
-    // torrents or live peer connections. Seeded with the current port so the
-    // first `.changed()` only fires on a real request.
-    let (tx, mut rx) = tokio::sync::watch::channel(bindings[0].addr.port());
-    torrent_mgr.set_rebind_tx(tx);
-
-    // uTP shares one UDP socket bound at startup (main.rs). It is NOT rebound
-    // on a hot port change — raw UDP dial+listen share the socket, and TCP is
-    // the path that matters for gluetun / NAT-PMP port rotation.
-    if let Some(sock) = utp_socket.clone() {
-        let utp_peer_id = bindings[0].peer_id;
-        let utp_advertised_port = if bindings[0].advertised_port != 0 {
-            bindings[0].advertised_port
-        } else {
-            default_port
-        };
-        info!("[peer] uTP listening on {} (peer_id from binding[0], advertised_port={})",
-            sock.bind_addr(), utp_advertised_port);
-        let tm = torrent_mgr.clone();
-        let dm = disk_mgr.clone();
-        let u = utp_socket.clone();
-        tokio::spawn(async move {
-            utp_accept_loop(sock, tm, dm, utp_peer_id, u, utp_advertised_port).await;
-        });
+    // Refused before any socket: outside Linux a pinned listener would be an
+    // unpinned one (`netpin::DEVICE_PIN_SUPPORTED`).
+    if !crate::netpin::DEVICE_PIN_SUPPORTED && bindings.iter().any(|b| b.egress.device().is_some()) {
+        return Err(crate::netpin::UNSUPPORTED.into());
     }
 
-    // `cur` is the live binding set; on a rebind we set addr.port + the BEP-10
+    // Hot-rebind requests: the API, gluetun and the tunnel's port follower
+    // push a new port here, and the loop below moves the TCP accept socket(s)
+    // and the uTP socket without dropping torrents or live TCP peers.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Rebind>();
+    torrent_mgr.set_rebind_tx(tx);
+
+    // `cur` is the live binding set; a rebind sets addr.port and the BEP-10
     // advertised_port to the new value (single-binding direct/gluetun case).
     let mut cur = bindings.clone();
+    // The first round is the startup bind: a failure there is the engine's
+    // listener failing, and the caller lowers `listening` and says so.
+    let first = bind_round(&cur).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let mut handles = spawn_tcp(first, &torrent_mgr, &disk_mgr, &utp);
+    let mut utp_task = spawn_utp(&utp, &cur, default_port, &torrent_mgr, &disk_mgr);
+    // The port actually held, from the first bind on, so whoever asks
+    // (announces, the API, the port mapper) reads the listener and not a
+    // config value that may say something else.
+    if cur[0].addr.port() != 0 {
+        torrent_mgr.set_live_port(cur[0].addr.port());
+    }
+    // Every socket of this round is bound and accepting. Raised here and
+    // not before, so the flag never claims a port the engine does not hold.
+    listening.store(!handles.is_empty(), std::sync::atomic::Ordering::Relaxed);
+
     loop {
-        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-        for b in &cur {
-            // TcpSocket to set SO_REUSEADDR + a generous backlog. Default
-            // TcpListener::bind() uses backlog=128 which drops SYNs under load.
-            let socket = if b.addr.is_ipv4() {
-                TcpSocket::new_v4()?
-            } else {
-                TcpSocket::new_v6()?
-            };
-            // Pin the LISTENER, not just the dials: a socket accepted on it
-            // inherits the device, so the reply to a peer that arrived on the
-            // second tunnel leaves by that tunnel too. Without it the reply
-            // follows the default route, reaches the peer from an address it
-            // never dialled, and the connection dies silently.
-            #[cfg(unix)]
-            {
-                use std::os::fd::AsRawFd;
-                if let Err(e) = crate::netpin::pin_fd(socket.as_raw_fd(), &b.egress) {
-                    return Err(format!(
-                        "cannot pin the peer listener to bind_device: {} — refusing to listen on the default route",
-                        e
-                    )
-                    .into());
-                }
-            }
-            // IPV6_V6ONLY for the `enable_ipv6` listener: it sits beside the v4
-            // one, so it must not also swallow v4. A dual-stack wildcard would
-            // hand us v4 peers as `::ffff:a.b.c.d` and every address compared
-            // downstream (dedup, allowlists, stats) would stop matching. Must
-            // be set before bind(). Explicitly configured bindings are left
-            // alone, their behaviour does not change.
-            //
-            // Unix only: Linux decides this from net.ipv6.bindv6only, which is
-            // 0 (dual-stack) on every mainstream distro. Windows already
-            // defaults the option on, so there is nothing to set there.
-            #[cfg(unix)]
-            if b.only_v6 {
-                use std::os::fd::AsRawFd;
-                let on: libc::c_int = 1;
-                let rc = unsafe {
-                    libc::setsockopt(
-                        socket.as_raw_fd(),
-                        libc::IPPROTO_IPV6,
-                        libc::IPV6_V6ONLY,
-                        &on as *const _ as *const libc::c_void,
-                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    )
-                };
-                if rc != 0 {
-                    // Refuse to bind rather than quietly take over v4 too.
-                    warn!(
-                        "[peer] IPV6_V6ONLY failed on {} ({}), skipping the IPv6 listener",
-                        b.addr,
-                        std::io::Error::last_os_error()
-                    );
-                    continue;
-                }
-            }
-            socket.set_reuseaddr(true)?;
-            socket.bind(b.addr)?;
-            let listener = socket.listen(4096)?;
-            info!(
-                "[peer] TCP listening on {} (binding id={}, peer_id_prefix={:?}, advertised_port={}, backlog=4096)",
-                b.addr,
-                b.id,
-                std::str::from_utf8(&b.peer_id[..8]).unwrap_or("?"),
-                b.advertised_port,
-            );
-            let tm = torrent_mgr.clone();
-            let dm = disk_mgr.clone();
-            let pid = b.peer_id;
-            let u = utp_socket.clone();
-            let advertised_port = b.advertised_port;
-            handles.push(tokio::spawn(async move {
-                tcp_accept_loop(listener, tm, dm, pid, u, advertised_port).await;
-            }));
-        }
-
-        // Every socket of this round is bound and accepting. Raised here and
-        // not before: a rebind that failed would otherwise leave the engine
-        // claiming to listen on a port it just lost.
-        listening.store(!handles.is_empty(), std::sync::atomic::Ordering::Relaxed);
-
         tokio::select! {
-            changed = rx.changed() => {
-                if changed.is_err() {
-                    break; // sender dropped
+            req = rx.recv() => {
+                let Some(Rebind { port, reply }) = req else {
+                    break; // every sender dropped
+                };
+                let outcome = rebind(port, &mut cur, &mut handles, &mut utp_task, &utp, &torrent_mgr, &disk_mgr).await;
+                match &outcome {
+                    Ok(p) => {
+                        torrent_mgr.set_live_port(*p);
+                        listening.store(!handles.is_empty(), std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(e) => warn!("[peer] rebind to port {} refused: {}", port, e),
                 }
-                let new_port = *rx.borrow();
-                info!("[peer] hot rebind requested -> port {}", new_port);
-                // Abort + await so each accept task drops its TcpListener and
-                // frees the socket before we re-bind (SO_REUSEADDR makes an
-                // overlap harmless, but awaiting is deterministic).
-                for h in &handles {
-                    h.abort();
+                if let Some(reply) = reply {
+                    let _ = reply.send(outcome);
                 }
-                for h in handles {
-                    let _ = h.await;
-                }
-                for b in cur.iter_mut() {
-                    b.addr.set_port(new_port);
-                    b.advertised_port = new_port;
-                }
-                // loop -> re-bind on the new port
             }
             _ = tokio::signal::ctrl_c() => {
                 for h in &handles {
@@ -218,6 +130,278 @@ pub async fn listen(
         }
     }
     Ok(())
+}
+
+/// One request to move an engine's listeners to another port. `reply`, when
+/// present, receives the port now listened on, or why the old one was kept.
+pub struct Rebind {
+    pub port: u16,
+    pub reply: Option<tokio::sync::oneshot::Sender<Result<u16, String>>>,
+}
+
+/// Move every listener to `port`, or leave every one where it was.
+///
+/// The new sockets are bound BEFORE the old ones are let go. 4.3 aborted the
+/// accept tasks first and bound afterwards, so a port already in use killed
+/// the engine's listener for good: no inbound peer until a restart, behind a
+/// route that had already answered 200.
+async fn rebind(
+    port: u16,
+    cur: &mut Vec<crate::config::ResolvedBinding>,
+    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    utp_task: &mut Option<tokio::task::JoinHandle<()>>,
+    utp: &UtpHandle,
+    torrent_mgr: &Arc<TorrentManager>,
+    disk_mgr: &Arc<DiskManager>,
+) -> Result<u16, String> {
+    if port == 0 {
+        return Err("port 0 is not a port".into());
+    }
+    let was = cur[0].addr.port();
+    if port == was {
+        return Ok(port);
+    }
+    info!("[peer] hot rebind requested -> port {}", port);
+    let mut next = cur.clone();
+    for b in next.iter_mut() {
+        b.addr.set_port(port);
+        b.advertised_port = port;
+    }
+    let listeners = bind_round(&next).map_err(|e| format!("{e}; still listening on {was}"))?;
+    let fresh_utp = utp
+        .bind_next(port)
+        .await
+        .map_err(|e| format!("{e}; still listening on {was}"))?;
+    // Both bound: only now does the old port go.
+    for h in handles.iter() {
+        h.abort();
+    }
+    for h in handles.drain(..) {
+        let _ = h.await;
+    }
+    if let Some(t) = utp_task.take() {
+        t.abort();
+    }
+    if let Some(live) = fresh_utp {
+        utp.install(live);
+    }
+    *cur = next;
+    *handles = spawn_tcp(listeners, torrent_mgr, disk_mgr, utp);
+    *utp_task = spawn_utp(utp, cur, port, torrent_mgr, disk_mgr);
+    Ok(port)
+}
+
+/// Bind and listen on every binding of one round; nothing is spawned.
+/// Any socket that cannot be bound fails the whole round, so a rebind is
+/// all-or-nothing.
+fn bind_round(
+    cur: &[crate::config::ResolvedBinding],
+) -> Result<Vec<(TcpListener, crate::config::ResolvedBinding)>, String> {
+    let mut out = Vec::new();
+    for b in cur {
+        // TcpSocket to set SO_REUSEADDR + a generous backlog. Default
+        // TcpListener::bind() uses backlog=128 which drops SYNs under load.
+        let socket = if b.addr.is_ipv4() {
+            TcpSocket::new_v4()
+        } else {
+            TcpSocket::new_v6()
+        }
+        .map_err(|e| format!("socket for {}: {e}", b.addr))?;
+        // Pin the LISTENER, not just the dials: a socket accepted on it
+        // inherits the device, so the reply to a peer that arrived on the
+        // second tunnel leaves by that tunnel too. Without it the reply
+        // follows the default route, reaches the peer from an address it
+        // never dialled, and the connection dies silently.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if let Err(e) = crate::netpin::pin_fd(socket.as_raw_fd(), &b.egress) {
+                return Err(format!(
+                    "cannot pin the peer listener to bind_device: {} — refusing to listen on the default route",
+                    e
+                ));
+            }
+        }
+        // IPV6_V6ONLY for the `enable_ipv6` listener: it sits beside the v4
+        // one, so it must not also swallow v4. A dual-stack wildcard would
+        // hand us v4 peers as `::ffff:a.b.c.d` and every address compared
+        // downstream (dedup, allowlists, stats) would stop matching. Must
+        // be set before bind(). Explicitly configured bindings are left
+        // alone, their behaviour does not change.
+        //
+        // Unix only: Linux decides this from net.ipv6.bindv6only, which is
+        // 0 (dual-stack) on every mainstream distro. Windows already
+        // defaults the option on, so there is nothing to set there.
+        #[cfg(unix)]
+        if b.only_v6 {
+            use std::os::fd::AsRawFd;
+            let on: libc::c_int = 1;
+            let rc = unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_V6ONLY,
+                    &on as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if rc != 0 {
+                // Refuse to bind rather than quietly take over v4 too.
+                warn!(
+                    "[peer] IPV6_V6ONLY failed on {} ({}), skipping the IPv6 listener",
+                    b.addr,
+                    std::io::Error::last_os_error()
+                );
+                continue;
+            }
+        }
+        socket.set_reuseaddr(true).map_err(|e| format!("{}: {e}", b.addr))?;
+        socket.bind(b.addr).map_err(|e| format!("cannot bind {}: {e}", b.addr))?;
+        let listener = socket.listen(4096).map_err(|e| format!("cannot listen on {}: {e}", b.addr))?;
+        out.push((listener, b.clone()));
+    }
+    Ok(out)
+}
+
+fn spawn_tcp(
+    listeners: Vec<(TcpListener, crate::config::ResolvedBinding)>,
+    torrent_mgr: &Arc<TorrentManager>,
+    disk_mgr: &Arc<DiskManager>,
+    utp: &UtpHandle,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    listeners
+        .into_iter()
+        .map(|(listener, b)| {
+            info!(
+                "[peer] TCP listening on {} (binding id={}, peer_id_prefix={:?}, advertised_port={}, backlog=4096)",
+                b.addr,
+                b.id,
+                std::str::from_utf8(&b.peer_id[..8]).unwrap_or("?"),
+                b.advertised_port,
+            );
+            let tm = torrent_mgr.clone();
+            let dm = disk_mgr.clone();
+            let u = utp.get();
+            tokio::spawn(async move {
+                tcp_accept_loop(listener, tm, dm, b.peer_id, u, b.advertised_port).await;
+            })
+        })
+        .collect()
+}
+
+/// The uTP accept loop on whatever socket the handle holds now.
+fn spawn_utp(
+    utp: &UtpHandle,
+    cur: &[crate::config::ResolvedBinding],
+    default_port: u16,
+    torrent_mgr: &Arc<TorrentManager>,
+    disk_mgr: &Arc<DiskManager>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let sock = utp.get()?;
+    let utp_peer_id = cur[0].peer_id;
+    let utp_advertised_port = if cur[0].advertised_port != 0 {
+        cur[0].advertised_port
+    } else {
+        default_port
+    };
+    info!("[peer] uTP listening on {} (peer_id from binding[0], advertised_port={})",
+        sock.bind_addr(), utp_advertised_port);
+    let tm = torrent_mgr.clone();
+    let dm = disk_mgr.clone();
+    let u = Some(sock.clone());
+    Some(tokio::spawn(async move {
+        utp_accept_loop(sock, tm, dm, utp_peer_id, u, utp_advertised_port).await;
+    }))
+}
+
+/// This engine's uTP socket, which a rebind replaces.
+///
+/// One UDP socket carries both directions -- the accept loop and every
+/// outbound uTP dial -- so moving the port means a new socket that both
+/// sides pick up. Dials read it per dial (`get`), so the next one after a
+/// rebind leaves from the new port.
+///
+/// The old socket is cancelled, not just dropped: librqbit-utp's dispatcher
+/// task holds its own reference and runs until its cancellation token fires,
+/// so dropping our handles would have kept the old UDP port bound and
+/// answering forever. Cancelling it ends the uTP connections that were on
+/// it; those peers come back on the new port (TCP peers are kept).
+#[derive(Clone, Default)]
+pub struct UtpHandle {
+    inner: Arc<std::sync::RwLock<Option<UtpLive>>>,
+    /// The device the socket is pinned to; a replacement gets the same pin.
+    device: Option<Arc<str>>,
+}
+
+struct UtpLive {
+    sock: Arc<UtpSocketUdp>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl UtpHandle {
+    /// No uTP at all (TYPHON_DISABLE_UTP, or a socket that could not be
+    /// opened): a rebind then moves TCP only, as before.
+    pub fn off() -> Self {
+        Self::default()
+    }
+
+    /// Open the engine's uTP socket on `port`, pinned to `device`.
+    pub async fn bind(port: u16, device: Option<&str>) -> Result<Self, String> {
+        let live = bind_utp(port, device).await?;
+        Ok(Self {
+            inner: Arc::new(std::sync::RwLock::new(Some(live))),
+            device: device.map(Arc::from),
+        })
+    }
+
+    /// The socket in use now.
+    pub fn get(&self) -> Option<Arc<UtpSocketUdp>> {
+        self.inner
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|l| l.sock.clone())
+    }
+
+    /// A socket on `port` for a rebind, not installed yet. None when this
+    /// engine runs no uTP.
+    async fn bind_next(&self, port: u16) -> Result<Option<UtpLive>, String> {
+        if self.get().is_none() {
+            return Ok(None);
+        }
+        bind_utp(port, self.device.as_deref()).await.map(Some)
+    }
+
+    /// Put `live` in place and shut the old socket down.
+    fn install(&self, live: UtpLive) {
+        let old = self.inner.write().unwrap_or_else(|p| p.into_inner()).replace(live);
+        if let Some(old) = old {
+            old.cancel.cancel();
+        }
+    }
+}
+
+async fn bind_utp(port: u16, device: Option<&str>) -> Result<UtpLive, String> {
+    let bind = SocketAddr::from(([0, 0, 0, 0], port));
+    // max_live_vsocks default is 128 which saturates immediately on a seedbox
+    // with thousands of peers — new uTP dials get rejected with
+    // TooManyActiveConnections. Bumped to 4096 (2026-04-17 investigation: 70%
+    // of uTP fails were "error"=saturated).
+    let mut opts = librqbit_utp::SocketOpts::default();
+    opts.max_live_vsocks = std::num::NonZeroUsize::new(4096);
+    let cancel = opts.cancellation_token.clone();
+    // uTP is raw UDP and gets the same device pin as everything else.
+    // Without it the tunnel steering would hold for TCP and leak for uTP,
+    // which is the shape of leak nobody notices: it is the same swarm.
+    let dev = device
+        .map(|d| d.parse::<librqbit_utp::BindDevice>())
+        .transpose()
+        .map_err(|e| format!("bind_device is not usable for the uTP socket: {e}"))?;
+    let udp_opts = librqbit_utp::UtpSocketUdpOpts { bind_device: dev.as_ref() };
+    let sock = UtpSocketUdp::new_udp_with_opts(bind, opts, udp_opts)
+        .await
+        .map_err(|e| format!("cannot bind the uTP socket on {bind}: {e}"))?;
+    Ok(UtpLive { sock, cancel })
 }
 
 /// Thread-per-core for peer sessions, switchable at runtime.
@@ -589,6 +773,7 @@ async fn handle_incoming(
     info!("[peer] incoming {} from {}", stream.kind(), addr);
     if !crate::tracker::is_self_ip(addr.ip()) {
         INBOUND_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        torrent_mgr.note_inbound_peer();
     }
 
     // A peer that connects and then says nothing used to park a task in

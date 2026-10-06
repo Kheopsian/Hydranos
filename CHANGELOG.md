@@ -24,6 +24,24 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- 4.4
 
 ### Added
+- **Prometheus `/metrics` is a real exporter**: per engine (extra engines
+  included) torrents by state, rates, bytes, peers, seed size, announces by
+  tracker and outcome, the announce queue, limits in force, memory, uptime;
+  read from counters, never a scan of the library per scrape.
+- **The API port opens at once and the startup screen shows the real
+  restore**: `/api/startup` reports each engine's restored/total; other
+  routes answer 503 with `Retry-After` until the load is done. A stop during
+  the load is heard and flushed.
+- **Moves to a node are jobs**: kept across a restart, cancellable, shown
+  with the node's progress; the local copy goes only once the node holds all
+  of it.
+- **Edit a node and rotate its key** (`PATCH /api/nodes/:name`,
+  `POST /api/nodes/:name/rotate-key`); the node mints the new key.
+- qBittorrent API: `torrents/setLocation`, `setForceStart`, `filePrio`,
+  `sync/maindata` (full updates), `torrents/count`, `app/defaultSavePath`;
+  `rename` and the queue-position routes answer 409 with the reason.
+- Extra engines (`[[engine]]`) on the Overview, in the Benchmark and in the
+  Records. A **Sign out** button.
 - **Local Service Discovery (BEP 14)**, per engine (`enable_lsd`, on for
   race and off for hoard by default). Only torrents an engine is downloading
   or has peers for are announced, at most one small multicast datagram a
@@ -74,6 +92,27 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   resolved by the proxy); `TYPHON_ANNOUNCE_PROXY` stays as a global fallback.
 
 ### Fixed
+- **`/health` always said `healthy`.** It checks the store and the
+  engines' listeners: `healthy`, `degraded`, `unhealthy` (503), or `starting`
+  (200) while loading. `install.sh` waits past `starting` before enrolling.
+- **The Logs tab's filters were ignored and Live never showed a line.**
+  Filters apply on the server and the live tail follows new lines.
+- **`/api/health/anomalies` and the MCP `health` tool were mostly zeros**:
+  a real invariant scan runs every 5 minutes; fictional fields are gone.
+- **A live listen-port change moved only TCP and was lost at restart; a port
+  in use killed the listener.** The new TCP and uTP sockets are bound first,
+  the change is saved, and a refused port leaves the old one listening.
+- **"Check what actually happens" could not see a leak.** It compares what
+  each engine's trackers and peers see by the engine's own path with the
+  default route, and reports `LEAK` when they match for a tunnelled or
+  proxied engine. `/api/port-forward` reports real values.
+- **Automatic port forwarding mapped TCP only**; UDP (uTP, DHT) is mapped
+  too and follows a live port change.
+- The header's Network panel named every engine `local`; rows carry the
+  engine id and say what the colour means.
+- `/api/provenance` is written by qBittorrent and Transmission imports.
+- Tracker health ignored extra engines; the Benchmark's "Peers Race" card
+  showed the torrent count.
 - **Tracker lists, IP filter lists, the update check, webhooks and `.torrent`
   URLs left by the default route**, from the home address, even with every
   engine in a tunnel.
@@ -103,8 +142,19 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   values under 120 are raised to 120, so the old template's 30/20 do not
   shorten anything.
 - The engine RPC `set_upload_limit` / `set_download_limit` did nothing.
+- The network-storage banner appears when the data directory is on a
+  network filesystem; the server never reported it.
 
 ### Changed
+- **`bind_interface` is Linux-only.** On Windows and macOS peer
+  connections left by the default route; it is now refused with the reason,
+  hidden in the Network tab, and an engine whose file still sets it stays off
+  the network rather than half in the tunnel.
+- qBittorrent API: `setPreferences` applies speed limits, `dht`, `pex`, the
+  active counts and `save_path` (other keys are logged as having no effect);
+  `properties` reports the `.torrent`'s date, creator and comment, peers,
+  ETA and averages; `torrents/add` honours `contentLayout`/`root_folder`,
+  `autoTMM` and `stopCondition`.
 - No UPnP/NAT-PMP mapping on the home router for an engine pinned to another
   interface, behind a proxy or behind gluetun: that port would publish the
   host's address. Webseeds of an engine pinned without a proxy are pinned to
@@ -138,10 +188,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   never shown, and the stub routes behind dead buttons: download-slots
   writes, `POST /api/race/settings`, `/api/opt/flags`, `/api/race/choking`,
   `verify-downloading`, `restart-stuck`, `arr-cleanup/execute`.
-
-### Fixed
-- The network-storage banner appears when the data directory is on a
-  network filesystem; the server never reported it.
 
 ## v4.3.1 -- cross-seed sees the library
 

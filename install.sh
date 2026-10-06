@@ -343,7 +343,10 @@ esac
 echo "==> waiting for the node to answer"
 i=0
 while [ $i -lt 60 ]; do
-    if curl -fsS -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then break; fi
+    # The port opens while the catalogue still loads, and /health then says
+    # "starting": the controller would be handed a node that answers 503.
+    h=$(curl -fsS -m 2 "http://127.0.0.1:$PORT/health" 2>/dev/null) && \
+        ! printf '%s' "$h" | grep -q '"status": *"starting"' && break
     i=$((i + 1)); sleep 1
 done
 [ $i -lt 60 ] || { echo "the node did not come up; look at: $LOGS_HINT" >&2; exit 1; }

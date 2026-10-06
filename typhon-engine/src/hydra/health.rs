@@ -64,7 +64,33 @@ pub struct Report {
     pub anomalies: Vec<Anomaly>,
     pub counts: BTreeMap<String, i64>,
     pub wasted_bytes: i64,
+    /// Bytes pulled by torrents that downloaded anything, and the part of it
+    /// that landed (capped at each torrent's size): `efficiency` is the ratio.
+    pub exchanged: i64,
+    pub useful: i64,
+    /// Torrents past `ROUTE_REDL_FACTOR` and `ROUTE_REDL_FLOOR_BYTES`, the
+    /// looser "historical" re-download figure the API has always published.
+    pub redl_historical: i64,
+    pub redl_historical_bytes: i64,
+    /// Torrents looked at, per engine.
+    pub scanned: BTreeMap<String, i64>,
+    /// The save paths of the active torrents, for the free-space check.
+    pub save_paths: HashSet<std::path::PathBuf>,
+    /// Off in the background pass: the breaker owns outages, and resolving
+    /// every tracker URL of a million torrents to answer "no" is not free.
+    pub skip_outage: bool,
+    /// One stat per directory, not one per torrent: thousands of torrents
+    /// share a category's save path.
+    ghost_dirs: std::collections::HashMap<std::path::PathBuf, bool>,
 }
+
+/// The anomaly list is capped; the counts are not.
+pub const MAX_LISTED: usize = 500;
+
+/// The route's historical re-download gates: 1.2 x the size AND 50 MiB.
+/// Looser than `REDL_FLOOR_BYTES`, which only flags what is worth an alert.
+pub const ROUTE_REDL_FACTOR: f64 = 1.20;
+pub const ROUTE_REDL_FLOOR_BYTES: i64 = 50 << 20;
 
 impl Report {
     fn add(&mut self, a: Anomaly) {
@@ -72,8 +98,37 @@ impl Report {
         if a.kind == REDL {
             self.wasted_bytes += a.wasted_bytes;
         }
-        self.anomalies.push(a);
+        if self.anomalies.len() < MAX_LISTED {
+            self.anomalies.push(a);
+        }
     }
+
+    /// Useful over exchanged; 1.0 when nothing was downloaded.
+    pub fn efficiency(&self) -> f64 {
+        if self.exchanged > 0 {
+            self.useful as f64 / self.exchanged as f64
+        } else {
+            1.0
+        }
+    }
+
+    pub fn truncated(&self) -> bool {
+        self.counts.values().sum::<i64>() > self.anomalies.len() as i64
+    }
+}
+
+static LATEST: std::sync::RwLock<Option<std::sync::Arc<(i64, u64, Report)>>> = std::sync::RwLock::new(None);
+
+/// Keep a finished pass: (unix time, duration in ms, report).
+pub fn publish(at: i64, took_ms: u64, report: Report) {
+    if let Ok(mut g) = LATEST.write() {
+        *g = Some(std::sync::Arc::new((at, took_ms, report)));
+    }
+}
+
+/// The last pass, `None` before the first.
+pub fn latest() -> Option<std::sync::Arc<(i64, u64, Report)>> {
+    LATEST.read().ok().and_then(|g| g.clone())
 }
 
 /// Check one engine's torrents.
@@ -88,53 +143,82 @@ pub fn scan_engine(
     host_in_outage: impl Fn(&str) -> bool,
     report: &mut Report,
 ) {
+    *report.scanned.entry(engine.to_string()).or_insert(0) += torrents.len() as i64;
     for t in torrents {
-        let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
-        let name = t.meta.name.clone();
+        // Formatted only for a torrent that is reported or looked up: a
+        // million hex strings per pass were most of its allocations.
+        let hash = || typhon_engine::torrent::hex_encode(&t.info_hash);
         let status = t.status.load(Ordering::Relaxed);
         let downloaded = t.total_downloaded.load(Ordering::Relaxed) as i64;
         let size = t.meta.total_size as i64;
+        let anomaly = |kind: &str, detail: String, wasted_bytes: i64| Anomaly {
+            kind: kind.into(),
+            engine: engine.into(),
+            info_hash: hash(),
+            name: t.meta.name.clone(),
+            detail,
+            wasted_bytes,
+        };
+
+        // Efficiency and the historical re-download figure.
+        if downloaded > 0 {
+            let done = typhon_engine::rpc::dispatch::torrent_core(t).total_done as i64;
+            report.exchanged += downloaded;
+            report.useful += done.min(size);
+        }
+        let extra = downloaded - size;
+        if size > 0 && downloaded > (size as f64 * ROUTE_REDL_FACTOR) as i64 && extra >= ROUTE_REDL_FLOOR_BYTES {
+            report.redl_historical += 1;
+            report.redl_historical_bytes += extra;
+        }
 
         // redl
-        let extra = downloaded - size;
         if size > 0 && downloaded > (size as f64 * REDL_FACTOR) as i64 && extra >= REDL_FLOOR_BYTES
         {
-            report.add(Anomaly {
-                kind: REDL.into(),
-                engine: engine.into(),
-                info_hash: hash.clone(),
-                name: name.clone(),
-                detail: format!("downloaded {downloaded} for a size of {size}"),
-                wasted_bytes: extra,
-            });
+            report.add(anomaly(REDL, format!("downloaded {downloaded} for a size of {size}"), extra));
         }
 
         // files_missing: the serve path sets Error on ENOENT and never clears
         // it, precisely so this can be seen.
         if status == TorrentStatus::Error as u8 {
-            report.add(Anomaly {
-                kind: FILES_MISSING.into(),
-                engine: engine.into(),
-                info_hash: hash.clone(),
-                name: name.clone(),
-                detail: "a read hit ENOENT: this torrent can serve nothing".into(),
-                wasted_bytes: 0,
-            });
+            report.add(anomaly(FILES_MISSING, "a read hit ENOENT: this torrent can serve nothing".into(), 0));
+        }
+
+        // fake_seed: announced complete, while the piece map says otherwise.
+        // Only a torrent that still has a picker can say so; a seed-mode
+        // torrent has none and its data is trusted whole.
+        if status == TorrentStatus::Seeding as u8 {
+            if let Some(picker) = t.picker.get() {
+                let (have, total) = {
+                    let p = picker.lock().unwrap_or_else(|e| e.into_inner());
+                    (p.num_have(), t.meta.num_pieces())
+                };
+                let done = (have as u64 * t.meta.piece_length as u64).min(t.meta.total_size);
+                if have < total && is_fake_seed(status, t.meta.total_size, done) {
+                    report.add(anomaly(FAKE_SEED, format!("seeding with {have} of {total} pieces"), 0));
+                }
+            }
         }
 
         // ghost: an active torrent whose directory is gone. A stat, because
         // nothing else can see it.
         if status == TorrentStatus::Downloading as u8 || status == TorrentStatus::Seeding as u8 {
             let save_path = t.save_path.read().clone();
-            if save_path.as_os_str().len() > 0 && !save_path.exists() {
-                report.add(Anomaly {
-                    kind: GHOST.into(),
-                    engine: engine.into(),
-                    info_hash: hash.clone(),
-                    name: name.clone(),
-                    detail: format!("save path {} is gone from disk", save_path.display()),
-                    wasted_bytes: 0,
-                });
+            if save_path.as_os_str().len() > 0 {
+                let exists = match report.ghost_dirs.get(&save_path) {
+                    Some(e) => *e,
+                    None => {
+                        let e = save_path.exists();
+                        report.ghost_dirs.insert(save_path.clone(), e);
+                        if e {
+                            report.save_paths.insert(save_path.clone());
+                        }
+                        e
+                    }
+                };
+                if !exists {
+                    report.add(anomaly(GHOST, format!("save path {} is gone from disk", save_path.display()), 0));
+                }
             }
         }
 
@@ -142,33 +226,24 @@ pub fn scan_engine(
         let peers = t.peers_connected.load(Ordering::Relaxed);
         if status == TorrentStatus::Downloading as u8
             && peers == 0
-            && seeds_in_swarm(&hash) > 0
             && !t.is_paused.load(Ordering::Relaxed)
         {
-            report.add(Anomaly {
-                kind: STARVED.into(),
-                engine: engine.into(),
-                info_hash: hash.clone(),
-                name: name.clone(),
-                detail: format!("{} seeds in the swarm and no peer connected", seeds_in_swarm(&hash)),
-                wasted_bytes: 0,
-            });
+            let seeds = seeds_in_swarm(&hash());
+            if seeds > 0 {
+                report.add(anomaly(STARVED, format!("{seeds} seeds in the swarm and no peer connected"), 0));
+            }
         }
 
         // tracker_outage, collapsed per host by the caller's breaker.
-        for tier in &t.meta.trackers {
+        if report.skip_outage {
+            continue;
+        }
+        'tiers: for tier in &t.meta.trackers {
             for url in tier {
                 let host = crate::announce::overrides::override_host(url);
                 if !host.is_empty() && host_in_outage(&host) {
-                    report.add(Anomaly {
-                        kind: TRACKER_OUTAGE.into(),
-                        engine: engine.into(),
-                        info_hash: hash.clone(),
-                        name: name.clone(),
-                        detail: format!("{host} stopped answering"),
-                        wasted_bytes: 0,
-                    });
-                    break;
+                    report.add(anomaly(TRACKER_OUTAGE, format!("{host} stopped answering"), 0));
+                    break 'tiers;
                 }
             }
         }
@@ -179,6 +254,7 @@ pub fn scan_engine(
 ///
 /// Checked across engines rather than inside one, which is why it does not
 /// live in `scan_engine`.
+#[cfg(test)]
 pub fn scan_dual_seed(
     per_engine: &[(String, Vec<std::sync::Arc<TorrentState>>)],
     report: &mut Report,
@@ -204,6 +280,39 @@ pub fn scan_dual_seed(
                 detail: "seeded by two engines: the credit is the maximum, not the sum".into(),
                 wasted_bytes: 0,
             });
+        }
+    }
+}
+
+/// `scan_dual_seed` over live engines, by lookup instead of a map of every
+/// hash: at a million torrents that map was a hundred MB built and thrown
+/// away every pass, to find the handful held twice.
+pub fn scan_dual_seed_live(
+    engines: &[(String, Vec<std::sync::Arc<TorrentState>>, std::sync::Arc<typhon_engine::torrent::TorrentManager>)],
+    report: &mut Report,
+) {
+    let seeding = |t: &TorrentState| t.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8;
+    for (i, (engine, torrents, _)) in engines.iter().enumerate() {
+        for t in torrents.iter().filter(|t| seeding(t)) {
+            // Reported once, by the first engine that holds it.
+            if engines[..i].iter().any(|(_, _, m)| m.get(&t.info_hash).is_some_and(|o| seeding(&o))) {
+                continue;
+            }
+            let others: Vec<&str> = engines[i + 1..]
+                .iter()
+                .filter(|(_, _, m)| m.get(&t.info_hash).is_some_and(|o| seeding(&o)))
+                .map(|(id, _, _)| id.as_str())
+                .collect();
+            if !others.is_empty() {
+                report.add(Anomaly {
+                    kind: DUAL_SEED.into(),
+                    engine: std::iter::once(engine.as_str()).chain(others).collect::<Vec<_>>().join("+"),
+                    info_hash: typhon_engine::torrent::hex_encode(&t.info_hash),
+                    name: t.meta.name.clone(),
+                    detail: "seeded by two engines: the credit is the maximum, not the sum".into(),
+                    wasted_bytes: 0,
+                });
+            }
         }
     }
 }
@@ -311,6 +420,65 @@ mod scan_tests {
             .add_torrent_bytes(&torrent_bytes(name, size), "/tmp", true, true)
             .expect("the fixture torrent parses");
         mgr.get(&ih).expect("just added")
+    }
+
+    /// The live dual-seed check finds a hash seeded by two engines once,
+    /// and says which two.
+    #[test]
+    fn a_hash_seeded_by_two_live_engines_is_reported_once() {
+        let (a, ra) = manager("dual-live-a");
+        let (b, rb) = manager("dual-live-b");
+        let ta = torrent(&a, "same", 16384);
+        let tb = torrent(&b, "same", 16384);
+        let _other = torrent(&a, "only-a", 16384);
+        for t in [&ta, &tb] {
+            t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        }
+        let mut r = Report::default();
+        scan_dual_seed_live(
+            &[("race".into(), a.all(), a.clone()), ("vpn7".into(), b.all(), b.clone())],
+            &mut r,
+        );
+        assert_eq!(kinds(&r), vec![DUAL_SEED.to_string()]);
+        assert_eq!(r.anomalies[0].engine, "race+vpn7");
+        let _ = (std::fs::remove_dir_all(ra), std::fs::remove_dir_all(rb));
+    }
+
+    /// The figures the route has always published, now from the pass:
+    /// efficiency and the looser historical re-download count.
+    #[test]
+    fn the_pass_measures_efficiency_and_historical_redownloads() {
+        let (m, root) = manager("efficiency");
+        let t = torrent(&m, "eff", 16384);
+        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        // 16 KiB kept for 60 MiB pulled: past 1.2x and past 50 MiB.
+        t.total_downloaded.store(60 << 20, Ordering::Relaxed);
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, no_outage, &mut r);
+        assert_eq!(r.redl_historical, 1);
+        assert_eq!(r.redl_historical_bytes, (60 << 20) - 16384);
+        assert!((r.efficiency() - 16384.0 / (60u64 << 20) as f64).abs() < 1e-9);
+        assert_eq!(r.scanned["race"], 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The list is capped, the counts are not, and the cap is said.
+    #[test]
+    fn the_list_is_capped_and_says_so() {
+        let mut r = Report::default();
+        for i in 0..MAX_LISTED + 3 {
+            r.add(Anomaly {
+                kind: FILES_MISSING.into(),
+                engine: "race".into(),
+                info_hash: format!("{i}"),
+                name: String::new(),
+                detail: String::new(),
+                wasted_bytes: 0,
+            });
+        }
+        assert_eq!(r.anomalies.len(), MAX_LISTED);
+        assert_eq!(r.counts[FILES_MISSING], (MAX_LISTED + 3) as i64);
+        assert!(r.truncated());
     }
 
     fn no_seeds(_: &str) -> i64 {

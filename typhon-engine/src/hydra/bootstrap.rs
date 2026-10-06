@@ -35,7 +35,7 @@ pub async fn setup_status(State(state): State<AppState>) -> Response {
 ///
 /// The page keys its "Got it" on this string, so it must stay stable from one
 /// boot to the next: a generic label, not the mount it happened to resolve.
-fn network_storage(data_dir: &str) -> &'static str {
+pub(crate) fn network_storage(data_dir: &str) -> &'static str {
     if crate::platform::is_network_fs(std::path::Path::new(data_dir)) {
         "network share"
     } else {
@@ -184,34 +184,36 @@ pub async fn login(State(state): State<AppState>, body: String) -> Response {
 /// How far the catalogue has got loading.
 ///
 /// Public and cheap: the page polls it while the engines come up, and a
-/// quarter of a million torrents take minutes.
+/// quarter of a million torrents take minutes. While they do, the answer
+/// comes from `startup::snapshot` behind the gate; this handler only runs
+/// once the router is served, so the load is over and every engine's
+/// catalogue is what it holds now.
 pub async fn startup(State(state): State<AppState>) -> Response {
-    let total: i64 = state.engines.engines().iter().map(|e| e.manager.len() as i64).sum();
+    let engines: Vec<serde_json::Value> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| {
+            let n = e.manager.len();
+            serde_json::json!({"id": e.id, "restored": n, "total": n})
+        })
+        .collect();
+    let total: usize = state.engines.engines().iter().map(|e| e.manager.len()).sum();
     Json(serde_json::json!({
         "ready": true,
+        "phase": crate::startup::Phase::Ready.name(),
         "total": total,
         "restored": total,
+        "engines": engines,
+        "uptime": crate::startup::uptime_secs(),
     }))
     .into_response()
 }
 
-/// Prometheus text format.
+/// Prometheus text format: per-engine series from counters already kept
+/// (see `obs`), never a walk of the catalogue per scrape.
 pub async fn metrics(State(state): State<AppState>) -> Response {
-    let uptime = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-        - state.started_at;
-    let mut out = String::new();
-    out.push_str("hydra_up 1\n");
-    out.push_str(&format!("hydra_uptime_seconds {uptime}\n"));
-    for engine in state.engines.engines() {
-        out.push_str(&format!(
-            "hydra_torrents{{engine=\"{}\"}} {}\n",
-            engine.id,
-            engine.manager.len()
-        ));
-    }
+    let out = crate::obs::metrics(&state);
     ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }
 

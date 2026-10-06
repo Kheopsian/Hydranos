@@ -78,14 +78,21 @@ pub fn spawn(engine: String, manager: Arc<TorrentManager>, url: String, key: Str
             match fetch(&client, &url, &key).await {
                 Ok(port) if port == applied => {}
                 Ok(port) => {
-                    if manager.request_listen_rebind(port) {
-                        tracing::info!(engine = %engine, from = applied, to = port, "gluetun port forward: listening on the forwarded port");
-                        applied = port;
-                        last_error.clear();
-                        manager.set_port_pending(false);
-                    } else {
-                        // The listener is not up yet; the next poll retries.
-                        tracing::debug!(engine = %engine, port, "gluetun port forward: listener not ready");
+                    // Awaited: announces are released only once the listener
+                    // really holds the port. A port that cannot be bound
+                    // keeps them held rather than hand trackers a dead port.
+                    match manager.rebind_listener(port).await {
+                        Ok(_) => {
+                            tracing::info!(engine = %engine, from = applied, to = port, "gluetun port forward: listening on the forwarded port");
+                            applied = port;
+                            last_error.clear();
+                            manager.set_port_pending(false);
+                        }
+                        Err(e) => {
+                            // The listener is not up yet, or the port is
+                            // taken; the next poll retries.
+                            tracing::debug!(engine = %engine, port, error = %e, "gluetun port forward: listener not moved");
+                        }
                     }
                 }
                 Err(e) => {

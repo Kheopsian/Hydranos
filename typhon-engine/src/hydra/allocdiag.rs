@@ -28,6 +28,22 @@ pub fn spawn() {
     }
 }
 
+/// (allocated, resident) bytes as jemalloc counts them now, for /metrics.
+/// `None` on Windows, which runs the system allocator. Advancing the epoch
+/// is a few microseconds: cheap enough for a scrape.
+pub fn memory() -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use tikv_jemalloc_ctl::{epoch, stats};
+        epoch::advance().ok()?;
+        Some((stats::allocated::read().ok()? as u64, stats::resident::read().ok()? as u64))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// SIGUSR1 => dump a jemalloc heap profile to $prof_prefix (set via
 /// MALLOC_CONF). This is the only way to get an allocation-site profile of a
 /// running node, and it went missing for the whole of the 4.x line.

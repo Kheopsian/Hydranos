@@ -88,12 +88,28 @@ pub fn pin_fd(fd: std::os::unix::io::RawFd, egress: &Egress) -> std::io::Result<
     Ok(())
 }
 
-/// No SO_BINDTODEVICE outside Linux; the Windows agent keeps the source-address
-/// pin the Go side still applies.
+/// No SO_BINDTODEVICE outside Linux, so a socket asked to leave by a device
+/// fails instead. This used to answer Ok and pin nothing: on Windows and
+/// macOS an engine with `bind_interface` dialled every peer by the default
+/// route while its config said tunnel.
 #[cfg(not(target_os = "linux"))]
-pub fn pin_fd(_fd: i32, _egress: &Egress) -> std::io::Result<()> {
-    Ok(())
+pub fn pin_fd(_fd: i32, egress: &Egress) -> std::io::Result<()> {
+    if egress.device().is_none() {
+        return Ok(());
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, UNSUPPORTED))
 }
+
+/// Whether `bind_interface` can be honoured here. Linux only: a device pin is
+/// `SO_BINDTODEVICE`. Windows has nothing that pins by interface NAME, and
+/// macOS's `IP_BOUND_IF` reaches uTP and HTTP but not the TCP peer sockets,
+/// so half an engine would follow the tunnel and half the default route --
+/// the kind of leak nobody notices. The key is refused there instead
+/// (maintainer's decision, 4.4).
+pub const DEVICE_PIN_SUPPORTED: bool = cfg!(target_os = "linux");
+
+/// Why, in the words the API, the log and the Network tab use.
+pub const UNSUPPORTED: &str = "bind_interface is Linux-only: this platform cannot pin every socket of an engine to an interface (TCP peers would leave by the default route). Run the VPN client system-wide instead";
 
 #[cfg(test)]
 mod tests {
@@ -109,6 +125,21 @@ mod tests {
         let blank = Egress { fwmark: 0, device: "  ".into(), ..Default::default() };
         assert_eq!(blank.device(), None);
         assert!(!blank.is_steered());
+    }
+
+    /// ⭐ #62. Outside Linux a socket asked to leave by a device is refused,
+    /// never opened unpinned (4.3 answered Ok and pinned nothing); a socket
+    /// with no device is untouched everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_pin_that_cannot_be_applied_fails_closed() {
+        use std::os::fd::AsRawFd;
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        assert!(pin_fd(sock.as_raw_fd(), &Egress::default()).is_ok(), "no device, nothing to refuse");
+        let wg = Egress { device: "hydranos-test-nodev".into(), ..Default::default() };
+        assert!(pin_fd(sock.as_raw_fd(), &wg).is_err(), "a missing (Linux) or unpinnable (elsewhere) device fails");
+        assert_eq!(DEVICE_PIN_SUPPORTED, cfg!(target_os = "linux"));
+        assert!(UNSUPPORTED.contains("Linux-only"));
     }
 
     #[test]
