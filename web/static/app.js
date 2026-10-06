@@ -26,50 +26,44 @@ const POLL_INTERVAL = 1000;
 let _sessionBaselineUl = null;
 let _sessionBaselineDl = null;
 
-// The dot answers "can a peer open a connection to us", which is measured by a
-// probe (see reachability.go). It used to be `peers > 0`, which answers a
-// different question entirely: every peer we dialled ourselves counts, so a node
-// nobody could reach looked perfectly healthy and stayed leech-only.
-function _paintHealthDot(id, reach, port, peers, warnings, engine) {
-    const dot = document.getElementById(id);
-    if (!dot) return;
-    const st = (reach && reach.state) || "unknown";
-    const cls = st === "reachable" ? "ok" : (st === "unreachable" ? "error" : "warn");
-    dot.className = "health-dot " + cls;
-    const head = st === "reachable"
-        ? t("Peers can reach you on port {port}", { port: port })
-        : (st === "unreachable"
-            ? t("Nobody can reach you on port {port}", { port: port })
-            : t("Reachability on port {port} not established yet", { port: port }));
-    let lines = [engine + ": " + head];
-    if (reach && reach.detail) lines.push(reach.detail);
-    lines.push(t("{n} peers connected", { n: peers }));
-    if (warnings && warnings.length) lines = [...warnings, "", ...lines];
-    const row = dot.closest(".health-row") || dot;
-    row.title = lines.join("\n");
+// The dot answers "can a peer open a connection to us", from what actually
+// happened: a peer from outside connected to the engine since it started
+// (`inbound_peers`). A probe we sent ourselves would turn around at our own
+// router and prove nothing. Until 4.4 the route answered constants, so the dot
+// was red on every install whatever the network did.
+function _forwardLine(f) {
+    f = f || {};
+    if ((f.by === "upnp" || f.by === "natpmp") && !f.udp)
+        return t("port {port} forwarded by {by}, TCP only: {why}", { port: f.external_port, by: f.by, why: f.udp_error || "" });
+    if (f.by === "upnp" || f.by === "natpmp") return t("port {port} forwarded by {by}, TCP and UDP", { port: f.external_port, by: f.by });
+    if (f.by === "wireguard") return t("port {port} forwarded by the WireGuard tunnel", { port: f.external_port });
+    if (f.by === "gluetun") return f.pending ? t("waiting for gluetun's port") : t("port {port} taken from gluetun", { port: f.external_port });
+    if (f.by === "off") return t("automatic port forwarding is off");
+    if (f.by === "pending") return t("the router has not answered yet");
+    if (f.refused) return t("not forwarded: {why}", { why: f.refused });
+    if (f.error) return t("not forwarded: {why}", { why: f.error });
+    return t("not forwarded");
 }
 
 async function fetchPortForward() {
     try {
         const d = await api("/api/port-forward");
         const dot = document.getElementById("health-dot");
-
-        // Determine health class
-        let cls = "ok";
-        let warnings = [];
-
-        if (!d.listen_healthy) {
-            cls = "error";
-            // Find stale sockets
-            const stale = [...(d.race_sockets || []), ...(d.hoard_sockets || [])].filter(s => s.stale);
-            for (const s of stale) {
-                warnings.push("⚠ " + t("{addr}, stale socket (bound {iface}, interface recreated)", { addr: s.ip + ":" + s.port, iface: s.bound_interface }));
-            }
-        } else if (!d.all_connectable) {
-            cls = d.race_connectable || d.hoard_connectable ? "warn" : "error";
+        const engines = d.engines || [];
+        const cls = !d.listen_healthy ? "error" : (d.all_connectable ? "ok" : "warn");
+        if (dot) {
+            dot.className = "health-dot " + cls;
+            const lines = engines.map(e => {
+                const head = e.reachable === "yes"
+                    ? t("{engine}: {n} peers from outside connected on port {port}", { engine: e.engine, n: e.inbound_peers, port: e.listen_port })
+                    : (e.reachable === "no"
+                        ? t("{engine}: not listening (port {port} could not be bound)", { engine: e.engine, port: e.listen_port })
+                        : t("{engine}: listening on port {port}, no peer from outside yet (not proven)", { engine: e.engine, port: e.listen_port }));
+                return head + " — " + _forwardLine(e.forward);
+            });
+            const row = dot.closest(".health-row") || dot;
+            row.title = lines.join("\n");
         }
-
-        if (dot) dot.className = "health-dot " + cls;
         _ipv6Wanted = !!d.ipv6_wanted;
         // The header address is written by the per-engine measurement now (see
         // updateNetPoly). This one is the whole process's default route, which
@@ -500,6 +494,18 @@ function promptFirstRunSetup(networkStorage) {
     };
     ov.querySelector("#setup-go").addEventListener("click", go);
     [user, pass, pass2].forEach(el => el.addEventListener("keydown", e => { if (e.key === "Enter") go(); }));
+}
+
+// Sign out. The page holds the API key in localStorage, so signing out means
+// forgetting it here: the reload then finds no key, the first call answers
+// 401 and the login screen opens. A SID cookie from the qBittorrent login,
+// if this browser has one, is ended on the server too. The key itself stays
+// valid: it is the instance's, shared by every client (`[daemon] api_key`),
+// and a sign-out in one browser must not cut off the *arr stack.
+async function logout() {
+    try { await fetch("/api/v2/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (_) {}
+    try { localStorage.removeItem("hydra_api_key"); } catch (_) {}
+    location.replace(location.pathname);
 }
 
 let _loginOpen = false;
@@ -1316,8 +1322,9 @@ function _renderStatus(data) {
             const hSU = data.hoard.session_uploaded || 0, hSD = data.hoard.session_downloaded || 0;
             document.getElementById("hoard-ov-ratio").textContent = (hSD > 0 ? hSU / hSD : 0).toFixed(2);
             const ovt = document.getElementById("ov-torrents-total");
-            if (ovt) ovt.textContent = fmtInt((data.hoard.total_torrents || 0) + (data.race?.torrents || 0));
+            if (ovt) ovt.textContent = fmtInt((data.hoard.total_torrents || 0) + (data.race?.torrents || 0) + _extraTorrents);
         }
+        _maybeUpdateExtraEngines();
 
         // Seed size (tracker pass, 30 s) against the space it takes (link
         // scanner, up to a day old). Null until each has run once: "-", not 0.
@@ -1431,7 +1438,11 @@ async function updateRecords(force) {
         return h && h.textContent.trim().startsWith("Records");
     });
     const rc = recCard ? recCard.querySelector(".card-body") : null;
-    if (rc && Array.isArray(d.records)) {
+    if (rc && Array.isArray(d.records) && !d.records.length) {
+        // No bench.db, or nothing recorded yet: say so rather than leave the
+        // placeholder row reading like a figure.
+        rc.innerHTML = '<div class="metric"><span>' + esc(t("No records yet")) + '</span><span>-</span></div>';
+    } else if (rc && Array.isArray(d.records)) {
         rc.innerHTML = d.records.map(r => {
             const val = r.unit ? (r.value + " " + r.unit) : fmtInt(Math.round(r.value));
             return '<div class="metric"><span>' + r.label + ' <small>' + (r.date || "") +
@@ -1471,6 +1482,50 @@ async function updateRecords(force) {
         }
         ac.innerHTML = rows.join("");
     }
+}
+
+// ─── Extra engines on the Overview ──────────────────────
+//
+// The Race and Hoard cards are fed by /api/status, which only knows those two
+// engines by name. Every other engine (an `[[engine]]` block, one per tunnel)
+// gets a card of the same shape here, from /api/engines. Until 4.4 they had
+// none, and their torrents were missing from the overview's total.
+let _extraTorrents = 0;
+let _extraEnginesAt = 0;
+function _maybeUpdateExtraEngines() {
+    if (Date.now() - _extraEnginesAt < 3000) return;
+    _extraEnginesAt = Date.now();
+    _updateExtraEngines();
+}
+async function _updateExtraEngines() {
+    const box = document.getElementById("ov-extra-engines");
+    if (!box) return;
+    let list;
+    try { list = await api("/api/engines"); } catch (_) { return; }
+    const extra = (list || []).filter(e => e.id !== "race" && e.id !== "hoard" && e.stats);
+    _extraTorrents = extra.reduce((n, e) => n + (e.stats.torrents || 0), 0);
+    const ratio = s => {
+        const up = s.session_uploaded || 0, down = s.session_downloaded || 0;
+        return down > 0 ? (up / down).toFixed(2) : (up > 0 ? "∞" : "0.00");
+    };
+    const row = (label, value, hi) =>
+        `<div class="metric"><span>${esc(label)}</span><span${hi ? ' class="hi"' : ""}>${value}</span></div>`;
+    box.innerHTML = extra.map(e => {
+        const s = e.stats;
+        const tag = e.listening ? esc(e.role) : `${esc(e.role)} · ${esc(t("not listening"))}`;
+        return `<div class="card" data-engine="${esc(e.id)}">
+            <h3>${esc(t("Engine {id}", { id: e.id }))} <span class="tag">${tag}</span></h3>
+            <div class="card-body">
+                ${row(t("Torrents"), fmtInt(s.torrents))}
+                ${row(t("With peers"), fmtInt(s.with_peers))}
+                ${row(t("Upload"), formatSpeed(s.upload_rate), true)}
+                ${row(t("Download"), formatSpeed(s.download_rate))}
+                ${row(t("Peers"), fmtInt(s.peers))}
+                ${row(t("Seeding"), s.seed_size == null ? "-" : formatBytes(s.seed_size))}
+                ${row(t("Session ratio"), ratio(s))}
+            </div>
+        </div>`;
+    }).join("");
 }
 
 async function updateOverview() {
@@ -3345,7 +3400,7 @@ async function updateNodes() {
                 <td>${esc((h.engines || []).join(", ") || "-")}</td>
                 <td>${h.torrents ?? 0}</td>
                 <td>${status}</td>
-                <td>${open} <button class="btn-small" onclick="removeNode('${esc(n.name)}')">Remove</button></td>
+                <td>${open} <button class="btn-small" onclick="editNode('${esc(n.name)}', '${esc(n.url)}')">${t("Edit")}</button> <button class="btn-small" onclick="rotateNodeKey('${esc(n.name)}')"${h.online ? "" : " disabled"}>${t("Rotate key")}</button> <button class="btn-small" onclick="removeNode('${esc(n.name)}')">Remove</button></td>
             </tr>`;
         }).join("");
     } catch (e) {
@@ -3353,11 +3408,29 @@ async function updateNodes() {
     }
 }
 
-function showEngineForm() {
+async function showEngineForm() {
     const f = document.getElementById("engine-form");
     if (f) f.style.display = "";
     const r = document.getElementById("en-result");
     if (r) { r.textContent = ""; r.className = "result-msg"; }
+    // Greyed with the reason where the platform cannot pin an engine to an
+    // interface: the daemon refuses the key there (Linux only).
+    if (!_netState) { try { _netState = await api("/api/network/mode"); } catch (e) { /* the field stays as it is */ } }
+    const i = document.getElementById("en-iface");
+    if (i && !_bindIfaceOK()) {
+        i.value = "";
+        i.disabled = true;
+        i.placeholder = t("Linux only");
+        i.title = _bindIfaceWhy();
+    }
+}
+
+// Whether `bind_interface` can be applied on this host (`/api/network/mode`).
+function _bindIfaceOK() {
+    return !(_netState && _netState.bind_interface && _netState.bind_interface.supported === false);
+}
+function _bindIfaceWhy() {
+    return t("Pinning an engine to an interface is Linux-only: on this platform its peer connections would leave by the default route. Run your VPN client system-wide instead.");
 }
 function hideEngineForm() {
     const f = document.getElementById("engine-form");
@@ -3442,11 +3515,49 @@ function copyEnrol() {
     if (res) { res.textContent = t("Copied."); res.className = "result-msg success"; }
 }
 
+// The node the form is editing, or null when it declares a new one. An edit
+// is a PATCH on the old name: re-adding under a new name would leave the old
+// row behind, and every move still waiting on it would fail.
+let _nodeEditing = null;
+
 function showNodeForm() {
     const f = document.getElementById("node-form");
     if (f) f.style.display = "";
     const r = document.getElementById("nd-result");
     if (r) { r.textContent = ""; r.className = "result-msg"; }
+    _nodeEditing = null;
+    const b = document.getElementById("nd-save");
+    if (b) b.textContent = t("Add");
+    const k = document.getElementById("nd-key");
+    if (k) k.placeholder = "";
+}
+
+function editNode(name, url) {
+    showNodeForm();
+    _nodeEditing = name;
+    document.getElementById("nd-name").value = name;
+    document.getElementById("nd-url").value = url;
+    const k = document.getElementById("nd-key");
+    k.value = "";
+    // The stored key is never sent back to a browser: empty keeps it.
+    k.placeholder = t("unchanged");
+    document.getElementById("nd-save").textContent = t("Save");
+}
+
+/// Rotate a node's API key. The node mints the new key and drops the old
+/// one only once this Hydranos has confirmed it, so the fleet never loses
+/// the node. Whatever else used the old key (the node's own browser tab, an
+/// *arr) needs the new one: it is shown once, here.
+async function rotateNodeKey(name) {
+    if (!await hydraConfirm(t("Rotate the API key of {name}?", { name }),
+        t("The node gets a new key and refuses the old one. This Hydranos keeps working with it; anything else using the old key (the node's own page, an *arr) must be given the new one."))) return;
+    try {
+        const r = await api("/api/nodes/" + encodeURIComponent(name) + "/rotate-key", { method: "POST" });
+        await hydraPrompt(t("New API key of {name}", { name }), t("Shown once. Copy it for the clients of this node that used the old key."), r.api_key, t("Done"));
+    } catch (e) {
+        hydraNotify(String(e.message || e));
+    }
+    await updateNodes();
 }
 function hideNodeForm() {
     const f = document.getElementById("node-form");
@@ -3486,7 +3597,14 @@ async function saveNode() {
     const v = _nodeFormValues();
     const r = document.getElementById("nd-result");
     try {
-        await api("/api/nodes", { method: "POST", body: JSON.stringify(v) });
+        if (_nodeEditing) {
+            const body = { name: v.name, url: v.url };
+            if (v.api_key) body.api_key = v.api_key;
+            await api("/api/nodes/" + encodeURIComponent(_nodeEditing), { method: "PATCH", body: JSON.stringify(body) });
+            _nodeEditing = null;
+        } else {
+            await api("/api/nodes", { method: "POST", body: JSON.stringify(v) });
+        }
         hideNodeForm();
         await updateNodes();
     } catch (e) {
@@ -3636,6 +3754,7 @@ const _BULK_OUTCOMES = [
     { key: "unchanged", say: "{n} already so" },
     { key: "in_flight", say: "{n} already announcing" },
     { key: "queued", say: "{n} queued" },
+    { key: "waiting_node", say: "{n} sent; the local copy goes once the node holds it (Jobs)" },
     { key: "cooldown", say: "{n} refused (cooldown)", tone: "warn", loud: true },
     { key: "skipped", say: "{n} not applicable", loud: true },
     { key: "not_here", say: "{n} not on this node", loud: true },
@@ -6265,17 +6384,40 @@ document.querySelectorAll(".bm-range-btn").forEach(btn => {
     });
 });
 
+// Colours for engines beyond race (orange) and hoard (green).
+const _EXTRA_ENGINE_COLORS = ["#58a6ff", "#bc8cff", "#f778ba", "#39c5cf", "#d29922"];
+
+// Upload, download and peers for each engine beyond race and hoard, from
+// /api/benchmark/current's `engines`. The fixed cards above name race and
+// hoard; 4.3 showed nothing at all for an `[[engine]]` block.
+function _renderExtraBenchCards(engines) {
+    const box = document.getElementById("bm-extra-engines");
+    if (!box) return;
+    const extra = engines.filter(e => e.id !== "race" && e.id !== "hoard");
+    box.style.display = extra.length ? "" : "none";
+    const card = (label, value) =>
+        `<div class="bm-metric-card"><span class="bm-metric-label">${esc(label)}</span><span class="bm-metric-value">${value}</span></div>`;
+    box.innerHTML = extra.map(e =>
+        card(t("Upload {id}", { id: e.id }), formatSpeed(e.upload_rate || 0)) +
+        card(t("Download {id}", { id: e.id }), formatSpeed(e.download_rate || 0)) +
+        card(t("Peers {id}", { id: e.id }), fmtInt(e.peers || 0))
+    ).join("");
+}
+
 async function updateBenchmark() {
     try {
         const now = Date.now() / 1000;
         const start = now - _bmSpan;
 
-        const [cur, history] = await Promise.all([
+        const [cur, history, extraHistory] = await Promise.all([
             api("/api/benchmark/current"),
             api(`/api/benchmark/range?start=${start}&end=${now}`),
+            // The engines beyond race and hoard, from their own table.
+            api(`/api/benchmark/engines?start=${start}&end=${now}`).catch(() => ({})),
         ]);
 
         if (!_bmCharts) _initBmCharts();
+        _renderExtraBenchCards(cur.engines || []);
 
         // Live cards
         const totalUpload = (cur.race_upload_rate ?? 0) + (cur.hoard_upload_rate ?? 0);
@@ -6299,6 +6441,30 @@ async function updateBenchmark() {
 
         // Charts
         _updateDualChart(_bmCharts.upload, history, "race_upload_rate", "hoard_upload_rate");
+        // One more line per extra engine, on the same time axis. The server
+        // averages them into buckets of max(5 s, span / 300); the same bucket
+        // here puts each history point on its engine row.
+        const _extraIds = Object.keys(extraHistory || {}).sort();
+        const _bucket = Math.max(5, (now - start) / 300);
+        const _extraAt = {};
+        _extraIds.forEach(id => {
+            const m = new Map();
+            (extraHistory[id] || []).forEach(r => m.set(Math.floor(r.ts / _bucket) * _bucket, r));
+            _extraAt[id] = p => m.get(Math.floor(p.ts / _bucket) * _bucket);
+        });
+        {
+            const c = _bmCharts.upload;
+            c.data.datasets.length = 2;
+            _extraIds.forEach((id, i) => {
+                const color = _EXTRA_ENGINE_COLORS[i % _EXTRA_ENGINE_COLORS.length];
+                c.data.datasets.push({
+                    label: id, data: history.map(p => { const r = _extraAt[id](p); return r ? r.upload_rate : null; }),
+                    borderColor: color, backgroundColor: color + "18", borderWidth: 1.5,
+                    pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, spanGaps: true,
+                });
+            });
+            c.update("none");
+        }
 
         // Total uploaded, 20 stacked bars, each = sum of volume in bucket
         {
@@ -6308,7 +6474,7 @@ async function updateBenchmark() {
                 const bucketSize = (tMax - tMin) / N;
                 const durEl = document.getElementById("bm-bar-duration-uploaded");
                 if (durEl) durEl.textContent = "(" + _fmtDuration(bucketSize) + "/bar)";
-                const labels = [], raceVol = new Float64Array(N), hoardVol = new Float64Array(N);
+                const labels = [], raceVol = new Float64Array(N), hoardVol = new Float64Array(N), extraVol = new Float64Array(N);
                 for (let b = 0; b < N; b++) {
                     const mid = tMin + bucketSize * (b + 0.5);
                     labels.push(_bmLabel(mid));
@@ -6318,10 +6484,19 @@ async function updateBenchmark() {
                     const b = Math.min(Math.floor((history[i].ts - tMin) / bucketSize), N - 1);
                     raceVol[b] += (history[i].race_upload_rate ?? 0) * dt;
                     hoardVol[b] += (history[i].hoard_upload_rate ?? 0) * dt;
+                    extraVol[b] += (history[i].extra_upload_rate ?? 0) * dt;
                 }
                 _bmCharts.totalUploaded.data.labels = labels;
                 _bmCharts.totalUploaded.data.datasets[0].data = Array.from(raceVol);
                 _bmCharts.totalUploaded.data.datasets[1].data = Array.from(hoardVol);
+                // The other engines stacked on top, only when there are any.
+                _bmCharts.totalUploaded.data.datasets.length = 2;
+                if (_extraIds.length || extraVol.some(v => v > 0)) {
+                    _bmCharts.totalUploaded.data.datasets.push({
+                        label: t("Other engines"), data: Array.from(extraVol),
+                        backgroundColor: _EXTRA_ENGINE_COLORS[0] + "99", stack: "ul",
+                    });
+                }
             } else {
                 _bmCharts.totalUploaded.data.labels = [];
                 _bmCharts.totalUploaded.data.datasets[0].data = [];
@@ -6972,11 +7147,23 @@ async function _checkStartup() {
     const overlay = document.getElementById("startup-overlay");
     try {
         const r = await fetch("/api/startup", { headers: { "X-Api-Key": API_KEY } });
+        // Not there at all: the daemon went from starting into rescue mode
+        // (its store would not open). Reload to get what rescue mode serves.
+        if (r.status === 404) { location.reload(); return; }
         if (!r.ok) throw new Error();
         const d = await r.json();
 
+        // The phase the server reports, since 4.4 served while the
+        // catalogue loads instead of after.
+        const phases = {
+            loading: t("Restoring state…"),
+            connecting: t("Connecting to the network…"),
+            opening_store: t("Opening the database…"),
+            starting_workers: t("Starting…"),
+        };
+        if (phases[d.phase]) document.getElementById("startup-phase").textContent = phases[d.phase];
         if (d.total > 0) {
-            document.getElementById("startup-phase").textContent = t("Restoring state…");
+            if (!d.phase) document.getElementById("startup-phase").textContent = t("Restoring state…");
             document.getElementById("startup-restored").textContent = fmtInt(d.restored);
             document.getElementById("startup-total").textContent = fmtInt(d.total);
             const pct = Math.min(100, Math.round((d.restored / d.total) * 100));
@@ -9215,9 +9402,14 @@ let logsEntries = [];
 let logsTailSource = null;
 let _logsInit = false;
 
+// The seq of the newest line the server had when the list was loaded: the
+// live tail starts after it, so nothing is shown twice or skipped.
+let _logsLastSeq = 0;
+let _logsTyping = null;
+
 function logsFilters() {
     return {
-        source: document.getElementById("logs-source").value,
+        module: document.getElementById("logs-source").value,
         level: document.getElementById("logs-level").value,
         since: document.getElementById("logs-since").value,
         q: document.getElementById("logs-q").value.trim(),
@@ -9225,7 +9417,22 @@ function logsFilters() {
 }
 function fmtLogLine(e) {
     const ts = String(e.ts || "").replace("T", " ").replace("Z", "").slice(0, 23);
-    return `${ts}  ${String(e.level || "").padEnd(5)} ${String(e.source || "").padEnd(13)} ${e.msg || ""}`;
+    // The module, short: "announce::runner" says where a line came from;
+    // "rust" (the 3.x source field) said nothing.
+    const mod = String(e.module || "").replace(/^hydranos::/, "");
+    return `${ts}  ${String(e.level || "").padEnd(5)} ${mod.padEnd(20)} ${e.msg || ""}`;
+}
+// The module list comes from the lines the server holds, so it only offers
+// filters that can match.
+function _fillLogModules(modules) {
+    const sel = document.getElementById("logs-source");
+    if (!sel || !Array.isArray(modules)) return;
+    const cur = sel.value;
+    const opts = [`<option value="">${esc(t("All modules"))}</option>`]
+        .concat(modules.map(m => `<option value="${esc(m)}">${esc(m.replace(/^hydranos::/, ""))}</option>`));
+    sel.innerHTML = opts.join("");
+    if (cur && !modules.includes(cur)) sel.insertAdjacentHTML("beforeend", `<option value="${esc(cur)}">${esc(cur)}</option>`);
+    sel.value = cur;
 }
 function renderLogs() {
     const el = document.getElementById("logs-body");
@@ -9238,7 +9445,7 @@ function renderLogs() {
 function logsQuery() {
     const f = logsFilters();
     const qs = new URLSearchParams();
-    if (f.source) qs.set("source", f.source);
+    if (f.module) qs.set("module", f.module);
     if (f.level) qs.set("level", f.level);
     if (f.since) qs.set("since", f.since);
     if (f.q) qs.set("q", f.q);
@@ -9249,7 +9456,11 @@ async function loadLogs() {
         _logsInit = true;
         ["logs-source", "logs-level", "logs-since"].forEach(id =>
             document.getElementById(id).addEventListener("change", onLogsFilterChange));
-        document.getElementById("logs-q").addEventListener("input", onLogsFilterChange);
+        // A pause in typing, not every keystroke: each reload is a request.
+        document.getElementById("logs-q").addEventListener("input", () => {
+            clearTimeout(_logsTyping);
+            _logsTyping = setTimeout(onLogsFilterChange, 300);
+        });
         document.getElementById("logs-tail").addEventListener("change", (ev) => {
             if (ev.target.checked) startLogsTail(); else stopLogsTail();
         });
@@ -9259,6 +9470,8 @@ async function loadLogs() {
     try {
         const d = await api("/api/logs?" + qs.toString());
         logsEntries = d.entries || [];
+        _logsLastSeq = d.last_seq || 0;
+        _fillLogModules(d.modules);
         renderLogs();
     } catch (e) {
         const el = document.getElementById("logs-body");
@@ -9271,15 +9484,22 @@ function onLogsFilterChange() {
 function startLogsTail() {
     stopLogsTail();
     const qs = logsQuery();
+    // Every line the tail sends is new: a period filter would only hide them.
+    qs.delete("since");
+    qs.set("after", String(_logsLastSeq));
     qs.set("apikey", API_KEY);
     logsTailSource = new EventSource("/api/logs/stream?" + qs.toString());
-    logsTailSource.onmessage = (ev) => {
+    // The server names its events "log". `onmessage` only receives unnamed
+    // ones, which is why Live never showed a line in 4.3.
+    logsTailSource.addEventListener("log", (ev) => {
         try {
-            logsEntries.push(JSON.parse(ev.data));
+            const e = JSON.parse(ev.data);
+            _logsLastSeq = Math.max(_logsLastSeq, e.seq || 0);
+            logsEntries.push(e);
             if (logsEntries.length > 5000) logsEntries.splice(0, logsEntries.length - 5000);
             renderLogs();
         } catch {}
-    };
+    });
 }
 function stopLogsTail() {
     if (logsTailSource) { logsTailSource.close(); logsTailSource = null; }
@@ -9589,7 +9809,11 @@ function netModeRender() {
         // in would offer a value that is overwritten at the next boot.
         fields += `<div id="net-wg-body"><p class="sr-desc">${t("Loading…")}</p></div>`;
     }
-    if (mode === "direct" || mode === "gluetun" || mode === "socks5" || mode === "proxy_v2") {
+    if ((mode === "direct" || mode === "gluetun" || mode === "socks5" || mode === "proxy_v2") && !_bindIfaceOK()) {
+        // Linux only: no field, the reason instead (the daemon refuses the key).
+        fields += `<div class="settings-section"><div class="settings-section-title">${t("Interface per engine")}</div>
+            <p class="sr-desc net-warn">${esc(_bindIfaceWhy())}</p></div>`;
+    } else if (mode === "direct" || mode === "gluetun" || mode === "socks5" || mode === "proxy_v2") {
         // One interface per engine. The two engines are independent network
         // identities, and a single shared field could not say so: it put both
         // on one tunnel while the page implied otherwise. Shown with a proxy
@@ -9766,8 +9990,10 @@ function netModeCollect() {
         race_listen_port: num("net-race-port"),
         hoard_listen_port: num("net-hoard-port"),
         enable_ipv6: bool("net-ipv6"),
-        race_bind_interface: document.getElementById("net-race-iface") ? str("net-race-iface") : (prev.race_bind_interface || ""),
-        hoard_bind_interface: document.getElementById("net-hoard-iface") ? str("net-hoard-iface") : (prev.hoard_bind_interface || ""),
+        // Empty where the platform cannot apply it: the daemon refuses any
+        // value there, so carrying an old one back would block every save.
+        race_bind_interface: !_bindIfaceOK() ? "" : document.getElementById("net-race-iface") ? str("net-race-iface") : (prev.race_bind_interface || ""),
+        hoard_bind_interface: !_bindIfaceOK() ? "" : document.getElementById("net-hoard-iface") ? str("net-hoard-iface") : (prev.hoard_bind_interface || ""),
         socks5_host: document.getElementById("net-socks-host") ? str("net-socks-host") : (prev.socks5_host || ""),
         socks5_port: document.getElementById("net-socks-port") ? num("net-socks-port") : (prev.socks5_port || 0),
         socks5_user: document.getElementById("net-socks-user") ? str("net-socks-user") : (prev.socks5_user || ""),
@@ -9797,7 +10023,7 @@ function netModeCollectExtras() {
         return {
             id: e.id,
             role: e.role,
-            bind_interface: iface ? iface.value.trim() : (e.bind_interface || ""),
+            bind_interface: !_bindIfaceOK() ? "" : iface ? iface.value.trim() : (e.bind_interface || ""),
             listen_port: port ? Number(port.value || 0) : (e.listen_port || 0),
         };
     });
@@ -9847,7 +10073,7 @@ async function netModeCheck() {
     // looks like it did nothing at all, so freeze it for the whole run.
     const label = btn ? btn.textContent : "";
     if (btn) { btn.disabled = true; btn.textContent = t("Checking…"); }
-    out.innerHTML = `<div class="result-msg info">${t("Measuring… this takes up to a minute: it asks an outside service where our traffic comes from, then knocks on the port a tracker publishes for us.")}</div>`;
+    out.innerHTML = `<div class="result-msg info">${t("Measuring… this takes up to a minute: it asks an outside service what address the default route shows, then what each engine's trackers and peers see, and compares them. Inbound comes from the peers that actually connected.")}</div>`;
     out.scrollIntoView({ block: "nearest" });
     try {
         const r = await api("/api/network/check", {
@@ -9904,6 +10130,8 @@ function _jobStateLabel(state) {
     switch (state) {
         case "pending": return t("Queued");
         case "running": return t("Running");
+        // A move to a node, waiting for the node to hold a full copy.
+        case "waiting": return t("Waiting for the node");
         case "verifying": return t("Verifying");
         case "done": return t("Done");
         case "failed": return t("Failed");
@@ -9927,7 +10155,7 @@ async function loadJobs() {
     if (activeOnly && activeOnly.checked) {
         // "queued" is what the daemon calls a job waiting its turn; 4.3
         // looked for "pending" and hid every queued job.
-        jobs = jobs.filter(j => ["queued", "pending", "running", "verifying", "cancelling"].includes(j.state));
+        jobs = jobs.filter(j => ["queued", "pending", "running", "verifying", "cancelling", "waiting"].includes(j.state));
     }
     if (jobs.length === 0) {
         tbody.innerHTML = `<tr><td colspan="7">${t("Nothing running.")}</td></tr>`;
@@ -9937,7 +10165,7 @@ async function loadJobs() {
         ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
     tbody.innerHTML = jobs.map(j => {
         const pct = Math.min(100, Math.max(0, j.percent || 0));
-        const running = ["queued", "pending", "running", "verifying"].includes(j.state);
+        const running = ["queued", "pending", "running", "verifying", "waiting"].includes(j.state);
         const target = (j.params && j.params.target) || "";
         // The error is the whole story on a failed job, so it replaces the
         // progress bar rather than hiding in a tooltip.
@@ -9962,7 +10190,7 @@ async function loadJobs() {
 }
 
 async function cancelJob(id) {
-    if (!await hydraConfirm(t("Cancel this job? A waiting job is dropped. A move to another engine stops after the current file and is put back as it was; another running move cannot be interrupted and finishes."))) return;
+    if (!await hydraConfirm(t("Cancel this job? A waiting job is dropped. A move to another engine stops after the current file and is put back as it was; another running move cannot be interrupted and finishes. A move to a node stops waiting: both copies are kept."))) return;
     try {
         const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, {
             method: "DELETE",
@@ -10111,17 +10339,26 @@ function _netPolyMarkup(engines, size) {
     const dots = pts.map((p, i) => {
         const e = engines[i];
         const cls = e.state === "warn" ? "np-node np-warn" : "np-node";
-        return `<g class="${cls}"><title>${esc(e.agent + " — " + _netStateWord(e.state))}</title>` +
+        return `<g class="${cls}"><title>${esc(_netRowName(e) + " — " + _netStateWord(e.state))}</title>` +
             `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${rr}" fill="${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}"/></g>`;
     }).join("");
     return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${ring}${dots}</svg>`;
 }
 
+// What the colour means, said exactly: it is the OUTBOUND exit probe (an echo
+// service asked "what address do you see"), not inbound reachability. 4.3 said
+// "reachable" for a probe that answered, which no peer had tested; inbound is
+// the header's health dot (`/api/port-forward`).
 function _netStateWord(s) {
-    return s === "ok" ? t("reachable")
-        : s === "bad" ? t("unreachable")
+    return s === "ok" ? t("exit probe answered")
+        : s === "bad" ? t("exit probe got no answer")
         : s === "off" ? t("offline")
-        : t("not established yet");
+        : t("no answer yet from its interface");
+}
+
+// A row's name: the engine id (4.3 printed "local" on every row).
+function _netRowName(e) {
+    return e.local === false ? (e.agent || "") : (e.engine || e.agent || "");
 }
 
 async function updateNetPoly() {
@@ -10172,8 +10409,8 @@ function openNetPanel(from) {
         const ip = e.exit_ip ? esc(incoExitIP(e.exit_ip)) : "\u2014";
         const ip6 = e.exit_ip_v6 ? "<br>" + esc(incoExitIP(e.exit_ip_v6)) : "";
         return `<div class="net-row">
-            <div class="nr-dot" style="background:${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}"></div>
-            <div><div class="nr-name">${esc(e.agent)}</div>
+            <div class="nr-dot" style="background:${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}" title="${esc(_netStateWord(e.state) + ". " + t("Outbound only: whether peers can reach this engine is the health dot's tooltip."))}"></div>
+            <div><div class="nr-name">${esc(_netRowName(e))}</div>
                  <div class="nr-sub">${esc(e.role)} · ${where}${port}${e.detail ? " · " + esc(e.detail) : ""}</div></div>
             <div class="nr-ip">${ip}${ip6}</div>
         </div>`;

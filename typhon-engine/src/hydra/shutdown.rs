@@ -26,6 +26,19 @@ pub fn restart_requested() -> bool {
     RESTART.load(Ordering::SeqCst)
 }
 
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// The stop has begun. Set when the drain starts, so the streams that never
+/// end on their own (the event stream, the log tail) end themselves instead
+/// of holding the drain for its whole 5 s budget.
+pub fn begin_stop() {
+    STOPPING.store(true, Ordering::SeqCst);
+}
+
+pub fn stopping() -> bool {
+    STOPPING.load(Ordering::SeqCst)
+}
+
 /// Leave with the restart code. On Windows nothing supervises the process,
 /// so it starts its successor itself first, with the same arguments.
 pub fn exit_for_restart() -> ! {

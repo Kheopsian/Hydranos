@@ -231,6 +231,9 @@ impl EngineHost {
             manager.rates().set_client(client_rates.clone());
             apply_live_settings(&manager, session);
 
+            // So the startup screen can count this engine's restore while
+            // it runs (`startup::snapshot`).
+            crate::startup::register(id, manager.clone());
             let loaded = manager.load_resume_data();
             tracing::info!(engine = id, torrents = loaded, "engine state loaded");
             {
@@ -349,6 +352,7 @@ impl EngineHost {
     /// flag -- it is a different call.
     pub async fn start(config: &Config, config_dir: &std::path::Path) -> Self {
         let host = Self::offline(config, config_dir);
+        crate::startup::set_phase(crate::startup::Phase::Connecting);
         host.connect(config, config_dir).await;
         host
     }
@@ -872,6 +876,14 @@ pub(crate) fn session_socks5_url(session: &crate::config::Session) -> String {
     engine_config(session, dir, dir).map(|c| c.socks5_url()).unwrap_or_default()
 }
 
+/// What an engine would start with from this session, for tests outside
+/// this module.
+#[cfg(test)]
+pub(crate) fn engine_config_for_test(session: &crate::config::Session) -> typhon_engine::config::EngineConfig {
+    let dir = std::path::Path::new("/tmp");
+    engine_config(session, dir, dir).expect("engine config builds")
+}
+
 /// The engine-side config for one session.
 ///
 /// Built through serde rather than a struct literal on purpose: `EngineConfig`
@@ -900,6 +912,7 @@ fn engine_config(
         "enable_webseed": session.enable_webseed,
         "enable_ipv6": session.enable_ipv6,
         "max_connections": session.max_connections.max(0),
+        "max_dials_per_sec": if session.max_dials_per_sec.is_finite() { session.max_dials_per_sec.max(0.0) } else { 0.0 },
         "max_uploads_per_torrent": session.max_uploads_per_torrent.clamp(i32::MIN as i64, i32::MAX as i64),
         // Rate caps, the idle timeout and the choker: the same values
         // `apply_live_settings` puts on the running engine, so a start and a

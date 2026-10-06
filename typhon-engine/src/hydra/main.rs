@@ -89,6 +89,8 @@ mod watch;
 mod mcp;
 mod session;
 mod shutdown;
+mod startup;
+mod obs;
 
 use config::Config;
 
@@ -355,7 +357,8 @@ fn attach_console(_force: bool) {}
 async fn rescue(
     store_path: &std::path::Path,
     config_path: &std::path::Path,
-    addr: &str,
+    slot: &std::sync::OnceLock<axum::Router>,
+    serve: tokio::task::JoinHandle<std::io::Result<()>>,
     why: &str,
 ) -> anyhow::Result<()> {
     // A diagnosis that itself fails must still carry the PATH: that is the one
@@ -380,11 +383,13 @@ async fn rescue(
         diagnosis,
         config_path: config_path.to_path_buf(),
     };
-    // The address the operator configured, as in normal mode: 4.3 bound
-    // 0.0.0.0:8199 here whatever api_host said, so an instance kept on
-    // loopback became reachable from the network exactly when it was broken.
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, api::rescue_router(state)).await?;
+    // On the listener normal mode opened, so on the address the operator
+    // configured: 4.3 bound 0.0.0.0:8199 here whatever api_host said, so an
+    // instance kept on loopback became reachable from the network exactly
+    // when it was broken.
+    let _ = slot.set(api::rescue_router(state));
+    startup::set_phase(startup::Phase::Rescue);
+    serve.await.map_err(|e| anyhow::anyhow!("API task: {e}"))??;
     Ok(())
 }
 
@@ -552,6 +557,57 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     let port = if config.daemon.api_port == 0 { 8199 } else { config.daemon.api_port };
     let addr = format!("{host}:{port}");
 
+    // The port opens NOW, before the catalogue loads, behind a gate that
+    // serves the startup screen, /health and /api/startup until the real
+    // router is ready (see `startup`). 4.3 opened it last: minutes of
+    // "connection refused" at a million torrents, and a progress bar that
+    // could never be seen. A port already taken also fails here, in the
+    // first second, instead of after the whole load.
+    startup::started_at();
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!(%addr, "hydra API listening (starting)");
+    let router_slot: Arc<std::sync::OnceLock<axum::Router>> = Arc::new(std::sync::OnceLock::new());
+    let gate = startup::gate(
+        router_slot.clone(),
+        startup::Early {
+            front_only: config.local_engines().is_empty(),
+            needs_setup: config.auth.password_hash.is_empty(),
+            network_storage: bootstrap::network_storage(&config.daemon.data_dir),
+        },
+    );
+    // ⭐⭐ With a shutdown, because for the whole of V4 there was none.
+    //
+    // `axum::serve(..).await` alone never returns, and this process is PID 1
+    // in its container. PID 1 does not get the default disposition of
+    // SIGTERM: with no handler installed the signal is simply DISCARDED. So
+    // `docker stop -t 300` sent a SIGTERM that nothing received, waited the
+    // full five minutes while the daemon kept accepting peers, and then
+    // SIGKILLed a 300k-torrent instance. Every V4 deploy went that way, and
+    // the log said "arrete" as though it had been graceful.
+    //
+    // What that cost: resume state is written by a five-minute sweep
+    // (`session::start`), so a kill throws away up to five minutes of piece
+    // progress and byte counters for every engine, and the next start
+    // re-checks what it lost. 3.x saved on the way out; the port dropped it.
+    //
+    // Installed with the listener, so a stop during the load is heard too:
+    // the load finishes, nothing more starts, and the flush runs.
+    let draining = std::sync::Arc::new(tokio::sync::Notify::new());
+    let drain_started = draining.clone();
+    // with_connect_info so a handler can see who dialled it. One thing needs it:
+    // a node being handed a torrent has to be told where to fetch it from, and
+    // the sender cannot know which of ITS addresses the receiver can reach --
+    // tunnels, NAT, several interfaces. The receiver can: it is the address the
+    // request arrived from.
+    let mut serve = tokio::spawn(std::future::IntoFuture::into_future(
+        axum::serve(listener, gate.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                shutdown::begin_stop();
+                drain_started.notify_one();
+            }),
+    ));
+
     // The engines live here now, not in a child process behind a socket.
     let config_dir = config_path
         .parent()
@@ -562,6 +618,16 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // on a 4.x daemon for the whole life of the project.
     typhon_engine::config::set_version(api::HYDRANOS_VERSION);
     let engine_host = Arc::new(engines::EngineHost::start(&config, &config_dir).await);
+    // Stopped while loading: save what was loaded and leave, rather than
+    // starting a dozen workers only to stop them.
+    if shutdown::stopping() {
+        tracing::warn!("stop requested during startup; flushing and leaving");
+        engine_host.depart_all(std::time::Duration::from_secs(5)).await;
+        flush_on_shutdown(&engine_host, stop_budget);
+        let _ = engine_host.wireguard_down().await;
+        return Ok(());
+    }
+    startup::set_phase(startup::Phase::OpeningStore);
 
     // Same file 3.x writes: the store is what makes the switch reversible.
     let cfg_data_dir = config.daemon.data_dir.clone();
@@ -572,10 +638,11 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     let store = match store::Store::open(&store_path, false) {
         Ok(store) => match store.check_schema() {
             Ok(()) => store,
-            Err(e) => return rescue(&store_path, &config_path, &addr, &e.to_string()).await,
+            Err(e) => return rescue(&store_path, &config_path, &router_slot, serve, &e.to_string()).await,
         },
-        Err(e) => return rescue(&store_path, &config_path, &addr, &e.to_string()).await,
+        Err(e) => return rescue(&store_path, &config_path, &router_slot, serve, &e.to_string()).await,
     };
+    startup::set_phase(startup::Phase::StartingWorkers);
     tracing::info!(torrents = engine_host.total_torrents(), "engines up");
     // What the kill switch covers and what it does not, once the tunnels are
     // up and their DNS is known.
@@ -596,10 +663,26 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Get the listen port forwarded. `portfwd` has been able to do this since
     // it was written and was never once called -- `mod portfwd;` and no call
     // site -- while the interface told Proton users their port was obtained by
-    // NAT-PMP and renewed continuously. One port per engine, deduplicated:
-    // race and hoard listen on different ones.
+    // `bind_interface` outside Linux: said once per engine at startup, in the
+    // words the API and the Network tab use. The engine itself stays off the
+    // network (`typhon_engine::session::start`): no listener, no dial, no
+    // announce -- never half of it in the tunnel and half on the default route.
+    if !typhon_engine::netpin::DEVICE_PIN_SUPPORTED {
+        for engine in engine_host.engines() {
+            if !engine.bind_interface.trim().is_empty() {
+                tracing::warn!(
+                    engine = %engine.id,
+                    bind_interface = %engine.bind_interface.trim(),
+                    "{} -- this engine will not announce, accept or dial any peer until the key is removed",
+                    typhon_engine::netpin::UNSUPPORTED
+                );
+            }
+        }
+    }
+
+    // NAT-PMP and renewed continuously. One mapper per engine (engines never
+    // share a port, `Config::local_engines`), following the engine's live port.
     if config.auto_port_forward {
-        let mut asked = std::collections::BTreeSet::new();
         let mode = netmode::current(&config);
         let default_iface = portmap::default_interface();
         for engine in engine_host.engines() {
@@ -612,10 +695,11 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
                 killswitch::home_mapping_refusal(mode, &engine.session, tunnelled, default_iface.as_deref())
             {
                 tracing::info!(engine = %engine.id, "port mapping: no UPnP/NAT-PMP request to the home router: {why}");
+                portmap::record_refusal(&engine.id, engine.listen_port, &why);
                 continue;
             }
-            if engine.listen_port != 0 && asked.insert(engine.listen_port) {
-                portmap::spawn(engine.listen_port);
+            if engine.listen_port != 0 {
+                portmap::spawn(engine.id.clone(), engine.manager.clone(), engine.listen_port);
             }
         }
     }
@@ -895,6 +979,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // The job runner. One task, one job at a time -- see the module header for
     // why concurrency buys nothing here.
     jobsrun::spawn(state.clone());
+    // Moves to a node waiting for the far side to hold a full copy: their own
+    // watcher, so an hours-long wait never holds the runner's single slot.
+    api::spawn_handoff_watcher(state.clone());
 
     // The workflow timer, before the router takes ownership of the state.
     // It waits two minutes of its own so it never fires against a catalogue
@@ -914,6 +1001,8 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Keeps the hardlink index the workflows read, instead of each pass
     // stat-ing the whole catalogue itself.
     linkscan::spawn(state.engines.clone(), state.store.clone());
+    // The anomaly pass behind /api/health/anomalies and the MCP `health` tool.
+    workers::spawn_health_scan(state.engines.clone());
 
     // Taken before the router consumes the state: `flush_on_shutdown` needs the
     // engines, and by then `state` has been moved.
@@ -941,47 +1030,19 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
             }),
         );
     }
-    let app = api::router(state);
+    // The hand-over: from here every request reaches the real router.
+    let _ = router_slot.set(api::router(state));
+    startup::set_phase(startup::Phase::Ready);
+    tracing::info!(%addr, "hydra API ready");
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!(%addr, "hydra API listening");
-    // with_connect_info so a handler can see who dialled it. One thing needs it:
-    // a node being handed a torrent has to be told where to fetch it from, and
-    // the sender cannot know which of ITS addresses the receiver can reach --
-    // tunnels, NAT, several interfaces. The receiver can: it is the address the
-    // request arrived from.
-    // ⭐⭐ With a shutdown, because for the whole of V4 there was none.
-    //
-    // `axum::serve(..).await` alone never returns, and this process is PID 1
-    // in its container. PID 1 does not get the default disposition of
-    // SIGTERM: with no handler installed the signal is simply DISCARDED. So
-    // `docker stop -t 300` sent a SIGTERM that nothing received, waited the
-    // full five minutes while the daemon kept accepting peers, and then
-    // SIGKILLed a 300k-torrent instance. Every V4 deploy went that way, and
-    // the log said "arrete" as though it had been graceful.
-    //
-    // What that cost: resume state is written by a five-minute sweep
-    // (`session::start`), so a kill throws away up to five minutes of piece
-    // progress and byte counters for every engine, and the next start
-    // re-checks what it lost. 3.x saved on the way out; the port dropped it.
-    //
     // ⚠ The drain is bounded. A graceful shutdown waits for every open
     // connection, and the UI keeps two that never end on their own (the event
     // stream and the live log tail): with a tab open, 4.3 never reached the
-    // flush and the supervisor's SIGKILL arrived first. Five seconds is
-    // enough for any real request to finish.
-    let draining = std::sync::Arc::new(tokio::sync::Notify::new());
-    let drain_started = draining.clone();
-    let serve = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        shutdown_signal().await;
-        drain_started.notify_one();
-    });
+    // flush and the supervisor's SIGKILL arrived first. Both now end
+    // themselves when the stop begins (`shutdown::begin_stop`); five seconds
+    // stay the bound for anything else.
     tokio::select! {
-        r = std::future::IntoFuture::into_future(serve) => r?,
+        r = &mut serve => r.map_err(|e| anyhow::anyhow!("API task: {e}"))??,
         _ = async {
             draining.notified().await;
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;

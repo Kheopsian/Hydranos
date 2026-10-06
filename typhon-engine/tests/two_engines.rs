@@ -173,7 +173,7 @@ async fn a_leecher_downloads_a_whole_torrent_from_a_seeder_over_a_real_socket() 
                 port,
                 mgr,
                 disk,
-                None,
+                typhon_engine::peer::UtpHandle::off(),
                 listening,
             )
             .await;
@@ -291,7 +291,7 @@ async fn a_piece_that_fails_its_hash_is_not_kept() {
                 port,
                 mgr,
                 disk,
-                None,
+                typhon_engine::peer::UtpHandle::off(),
                 listening,
             )
             .await;
@@ -611,7 +611,7 @@ async fn spawn_seeder(tag: &str, torrent: &[u8], data: &[u8], peer_id: [u8; 20])
                 port,
                 mgr,
                 disk,
-                None,
+                typhon_engine::peer::UtpHandle::off(),
                 listening,
             )
             .await;

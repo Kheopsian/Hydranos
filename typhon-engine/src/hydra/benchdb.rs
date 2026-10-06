@@ -64,8 +64,18 @@ CREATE TABLE IF NOT EXISTS bench_samples (
     hoard_announce_concurrency REAL DEFAULT 0,
     hoard_announce_latency_ms REAL DEFAULT 0,
     hoard_announce_throttled_pct REAL DEFAULT 0,
-    hoard_announce_in_flight REAL DEFAULT 0);
+    hoard_announce_in_flight REAL DEFAULT 0,
+    hoard_download_rate REAL DEFAULT 0,
+    extra_upload_rate REAL DEFAULT 0,
+    extra_download_rate REAL DEFAULT 0,
+    extra_peers REAL DEFAULT 0,
+    extra_uploading REAL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_bench_ts ON bench_samples(ts);
+CREATE TABLE IF NOT EXISTS engine_samples (
+    ts REAL NOT NULL, engine TEXT NOT NULL,
+    upload_rate REAL DEFAULT 0, download_rate REAL DEFAULT 0,
+    peers REAL DEFAULT 0, uploading REAL DEFAULT 0, torrents REAL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_engine_samples_ts ON engine_samples(ts);
 CREATE TABLE IF NOT EXISTS tracker_samples (
     ts REAL NOT NULL, engine TEXT NOT NULL, tracker TEXT NOT NULL,
     upload_rate REAL DEFAULT 0, download_rate REAL DEFAULT 0,
@@ -134,13 +144,16 @@ pub const BENCH_COLUMNS: &str = "ts, race_upload_rate, race_download_rate, race_
      race_announce_needed, race_announce_late, race_announce_lag_p50, race_announce_lag_p90, race_announce_concurrency, race_announce_latency_ms, \
      hoard_announce_needed, hoard_announce_late, hoard_announce_lag_p50, hoard_announce_lag_p90, hoard_announce_concurrency, hoard_announce_latency_ms, \
      race_announce_throttled_pct, hoard_announce_throttled_pct, \
-     race_announce_in_flight, hoard_announce_in_flight";
+     race_announce_in_flight, hoard_announce_in_flight, \
+     hoard_download_rate, extra_upload_rate, extra_download_rate, extra_peers, extra_uploading";
 
 /// Columns added to `bench_samples` after databases already existed in the
 /// field. `CREATE TABLE IF NOT EXISTS` does not touch a table that is there,
 /// so an existing bench.db would lack them and every insert naming them would
 /// fail -- the sampler would stop recording anything at all.
-const ADDED_COLUMNS: &[&str] = &["race_announce_needed", "race_announce_late", "race_announce_lag_p50", "race_announce_lag_p90", "race_announce_concurrency", "race_announce_latency_ms", "race_announce_throttled_pct", "race_announce_in_flight", "hoard_announce_needed", "hoard_announce_late", "hoard_announce_lag_p50", "hoard_announce_lag_p90", "hoard_announce_concurrency", "hoard_announce_latency_ms", "hoard_announce_throttled_pct", "hoard_announce_in_flight"];
+const ADDED_COLUMNS: &[&str] = &["race_announce_needed", "race_announce_late", "race_announce_lag_p50", "race_announce_lag_p90", "race_announce_concurrency", "race_announce_latency_ms", "race_announce_throttled_pct", "race_announce_in_flight", "hoard_announce_needed", "hoard_announce_late", "hoard_announce_lag_p50", "hoard_announce_lag_p90", "hoard_announce_concurrency", "hoard_announce_latency_ms", "hoard_announce_throttled_pct", "hoard_announce_in_flight",
+    // 4.4: the engines beyond race and hoard, summed, and hoard's download.
+    "hoard_download_rate", "extra_upload_rate", "extra_download_rate", "extra_peers", "extra_uploading"];
 
 fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
     let have: std::collections::HashSet<String> = {
@@ -154,6 +167,17 @@ fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// One extra engine's figures at one sample.
+#[derive(Debug, Clone, Default)]
+pub struct EngineSample {
+    pub engine: String,
+    pub upload_rate: f64,
+    pub download_rate: f64,
+    pub peers: f64,
+    pub uploading: f64,
+    pub torrents: f64,
 }
 
 /// One recorded moment in a torrent's life.
@@ -549,6 +573,61 @@ impl BenchDb {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// One row per engine beyond `race` and `hoard`, beside the sample.
+    ///
+    /// Their own table rather than columns: `bench_samples` has a column per
+    /// figure per engine NAME, and an `[[engine]]` block's name is whatever
+    /// the operator chose.
+    pub fn record_engine_samples(&self, ts: f64, rows: &[EngineSample]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO engine_samples (ts, engine, upload_rate, download_rate, peers, uploading, torrents) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for r in rows {
+                stmt.execute(rusqlite::params![ts, r.engine, r.upload_rate, r.download_rate, r.peers, r.uploading, r.torrents])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every extra engine's rows between two instants, averaged per `bucket`
+    /// seconds, oldest first: engine -> rows.
+    pub fn engine_samples_in_range(
+        &self,
+        start: f64,
+        end: f64,
+        bucket: f64,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, Vec<serde_json::Value>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT engine, CAST(ts / ?3 AS INTEGER) * ?3 AS b, AVG(upload_rate), AVG(download_rate), \
+                    AVG(peers), AVG(uploading), AVG(torrents) \
+               FROM engine_samples WHERE ts >= ?1 AND ts <= ?2 \
+              GROUP BY engine, b ORDER BY engine, b",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![start, end, bucket.max(1.0)], |r| {
+            let engine: String = r.get(0)?;
+            let n = |i: usize| crate::row::num_json(r.get::<_, f64>(i).unwrap_or(0.0));
+            Ok((
+                engine,
+                serde_json::json!({
+                    "ts": n(1), "upload_rate": n(2), "download_rate": n(3),
+                    "peers": n(4), "uploading": n(5), "torrents": n(6),
+                }),
+            ))
+        })?;
+        let mut out: std::collections::BTreeMap<String, Vec<serde_json::Value>> = Default::default();
+        for (engine, row) in rows.filter_map(|r| r.ok()) {
+            out.entry(engine).or_default().push(row);
+        }
+        Ok(out)
+    }
+
     /// Append one tracker pass, in one transaction.
     ///
     /// One commit per row was ~20 fsyncs every pass in the rollback journal,
@@ -771,13 +850,13 @@ impl BenchDb {
         };
 
         let mut records = Vec::new();
-        if let Some((ts, v)) = sustained("race_upload_rate + hoard_upload_rate") {
+        if let Some((ts, v)) = sustained("race_upload_rate + hoard_upload_rate + extra_upload_rate") {
             records.push(rec("Peak upload", v * 8.0 / 1e9, "Gbps", ts, true));
         }
-        if let Some((ts, v)) = sustained("race_download_rate") {
+        if let Some((ts, v)) = sustained("race_download_rate + hoard_download_rate + extra_download_rate") {
             records.push(rec("Peak download", v * 8.0 / 1e9, "Gbps", ts, false));
         }
-        if let Some((ts, v)) = peak("race_peers + hoard_peers") {
+        if let Some((ts, v)) = peak("race_peers + hoard_peers + extra_peers") {
             records.push(rec("Peak swarm peers", v.round(), "", ts, false));
         }
         if let Ok((ts, delta)) = self.conn.query_row(
@@ -1007,6 +1086,40 @@ pub type Shared = Arc<Mutex<BenchDb>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #92: an `[[engine]]` block is charted from its own rows, and counted
+    /// in the Records through the `extra_*` sums.
+    #[test]
+    fn extra_engines_are_recorded_and_counted_in_the_records() {
+        let db = BenchDb::open_in_memory().unwrap();
+        let row = |e: &str, up: f64| EngineSample { engine: e.into(), upload_rate: up, peers: 3.0, torrents: 1.0, ..Default::default() };
+        for i in 0..12 {
+            let ts = 1_000.0 + i as f64 * 5.0;
+            db.record_sample(&serde_json::json!({
+                "ts": ts, "race_upload_rate": 10.0, "hoard_upload_rate": 10.0,
+                "extra_upload_rate": 1_000.0, "extra_peers": 6.0,
+            }))
+            .unwrap();
+            db.record_engine_samples(ts, &[row("vpn1", 600.0), row("vpn2", 400.0)]).unwrap();
+        }
+        let by_engine = db.engine_samples_in_range(0.0, 5_000.0, 60.0).unwrap();
+        assert_eq!(by_engine.keys().collect::<Vec<_>>(), ["vpn1", "vpn2"]);
+        assert_eq!(by_engine["vpn1"][0]["upload_rate"], 600.0);
+
+        let rec = db.records_payload().unwrap();
+        let peak = rec["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["label"] == "Peak upload")
+            .unwrap()["value"]
+            .as_f64()
+            .unwrap();
+        // (10 + 10 + 1000) B/s in Gbps, rounded to two places by the payload.
+        assert!((peak - (1020.0 * 8.0 / 1e9)).abs() < 0.01, "{peak}");
+        let peers = rec["records"].as_array().unwrap().iter().find(|r| r["label"] == "Peak swarm peers").unwrap()["value"].clone();
+        assert_eq!(peers, 6.0, "race_peers + hoard_peers + extra_peers");
+    }
 
     /// A bench.db written by an older release lacks the announce-health
     /// columns. Opening it must add them, or the first insert fails and the

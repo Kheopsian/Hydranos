@@ -10,7 +10,7 @@
 //! the priority effectively random, because a parked torrent reports none.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 /// The host part of a tracker announce URL.
@@ -216,20 +216,62 @@ pub struct Cache {
     errors: RwLock<HashMap<(String, String), Window>>,
     /// host -> what the last announce self-check saw.
     verify: RwLock<HashMap<String, Verify>>,
+    /// host -> lifetime (ok, failed) announces, for /metrics. Monotonic like
+    /// the engine totals, so Prometheus can `rate()` them per tracker; the
+    /// windowed `errors` above answers "what is wrong now" and cannot.
+    per_host: RwLock<HashMap<String, Arc<HostOutcomes>>>,
+}
+
+/// One tracker's lifetime announce outcomes.
+#[derive(Default)]
+pub struct HostOutcomes {
+    pub ok: std::sync::atomic::AtomicU64,
+    pub failed: std::sync::atomic::AtomicU64,
 }
 
 impl Cache {
-    pub fn count_ok(&self) {
+    pub fn count_ok(&self, host: &str) {
         self.announces_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.host(host).ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn count_failed(&self) {
         self.announces_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The outcome counters of one host, created on first use. A read lock on
+    /// the announce path: the table holds one entry per tracker, and only a
+    /// tracker seen for the first time takes the write lock.
+    fn host(&self, host: &str) -> Arc<HostOutcomes> {
+        if let Some(h) = self.per_host.read().unwrap_or_else(|e| e.into_inner()).get(host) {
+            return h.clone();
+        }
+        self.per_host
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(host.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// host -> (ok, failed) announces since this process started.
+    pub fn host_outcomes(&self) -> Vec<(String, u64, u64)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut out: Vec<(String, u64, u64)> = self
+            .per_host
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(h, c)| (h.clone(), c.ok.load(Relaxed), c.failed.load(Relaxed)))
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Record a failure under its class, for the trackers tab.
     pub fn count_failed_kind(&self, host: &str, class: &str) {
         self.count_failed();
+        self.host(host).failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.count_failed_kind_at(host, class, now_min());
     }
 
@@ -244,6 +286,7 @@ impl Cache {
         event: &str,
     ) {
         self.count_failed();
+        self.host(host).failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.count_failed_message_at(host, class, Some((message, info_hash, event)), now_min());
     }
 
@@ -444,6 +487,22 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// /metrics' per-tracker counters: lifetime and per host, both outcomes,
+    /// and the engine totals still add up.
+    #[test]
+    fn outcomes_are_counted_per_host() {
+        let c = Cache::default();
+        c.count_ok("a.example");
+        c.count_ok("a.example");
+        c.count_failed_kind("a.example", "timeout");
+        c.count_failed_message("b.example", "other", "boom", "00", "started");
+        assert_eq!(
+            c.host_outcomes(),
+            vec![("a.example".to_string(), 2, 1), ("b.example".to_string(), 0, 1)]
+        );
+        assert_eq!(c.outcomes(), (2, 2));
+    }
 
     fn entry(complete: i64) -> Entry {
         Entry {

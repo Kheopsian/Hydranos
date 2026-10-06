@@ -284,12 +284,15 @@ pub async fn describe(location: &str) -> Result<Gateway, String> {
         .ok_or_else(|| format!("{location} describes no port mapping service"))
 }
 
-/// Ask for one mapping.
+/// Ask for one mapping. `protocol` is `"TCP"` or `"UDP"`: an engine needs
+/// both, TCP for its listener and UDP for uTP and the DHT, which share the
+/// same port number.
 pub async fn add_mapping(
     gateway: &Gateway,
     internal_ip: &str,
     internal_port: u16,
     external_port: u16,
+    protocol: &str,
     lease: Duration,
 ) -> Result<(), String> {
     let body = add_mapping_body(
@@ -297,7 +300,7 @@ pub async fn add_mapping(
         internal_ip,
         internal_port,
         external_port,
-        "TCP",
+        protocol,
         lease,
     );
     let client = reqwest::Client::builder()
@@ -552,7 +555,7 @@ mod io_tests {
             control_url: url,
             service_type: "urn:schemas-upnp-org:service:WANIPConnection:1".into(),
         };
-        rt().block_on(add_mapping(&g, "192.168.99.50", 16171, 16171, Duration::from_secs(3600)))
+        rt().block_on(add_mapping(&g, "192.168.99.50", 16171, 16171, "TCP", Duration::from_secs(3600)))
             .expect("the router accepted");
 
         let req = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a request arrived");
@@ -583,7 +586,7 @@ mod io_tests {
             service_type: "urn:schemas-upnp-org:service:WANIPConnection:1".into(),
         };
         let err = rt()
-            .block_on(add_mapping(&g, "192.168.99.50", 16171, 16171, Duration::from_secs(3600)))
+            .block_on(add_mapping(&g, "192.168.99.50", 16171, 16171, "TCP", Duration::from_secs(3600)))
             .expect_err("718 is a refusal");
         assert!(err.contains("already mapped"), "{err}");
         assert!(err.contains("718"), "the number is there for searching: {err}");

@@ -317,8 +317,29 @@ fn sample_once(
 
     let (race_up, race_down, race_peers, race_torrents, _race_with, race_uploading) =
         gauges("race");
-    let (hoard_up, _hoard_down, hoard_peers, _hoard_torrents, hoard_with, hoard_uploading) =
+    let (hoard_up, hoard_down, hoard_peers, _hoard_torrents, hoard_with, hoard_uploading) =
         gauges("hoard");
+    // Every engine beyond the two the columns are named after: one row each
+    // in `engine_samples`, and their sum in the `extra_*` columns so the
+    // Records and the totals count them. 4.3 sampled `race` and `hoard` by
+    // name and an `[[engine]]` block was in no chart and no record.
+    let extra: Vec<crate::benchdb::EngineSample> = engines
+        .engines()
+        .iter()
+        .filter(|e| e.id != "race" && e.id != "hoard")
+        .map(|e| {
+            let (up, down, peers, torrents, _with, uploading) = gauges(&e.id);
+            crate::benchdb::EngineSample {
+                engine: e.id.clone(),
+                upload_rate: up,
+                download_rate: down,
+                peers,
+                uploading,
+                torrents,
+            }
+        })
+        .collect();
+    let extra_sum = |f: fn(&crate::benchdb::EngineSample) -> f64| extra.iter().map(f).sum::<f64>();
 
     // The lifetime figure is the stored baseline plus what the loaded torrents
     // account for, the same sum the status route publishes. Sampling the
@@ -431,10 +452,16 @@ fn sample_once(
         "hoard_announce_concurrency": hoard_h[4],
         "hoard_announce_latency_ms": hoard_h[5],
         "hoard_announce_throttled_pct": hoard_h[6],
+        "hoard_download_rate": hoard_down,
+        "extra_upload_rate": extra_sum(|e| e.upload_rate),
+        "extra_download_rate": extra_sum(|e| e.download_rate),
+        "extra_peers": extra_sum(|e| e.peers),
+        "extra_uploading": extra_sum(|e| e.uploading),
     });
 
     let db = bench.lock().unwrap_or_else(|e| e.into_inner());
     db.record_sample(&sample)?;
+    db.record_engine_samples(ts, &extra)?;
     Ok(())
 }
 

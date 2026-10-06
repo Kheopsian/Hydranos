@@ -8,15 +8,15 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-const NATPMP_PORT: u16 = 5351;
+pub(crate) const NATPMP_PORT: u16 = 5351;
 const VERSION: u8 = 0;
-const OP_MAP_UDP: u8 = 1;
-const OP_MAP_TCP: u8 = 2;
+pub(crate) const OP_MAP_UDP: u8 = 1;
+pub(crate) const OP_MAP_TCP: u8 = 2;
 const TIMEOUT: Duration = Duration::from_secs(3);
 /// RFC 6886 asks for exponential backoff. Four tries over about twelve seconds
 /// is enough to ride out a tunnel that has just come up and is not yet passing
 /// traffic -- which is exactly when the first request is made.
-const ATTEMPTS: usize = 4;
+pub(crate) const ATTEMPTS: usize = 4;
 
 /// What the gateway granted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,27 +81,7 @@ pub fn result_text(code: u16) -> &'static str {
     }
 }
 
-/// Ask once, retrying on silence.
-pub async fn map(
-    gateway: IpAddr,
-    tcp: bool,
-    internal: u16,
-    suggested: u16,
-    lifetime: Duration,
-) -> Result<Mapping, String> {
-    map_to(
-        SocketAddr::new(gateway, NATPMP_PORT),
-        tcp,
-        internal,
-        suggested,
-        lifetime,
-        ATTEMPTS,
-        None,
-    )
-    .await
-}
-
-/// The same, to a chosen address and with a chosen number of tries.
+/// Ask a gateway for one mapping, retrying on silence.
 ///
 /// The port is a constant in the protocol and the retry count is a constant in
 /// the spec, which between them made this function unreachable from a test: a
@@ -227,21 +207,27 @@ pub fn spawn_follower(
                         // The listener task may not have registered its
                         // rebind channel yet on the first grant: retried for
                         // a few seconds rather than a whole renewal.
-                        let mut moved = false;
+                        // Awaited, so announces are released only once the
+                        // port is really bound.
+                        let mut moved = Err(String::new());
                         for _ in 0..50 {
-                            if manager.request_listen_rebind(m.external_port) {
-                                moved = true;
+                            moved = manager.rebind_listener(m.external_port).await;
+                            if moved.is_ok() {
                                 break;
                             }
                             tokio::time::sleep(Duration::from_millis(200)).await;
                         }
-                        if moved {
-                            tracing::info!(engine = %engine, from = applied, to = m.external_port, "wireguard port forward: listening on the forwarded port");
-                            applied = m.external_port;
-                            manager.set_port_pending(false);
-                            sink.forwarded(applied);
-                        } else {
-                            tracing::warn!(engine = %engine, port = m.external_port, "wireguard port forward: the listener is not up, announces stay held");
+                        match moved {
+                            Ok(_) => {
+                                tracing::info!(engine = %engine, from = applied, to = m.external_port, "wireguard port forward: listening on the forwarded port");
+                                applied = m.external_port;
+                                manager.set_port_pending(false);
+                                sink.forwarded(applied);
+                            }
+                            Err(e) => {
+                                tracing::warn!(engine = %engine, port = m.external_port, error = %e, "wireguard port forward: the listener did not move, announces stay held");
+                                sink.failed(format!("forwarded port {} not listened on: {e}", m.external_port));
+                            }
                         }
                     }
                     last_error.clear();

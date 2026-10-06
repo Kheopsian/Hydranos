@@ -26,7 +26,12 @@ static INDEX_HTML: &str = include_str!("../../../web/templates/index.html");
 /// egress is not the fleet's, and showing an address no torrent announces from
 /// is worse than showing nothing.
 pub async fn index(State(state): State<AppState>) -> Response {
-    let front_only = state.engines.engines().is_empty();
+    page(state.engines.engines().is_empty())
+}
+
+/// The page, with or without its engine panels. Also served while the
+/// daemon is still starting, so the startup screen has a page to draw on.
+pub fn page(front_only: bool) -> Response {
     let html = render(INDEX_HTML, front_only);
     (
         StatusCode::OK,

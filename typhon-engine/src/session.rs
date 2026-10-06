@@ -38,6 +38,19 @@ pub async fn start(
     if !config.pex_enabled {
         info!("[engine] PEX disabled by config: ut_pex is not advertised, and an incoming PEX message is ignored");
     }
+    // `bind_interface` where no socket can be pinned (anything but Linux):
+    // the engine stays off the network rather than half of it following the
+    // tunnel. Its listener, peer dials and announces refuse on their own
+    // (`netpin::pin_fd`, `tracker::http::pin_builder`); DHT, LSD and uTP are
+    // simply not opened.
+    let unpinnable = !crate::netpin::DEVICE_PIN_SUPPORTED && !config.bind_device.trim().is_empty();
+    if unpinnable {
+        error!(
+            "[engine] {} — bind_interface = {:?}: this engine accepts no peer, dials none and announces nothing",
+            crate::netpin::UNSUPPORTED,
+            config.bind_device.trim()
+        );
+    }
 
     // Bootstrap DHT (BEP 5). Non-private torrents will get a get_peers stream
     // that funnels discovered peers into the dial queue.
@@ -50,6 +63,7 @@ pub async fn start(
     // `dht::dht_policy`); pinned to the engine's device otherwise, so an
     // engine in a tunnel runs its DHT through that tunnel.
     match crate::dht::dht_policy(config) {
+        _ if unpinnable => {}
         crate::dht::Discovery::On => {
             let device = Some(config.bind_device.trim()).filter(|d| !d.is_empty());
             if let Some(session) = crate::dht::DhtSession::start(device).await {
@@ -75,17 +89,16 @@ pub async fn start(
     // is UDP multicast, which no SOCKS5 proxy carries. Pinned to the engine's
     // device like the DHT; a socket that cannot join leaves LSD off, nothing
     // else.
-    crate::lsd::start(mgr.clone(), config).await;
+    if !unpinnable {
+        crate::lsd::start(mgr.clone(), config).await;
+    }
 
     // BEP 19 webseed. Started after the resume load so the very first scan
     // already sees the whole catalogue.
     crate::webseed::start(mgr.clone(), &config);
 
-    // Bind shared uTP socket on the same UDP port as TCP listen_port (qBittorrent default).
-    // Used both for outgoing (dial fallback) and incoming (separate accept loop).
-    // max_live_vsocks default is 128 which saturates immediately on a seedbox with
-    // thousands of peers — new uTP dials get rejected with TooManyActiveConnections.
-    // Bumped to 4096 (2026-04-17 investigation: 70% of uTP fails were "error"=saturated).
+    // One uTP socket on the same UDP port as TCP listen_port (qBittorrent
+    // default), for outgoing (dial fallback) and incoming (its accept loop).
     let listen_port = config.listen_port;
     // Before ANY socket is opened: every one of them is pinned to this device.
     // The device travels inside each binding's Egress rather than a global, so
@@ -135,44 +148,30 @@ pub async fn start(
     // with a SOCKS5 proxy no longer needs it to stay hidden: its OUTBOUND uTP
     // is refused in `tracker::open_peer` whatever this says. What is left is
     // incoming uTP, which only answers a peer that already found us.
-    let utp_socket = if std::env::var("TYPHON_DISABLE_UTP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+    // The socket sits in a handle a listen-port rebind replaces
+    // (`peer::UtpHandle`), so the port moves for uTP as it does for TCP.
+    let utp = if std::env::var("TYPHON_DISABLE_UTP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
         info!("[engine] uTP disabled via TYPHON_DISABLE_UTP — TCP-only dial+listen");
-        None
+        crate::peer::UtpHandle::off()
+    } else if unpinnable {
+        crate::peer::UtpHandle::off()
     } else {
-        let utp_bind: std::net::SocketAddr = format!("0.0.0.0:{}", listen_port).parse().unwrap();
-        let mut utp_opts = librqbit_utp::SocketOpts::default();
-        utp_opts.max_live_vsocks = std::num::NonZeroUsize::new(4096);
-        // uTP is raw UDP and gets the same device pin as everything else.
-        // Without it the tunnel steering would hold for TCP and leak for uTP,
-        // which is the shape of leak nobody notices: it is the same swarm.
-        let utp_dev = egress
-            .device()
-            .map(|d| d.parse::<librqbit_utp::BindDevice>())
-            .transpose();
-        match utp_dev {
+        match crate::peer::UtpHandle::bind(listen_port, egress.device()).await {
+            Ok(h) => {
+                info!("[engine] uTP socket bound on 0.0.0.0:{}", listen_port);
+                h
+            }
             // The message always said "refusing to open it"; 4.3 then opened
             // it anyway with no device, so an interface missing at startup (a
             // tunnel not up yet) sent every uTP dial out by the default route.
             // Refused for real now: TCP-only until a restart finds the device.
             Err(e) => {
-                error!("[engine] bind_device is not usable for the uTP socket: {} — uTP disabled rather than leak the default route; restart once the interface is up", e);
-                None
-            }
-            Ok(utp_dev) => {
-                let udp_opts = librqbit_utp::UtpSocketUdpOpts { bind_device: utp_dev.as_ref() };
-                match librqbit_utp::UtpSocketUdp::new_udp_with_opts(utp_bind, utp_opts, udp_opts).await {
-                    Ok(s) => {
-                        info!("[engine] uTP socket bound on {}", utp_bind);
-                        Some(s)
-                    }
-                    Err(e) => {
-                        error!("[engine] failed to bind uTP socket on {}: {} — uTP disabled", utp_bind, e);
-                        None
-                    }
-                }
+                error!("[engine] {} — uTP disabled rather than leak the default route; restart once the interface is up", e);
+                crate::peer::UtpHandle::off()
             }
         }
     };
+    let utp_socket = utp.get();
 
     // Start TCP listener for incoming peers (+ uTP accept loop if socket bound)
     // Multi-binding: each binding has its own peer_id and (addr, port). Empty
@@ -189,7 +188,7 @@ pub async fn start(
     }
     let tm = mgr.clone();
     let dm = disk.clone();
-    let utp_for_listen = utp_socket.clone();
+    let utp_for_listen = utp.clone();
     let bindings_for_listen = resolved_bindings.clone();
     let listening_for_listen = listening.clone();
     tokio::spawn(async move {
@@ -238,7 +237,7 @@ pub async fn start(
     // effect -- it starts biting at this upgrade.
     mgr.limiter().set_max_connections(config.max_connections);
     mgr.limiter().set_max_dials_per_sec(config.max_dials_per_sec);
-    crate::tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp_socket.clone(), config.max_dials_per_sec, mgr.limiter().clone());
+    crate::tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp.clone(), config.max_dials_per_sec, mgr.limiter().clone());
 
     // The choker: spawned always, OFF unless `choking = true`. It was removed
     // outright in 2.4.13-typhon -- ticking every 10 s and choking all but the

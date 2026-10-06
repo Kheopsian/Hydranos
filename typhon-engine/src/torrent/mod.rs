@@ -109,6 +109,11 @@ impl RemoveTimings {
     }
 }
 
+/// Slots of `TorrentManager::cached_status_counts`: one per `TorrentStatus`
+/// discriminant (0..=4), then the paused torrents, whatever their status.
+pub const STATUS_SLOTS: usize = 6;
+pub const STATUS_PAUSED: usize = 5;
+
 pub struct TorrentManager {
     torrents: DashMap<InfoHash, Arc<TorrentState>>,
     data_dir: String,
@@ -126,6 +131,15 @@ pub struct TorrentManager {
     pub cached_active_peers: std::sync::atomic::AtomicUsize,
     pub cached_torrents_with_peers: std::sync::atomic::AtomicUsize,
     pub cached_torrents_uploading: std::sync::atomic::AtomicUsize,
+    /// Torrents per `TorrentStatus`, indexed by its discriminant, plus the
+    /// paused ones at `STATUS_PAUSED`. Counted by the same walk, so /metrics
+    /// and the anomaly report read a count instead of scanning a million
+    /// torrents per request.
+    pub cached_status_counts: [std::sync::atomic::AtomicUsize; STATUS_SLOTS],
+    /// Resume records this engine has to restore at startup, and how many it
+    /// has gone through. The startup screen reads them while the load runs.
+    pub restore_total: std::sync::atomic::AtomicUsize,
+    pub restore_done: std::sync::atomic::AtomicUsize,
     /// Cumulative bytes every torrent of this engine has moved, summed by the
     /// same `update_rates` walk. The header asked for these once a second per
     /// open tab, and each ask cloned the whole catalogue into a Vec to add two
@@ -190,16 +204,18 @@ pub struct TorrentManager {
     /// guarantee only these can reach the PROXY v2 port; the header carries an
     /// attacker-chosen peer IP otherwise.
     trusted_proxy_sources: std::sync::OnceLock<Vec<std::net::IpAddr>>,
-    /// Runtime listen-port rebind signal for this engine's TCP listener. The
-    /// RPC `set_listen_port` sends the new port here and the supervisor in
-    /// `peer::listen` rebinds without restarting: torrents and live peer
-    /// connections are untouched.
-    rebind_tx: std::sync::OnceLock<tokio::sync::watch::Sender<u16>>,
+    /// Runtime listen-port rebind requests for this engine's listeners (TCP
+    /// and uTP). The supervisor in `peer::listen` binds the new port first and
+    /// only then lets go of the old one, so a refused port leaves the engine
+    /// where it was; each request can carry a reply with the outcome.
+    rebind_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<crate::peer::Rebind>>,
     /// The port trackers are told once a rebind moved the listener; 0 until
     /// then, meaning the configured one. Without it a rebind moved the accept
     /// socket while every announce kept handing out the old port, and peers
     /// dialled a port nothing listened on.
     live_port: std::sync::atomic::AtomicU16,
+    /// Inbound peers from outside since start (`note_inbound_peer`).
+    inbound_peers: std::sync::atomic::AtomicU64,
     /// No announce until a port is known: set while a forwarded port (gluetun)
     /// has not been read yet, so no tracker is ever handed a guess.
     port_pending: std::sync::atomic::AtomicBool,
@@ -344,21 +360,47 @@ impl TorrentManager {
 
     /// Register this engine's listener rebind channel. Called once, by
     /// `peer::listen` when the supervisor comes up.
-    pub fn set_rebind_tx(&self, tx: tokio::sync::watch::Sender<u16>) {
+    pub fn set_rebind_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<crate::peer::Rebind>) {
         let _ = self.rebind_tx.set(tx);
     }
 
-    /// Ask this engine's TCP listener to rebind to `port`. False when the
-    /// supervisor is not up yet.
+    /// Ask this engine's listeners to move to `port`, without waiting for
+    /// the outcome. False when the supervisor is not up yet. The announced
+    /// port follows only once the new port is bound (`set_live_port`): a port
+    /// that could not be bound is never handed to a tracker.
     pub fn request_listen_rebind(&self, port: u16) -> bool {
-        let sent = match self.rebind_tx.get() {
-            Some(tx) => tx.send(port).is_ok(),
+        match self.rebind_tx.get() {
+            Some(tx) => tx.send(crate::peer::Rebind { port, reply: None }).is_ok(),
             None => false,
-        };
-        if sent {
-            self.live_port.store(port, std::sync::atomic::Ordering::Relaxed);
         }
-        sent
+    }
+
+    /// Move this engine's listeners to `port` and say whether they got there.
+    /// On an error the engine still listens on the port it had.
+    pub async fn rebind_listener(&self, port: u16) -> Result<u16, String> {
+        let Some(tx) = self.rebind_tx.get() else {
+            return Err("the listener is not up: the engine is not on the network".into());
+        };
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(crate::peer::Rebind { port, reply: Some(reply) })
+            .map_err(|_| "the listener has stopped".to_string())?;
+        rx.await.map_err(|_| "the listener has stopped".to_string())?
+    }
+
+    /// Called by the listener once a new port is bound.
+    pub fn set_live_port(&self, port: u16) {
+        self.live_port.store(port, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// One more peer from outside opened a connection to this engine.
+    pub fn note_inbound_peer(&self) {
+        self.inbound_peers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Peers from outside (not our own addresses) that connected to this
+    /// engine since it started: the one proof of reachability nobody can fake.
+    pub fn inbound_peers(&self) -> u64 {
+        self.inbound_peers.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The port to announce: the one a rebind moved the listener to, or the
@@ -472,6 +514,9 @@ impl TorrentManager {
             cached_active_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_with_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_uploading: std::sync::atomic::AtomicUsize::new(0),
+            cached_status_counts: Default::default(),
+            restore_total: std::sync::atomic::AtomicUsize::new(0),
+            restore_done: std::sync::atomic::AtomicUsize::new(0),
             cached_total_uploaded: std::sync::atomic::AtomicU64::new(0),
             cached_total_downloaded: std::sync::atomic::AtomicU64::new(0),
             totals_ready: std::sync::atomic::AtomicBool::new(false),
@@ -487,6 +532,7 @@ impl TorrentManager {
             trusted_proxy_sources: std::sync::OnceLock::new(),
             rebind_tx: std::sync::OnceLock::new(),
             live_port: std::sync::atomic::AtomicU16::new(0),
+            inbound_peers: std::sync::atomic::AtomicU64::new(0),
             port_pending: std::sync::atomic::AtomicBool::new(false),
             bus: Default::default(),
             completed_tx,
@@ -1202,12 +1248,17 @@ impl TorrentManager {
         let t_start = std::time::Instant::now();
         let resumes = self.load_state_records();
         let records = resumes.len();
+        self.restore_total.store(records, Ordering::Relaxed);
+        self.restore_done.store(0, Ordering::Relaxed);
         let t_records = t_start.elapsed();
         let mut loaded = 0;
         let mut mismatched = 0usize;
         let mut parse_time = std::time::Duration::ZERO;
         let mut parse_bytes: u64 = 0;
         for rd in resumes {
+            // Counted as gone through, whether it loads or is skipped: the
+            // startup screen shows how far the pass is, not how many loaded.
+            self.restore_done.fetch_add(1, Ordering::Relaxed);
             let t_parse = std::time::Instant::now();
             let parsed = self.metainfo_for(&rd);
             parse_time += t_parse.elapsed();
@@ -1379,8 +1430,16 @@ impl TorrentManager {
         let mut with_peers = 0usize;
         let mut uploading = 0usize;
         let mut moved = (0u64, 0u64);
+        let mut by_status = [0usize; STATUS_SLOTS];
         for entry in self.torrents.iter() {
             let t = entry.value();
+            // Two loads per torrent on a walk that already makes several: the
+            // per-state counts for /metrics come for free here.
+            let s = t.status.load(Ordering::Relaxed) as usize;
+            by_status[s.min(STATUS_PAUSED - 1)] += 1;
+            if t.is_paused.load(Ordering::Relaxed) {
+                by_status[STATUS_PAUSED] += 1;
+            }
             let ul = t.total_uploaded.load(Ordering::Relaxed);
             let dl = t.total_downloaded.load(Ordering::Relaxed);
             total_ul += ul;
@@ -1423,6 +1482,24 @@ impl TorrentManager {
         self.cached_active_peers.store(active_peers, Ordering::Relaxed);
         self.cached_torrents_with_peers.store(with_peers, Ordering::Relaxed);
         self.cached_torrents_uploading.store(uploading, Ordering::Relaxed);
+        for (slot, n) in self.cached_status_counts.iter().zip(by_status) {
+            slot.store(n, Ordering::Relaxed);
+        }
+    }
+
+    /// Torrents per state as of the last `update_rates` walk: stopped,
+    /// checking, downloading, seeding, error (data missing), then paused.
+    pub fn status_counts(&self) -> [usize; STATUS_SLOTS] {
+        let mut out = [0usize; STATUS_SLOTS];
+        for (o, slot) in out.iter_mut().zip(&self.cached_status_counts) {
+            *o = slot.load(Ordering::Relaxed);
+        }
+        out
+    }
+
+    /// (gone through, to go through) of the startup restore.
+    pub fn restore_progress(&self) -> (usize, usize) {
+        (self.restore_done.load(Ordering::Relaxed), self.restore_total.load(Ordering::Relaxed))
     }
 
     // NOTE: per-peer rate tracking removed — on-demand compute done in

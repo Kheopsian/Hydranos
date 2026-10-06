@@ -467,6 +467,22 @@ impl StoreLock {
         }
     }
 
+    /// The read connection if it is free right now, `None` if someone holds
+    /// it. For a health probe: a probe that queued behind a long read would
+    /// report the store as broken when it is only busy, and pile up blocked
+    /// threads while it waited.
+    #[track_caller]
+    pub fn try_read(&self) -> Option<Result<StoreGuard<'_>, ()>> {
+        let m = self.reader.as_ref().unwrap_or(&self.inner);
+        let at = std::panic::Location::caller();
+        let wrap = |guard| StoreGuard { guard, at, waited: std::time::Duration::ZERO, since: std::time::Instant::now() };
+        match m.try_lock() {
+            Ok(g) => Some(Ok(wrap(g))),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(_)) => Some(Err(())),
+        }
+    }
+
     fn take<'a>(
         m: &'a std::sync::Mutex<Store>,
         at: &'static std::panic::Location<'static>,
@@ -637,6 +653,14 @@ impl Store {
     }
 
     /// The journal mode SQLite reports for this file.
+    /// Whether the database answers a query at all.
+    pub fn ping(&self) -> Result<(), String> {
+        self.conn
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn journal_mode(&self) -> String {
         self.conn
             .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
@@ -1473,6 +1497,39 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Rename a node, and every waiting handoff that names it.
+    ///
+    /// One transaction: a handoff still waiting on `old` would otherwise find
+    /// no node on its next poll and fail as if the node had been removed.
+    /// Refuses (Ok(false)) when `old` does not exist or `new` is taken -- a
+    /// rename must never merge two nodes.
+    pub fn rename_node(&self, old: &str, new: &str) -> anyhow::Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let taken: i64 = tx.query_row("SELECT COUNT(*) FROM nodes WHERE name = ?1", [new], |r| r.get(0))?;
+        if taken > 0 {
+            return Ok(false);
+        }
+        let n = tx.execute("UPDATE nodes SET name = ?2 WHERE name = ?1", rusqlite::params![old, new])?;
+        if n == 0 {
+            return Ok(false);
+        }
+        let waiting: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT id, params FROM jobs WHERE state = 'waiting'")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for (id, params) in waiting {
+            let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&params) else { continue };
+            if v.get("node").and_then(|x| x.as_str()) != Some(old) {
+                continue;
+            }
+            v["node"] = serde_json::Value::String(new.to_string());
+            tx.execute("UPDATE jobs SET params = ?2 WHERE id = ?1", rusqlite::params![id, v.to_string()])?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Re-key `torrents` on `(info_hash, session)`.
     ///
     /// One torrent, one row was the wrong shape: a torrent lives in an ENGINE,
@@ -1623,7 +1680,7 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT COUNT(*) FROM jobs
-                 WHERE type = ?1 AND info_hash = ?2 AND state IN ('queued','running','cancelling')",
+                 WHERE type = ?1 AND info_hash = ?2 AND state IN ('queued','running','cancelling','waiting')",
                 rusqlite::params![kind, info_hash],
                 |r| r.get::<_, i64>(0),
             )
@@ -1665,9 +1722,12 @@ impl Store {
         let before = self.job(id)?.state;
         let now = now_secs();
         match before.as_str() {
-            "queued" => {
+            // A waiting job has no runner to tell: the watcher that polls it
+            // only ever settles a row still `waiting` (`settle_waiting_job`),
+            // so cancelling it here is the whole of the stop.
+            "queued" | "waiting" => {
                 let _ = self.conn.execute(
-                    "UPDATE jobs SET state = 'cancelled', error = 'cancelled', updated_at = ?2 WHERE id = ?1 AND state = 'queued'",
+                    "UPDATE jobs SET state = 'cancelled', error = 'cancelled', updated_at = ?2 WHERE id = ?1 AND state IN ('queued', 'waiting')",
                     rusqlite::params![id, now],
                 );
             }
@@ -1685,6 +1745,67 @@ impl Store {
     /// Whether a running job has been asked to stop.
     pub fn job_cancelling(&self, id: &str) -> bool {
         self.job(id).is_some_and(|j| j.state == "cancelling")
+    }
+
+    /// Queue a job that WAITS rather than works: state `waiting`.
+    ///
+    /// The runner (`jobsrun`) claims `queued` rows one at a time, and a wait of
+    /// hours on another machine must not hold the only slot every graduation
+    /// queues behind. A waiting row is polled by its own watcher, survives a
+    /// restart like any row, and is never requeued: there is nothing half done
+    /// to redo.
+    pub fn create_waiting_job(
+        &self,
+        kind: &str,
+        info_hash: &str,
+        params: &str,
+        total_bytes: i64,
+    ) -> anyhow::Result<String> {
+        let id = self.create_job(kind, info_hash, params, total_bytes)?;
+        self.conn.execute(
+            "UPDATE jobs SET state = 'waiting' WHERE id = ?1 AND state = 'queued'",
+            [&id],
+        )?;
+        Ok(id)
+    }
+
+    /// Every job of a kind still waiting, oldest first.
+    pub fn waiting_jobs(&self, kind: &str) -> Vec<Job> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id FROM jobs WHERE type = ?1 AND state = 'waiting' ORDER BY created_at",
+        ) else {
+            return Vec::new();
+        };
+        let ids: Vec<String> = stmt
+            .query_map([kind], |r| r.get(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+        ids.iter().filter_map(|id| self.job(id)).collect()
+    }
+
+    /// End a waiting job, only if it is STILL waiting. Returns whether it was.
+    ///
+    /// Conditional on purpose: a cancel that lands between the watcher's poll
+    /// and its verdict must win. The watcher acts (drops a local copy) only
+    /// after this answered true, so a cancelled handoff never deletes.
+    pub fn settle_waiting_job(&self, id: &str, state: &str, error: &str) -> bool {
+        self.conn
+            .execute(
+                "UPDATE jobs SET state = ?2, error = ?3, updated_at = ?4 WHERE id = ?1 AND state = 'waiting'",
+                rusqlite::params![id, state, error, now_secs()],
+            )
+            .unwrap_or(0)
+            > 0
+    }
+
+    /// Replace a job's params (a waiting job's node was renamed, its deadline
+    /// moved).
+    pub fn set_job_params(&self, id: &str, params: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET params = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, params, now_secs()],
+        )?;
+        Ok(())
     }
 
     pub fn job_finish(&self, id: &str, error: &str) -> anyhow::Result<()> {
@@ -4115,6 +4236,56 @@ mod jobs_nodes_drain_tests {
     fn an_unknown_node_is_none_not_an_error() {
         let s = store();
         assert!(s.node("nobody").unwrap().is_none());
+    }
+
+    /// ⭐ A waiting job is never claimed by the runner: a six-hour wait on
+    /// another machine must not hold the slot every graduation queues behind.
+    #[test]
+    fn a_waiting_job_is_not_claimed_by_the_runner_and_survives_a_requeue() {
+        let s = store();
+        let id = s.create_waiting_job("handoff", H, r#"{"node":"n1"}"#, 10).unwrap();
+        assert_eq!(s.job(&id).unwrap().state, "waiting");
+        assert!(s.claim_next_job().is_none(), "the runner leaves it alone");
+        assert_eq!(s.requeue_running_jobs(), 0, "a restart does not requeue it");
+        assert_eq!(s.job(&id).unwrap().state, "waiting");
+        assert_eq!(s.waiting_jobs("handoff").len(), 1);
+        assert!(s.job_pending_for("handoff", H), "a second handoff of the same hash is refused");
+    }
+
+    /// ⭐ A cancel between the watcher's poll and its verdict wins: the
+    /// watcher only drops the local copy after settling a row still waiting.
+    #[test]
+    fn a_cancelled_waiting_job_cannot_be_settled_afterwards() {
+        let s = store();
+        let id = s.create_waiting_job("handoff", H, "{}", 0).unwrap();
+        assert_eq!(s.cancel_job(&id).as_deref(), Some("waiting"));
+        assert_eq!(s.job(&id).unwrap().state, "cancelled");
+        assert!(!s.settle_waiting_job(&id, "done", ""), "too late: it was cancelled");
+        assert_eq!(s.job(&id).unwrap().state, "cancelled");
+
+        let id2 = s.create_waiting_job("handoff", &format!("b{}", &H[1..]), "{}", 0).unwrap();
+        assert!(s.settle_waiting_job(&id2, "done", ""));
+        assert!(!s.settle_waiting_job(&id2, "failed", "x"), "settled once");
+        assert_eq!(s.job(&id2).unwrap().state, "done");
+    }
+
+    /// A rename carries the waiting handoffs with it, and never merges two
+    /// nodes.
+    #[test]
+    fn renaming_a_node_moves_its_waiting_handoffs_and_refuses_a_taken_name() {
+        let s = store();
+        s.put_node(&node("alpha", "http://10.0.0.5:8199")).unwrap();
+        s.put_node(&node("beta", "http://10.0.0.6:8199")).unwrap();
+        let id = s.create_waiting_job("handoff", H, r#"{"node":"alpha","engine":"vpn1"}"#, 0).unwrap();
+
+        assert!(!s.rename_node("alpha", "beta").unwrap(), "beta is taken");
+        assert!(!s.rename_node("nobody", "gamma").unwrap(), "no such node");
+        assert!(s.rename_node("alpha", "gamma").unwrap());
+        assert!(s.node("alpha").unwrap().is_none());
+        assert_eq!(s.node("gamma").unwrap().unwrap().api_key, "remote-key");
+        let p: serde_json::Value = serde_json::from_str(&s.job(&id).unwrap().params).unwrap();
+        assert_eq!(p["node"], "gamma");
+        assert_eq!(p["engine"], "vpn1", "the rest of the params is untouched");
     }
 
     /// ⭐ An enrolment token is ONE-TIME. A token that could be spent twice

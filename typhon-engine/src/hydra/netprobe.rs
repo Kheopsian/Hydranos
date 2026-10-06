@@ -78,34 +78,7 @@ pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: 
             Some(_) => (echo(bound, ECHO_V4).await, echo(bound, ECHO_V6).await),
         };
 
-        // "ok" only when something answered. An engine bound to a device that
-        // is not carrying traffic yet is "warn", not "bad": the tunnel may
-        // still be coming up, and red here would cry wolf on every restart.
-        let state = match (&v4, &v6) {
-            (None, None) if bound.is_some() => "warn",
-            (None, None) => "bad",
-            _ => "ok",
-        };
-
-        let mut row = serde_json::Map::new();
-        row.insert("agent".into(), "local".into());
-        row.insert("engine".into(), engine.id.clone().into());
-        row.insert("role".into(), engine.role.clone().into());
-        row.insert("local".into(), true.into());
-        row.insert("state".into(), state.into());
-        if !engine.bind_interface.is_empty() {
-            row.insert("bind_interface".into(), engine.bind_interface.clone().into());
-        }
-        if engine.listen_port != 0 {
-            row.insert("listen_port".into(), engine.listen_port.into());
-        }
-        if let Some(ip) = v4 {
-            row.insert("exit_ip".into(), ip.into());
-        }
-        if let Some(ip) = v6 {
-            row.insert("exit_ip_v6".into(), ip.into());
-        }
-        rows.push(serde_json::Value::Object(row));
+        rows.push(row(&engine, bound.is_some(), v4, v6));
     }
 
     let now = std::time::SystemTime::now()
@@ -114,6 +87,46 @@ pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: 
         .unwrap_or(0);
     let mut slot = snapshot.lock().await;
     *slot = (rows, now);
+}
+
+/// One engine's row of the header panel.
+fn row(engine: &crate::engines::Engine, bound: bool, v4: Option<String>, v6: Option<String>) -> serde_json::Value {
+    // "ok" only when something answered. An engine bound to a device that
+    // is not carrying traffic yet is "warn", not "bad": the tunnel may
+    // still be coming up, and red here would cry wolf on every restart.
+    // This is the OUTBOUND probe only -- "the echo service answered" --
+    // and the panel says exactly that; inbound reachability is
+    // `/api/port-forward`'s `reachable`.
+    let state = match (&v4, &v6) {
+        (None, None) if bound => "warn",
+        (None, None) => "bad",
+        _ => "ok",
+    };
+
+    let mut row = serde_json::Map::new();
+    // The engine's id, which is what the header panel names each row by.
+    // 4.3 wrote the literal "local" here, so every row of the panel read
+    // "local" and the engines could only be told apart by port.
+    row.insert("agent".into(), engine.id.clone().into());
+    row.insert("engine".into(), engine.id.clone().into());
+    row.insert("role".into(), engine.role.clone().into());
+    row.insert("local".into(), true.into());
+    row.insert("state".into(), state.into());
+    if !engine.bind_interface.is_empty() {
+        row.insert("bind_interface".into(), engine.bind_interface.clone().into());
+    }
+    // The port the listener holds now, a live change included.
+    let port = engine.manager.announced_port(engine.listen_port);
+    if port != 0 {
+        row.insert("listen_port".into(), port.into());
+    }
+    if let Some(ip) = v4 {
+        row.insert("exit_ip".into(), ip.into());
+    }
+    if let Some(ip) = v6 {
+        row.insert("exit_ip_v6".into(), ip.into());
+    }
+    serde_json::Value::Object(row)
 }
 
 /// Ask one echo service what address the daemon's own requests leave with.
@@ -157,4 +170,24 @@ async fn echo(device: Option<&str>, url: &str) -> Option<String> {
     // portal or an error page, and parsing proves which.
     ip.parse::<std::net::IpAddr>().ok()?;
     Some(ip)
+}
+
+#[cfg(test)]
+mod tests {
+    /// ⭐ #8. Each row is named by its engine and shows the port it holds
+    /// now; "ok" means the exit probe answered, nothing more.
+    #[test]
+    fn a_row_names_its_engine_and_its_live_port() {
+        let s = crate::api::testing::state_from("netprobe-row", "[race]\nlisten_port = 16171\n");
+        let engines = s.state.engines.engines();
+        let race = engines.iter().find(|e| e.id == "race").unwrap();
+        race.manager.set_live_port(40001);
+        let r = super::row(race, false, Some("203.0.113.5".into()), None);
+        assert_eq!(r["agent"], "race", "not the literal \"local\"");
+        assert_eq!(r["engine"], "race");
+        assert_eq!(r["listen_port"], 40001, "the port held now, not the startup one");
+        assert_eq!(r["state"], "ok");
+        assert_eq!(super::row(race, true, None, None)["state"], "warn");
+        assert_eq!(super::row(race, false, None, None)["state"], "bad");
+    }
 }

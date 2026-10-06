@@ -183,17 +183,22 @@ pub(crate) fn pin_builder(builder: reqwest::ClientBuilder, device: &str) -> Resu
     if device.is_empty() {
         return Ok(builder);
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    // Linux only, macOS included in the refusal although reqwest could pin
+    // an announce there: the engine's TCP peers cannot follow
+    // (`netpin::DEVICE_PIN_SUPPORTED`), and an engine whose announces leave
+    // by the tunnel while its peers leave by the default route hands the
+    // tracker one address and the swarm another.
+    #[cfg(target_os = "linux")]
     {
         // The tracker's NAME too: in a managed tunnel it is asked of the
         // tunnel's DNS server through the tunnel, not of the host's resolver
         // (`tunneldns`). Through a proxy it is never resolved here at all.
         Ok(builder.interface(device).dns_resolver(crate::tunneldns::Resolver::new(device)))
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = builder;
-        Err(format!("bind_interface {device:?} cannot be applied to announces on this platform"))
+        Err(format!("bind_interface {device:?}: {}", crate::netpin::UNSUPPORTED))
     }
 }
 

@@ -389,7 +389,7 @@ fn pick_binding_for_dial(
 pub fn start_announce_loop(
     disk_mgr: Arc<DiskManager>,
     bindings: Vec<crate::config::ResolvedBinding>,
-    utp_socket: Option<Arc<UtpSocketUdp>>,
+    utp: crate::peer::UtpHandle,
     max_dials_per_sec: f64,
     limiter: Arc<dial_limiter::DialLimiter>,
 ) {
@@ -412,7 +412,7 @@ pub fn start_announce_loop(
     let _ = DIAL_TX.set(dial_tx);
     {
         let disk_c = disk_mgr.clone();
-        let utp_c = utp_socket.clone();
+        let utp_c = utp;
         let bindings_c = bindings.clone();
         // This loop is the single chokepoint every outbound dial goes through
         // -- tracker peers, PEX, DHT and the orchestrator's `add_peers` all
@@ -445,7 +445,9 @@ pub fn start_announce_loop(
                 }
                 pacer.acquire(&limiter).await;
                 let d = disk_c.clone();
-                let u = utp_c.clone();
+                // Read per dial: a listen-port rebind replaces the socket,
+                // and the next dial must leave from the new port.
+                let u = utp_c.get();
                 let b = pick_binding_for_dial(&bindings_c, addr);
                 tokio::spawn(async move {
                     dial_peer(addr, t, d, b.peer_id, u, b.addr.port(), &b.egress).await;
@@ -485,6 +487,12 @@ async fn steered_connect(
     // A device pin and/or a fwmark both need the socket before connect().
     // The device is what steers a Proton-style setup, where every tunnel
     // shares 10.2.0.2 and a source address decides nothing.
+    // Nothing can pin a socket here (Windows): a steered dial fails rather
+    // than leave by the default route, which it silently did until 4.4.
+    #[cfg(not(unix))]
+    if egress.is_steered() {
+        return None;
+    }
     #[cfg(unix)]
     if egress.is_steered() {
         let socket = if dest.is_ipv4() {

@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// Where to reach the client we are taking over from.
 ///
@@ -78,6 +78,9 @@ pub struct Progress {
     /// Already in Hydranos.
     pub skipped: AtomicUsize,
     pub failed: AtomicUsize,
+    /// The source client's upload counters carried by the torrents that went
+    /// in (seeded or resumed). What the provenance record reports.
+    pub carried_uploaded: AtomicU64,
     /// Of the added ones, how many were left stopped (the wizard's default).
     /// The outcome counts above say what the data was; this says whether it
     /// is announcing -- 4.3 printed "7821 seeding" over 7997 stopped torrents.
@@ -654,8 +657,11 @@ pub async fn run_job(
                 .unwrap_or_else(|e| Err(e.to_string()))
             }
         };
-        if matches!(outcome, Ok(Added::Seeded) | Ok(Added::Resumed)) && stays_stopped {
-            progress.stopped.fetch_add(1, Ordering::Relaxed);
+        if matches!(outcome, Ok(Added::Seeded) | Ok(Added::Resumed)) {
+            progress.carried_uploaded.fetch_add(retry_copy.uploaded, Ordering::Relaxed);
+            if stays_stopped {
+                progress.stopped.fetch_add(1, Ordering::Relaxed);
+            }
         }
         match outcome {
             Ok(Added::Seeded) => progress.seeded.fetch_add(1, Ordering::Relaxed),
@@ -686,6 +692,44 @@ pub async fn run_job(
     }
     progress.set_phase("done");
     progress.finished.store(true, Ordering::Relaxed);
+}
+
+/// The provenance document after one more import, as `/api/provenance`
+/// reads it from the store's `provenance` key.
+///
+/// 4.3 read this document and nothing ever wrote it: the stats card never
+/// said where the counters came from, and the import offer came back on every
+/// load of a library that had been imported. Several imports add up: the
+/// counts and the carried bytes are summed, every client is named once, and
+/// the date stays the FIRST import's -- the counters have been carried since
+/// then. An import that added nothing changes nothing.
+pub fn provenance_doc(previous: Option<&str>, client: &str, added: usize, carried_uploaded: u64, now: i64) -> Option<String> {
+    let prev: serde_json::Value = previous
+        .and_then(|d| serde_json::from_str(d).ok())
+        .unwrap_or(serde_json::Value::Null);
+    if added == 0 {
+        return None;
+    }
+    let mut clients: Vec<String> = prev
+        .get("source_client")
+        .and_then(|c| c.as_str())
+        .map(|c| c.split(", ").filter(|s| !s.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
+    if !clients.iter().any(|c| c == client) {
+        clients.push(client.to_string());
+    }
+    let date = prev.get("source_date").and_then(|d| d.as_i64()).filter(|d| *d > 0).unwrap_or(now);
+    let count = prev.get("imported_count").and_then(|n| n.as_u64()).unwrap_or(0) + added as u64;
+    let carried = prev.get("carried_uploaded_bytes").and_then(|n| n.as_u64()).unwrap_or(0) + carried_uploaded;
+    Some(
+        serde_json::json!({
+            "source_client": clients.join(", "),
+            "source_date": date,
+            "imported_count": count,
+            "carried_uploaded_bytes": carried,
+        })
+        .to_string(),
+    )
 }
 
 /// Percent-encode one form or query value.
@@ -813,6 +857,26 @@ mod tests {
         assert!(!plan(&x, &ch, true).seed_mode, "partial: check and resume");
         x.stopped = true;
         assert!(plan(&x, &ch, true).paused, "stopped in the source stays stopped");
+    }
+
+    #[test]
+    fn provenance_is_written_by_an_import_that_added_something_and_adds_up() {
+        assert_eq!(provenance_doc(None, "qBittorrent", 0, 0, 100), None, "nothing added, nothing claimed");
+        let first = provenance_doc(None, "qBittorrent", 3, 500, 100).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(v["source_client"], "qBittorrent");
+        assert_eq!((v["source_date"].as_i64(), v["imported_count"].as_u64()), (Some(100), Some(3)));
+        assert_eq!(v["carried_uploaded_bytes"], 500);
+
+        let again = provenance_doc(Some(&first), "qBittorrent", 2, 50, 200).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(v["source_client"], "qBittorrent", "named once");
+        assert_eq!(v["source_date"], 100, "the first import's date");
+        assert_eq!((v["imported_count"].as_u64(), v["carried_uploaded_bytes"].as_u64()), (Some(5), Some(550)));
+
+        let both = provenance_doc(Some(&again), "Transmission", 1, 0, 300).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&both).unwrap();
+        assert_eq!(v["source_client"], "qBittorrent, Transmission");
     }
 
     #[test]
