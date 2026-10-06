@@ -4915,6 +4915,10 @@ async fn get_network_mode(
         engine_state: Vec<serde_json::Value>,
         /// Whether `bind_interface` can be applied on this platform, and why not.
         bind_interface: serde_json::Value,
+        /// The kill switch: armed or not and why, each engine's verdict
+        /// (covered / direct / blocked), the daemon's way out, and the same
+        /// lines the startup log said (`killswitch::report_of`).
+        kill_switch: serde_json::Value,
     }
 
     let wg_support = crate::wgtunnel::support();
@@ -4997,6 +5001,7 @@ async fn get_network_mode(
             "supported": typhon_engine::netpin::DEVICE_PIN_SUPPORTED,
             "reason": (!typhon_engine::netpin::DEVICE_PIN_SUPPORTED).then_some(typhon_engine::netpin::UNSUPPORTED),
         }),
+        kill_switch: crate::killswitch::live(&state),
     })
     .into_response()
 }
@@ -6267,7 +6272,10 @@ async fn get_wireguard(
         engines.insert(
             e.id.clone(),
             serde_json::json!({
-                "enabled": s.wireguard_enabled,
+                "enabled": s.wireguard_enabled == Some(true),
+                // The block's three choices: "tunnel", "direct" (the default
+                // route on purpose) or "none" (blocked by the kill switch).
+                "assignment": crate::killswitch::wg_assignment(&e.session),
                 "config_file": s.wireguard_config,
                 "provider": s.wireguard_provider,
                 "manual_port": s.wireguard_port,
@@ -6435,7 +6443,8 @@ async fn post_wireguard_engines(
     let local: Vec<String> = cfg.local_engines().into_iter().map(|e| e.id).collect();
     let dir = crate::wgtunnel::conf_dir(&cfg.daemon.data_dir);
 
-    let mut rows: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    // Per engine: the keys written, and the keys removed.
+    let mut rows: Vec<(String, Vec<(String, String)>, Vec<&'static str>)> = Vec::new();
     let mut files_in_use: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let q = crate::tomledit::quote_toml_key;
@@ -6445,7 +6454,16 @@ async fn post_wireguard_engines(
         if !local.contains(&id) {
             return bad(StatusCode::BAD_REQUEST, format!("unknown engine {id:?}"));
         }
-        let enabled = e.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        // Three choices: a tunnel, "direct" (the default route on purpose)
+        // or "none" (unassigned: the kill switch blocks it). A caller that
+        // predates them sends `enabled` alone, and unticked meant direct.
+        let enabled_flag = e.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let assignment = match e.get("assignment").and_then(|v| v.as_str()).map(str::trim) {
+            None | Some("") => if enabled_flag { "tunnel" } else { "direct" },
+            Some(a @ ("tunnel" | "direct" | "none")) => a,
+            Some(other) => return bad(StatusCode::BAD_REQUEST, format!("{id}: assignment {other:?} is not tunnel, direct or none")),
+        };
+        let enabled = assignment == "tunnel";
         let file = txt("config_file");
         let provider = txt("provider");
         let mode = txt("port_forward").to_ascii_lowercase();
@@ -6480,16 +6498,29 @@ async fn post_wireguard_engines(
                 warnings.push(format!("{id}: no port is forwarded for this provider. This engine takes no incoming connection."));
             }
         }
-        rows.push((
-            id,
-            vec![
-                ("wireguard_enabled".into(), enabled.to_string()),
-                ("wireguard_config".into(), q(&file)),
-                ("wireguard_provider".into(), q(&provider)),
-                ("wireguard_port".into(), port.to_string()),
-                ("wireguard_port_forward".into(), q(&mode)),
-            ],
-        ));
+        // `wireguard_enabled` is written only as `true`: a written `false`
+        // is how the old tick box said "direct", and is read that way.
+        let mut set = vec![
+            ("wireguard_config".to_string(), q(&file)),
+            ("wireguard_provider".to_string(), q(&provider)),
+            ("wireguard_port".to_string(), port.to_string()),
+            ("wireguard_port_forward".to_string(), q(&mode)),
+        ];
+        let del: Vec<&'static str> = match assignment {
+            "tunnel" => {
+                set.insert(0, ("wireguard_enabled".into(), "true".into()));
+                vec!["allow_direct"]
+            }
+            "direct" => {
+                set.push(("allow_direct".into(), "true".into()));
+                vec!["wireguard_enabled"]
+            }
+            _ => vec!["wireguard_enabled", "allow_direct"],
+        };
+        if assignment == "none" {
+            warnings.push(format!("{id}: no tunnel and not direct. The kill switch keeps this engine off the network until it is given one."));
+        }
+        rows.push((id, set, del));
     }
     let any_on = !files_in_use.is_empty();
     if any_on {
@@ -6501,12 +6532,20 @@ async fn post_wireguard_engines(
     let extra_ids: Vec<String> = local.iter().filter(|id| *id != "race" && *id != "hoard").cloned().collect();
     let ok = edit_config(&state, |doc| {
         let mut out = doc.to_string();
-        for (id, kv) in &rows {
+        for (id, kv, del) in &rows {
             if id == "race" || id == "hoard" {
                 out = crate::tomledit::set_toml_table(&out, id, kv)?;
+                for k in del {
+                    out = crate::tomledit::delete_toml_key(&out, id, k);
+                }
             } else {
                 for (k, v) in kv {
                     if let Some(next) = crate::tomledit::set_agent_session_key(&out, id, k, v) {
+                        out = next;
+                    }
+                }
+                for k in del {
+                    if let Some(next) = crate::tomledit::delete_agent_session_key(&out, id, k) {
                         out = next;
                     }
                 }
@@ -6533,7 +6572,8 @@ async fn post_wireguard_engines(
     let now = state.cfg();
     let running: Vec<(String, crate::config::Session)> =
         state.engines.engines().iter().map(|e| (e.id.clone(), e.session.clone())).collect();
-    let restart_required = crate::netmode::restart_required(&now, &running);
+    let restart_required =
+        crate::netmode::restart_required(&now, &running) || crate::killswitch::blocking_changed(&now, &state.engines);
     tracing::info!(tunnels = files_in_use.len(), restart_required, "wireguard: tunnel assignments saved");
     Json(serde_json::json!({
         "status": "ok",
@@ -13369,7 +13409,8 @@ async fn post_network_check(
     let mut results = Vec::new();
 
     // 1. The default route: what a leak looks like.
-    let baseline: Option<String> = if cfg.daemon.kill_switch {
+    let plan = crate::killswitch::plan(&cfg);
+    let baseline: Option<String> = if plan.armed {
         results.push(serde_json::json!({
             "id": "default_route", "label": "Address of the default route", "status": "warn",
             "detail": "not measured: the kill switch sends nothing by the default route, so a leak to it cannot be compared here",
@@ -13408,10 +13449,10 @@ async fn post_network_check(
                 Some(crate::engines::session_socks5_url(session)).filter(|u| !u.is_empty())
             };
             let id = format!("{prefix}_{engine}");
-            if cfg.daemon.kill_switch && proxy.is_none() && device.is_empty() {
+            if let Some(why) = plan.blocked(engine) {
                 results.push(serde_json::json!({
                     "id": id, "label": label, "status": "warn",
-                    "detail": "not measured: this engine has no interface and no proxy, so the kill switch does not cover it, and the check sends nothing by the default route",
+                    "detail": format!("not measured: the kill switch keeps this engine off the network ({why}), and the check sends nothing on its behalf"),
                 }));
                 continue;
             }
@@ -13891,7 +13932,10 @@ async fn post_network_mode(
     let now = state.cfg();
     let running: Vec<(String, crate::config::Session)> =
         state.engines.engines().iter().map(|e| (e.id.clone(), e.session.clone())).collect();
-    let restart_required = crate::netmode::restart_required(&now, &running);
+    // The mode also decides which engines the kill switch keeps off the
+    // network, which is settled at boot too.
+    let restart_required =
+        crate::netmode::restart_required(&now, &running) || crate::killswitch::blocking_changed(&now, &state.engines);
     let warnings = crate::netmode::warnings(&now, &|id: &str| engine_lists_udp(&state, id));
     // Another mode switches the tunnels off now, not at the next boot: the
     // engines pinned to them stop reaching anybody until the restart this
@@ -20781,7 +20825,7 @@ mod route_table_tests {
         let got: serde_json::Value = c
             .post(&url)
             .header("X-API-Key", KEY)
-            .body(r#"{"socks5_host":"10.0.0.1","socks5_port":1080,"socks5_user":"u","socks5_pass":"p","kill_switch":true}"#)
+            .body(r#"{"egress":"proxy","socks5_host":"10.0.0.1","socks5_port":1080,"socks5_user":"u","socks5_pass":"p","kill_switch":true}"#)
             .send()
             .await
             .unwrap()
@@ -20794,6 +20838,42 @@ mod route_table_tests {
         let again: serde_json::Value =
             c.get(&url).header("X-API-Key", KEY).send().await.unwrap().json().await.unwrap();
         assert_eq!(again["daemon"]["socks5_port"], 1080, "read back from the file");
+        assert_eq!(again["egress"], "proxy");
+        assert_eq!(again["daemon"]["via_kind"], "proxy");
+
+        // Back to the mode's own rule, and the switch back to "deduced".
+        let auto: serde_json::Value = c
+            .post(&url)
+            .header("X-API-Key", KEY)
+            .body(r#"{"egress":"auto","kill_switch":null}"#)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(auto["kill_switch"], serde_json::Value::Null, "{auto:#}");
+        assert_eq!(auto["armed"], false, "direct mode, nothing written");
+        assert_eq!(auto["daemon"]["via_kind"], "direct");
+        assert_eq!(auto["daemon"]["socks5_host"], "10.0.0.1", "untouched: not in the body");
+        // A typo and an unknown engine are refused, nothing written.
+        for body in [r#"{"egress":"tunnel"}"#, r#"{"egress":"engine:nope"}"#, r#"{"allow_direct":{"nope":true}}"#, r#"{"kill_switch":"yes"}"#] {
+            let r = c.post(&url).header("X-API-Key", KEY).body(body).send().await.unwrap();
+            assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST, "{body}");
+        }
+        // allow_direct on an engine, by the route.
+        let d: serde_json::Value = c
+            .post(&url)
+            .header("X-API-Key", KEY)
+            .body(r#"{"allow_direct":{"hoard":true}}"#)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let hoard = d["engines"].as_array().unwrap().iter().find(|e| e["engine"] == "hoard").unwrap().clone();
+        assert_eq!(hoard["allow_direct"], true, "{d:#}");
     }
 }
 
@@ -22165,6 +22245,53 @@ mod wireguard_route_tests {
         ]})
     }
 
+    /// ⭐ The block's three choices. A tunnel writes `wireguard_enabled =
+    /// true`; "direct" writes `allow_direct = true` and no tick box; "none"
+    /// writes neither, and the kill switch then blocks the engine. A caller
+    /// that sends only `enabled: false` keeps meaning "direct".
+    #[tokio::test]
+    async fn each_engine_gets_a_tunnel_direct_or_nothing() {
+        crate::wgtunnel::force_support(Some(Ok(())));
+        let s = node("wg-three-states");
+        upload_raw(&s, "a.conf", CONF).await;
+        let body = serde_json::json!({"engines": [
+            {"engine_id": "race", "assignment": "tunnel", "config_file": "a.conf", "provider": "proton"},
+            {"engine_id": "hoard", "assignment": "none"},
+        ]});
+        let (st, r) = assign(&s, body).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("off the network")), "{r}");
+        let text = std::fs::read_to_string(&s.config_path).unwrap();
+        let cfg = s.cfg();
+        let plan = crate::killswitch::plan_with(&cfg, &|_| None, None);
+        assert!(plan.blocked("race").is_none());
+        assert!(plan.blocked("hoard").is_some(), "unassigned = blocked:\n{text}");
+        assert_eq!(r["restart_required"], true);
+
+        let body = serde_json::json!({"engines": [
+            {"engine_id": "race", "assignment": "tunnel", "config_file": "a.conf", "provider": "proton"},
+            {"engine_id": "hoard", "assignment": "direct"},
+        ]});
+        assert_eq!(assign(&s, body).await.0, StatusCode::OK);
+        let cfg = s.cfg();
+        assert!(cfg.hoard.allow_direct && cfg.hoard.wireguard_enabled.is_none(), "{:?}", cfg.hoard);
+        assert!(crate::killswitch::plan_with(&cfg, &|_| None, None).blocked("hoard").is_none());
+        let page: serde_json::Value = serde_json::from_str(&status(&s).await).unwrap();
+        assert_eq!(page["engines"]["hoard"]["assignment"], "direct");
+        assert_eq!(page["engines"]["race"]["assignment"], "tunnel");
+
+        // The old shape: enabled false is direct, as the tick box meant.
+        assert_eq!(assign(&s, race_on("a.conf")).await.0, StatusCode::OK);
+        assert_eq!(s.cfg().hoard.allow_direct, true);
+        let bad = serde_json::json!({"engines": [{"engine_id": "race", "assignment": "maybe"}]});
+        assert_eq!(assign(&s, bad).await.0, StatusCode::BAD_REQUEST);
+        // The Network tab's answer carries the same verdicts.
+        let mode = body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert_eq!(mode["kill_switch"]["armed"], true, "{mode:#}");
+        assert!(mode["kill_switch"]["summary"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().starts_with("hoard: direct on purpose")));
+        crate::wgtunnel::force_support(None);
+    }
+
     /// ⭐ Stored, listed, never served back: no private or preshared key in
     /// any answer, the file at 0600, and a file that would not bring a
     /// tunnel up refused before it is written.
@@ -22263,7 +22390,7 @@ mod wireguard_route_tests {
         let cfg = s.cfg();
         assert_eq!(cfg.network.mode, "wireguard");
         let race = cfg.local_engines().into_iter().find(|e| e.id == "race").unwrap();
-        assert!(race.session.wireguard_enabled);
+        assert_eq!(race.session.wireguard_enabled, Some(true));
         assert_eq!(race.session.wireguard_config, "a.conf");
         assert_eq!(race.session.bind_interface, "wg-race", "pinned to its device");
         assert!(race.session.socks5_outbound_host.is_empty(), "the SOCKS5 mode's keys are gone");

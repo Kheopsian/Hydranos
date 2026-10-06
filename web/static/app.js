@@ -7518,6 +7518,7 @@ const NET_OWNED_KEYS = new Set([
     // [daemon] / [proxy]: the daemon's own way out and the kill switch,
     // saved by the Network tab's "Daemon traffic" card.
     "kill_switch", "socks5_host", "socks5_port", "socks5_user", "socks5_pass",
+    "egress", "allow_direct",
 ]);
 
 // Keys and sections nothing reads ("section::key", or a whole "section" and its
@@ -9929,33 +9930,80 @@ async function netEgressLoad() {
     netEgressRender();
 }
 
+// The daemon's way out in the page's own words, from the kind the daemon
+// resolved (`egress::resolve`), not from its English sentence.
+function _egressVia(d) {
+    const e = d.via_engine || "";
+    switch (d.via_kind) {
+        case "direct": return t("direct (the host's default route)") + (d.bind_interface ? " · " + d.bind_interface : "");
+        case "proxy": return t("the [proxy] SOCKS5 proxy");
+        case "engine_tunnel": return t("the WireGuard tunnel of engine {e}", { e });
+        case "engine_proxy": return t("the proxy of engine {e}", { e });
+        case "engine_interface": return t("the interface of engine {e}", { e });
+        case "engine_direct": return t("direct, like engine {e}", { e });
+        case "gluetun": return t("direct, inside gluetun's network");
+        default: return t("nothing (refused)");
+    }
+}
+
+const _EGRESS_STATE = {
+    covered: ["net-ok", "covered"],
+    direct: ["net-warn", "direct on purpose"],
+    blocked: ["net-fail", "BLOCKED"],
+    uncovered: ["net-fail", "NOT covered"],
+};
+
 function netEgressRender() {
     const body = document.getElementById("net-egress-body");
     if (!body || !_egress) return;
     const d = _egress.daemon || {};
     const list = (_detectedIfaces || []).map(i => (i.name || i));
+    const mode = _egress.mode || "direct";
+    // allow_direct is a choice per engine in the modes that block; in
+    // WireGuard mode it is the "Direct" entry of each engine's selector.
+    const directBox = mode !== "wireguard" && mode !== "gluetun";
     let cover = "";
     for (const e of (_egress.engines || [])) {
-        const cls = e.covered ? "net-ok" : "net-fail";
+        const st = _EGRESS_STATE[e.state] || ["", e.state];
         const gaps = (e.gaps || []).map(g => `<span class="sr-desc net-warn">${esc(t(g))}</span>`).join("");
-        cover += `<div class="settings-row"><div class="sr-label"><span class="sr-key ${cls}">${esc(e.engine)}: ${esc(e.covered ? t("covered") : t("NOT covered"))}</span>
-            <span class="sr-desc">${esc(t(e.how))}</span>${gaps}</div></div>`;
+        const pending = e.blocked_now !== null && e.blocked_now !== undefined && e.blocked_now !== e.blocked
+            ? `<span class="sr-desc net-warn">${esc(t("takes effect at the next restart"))}</span>` : "";
+        const box = directBox
+            ? `<div class="sr-field"><label class="sr-desc" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="net-eg-direct-${esc(e.engine)}" ${e.allow_direct ? "checked" : ""}> ${esc(t("Direct on purpose"))}</label></div>` : "";
+        cover += `<div class="settings-row"><div class="sr-label"><span class="sr-key ${st[0]}">${esc(e.engine)}: ${esc(t(st[1]))}</span>
+            <span class="sr-desc">${esc(t(e.how))}</span>${gaps}${pending}</div>${box}</div>`;
     }
-    const daemonLine = d.error
-        ? `<div class="result-msg error" style="margin:.3em 0">${esc(t("The daemon's own requests are refused: {msg}", { msg: d.error }))}</div>`
-        : `<p class="sr-desc">${esc(t("The daemon's own requests leave by: {route}", { route: d.route || "" }))}</p>`;
+    const engines = (_egress.engines || []).map(e => e.engine);
+    const egOpts = [
+        { value: "auto", label: "Follow the network mode" },
+        { value: "direct", label: "Direct (default interface)" },
+        { value: "proxy", label: "The [proxy] SOCKS5 proxy below" },
+    ].concat(engines.map(id => ({ value: "engine:" + id, label: t("Same way out as engine {e}", { e: id }) })));
+    const ksVal = _egress.kill_switch === true ? "true" : _egress.kill_switch === false ? "false" : "";
+    const ksOpts = [
+        { value: "", label: "Follow the network mode" },
+        { value: "false", label: "Disarmed: leaks accepted" },
+        { value: "true", label: "Armed, even in direct mode" },
+    ];
+    const daemonLine = `<p class="sr-key" style="margin:.4em 0">${esc(t("External requests of the daemon: via {via}", { via: _egressVia(d) }))}</p>` +
+        (d.error ? `<div class="result-msg error" style="margin:.3em 0">${esc(t("The daemon's own requests are refused: {msg}", { msg: d.error }))}</div>` : "");
     const outside = (_egress.not_covered || []).map(g => `<li>${esc(t(g))}</li>`).join("");
-    body.innerHTML = `<div class="settings-section"><div class="settings-section-title">${t("Daemon traffic and kill switch")}</div>
-        <p class="sr-desc" style="margin:.2em 0 .8em">${t("Tracker lists, ipfilter lists, the update check, webhooks and .torrent URLs are the daemon's own requests, not an engine's. They leave by this proxy and/or interface, applied at once.")}</p>
-        ${_netField("net-eg-host", "Proxy host", "text", d.socks5_host, "SOCKS5 server for the daemon's requests (names are resolved by the proxy). Empty: no proxy.")}
+    const blocked = (_egress.blocked || []).length
+        ? `<div class="result-msg error" style="margin:.3em 0">${esc(t("Blocked by the kill switch, kept off the network: {list}", { list: _egress.blocked.join(", ") }))}</div>` : "";
+    body.innerHTML = `<div class="settings-section"><div class="settings-section-title">${t("Kill switch and the daemon's own requests")}</div>
+        <p class="sr-desc" style="margin:.2em 0 .6em">${esc(t(_egress.armed ? "Kill switch armed" : "Kill switch disarmed"))} — ${esc(t(_egress.armed_why || ""))}</p>
+        ${blocked}
+        ${cover}
+        ${daemonLine}
+        ${_netOptionSelect("net-eg-egress", "External requests of the daemon", _egress.egress || "auto", egOpts,
+            "Where the daemon's own requests (tracker lists, IP filter lists, update check, webhooks, .torrent URLs) go. Applied at once.")}
+        ${_netOptionSelect("net-eg-kill", "Kill switch", ksVal, ksOpts,
+            "Follows the mode unless set: off in direct mode, on in every other. Armed, an engine with no tunnel, no interface and no proxy is kept off the network unless it is marked direct, and the daemon's requests are refused when their way out is not usable.")}
+        ${_netField("net-eg-host", "Proxy host", "text", d.socks5_host, "SOCKS5 server used when the daemon's requests go through [proxy] (names are resolved by the proxy). Empty: no proxy.")}
         ${_netField("net-eg-port", "Proxy port", "number", d.socks5_port || "", "")}
         ${_netField("net-eg-user", "Username", "text", d.socks5_user, "Leave both credentials empty for an open proxy.")}
         ${_netField("net-eg-pass", "Password", "password", d.socks5_pass, "")}
-        ${_netSelect("net-eg-iface", "Daemon interface", d.bind_interface, list, "The interface the daemon's requests (or its connection to the proxy) are bound to. Empty means the host's default route.")}
-        ${_netCheckbox("net-eg-kill", "Kill switch", !!_egress.kill_switch, "Nothing leaves outside the interface or proxy configured. With neither, the daemon sends nothing at all; an engine with no interface and no proxy is listed below as not covered.")}
-        ${daemonLine}
-        ${_egress.kill_switch && !_egress.all_engines_covered ? `<div class="result-msg error" style="margin:.3em 0">${esc(t("Some engines are not covered by the kill switch: they have no interface and no proxy."))}</div>` : ""}
-        ${cover}
+        ${_netSelect("net-eg-iface", "Daemon interface", d.bind_interface, list, "The interface the daemon's requests (or its connection to the proxy) are bound to when they go direct or through [proxy]. Empty means the host's default route.")}
         <details style="margin:.5em 0"><summary class="sr-desc">${t("What the kill switch does not cover")}</summary><ul class="sr-desc">${outside}</ul></details>
         <button class="btn-small" onclick="netEgressSave()">${t("Save daemon traffic")}</button>
         <div id="net-egress-result"></div>
@@ -9965,21 +10013,36 @@ function netEgressRender() {
 async function netEgressSave() {
     const out = document.getElementById("net-egress-result");
     const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
+    const ks = val("net-eg-kill");
     const payload = {
+        egress: val("net-eg-egress") || "auto",
         socks5_host: val("net-eg-host"),
         socks5_port: Number(val("net-eg-port") || 0),
         socks5_user: val("net-eg-user"),
         socks5_pass: (document.getElementById("net-eg-pass") || {}).value || "",
         bind_interface: val("net-eg-iface"),
-        kill_switch: !!(document.getElementById("net-eg-kill") || {}).checked,
+        // null: follow the network mode (the key is removed).
+        kill_switch: ks === "true" ? true : ks === "false" ? false : null,
     };
+    const direct = {};
+    for (const e of ((_egress && _egress.engines) || [])) {
+        const box = document.getElementById("net-eg-direct-" + e.engine);
+        if (box) direct[e.engine] = !!box.checked;
+    }
+    if (Object.keys(direct).length) payload.allow_direct = direct;
     try {
         _egress = await api("/api/network/egress", {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
         });
         netEgressRender();
         const r = document.getElementById("net-egress-result");
-        if (r) r.innerHTML = `<div class="result-msg success" style="margin:.3em 0">${esc(t("Saved and applied, no restart needed."))}</div>`;
+        if (r) r.innerHTML = `<div class="result-msg success" style="margin:.3em 0">${esc(t(_egress.restart_required
+            ? "Saved. The daemon's requests follow it now; which engines are blocked changes at the next restart."
+            : "Saved and applied, no restart needed."))}</div>`;
+        if (_egress.restart_required) {
+            _setRestartBanner(t("Saved. Which engines the kill switch blocks changes at the next restart.") +
+                ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply and restart")}</button>`);
+        }
     } catch (e) {
         if (out) out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
     }
@@ -10579,15 +10642,20 @@ function netWgRender() {
     let agentBlocks = "";
     for (const e of _wgEngineRows()) {
         const cur = _wgCurrentFor(e.id);
-        const fileOpts = [{ value: "", label: "none" }].concat(files.map(f => ({ value: f.name, label: f.name })));
+        // One choice per agent, three kinds: a tunnel (a file), "Direct" (the
+        // default route, on purpose) or nothing -- which the kill switch
+        // blocks, so it says so in the option itself.
+        const outOpts = [
+            { value: "", label: "Not assigned (blocked by the kill switch)" },
+            { value: "direct", label: "Direct (default interface)" },
+        ].concat(files.map(f => ({ value: f.name, label: f.name })));
+        const outVal = cur.assignment === "tunnel" ? cur.config_file : cur.assignment === "direct" ? "direct" : "";
         const prov = providers.find(p => p.value === cur.provider) || {};
         const manual = prov.kind === "manual" || (cur.port_forward || "").toLowerCase() === "manual";
         agentBlocks += `<div class="settings-section">
             <div class="settings-section-title">${esc(_wgAgentName(e.id))}${e.role && e.role !== e.id ? " · " + esc(e.role) : ""}</div>
-            ${_netCheckbox("wg-en-" + e.id, "Bring up a tunnel for this agent", cur.enabled,
-                "Off, this agent leaves by whatever the host does.")}
-            ${_netOptionSelect("wg-file-" + e.id, "Configuration file", cur.config_file, fileOpts,
-                "The .conf from your provider. One file per agent: two agents on one file share one address and one port.")}
+            ${_netOptionSelect("wg-file-" + e.id, "Way out", outVal, outOpts,
+                "A .conf from your provider brings a tunnel up for this agent (one file per agent: two agents on one file share one address and one port). Direct: it leaves by the host's default interface, on purpose. Not assigned: the kill switch keeps it off the network.")}
             ${_netOptionSelect("wg-prov-" + e.id, "Provider", cur.provider, providers,
                 prov.note || "Who the configuration comes from. This is what says whether an incoming port can be asked for at all.",
                 "netWgProviderChanged('" + esc(e.id) + "')")}
@@ -10631,6 +10699,7 @@ function _wgCurrentFor(engineId) {
     const cfg = ((_wgState && _wgState.engines) || {})[engineId] || {};
     return {
         enabled: !!tn || !!cfg.enabled,
+        assignment: tn ? "tunnel" : (cfg.assignment || (cfg.enabled ? "tunnel" : "none")),
         provider: (tn && tn.provider) || cfg.provider || "proton",
         config_file: cfg.config_file || "",
         manual_port: cfg.manual_port || 0,
@@ -10670,14 +10739,16 @@ async function netWgDeleteConfig(name) {
 async function netWgSave() {
     const out = document.getElementById("net-wg-result");
     const engines = _wgEngineRows().map(function (e) {
-        const en = document.getElementById("wg-en-" + e.id);
         const file = document.getElementById("wg-file-" + e.id);
         const prov = document.getElementById("wg-prov-" + e.id);
         const port = document.getElementById("wg-port-" + e.id);
+        const out = file ? file.value : "";
+        const assignment = out === "direct" ? "direct" : out ? "tunnel" : "none";
         return {
             engine_id: e.id,
-            enabled: en ? !!en.checked : false,
-            config_file: file ? file.value : "",
+            assignment,
+            enabled: assignment === "tunnel",
+            config_file: assignment === "tunnel" ? out : "",
             provider: prov ? prov.value : "",
             manual_port: port ? Number(port.value || 0) : 0,
             // Empty means "whatever this provider does", which is the honest

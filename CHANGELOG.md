@@ -48,14 +48,29 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   second whatever the library's size, each torrent once per 5 minutes; never
   a private torrent, never behind a SOCKS5 proxy. LAN peers are dialled like
   any other. The qBittorrent API's `preferences.lsd` is real.
-- **Kill switch** (`[daemon] kill_switch`): the daemon's own requests are
-  refused when neither its interface nor its proxy is usable, never sent by
-  the default route. An engine with neither an interface nor a proxy is
-  named as not covered, at startup and in the Network tab.
+- **A kill switch that follows the network mode.** Off in direct mode, which
+  does not change, and armed in SOCKS5, PROXY v2, WireGuard and gluetun.
+  `[daemon] kill_switch = false` disarms it on purpose; `true` arms it even in
+  direct mode. An engine with no tunnel, no interface and no proxy is
+  **blocked**: never put on the network (no listener, no dial, no announce, no
+  DHT, no LSD, no port mapping) unless its section says `allow_direct = true`.
+  Inside gluetun, an engine pinned to another interface than the namespace's
+  is blocked. The reason is given at startup, in the Network tab and on
+  `/health`, which reports `degraded`, never `unhealthy`.
 - **The daemon's own requests have an exit too**: tracker lists, IP filter
   lists, the update check and `hydranos-update`, webhooks and `.torrent`
-  URLs go through `[proxy]` (SOCKS5, `socks5h`) and/or
-  `[daemon] bind_interface`, set live from the Network tab.
+  URLs. `[daemon] egress` = `auto` | `direct` | `proxy` | `engine:<id>`; on
+  `auto` they follow the mode: the race engine's proxy or tunnel (else the
+  first engine that has one), direct inside gluetun, direct (and
+  `[daemon] bind_interface` if set) in direct mode. `[proxy]` (SOCKS5,
+  `socks5h`) is used with `egress = "proxy"`. With the kill switch armed, an
+  exit that cannot be found is refused, never replaced by the default route.
+  `hydranos-update` resolves it the same way.
+- **One summary, the same everywhere**: a line per engine (covered by X,
+  direct on purpose, or BLOCKED and why) and one for the daemon's requests,
+  in the startup log, on `GET /api/network/mode` (`kill_switch`) and
+  `GET /api/network/egress`, and in the Network tab, where the egress and
+  the kill switch are also set.
 - **Share limits, as in qBittorrent.** Per engine (`max_ratio`,
   `max_seeding_time`, `max_inactive_seeding_time`, `share_limit_action` =
   stop / remove / remove with files) and per torrent (right-click > Share
@@ -75,7 +90,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   forwarding (Proton and generic) with announces held until the first port
   is known, TCP and UDP mapped, renewed at half-lease. A tunnel that is down
   leaves its engine with no network, never on the default route. Needs Linux
-  and `NET_ADMIN`; refused with the reason otherwise.
+  and `NET_ADMIN`; refused with the reason otherwise. Each engine gets a
+  tunnel, **Direct (default interface)**, or nothing, which blocks it
+  (`assignment` on `/api/network/wireguard/engines`); a tunnel chosen without
+  its file blocks the engine too.
 - **Speed limits that actually limit.** `upload_rate_limit` and
   `download_rate_limit` per engine (bytes/s, applied live), a cap per torrent
   (right-click > Limit rate…, `/api/torrents/:h/limits`, selection action

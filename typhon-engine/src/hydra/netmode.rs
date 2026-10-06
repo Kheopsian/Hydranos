@@ -90,7 +90,7 @@ pub fn cleared_keys(mode: &str) -> Vec<&'static str> {
 /// tunnel are all set up in `engines::connect`.
 fn fingerprint(s: &Session) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
         s.listen_port,
         s.bind_interface.trim(),
         s.enable_ipv6,
@@ -111,6 +111,8 @@ fn fingerprint(s: &Session) -> String {
         s.wireguard_provider.trim(),
         s.wireguard_port,
         s.wireguard_port_forward.trim(),
+        // Decides whether the kill switch lets the engine on the network.
+        s.allow_direct,
     )
 }
 
@@ -169,6 +171,12 @@ pub fn warnings(cfg: &Config, has_udp: &dyn Fn(&str) -> bool) -> Vec<String> {
     }
     if mode == "proxy_v2" && cfg.race.socks5_outbound_host.trim().is_empty() {
         out.push("No SOCKS5 proxy is set: incoming peers come through the relay, but outgoing connections and announces leave directly.".to_string());
+    }
+    // Said when saved, not discovered as an engine that seeds nothing.
+    for v in crate::killswitch::plan(cfg).engines {
+        if let Some(why) = v.exit.blocked {
+            out.push(format!("{}: the kill switch keeps this engine off the network ({why}).", v.engine));
+        }
     }
     if mode != "socks5" && mode != "proxy_v2" && typhon_engine::tracker::http::env_announce_proxy().is_some() {
         out.push("TYPHON_ANNOUNCE_PROXY is set in the environment: announces and webseed fetches go through it, whatever mode this page shows.".to_string());
