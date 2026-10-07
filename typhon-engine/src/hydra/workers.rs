@@ -1228,6 +1228,12 @@ pub fn drain_once(
             tracing::warn!("drain history not written: {e}");
         }
     }
+    // Right after the deletions, when the SSD has the most freed blocks it has
+    // not been told about. A graduation frees nothing yet; its copy's removal
+    // is trimmed by the next drain.
+    if deleted > 0 && freed > 0 {
+        crate::volumes::trim_after_drain(state, &volume.id);
+    }
     DrainOutcome {
         deleted,
         graduated,

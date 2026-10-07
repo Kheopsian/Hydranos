@@ -295,6 +295,146 @@ pub fn save_quota(state: &crate::api::AppState, mount: &str, bytes: Option<u64>)
     store.put_meta(&format!("{QUOTA_PREFIX}{mount}"), &doc)
 }
 
+const TRIM_PREFIX: &str = "volume_trim:";
+const TRIM_LAST_PREFIX: &str = "volume_trim_last:";
+
+/// Whether this volume is TRIMmed after a drain has freed space on it.
+///
+/// Off unless the operator turned it on for this volume, and its own key like
+/// the quota: it is a fact about the disk, not a drain rule, and turning it on
+/// must not freeze the watermarks out of the global default.
+///
+/// Why it exists: a race SSD that is never trimmed sees every deleted race as
+/// still holding data. Measured on a WD SN700 at 79 % that had never been
+/// trimmed: 161 MiB/s sequential write, 199 ms average latency; after one
+/// `fstrim`, 679 MiB/s and 47 ms. A drain frees ~170 GB at once, so right
+/// after it is when the disk has the most to be told.
+pub fn trim_enabled(state: &crate::api::AppState, mount: &str) -> bool {
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    store.meta_doc(&format!("{TRIM_PREFIX}{mount}")).as_deref() == Some("1")
+}
+
+pub fn save_trim(state: &crate::api::AppState, mount: &str, on: bool) -> anyhow::Result<()> {
+    // Turning it on again is how the operator retries after a refusal.
+    if on {
+        trim_refused().remove(mount);
+    }
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    store.put_meta(&format!("{TRIM_PREFIX}{mount}"), if on { "1" } else { "" })
+}
+
+/// The last TRIM of this volume: when, how long, how much, or why it failed.
+pub fn last_trim(state: &crate::api::AppState, mount: &str) -> Option<serde_json::Value> {
+    let raw = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.meta_doc(&format!("{TRIM_LAST_PREFIX}{mount}"))
+    }?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Volumes with a TRIM running. Two race engines on one SSD drain it twice.
+fn trim_running() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let m = S.get_or_init(Default::default);
+    match m.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    }
+}
+
+/// Volumes whose TRIM was refused since start. A refusal does not go away by
+/// itself (a capability, a filesystem), so it is said once, not every drain.
+fn trim_refused() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let m = S.get_or_init(Default::default);
+    match m.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    }
+}
+
+/// TRIM `mount` on a thread of its own, if the operator asked for it.
+///
+/// Returns at once. The discard takes seconds and its length is the disk's
+/// business, so it runs outside the drain and holds no lock; the store is
+/// only taken to write down the outcome.
+pub fn trim_after_drain(state: &crate::api::AppState, mount: &str) {
+    if !trim_enabled(state, mount) || trim_refused().contains(mount) {
+        return;
+    }
+    if !trim_running().insert(mount.to_string()) {
+        return;
+    }
+    let state = state.clone();
+    let mount = mount.to_string();
+    let spawned = std::thread::Builder::new().name("trim".into()).spawn({
+        let mount = mount.clone();
+        move || {
+            let started = std::time::Instant::now();
+            let result = crate::platform::trim(Path::new(&mount));
+            let secs = started.elapsed().as_secs_f64();
+            let mut doc = serde_json::json!({
+                "at": typhon_engine::torrent::meta::now_secs(),
+                "secs": (secs * 10.0).round() / 10.0,
+            });
+            match &result {
+                Ok(bytes) => {
+                    doc["bytes"] = serde_json::json!(bytes);
+                    tracing::info!(volume = %mount, processed_gb = (*bytes as f64 / 1e9).round(), secs = %doc["secs"], "volume trimmed after drain");
+                }
+                Err(e) => {
+                    let why = trim_refusal(e);
+                    doc["error"] = serde_json::json!(why);
+                    trim_refused().insert(mount.clone());
+                    tracing::warn!(volume = %mount, "TRIM after drain refused, off for this volume until it is turned on again or the daemon restarts: {why}");
+                }
+            }
+            let store = match state.store.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            if let Err(e) = store.put_meta(&format!("{TRIM_LAST_PREFIX}{mount}"), &doc.to_string()) {
+                tracing::warn!("trim outcome not written: {e}");
+            }
+            drop(store);
+            trim_running().remove(&mount);
+        }
+    });
+    if let Err(e) = spawned {
+        trim_running().remove(&mount);
+        tracing::warn!(volume = %mount, "could not start the trim thread: {e}");
+    }
+}
+
+/// The sentence the operator needs, not the errno.
+fn trim_refusal(e: &std::io::Error) -> String {
+    #[cfg(unix)]
+    match e.raw_os_error() {
+        Some(libc::EPERM) | Some(libc::EACCES) => {
+            return "not allowed: TRIM needs CAP_SYS_ADMIN (Docker: cap_add SYS_ADMIN)".into()
+        }
+        Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY) => {
+            return "this filesystem or device does not support TRIM (ZFS: use autotrim)".into()
+        }
+        _ => {}
+    }
+    if e.kind() == std::io::ErrorKind::Unsupported {
+        return "TRIM is not available on this system".into();
+    }
+    format!("TRIM failed: {e}")
+}
+
 pub fn device_of(p: &Path) -> Option<u64> {
     crate::platform::volume_id(p)
 }

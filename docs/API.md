@@ -224,9 +224,11 @@ Bodies: [Workflows](https://github.com/Kheopsian/Hydranos/wiki/Workflows), [Jobs
 |---|---|---|---|
 | `/api/drain/{status,history,graduations}` | GET | Volumes, past drains, graduations in progress. | ✓ |
 | `/api/drain/now?volume=` | POST | Drain now. | ✓ |
-| `/api/drain/policy` | POST | `{"volume","enabled","high_watermark","low_watermark"}` or `{"volume","inherit":true}`; optional `"quota_gb"` (declared capacity in GB of 10^9 bytes, `0` removes it), on its own or with either form. | ✓ |
+| `/api/drain/policy` | POST | `{"volume","enabled","high_watermark","low_watermark"}` or `{"volume","inherit":true}`; optional `"quota_gb"` (declared capacity in GB of 10^9 bytes, `0` removes it) and `"trim_after_drain"` (bool), each on its own or with either form. | ✓ |
 
 A **quota** is for a volume shared with other data (a seedbox slot): with one, the volume's `used` is what Hydranos torrents wrote there and `free` is the smaller of the quota left and the disk's free space; the drain, the add refusal and the panel all use it. Each volume in `GET /api/drain/status` carries `quota` (bytes, or `null`), `basis` (`"quota"` or `"disk"`: what `total`/`used`/`free`/`used_pct` are measured against) and the disk underneath as `disk_total`, `disk_used`, `disk_free`.
+
+**TRIM after drain** (off by default, per volume): once a drain pass has deleted torrents and the disk gave space back, the volume is trimmed (`FITRIM`, Linux) on a thread of its own. Each volume in `GET /api/drain/status` carries `trim_after_drain` and `last_trim`: `null`, or `{"at","secs","bytes"}` (`bytes` is the filesystem's own count: XFS reports the whole range it walked, not what it discarded), or `{"at","secs","error"}` when it was refused. A refusal (no `CAP_SYS_ADMIN`; ZFS, network or FUSE filesystems, hard disks; Windows, which trims on delete itself) is logged once and turns the trim off for that volume until it is switched on again or the daemon restarts. Like the quota, setting it alone does not turn the watermarks into an override.
 
 See [Race Drain, Graduation and Seed Obligations](https://github.com/Kheopsian/Hydranos/wiki/Race-Drain-and-Graduation).
 
