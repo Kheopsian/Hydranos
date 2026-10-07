@@ -44,6 +44,7 @@ mod qbitrow;
 mod row;
 mod speedtest;
 mod dedup;
+mod pathclaim;
 mod deadkeys;
 mod export;
 mod selection;
