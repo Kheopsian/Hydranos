@@ -2382,11 +2382,29 @@ pub(crate) fn add_torrent_bytes_as(
     // that acts on the fast side is not accepting the work.
     race_admission(state, engine, meta.total_size as i64, &save_path)?;
 
+    let cfg = state.cfg();
+    // Files another torrent already names with other bytes: this torrent goes
+    // to a folder of its own (or is refused, per `[dedup] path_collision`)
+    // BEFORE anything is written, instead of rechecking over them. The
+    // reservation in `claim` keeps a concurrent add on the same folder out
+    // until the engine holds this one. See `pathclaim.rs`.
+    let claim = crate::pathclaim::check_add(
+        state, bytes, &meta, &hash, &engine_id, &save_path, seed_mode, cfg.dedup.path_collision,
+    )?;
+    let save_path = claim.save_path.clone();
+    // Held paused until `pathclaim::finish` has proven what it shares; the
+    // store says paused too, so the queue does not start it meanwhile.
+    let paused_asked = paused;
+    let paused = paused || claim.hold;
+    // skip_checking vouches for data at the path it was given. Isolated, the
+    // torrent starts from an empty folder: trusting it complete would seed
+    // nothing under a seed's flag.
+    let seed_mode = seed_mode && claim.isolate_from.is_none();
+
     // The metainfo goes into the store BEFORE the engine is told, and that
     // order is not cosmetic: the engine reads its piece hashes from the store,
     // and adding a torrent triggers a recheck. Told first, it would verify
     // against a row that does not exist yet and refuse every piece.
-    let cfg = state.cfg();
     let added_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -2453,9 +2471,19 @@ pub(crate) fn add_torrent_bytes_as(
     // paused torrent is safe: `run_recheck` leaves it Stopped and the download
     // path gates on `is_paused`, so this reports what is on disk without
     // fetching anything.
-    if add_recheck_wanted(seed_mode, engine.manager.any_file_exists(&info_hash)) {
+    // A held torrent is rechecked by `pathclaim::finish`, once what it shares
+    // is proven: two rechecks in flight install their verdicts in whatever
+    // order they end, and the earlier, emptier one could land last.
+    if !claim.hold && add_recheck_wanted(seed_mode, engine.manager.any_file_exists(&info_hash)) {
         let _ = engine.manager.recheck(&info_hash);
     }
+
+    if claim.hold {
+        tracing::info!(engine = %engine_id, hash = %hash, note = claim.note.as_deref().unwrap_or(""),
+            "torrent held until its shared files are proven");
+        crate::pathclaim::finish(state, &engine_id, &hash, bytes, &claim, !paused_asked);
+    }
+    drop(claim);
 
     if linked_from.is_empty() {
         tracing::info!(engine = %engine_id, category = %category, hash = %hash, "torrent added");
@@ -10875,8 +10903,10 @@ async fn hoard_verify_one(
         return not_found();
     };
     // The engine owns the hash, so take the typed one off the torrent instead
-    // of re-parsing the prefix the caller typed.
-    match engine.manager.recheck(&torrent.info_hash) {
+    // of re-parsing the prefix the caller typed. Guarded: a recheck fetches
+    // what fails, and a file another torrent names with other bytes must be
+    // proven before anything is fetched into it.
+    match crate::pathclaim::guarded_recheck(&state, &engine_id, &torrent) {
         // Answer what happened, not that the request was well-formed: the
         // check runs in the background, and "checking" is what the caller
         // needs to know to start polling progress.
@@ -14551,12 +14581,13 @@ async fn qbit_recheck(
     let mut refused = 0usize;
     for hash in resolved {
         for (id, copy) in copies_of(&state, &hash) {
-            let Some(engine) = state.engines.get(&id) else {
+            if state.engines.get(&id).is_none() {
                 continue;
-            };
+            }
             // The engine owns the hash: take the typed one off the torrent
-            // rather than re-parsing the prefix the caller sent.
-            match engine.manager.recheck(&copy.info_hash) {
+            // rather than re-parsing the prefix the caller sent. Guarded like
+            // the Verify button: the *arr call this right after an import.
+            match crate::pathclaim::guarded_recheck(&state, &id, &copy) {
                 Ok(()) => checking += 1,
                 // recheck refuses a torrent it cannot check -- no metadata yet,
                 // or a check already running. Counted, not fatal to the batch.

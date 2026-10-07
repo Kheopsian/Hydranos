@@ -34,6 +34,33 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   pages pile up until the kernel throttles every writer of the machine.
 
 ### Fixed
+- **A torrent no longer overwrites another torrent's files.** Two different
+  torrents naming the same folder and file names -- a re-upload that kept the
+  release name, an encode published twice under one title -- shared the
+  path: the second one rechecked the first one's files, fetched the pieces
+  that differed and wrote them in place. The first never rehashes what it
+  verified, so it went on seeding the mix, and whatever read the file played
+  it broken. Measured on a 1.09M-torrent library: 14 such paths, a whole
+  season among them, broken for seven weeks with nothing logged. An incoming
+  torrent whose files another torrent holds with other bytes now goes to a
+  folder of its own next to the one it asked for (`<name> [<hash>]`); every
+  file whose pieces verify against the existing one is hardlinked in, so only
+  what really differs is downloaded. Same size is not taken for same bytes:
+  the files are hashed first. A torrent sharing the very same bytes
+  (cross-seeding) shares the path as before. `[dedup] path_collision` =
+  `isolate` (default), `refuse`, or `legacy` (the old behaviour).
+- **A recheck no longer fetches over a file another torrent holds with other
+  bytes** (the Verify button, the qBittorrent recheck the *arr call after an
+  import): those files are hashed first, and if they differ the torrent stays
+  paused in error, saying why, instead of downloading into them. A file a
+  new torrent finds on disk that nobody seeds but is hardlinked elsewhere
+  (the *arr library) is proven the same way before anything is fetched.
+- **A move onto files already at the destination is refused**
+  (`destination_taken`): `rename` replaces its target without a word, so a
+  move or a category change onto another torrent's file of the same name
+  destroyed it.
+- Shared paths found by these checks are reported as `path_collision` in
+  `/api/health/anomalies`.
 - **A hoard download no longer flaps to "seeding 100 %"** when race holds
   the same hash: the hoard list ignored which engine a live update came
   from, and a race removal could drop the hoard row too.

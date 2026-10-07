@@ -299,6 +299,10 @@ pub struct MovePlan {
     /// Another torrent reads one of these same files. Renaming it away would
     /// leave that torrent serving bytes that are no longer there.
     pub shared_with: Vec<String>,
+    /// Files already at the destination. `rename(2)` replaces its target
+    /// without a word, so moving onto them would destroy whatever they are --
+    /// another torrent's file, most likely, under the same name.
+    pub occupied: Vec<String>,
 }
 
 impl MovePlan {
@@ -315,6 +319,13 @@ impl MovePlan {
                 "{} other torrent(s) read the same files ({}); moving them would leave those serving nothing",
                 self.shared_with.len(),
                 self.shared_with.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        if !self.occupied.is_empty() {
+            return Some(("destination_taken", format!(
+                "{} file(s) already exist at the destination ({}); moving onto them would overwrite them",
+                self.occupied.len(),
+                self.occupied.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
             )));
         }
         None
@@ -349,6 +360,7 @@ impl MovePlan {
             "enough_space": free.map(|f| f >= copy).unwrap_or(true),
             "unsafe_path": self.unsafe_path,
             "shared_with": self.shared_with,
+            "occupied": self.occupied,
         })
     }
 }
@@ -465,10 +477,48 @@ fn scan_shared(
     mine: &std::collections::HashSet<std::path::PathBuf>,
     skip_copies: bool,
 ) -> (Vec<String>, std::collections::HashSet<std::path::PathBuf>) {
-    let my_top = top_entry(t);
+    let skip = |other: &typhon_engine::torrent::meta::TorrentState| {
+        std::ptr::eq(other, t) || (skip_copies && other.meta.info_hash == t.meta.info_hash)
+    };
+    // Compared by `path_key` (case-folded on Windows), answered with the
+    // caller's own spelling of each path: the caller looks its files up in
+    // what comes back.
+    let by_key: std::collections::HashMap<std::path::PathBuf, &std::path::PathBuf> =
+        mine.iter().map(|p| (crate::pathclaim::path_key(p), p)).collect();
+    let keys: std::collections::HashSet<std::path::PathBuf> = by_key.keys().cloned().collect();
+    let mut hashes: Vec<String> = Vec::new();
+    let mut files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    for (other, hit) in scan_claims(state, root, top_entry(t), &keys, &skip) {
+        let h = typhon_engine::torrent::hex_encode(&other.meta.info_hash);
+        if !hashes.contains(&h) {
+            hashes.push(h);
+        }
+        files.extend(
+            hit.into_iter()
+                .filter_map(|(p, _)| by_key.get(&crate::pathclaim::path_key(&p)).map(|m| (*m).clone())),
+        );
+    }
+    (hashes, files)
+}
+
+/// Every torrent of every engine that names one of `mine` -- absolute paths
+/// under the save path `root`, whose first component under it is `my_top` --
+/// with each file it names and the size IT expects there. `skip` leaves
+/// torrents out.
+///
+/// The same scan serves a move, a deletion, and an add checking whether its
+/// paths are already somebody's (`pathclaim`). On Windows `mine` holds
+/// `pathclaim::path_key`s, so a name differing only by case still matches.
+pub fn scan_claims(
+    state: &AppState,
+    root: &std::path::Path,
+    my_top: Option<&std::ffi::OsStr>,
+    mine: &std::collections::HashSet<std::path::PathBuf>,
+    skip: &(dyn Fn(&typhon_engine::torrent::meta::TorrentState) -> bool + Sync),
+) -> Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> {
     // The files of `mine` that `other` reads, or None when it reads none.
-    let shared_by = |other: &typhon_engine::torrent::meta::TorrentState| -> Option<Vec<std::path::PathBuf>> {
-        if std::ptr::eq(other, t) || (skip_copies && other.meta.info_hash == t.meta.info_hash) {
+    let shared_by = |other: &typhon_engine::torrent::meta::TorrentState| -> Option<Vec<(std::path::PathBuf, u64)>> {
+        if skip(other) {
             return None;
         }
         // Only a torrent whose root is on the same branch can name the
@@ -493,15 +543,18 @@ fn scan_shared(
             }
             r.clone()
         };
-        let hit: Vec<std::path::PathBuf> =
-            rel_paths(other).into_iter().map(|p| r.join(p)).filter(|p| mine.contains(p)).collect();
+        let hit: Vec<(std::path::PathBuf, u64)> = rel_paths(other)
+            .into_iter()
+            .zip(other.meta.files.iter().map(|f| f.length))
+            .map(|(p, len)| (r.join(p), len))
+            .filter(|(p, _)| mine.contains(&crate::pathclaim::path_key(p)))
+            .collect();
         if hit.is_empty() { None } else { Some(hit) }
     };
     let pair = |o: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>| {
-        shared_by(o).map(|files| (typhon_engine::torrent::hex_encode(&o.meta.info_hash), files))
+        shared_by(o).map(|files| (o.clone(), files))
     };
-    let mut hashes: Vec<String> = Vec::new();
-    let mut files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut out: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> = Vec::new();
     // Over every torrent of every engine, in slices on their own threads: the
     // prefix test alone is a second per move at a million torrents, and a
     // move of a hundred torrents runs it a hundred times.
@@ -511,7 +564,7 @@ fn scan_shared(
             .map(|n| n.get())
             .unwrap_or(1)
             .clamp(1, 16);
-        let found: Vec<Vec<(String, Vec<std::path::PathBuf>)>> = if threads == 1 || all.len() < SHARED_SCAN_PARALLEL_FROM {
+        let found: Vec<Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)>> = if threads == 1 || all.len() < SHARED_SCAN_PARALLEL_FROM {
             vec![all.iter().filter_map(pair).collect()]
         } else {
             let per = all.len().div_ceil(threads).max(1);
@@ -524,14 +577,9 @@ fn scan_shared(
                 handles.into_iter().map(|h| h.join().expect("shared-file scan slice")).collect()
             })
         };
-        for (h, fs) in found.into_iter().flatten() {
-            if !hashes.contains(&h) {
-                hashes.push(h);
-            }
-            files.extend(fs);
-        }
+        out.extend(found.into_iter().flatten());
     }
-    (hashes, files)
+    out
 }
 
 /// Plan moving `t`'s files from where it reads them to `new_root`.
@@ -546,7 +594,7 @@ pub fn plan_move(
         .map(|p| p.display().to_string());
     let multi = t.meta.multi_file;
     let name = t.meta.name.clone();
-    let files = t
+    let files: Vec<MoveFile> = t
         .meta
         .files
         .iter()
@@ -572,7 +620,28 @@ pub fn plan_move(
             }
         })
         .collect();
-    MovePlan { old_root, new_root: new_root.to_path_buf(), files, unsafe_path, shared_with: Vec::new() }
+    let occupied = files
+        .iter()
+        .filter(|f| f.present && f.from != f.to && f.to.exists() && !same_file(&f.from, &f.to))
+        .map(|f| f.to.display().to_string())
+        .collect();
+    MovePlan { old_root, new_root: new_root.to_path_buf(), files, unsafe_path, shared_with: Vec::new(), occupied }
+}
+
+/// Two names of one file: renaming one onto the other loses nothing.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+    }
 }
 
 /// Queue moving a torrent's data to `save_path` without leaving its engine.
@@ -850,6 +919,24 @@ mod graduate_tests {
         )
         .expect("added");
         (s, hash, src, dst)
+    }
+
+    #[test]
+    fn a_move_onto_a_file_that_is_already_there_is_refused() {
+        // rename(2) replaces its target silently: moving onto another
+        // torrent's file of the same name would destroy it.
+        let (s, hash, src, dst) = setup("move-occupied");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("grad"), b"somebody else's grad").unwrap();
+        let e = s.state.engines.get("race").unwrap();
+        let t = e.manager.get(&crate::store::hex20(&hash).unwrap()).unwrap();
+        let plan = plan_move(&t, &dst);
+        assert_eq!(plan.refusal().map(|r| r.0), Some("destination_taken"));
+
+        // Another name of the very same file loses nothing when renamed onto.
+        std::fs::remove_file(dst.join("grad")).unwrap();
+        std::fs::hard_link(src.join("grad"), dst.join("grad")).unwrap();
+        assert!(plan_move(&t, &dst).refusal().is_none());
     }
 
     fn job(hash: &str, dest: &std::path::Path) -> crate::store::Job {

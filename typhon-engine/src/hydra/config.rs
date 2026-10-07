@@ -377,6 +377,12 @@ pub struct Dedup {
     /// of offers nobody reads is dead weight that still has to be maintained.
     #[serde(default = "dedup_default_enabled")]
     pub enabled: bool,
+    /// An incoming torrent naming files another torrent holds with other
+    /// bytes: `isolate` (a folder of its own, identical files hardlinked in),
+    /// `refuse`, or `legacy` (share the path and let the recheck overwrite,
+    /// as every version before 4.4 did). See `pathclaim.rs`.
+    #[serde(default)]
+    pub path_collision: crate::pathclaim::Mode,
 }
 
 fn dedup_default_enabled() -> bool {
@@ -385,7 +391,7 @@ fn dedup_default_enabled() -> bool {
 
 impl Default for Dedup {
     fn default() -> Self {
-        Self { enabled: dedup_default_enabled() }
+        Self { enabled: dedup_default_enabled(), path_collision: Default::default() }
     }
 }
 
