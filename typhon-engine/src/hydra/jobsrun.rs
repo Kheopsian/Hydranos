@@ -415,7 +415,9 @@ pub fn plan_move_checked(
     }
     let mine: std::collections::HashSet<std::path::PathBuf> =
         plan.files.iter().map(|f| f.from.clone()).collect();
-    let (hashes, _) = scan_shared(state, t, &plan.old_root, &mine, true);
+    // This torrent's copy in another engine counts: seeded from the same path
+    // (POST /copy), it would be left serving files moved out from under it.
+    let (hashes, _) = scan_shared(state, t, &plan.old_root, &mine, false);
     plan.shared_with = hashes;
     plan
 }
