@@ -1146,6 +1146,96 @@ mod tests {
         assert_eq!(std::fs::read(lib.join("ep.mkv")).unwrap(), vec![3u8; 20_000]);
     }
 
+    /// A single-file torrent (`length` in the info dict, no `files`).
+    fn single_over(name: &str, data: &[u8], salt: &str) -> Vec<u8> {
+        use sha1::{Digest, Sha1};
+        let mut pieces = Vec::new();
+        for chunk in data.chunks(16384) {
+            pieces.extend_from_slice(&Sha1::digest(chunk));
+        }
+        let mut v = Vec::new();
+        v.extend_from_slice(format!("d4:infod6:lengthi{}e4:name{}:{name}12:piece lengthi16384e6:pieces{}:", data.len(), name.len(), pieces.len()).as_bytes());
+        v.extend_from_slice(&pieces);
+        v.extend_from_slice(format!("6:x-salt{}:{salt}ee", salt.len()).as_bytes());
+        v
+    }
+
+    /// The store lookup must find exactly what walking every torrent finds,
+    /// on the shapes that make it non-trivial: a torrent rooted above ours,
+    /// one rooted inside it, a sibling under the same name, one two levels
+    /// deep, an unrelated one, one whose store row spells its root rather than
+    /// its save path (the Internet Archive layout) -- and after a move.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_store_lookup_finds_what_the_full_walk_finds() {
+        let s = crate::api::testing::state_from("pathclaim-index", "[dedup]\npath_collision = \"legacy\"\n");
+        let t = s.dir.join("t");
+        let lib = t.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let fixtures: Vec<(Vec<u8>, PathBuf)> = vec![
+            (torrent_over("Pack", &[("a.mkv", &[1u8; 300]), ("sub/b.nfo", &[2u8; 30])], 16384), lib.clone()),
+            (salted("lib", &[("Pack/a.mkv", &[1u8; 300])], 16384, "above"), t.clone()),
+            (single_over("a.mkv", &[3u8; 400], "inside"), lib.join("Pack")),
+            (single_over("b.nfo", &[4u8; 30], "deep"), lib.join("Pack").join("sub")),
+            (salted("Pack", &[("c.txt", &[5u8; 10])], 16384, "sibling"), lib.clone()),
+            (salted("Other", &[("a.mkv", &[6u8; 300])], 16384, "unrelated"), lib.clone()),
+            (salted("lib", &[("Pack/sub/b.nfo", &[7u8; 30])], 16384, "ia"), t.clone()),
+        ];
+        let mut hashes = Vec::new();
+        for (bytes, save) in &fixtures {
+            hashes.push(add(&s, bytes, save, true, true).unwrap());
+        }
+        // The Internet Archive layout: the store row names the item's own
+        // folder, the engine its parent.
+        {
+            let store = s.state.store.lock().unwrap();
+            store.set_save_path(&hashes[6], &t.join("lib").to_string_lossy()).unwrap();
+        }
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+
+        let compare = |label: &str| {
+            for h in &hashes {
+                let me = mgr.get(&crate::store::hex20(h).unwrap()).unwrap();
+                let save = me.save_path.read().clone();
+                let mine: HashSet<PathBuf> = files_of(&me.meta, &save).into_iter().map(|(a, _, _)| path_key(&a)).collect();
+                let top = if me.meta.multi_file {
+                    Path::new(&me.meta.name).components().next().map(|c| c.as_os_str().to_os_string())
+                } else {
+                    me.meta.files[0].path.components().next().map(|c| c.as_os_str().to_os_string())
+                };
+                let ih = me.meta.info_hash;
+                let skip = move |o: &TorrentState| o.meta.info_hash == ih;
+                let norm = |v: Vec<(Arc<TorrentState>, Vec<(PathBuf, u64)>)>| {
+                    let mut v: Vec<(String, Vec<(PathBuf, u64)>)> = v
+                        .into_iter()
+                        .map(|(t, mut f)| {
+                            f.sort();
+                            (typhon_engine::torrent::hex_encode(&t.meta.info_hash), f)
+                        })
+                        .collect();
+                    v.sort();
+                    v
+                };
+                let fast = norm(crate::jobsrun::scan_claims(&s.state, &save, top.as_deref(), &mine, &skip));
+                let full = norm(crate::jobsrun::scan_claims_full(&s.state, &save, top.as_deref(), &mine, &skip));
+                assert_eq!(fast, full, "{label}: lookup and walk disagree for {}", &h[..8]);
+            }
+        };
+        compare("as added");
+        // The case the test exists for must be in the data: above, inside and
+        // deep each share a file with the pack.
+        let pack = mgr.get(&crate::store::hex20(&hashes[0]).unwrap()).unwrap();
+        let mine: HashSet<PathBuf> = files_of(&pack.meta, &lib).into_iter().map(|(a, _, _)| path_key(&a)).collect();
+        let ih = pack.meta.info_hash;
+        let found = crate::jobsrun::scan_claims(&s.state, &lib, Some(std::ffi::OsStr::new("Pack")), &mine, &move |o: &TorrentState| o.meta.info_hash == ih);
+        assert_eq!(found.len(), 4, "above, inside, deep, and the item whose store row spells its root");
+
+        // Moved, as a move does it: the engine and the store row together.
+        let moved = &hashes[5];
+        mgr.set_save_path(&crate::store::hex20(moved).unwrap(), &t.to_string_lossy()).unwrap();
+        s.state.store.lock().unwrap().set_save_path(moved, &t.to_string_lossy()).unwrap();
+        compare("after a move");
+    }
+
     #[test]
     fn a_missing_source_proves_nothing() {
         let dir = std::env::temp_dir().join(format!("pathclaim-missing-{}", std::process::id()));
