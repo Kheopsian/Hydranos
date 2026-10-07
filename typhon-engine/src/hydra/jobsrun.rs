@@ -506,9 +506,19 @@ fn scan_shared(
 /// with each file it names and the size IT expects there. `skip` leaves
 /// torrents out.
 ///
-/// The same scan serves a move, a deletion, and an add checking whether its
+/// The same lookup serves a move, a deletion, and an add checking whether its
 /// paths are already somebody's (`pathclaim`). On Windows `mine` holds
 /// `pathclaim::path_key`s, so a name differing only by case still matches.
+///
+/// The candidates come from the store's `save_path` index rather than a walk
+/// of every engine: the walk cost ~190 ms per add at a million torrents,
+/// measured on a copy of production. A torrent can only name one of our
+/// files if its save path is an ancestor of our root (or our root itself) or
+/// lies under it -- and that holds whichever way the store spells the path:
+/// for most torrents the engine's save path, for an Internet Archive item its
+/// root. Each candidate is then checked against the engine's live paths.
+/// `scan_claims_full` is the walk, kept under test to hold the two to the
+/// same answer.
 pub fn scan_claims(
     state: &AppState,
     root: &std::path::Path,
@@ -516,41 +526,107 @@ pub fn scan_claims(
     mine: &std::collections::HashSet<std::path::PathBuf>,
     skip: &(dyn Fn(&typhon_engine::torrent::meta::TorrentState) -> bool + Sync),
 ) -> Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> {
-    // The files of `mine` that `other` reads, or None when it reads none.
-    let shared_by = |other: &typhon_engine::torrent::meta::TorrentState| -> Option<Vec<(std::path::PathBuf, u64)>> {
-        if skip(other) {
+    let my_root = match my_top {
+        Some(t) => root.join(t),
+        None => root.to_path_buf(),
+    };
+    let exact: Vec<String> = my_root.ancestors().map(|a| a.to_string_lossy().into_owned()).collect();
+    let rows = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.rows_by_save_path(&exact, &my_root.to_string_lossy(), std::path::MAIN_SEPARATOR)
+    };
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            // A store that cannot answer must not read as "nobody holds these
+            // files": that is the overwrite this check exists for.
+            tracing::warn!("path claim: store lookup failed ({e}), walking every torrent instead");
+            return scan_claims_walk(state, root, my_top, mine, skip);
+        }
+    };
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<(String, [u8; 20])> = std::collections::HashSet::new();
+    for (hash, session) in rows {
+        let Some(engine) = state.engines.get(&session) else { continue };
+        let Some(ih) = crate::store::hex20(&hash) else { continue };
+        let Some(other) = engine.manager.get(&ih) else { continue };
+        if !seen.insert((session, ih)) {
+            continue;
+        }
+        if let Some(hit) = claim_of(&other, root, my_top, mine, skip) {
+            out.push((other, hit));
+        }
+    }
+    out
+}
+
+/// The files of `mine` that `other` names, with the size it expects, or None.
+/// `root`/`my_top` as in `scan_claims`: a prefix test first, the file list
+/// only for a torrent on the same branch.
+fn claim_of(
+    other: &typhon_engine::torrent::meta::TorrentState,
+    root: &std::path::Path,
+    my_top: Option<&std::ffi::OsStr>,
+    mine: &std::collections::HashSet<std::path::PathBuf>,
+    skip: &(dyn Fn(&typhon_engine::torrent::meta::TorrentState) -> bool + Sync),
+) -> Option<Vec<(std::path::PathBuf, u64)>> {
+    if skip(other) {
+        return None;
+    }
+    // Only a torrent whose save path is on the same branch can name the same
+    // files: a prefix test first, the file list only then. Read in place: a
+    // PathBuf clone per torrent would be an allocation for the ones that fail.
+    let r = {
+        let r = other.save_path.read();
+        if !(root.starts_with(&*r) || r.starts_with(root)) {
             return None;
         }
-        // Only a torrent whose root is on the same branch can name the
-        // same files: a prefix test first, the file list only then.
-        // Read in place: a PathBuf clone per torrent would be an allocation
-        // for the 99.99% that fail the test.
-        let r = {
-            let r = other.save_path.read();
-            if !(root.starts_with(&*r) || r.starts_with(root)) {
-                return None;
-            }
-            // Same folder, different top-level entry: no file can be
-            // shared, since every path of each starts with its own entry.
-            // A whole category can share one folder, and there the folder
-            // test lets nearly everything through.
-            if *r == *root {
-                if let (Some(a), Some(b)) = (my_top, top_entry(other)) {
-                    if a != b {
-                        return None;
-                    }
+        // Same folder, different top-level entry: no file can be shared, since
+        // every path of each starts with its own entry.
+        if *r == *root {
+            if let (Some(a), Some(b)) = (my_top, top_entry(other)) {
+                if a != b {
+                    return None;
                 }
             }
-            r.clone()
-        };
-        let hit: Vec<(std::path::PathBuf, u64)> = rel_paths(other)
-            .into_iter()
-            .zip(other.meta.files.iter().map(|f| f.length))
-            .map(|(p, len)| (r.join(p), len))
-            .filter(|(p, _)| mine.contains(&crate::pathclaim::path_key(p)))
-            .collect();
-        if hit.is_empty() { None } else { Some(hit) }
+        }
+        r.clone()
     };
+    let hit: Vec<(std::path::PathBuf, u64)> = rel_paths(other)
+        .into_iter()
+        .zip(other.meta.files.iter().map(|f| f.length))
+        .map(|(p, len)| (r.join(p), len))
+        .filter(|(p, _)| mine.contains(&crate::pathclaim::path_key(p)))
+        .collect();
+    if hit.is_empty() { None } else { Some(hit) }
+}
+
+/// `scan_claims` by walking every torrent of every engine: the reference the
+/// tests hold the lookup to.
+#[cfg(test)]
+pub fn scan_claims_full(
+    state: &AppState,
+    root: &std::path::Path,
+    my_top: Option<&std::ffi::OsStr>,
+    mine: &std::collections::HashSet<std::path::PathBuf>,
+    skip: &(dyn Fn(&typhon_engine::torrent::meta::TorrentState) -> bool + Sync),
+) -> Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> {
+    scan_claims_walk(state, root, my_top, mine, skip)
+}
+
+/// Every torrent of every engine, checked one by one: what `scan_claims`
+/// falls back on when the store cannot answer.
+fn scan_claims_walk(
+    state: &AppState,
+    root: &std::path::Path,
+    my_top: Option<&std::ffi::OsStr>,
+    mine: &std::collections::HashSet<std::path::PathBuf>,
+    skip: &(dyn Fn(&typhon_engine::torrent::meta::TorrentState) -> bool + Sync),
+) -> Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> {
+    let shared_by = |other: &typhon_engine::torrent::meta::TorrentState| claim_of(other, root, my_top, mine, skip);
     let pair = |o: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>| {
         shared_by(o).map(|files| (o.clone(), files))
     };

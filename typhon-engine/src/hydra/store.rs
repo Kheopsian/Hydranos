@@ -716,7 +716,57 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_torrents_pinned
              ON torrents(session, info_hash) WHERE pinned <> 0;",
         )?;
+        // Which rows hang off a path: what an add asks to learn whether its
+        // files are already another torrent's (`pathclaim.rs`). Without it
+        // the answer was a walk of every torrent of every engine, measured at
+        // ~190 ms per add on a million-torrent library. NOCASE so the same
+        // index answers for NTFS, where two names differing by case are one
+        // file; on other systems it only adds candidates, which the caller
+        // checks against the real paths. Covering, so the table and its BLOBs
+        // are never read.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_torrents_save_path
+             ON torrents(save_path COLLATE NOCASE, session, info_hash);",
+        )?;
         Ok(())
+    }
+
+    /// (info_hash, session) of every row whose `save_path` is one of
+    /// `exact`, or lies under `root` (a path starting with `root` and the
+    /// separator). Compared without case, through `idx_torrents_save_path`.
+    pub fn rows_by_save_path(
+        &self,
+        exact: &[String],
+        root: &str,
+        sep: char,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        {
+            let mut q = self.conn.prepare_cached(
+                "SELECT info_hash, session FROM torrents WHERE save_path = ?1 COLLATE NOCASE",
+            )?;
+            for p in exact {
+                let rows = q.query_map([p], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
+        }
+        // Everything under `root`: from `root/` up to, not including, the
+        // character after the separator.
+        let lo = format!("{root}{sep}");
+        let hi = format!("{root}{}", char::from_u32(sep as u32 + 1).unwrap_or(sep));
+        let mut q = self.conn.prepare_cached(
+            "SELECT info_hash, session FROM torrents
+             WHERE save_path >= ?1 COLLATE NOCASE AND save_path < ?2 COLLATE NOCASE",
+        )?;
+        let rows = q.query_map([lo, hi], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for r in rows {
+            out.push(r?);
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
     }
 
     /// The fleet registry.
