@@ -45,6 +45,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   drain could not see. Files are now kept only when another torrent, this
   hash's other copies included, reads the very same path. Removing a torrent
   from every engine at once now deletes each copy's own files too.
+- **Moving a torrent's data is refused when its copy in another engine
+  reads the same files** (two engines seeding one payload). The check for
+  files another torrent reads skipped every torrent of the same hash, so the
+  move went ahead and left the other copy serving files that were gone.
 
 ## v4.3.2 -- managed WireGuard that holds, a kill switch that follows the mode
 

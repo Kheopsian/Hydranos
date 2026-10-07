@@ -21829,6 +21829,27 @@ mod delete_spares_shared_files_tests {
         assert!(!race.join("book.epub").exists());
         assert!(!hoard.join("book.epub").exists());
     }
+
+    /// A move is refused when this torrent's copy in another engine reads the
+    /// same files, and allowed when that copy has a payload of its own.
+    #[test]
+    fn a_move_is_refused_only_when_another_copy_reads_the_same_path() {
+        let s = state("move-copy");
+        let shared = s.dir.join("shared");
+        let hash = seed_copy(&s, "race", &shared);
+        seed_copy(&s, "hoard", &shared);
+        let race = find_copy(&s.state, "race", &hash).unwrap();
+        let plan = crate::jobsrun::plan_move_checked(&s.state, &race, &s.dir.join("dst"));
+        assert_eq!(plan.refusal().map(|r| r.0), Some("shared"), "the hoard copy reads these files");
+        assert_eq!(plan.shared_with, vec![hash.clone()]);
+
+        let t = state("move-copy-elsewhere");
+        let hash = seed_copy(&t, "race", &t.dir.join("race"));
+        seed_copy(&t, "hoard", &t.dir.join("hoard"));
+        let race = find_copy(&t.state, "race", &hash).unwrap();
+        let plan = crate::jobsrun::plan_move_checked(&t.state, &race, &t.dir.join("dst"));
+        assert!(plan.refusal().is_none(), "the hoard copy reads its own payload");
+    }
 }
 
 /// cross-seed against the qBit shim, through the real router.
