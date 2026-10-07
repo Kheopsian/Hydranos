@@ -6802,9 +6802,25 @@ function _rpVolCard(v, i) {
         + '<span class="rp2-info">i<span class="rp2-tip" style="left:auto;right:0">' + esc(t("On a shared disk (a seedbox slot), the space you are allowed rather than the disk's size. The percentages and the drain then count the data of this engine's torrents against it. Empty: the whole disk.")) + "</span></span>"
         + '<input type="number" min="0" step="1" style="width:90px" placeholder="' + t("whole disk") + '" value="'
         + (v.quota ? Math.round(v.quota / 1e9) : "") + '" onchange="_rpVolSave(' + i + ',\'quota_gb\',parseFloat(this.value)||0)"> GB</div></div></div>'
+        + '<div class="rp2-row"><div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox"'
+        + (v.trim_after_drain ? " checked" : "") + ' onchange="_rpVolSave(' + i + ',\'trim_after_drain\',this.checked)">'
+        + '<span class="rp2-sl"></span></label>' + t("TRIM after drain")
+        + '<span class="rp2-info">i<span class="rp2-tip">' + esc(t("Tells the SSD which blocks the drain just freed. An SSD that is never trimmed treats deleted races as live data and can fall to a fraction of its write speed. Needs CAP_SYS_ADMIN; ZFS, network shares and hard disks refuse it.")) + "</span></span></div>"
+        + '<div class="rp2-spacer"></div>' + _rpTrimLast(v.last_trim) + "</div>"
         + '<div class="rp2-row rp2-drain-result" id="rp-res-' + i + '" style="display:none"></div>'
         + '<div class="rp2-hist" id="rp-hist-' + i + '" style="display:none"></div>'
         + "</div></div>";
+}
+// The last trim, or why it was refused: a switch that is on and silently does
+// nothing is worse than no switch.
+function _rpTrimLast(x) {
+    if (!x || !x.at) return "";
+    if (x.error) {
+        return '<span class="rp2-warn" style="color:var(--accent-red)">' + esc(x.error) + " &middot; " + relTime(x.at) + "</span>";
+    }
+    // Not the byte count: XFS reports the whole range it walked, so it would
+    // read as "2 TB trimmed" on a disk that had 400 GB free.
+    return '<span style="color:var(--text-muted)">' + esc(t("last trim: {secs} s, {ago}", { secs: x.secs ?? "?", ago: relTime(x.at) })) + "</span>";
 }
 // Saved against the VOLUME, and it applies on the next tick: the daemon reads
 // the policy from the store every pass, so there is no restart to offer here.
@@ -6821,7 +6837,7 @@ async function _rpVolSave(i, key, value) {
         });
         // A quota alone is not a threshold override: the volume keeps
         // following the defaults it inherited.
-        _rpVols[i] = Object.assign({}, v, r, key === "quota_gb" ? {} : { inherited: false });
+        _rpVols[i] = Object.assign({}, v, r, key === "quota_gb" || key === "trim_after_drain" ? {} : { inherited: false });
         loadRacePolicy();
     } catch (e) {
         hydraNotify(t("Save failed: {msg}", { msg: e.message }));

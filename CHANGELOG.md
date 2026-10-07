@@ -21,6 +21,23 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a race SSD told what the drain freed
+
+### Added
+- **TRIM after drain**, per race volume, off by default: once a drain pass
+  has deleted torrents, the volume is trimmed on a thread of its own, and the
+  panel shows when and how long, or why it was refused (no
+  `CAP_SYS_ADMIN`, ZFS, a network share, a hard disk). An SSD that is never
+  trimmed treats every deleted race as live data: measured on a WD SN700 at
+  79 %, 161 MiB/s sequential write and 199 ms average latency before one
+  `fstrim`, 679 MiB/s and 47 ms after. Below the download rate, the dirty
+  pages pile up until the kernel throttles every writer of the machine.
+
+### Fixed
+- **A hoard download no longer flaps to "seeding 100 %"** when race holds
+  the same hash: the hoard list ignored which engine a live update came
+  from, and a race removal could drop the hoard row too.
+
 ## v4.3.2 -- managed WireGuard that holds, a kill switch that follows the mode
 
 ### Added

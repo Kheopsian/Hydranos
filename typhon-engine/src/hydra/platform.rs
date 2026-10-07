@@ -410,6 +410,54 @@ pub fn is_network_fs(_path: &Path) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Discard (TRIM)
+// ---------------------------------------------------------------------------
+
+/// Tell the SSD under `mount` which of its blocks the filesystem no longer
+/// uses, and return the byte count the filesystem writes back.
+///
+/// ⚠ That count is the filesystem's to define: XFS answers with the whole
+/// range it walked (2.0 TB on a 79 % full 2 TB disk), not what it discarded.
+/// Report it as "processed", never as "freed".
+///
+/// Free space only: the filesystem picks the ranges, so no live data can be
+/// touched. What can go wrong is that it is refused -- `EPERM` without
+/// CAP_SYS_ADMIN, `EOPNOTSUPP`/`ENOTTY` on ZFS, NFS, FUSE, a hard disk, a
+/// dm-crypt without `allow_discards` -- and the error is returned for the
+/// caller to say so.
+///
+/// ⚠ Blocking, for seconds: XFS and btrfs re-discard ALL their free space on
+/// every call (19 s for 1.8 TB measured on a WD SN700). Never under a lock,
+/// never on the async runtime.
+#[cfg(target_os = "linux")]
+pub fn trim(mount: &Path) -> std::io::Result<u64> {
+    use std::os::unix::io::AsRawFd;
+    // linux/fs.h: `struct fstrim_range` and `_IOWR('X', 121, struct fstrim_range)`.
+    #[repr(C)]
+    struct FstrimRange {
+        start: u64,
+        len: u64,
+        minlen: u64,
+    }
+    const FITRIM: u32 = 0xC018_5879;
+    let dir = std::fs::File::open(mount)?;
+    let mut range = FstrimRange { start: 0, len: u64::MAX, minlen: 0 };
+    // `as _`: the request is a c_ulong on glibc and a c_int on musl.
+    if unsafe { libc::ioctl(dir.as_raw_fd(), FITRIM as _, &mut range) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // The filesystem writes its count back into `len` (see above).
+    Ok(range.len)
+}
+
+/// Windows sends TRIM itself as files are deleted, and there is no FITRIM
+/// elsewhere: refused like an unsupported filesystem, not faked as done.
+#[cfg(not(target_os = "linux"))]
+pub fn trim(_mount: &Path) -> std::io::Result<u64> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
