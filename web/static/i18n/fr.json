@@ -1064,5 +1064,8 @@
   "disarmed by [daemon] kill_switch = false: engines with no way out of their own leave by the host": "désarmé par [daemon] kill_switch = false : les engines sans sortie propre sortent par l'hôte",
   "armed by [daemon] kill_switch = true in direct mode: nothing leaves unless it has an interface, a proxy or allow_direct": "armé par [daemon] kill_switch = true en mode direct : rien ne sort sans interface, proxy ou allow_direct",
   "[daemon] kill_switch = true in direct mode, and it has no interface, no proxy and no allow_direct": "[daemon] kill_switch = true en mode direct, et il n'a ni interface, ni proxy, ni allow_direct",
-  "no tunnel and not direct. The kill switch keeps this engine off the network until it is given one.": "ni tunnel ni direct. Le kill switch tient cet engine hors du réseau tant qu'on ne lui en donne pas."
+  "no tunnel and not direct. The kill switch keeps this engine off the network until it is given one.": "ni tunnel ni direct. Le kill switch tient cet engine hors du réseau tant qu'on ne lui en donne pas.",
+  "TRIM after drain": "TRIM après drain",
+  "Tells the SSD which blocks the drain just freed. An SSD that is never trimmed treats deleted races as live data and can fall to a fraction of its write speed. Needs CAP_SYS_ADMIN; ZFS, network shares and hard disks refuse it.": "Indique au SSD les blocs que le drain vient de libérer. Un SSD jamais trimmé traite les races supprimées comme des données vivantes et peut tomber à une fraction de sa vitesse d'écriture. Demande CAP_SYS_ADMIN ; ZFS, partages réseau et disques durs le refusent.",
+  "last trim: {secs} s, {ago}": "dernier TRIM : {secs} s, {ago}"
 }

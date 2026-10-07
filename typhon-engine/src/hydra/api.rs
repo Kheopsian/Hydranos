@@ -4294,6 +4294,8 @@ async fn get_drain_status(
                 "high_watermark": v.policy.high,
                 "low_watermark": v.policy.low,
                 "inherited": v.policy.inherited,
+                "trim_after_drain": crate::volumes::trim_enabled(&state, &v.id),
+                "last_trim": crate::volumes::last_trim(&state, &v.id),
             }));
         }
     }
@@ -4329,6 +4331,10 @@ struct VolumePolicyBody {
     /// Independent of `inherit`: the slot's size is not a drain rule.
     #[serde(default)]
     quota_gb: Option<f64>,
+    /// TRIM the volume after a drain frees space on it. Independent of
+    /// `inherit` too: whether the disk wants a discard is not a drain rule.
+    #[serde(default)]
+    trim_after_drain: Option<bool>,
 }
 
 async fn set_volume_policy(
@@ -4343,6 +4349,21 @@ async fn set_volume_policy(
         return bad_request("volume is required");
     }
     let cfg = state.cfg();
+    let mut trim = crate::volumes::trim_enabled(&state, &body.volume);
+    if let Some(on) = body.trim_after_drain {
+        if let Err(e) = crate::volumes::save_trim(&state, &body.volume, on) {
+            return bad_request(&format!("could not save the trim setting: {e}"));
+        }
+        trim = on;
+    }
+    let only_trim = body.quota_gb.is_none()
+        && !body.inherit
+        && body.enabled.is_none()
+        && body.high_watermark.is_none()
+        && body.low_watermark.is_none();
+    if body.trim_after_drain.is_some() && only_trim {
+        return Json(serde_json::json!({"status": "ok", "trim_after_drain": trim})).into_response();
+    }
     let mut quota = crate::volumes::quota_for(&state, &body.volume);
     if let Some(gb) = body.quota_gb {
         if !gb.is_finite() || gb < 0.0 {
@@ -4359,14 +4380,14 @@ async fn set_volume_policy(
             && body.high_watermark.is_none()
             && body.low_watermark.is_none()
         {
-            return Json(serde_json::json!({"status": "ok", "quota": quota})).into_response();
+            return Json(serde_json::json!({"status": "ok", "quota": quota, "trim_after_drain": trim})).into_response();
         }
     }
     if body.inherit {
         if let Err(e) = crate::volumes::clear_policy(&state, &body.volume) {
             return bad_request(&format!("could not clear: {e}"));
         }
-        return Json(serde_json::json!({"status": "ok", "inherited": true, "quota": quota})).into_response();
+        return Json(serde_json::json!({"status": "ok", "inherited": true, "quota": quota, "trim_after_drain": trim})).into_response();
     }
     let mut p = crate::volumes::policy_for(&state, &body.volume, &cfg.race_drain);
     if let Some(v) = body.enabled {
@@ -4395,6 +4416,7 @@ async fn set_volume_policy(
         "low_watermark": p.low,
         "inherited": false,
         "quota": quota,
+        "trim_after_drain": trim,
     }))
     .into_response()
 }
@@ -20284,6 +20306,64 @@ mod write_path_tests {
         assert_eq!(p.high, 91, "the drain reads what the panel wrote");
         assert_eq!(p.low, 77);
         assert!(!p.inherited, "it is this volume's own policy now");
+    }
+
+    /// TRIM after drain is a fact about the disk: turning it on alone must not
+    /// freeze today's watermarks onto the volume, and it is off by default.
+    #[tokio::test]
+    async fn trim_after_drain_is_off_by_default_and_does_not_freeze_the_watermarks() {
+        let s = state_from("voltrim", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        assert!(!crate::volumes::trim_enabled(&s.state, "/mnt/race"), "off unless asked");
+        let body: VolumePolicyBody = serde_json::from_value(serde_json::json!({
+            "volume": "/mnt/race", "trim_after_drain": true
+        }))
+        .unwrap();
+        let resp =
+            super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(body))
+                .await;
+        assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+        assert!(crate::volumes::trim_enabled(&s.state, "/mnt/race"));
+        let cfg = s.cfg();
+        let p = crate::volumes::policy_for(&s.state, "/mnt/race", &cfg.race_drain);
+        assert!(p.inherited, "the watermarks still follow the global default");
+
+        let off: VolumePolicyBody = serde_json::from_value(serde_json::json!({
+            "volume": "/mnt/race", "trim_after_drain": false
+        }))
+        .unwrap();
+        super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(off)).await;
+        assert!(!crate::volumes::trim_enabled(&s.state, "/mnt/race"));
+    }
+
+    /// A trim that runs leaves its outcome where the panel reads it, whether
+    /// the filesystem accepted it or not -- a test container usually refuses
+    /// (no CAP_SYS_ADMIN, overlayfs), which is the case worth seeing.
+    #[tokio::test]
+    async fn a_trim_after_drain_writes_down_its_outcome() {
+        let s = state_from("voltrim-run", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let dir = std::env::temp_dir().join(format!("hydranos-trim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mount = dir.to_string_lossy().to_string();
+        crate::volumes::trim_after_drain(&s.state, &mount);
+        assert!(crate::volumes::last_trim(&s.state, &mount).is_none(), "off: nothing runs");
+
+        crate::volumes::save_trim(&s.state, &mount, true).unwrap();
+        crate::volumes::trim_after_drain(&s.state, &mount);
+        let mut last = None;
+        // A real discard on a real SSD takes seconds (19 s for 1.8 TB); a
+        // refusal comes back at once.
+        for _ in 0..1200 {
+            last = crate::volumes::last_trim(&s.state, &mount);
+            if last.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let last = last.expect("the outcome is written down");
+        eprintln!("trim outcome on {mount}: {last}");
+        assert!(last.get("secs").is_some(), "got {last}");
+        assert!(last.get("bytes").is_some() || last.get("error").is_some(), "got {last}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Clearing a volume's policy puts it back on the global default.
