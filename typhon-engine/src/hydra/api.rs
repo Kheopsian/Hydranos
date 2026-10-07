@@ -12060,9 +12060,6 @@ pub(crate) struct DeleteTimings {
     /// The handler's own lookups (resolve_hash, sessions_of).
     lookup_wait: std::time::Duration,
     lookup_hold: std::time::Duration,
-    /// `remove_one_torrent`'s count of the copies left.
-    count_wait: std::time::Duration,
-    count_hold: std::time::Duration,
     find: std::time::Duration,
     engine: typhon_engine::torrent::RemoveTimings,
     announce_forget: std::time::Duration,
@@ -12091,8 +12088,6 @@ impl DeleteTimings {
             total_ms = ms(total),
             lookup_lock_wait_ms = ms(self.lookup_wait),
             lookup_lock_hold_ms = ms(self.lookup_hold),
-            count_lock_wait_ms = ms(self.count_wait),
-            count_lock_hold_ms = ms(self.count_hold),
             find_ms = ms(self.find),
             engine_total_ms = ms(e.total),
             statedb_wait_ms = ms(e.statedb_wait),
@@ -12163,13 +12158,6 @@ fn remove_one_inner(
     // The engine first: dropping the store row alone leaves a torrent that
     // still seeds, still announces, and comes back at the next restart from the
     // engine's own state -- present to the network, invisible to the interface.
-    //
-    // The files go only with the LAST copy: two engines seeding one payload
-    // share it, so deleting it with the first would leave the others seeding
-    // nothing.
-    let remaining = timed_store(state, &mut tm.count_wait, &mut tm.count_hold, |store| {
-        store.sessions_of(hash).len()
-    });
     let mut dropped = 0usize;
     for session in sessions {
         let Some(engine) = state.engines.get(session) else { continue };
@@ -12177,12 +12165,18 @@ fn remove_one_inner(
         let found = find_copy(state, session, hash);
         tm.find += stage.elapsed();
         let Some(torrent) = found else { continue };
-        let last = dropped + 1 >= remaining;
-        let keep = !(delete_files && last);
-        // Files another torrent reads stay: a cross-seed, or an upload seeded
-        // from the very files it was made from, points at the same path. On
-        // 2026-10-02 a bulk delete took 1 376 uploads' books with their source
-        // torrents, and they went on "seeding" empty folders.
+        let keep = !delete_files;
+        // Files another torrent reads stay: a cross-seed, an upload seeded
+        // from the very files it was made from, or this torrent's copy in
+        // another engine, points at the same path. On 2026-10-02 a bulk delete
+        // took 1 376 uploads' books with their source torrents, and they went
+        // on "seeding" empty folders.
+        //
+        // Decided by path, never by how many copies the store lists: a race
+        // grab the *arr also fetched into the hoard has two rows and two
+        // payloads, and "files go with the last copy" kept the race one for a
+        // hoard copy that never read it -- 58 of the 62 orphans /race gathered
+        // on 2026-10-06.
         let spare = if keep { Default::default() } else { crate::jobsrun::files_read_by_others(state, &torrent) };
         // Before the engine lets go: the departure needs the torrent's own
         // book and counters, and nothing else would tell the trackers.
@@ -12629,19 +12623,18 @@ fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bo
     let keep_data = !delete_files;
     if let Some((_, torrent)) = find_torrent(state, &hash) {
         let ih = torrent.info_hash;
-        // The files go with the LAST copy only, minus what another torrent
-        // reads -- the same rules as `remove_one_inner`.
-        let mut copies = state.engines.engines().iter().filter(|e| e.manager.get(&ih).is_some()).count();
-        let spare = if keep_data { Default::default() } else { crate::jobsrun::files_read_by_others(state, &torrent) };
         for engine in state.engines.engines() {
             // This engine's OWN copy: the counters are per copy, and absorbing
             // the first engine's figures for every engine would credit the
             // carry-over with bytes the others never moved.
             if let Some(copy) = engine.manager.get(&ih) {
-                copies -= 1;
-                let keep = keep_data || copies > 0;
+                // Every copy goes, each with its own files, minus what a
+                // torrent of another hash reads: copies need not share a path
+                // (see `remove_one_inner`), so "the last copy deletes" left
+                // the others' payloads behind.
+                let spare = if keep_data { Default::default() } else { crate::jobsrun::files_read_by_other_hashes(state, &copy) };
                 state.engines.spawn_departure(&engine.id, copy.clone());
-                if let Err(e) = engine.manager.remove_torrent_sparing(&ih, keep, &spare).0 {
+                if let Err(e) = engine.manager.remove_torrent_sparing(&ih, keep_data, &spare).0 {
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
                     return;
                 }
@@ -21775,6 +21768,66 @@ mod delete_spares_shared_files_tests {
 
         remove_one_torrent(&s.state, &upload, &sessions, "", true).expect("upload removed");
         assert!(!file.exists(), "nothing reads it any more: deleting with files deletes it");
+    }
+
+    /// `torrent_bytes(false)` seeded by `engine` from `dir`, next to whatever
+    /// copy another engine already holds -- what POST /copy does.
+    fn seed_copy(s: &TestState, engine: &str, dir: &std::path::Path) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("book.epub"), vec![7u8; 16384]).unwrap();
+        let blob = torrent_bytes(false);
+        let root = dir.to_string_lossy().to_string();
+        let (ih, _) = s.state.engines.get(engine).unwrap().manager.add_torrent_bytes(&blob, &root, false, true).expect("seeded");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        s.state.store.lock().unwrap().insert_torrent(&hash, engine, &blob, &root, "", 0.0, false, "").unwrap();
+        hash
+    }
+
+    /// 2026-10-06: the *arr grabbed a race torrent into the hoard too, from a
+    /// payload of its own. The drain removed the race copy "with files", but
+    /// the store still listed the hoard copy, so the race files were kept for
+    /// a copy that never read them: 58 orphans on /race in a day.
+    #[test]
+    fn a_copy_with_its_own_payload_does_not_keep_this_one() {
+        let s = state("delete-copy-elsewhere");
+        let race = s.dir.join("race");
+        let hoard = s.dir.join("hoard");
+        let hash = seed_copy(&s, "race", &race);
+        assert_eq!(seed_copy(&s, "hoard", &hoard), hash);
+
+        remove_one_torrent(&s.state, &hash, &["race".to_string()], "race", true).expect("race copy removed");
+        assert!(!race.join("book.epub").exists(), "nothing reads the race payload any more");
+        assert!(hoard.join("book.epub").exists(), "the hoard copy's own payload stays");
+    }
+
+    /// Two engines seeding ONE payload (POST /copy): the first removal keeps
+    /// the files the other copy reads, the last one takes them.
+    #[test]
+    fn a_copy_reading_the_same_files_keeps_them_until_it_goes() {
+        let s = state("delete-copy-shared");
+        let dir = s.dir.join("data");
+        let hash = seed_copy(&s, "race", &dir);
+        seed_copy(&s, "hoard", &dir);
+
+        remove_one_torrent(&s.state, &hash, &["race".to_string()], "race", true).expect("race copy removed");
+        assert!(dir.join("book.epub").exists(), "the hoard copy still reads it");
+        remove_one_torrent(&s.state, &hash, &["hoard".to_string()], "hoard", true).expect("hoard copy removed");
+        assert!(!dir.join("book.epub").exists(), "the last reader is gone");
+    }
+
+    /// Removing every copy at once takes every copy's own payload, not only
+    /// the one the last engine happened to read.
+    #[test]
+    fn removing_everywhere_takes_each_copys_files() {
+        let s = state("delete-everywhere");
+        let race = s.dir.join("race");
+        let hoard = s.dir.join("hoard");
+        let hash = seed_copy(&s, "race", &race);
+        seed_copy(&s, "hoard", &hoard);
+
+        remove_torrent_everywhere(&s.state, &hash, true);
+        assert!(!race.join("book.epub").exists());
+        assert!(!hoard.join("book.epub").exists());
     }
 }
 
