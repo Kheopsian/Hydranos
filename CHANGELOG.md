@@ -37,6 +37,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - **A hoard download no longer flaps to "seeding 100 %"** when race holds
   the same hash: the hoard list ignored which engine a live update came
   from, and a race removal could drop the hoard row too.
+- **Deleting a torrent with its files deletes them when another engine
+  holds the same hash from a payload of its own** -- a race grab that the
+  *arr also fetched into the hoard, for instance. The files went only with
+  the last copy listed, so the race copy's files stayed on disk for a hoard
+  copy that never read them, and the race volume filled with orphans the
+  drain could not see. Files are now kept only when another torrent, this
+  hash's other copies included, reads the very same path. Removing a torrent
+  from every engine at once now deletes each copy's own files too.
 
 ## v4.3.2 -- managed WireGuard that holds, a kill switch that follows the mode
 

@@ -415,7 +415,7 @@ pub fn plan_move_checked(
     }
     let mine: std::collections::HashSet<std::path::PathBuf> =
         plan.files.iter().map(|f| f.from.clone()).collect();
-    let (hashes, _) = scan_shared(state, t, &plan.old_root, &mine);
+    let (hashes, _) = scan_shared(state, t, &plan.old_root, &mine, true);
     plan.shared_with = hashes;
     plan
 }
@@ -426,6 +426,11 @@ pub fn plan_move_checked(
 /// cross-seed, an upload seeded from the files it was made from) read the same
 /// bytes, and deleting them with the first torrent leaves the other one
 /// announcing an empty folder, complete by its own account.
+///
+/// A copy of `t` in another engine counts as another torrent: it reads the
+/// same files only if it points at the same path. One seeded from a payload of
+/// its own (a race grab the *arr also fetched into the hoard) reads none of
+/// these, and keeping them for it is how /race filled with orphans.
 pub fn files_read_by_others(
     state: &AppState,
     t: &typhon_engine::torrent::meta::TorrentState,
@@ -433,21 +438,35 @@ pub fn files_read_by_others(
     let root = t.save_path.read().clone();
     let mine: std::collections::HashSet<std::path::PathBuf> =
         rel_paths(t).into_iter().map(|p| root.join(p)).collect();
-    scan_shared(state, t, &root, &mine).1
+    scan_shared(state, t, &root, &mine, false).1
+}
+
+/// `files_read_by_others`, not counting the copies of `t` in other engines:
+/// for a removal that takes every copy at once.
+pub fn files_read_by_other_hashes(
+    state: &AppState,
+    t: &typhon_engine::torrent::meta::TorrentState,
+) -> std::collections::HashSet<std::path::PathBuf> {
+    let root = t.save_path.read().clone();
+    let mine: std::collections::HashSet<std::path::PathBuf> =
+        rel_paths(t).into_iter().map(|p| root.join(p)).collect();
+    scan_shared(state, t, &root, &mine, true).1
 }
 
 /// Every other torrent that reads one of `mine` (files of `t`, under `root`),
-/// and which of those files they read.
+/// and which of those files they read. `skip_copies` leaves out the copies of
+/// `t` held by other engines; `t` itself is always left out.
 fn scan_shared(
     state: &AppState,
     t: &typhon_engine::torrent::meta::TorrentState,
     root: &std::path::Path,
     mine: &std::collections::HashSet<std::path::PathBuf>,
+    skip_copies: bool,
 ) -> (Vec<String>, std::collections::HashSet<std::path::PathBuf>) {
     let my_top = top_entry(t);
     // The files of `mine` that `other` reads, or None when it reads none.
     let shared_by = |other: &typhon_engine::torrent::meta::TorrentState| -> Option<Vec<std::path::PathBuf>> {
-        if other.meta.info_hash == t.meta.info_hash {
+        if std::ptr::eq(other, t) || (skip_copies && other.meta.info_hash == t.meta.info_hash) {
             return None;
         }
         // Only a torrent whose root is on the same branch can name the
