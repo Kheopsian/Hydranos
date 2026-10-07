@@ -7336,6 +7336,11 @@ function setupHoardSSE() {
         }
         if (type === "stats_snapshot" && Array.isArray(data.torrents)) {
             if (!_hoardAllTorrents || !_hoardAllTorrents.length) return;
+            // Every engine's snapshot comes down this stream, keyed by hash
+            // alone. The same hash held by race and hoard got the race copy's
+            // figures painted onto the hoard row: a hoard download at 64 %
+            // flapped to "seeding 100 %" each time race reported (06/10/2026).
+            if (data.mode !== "hoard") return;
             const byHash = new Map();
             for (let i = 0; i < _hoardAllTorrents.length; i++) {
                 const row = _hoardAllTorrents[i];
@@ -7362,6 +7367,9 @@ function setupHoardSSE() {
             }
             if (touched > 0) _scheduleHoardRender();
         } else if (type === "torrent_removed" && data.info_hash) {
+            // Same stream, same trap: removing the race copy must not drop
+            // the hoard row of the same hash.
+            if (data.mode !== "hoard") return;
             if (_hoardAllTorrents) {
                 _hoardAllTorrents = _hoardAllTorrents.filter(
                     t => !(t.info_hash === data.info_hash && _isLocalAgent(t.agent)));
