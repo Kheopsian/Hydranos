@@ -32,6 +32,10 @@ pub const DUAL_SEED: &str = "dual_seed";
 /// thrown pieces are never counted it is invisible in total_download -- `redl`
 /// does not catch it. Only a stat does.
 pub const GHOST: &str = "ghost";
+/// Two torrents naming one file with different bytes, as the add and the
+/// recheck guards met it (`pathclaim.rs`): isolated, refused, held, or let
+/// through by `legacy` mode.
+pub const PATH_COLLISION: &str = crate::pathclaim::PATH_COLLISION;
 /// A whole tracker host erroring. External, not an integrity bug, and kept out
 /// of the alert path so a maintenance window does not wake anyone.
 pub const TRACKER_OUTAGE: &str = "tracker_outage";
@@ -93,7 +97,7 @@ pub const ROUTE_REDL_FACTOR: f64 = 1.20;
 pub const ROUTE_REDL_FLOOR_BYTES: i64 = 50 << 20;
 
 impl Report {
-    fn add(&mut self, a: Anomaly) {
+    pub(crate) fn add(&mut self, a: Anomaly) {
         *self.counts.entry(a.kind.clone()).or_insert(0) += 1;
         if a.kind == REDL {
             self.wasted_bytes += a.wasted_bytes;

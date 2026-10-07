@@ -740,6 +740,20 @@ pub fn health_pass(engines: &crate::engines::EngineHost) {
         per_engine.push((engine.id.clone(), torrents, engine.manager.clone()));
     }
     crate::health::scan_dual_seed_live(&per_engine, &mut report);
+    // Not scanned: a path shared by two torrents is found where it is
+    // created, at the add or the recheck, and kept there. Grouping a million
+    // torrents' files by path every five minutes would cost more than the
+    // whole rest of this pass.
+    for e in crate::pathclaim::recent() {
+        report.add(crate::health::Anomaly {
+            kind: crate::health::PATH_COLLISION.to_string(),
+            engine: e.engine,
+            info_hash: e.info_hash,
+            name: e.name,
+            detail: format!("{}: {}", e.action, e.detail),
+            wasted_bytes: 0,
+        });
+    }
     let found: i64 = report.counts.values().sum();
     if found > 0 {
         tracing::info!(anomalies = found, "health scan found something");

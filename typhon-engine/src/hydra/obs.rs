@@ -234,6 +234,7 @@ pub fn anomalies(state: &AppState) -> serde_json::Value {
         crate::health::STARVED,
         crate::health::REDL,
         crate::health::DUAL_SEED,
+        crate::health::PATH_COLLISION,
     ];
     let mut counts = serde_json::Map::new();
     for k in kinds {
