@@ -76,6 +76,18 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   reads the same files** (two engines seeding one payload). The check for
   files another torrent reads skipped every torrent of the same hash, so the
   move went ahead and left the other copy serving files that were gone.
+- **The hardlink index no longer doubles the client's memory.** At a million
+  torrents it held one full path per file -- seven and a half million of
+  them, 1.8 GB -- for the whole of a sweep, and every refresh of the
+  Hardlinks column (every ten minutes during a sweep) and every workflow pass
+  on links built a second copy of everything, plus every stored measurement
+  as strings: about 4 GB more for a minute, every few minutes. On a
+  1.09M-torrent library the resident memory went from 5.8 GB to 9-14 GB the
+  day the index arrived. Paths are now resolved a batch at a time and
+  dropped with it, stored measurements are read row by row, and files are
+  counted by an 8-byte key instead of their path. The numbers are the same:
+  the column, `external_links`, `link_count`, `freeable_bytes` and the disk
+  usage figures are computed as before.
 
 ## v4.3.2 -- managed WireGuard that holds, a kill switch that follows the mode
 
