@@ -81,8 +81,8 @@ pub fn due(
 ) -> Vec<usize> {
     let mut keyed: Vec<((u8, i64), usize)> = Vec::new();
     for (i, c) in cat.iter().enumerate() {
-        match meta.get(&(c.info_hash.clone(), c.session.clone())) {
-            Some(m) if m.save_path == c.save_path && m.files == c.paths.len() as i64 => {
+        match meta.get(&(c.info_hash.clone(), c.session.to_string())) {
+            Some(m) if *m.save_path == *c.save_path && m.files == c.files as i64 => {
                 if now - m.measured_at >= REFRESH_SECS {
                     keyed.push(((1, m.measured_at), i));
                 }
@@ -103,7 +103,7 @@ pub fn orphans(
     meta: &HashMap<(String, String), LinkRowMeta>,
 ) -> Vec<(String, String)> {
     let held: std::collections::HashSet<(&str, &str)> =
-        cat.iter().map(|c| (c.info_hash.as_str(), c.session.as_str())).collect();
+        cat.iter().map(|c| (c.info_hash.as_str(), &*c.session)).collect();
     meta.keys()
         .filter(|(h, s)| !held.contains(&(h.as_str(), s.as_str())))
         .cloned()
@@ -126,15 +126,12 @@ pub fn spawn(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
 /// count. The column and the condition can only differ by WHEN they were
 /// computed, never by HOW. Returns how many torrents it answers for.
 pub fn refresh_summary(engines: &EngineHost, store: &StoreLock) -> Option<usize> {
-    // The read connection, released before the counting.
-    let (stored, rows) = {
-        let s = store.read().ok()?;
-        (rulesrun::stored_facts(engines, &s), s.link_index_stats().ok()?)
-    };
-    let cat = rulesrun::catalogue_from(engines, &stored);
-    drop(stored);
-    let got = rulesrun::links_from_store(&cat, &rows);
-    drop(rows);
+    // The read connection, for the reads only; released before the counting.
+    let known = rulesrun::stored_copies(engines, &*store.read().ok()?);
+    let cat = rulesrun::catalogue_from(engines, &known);
+    drop(known);
+    let measured = rulesrun::read_measured(&cat, &*store.read().ok()?).ok()?;
+    let got = rulesrun::links_from_measured(&cat, measured);
     let summary = rulesrun::link_summary(&cat, &got.origin, &got.measured_at, &got.links);
     let n = summary.len();
     engines.publish_link_summary(summary);
@@ -154,16 +151,18 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
     std::thread::sleep(SETTLE);
     loop {
         // One snapshot per sweep, not per batch: reading a million rows and
-        // resolving a million torrents' paths is seconds, not something to
-        // redo every two thousand torrents.
+        // walking a million torrents is seconds, not something to redo every
+        // two thousand torrents. The catalogue holds no paths -- each batch
+        // resolves its own -- so keeping it for the sweep costs ~90 bytes a
+        // torrent, not the 1.7 GB it did.
         let snapshot = store.read().ok().map(|s| {
-            (rulesrun::stored_facts(&engines, &s), s.link_index_meta().unwrap_or_default())
+            (rulesrun::stored_copies(&engines, &s), s.link_index_meta().unwrap_or_default())
         });
         let Some((stored, meta)) = snapshot else {
             std::thread::sleep(IDLE);
             continue;
         };
-        // Paths are built after the connection is released.
+        // Walked after the connection is released.
         let cat = rulesrun::catalogue_from(&engines, &stored);
         drop(stored);
         PROGRESS.catalogue.store(cat.len() as i64, Ordering::Relaxed);
@@ -205,14 +204,16 @@ fn sweep(cat: &[CatalogueEntry], order: &[usize], store: &StoreLock, engines: &E
 
     for chunk in order.chunks(BATCH) {
         let t0 = std::time::Instant::now();
-        let plan = chunk
+        // Paths for this batch only, dropped with it. A torrent removed since
+        // the catalogue was taken has none, and is not measured.
+        let (live, plan): (Vec<usize>, Vec<_>) = chunk
             .iter()
-            .map(|&i| (cat[i].info_hash.clone(), cat[i].paths.clone()))
-            .collect();
+            .filter_map(|&i| Some((i, (cat[i].info_hash.clone(), cat[i].paths()?))))
+            .unzip();
         let measured = rulesrun::stat_plan_with(plan, rulesrun::scan_threads());
         let now = crate::store::now_secs();
         let mut batch_files = 0usize;
-        let rows: Vec<_> = chunk
+        let rows: Vec<_> = live
             .iter()
             .zip(&measured)
             .map(|(&i, (_, fs))| {
@@ -259,12 +260,12 @@ mod tests {
     use super::*;
 
     fn c(hash: &str, save_path: &str, files: usize) -> CatalogueEntry {
-        CatalogueEntry {
-            info_hash: hash.into(),
-            session: "hoard".into(),
-            save_path: save_path.into(),
-            paths: (0..files).map(|i| std::path::PathBuf::from(format!("{save_path}/{i}"))).collect(),
-        }
+        CatalogueEntry::fixed(
+            hash,
+            "hoard",
+            save_path,
+            (0..files).map(|i| std::path::PathBuf::from(format!("{save_path}/{i}"))).collect(),
+        )
     }
 
     fn m(save_path: &str, measured_at: i64, files: i64) -> LinkRowMeta {

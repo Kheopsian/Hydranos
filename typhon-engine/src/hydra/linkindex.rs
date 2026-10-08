@@ -24,6 +24,7 @@
 //! library is using as free to delete. Dedup by path before counting, always.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 use crate::platform::FileId;
@@ -48,9 +49,37 @@ pub struct LinkFacts {
     pub data_missing: bool,
 }
 
-/// One torrent as this module needs it: its hash, and its files already
-/// resolved to absolute paths with their stat, `None` where the stat failed.
-pub type Entry = (String, Vec<(PathBuf, Option<FileId>)>);
+/// One torrent as this module needs it: its hash, and its files with their
+/// stat, `None` where the stat failed. Each file is named by `K`: the absolute
+/// path where the measuring happens, its `path_key` where the whole catalogue
+/// is counted at once.
+pub type Entry<K = PathBuf> = (String, Vec<(K, Option<FileId>)>);
+
+/// The name a file is deduplicated by when the whole catalogue is counted.
+///
+/// ⚠️ Why not the path itself: a million torrents are seven and a half million
+/// files, and holding a `PathBuf` for each while counting was gigabytes, paid
+/// again by every summary refresh and every workflow pass (08/10/2026: the
+/// hoard engine's RSS doubled the day the link index arrived). Eight bytes say
+/// the same thing, with one difference that is safe: two different paths that
+/// collide count as ONE name, which can only leave `owned` too low and
+/// `external_links` too high -- the direction that keeps files, never the one
+/// that deletes them.
+///
+/// `Path`'s own `Hash`, so two spellings `==` calls equal (`a//b`, `a/b`) key
+/// the same, exactly as the dedup by path did.
+pub fn path_key(p: &Path) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    p.hash(&mut h);
+    h.finish()
+}
+
+/// A measured torrent, its paths traded for their keys.
+pub fn keyed(e: Entry) -> Entry<u64> {
+    let (hash, files) = e;
+    (hash, files.into_iter().map(|(p, st)| (path_key(&p), st)).collect())
+}
 
 /// Count the catalogue, then answer for each torrent. Pure: every syscall has
 /// already happened by the time this is called, which is what lets the whole
@@ -59,7 +88,7 @@ pub type Entry = (String, Vec<(PathBuf, Option<FileId>)>);
 /// Both passes are over the same slice, and both are needed: a torrent's
 /// answer depends on names held by OTHER torrents, so nothing can be decided
 /// until every file in the catalogue has been seen.
-pub fn compute(entries: &[Entry]) -> HashMap<String, LinkFacts> {
+pub fn compute<K: Hash + Eq>(entries: &[Entry<K>]) -> HashMap<String, LinkFacts> {
     let owned = names_held(entries);
 
     let mut out = HashMap::with_capacity(entries.len());
@@ -94,15 +123,15 @@ pub fn compute(entries: &[Entry]) -> HashMap<String, LinkFacts> {
 
 /// How many of each inode's names the catalogue holds, keyed by
 /// (volume, inode). The one count both `compute` and `usage` stand on.
-fn names_held(entries: &[Entry]) -> HashMap<(u64, u64), u64> {
+fn names_held<K: Hash + Eq>(entries: &[Entry<K>]) -> HashMap<(u64, u64), u64> {
     let mut owned: HashMap<(u64, u64), u64> = HashMap::new();
-    let mut seen: HashSet<&Path> = HashSet::new();
+    let mut seen: HashSet<&K> = HashSet::new();
     for (_, files) in entries {
         for (path, st) in files {
             let Some(st) = st else { continue };
             // The dedup that keeps two cross-seeds of one path from counting
             // as two names. See the module note.
-            if seen.insert(path.as_path()) {
+            if seen.insert(path) {
                 *owned.entry((st.volume, st.index)).or_insert(0) += 1;
             }
         }
@@ -132,7 +161,7 @@ pub struct DiskUsage {
 /// Count the catalogue's space on disk from the same measurements `compute`
 /// reads. Logical sizes: compression, sparse files and block cloning are below
 /// what `stat` reports.
-pub fn usage(entries: &[Entry]) -> DiskUsage {
+pub fn usage<K: Hash + Eq>(entries: &[Entry<K>]) -> DiskUsage {
     let mut held = names_held(entries);
     let mut out = DiskUsage { torrents: entries.len() as u64, ..Default::default() };
     for (_, files) in entries {
@@ -348,6 +377,28 @@ mod tests {
         assert_eq!(got.shared_bytes, 3000, "A, B and E have a name outside; C and D do not");
         assert_eq!(got.missing_files, 1);
         assert_eq!(got.torrents, 9);
+    }
+
+    /// Counting by `path_key` is counting by path: same answers, same space,
+    /// on the fixture that has every kind of sharing -- including two
+    /// torrents naming ONE path, and that path spelled two ways.
+    #[test]
+    fn keys_count_the_catalogue_exactly_as_paths_do() {
+        let fixture = vec![
+            e("A", &[("/t/A.bin", st(1, 2, 1000))]),
+            e("B", &[("/t/B.bin", st(2, 3, 1000))]),
+            e("Bx", &[("/x/B.bin", st(2, 3, 1000))]),
+            e("C", &[("/t/C.bin", st(3, 2, 1000))]),
+            e("Cx", &[("/x/C.bin", st(3, 2, 1000))]),
+            e("D", &[("/t/D.bin", st(4, 1, 1000))]),
+            e("E1", &[("/t/E.bin", st(5, 2, 1000))]),
+            e("E2", &[("/t//E.bin", st(5, 2, 1000))]),
+            e("M", &[("/t/M.bin", None)]),
+        ];
+        let keyed_fixture: Vec<Entry<u64>> = fixture.iter().cloned().map(keyed).collect();
+        assert_eq!(compute(&keyed_fixture), compute(&fixture));
+        assert_eq!(usage(&keyed_fixture), usage(&fixture));
+        assert_eq!(compute(&keyed_fixture)["E1"].external_links, 1, "one path, however spelled, is one name");
     }
 
     /// An inode number is only unique within its volume.

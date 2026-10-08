@@ -3059,25 +3059,50 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Every row's measurement, keyed by (info_hash, session), with the save
-    /// path it was taken under and when.
+    /// Every row's measurement, handed over one at a time: (info_hash,
+    /// session, the save path it was taken under, when, the packed stats).
     ///
     /// `measured_at` rides along so the list's "Checked" column is read in the
     /// same query as the measurement it dates, not from a second read that a
     /// batch written in between would make disagree.
-    pub fn link_index_stats(
-        &self,
-    ) -> anyhow::Result<std::collections::HashMap<(String, String), (String, i64, Vec<u8>)>> {
+    ///
+    /// ⚠️ A callback and not a map, on purpose: collected into a HashMap of
+    /// owned strings and BLOBs, the table was 0.7 GB at a million torrents,
+    /// built again by every summary refresh and every workflow pass. The caller
+    /// keeps the rows it can use, and nothing else is ever allocated.
+    pub fn for_each_link_row(&self, mut f: impl FnMut(&str, &str, &str, i64, &[u8])) -> anyhow::Result<()> {
         let mut q = self
             .conn
             .prepare("SELECT info_hash, session, save_path, measured_at, stats FROM link_index")?;
-        let rows = q.query_map([], |r| {
-            Ok((
-                (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
-                (r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, Vec<u8>>(4)?),
-            ))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let mut rows = q.query([])?;
+        while let Some(r) = rows.next()? {
+            f(
+                r.get_ref(0)?.as_str()?,
+                r.get_ref(1)?.as_str()?,
+                r.get_ref(2)?.as_str()?,
+                r.get(3)?,
+                r.get_ref(4)?.as_blob()?,
+            );
+        }
+        Ok(())
+    }
+
+    /// The torrents the store holds for one session, as raw hashes.
+    ///
+    /// All the link index asks of the store about the catalogue is whether a
+    /// copy is known; `workflow_facts` answers that too, with every column of
+    /// a million rows (half a gigabyte) behind a yes or no. Index-only, like
+    /// `workflow_facts`: `session, info_hash` lead `idx_torrents_cover`.
+    pub fn session_hashes(&self, session: &str) -> anyhow::Result<std::collections::HashSet<[u8; 20]>> {
+        let mut q = self.conn.prepare("SELECT info_hash FROM torrents WHERE session = ?1")?;
+        let mut rows = q.query(rusqlite::params![session])?;
+        let mut out = std::collections::HashSet::new();
+        while let Some(r) = rows.next()? {
+            if let Some(h) = r.get_ref(0)?.as_str().ok().and_then(hex20) {
+                out.insert(h);
+            }
+        }
+        Ok(out)
     }
 
     /// Write a batch of measurements in one transaction.
@@ -4833,7 +4858,12 @@ mod link_index_tests {
         assert_eq!(meta.len(), 2, "one row per (hash, session)");
         assert_eq!(meta[&("a".into(), "hoard".into())].measured_at, 20);
         assert_eq!(meta[&("a".into(), "hoard".into())].files, 3);
-        let stats = s.link_index_stats().unwrap();
+        let mut stats = std::collections::HashMap::new();
+        s.for_each_link_row(|h, sess, sp, at, blob| {
+            stats.insert((h.to_string(), sess.to_string()), (sp.to_string(), at, blob.to_vec()));
+        })
+        .unwrap();
+        assert_eq!(stats.len(), 2);
         assert_eq!(stats[&("a".into(), "race".into())], ("/data/x".to_string(), 11, vec![7, 7]));
     }
 
