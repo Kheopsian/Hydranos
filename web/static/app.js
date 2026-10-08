@@ -1069,6 +1069,7 @@ function _activateTabNow(name) {
     else if (name === "changelog") loadChangelog();
     else if (name === "nodes") { updateNodes(); }
     else if (name === "workflows") { updateWorkflows(); }
+    else if (name === "rss") { updateRss(); }
     else if (name === "trackers") { updateTrackers(); loadTrackerStats(); }
     else if (name === "logs") loadLogs();
     else if (name === "jobs") startJobsPolling();
@@ -1763,7 +1764,10 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
     const req = ++_contentReq;
     body.innerHTML = `<div class="tc-empty">Loading…</div>`;
     if (summary) summary.textContent = "";
-    let files, avail;
+    let files, avail, order;
+    // A file's priority is set on this node's copies; a row from another
+    // node shows its priorities, read-only.
+    const remote = !!(agent && !_isLocalAgent(agent));
     try {
         const params = new URLSearchParams();
         if (agent && !_isLocalAgent(agent)) params.set("agent", agent);
@@ -1772,6 +1776,7 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
         const d = await api(`/api/torrents/${infoHash}/files${q}`);
         files = d.files || [];
         avail = d.availability || null;
+        order = { sequential: !!d.sequential, first_last_piece: !!d.first_last_piece, complete: !!d.complete };
     } catch (err) {
         if (req !== _contentReq) return;
         body.innerHTML = `<div class="tc-empty">Could not read the file list, ${esc(err.message || String(err))}</div>`;
@@ -1803,6 +1808,7 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
             <td class="tc-num">${f.done == null ? "–" : formatBytes(f.done)}</td>
             <td class="tc-num">${pct == null ? "–" : (pct >= 100 ? "100%" : pct.toFixed(1) + "%")}</td>
             <td class="tc-barcell"><div class="tc-bar"><div class="tc-bar-fill${cls}" style="width:${fill.toFixed(1)}%"></div></div></td>
+            <td>${_filePrioSelect(infoHash, f, remote)}</td>
         </tr>`;
     }).join("");
     if (summary) {
@@ -1820,12 +1826,49 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
                 range: avail.min + (avail.max !== avail.min ? "-" + avail.max : ""),
                 avg: avail.avg.toFixed(2), pieces: avail.num_pieces });
         }
+        if (order.sequential) line += " · " + t("sequential");
+        if (order.first_last_piece) line += " · " + t("first/last piece first");
         summary.textContent = line;
     }
     body.innerHTML = `<div class="tc-scroll"><table class="tc-table">
-        <thead><tr><th>${t("Path")}</th><th class="tc-num">${t("Size")}</th><th class="tc-num">${t("Downloaded")}</th><th class="tc-num">${t("Progress")}</th><th></th></tr></thead>
+        <thead><tr><th>${t("Path")}</th><th class="tc-num">${t("Size")}</th><th class="tc-num">${t("Downloaded")}</th><th class="tc-num">${t("Progress")}</th><th></th><th title="${esc(t("The order files are downloaded in. Every file is always downloaded."))}">${t("Priority")}</th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>`;
+}
+
+// Normal / High / Maximum: qBittorrent's 1, 6, 7. There is no "do not
+// download": Hydranos fetches every file, a priority only changes the order.
+const _FILE_PRIOS = [[1, "Normal"], [6, "High"], [7, "Maximum"]];
+
+function _filePrioSelect(infoHash, f, remote) {
+    const cur = f.priority || 1;
+    if (remote || f.index == null) {
+        const p = _FILE_PRIOS.find(([v]) => v === cur);
+        return esc(t(p ? p[1] : "Normal"));
+    }
+    const opts = _FILE_PRIOS.map(([v, l]) => `<option value="${v}"${v === cur ? " selected" : ""}>${esc(t(l))}</option>`).join("");
+    return `<select class="tc-prio" onchange="_setFilePriority('${esc(infoHash)}', ${Number(f.index)}, this)">${opts}</select>`;
+}
+
+async function _setFilePriority(infoHash, index, sel) {
+    const priority = Number(sel.value);
+    sel.disabled = true;
+    try {
+        await api(`/api/torrents/${encodeURIComponent(infoHash)}/download-order`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ file_ids: [index], priority }),
+        });
+        // What the daemon now holds is what a later failure reverts to.
+        sel.querySelectorAll("option").forEach(o => o.toggleAttribute("selected", o.value === sel.value));
+    } catch (err) {
+        hydraNotify(t("Priority not changed: {err}", { err: err.message || String(err) }));
+        // Back to what the daemon holds.
+        const back = sel.querySelector("option[selected]");
+        if (back) sel.value = back.value;
+    } finally {
+        sel.disabled = false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4218,6 +4261,7 @@ function _showCtxMenu(x, y) {
     if (pItem) pItem.style.display = anyRunning ? "" : "none";
     const rItem = document.getElementById("ctx-resume");
     if (rItem) rItem.style.display = anyPaused ? "" : "none";
+    _refreshOrderMarks();
     _applyCtxGroups();
     _hideCtxSubmenu();
 
@@ -4773,6 +4817,57 @@ function _hydraPromptLimits(title, body, up, down) {
     u.focus();
     u.select();
     return shown.then(v => v === true ? { up: u.value.trim(), down: d.value.trim() } : null);
+}
+
+// ── Download order ────────────────────────────────────────────────────────
+//
+// Sequential and first/last piece first are ticked when every selected
+// torrent has them on; a click sets the opposite on the whole selection. The
+// state is read from the daemon when the menu opens: the list rows do not
+// carry it, and a selection over a filter (or a large one) is not read at
+// all -- it shows unticked, and a click turns the setting on.
+const _ORDER_MARK_MAX = 50;
+const _orderMarks = { sequential: false, first_last_piece: false };
+let _orderMarksReq = 0;
+
+async function _refreshOrderMarks() {
+    const req = ++_orderMarksReq;
+    const paint = () => {
+        const s = document.getElementById("ctx-seq-dl-mark");
+        const f = document.getElementById("ctx-first-last-mark");
+        if (s) s.textContent = _orderMarks.sequential ? "✓" : "";
+        if (f) f.textContent = _orderMarks.first_last_piece ? "✓" : "";
+    };
+    _orderMarks.sequential = false;
+    _orderMarks.first_last_piece = false;
+    paint();
+    const count = _selCount();
+    if (_selAll || count === 0 || count > _ORDER_MARK_MAX) return;
+    const hashes = [..._selected.values()].map(v => _selHash(v));
+    let seq = true, fl = true;
+    for (const h of hashes) {
+        try {
+            const r = await api(`/api/torrents/${encodeURIComponent(h)}/download-order`);
+            const c = (r.copies || [])[0];
+            if (!c) { seq = fl = false; break; }
+            seq = seq && !!c.sequential;
+            fl = fl && !!c.first_last_piece;
+        } catch (_) { seq = fl = false; break; } // a remote row: unticked
+        if (!seq && !fl) break;
+    }
+    if (req !== _orderMarksReq) return;
+    _orderMarks.sequential = seq;
+    _orderMarks.first_last_piece = fl;
+    paint();
+}
+
+async function _toggleOrderSelected(key) {
+    _hideCtxMenu();
+    if (_selCount() === 0) return;
+    const on = !_orderMarks[key];
+    const label = key === "sequential" ? t("Sequential download") : t("First/last piece first");
+    const j = await _runSelection("download_order", { [key]: on }, label);
+    if (j) _bulkNote(j, "");
 }
 
 async function _limitRateSelected() {
@@ -11434,4 +11529,359 @@ async function deleteWorkflow(id) {
     if (!confirm("Delete this workflow?")) return;
     await api(`/api/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
     updateWorkflows();
+}
+
+// ─── RSS ────────────────────────────────────────────────
+
+// The last GET /api/rss: feeds, folders, rules. The rule editor's feed list
+// and the toggles read it rather than asking again.
+let _rssState = null;
+let _rssOpenFeed = null;
+let _rssArticles = [];
+let _rssEditingFeed = null;
+let _rssEditingRule = null;
+
+function _rssSay(el, msg, kind) {
+    el.textContent = msg;
+    el.className = "result-msg " + kind;
+}
+
+function _rssWhen(ts) {
+    return ts ? new Date(ts * 1000).toLocaleString() : t("never");
+}
+
+async function _rssFillCategories(sel, current) {
+    let cats = [];
+    try { cats = (await api("/api/categories")) || []; } catch (e) { console.error("load categories", e); }
+    sel.innerHTML = `<option value="">${esc(t("- none -"))}</option>` +
+        cats.map(c => `<option value="${esc(c.name)}"${c.name === current ? " selected" : ""}>${esc(c.name)} (${esc(c.mode)})</option>`).join("");
+}
+
+async function updateRss() {
+    const body = document.getElementById("rss-feeds");
+    let d;
+    try {
+        d = await api("/api/rss");
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`;
+        return;
+    }
+    _rssState = d;
+    document.getElementById("rss-disabled").style.display = d.enabled ? "none" : "";
+    _rssRenderFeeds(d.feeds || []);
+    _rssRenderRules(d.rules || []);
+    if (_rssOpenFeed !== null) rssOpenArticles(_rssOpenFeed);
+}
+
+function _rssFeedState(f) {
+    if (f.loading) return `<span class="sr-desc">${esc(t("refreshing..."))}</span>`;
+    if (f.blocked) return `<span style="color:var(--accent-red)" title="${esc(f.blocked)}">${esc(t("blocked by the kill switch"))}</span>`;
+    if (f.last_error) return `<span style="color:var(--accent-red)" title="${esc(f.last_error)}">${esc(f.last_error)}</span>`;
+    if (!f.last_refresh) return `<span class="sr-desc">${esc(t("not fetched yet"))}</span>`;
+    return `<span style="color:var(--accent-green)">OK</span><div class="sr-desc">${esc(t("via {via}", { via: f.via }))}</div>`;
+}
+
+function _rssRenderFeeds(feeds) {
+    const body = document.getElementById("rss-feeds");
+    if (!feeds.length) {
+        body.innerHTML = `<tr><td colspan="6" class="sr-desc">${esc(t("No feed yet."))}</td></tr>`;
+        return;
+    }
+    body.innerHTML = feeds.map(f => `<tr>
+        <td><strong>${esc(f.path)}</strong>
+            <div class="sr-desc">${esc(f.url_masked)}${f.title ? " · " + esc(f.title) : ""}</div></td>
+        <td>${_rssFeedState(f)}</td>
+        <td>${esc(_rssWhen(f.last_refresh))}</td>
+        <td>${esc(t("{u} unread of {n}", { u: f.unread, n: f.articles }))}</td>
+        <td>${esc(t("{m} min", { m: Math.round(f.refresh_secs / 60) }))}</td>
+        <td>
+            <button class="btn-small" onclick="rssOpenArticles(${f.id})">${esc(t("Articles"))}</button>
+            <button class="btn-small" onclick="rssRefresh(${f.id}, this)">${esc(t("Refresh"))}</button>
+            <button class="btn-small" onclick="rssEditFeed(${f.id})">${esc(t("Edit"))}</button>
+            <button class="btn-small" onclick="rssDeleteFeed(${f.id})">${esc(t("Delete"))}</button>
+        </td>
+    </tr>`).join("");
+}
+
+function rssShowFeedForm() {
+    _rssEditingFeed = null;
+    document.getElementById("rss-feed-url").value = "";
+    document.getElementById("rss-feed-name").value = "";
+    document.getElementById("rss-feed-every").value = String(Math.round(((_rssState && _rssState.default_refresh_secs) || 1800) / 60));
+    document.getElementById("rss-feed-result").className = "result-msg";
+    document.getElementById("rss-feed-form").style.display = "block";
+}
+
+function rssEditFeed(id) {
+    const f = ((_rssState && _rssState.feeds) || []).find(x => x.id === id);
+    if (!f) return;
+    rssShowFeedForm();
+    _rssEditingFeed = id;
+    document.getElementById("rss-feed-url").value = f.url;
+    document.getElementById("rss-feed-name").value = f.path;
+    document.getElementById("rss-feed-every").value = String(Math.round(f.refresh_secs / 60));
+}
+
+function rssHideFeedForm() {
+    document.getElementById("rss-feed-form").style.display = "none";
+    _rssEditingFeed = null;
+}
+
+async function rssSaveFeed() {
+    const out = document.getElementById("rss-feed-result");
+    const body = {
+        url: document.getElementById("rss-feed-url").value.trim(),
+        path: document.getElementById("rss-feed-name").value.trim(),
+        refresh_secs: Math.max(5, parseInt(document.getElementById("rss-feed-every").value, 10) || 30) * 60,
+    };
+    try {
+        const editing = _rssEditingFeed !== null;
+        await api(editing ? `/api/rss/feeds/${_rssEditingFeed}` : "/api/rss/feeds", {
+            method: editing ? "PATCH" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        rssHideFeedForm();
+        updateRss();
+    } catch (e) {
+        _rssSay(out, e.message, "error");
+    }
+}
+
+async function rssRefresh(id, btn) {
+    if (btn) btn.disabled = true;
+    try { await api(`/api/rss/feeds/${id}/refresh`, { method: "POST" }); }
+    catch (e) { alert(e.message); }
+    updateRss();
+}
+
+async function rssRefreshAll() {
+    try { await api("/api/rss/refresh", { method: "POST" }); } catch (e) { alert(e.message); return; }
+    // The fetches run in the background: look again once they had time.
+    setTimeout(updateRss, 3000);
+    updateRss();
+}
+
+async function rssDeleteFeed(id) {
+    const f = ((_rssState && _rssState.feeds) || []).find(x => x.id === id);
+    if (!confirm(t("Delete the feed {name} and its articles?", { name: f ? f.path : id }))) return;
+    try { await api(`/api/rss/feeds/${id}`, { method: "DELETE" }); } catch (e) { alert(e.message); }
+    if (_rssOpenFeed === id) rssCloseArticles();
+    updateRss();
+}
+
+async function rssOpenArticles(id) {
+    const f = ((_rssState && _rssState.feeds) || []).find(x => x.id === id);
+    if (!f) { rssCloseArticles(); return; }
+    const sel = document.getElementById("rss-dl-category");
+    if (_rssOpenFeed !== id || !sel.options.length) await _rssFillCategories(sel, sel.value);
+    _rssOpenFeed = id;
+    document.getElementById("rss-articles-box").style.display = "block";
+    document.getElementById("rss-articles-title").textContent = t("Articles of {name}", { name: f.path });
+    const body = document.getElementById("rss-articles");
+    try {
+        _rssArticles = await api(`/api/rss/feeds/${id}/articles`);
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="5">${esc(e.message)}</td></tr>`;
+        return;
+    }
+    if (!_rssArticles.length) {
+        body.innerHTML = `<tr><td colspan="5" class="sr-desc">${esc(t("No article."))}</td></tr>`;
+        return;
+    }
+    body.innerHTML = _rssArticles.map((a, i) => {
+        const title = a.link
+            ? `<a href="${esc(a.link)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>`
+            : esc(a.title);
+        const state = a.taken
+            ? esc(t("taken by {rule}: {outcome}", { rule: a.taken.rule, outcome: a.taken.outcome }))
+            : a.read ? esc(t("read")) : `<strong>${esc(t("new"))}</strong>`;
+        return `<tr>
+            <td>${esc(_rssWhen(a.date))}</td>
+            <td>${title}</td>
+            <td>${a.size > 0 ? esc(formatBytes(a.size)) : ""}</td>
+            <td>${state}</td>
+            <td><button class="btn-small" ${a.torrent_url ? "" : "disabled"} onclick="rssDownload(${i}, this)">${esc(t("Download"))}</button></td>
+        </tr>`;
+    }).join("");
+}
+
+function rssCloseArticles() {
+    _rssOpenFeed = null;
+    _rssArticles = [];
+    document.getElementById("rss-articles-box").style.display = "none";
+}
+
+// By hand: the same add as a rule's, with the category picked above.
+async function rssDownload(i, btn) {
+    const a = _rssArticles[i];
+    if (!a || _rssOpenFeed === null) return;
+    const out = document.getElementById("rss-articles-result");
+    const category = document.getElementById("rss-dl-category").value;
+    if (btn) btn.disabled = true;
+    try {
+        const d = await api(`/api/rss/feeds/${_rssOpenFeed}/download`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ guid: a.guid, category: category }),
+        });
+        _rssSay(out, d.already ? t("Already in this client: {title}", { title: a.title }) : t("Added: {title}", { title: a.title }), "success");
+    } catch (e) {
+        _rssSay(out, e.message, "error");
+    }
+    rssOpenArticles(_rssOpenFeed);
+}
+
+async function rssMarkAllRead() {
+    if (_rssOpenFeed === null) return;
+    try {
+        await api(`/api/rss/feeds/${_rssOpenFeed}/read`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+    } catch (e) { alert(e.message); }
+    updateRss();
+}
+
+function _rssRenderRules(rules) {
+    const body = document.getElementById("rss-rules");
+    if (!rules.length) {
+        body.innerHTML = `<tr><td colspan="7" class="sr-desc">${esc(t("No rule yet."))}</td></tr>`;
+        return;
+    }
+    const feeds = (_rssState && _rssState.feeds) || [];
+    const feedName = url => { const f = feeds.find(x => x.url === url); return f ? f.path : t("(removed feed)"); };
+    body.innerHTML = rules.map((r, i) => `<tr>
+        <td><input type="checkbox" ${r.enabled ? "checked" : ""} onchange="rssToggleRule(${i}, this.checked)"></td>
+        <td><strong>${esc(r.name)}</strong></td>
+        <td>${esc(r.mustContain || "")}${r.mustNotContain ? `<div class="sr-desc">${esc(t("not: {x}", { x: r.mustNotContain }))}</div>` : ""}</td>
+        <td>${esc(r.assignedCategory || t("- none -"))}</td>
+        <td>${esc((r.affectedFeeds || []).map(feedName).join(", "))}</td>
+        <td>${esc(r.lastMatch ? new Date(r.lastMatch).toLocaleString() : t("never"))}</td>
+        <td>
+            <button class="btn-small" onclick="rssEditRule(${i})">${esc(t("Edit"))}</button>
+            <button class="btn-small" onclick="rssDeleteRule(${i})">${esc(t("Delete"))}</button>
+        </td>
+    </tr>`).join("");
+}
+
+async function _rssShowRuleForm(r) {
+    _rssEditingRule = r ? r.name : null;
+    const v = (id, x) => { document.getElementById(id).value = x; };
+    const c = (id, x) => { document.getElementById(id).checked = !!x; };
+    v("rss-rule-name", r ? r.name : "");
+    v("rss-rule-must", r ? r.mustContain || "" : "");
+    v("rss-rule-mustnot", r ? r.mustNotContain || "" : "");
+    v("rss-rule-episodes", r ? r.episodeFilter || "" : "");
+    v("rss-rule-ignore", String(r ? r.ignoreDays || 0 : 0));
+    v("rss-rule-savepath", r ? r.savePath || "" : "");
+    c("rss-rule-enabled", r ? r.enabled : true);
+    c("rss-rule-regex", r && r.useRegex);
+    c("rss-rule-smart", r && r.smartFilter);
+    c("rss-rule-paused", r && r.addPaused);
+    await _rssFillCategories(document.getElementById("rss-rule-category"), r ? r.assignedCategory || "" : "");
+    const chosen = new Set(r ? r.affectedFeeds || [] : []);
+    const feeds = (_rssState && _rssState.feeds) || [];
+    document.getElementById("rss-rule-feeds").innerHTML = feeds.length
+        ? feeds.map(f => `<label style="display:block"><input type="checkbox" class="rss-rule-feed" value="${esc(f.url)}"
+                ${chosen.has(f.url) ? "checked" : ""}> ${esc(f.path)}</label>`).join("")
+        : `<span class="sr-desc">${esc(t("Add a feed first."))}</span>`;
+    document.getElementById("rss-rule-result").className = "result-msg";
+    document.getElementById("rss-rule-preview").innerHTML = "";
+    document.getElementById("rss-rule-form").style.display = "block";
+}
+
+function rssNewRule() { _rssShowRuleForm(null); }
+
+function rssEditRule(i) {
+    const r = ((_rssState && _rssState.rules) || [])[i];
+    if (r) _rssShowRuleForm(r);
+}
+
+function rssHideRuleForm() {
+    document.getElementById("rss-rule-form").style.display = "none";
+    _rssEditingRule = null;
+}
+
+// qBittorrent's rule document. lastMatch and previouslyMatchedEpisodes are
+// left out on purpose: the server keeps the stored ones.
+function _rssCollectRule() {
+    const old = ((_rssState && _rssState.rules) || []).find(r => r.name === _rssEditingRule);
+    return {
+        enabled: document.getElementById("rss-rule-enabled").checked,
+        priority: old ? old.priority || 0 : 0,
+        useRegex: document.getElementById("rss-rule-regex").checked,
+        mustContain: document.getElementById("rss-rule-must").value,
+        mustNotContain: document.getElementById("rss-rule-mustnot").value,
+        episodeFilter: document.getElementById("rss-rule-episodes").value.trim(),
+        ignoreDays: Math.max(0, parseInt(document.getElementById("rss-rule-ignore").value, 10) || 0),
+        smartFilter: document.getElementById("rss-rule-smart").checked,
+        affectedFeeds: Array.from(document.querySelectorAll(".rss-rule-feed:checked")).map(x => x.value),
+        assignedCategory: document.getElementById("rss-rule-category").value,
+        savePath: document.getElementById("rss-rule-savepath").value.trim(),
+        addPaused: document.getElementById("rss-rule-paused").checked,
+    };
+}
+
+// The articles the draft would take, from what the feeds already hold.
+// Nothing is added.
+async function rssPreviewRule() {
+    const out = document.getElementById("rss-rule-result");
+    const box = document.getElementById("rss-rule-preview");
+    try {
+        const d = await api("/api/rss/preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(_rssCollectRule()),
+        });
+        _rssSay(out, t("{n} matching articles, {m} of them would be added (unread, not taken yet)", { n: d.count, m: d.would_add }), "success");
+        box.innerHTML = (d.feeds || []).filter(f => f.articles.length).map(f => `
+            <h4 style="margin:12px 0 4px">${esc(f.path)}</h4>
+            <ul style="margin:0; padding-left:18px">${f.articles.slice(0, 50).map(a =>
+                `<li>${esc(a.title)}${a.taken ? ` <span class="sr-desc">(${esc(t("taken by {rule}", { rule: a.taken.rule }))})</span>` : a.read ? ` <span class="sr-desc">(${esc(t("read"))})</span>` : ""}</li>`).join("")}
+            </ul>`).join("");
+    } catch (e) {
+        box.innerHTML = "";
+        _rssSay(out, e.message, "error");
+    }
+}
+
+async function rssSaveRule() {
+    const out = document.getElementById("rss-rule-result");
+    const name = document.getElementById("rss-rule-name").value.trim();
+    if (!name) { _rssSay(out, t("A rule needs a name."), "error"); return; }
+    try {
+        const doc = _rssCollectRule();
+        if (_rssEditingRule && _rssEditingRule !== name) {
+            await api(`/api/rss/rules/${encodeURIComponent(_rssEditingRule)}/rename`, {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name }),
+            });
+        }
+        await api(`/api/rss/rules/${encodeURIComponent(name)}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(doc),
+        });
+        rssHideRuleForm();
+        updateRss();
+    } catch (e) {
+        _rssSay(out, e.message, "error");
+    }
+}
+
+async function rssToggleRule(i, on) {
+    const r = ((_rssState && _rssState.rules) || [])[i];
+    if (!r) return;
+    const doc = Object.assign({}, r, { enabled: on });
+    delete doc.name;
+    try {
+        await api(`/api/rss/rules/${encodeURIComponent(r.name)}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(doc),
+        });
+    } catch (e) { alert(e.message); }
+    updateRss();
+}
+
+async function rssDeleteRule(i) {
+    const r = ((_rssState && _rssState.rules) || [])[i];
+    if (!r || !confirm(t("Delete the rule {name}?", { name: r.name }))) return;
+    try { await api(`/api/rss/rules/${encodeURIComponent(r.name)}`, { method: "DELETE" }); } catch (e) { alert(e.message); }
+    updateRss();
 }

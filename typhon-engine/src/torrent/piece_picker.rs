@@ -1,11 +1,127 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
+use super::meta::FileEntry;
+
+/// qBittorrent's file priorities, the only ones Hydranos accepts.
+///
+/// There is deliberately no 0 ("do not download"): Hydranos is a seeding
+/// client and fetches every byte of a torrent. A priority changes the ORDER
+/// pieces are fetched in, never the set.
+pub const PRIO_NORMAL: u8 = 1;
+pub const PRIO_HIGH: u8 = 6;
+pub const PRIO_MAX: u8 = 7;
+/// Rank of a file's first and last piece under "first/last piece first":
+/// above every file priority, like qBittorrent, which gives them the top
+/// priority whatever the file's own.
+const RANK_FIRST_LAST: u8 = PRIO_MAX + 1;
+
+pub fn is_valid_file_priority(p: u8) -> bool {
+    matches!(p, PRIO_NORMAL | PRIO_HIGH | PRIO_MAX)
+}
+
+/// The operator's download-order settings for one torrent.
+///
+/// The default (nothing set) is what nearly every torrent carries, and it is
+/// never stored: `TorrentState` keeps `None` for it, the resume record omits
+/// it, and the picker keeps its plain rarest-first path.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadOrder {
+    /// Pieces in index order instead of rarest first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sequential: bool,
+    /// Each file's first and last piece before anything else.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first_last: bool,
+    /// One priority per file, in `meta.files` order. Empty = all normal,
+    /// which is how it is kept whenever every file is back to normal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_prio: Vec<u8>,
+}
+
+impl DownloadOrder {
+    pub fn is_default(&self) -> bool {
+        !self.sequential && !self.first_last && self.file_prio.iter().all(|&p| p == PRIO_NORMAL)
+    }
+
+    pub fn file_priority(&self, index: usize) -> u8 {
+        self.file_prio.get(index).copied().unwrap_or(PRIO_NORMAL)
+    }
+
+    /// Set one file's priority. Anything but 1/6/7 is ignored: the callers
+    /// refuse it before getting here, and a 0 that slipped through must not
+    /// become a file that is never fetched.
+    pub fn set_file_priority(&mut self, index: usize, num_files: usize, prio: u8) {
+        if index >= num_files || !is_valid_file_priority(prio) {
+            return;
+        }
+        if self.file_prio.len() != num_files {
+            self.file_prio.resize(num_files, PRIO_NORMAL);
+        }
+        self.file_prio[index] = prio;
+        if self.file_prio.iter().all(|&p| p == PRIO_NORMAL) {
+            self.file_prio = Vec::new();
+        }
+    }
+}
+
+/// What `pick_piece` consults when a torrent has a non-default order: the
+/// settings turned into a rank per piece, computed once when they change
+/// rather than walked from the file list on every pick.
+pub struct PickOrder {
+    sequential: bool,
+    /// Higher is picked first. `None` when every piece ranks the same
+    /// (sequential alone), so a sequential torrent pays no per-piece byte.
+    rank: Option<Vec<u8>>,
+}
+
+impl PickOrder {
+    /// `None` for the default order: the picker then takes the exact path it
+    /// took before these settings existed.
+    pub fn build(order: &DownloadOrder, files: &[FileEntry], piece_length: u32, num_pieces: u32) -> Option<Box<PickOrder>> {
+        if order.is_default() {
+            return None;
+        }
+        let ranked = order.first_last || order.file_prio.iter().any(|&p| p != PRIO_NORMAL);
+        let rank = if ranked && num_pieces > 0 {
+            let pl = piece_length.max(1) as u64;
+            let last_piece = num_pieces as u64 - 1;
+            let mut rank = vec![0u8; num_pieces as usize];
+            for (i, f) in files.iter().enumerate() {
+                if f.length == 0 {
+                    continue;
+                }
+                let first = (f.offset / pl).min(last_piece) as usize;
+                let last = ((f.offset + f.length - 1) / pl).min(last_piece) as usize;
+                // A piece straddling two files takes the higher of the two:
+                // putting it off would hold back the file that asked first.
+                let p = order.file_priority(i);
+                for r in &mut rank[first..=last] {
+                    *r = (*r).max(p);
+                }
+                if order.first_last {
+                    rank[first] = RANK_FIRST_LAST;
+                    rank[last] = RANK_FIRST_LAST;
+                }
+            }
+            Some(rank)
+        } else {
+            None
+        };
+        Some(Box::new(PickOrder { sequential: order.sequential, rank }))
+    }
+}
+
 /// Rarest-first piece picker for download mode.
 pub struct PiecePicker {
     num_pieces: u32,
     have: Vec<bool>,           // pieces we have
     availability: Vec<u16>,    // how many peers have each piece (u16: le swarm ne depasse jamais 65535 copies)
     pending: HashMap<u32, PendingPiece>,  // piece index -> in-flight requests
+    /// The torrent's download order, when it is not the default. Boxed so the
+    /// default costs one null pointer, and checked once per pick.
+    order: Option<Box<PickOrder>>,
 }
 
 struct PendingPiece {
@@ -23,7 +139,18 @@ impl PiecePicker {
             have: vec![false; num_pieces as usize],
             availability: vec![0; num_pieces as usize],
             pending: HashMap::new(),
+            order: None,
         }
+    }
+
+    /// Install (or, with `None`, drop) the torrent's download order.
+    pub fn set_order(&mut self, order: Option<Box<PickOrder>>) {
+        self.order = order;
+    }
+
+    /// Is a non-default order installed?
+    pub fn has_order(&self) -> bool {
+        self.order.is_some()
     }
 
     /// Mark a piece as completed.
@@ -79,6 +206,11 @@ impl PiecePicker {
     /// in `pending` so multiple peers race for the same final pieces. Without
     /// this, stragglers (slow/dead peer holding the last piece) stall the DL.
     pub fn pick_piece(&self, peer_has: &[u8]) -> Option<u32> {
+        // The one test the default pays. Everything below it is the picker
+        // as it was before download orders existed, untouched.
+        if let Some(order) = self.order.as_deref() {
+            return self.pick_ordered(peer_has, order);
+        }
         use rand::Rng;
         let remaining = self.num_pieces.saturating_sub(self.num_have());
         let endgame = remaining > 0 && remaining <= 16;
@@ -107,6 +239,66 @@ impl PiecePicker {
             }
             let avail = self.availability[piece as usize] as u32;
             if avail < best_avail {
+                best_avail = avail;
+                best_count = 1;
+                best_pick = Some(piece);
+            } else if avail == best_avail {
+                best_count += 1;
+                if rng.gen_range(0..best_count) == 0 {
+                    best_pick = Some(piece);
+                }
+            }
+        }
+
+        best_pick
+    }
+
+    /// `pick_piece` under a non-default order: the highest rank first; within
+    /// a rank, the lowest index when sequential, else rarest first with the
+    /// same random tie-break. The eligibility rules -- held, reserved,
+    /// endgame, what the peer has -- are exactly the default's.
+    ///
+    /// Sequential still keeps several pieces in flight: every call skips the
+    /// pieces already reserved, so a peer filling its pipeline takes the next
+    /// ones in order, and so does the next peer.
+    fn pick_ordered(&self, peer_has: &[u8], order: &PickOrder) -> Option<u32> {
+        use rand::Rng;
+        let remaining = self.num_pieces.saturating_sub(self.num_have());
+        let endgame = remaining > 0 && remaining <= 16;
+        let mut best_rank: i32 = -1;
+        let mut best_avail = u32::MAX;
+        let mut best_count = 0u32;
+        let mut best_pick: Option<u32> = None;
+        let mut rng = rand::thread_rng();
+
+        for piece in 0..self.num_pieces {
+            if self.have[piece as usize] {
+                continue;
+            }
+            if !endgame && self.pending.contains_key(&piece) {
+                continue;
+            }
+            let byte_idx = piece as usize / 8;
+            let bit_idx = 7 - (piece % 8);
+            if byte_idx >= peer_has.len() || (peer_has[byte_idx] >> bit_idx) & 1 == 0 {
+                continue;
+            }
+            let rank = order.rank.as_ref().map_or(0, |r| r[piece as usize]) as i32;
+            if rank < best_rank {
+                continue;
+            }
+            if order.sequential {
+                // Ascending walk: the first piece seen at a rank is the
+                // lowest index of it, so only a strictly higher rank wins.
+                if rank > best_rank {
+                    best_rank = rank;
+                    best_pick = Some(piece);
+                }
+                continue;
+            }
+            let avail = self.availability[piece as usize] as u32;
+            if rank > best_rank || avail < best_avail {
+                best_rank = rank;
                 best_avail = avail;
                 best_count = 1;
                 best_pick = Some(piece);
@@ -361,5 +553,177 @@ mod receive_block_tests {
         let mut p = picker_with_one_pending(20, 16);
         assert!(!p.receive_block(0, 0, &[1u8; 16]));
         assert!(p.receive_block(0, 16, &[2u8; 4]));
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn file(offset: u64, length: u64) -> FileEntry {
+        FileEntry { path: PathBuf::from(format!("f{offset}")), offset, length }
+    }
+
+    /// A peer that has every piece.
+    fn all(n: u32) -> Vec<u8> {
+        vec![0xff; (n as usize).div_ceil(8)]
+    }
+
+    /// Availability per piece, as HAVE messages would build it.
+    fn picker_with_avail(avail: &[u16]) -> PiecePicker {
+        let mut p = PiecePicker::new(avail.len() as u32);
+        for (i, &a) in avail.iter().enumerate() {
+            for _ in 0..a {
+                p.add_have(i as u32);
+            }
+        }
+        p
+    }
+
+    fn ordered(p: &mut PiecePicker, o: &DownloadOrder, files: &[FileEntry], pl: u32) {
+        let n = p.num_pieces;
+        p.set_order(PickOrder::build(o, files, pl, n));
+    }
+
+    /// ⭐ The default order is not an order: building it allocates nothing,
+    /// and the picker picks what it picked before these settings existed --
+    /// on a fixed scenario with one rarest piece, that piece, every time.
+    #[test]
+    fn default_order_picks_exactly_as_before() {
+        let files = [file(0, 8 * 16)];
+        assert!(PickOrder::build(&DownloadOrder::default(), &files, 16, 8).is_none());
+        let explicit_normal = DownloadOrder { file_prio: vec![PRIO_NORMAL], ..Default::default() };
+        assert!(explicit_normal.is_default());
+        assert!(PickOrder::build(&explicit_normal, &files, 16, 8).is_none());
+
+        // Forty pieces, so the endgame (last sixteen) stays out of it.
+        let mut avail = vec![5u16; 40];
+        avail[4] = 1;
+        avail[11] = 2;
+        avail[27] = 3;
+        let mut p = picker_with_avail(&avail);
+        p.set_have(4);
+        p.begin_piece_for_test(11, 16, 16);
+        ordered(&mut p, &DownloadOrder::default(), &[file(0, 40 * 16)], 16);
+        assert!(p.order.is_none());
+        for _ in 0..50 {
+            // 4 is held, 11 reserved: the rarest left is 27.
+            assert_eq!(p.pick_piece(&all(40)), Some(27));
+        }
+    }
+
+    #[test]
+    fn sequential_takes_pieces_in_order_with_several_in_flight() {
+        let files = [file(0, 40 * 16)];
+        let mut p = picker_with_avail(&[5; 40]);
+        p.add_have(30); // rarest-first would pick anything but 30
+        let o = DownloadOrder { sequential: true, ..Default::default() };
+        ordered(&mut p, &o, &files, 16);
+        assert_eq!(p.pick_piece(&all(40)), Some(0));
+        p.begin_piece_for_test(0, 16, 16);
+        assert_eq!(p.pick_piece(&all(40)), Some(1), "the next one, while 0 is in flight");
+        p.begin_piece_for_test(1, 16, 16);
+        p.set_have(2);
+        assert_eq!(p.pick_piece(&all(40)), Some(3));
+        // A peer that lacks 3 is asked for the next piece it does have.
+        let mut has = all(40);
+        has[0] &= !(1 << 4);
+        assert_eq!(p.pick_piece(&has), Some(4));
+    }
+
+    #[test]
+    fn sequential_keeps_the_endgame() {
+        let files = [file(0, 20 * 16)];
+        let mut p = PiecePicker::new(20);
+        for i in 0..18 {
+            p.set_have(i);
+        }
+        ordered(&mut p, &DownloadOrder { sequential: true, ..Default::default() }, &files, 16);
+        p.begin_piece_for_test(18, 16, 16);
+        p.begin_piece_for_test(19, 16, 16);
+        // Two left, both reserved: endgame lets another peer race for them.
+        assert_eq!(p.pick_piece(&all(20)), Some(18));
+    }
+
+    #[test]
+    fn high_priority_file_comes_before_normal_and_rarity_breaks_ties() {
+        // Three files of four pieces each.
+        let files = [file(0, 64), file(64, 64), file(128, 64)];
+        // The rarest pieces are in file 0; file 2's rarest is piece 9.
+        let mut p = picker_with_avail(&[1, 1, 1, 1, 4, 4, 4, 4, 3, 2, 3, 3]);
+        let mut o = DownloadOrder::default();
+        o.set_file_priority(2, 3, PRIO_HIGH);
+        ordered(&mut p, &o, &files, 16);
+        assert_eq!(p.pick_piece(&all(12)), Some(9));
+        for i in 8..12 {
+            p.set_have(i);
+        }
+        // File 2 done: back to rarest first among the normal ones.
+        let pick = p.pick_piece(&all(12)).unwrap();
+        assert!(pick < 4, "{pick}");
+        // Maximal beats high.
+        let mut q = picker_with_avail(&[1; 12]);
+        o.set_file_priority(1, 3, PRIO_MAX);
+        ordered(&mut q, &o, &files, 16);
+        assert!((4..8).contains(&q.pick_piece(&all(12)).unwrap()));
+    }
+
+    #[test]
+    fn a_piece_shared_by_two_files_takes_the_higher_priority() {
+        // Piece 1 holds the end of file 0 and the start of file 1.
+        let files = [file(0, 24), file(24, 40)];
+        let mut p = picker_with_avail(&[1, 9, 1, 1]);
+        let mut o = DownloadOrder::default();
+        o.set_file_priority(0, 2, PRIO_MAX);
+        ordered(&mut p, &o, &files, 16);
+        // File 0 spans pieces 0 and 1: 0 is rarer, then 1 despite its 9 copies.
+        assert_eq!(p.pick_piece(&all(4)), Some(0));
+        p.set_have(0);
+        assert_eq!(p.pick_piece(&all(4)), Some(1));
+    }
+
+    #[test]
+    fn first_and_last_piece_of_each_file_come_first() {
+        let files = [file(0, 10 * 16), file(160, 10 * 16)];
+        // The middle pieces are the rarest.
+        let mut avail = vec![1u16; 20];
+        for (i, a) in avail.iter_mut().enumerate() {
+            if [0, 9, 10, 19].contains(&i) {
+                *a = 8;
+            }
+        }
+        let mut p = picker_with_avail(&avail);
+        let o = DownloadOrder { first_last: true, ..Default::default() };
+        ordered(&mut p, &o, &files, 16);
+        let mut got = Vec::new();
+        for _ in 0..4 {
+            let pick = p.pick_piece(&all(20)).unwrap();
+            p.begin_piece_for_test(pick, 16, 16);
+            got.push(pick);
+        }
+        got.sort();
+        assert_eq!(got, vec![0, 9, 10, 19]);
+        // With sequential, the ends first, then in order.
+        let mut q = PiecePicker::new(20);
+        ordered(&mut q, &DownloadOrder { sequential: true, first_last: true, ..Default::default() }, &files, 16);
+        let mut seq = Vec::new();
+        for _ in 0..6 {
+            let pick = q.pick_piece(&all(20)).unwrap();
+            q.begin_piece_for_test(pick, 16, 16);
+            seq.push(pick);
+        }
+        assert_eq!(seq, vec![0, 9, 10, 19, 1, 2]);
+    }
+
+    /// Priority 0 does not exist here: nothing can make a file be skipped.
+    #[test]
+    fn priority_zero_is_never_stored() {
+        let mut o = DownloadOrder::default();
+        o.set_file_priority(0, 2, 0);
+        assert!(o.is_default());
+        o.set_file_priority(1, 2, PRIO_HIGH);
+        o.set_file_priority(1, 2, PRIO_NORMAL);
+        assert!(o.file_prio.is_empty(), "back to all-normal is back to nothing stored");
     }
 }

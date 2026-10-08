@@ -867,6 +867,7 @@ impl TorrentManager {
             seed_secs: 0,
             up_limit: 0,
             down_limit: 0,
+            download_order: None,
         };
         self.persist(&ih, &rd);
 
@@ -1373,6 +1374,10 @@ impl TorrentManager {
             // Its own rate caps, if it had any. Nothing is allocated for the
             // (nearly all) torrents that have none.
             state.set_rate_limits(Some(rd.up_limit), Some(rd.down_limit));
+            // Its download order, same terms: the default allocates nothing.
+            if let Some(o) = &rd.download_order {
+                state.set_download_order(o.clone());
+            }
             // History, not this session's traffic: the counted mark moves too.
             state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
             // The lifetime totals are ours; what a tracker is told starts
@@ -1672,6 +1677,7 @@ impl TorrentManager {
             seed_secs: t.seed_time_now(crate::torrent::meta::now_secs()),
             up_limit: t.rate_limits().0,
             down_limit: t.rate_limits().1,
+            download_order: t.stored_download_order(),
         }
     }
 
@@ -1694,6 +1700,27 @@ impl TorrentManager {
             self.persist(info_hash, &rd);
         }
         Ok(after)
+    }
+
+    /// Change one torrent's download order (file priorities, sequential,
+    /// first/last piece) and persist it at once, as `set_torrent_rate_limits`
+    /// does. Returns the order now in force.
+    ///
+    /// The order decides which pieces come first, never which pieces come:
+    /// every file is still downloaded, whatever is set here.
+    pub fn update_download_order(
+        &self,
+        info_hash: &InfoHash,
+        edit: impl FnOnce(&mut piece_picker::DownloadOrder),
+    ) -> Result<piece_picker::DownloadOrder, String> {
+        let t = self.get(info_hash).ok_or("torrent not found")?;
+        let mut order = t.download_order();
+        edit(&mut order);
+        if t.set_download_order(order) {
+            let rd = Self::build_resume_data(&t);
+            self.persist(info_hash, &rd);
+        }
+        Ok(t.download_order())
     }
 
     /// Swap the in-memory save_path for a running torrent and flush
@@ -1818,6 +1845,10 @@ impl TorrentManager {
         state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
         // A cap set on the torrent travels with it, like its tracker edits.
         state.set_rate_limits(Some(rd.up_limit), Some(rd.down_limit));
+        // And so does its download order.
+        if let Some(o) = &rd.download_order {
+            state.set_download_order(o.clone());
+        }
         // The source engine counted these bytes when it moved them, and
         // settles the rest when it lets go: this side counts from here on.
         state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
@@ -2045,11 +2076,18 @@ impl TorrentManager {
         // run_recheck can populate it from disk. Only rechecked torrents pay for a
         // picker; download.rs gates piece requests on picker presence, so a recheck
         // that finds missing/corrupt pieces will refetch them.
+        let mut created = false;
         let _ = t.picker.get_or_init(|| {
+            created = true;
             std::sync::Arc::new(std::sync::Mutex::new(
                 crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces()),
             ))
         });
+        // A new picker starts with no order: give it the torrent's, in case
+        // the recheck finds pieces to fetch.
+        if created {
+            t.apply_download_order();
+        }
         // A recheck is somebody saying the underlying problem is dealt with.
         // Without this the torrent came back working and went on displaying the
         // fault it no longer had.
@@ -2166,6 +2204,7 @@ impl TorrentManager {
             seed_secs: t.seed_time_now(crate::torrent::meta::now_secs()),
             up_limit: t.rate_limits().0,
             down_limit: t.rate_limits().1,
+            download_order: t.stored_download_order(),
         };
         self.persist(&ih, &rd);
         info!(
@@ -3186,6 +3225,48 @@ mod manager_tests {
         assert_eq!(t.rate_limits(), (51_200, 8_192), "the cap came back");
         assert!(t.rate_chain(ratelimit::Dir::Up).is_limited(), "and it is enforced, not only reported");
         assert_eq!(again.get(&other).unwrap().rate_limits(), (0, 0));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A torrent's download order survives a restart without a sweep, and
+    /// reaches the picker of the torrent that comes back. The default stays
+    /// the default: nothing stored, no order in the picker.
+    #[test]
+    fn a_download_order_survives_a_restart() {
+        let (mgr, root) = manager("resume-order");
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        let ih = mgr.add_torrent_bytes(&blob, "/tmp", true, false).unwrap().0;
+        let other = add(&mgr, "beta");
+        let o = mgr
+            .update_download_order(&ih, |o| {
+                o.sequential = true;
+                o.first_last = true;
+                o.set_file_priority(0, 1, piece_picker::PRIO_MAX);
+            })
+            .unwrap();
+        assert!(o.sequential && o.first_last && o.file_prio == vec![piece_picker::PRIO_MAX]);
+        assert!(mgr.get(&ih).unwrap().picker.get().unwrap().lock().unwrap().has_order());
+        assert!(mgr.update_download_order(&[9u8; 20], |o| o.sequential = true).is_err(), "unknown hash");
+        // Set on a seed: kept and shown, nothing to act on.
+        assert!(mgr.update_download_order(&other, |o| o.sequential = true).unwrap().sequential);
+        mgr.update_download_order(&other, |o| o.sequential = false).unwrap();
+        assert_eq!(mgr.get(&other).unwrap().stored_download_order(), None, "off again = nothing stored");
+
+        let again = Arc::new(TorrentManager::new(
+            root.join("data").to_string_lossy().into_owned(),
+            root.join("resume").to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        let blob_b = torrent_bytes("beta", &["https://tracker.example/announce"]);
+        let (ha, hb) = (hex_encode(&ih), hex_encode(&other));
+        again.set_blob_source(Arc::new(move |hash: &str| {
+            if hash == ha { Some(blob.clone()) } else if hash == hb { Some(blob_b.clone()) } else { None }
+        }));
+        assert_eq!(again.load_resume_data(), 2);
+        let t = again.get(&ih).unwrap();
+        assert_eq!(t.download_order(), o, "the order came back");
+        assert!(t.picker.get().unwrap().lock().unwrap().has_order(), "and the picker follows it");
+        assert_eq!(again.get(&other).unwrap().stored_download_order(), None);
         let _ = std::fs::remove_dir_all(root);
     }
 

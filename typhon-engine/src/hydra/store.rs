@@ -684,6 +684,7 @@ impl Store {
         self.ensure_content_index()?;
         self.ensure_link_index()?;
         self.ensure_share_limits_table()?;
+        self.ensure_rss_tables()?;
         // After the tables exist, and before anything reads them.
         self.migrate_composite_key()?;
         Ok(())
@@ -3310,6 +3311,381 @@ impl Store {
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+}
+
+/// One RSS feed (`rss.rs`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RssFeedRow {
+    pub id: i64,
+    /// qBittorrent's `uid`, kept stable across renames.
+    pub uid: String,
+    /// Its place in the tree, qBittorrent's way: `Folder\Name`.
+    pub path: String,
+    pub url: String,
+    pub refresh_secs: i64,
+    /// The channel's own title, as last read.
+    pub title: String,
+    pub last_refresh: i64,
+    /// Why the last refresh failed; empty when it did not.
+    pub last_error: String,
+    pub created_at: i64,
+}
+
+/// One article of a feed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RssArticleRow {
+    pub feed_id: i64,
+    pub guid: String,
+    pub title: String,
+    pub torrent_url: String,
+    pub link: String,
+    pub description: String,
+    pub author: String,
+    pub category: String,
+    /// The feed's date, else when it was first seen.
+    pub date: i64,
+    pub size: i64,
+    pub is_read: bool,
+    pub seen_at: i64,
+}
+
+/// What took an article, so it is never taken twice.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RssTaken {
+    pub rule: String,
+    pub at: i64,
+    pub info_hash: String,
+    /// `added`, `already` (the torrent was there) or `refused: <why>`.
+    pub outcome: String,
+}
+
+impl Store {
+    /// RSS feeds, their articles, the automatic download rules and what the
+    /// rules took.
+    ///
+    /// Additive and invisible to an older build, like every table since 4.0.
+    /// `rss_taken` is keyed by every identity of an article (guid and torrent
+    /// link): a feed that re-publishes an item under a new guid, or the same
+    /// link in two feeds, is still recognised. Rows are small and one per
+    /// download, so they are kept.
+    fn ensure_rss_tables(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS rss_feeds (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 uid TEXT NOT NULL DEFAULT '',
+                 path TEXT NOT NULL UNIQUE,
+                 url TEXT NOT NULL UNIQUE,
+                 refresh_secs INTEGER NOT NULL DEFAULT 1800,
+                 title TEXT NOT NULL DEFAULT '',
+                 last_refresh INTEGER NOT NULL DEFAULT 0,
+                 last_error TEXT NOT NULL DEFAULT '',
+                 created_at INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS rss_folders (path TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS rss_articles (
+                 feed_id INTEGER NOT NULL,
+                 guid TEXT NOT NULL,
+                 title TEXT NOT NULL DEFAULT '',
+                 torrent_url TEXT NOT NULL DEFAULT '',
+                 link TEXT NOT NULL DEFAULT '',
+                 description TEXT NOT NULL DEFAULT '',
+                 author TEXT NOT NULL DEFAULT '',
+                 category TEXT NOT NULL DEFAULT '',
+                 date INTEGER NOT NULL DEFAULT 0,
+                 size INTEGER NOT NULL DEFAULT 0,
+                 is_read INTEGER NOT NULL DEFAULT 0,
+                 seen_at INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (feed_id, guid));
+             CREATE TABLE IF NOT EXISTS rss_rules (
+                 name TEXT PRIMARY KEY,
+                 def TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS rss_taken (
+                 key TEXT PRIMARY KEY,
+                 rule TEXT NOT NULL DEFAULT '',
+                 at INTEGER NOT NULL DEFAULT 0,
+                 info_hash TEXT NOT NULL DEFAULT '',
+                 outcome TEXT NOT NULL DEFAULT '');",
+        )?;
+        Ok(())
+    }
+
+    pub fn rss_feeds(&self) -> anyhow::Result<Vec<RssFeedRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, uid, path, url, refresh_secs, title, last_refresh, last_error, created_at
+             FROM rss_feeds ORDER BY path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RssFeedRow {
+                id: r.get(0)?,
+                uid: r.get(1)?,
+                path: r.get(2)?,
+                url: r.get(3)?,
+                refresh_secs: r.get(4)?,
+                title: r.get(5)?,
+                last_refresh: r.get(6)?,
+                last_error: r.get(7)?,
+                created_at: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// A new feed; its id. A path or URL already taken is an error.
+    pub fn rss_feed_insert(&self, f: &RssFeedRow) -> anyhow::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO rss_feeds (uid, path, url, refresh_secs, title, last_refresh, last_error, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![f.uid, f.path, f.url, f.refresh_secs, f.title, f.last_refresh, f.last_error, f.created_at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn rss_feed_update(&self, f: &RssFeedRow) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE rss_feeds SET path=?2, url=?3, refresh_secs=?4, title=?5, last_refresh=?6, last_error=?7
+             WHERE id=?1",
+            rusqlite::params![f.id, f.path, f.url, f.refresh_secs, f.title, f.last_refresh, f.last_error],
+        )?;
+        Ok(())
+    }
+
+    /// What a refresh found, and only that: a rename or a new URL saved
+    /// while the feed was being fetched is not undone by the fetch ending.
+    pub fn rss_feed_refreshed(&self, id: i64, title: &str, at: i64, error: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE rss_feeds SET title=CASE WHEN ?2='' THEN title ELSE ?2 END, last_refresh=?3, last_error=?4 WHERE id=?1",
+            rusqlite::params![id, title, at, error],
+        )?;
+        Ok(())
+    }
+
+    /// The feed and its articles. What its rules took stays taken.
+    pub fn rss_feed_delete(&self, id: i64) -> anyhow::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM rss_articles WHERE feed_id=?1", [id])?;
+        tx.execute("DELETE FROM rss_feeds WHERE id=?1", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn rss_folders(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT path FROM rss_folders ORDER BY path")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn rss_folder_put(&self, path: &str) -> anyhow::Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO rss_folders (path) VALUES (?1)", [path])?;
+        Ok(())
+    }
+
+    pub fn rss_folder_delete(&self, path: &str) -> anyhow::Result<()> {
+        self.conn.execute("DELETE FROM rss_folders WHERE path=?1", [path])?;
+        Ok(())
+    }
+
+    /// A feed's articles, newest first.
+    pub fn rss_articles(&self, feed_id: i64) -> anyhow::Result<Vec<RssArticleRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT feed_id, guid, title, torrent_url, link, description, author, category, date, size, is_read, seen_at
+             FROM rss_articles WHERE feed_id=?1 ORDER BY date DESC, seen_at DESC, guid",
+        )?;
+        let rows = stmt.query_map([feed_id], |r| {
+            Ok(RssArticleRow {
+                feed_id: r.get(0)?,
+                guid: r.get(1)?,
+                title: r.get(2)?,
+                torrent_url: r.get(3)?,
+                link: r.get(4)?,
+                description: r.get(5)?,
+                author: r.get(6)?,
+                category: r.get(7)?,
+                date: r.get(8)?,
+                size: r.get(9)?,
+                is_read: r.get::<_, i64>(10)? != 0,
+                seen_at: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Articles of one refresh: the new ones go in unread, the known ones keep
+    /// their read flag, and only the newest `keep` stay. The guids that were
+    /// new, in the order given.
+    pub fn rss_articles_merge(&self, feed_id: i64, articles: &[RssArticleRow], keep: i64) -> anyhow::Result<Vec<String>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut fresh = Vec::new();
+        {
+            let mut ins = tx.prepare(
+                "INSERT OR IGNORE INTO rss_articles
+                     (feed_id, guid, title, torrent_url, link, description, author, category, date, size, is_read, seen_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11)",
+            )?;
+            for a in articles {
+                let n = ins.execute(rusqlite::params![
+                    feed_id,
+                    a.guid,
+                    a.title,
+                    a.torrent_url,
+                    a.link,
+                    a.description,
+                    a.author,
+                    a.category,
+                    a.date,
+                    a.size,
+                    a.seen_at
+                ])?;
+                if n > 0 {
+                    fresh.push(a.guid.clone());
+                }
+            }
+        }
+        tx.execute(
+            "DELETE FROM rss_articles WHERE feed_id=?1 AND guid NOT IN
+                 (SELECT guid FROM rss_articles WHERE feed_id=?1 ORDER BY date DESC, seen_at DESC, guid LIMIT ?2)",
+            rusqlite::params![feed_id, keep.max(1)],
+        )?;
+        tx.commit()?;
+        Ok(fresh)
+    }
+
+    /// Per feed: (articles, unread). One grouped read for the whole list.
+    pub fn rss_article_counts(&self) -> anyhow::Result<std::collections::HashMap<i64, (i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT feed_id, COUNT(*), SUM(CASE WHEN is_read=0 THEN 1 ELSE 0 END) FROM rss_articles GROUP BY feed_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Mark one article read (`guid`), or all of a feed's. How many changed.
+    pub fn rss_mark_read(&self, feed_id: i64, guid: Option<&str>) -> anyhow::Result<usize> {
+        Ok(match guid {
+            Some(g) => self.conn.execute(
+                "UPDATE rss_articles SET is_read=1 WHERE feed_id=?1 AND guid=?2 AND is_read=0",
+                rusqlite::params![feed_id, g],
+            )?,
+            None => self
+                .conn
+                .execute("UPDATE rss_articles SET is_read=1 WHERE feed_id=?1 AND is_read=0", [feed_id])?,
+        })
+    }
+
+    /// Every rule: name and qBittorrent document, by name.
+    pub fn rss_rules(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT name, def FROM rss_rules ORDER BY name")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn rss_rule_put(&self, name: &str, def: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO rss_rules (name, def) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET def=excluded.def",
+            rusqlite::params![name, def],
+        )?;
+        Ok(())
+    }
+
+    /// False when there is no such rule; an error when the new name is taken.
+    pub fn rss_rule_rename(&self, old: &str, new: &str) -> anyhow::Result<bool> {
+        Ok(self.conn.execute("UPDATE rss_rules SET name=?2 WHERE name=?1", rusqlite::params![old, new])? > 0)
+    }
+
+    pub fn rss_rule_delete(&self, name: &str) -> anyhow::Result<bool> {
+        Ok(self.conn.execute("DELETE FROM rss_rules WHERE name=?1", [name])? > 0)
+    }
+
+    /// What took the first of these keys that was taken, if any.
+    pub fn rss_taken(&self, keys: &[&str]) -> anyhow::Result<Option<RssTaken>> {
+        let mut stmt = self.conn.prepare_cached("SELECT rule, at, info_hash, outcome FROM rss_taken WHERE key=?1")?;
+        for k in keys.iter().filter(|k| !k.is_empty()) {
+            let row = stmt.query_row([k], |r| {
+                Ok(RssTaken { rule: r.get(0)?, at: r.get(1)?, info_hash: r.get(2)?, outcome: r.get(3)? })
+            });
+            match row {
+                Ok(t) => return Ok(Some(t)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Record every key of an article as taken. A key already there keeps
+    /// its first record.
+    pub fn rss_take(&self, keys: &[&str], t: &RssTaken) -> anyhow::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for k in keys.iter().filter(|k| !k.is_empty()) {
+            tx.execute(
+                "INSERT OR IGNORE INTO rss_taken (key, rule, at, info_hash, outcome) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![k, t.rule, t.at, t.info_hash, t.outcome],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rss_store_tests {
+    use super::*;
+
+    fn feed(path: &str, url: &str) -> RssFeedRow {
+        RssFeedRow { uid: "{u}".into(), path: path.into(), url: url.into(), refresh_secs: 1800, ..Default::default() }
+    }
+
+    fn art(guid: &str, date: i64) -> RssArticleRow {
+        RssArticleRow { guid: guid.into(), title: guid.into(), date, seen_at: 1, ..Default::default() }
+    }
+
+    /// Everything RSS keeps is still there after the store is closed and
+    /// opened again: feeds, folders, articles and their read flag, rules and
+    /// what the rules took.
+    #[test]
+    fn rss_state_survives_a_reopen() {
+        let dir = std::env::temp_dir().join(format!("hydra-rss-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hydra.db");
+        {
+            let s = Store::open(&path, false).unwrap();
+            let id = s.rss_feed_insert(&feed("Folder\\Tracker", "https://t.example/rss?passkey=x")).unwrap();
+            s.rss_folder_put("Folder").unwrap();
+            assert_eq!(s.rss_articles_merge(id, &[art("a", 10), art("b", 20)], 200).unwrap(), vec!["a", "b"]);
+            s.rss_mark_read(id, Some("a")).unwrap();
+            s.rss_rule_put("tv", "{\"enabled\":true}").unwrap();
+            s.rss_take(&["a", "https://t.example/a.torrent"], &RssTaken { rule: "tv".into(), at: 5, info_hash: "h".into(), outcome: "added".into() })
+                .unwrap();
+        }
+        let s = Store::open(&path, false).unwrap();
+        let feeds = s.rss_feeds().unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].path, "Folder\\Tracker");
+        assert_eq!(s.rss_folders().unwrap(), vec!["Folder"]);
+        let arts = s.rss_articles(feeds[0].id).unwrap();
+        assert_eq!(arts.iter().map(|a| (a.guid.as_str(), a.is_read)).collect::<Vec<_>>(), vec![("b", false), ("a", true)]);
+        assert_eq!(s.rss_rules().unwrap(), vec![("tv".to_string(), "{\"enabled\":true}".to_string())]);
+        let t = s.rss_taken(&["nope", "https://t.example/a.torrent"]).unwrap().expect("taken by its link");
+        assert_eq!((t.rule.as_str(), t.outcome.as_str()), ("tv", "added"));
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_read_flag_and_only_the_newest_articles() {
+        let s = Store::open_in_memory().unwrap();
+        s.ensure_schema().unwrap();
+        let id = s.rss_feed_insert(&feed("F", "u")).unwrap();
+        s.rss_articles_merge(id, &[art("old", 1), art("mid", 2)], 2).unwrap();
+        s.rss_mark_read(id, None).unwrap();
+        let fresh = s.rss_articles_merge(id, &[art("mid", 2), art("new", 3)], 2).unwrap();
+        assert_eq!(fresh, vec!["new"], "a known guid is not new");
+        let arts = s.rss_articles(id).unwrap();
+        assert_eq!(arts.iter().map(|a| (a.guid.as_str(), a.is_read)).collect::<Vec<_>>(), vec![("new", false), ("mid", true)]);
+        assert!(s.rss_feed_insert(&feed("F", "other")).is_err(), "a path is unique");
+        assert!(s.rss_feed_insert(&feed("G", "u")).is_err(), "a URL is unique");
+        s.rss_feed_delete(id).unwrap();
+        assert!(s.rss_articles(id).unwrap().is_empty());
     }
 }
 

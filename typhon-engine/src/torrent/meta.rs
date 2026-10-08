@@ -435,6 +435,10 @@ pub struct TorrentState {
     /// and never otherwise: on a million-torrent hoard almost none carries
     /// one, and an empty `OnceLock<Box<_>>` is all the rest pay.
     own_rates: std::sync::OnceLock<Box<crate::torrent::ratelimit::RatePair>>,
+    /// File priorities, sequential, first/last piece: `None` for the default,
+    /// which is what a million seeding torrents carry -- a null pointer each,
+    /// nothing allocated. See `set_download_order`.
+    download_order: RwLock<Option<Box<super::piece_picker::DownloadOrder>>>,
     /// Where this torrent reports that it finished downloading, so its engine
     /// can persist the fact at once.
     pub completed_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<InfoHash>>,
@@ -780,6 +784,66 @@ impl TorrentState {
         }
     }
 
+    /// This torrent's download order; the default when none was set.
+    pub fn download_order(&self) -> super::piece_picker::DownloadOrder {
+        self.download_order.read().as_deref().cloned().unwrap_or_default()
+    }
+
+    /// `(sequential, first_last)` without copying the per-file list: what a
+    /// listing row reports, read for every torrent of a page.
+    pub fn download_order_flags(&self) -> (bool, bool) {
+        self.download_order.read().as_deref().map_or((false, false), |o| (o.sequential, o.first_last))
+    }
+
+    /// The order as the resume record keeps it: `None` for the default.
+    pub fn stored_download_order(&self) -> Option<super::piece_picker::DownloadOrder> {
+        self.download_order.read().as_deref().cloned()
+    }
+
+    /// Replace this torrent's download order and hand it to the picker.
+    /// Returns whether anything changed.
+    ///
+    /// The default is stored as `None`, so turning every setting back off
+    /// frees what turning one on allocated. A torrent with no picker -- a
+    /// seed -- keeps the settings for display and for the day a recheck gives
+    /// it pieces to fetch (`apply_download_order`), and pays nothing else:
+    /// with nothing to pick, an order has nothing to act on.
+    pub fn set_download_order(&self, mut order: super::piece_picker::DownloadOrder) -> bool {
+        let n = self.meta.files.len();
+        if order.file_prio.len() != n || order.file_prio.iter().all(|&p| p == super::piece_picker::PRIO_NORMAL) {
+            // A record from another file list (it cannot happen for one
+            // info-hash, but a stray value must not index out of range), or
+            // all normal: nothing per file to keep.
+            order.file_prio = Vec::new();
+        }
+        let new = if order.is_default() { None } else { Some(Box::new(order)) };
+        {
+            let mut slot = self.download_order.write();
+            if *slot == new {
+                return false;
+            }
+            *slot = new;
+        }
+        self.apply_download_order();
+        true
+    }
+
+    /// Hand the current order to the picker, if this torrent has one. Called
+    /// when the order changes and when a picker is created for a torrent that
+    /// had none (a recheck of a seed).
+    pub fn apply_download_order(&self) {
+        let Some(picker) = self.picker.get() else { return };
+        let order = {
+            let slot = self.download_order.read();
+            slot.as_deref().and_then(|o| {
+                super::piece_picker::PickOrder::build(o, &self.meta.files, self.meta.piece_length, self.meta.num_pieces())
+            })
+        };
+        if let Ok(mut p) = picker.lock() {
+            p.set_order(order);
+        }
+    }
+
     pub fn policy(&self) -> &crate::peer::extension::PeerPolicy {
         self.policy
             .get()
@@ -1012,6 +1076,7 @@ impl TorrentState {
             limiter: std::sync::OnceLock::new(),
             rates: std::sync::OnceLock::new(),
             own_rates: std::sync::OnceLock::new(),
+            download_order: RwLock::new(None),
             completed_tx: std::sync::OnceLock::new(),
             blob_source: std::sync::OnceLock::new(),
             is_paused: AtomicBool::new(false),

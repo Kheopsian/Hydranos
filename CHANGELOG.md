@@ -32,6 +32,42 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   79 %, 161 MiB/s sequential write and 199 ms average latency before one
   `fstrim`, 679 MiB/s and 47 ms after. Below the download rate, the dirty
   pages pile up until the kernel throttles every writer of the machine.
+- **RSS feeds and automatic download rules**, qBittorrent's: feeds
+  (RSS 2.0 and Atom) in folders, fetched every 30 minutes by default
+  (never under 5), the newest 200 articles kept with their read state;
+  rules with Must contain / Must not contain (spaces = AND, `|` = OR,
+  wildcards, or regular expressions), an episode filter (`1x2;8-15;30-;`
+  or `S01E01-S01E10`), ignore days, the smart episode filter, a category,
+  a folder and add paused. A rule's article is added by the same path as
+  any add -- the category picks the engine and the folder, the path claim
+  and dedup run -- and every add or refusal is in the workflow activity
+  with its reason. An article taken once is never taken again, even
+  republished under a new guid. A private feed carries the passkey: it
+  and its `.torrent`s are fetched by the way out of the engine the torrent
+  goes to (its tunnel, interface, proxy or announce proxy), never by the
+  default route behind it, and not at all when the kill switch keeps that
+  engine off the network -- the feed says why. URLs are never logged
+  whole. An RSS tab, `/api/rss/*`, and qBittorrent's `/api/v2/rss/*` in
+  the shim (`addFeed`, `items`, `setRule`, `matchingArticles`...).
+  `[rss] enabled = false` turns it off.
+- **Download order: file priorities, sequential, first/last piece first.**
+  A file can be set Normal, High or Maximal (qBittorrent's 1/6/7): the
+  pieces of the higher files are fetched first, rarest first within a
+  priority, and a piece shared by two files takes the higher one.
+  Sequential fetches pieces in order, still several at a time, with the
+  same endgame; first/last piece fetches each file's two ends before
+  anything else. Per torrent, kept across restarts and engine moves, in
+  the Content tab and the context menu, at
+  `/api/torrents/:hash/download-order`, the `download_order` selection
+  action, and the qBittorrent shim (`filePrio`, `toggleSequentialDownload`,
+  `toggleFirstLastPiecePrio`, real `priority`, `seq_dl`, `f_l_piece_prio`,
+  `sequentialDownload` / `firstLastPiecePrio` at add).
+  **The order, never the set:** every file of a torrent is always
+  downloaded. Priority 0 ("do not download") stays refused (409): Hydranos
+  is a seeding client, and a torrent left incomplete by choice is one it
+  could never seed. A torrent left at the defaults pays nothing -- no
+  allocation, the picker takes the path it always took -- and a complete
+  one keeps and shows the settings with nothing left for them to act on.
 
 ### Fixed
 - **A torrent no longer overwrites another torrent's files.** Two different

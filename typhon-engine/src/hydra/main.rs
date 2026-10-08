@@ -85,6 +85,7 @@ mod rules;
 mod rulesrun;
 mod rulesapi;
 mod magnets;
+mod rss;
 mod ipfilter;
 mod watch;
 mod mcp;
@@ -1003,6 +1004,8 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     ipfilter::spawn(state.clone());
     // Watched folders: a .torrent or .magnet dropped in is added.
     watch::spawn(state.clone());
+    // RSS feeds due for a refresh, and the rules applied to what they bring.
+    rss::spawn(state.clone());
     // Keeps the hardlink index the workflows read, instead of each pass
     // stat-ing the whole catalogue itself.
     linkscan::spawn(state.engines.clone(), state.store.clone());

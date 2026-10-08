@@ -1474,6 +1474,18 @@ tr.row-selected td {
     background: rgba(248, 81, 73, 0.12);
 }
 
+/* The tick of a menu item that is a setting (sequential, first/last piece). */
+.ctx-check {
+    display: inline-block;
+    width: 1.2em;
+    color: var(--accent-orange, #f0883e);
+}
+
+.tc-prio {
+    font-size: 12px;
+    padding: 1px 4px;
+}
+
 .ctx-scroll {
     max-height: 50vh;
     overflow-y: auto;

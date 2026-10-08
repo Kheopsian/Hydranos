@@ -46,6 +46,11 @@ pub struct ResumeData {
     /// This torrent's own download cap, bytes/s. 0 = none.
     #[serde(default)]
     pub down_limit: u64,
+    /// File priorities, sequential, first/last piece. `None` = the default,
+    /// which is what nearly every record carries. Kept here for the same
+    /// reason as the caps: it must survive a restart and an engine move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_order: Option<super::piece_picker::DownloadOrder>,
 }
 
 /// Save resume data for a torrent.

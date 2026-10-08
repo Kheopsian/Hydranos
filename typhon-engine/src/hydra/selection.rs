@@ -270,6 +270,9 @@ pub enum Action {
     /// Share limits, `setShareLimits`' encoding (-2 follow the engine, -1
     /// none, minutes); `None` keeps a field.
     ShareLimits { ratio: Option<f64>, seeding: Option<i64>, inactive: Option<i64> },
+    /// Download order flags; `None` keeps one. File priorities are per
+    /// torrent (file ids mean nothing across a selection).
+    DownloadOrder { sequential: Option<bool>, first_last_piece: Option<bool> },
 }
 
 fn params<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, Refusal> {
@@ -358,6 +361,15 @@ struct ShareLimitParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DownloadOrderParams {
+    #[serde(default)]
+    sequential: Option<bool>,
+    #[serde(default)]
+    first_last_piece: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NodeMoveParams {
     node: String,
     engine: String,
@@ -441,6 +453,13 @@ impl Action {
                     seeding: l.seeding_time_limit,
                     inactive: l.inactive_seeding_time_limit,
                 }
+            }
+            "download_order" => {
+                let d: DownloadOrderParams = params(p)?;
+                if d.sequential.is_none() && d.first_last_piece.is_none() {
+                    return Err(Refusal::bad("params needs sequential and/or first_last_piece"));
+                }
+                Action::DownloadOrder { sequential: d.sequential, first_last_piece: d.first_last_piece }
             }
             "node-move" => {
                 let m: NodeMoveParams = params(p)?;
@@ -681,6 +700,11 @@ async fn remote_action(state: &AppState, t: &Target, action: &Action) -> Outcome
             format!("/api/torrents/{h}/limits?engine={e}"),
             Some(json!({"up_kib": up_kib, "down_kib": down_kib})),
         ),
+        Action::DownloadOrder { sequential, first_last_piece } => (
+            reqwest::Method::POST,
+            format!("/api/torrents/{h}/download-order?engine={e}"),
+            Some(download_order_body(*sequential, *first_last_piece)),
+        ),
         Action::Remove { delete_files } => (
             reqwest::Method::DELETE,
             format!("/api/torrents/{h}?delete_files={delete_files}&engine={e}"),
@@ -707,6 +731,19 @@ async fn remote_action(state: &AppState, t: &Target, action: &Action) -> Outcome
         }
         Err(e) => Outcome::failed(h, format!("{}: {e}", node.name)),
     }
+}
+
+/// The route's body, without the flags left as they are: `null` there would
+/// not parse as "keep".
+fn download_order_body(sequential: Option<bool>, first_last_piece: Option<bool>) -> Value {
+    let mut b = serde_json::Map::new();
+    if let Some(s) = sequential {
+        b.insert("sequential".into(), json!(s));
+    }
+    if let Some(f) = first_last_piece {
+        b.insert("first_last_piece".into(), json!(f));
+    }
+    Value::Object(b)
 }
 
 fn category_of(state: &AppState, hash: &str) -> String {
@@ -856,6 +893,20 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
                 Method::POST,
                 &format!("/api/torrents/{h}/limits?engine={}", enc(&t.engine())),
                 Some(json!({"up_kib": up_kib, "down_kib": down_kib})),
+                h,
+                "ok",
+            )
+            .await
+        }
+        Action::DownloadOrder { sequential, first_last_piece } => {
+            if !t.is_local() {
+                return remote_action(state, t, action).await;
+            }
+            // The copy the row is, like the caps.
+            c.simple(
+                Method::POST,
+                &format!("/api/torrents/{h}/download-order?engine={}", enc(&t.engine())),
+                Some(download_order_body(*sequential, *first_last_piece)),
                 h,
                 "ok",
             )
@@ -1289,6 +1340,35 @@ mod tests {
         assert_eq!(caps(&h[0]), (102_400, 0));
         assert_eq!(caps(&h[1]), (102_400, 0));
         assert_eq!(caps(&h[2]), (0, 0), "series was not selected");
+    }
+
+    /// `download_order` by filter sets the flags on exactly the filtered
+    /// torrents, in the engine; a flag left out is kept, empty params refused.
+    #[tokio::test]
+    async fn download_order_by_filter_reaches_exactly_the_filtered_torrents() {
+        let (s, h) = library("sel-order");
+        let (st, _) = start(&s, "download_order", json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let hoard = s.state.engines.get("hoard").unwrap();
+        let flags = |hash: &str| {
+            hoard.manager.get(&typhon_engine::torrent::hex_decode(hash).unwrap()).unwrap().download_order_flags()
+        };
+        hoard
+            .manager
+            .update_download_order(&typhon_engine::torrent::hex_decode(&h[0]).unwrap(), |o| o.first_last = true)
+            .unwrap();
+        let (st, v) = start(
+            &s,
+            "download_order",
+            json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {"sequential": true}}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+        let j = wait(&s, v["job"].as_str().unwrap()).await;
+        assert_eq!((j["done"].as_u64(), j["failed"].as_u64()), (Some(2), Some(0)), "{j}");
+        assert_eq!(flags(&h[0]), (true, true), "first/last kept");
+        assert_eq!(flags(&h[1]), (true, false));
+        assert_eq!(flags(&h[2]), (false, false), "series was not selected");
     }
 
     /// `share_limits` by filter is a store write on exactly the filtered
