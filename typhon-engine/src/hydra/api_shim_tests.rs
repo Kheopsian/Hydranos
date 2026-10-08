@@ -121,6 +121,8 @@ async fn none_of_the_added_routes_answers_404_any_more() {
         ("POST", "/api/v2/torrents/setLocation"),
         ("POST", "/api/v2/torrents/setForceStart"),
         ("POST", "/api/v2/torrents/filePrio"),
+        ("POST", "/api/v2/torrents/toggleSequentialDownload"),
+        ("POST", "/api/v2/torrents/toggleFirstLastPiecePrio"),
         ("POST", "/api/v2/torrents/rename"),
         ("POST", "/api/v2/torrents/topPrio"),
         ("POST", "/api/v2/torrents/bottomPrio"),
@@ -166,8 +168,8 @@ async fn sync_maindata_answers_the_full_state_with_a_moving_rid() {
     assert_eq!(n, "1");
 }
 
-/// `filePrio`: the engine downloads every file, so "skip" is refused and
-/// "normal" is what already happens.
+/// `filePrio`: the order, never the set. "Skip" is refused with the reason;
+/// 1/6/7 land on the file and come back in `torrents/files`.
 #[tokio::test]
 async fn file_priority_zero_is_refused_and_normal_is_accepted() {
     let s = st("shim-fileprio", "");
@@ -177,13 +179,141 @@ async fn file_priority_zero_is_refused_and_normal_is_accepted() {
     let h = hash_of(&t);
     let (code, body) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={h}&id=0&priority=0")).await;
     assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("whole torrent"), "{body}");
+    assert_eq!(held(&s, &h).unwrap().stored_download_order(), None, "a refused 0 stores nothing");
     let (code, _) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={h}&id=0|1&priority=1")).await;
     assert_eq!(code, StatusCode::OK);
+    assert_eq!(held(&s, &h).unwrap().stored_download_order(), None, "all normal is the default");
+    // In the query rather than the body, as some clients send it.
+    let (code, _) = call(&s, "POST", &format!("/api/v2/torrents/filePrio?hash={h}&id=1&priority=7"), "").await;
+    assert_eq!(code, StatusCode::OK);
+    let (_, body) = call(&s, "POST", "/api/v2/torrents/files", &format!("hash={h}")).await;
+    let files: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(files[0]["priority"], 1);
+    assert_eq!(files[1]["priority"], 7);
+    let t = held(&s, &h).unwrap();
+    assert_eq!(t.download_order().file_prio, vec![1, 7]);
+    assert!(t.picker.get().unwrap().lock().unwrap().has_order(), "the picker orders by it");
     let (code, _) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={h}&id=7&priority=1")).await;
     assert_eq!(code, StatusCode::CONFLICT, "no file 7");
     let (code, _) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={h}&id=0&priority=3")).await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
     let (code, _) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={}&id=0&priority=1", "0".repeat(40))).await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+}
+
+fn info_row(body: &str, h: &str) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = serde_json::from_str(body).unwrap();
+    rows.into_iter().find(|r| r["hash"] == h).unwrap_or_else(|| panic!("{h} not listed: {body}"))
+}
+
+/// The two toggles flip each torrent from what it is, POST only, `hashes`
+/// or `all`, in the body or the query; `torrents/info` reports the result.
+#[tokio::test]
+async fn sequential_and_first_last_toggle_and_are_listed() {
+    let s = st("shim-toggles", "");
+    let t = multi("toggle-multi");
+    add(&s, &t, &[("savepath", &data(&s))]).await;
+    let h = hash_of(&t);
+    let row = |b: &str| info_row(b, &h);
+    let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
+    assert_eq!((row(&b)["seq_dl"].clone(), row(&b)["f_l_piece_prio"].clone()), (false.into(), false.into()));
+
+    let (code, _) = call(&s, "POST", "/api/v2/torrents/toggleSequentialDownload", &format!("hashes={h}")).await;
+    assert_eq!(code, StatusCode::OK);
+    let (code, _) = call(&s, "POST", "/api/v2/torrents/toggleFirstLastPiecePrio?hashes=all", "").await;
+    assert_eq!(code, StatusCode::OK);
+    let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
+    assert_eq!(row(&b)["seq_dl"], true);
+    assert_eq!(row(&b)["f_l_piece_prio"], true);
+    // Persisted with the torrent's record, and handed to its picker.
+    let st = held(&s, &h).unwrap();
+    assert_eq!(st.download_order_flags(), (true, true));
+    assert!(st.picker.get().unwrap().lock().unwrap().has_order());
+
+    call(&s, "POST", "/api/v2/torrents/toggleSequentialDownload", &format!("hashes={h}")).await;
+    let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
+    assert_eq!(row(&b)["seq_dl"], false, "a toggle flips back");
+    assert_eq!(row(&b)["f_l_piece_prio"], true);
+
+    let (code, _) = call(&s, "GET", &format!("/api/v2/torrents/toggleSequentialDownload?hashes={h}"), "").await;
+    assert_eq!(code, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+/// `torrents/add` applies `sequentialDownload` and `firstLastPiecePrio`
+/// instead of logging them as ignored.
+#[tokio::test]
+async fn add_applies_sequential_and_first_last() {
+    let s = st("shim-add-order", "");
+    let t = multi("add-order");
+    let (code, _) = add(
+        &s,
+        &t,
+        &[("savepath", &data(&s)), ("sequentialDownload", "true"), ("firstLastPiecePrio", "true")],
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    let h = hash_of(&t);
+    let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
+    assert_eq!(info_row(&b, &h)["seq_dl"], true);
+    assert_eq!(info_row(&b, &h)["f_l_piece_prio"], true);
+    // Without them, nothing is stored.
+    let u = single("plain-add");
+    add(&s, &u, &[("savepath", &data(&s))]).await;
+    assert_eq!(held(&s, &hash_of(&u)).unwrap().stored_download_order(), None);
+}
+
+/// The native route: the three settings, 0 refused, every file shown with
+/// its priority. A complete torrent takes and shows them, and has nothing to
+/// fetch for them to act on.
+#[tokio::test]
+async fn native_download_order_route() {
+    let s = st("native-order", "");
+    let t = multi("native-order");
+    add(&s, &t, &[("savepath", &data(&s))]).await;
+    let h = hash_of(&t);
+    let post = |b: &'static str| {
+        let (s, h) = (&s, h.clone());
+        async move { call(s, "POST", &format!("/api/torrents/{h}/download-order"), b).await }
+    };
+    let (code, body) = post(r#"{"file_ids":[0],"priority":0}"#).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    let (code, _) = post(r#"{"file_ids":[0],"priority":3}"#).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = post(r#"{"file_ids":[5],"priority":6}"#).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "no file 5");
+    let (code, _) = post(r#"{"priority":6}"#).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "ids and priority go together");
+    let (code, _) = post(r#"{"skip":true}"#).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, body) = post(r#"{"file_ids":[1],"priority":6,"sequential":true}"#).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["copies"][0]["file_priorities"], serde_json::json!([1, 6]));
+    assert_eq!(v["copies"][0]["sequential"], true);
+    assert_eq!(v["copies"][0]["first_last_piece"], false);
+    let (_, body) = call(&s, "GET", &format!("/api/torrents/{h}/files"), "").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["sequential"], true);
+    let by_index = |i: u64| v["files"].as_array().unwrap().iter().find(|f| f["index"] == i).unwrap().clone();
+    assert_eq!(by_index(1)["priority"], 6);
+    assert_eq!(by_index(0)["priority"], 1);
+    let (code, body) = call(&s, "GET", &format!("/api/torrents/{h}/download-order"), "").await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(body.contains("\"sequential\":true"), "{body}");
+
+    // A seed: accepted, shown, nothing to act on.
+    let u = single("native-seed");
+    add(&s, &u, &[("savepath", &data(&s)), ("skip_checking", "true")]).await;
+    let hu = hash_of(&u);
+    let (code, body) = call(&s, "POST", &format!("/api/torrents/{hu}/download-order"), r#"{"first_last_piece":true}"#).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["copies"][0]["first_last_piece"], true);
+    assert_eq!(v["copies"][0]["complete"], true);
+    let seed = held(&s, &hu).unwrap();
+    assert!(seed.picker.get().is_none(), "a seed builds no picker for an order");
+    let (code, _) = call(&s, "POST", &format!("/api/torrents/{}/download-order", "0".repeat(40)), r#"{"sequential":true}"#).await;
     assert_eq!(code, StatusCode::NOT_FOUND);
 }
 

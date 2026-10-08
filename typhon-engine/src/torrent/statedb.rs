@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS torrent_state (
     trackers         TEXT NOT NULL DEFAULT '',
     seed_secs        INTEGER NOT NULL DEFAULT 0,
     up_limit         INTEGER NOT NULL DEFAULT 0,
-    down_limit       INTEGER NOT NULL DEFAULT 0
+    down_limit       INTEGER NOT NULL DEFAULT 0,
+    download_order   TEXT NOT NULL DEFAULT ''
 );
 ";
 
@@ -109,6 +110,9 @@ impl StateDb {
         // the caps and nothing else.
         let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN up_limit INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN down_limit INTEGER NOT NULL DEFAULT 0", []);
+        // Download order (file priorities, sequential, first/last piece) as
+        // JSON, '' for the default. Same migration, same rollback story.
+        let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN download_order TEXT NOT NULL DEFAULT ''", []);
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -191,7 +195,7 @@ impl StateDb {
         let mut stmt = match conn.prepare(
             "SELECT info_hash, save_path, seed_mode, paused,
                     total_uploaded, total_downloaded, added_time, completed_time,
-                    bitfield, trackers, seed_secs, up_limit, down_limit
+                    bitfield, trackers, seed_secs, up_limit, down_limit, download_order
              FROM torrent_state",
         ) {
             Ok(s) => s,
@@ -216,6 +220,7 @@ impl StateDb {
                 seed_secs: row.get(10).unwrap_or(0),
                 up_limit: row.get::<_, i64>(11).unwrap_or(0).max(0) as u64,
                 down_limit: row.get::<_, i64>(12).unwrap_or(0).max(0) as u64,
+                download_order: decode_order(&row.get::<_, String>(13).unwrap_or_default()),
             })
         });
         let rows = match rows {
@@ -268,8 +273,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
         "INSERT INTO torrent_state
             (info_hash, save_path, seed_mode, paused,
              total_uploaded, total_downloaded, added_time, completed_time,
-             bitfield, trackers, seed_secs, up_limit, down_limit)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             bitfield, trackers, seed_secs, up_limit, down_limit, download_order)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(info_hash) DO UPDATE SET
             save_path=excluded.save_path,
             seed_mode=excluded.seed_mode,
@@ -282,7 +287,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             trackers=excluded.trackers,
             seed_secs=excluded.seed_secs,
             up_limit=excluded.up_limit,
-            down_limit=excluded.down_limit",
+            down_limit=excluded.down_limit,
+            download_order=excluded.download_order",
         params![
             rd.info_hash,
             rd.save_path,
@@ -297,9 +303,27 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             rd.seed_secs,
             rd.up_limit.min(i64::MAX as u64) as i64,
             rd.down_limit.min(i64::MAX as u64) as i64,
+            encode_order(&rd.download_order),
         ],
     )?;
     Ok(())
+}
+
+/// '' for the default, so the column costs nothing on the rows that have none.
+fn encode_order(o: &Option<super::piece_picker::DownloadOrder>) -> String {
+    match o {
+        Some(o) if !o.is_default() => serde_json::to_string(o).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// A value that does not parse reads as the default: a lost order costs a
+/// download its preferred sequence, never a piece.
+fn decode_order(s: &str) -> Option<super::piece_picker::DownloadOrder> {
+    if s.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<super::piece_picker::DownloadOrder>(s).ok().filter(|o| !o.is_default())
 }
 
 fn encode_trackers(t: &[Vec<String>]) -> String {
@@ -335,6 +359,11 @@ mod tests {
             seed_secs: 0,
             up_limit: 51_200,
             down_limit: 0,
+            download_order: Some(crate::torrent::piece_picker::DownloadOrder {
+                sequential: true,
+                first_last: false,
+                file_prio: vec![1, 7],
+            }),
         }
     }
 
@@ -364,6 +393,25 @@ mod tests {
         assert_eq!(r.bitfield, "ff00");
         assert_eq!(r.trackers, vec![vec!["http://t/announce".to_string()]]);
         assert_eq!((r.up_limit, r.down_limit), (51_200, 0), "the rate caps come back");
+        assert_eq!(r.download_order, rec("aa", 42).download_order, "the download order comes back");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The default order is stored as nothing and read back as `None`.
+    #[test]
+    fn default_download_order_is_stored_empty() {
+        let path = tmpdb("order-default");
+        let db = StateDb::open(&path).unwrap();
+        let mut r = rec("cc", 1);
+        r.download_order = Some(Default::default());
+        db.put(&r).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let raw: String = conn
+            .query_row("SELECT download_order FROM torrent_state WHERE info_hash='cc'", [], |r| r.get(0))
+            .unwrap();
+        drop(conn);
+        assert_eq!(raw, "");
+        assert_eq!(db.load_all()[0].download_order, None);
         std::fs::remove_file(&path).ok();
     }
 

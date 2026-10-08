@@ -8554,6 +8554,9 @@ pub(crate) fn engine_qbit_rows(
         let (up_cap, down_cap) = torrent.rate_limits();
         row["up_limit"] = qbit_limit_field(up_cap).into();
         row["dl_limit"] = qbit_limit_field(down_cap).into();
+        let (seq_dl, f_l_piece_prio) = torrent.download_order_flags();
+        row["seq_dl"] = seq_dl.into();
+        row["f_l_piece_prio"] = f_l_piece_prio.into();
         crate::sharelimits::fill_qbit_row(&mut row, share_own.get(hash.as_str()).unwrap_or(&share_follow), &share_engine);
         rows.push(row);
         }
@@ -8596,6 +8599,9 @@ pub(crate) fn engine_qbit_rows(
         let (up_cap, down_cap) = torrent.rate_limits();
         row["up_limit"] = qbit_limit_field(up_cap).into();
         row["dl_limit"] = qbit_limit_field(down_cap).into();
+        let (seq_dl, f_l_piece_prio) = torrent.download_order_flags();
+        row["seq_dl"] = seq_dl.into();
+        row["f_l_piece_prio"] = f_l_piece_prio.into();
         crate::sharelimits::fill_qbit_row(&mut row, share_own.get(hash.as_str()).unwrap_or(&share_follow), &share_engine);
         rows.push(row);
     }
@@ -9008,22 +9014,34 @@ async fn get_torrent_files(
     // What each file already has on disk, so the Content tab shows what was
     // downloaded and what is still missing. It listed paths and sizes only.
     let done = file_done_bytes(&torrent);
+    let order = torrent.download_order();
     let files: Vec<serde_json::Value> = torrent
         .meta
         .files
         .iter()
         .zip(done.iter())
-        .map(|(f, d)| {
+        .enumerate()
+        .map(|(i, (f, d))| {
             serde_json::json!({
+                // The id `download-order` and `filePrio` take: the list is
+                // shown sorted, so its position is not it.
+                "index": i,
                 "path": f.path.to_string_lossy(),
                 "size": f.length,
                 // null: no piece map to tell (a stopped, never-checked torrent).
                 "done": d,
                 "progress": d.map(|d| if f.length == 0 { 1.0 } else { d as f64 / f.length as f64 }),
+                "priority": order.file_priority(i),
             })
         })
         .collect();
-    Json(serde_json::json!({"files": files})).into_response()
+    Json(serde_json::json!({
+        "files": files,
+        "sequential": order.sequential,
+        "first_last_piece": order.first_last,
+        "complete": torrent.bytes_left() == 0,
+    }))
+    .into_response()
 }
 
 /// Bytes of each file already held, in `meta.files` order.
@@ -9165,6 +9183,7 @@ async fn qbit_torrent_files(
     // The same per-file bytes the native Content tab shows, so the two never
     // disagree. qBit has no "unknown": a file with no piece map reads 0.
     let done = file_done_bytes(&torrent);
+    let order = torrent.download_order();
     let files: Vec<serde_json::Value> = torrent
         .meta
         .files
@@ -9183,7 +9202,8 @@ async fn qbit_torrent_files(
                 "is_seed": complete,
                 "name": qbit_file_name(&torrent.meta, &f.path),
                 "piece_range": [first, last],
-                "priority": 1,
+                // 1, 6 or 7: never 0, every file is downloaded.
+                "priority": order.file_priority(index),
                 "progress": progress,
                 "size": f.length,
             })
@@ -10283,6 +10303,150 @@ async fn post_torrent_limits(
             }
         }
         list.push(torrent_limits_json(engine, t));
+    }
+    Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
+}
+
+// --- Download order: file priorities, sequential, first/last piece ----------
+//
+// The order pieces are fetched in, never the set: every file of a torrent is
+// downloaded whatever is set here. Hydranos is a seeding client, and a
+// torrent left incomplete by choice is one it could never seed.
+
+const FILE_PRIO_ZERO_REFUSAL: &str = "Hydranos always downloads the whole torrent: a file priority changes the order \
+     files are fetched in, never whether one is fetched (priority 0 is not supported; use 1, 6 or 7)";
+
+/// Apply `edit` to the download order of each copy, through its engine, which
+/// persists it at once. A failure means the copy left between the lookup and
+/// the edit: nothing to order any more.
+fn edit_download_order(
+    state: &AppState,
+    copies: &[(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)],
+    edit: impl Fn(&mut typhon_engine::torrent::piece_picker::DownloadOrder),
+) {
+    for (engine, t) in copies {
+        if let Some(e) = state.engines.get(engine) {
+            let _ = e.manager.update_download_order(&t.info_hash, |o| edit(o));
+        }
+    }
+}
+
+fn download_order_json(engine: &str, t: &typhon_engine::torrent::meta::TorrentState) -> serde_json::Value {
+    let o = t.download_order();
+    let prio: Vec<u8> = (0..t.meta.files.len()).map(|i| o.file_priority(i)).collect();
+    serde_json::json!({
+        "engine": engine,
+        "sequential": o.sequential,
+        "first_last_piece": o.first_last,
+        "file_priorities": prio,
+        // A complete torrent keeps its order and shows it, with nothing left
+        // to fetch for it to act on.
+        "complete": t.bytes_left() == 0,
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DownloadOrderBody {
+    #[serde(default)]
+    sequential: Option<bool>,
+    #[serde(default)]
+    first_last_piece: Option<bool>,
+    /// Indices in the torrent's file list, with `priority` for all of them.
+    #[serde(default)]
+    file_ids: Option<Vec<usize>>,
+    #[serde(default)]
+    priority: Option<i64>,
+}
+
+/// One torrent's download order, per local copy (`?engine=` for one).
+async fn get_torrent_download_order(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let hash = {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+    };
+    let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
+    if copies.is_empty() {
+        return not_found();
+    }
+    let list: Vec<_> = copies.iter().map(|(e, t)| download_order_json(e, t)).collect();
+    Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
+}
+
+/// Set one torrent's download order: `sequential`, `first_last_piece`, and
+/// `file_ids` + `priority` (1 normal, 6 high, 7 maximal), each optional.
+/// Priority 0 is refused, 409. Every local copy unless `?engine=` names one;
+/// live and persisted at once. Answers what the engine now holds.
+async fn post_torrent_download_order(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let req: DownloadOrderBody = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return bad_request(&format!("invalid body: {e}")),
+    };
+    if req.file_ids.is_some() != req.priority.is_some() {
+        return bad_request("file_ids and priority go together");
+    }
+    if req.sequential.is_none() && req.first_last_piece.is_none() && req.file_ids.is_none() {
+        return bad_request("need sequential, first_last_piece and/or file_ids + priority");
+    }
+    let prio = match req.priority {
+        None => None,
+        Some(0) => {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({"error": FILE_PRIO_ZERO_REFUSAL}))).into_response()
+        }
+        Some(p) if (0..=255).contains(&p) && typhon_engine::torrent::piece_picker::is_valid_file_priority(p as u8) => {
+            Some(p as u8)
+        }
+        Some(_) => return bad_request("priority must be 1 (normal), 6 (high) or 7 (maximal)"),
+    };
+    let hash = {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+    };
+    let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
+    if copies.is_empty() {
+        return not_found();
+    }
+    let ids = req.file_ids.unwrap_or_default();
+    let n = copies[0].1.meta.files.len();
+    if let Some(bad) = ids.iter().find(|&&i| i >= n) {
+        return bad_request(&format!("file {bad} does not exist (this torrent has {n})"));
+    }
+    let mut list = Vec::new();
+    for (engine, t) in &copies {
+        if let Some(e) = state.engines.get(engine) {
+            let edit = |o: &mut typhon_engine::torrent::piece_picker::DownloadOrder| {
+                if let Some(s) = req.sequential {
+                    o.sequential = s;
+                }
+                if let Some(f) = req.first_last_piece {
+                    o.first_last = f;
+                }
+                if let Some(p) = prio {
+                    for &id in &ids {
+                        o.set_file_priority(id, n, p);
+                    }
+                }
+            };
+            if let Err(msg) = e.manager.update_download_order(&t.info_hash, edit) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg}))).into_response();
+            }
+        }
+        list.push(download_order_json(engine, t));
     }
     Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
 }
@@ -11392,6 +11556,9 @@ fn detail_payload(
         "download_limit": torrent.rate_limits().1,
         "engine_upload_limit": torrent.engine_rates().engine.up.rate(),
         "engine_download_limit": torrent.engine_rates().engine.down.rate(),
+        // Download order (file priorities are on the files route).
+        "sequential": torrent.download_order_flags().0,
+        "first_last_piece": torrent.download_order_flags().1,
         // Share limits: its own, the ones in force, and the engine's action.
         "share_limits": crate::sharelimits::native_json(
             engine_id,
@@ -11666,6 +11833,8 @@ async fn qbit_torrent_add(
     let mut layout: Option<String> = None;
     let mut root_folder: Option<bool> = None;
     let mut auto_tmm = false;
+    let mut sequential = false;
+    let mut first_last = false;
     let mut ignored: Vec<String> = Vec::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -11710,9 +11879,12 @@ async fn qbit_torrent_add(
                             paused = true;
                         }
                     }
+                    // Download order at add: which pieces come first, never
+                    // which come at all.
+                    "sequentialDownload" => sequential = value == "true" || value == "1",
+                    "firstLastPiecePrio" => first_last = value == "true" || value == "1",
                     // Accepted and without effect, said in the log once per
-                    // add: `rename` (the name is the .torrent's),
-                    // `sequentialDownload`, `firstLastPiecePrio`, `cookie`.
+                    // add: `rename` (the name is the .torrent's), `cookie`.
                     other => {
                         if !value.is_empty() {
                             ignored.push(other.to_string());
@@ -11830,7 +12002,15 @@ async fn qbit_torrent_add(
             Ok((hash, _)) => {
                 share_at_add(&state, hash.clone());
                 if up_limit.is_some() || dl_limit.is_some() {
-                    shim_cap_torrents(&state, &[hash], up_limit, dl_limit);
+                    shim_cap_torrents(&state, std::slice::from_ref(&hash), up_limit, dl_limit);
+                }
+                // Same terms as the caps: on the torrent once it exists, so
+                // a magnet's order is not kept.
+                if sequential || first_last {
+                    edit_download_order(&state, &torrent_copies(&state, &hash, ""), |o| {
+                        o.sequential |= sequential;
+                        o.first_last |= first_last;
+                    });
                 }
             }
             // "already added" is not a failure to a client that retries a
@@ -14292,12 +14472,13 @@ async fn qbit_set_force_start(State(state): State<AppState>, RawQuery(query): Ra
     qbit_ok()
 }
 
-/// `torrents/filePrio`: Hydranos downloads every file of a torrent.
+/// `torrents/filePrio`: the ORDER files are fetched in, never the set.
 ///
-/// Checked first: the engine has no per-file priority and no way to skip a
-/// file. Priority 0 ("do not download") is therefore refused (409) rather
-/// than answered 200 over a file that will be downloaded anyway; 1, 6 and 7
-/// ("normal", "high", "maximal") are what already happens, and answer 200.
+/// 1, 6 and 7 ("normal", "high", "maximal") set the file's priority on every
+/// local copy: the pieces of a higher file are picked first. Priority 0 ("do
+/// not download") is refused (409) rather than answered 200 over a file that
+/// will be downloaded anyway: Hydranos is a seeding client, and a torrent
+/// left incomplete by choice is one it could never seed.
 async fn qbit_file_prio(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
@@ -14318,9 +14499,48 @@ async fn qbit_file_prio(State(state): State<AppState>, RawQuery(query): RawQuery
         return qbit_refuse(StatusCode::CONFLICT, "file id is not valid");
     }
     if prio == 0 {
-        return qbit_refuse(StatusCode::CONFLICT, "Hydranos downloads every file of a torrent: skipping a file is not supported");
+        return qbit_refuse(StatusCode::CONFLICT, FILE_PRIO_ZERO_REFUSAL);
+    }
+    let ids: Vec<usize> = ids.split('|').filter_map(|i| i.trim().parse().ok()).collect();
+    let copies = torrent_copies(&state, &typhon_engine::torrent::hex_encode(&torrent.info_hash), "");
+    edit_download_order(&state, &copies, |o| {
+        for &id in &ids {
+            o.set_file_priority(id, n, prio as u8);
+        }
+    });
+    qbit_ok()
+}
+
+/// `torrents/toggleSequentialDownload` and `toggleFirstLastPiecePrio`:
+/// `hashes` (or `all`), each torrent flipped from what it is now, as
+/// qBittorrent does. Every local copy of a hash takes the new value of the
+/// first, so two copies never end up flipped in opposite directions.
+async fn qbit_toggle_order_flag(state: &AppState, query: &str, headers: &HeaderMap, body: &str, sequential: bool) -> Response {
+    let query = query.to_string();
+    guard!(*state, *headers, query);
+    let form = shim_form(&query, body);
+    for hash in shim_resolved_hashes(state, &form) {
+        let copies = torrent_copies(state, &hash, "");
+        let Some((_, first)) = copies.first() else { continue };
+        let (seq, fl) = first.download_order_flags();
+        let on = !if sequential { seq } else { fl };
+        edit_download_order(state, &copies, |o| {
+            if sequential {
+                o.sequential = on;
+            } else {
+                o.first_last = on;
+            }
+        });
     }
     qbit_ok()
+}
+
+async fn qbit_toggle_sequential(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    qbit_toggle_order_flag(&state, &query.unwrap_or_default(), &headers, &body, true).await
+}
+
+async fn qbit_toggle_first_last(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    qbit_toggle_order_flag(&state, &query.unwrap_or_default(), &headers, &body, false).await
 }
 
 /// `torrents/rename`: refused, 409.
@@ -15438,6 +15658,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/torrents/setLocation", axum::routing::post(qbit_set_location))
         .route("/api/v2/torrents/setForceStart", axum::routing::post(qbit_set_force_start))
         .route("/api/v2/torrents/filePrio", axum::routing::post(qbit_file_prio))
+        .route("/api/v2/torrents/toggleSequentialDownload", axum::routing::post(qbit_toggle_sequential))
+        .route("/api/v2/torrents/toggleFirstLastPiecePrio", axum::routing::post(qbit_toggle_first_last))
+        .route("/api/torrents/:info_hash/download-order", get(get_torrent_download_order).post(post_torrent_download_order))
         .route("/api/v2/torrents/rename", axum::routing::post(qbit_rename))
         .route("/api/v2/torrents/topPrio", axum::routing::post(qbit_queue_prio))
         .route("/api/v2/torrents/bottomPrio", axum::routing::post(qbit_queue_prio))
@@ -15528,6 +15751,7 @@ pub fn router(state: AppState) -> Router {
         // six handlers. Merged before with_state so they share it.
         .merge(crate::rulesapi::routes())
         .merge(crate::magnets::routes())
+        .merge(crate::rss::routes())
         .merge(crate::ipfilter::routes())
         .merge(crate::watch::routes())
         // Every action on a selection, by rows or by filter.

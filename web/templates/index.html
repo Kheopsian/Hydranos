@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.21">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.22">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -127,6 +127,7 @@
         <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="nodes">Nodes</button>
         <button class="tab" data-tab="workflows">Workflows</button>
+        <button class="tab" data-tab="rss">RSS</button>
         <button class="tab" data-tab="trackers">Trackers</button>
         <button class="tab" data-tab="config">Config</button>
         <button class="tab" data-tab="benchmark">Benchmark</button>
@@ -870,6 +871,150 @@
             </div>
         </section>
 
+        <section id="tab-rss" class="tab-content">
+            <div class="section-header">
+                <h2>RSS feeds</h2>
+                <div>
+                    <button class="btn-small" onclick="rssRefreshAll()">Refresh all</button>
+                    <button class="btn-small" onclick="rssShowFeedForm()">+ Feed</button>
+                </div>
+            </div>
+            <p class="sr-desc" style="margin:0 0 16px">Each feed is fetched on its own interval, by the way out of the engine its torrents go to (its tunnel, interface or proxy): a tracker's feed carries your passkey, and the tracker sees the address it is fetched from. An engine the kill switch keeps off the network fetches nothing, and the feed says so.</p>
+            <p class="result-msg error" id="rss-disabled" style="display:none">RSS is switched off by [rss] enabled = false: feeds are kept, nothing is fetched or added.</p>
+
+            <div id="rss-feed-form" class="card" style="display:none; margin-bottom:16px">
+                <div class="card-body">
+                    <div class="cat-form-grid">
+                        <div class="form-group">
+                            <label>URL</label>
+                            <input type="text" id="rss-feed-url" placeholder="https://tracker.example/rss?passkey=..." autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Name <span class="sr-desc">Folder\Name groups feeds; empty = the host</span></label>
+                            <input type="text" id="rss-feed-name" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Refresh every <span class="sr-desc">minutes, minimum 5</span></label>
+                            <input type="number" id="rss-feed-every" value="30" min="5" autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="cat-form-actions" style="margin-top:16px">
+                        <button class="btn-small" onclick="rssSaveFeed()">Save</button>
+                        <button class="btn-cancel" onclick="rssHideFeedForm()">Cancel</button>
+                    </div>
+                    <div id="rss-feed-result" class="result-msg"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Feed</th><th>State</th><th>Last refresh</th>
+                                <th>Articles</th><th>Every</th><th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="rss-feeds"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="rss-articles-box" style="display:none; margin-top:24px">
+                <div class="section-header">
+                    <h2 id="rss-articles-title">Articles</h2>
+                    <div>
+                        <label class="sr-desc">Download to category
+                            <select id="rss-dl-category"></select>
+                        </label>
+                        <button class="btn-small" onclick="rssMarkAllRead()">Mark all read</button>
+                        <button class="btn-cancel" onclick="rssCloseArticles()">Close</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr><th>Date</th><th>Title</th><th>Size</th><th>State</th><th></th></tr>
+                            </thead>
+                            <tbody id="rss-articles"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div id="rss-articles-result" class="result-msg"></div>
+            </div>
+
+            <div class="section-header" style="margin-top:24px">
+                <h2>Automatic download rules</h2>
+                <button class="btn-small" onclick="rssNewRule()">+ New rule</button>
+            </div>
+            <p class="sr-desc" style="margin:0 0 16px">qBittorrent's rules, read the same way: in Must contain, a space means AND and | means OR, * and ? are wildcards, case is ignored. The first rule that matches an unread article adds it, through the same path as any add: the category picks the engine and the folder. An article taken once is never taken again. What the rules added or refused, and why, is in the Workflows tab's activity, under "RSS: rule name".</p>
+
+            <div id="rss-rule-form" class="card" style="display:none; margin-bottom:16px">
+                <div class="card-body">
+                    <div class="cat-form-grid">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" id="rss-rule-name" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Category <span class="sr-desc">picks the engine and the folder</span></label>
+                            <select id="rss-rule-category"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Must contain</label>
+                            <input type="text" id="rss-rule-must" placeholder="show 1080p|show 2160p" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Must not contain</label>
+                            <input type="text" id="rss-rule-mustnot" placeholder="cam|hdts" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Episode filter <span class="sr-desc">1x1-10;12;20-; or S01E01-S01E10</span></label>
+                            <input type="text" id="rss-rule-episodes" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Ignore later matches for <span class="sr-desc">days, 0 = never</span></label>
+                            <input type="number" id="rss-rule-ignore" value="0" min="0" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Save path <span class="sr-desc">optional, else the category's</span></label>
+                            <input type="text" id="rss-rule-savepath" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label><input type="checkbox" id="rss-rule-enabled" checked> Enabled</label>
+                            <label><input type="checkbox" id="rss-rule-regex"> Use regular expressions</label>
+                            <label><input type="checkbox" id="rss-rule-smart"> Smart episode filter</label>
+                            <label><input type="checkbox" id="rss-rule-paused"> Add paused</label>
+                        </div>
+                    </div>
+                    <h3 style="margin:16px 0 6px">Feeds</h3>
+                    <div id="rss-rule-feeds"></div>
+                    <div class="cat-form-actions" style="margin-top:16px">
+                        <button class="btn-small" onclick="rssPreviewRule()">Preview</button>
+                        <button class="btn-small" onclick="rssSaveRule()">Save</button>
+                        <button class="btn-cancel" onclick="rssHideRuleForm()">Cancel</button>
+                    </div>
+                    <div id="rss-rule-result" class="result-msg"></div>
+                    <div id="rss-rule-preview"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Enabled</th><th>Name</th><th>Must contain</th>
+                                <th>Category</th><th>Feeds</th><th>Last match</th><th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="rss-rules"><tr><td colspan="7">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
         <section id="tab-trackers" class="tab-content">
             <div class="section-header">
                 <h2>Trackers</h2>
@@ -1495,6 +1640,8 @@
             <div class="ctx-item" id="ctx-set-location" onclick="_setLocationSelected()">Set location&hellip;</div>
             <div class="ctx-item" id="ctx-limit-rate" onclick="_limitRateSelected()">Limit rate&hellip;</div>
             <div class="ctx-item" id="ctx-share-limits" onclick="_shareLimitsSelected()">Share limits&hellip;</div>
+            <div class="ctx-item" id="ctx-seq-dl" onclick="_toggleOrderSelected('sequential')"><span class="ctx-check" id="ctx-seq-dl-mark"></span>Sequential download</div>
+            <div class="ctx-item" id="ctx-first-last" onclick="_toggleOrderSelected('first_last_piece')"><span class="ctx-check" id="ctx-first-last-mark"></span>First/last piece first</div>
             <div class="ctx-item" id="ctx-edit-tags" onclick="_showTagPicker(event)">Edit tags &rsaquo;</div>
         </div>
         <div class="ctx-separator" id="ctx-sep-node" style="display:none"></div>
@@ -1535,6 +1682,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.80"></script>
+    <script src="/static/app.js?v=1.6.82"></script>
 </body>
 </html>
