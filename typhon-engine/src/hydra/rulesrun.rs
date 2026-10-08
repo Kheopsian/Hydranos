@@ -304,102 +304,186 @@ pub fn torrent_files(
     }
 }
 
-/// One torrent copy as the link index sees it: where it lives and the files
-/// it resolves to there. No syscall has happened yet.
+/// Where a catalogue entry's files come from.
+#[derive(Debug, Clone)]
+pub enum CatalogueFiles {
+    /// The engine's own metadata, resolved when asked (`CatalogueEntry::paths`).
+    ///
+    /// ⚠️ Weak: the scanner holds its catalogue for the hours a sweep lasts,
+    /// and a torrent removed in the meantime is let go rather than kept alive
+    /// by it. Its entry then resolves to nothing and is skipped.
+    Torrent(std::sync::Weak<typhon_engine::torrent::meta::TorrentState>),
+    /// Paths given as they are, for a catalogue no engine stands behind.
+    #[cfg(test)]
+    Fixed(Box<[std::path::PathBuf]>),
+}
+
+/// One torrent copy as the link index sees it: where it lives and how many
+/// files it has there. No syscall has happened yet.
+///
+/// ⚠️ The paths are NOT held. They used to be, one `PathBuf` per file: 1.7 GB
+/// at a million torrents, kept for the whole of an hours-long sweep and built
+/// again by every summary refresh and every workflow pass. They are a pure
+/// function of the torrent's metadata and `save_path`, so they are resolved
+/// when a batch is about to be measured and dropped with it.
 #[derive(Debug, Clone)]
 pub struct CatalogueEntry {
     pub info_hash: String,
-    pub session: String,
-    pub save_path: String,
-    pub paths: Vec<std::path::PathBuf>,
+    /// The engine's id, one allocation shared by all its entries.
+    pub session: std::sync::Arc<str>,
+    /// The save path when the catalogue was taken, interned: a million
+    /// torrents live under a few hundred folders.
+    pub save_path: std::sync::Arc<str>,
+    /// How many files `paths` resolves to.
+    pub files: usize,
+    pub source: CatalogueFiles,
 }
 
-/// Every torrent copy this node holds, with its files resolved.
-///
-/// ⚠️ Pure bookkeeping, no `stat`: this half needs the store (for the save
-/// paths), the other half is disk wait whose cost cannot be bounded. Build
-/// this under the lock, drop it, then touch the filesystem.
-/// The store's half of the catalogue, per engine: the only part that needs a
-/// store connection. Take it, let the connection go, then `catalogue_from`.
-pub fn stored_facts(
+impl CatalogueEntry {
+    /// An entry with its paths spelled out, no engine behind it.
+    #[cfg(test)]
+    pub fn fixed(info_hash: &str, session: &str, save_path: &str, paths: Vec<std::path::PathBuf>) -> Self {
+        CatalogueEntry {
+            info_hash: info_hash.to_string(),
+            session: session.into(),
+            save_path: save_path.into(),
+            files: paths.len(),
+            source: CatalogueFiles::Fixed(paths.into_boxed_slice()),
+        }
+    }
+
+    /// The copy's files, by `torrent_files` -- the very resolution the guard
+    /// re-measures with. `None` once the torrent has left its engine.
+    pub fn paths(&self) -> Option<Vec<std::path::PathBuf>> {
+        match &self.source {
+            CatalogueFiles::Torrent(t) => t.upgrade().map(|t| torrent_files(&t, &self.save_path)),
+            #[cfg(test)]
+            CatalogueFiles::Fixed(p) => Some(p.to_vec()),
+        }
+    }
+}
+
+/// The store's half of the catalogue, per engine: which copies it knows.
+/// The only part that needs a store connection. Take it, let the connection
+/// go, then `catalogue_from`.
+pub fn stored_copies(
     host: &EngineHost,
     store: &Store,
-) -> Vec<(String, std::collections::HashMap<String, crate::store::WorkflowFacts>)> {
+) -> Vec<(String, std::collections::HashSet<[u8; 20]>)> {
     host.engines()
         .iter()
-        .map(|e| (e.id.clone(), store.workflow_facts(&e.id).unwrap_or_default()))
+        .map(|e| (e.id.clone(), store.session_hashes(&e.id).unwrap_or_default()))
         .collect()
 }
 
-/// Resolve every copy's files from the engines' metadata. No store, no
-/// syscall: at a million torrents this is seconds of path building, which no
-/// connection has to wait for.
+/// Every copy this node holds that the store knows. No store, no syscall, no
+/// path built: a few seconds of walking the engines at a million torrents,
+/// and some ninety bytes an entry.
 pub fn catalogue_from(
     host: &EngineHost,
-    facts: &[(String, std::collections::HashMap<String, crate::store::WorkflowFacts>)],
+    known: &[(String, std::collections::HashSet<[u8; 20]>)],
 ) -> Vec<CatalogueEntry> {
     let mut out = Vec::new();
+    let mut folders: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
     for engine in host.engines().iter() {
-        let Some((_, stored)) = facts.iter().find(|(id, _)| *id == engine.id) else {
+        let Some((_, stored)) = known.iter().find(|(id, _)| *id == engine.id) else {
             continue;
         };
+        let session: std::sync::Arc<str> = engine.id.as_str().into();
         for t in engine.manager.all() {
-            let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
             // A copy the store does not know is not part of any pass.
-            if !stored.contains_key(&hash) {
+            if !stored.contains(&t.info_hash) {
                 continue;
             }
             let save_path = engine_save_path(&t);
             if save_path.is_empty() {
                 continue;
             }
-            let paths = torrent_files(&t, &save_path);
-            out.push(CatalogueEntry { info_hash: hash, session: engine.id.clone(), save_path, paths });
+            let save_path = folders.entry(save_path).or_insert_with_key(|k| k.as_str().into()).clone();
+            out.push(CatalogueEntry {
+                info_hash: t.info_hash.iter().map(|b| format!("{b:02x}")).collect(),
+                session: session.clone(),
+                save_path,
+                files: if t.meta.multi_file { t.meta.files.len() } else { 1 },
+                source: CatalogueFiles::Torrent(std::sync::Arc::downgrade(&t)),
+            });
         }
     }
     out
 }
 
-/// The catalogue as the store last measured it, ready for `linkindex::compute`.
+/// The store's measurements of a catalogue, matched to it as they are read.
 ///
 /// ⭐ A copy with no row, a row taken under another save path, or a row whose
 /// file count no longer matches, is left OUT -- not answered with zeros. Its
 /// facts then read `NEVER`, so no rule can match a torrent nobody has looked
 /// at yet. Leaving it out also drops its names from `owned`, which can only
 /// raise another torrent's `external_links`: the direction that keeps files.
-///
-/// Returns, beside the entries, the index in `cat` each one came from: a pass
-/// that re-measures a candidate writes it back to the store under that copy.
-pub fn entries_from_store(
-    cat: &[CatalogueEntry],
-    rows: &LinkRows,
-) -> (Vec<linkindex::Entry>, Vec<usize>) {
-    let mut out = Vec::with_capacity(rows.len().min(cat.len()));
-    let mut origin = Vec::with_capacity(out.capacity());
-    for (i, c) in cat.iter().enumerate() {
-        let Some((save_path, _, blob)) = rows.get(&(c.info_hash.clone(), c.session.clone())) else {
-            continue;
-        };
-        if *save_path != c.save_path {
-            continue;
-        }
-        let Some(stats) = linkindex::unpack(blob) else { continue };
-        if stats.len() != c.paths.len() {
-            continue;
-        }
-        out.push((c.info_hash.clone(), c.paths.iter().cloned().zip(stats).collect()));
-        origin.push(i);
-    }
-    (out, origin)
+pub struct RowMatcher<'a> {
+    cat: &'a [CatalogueEntry],
+    index: std::collections::HashMap<(&'a str, &'a str), usize>,
+    got: Vec<(usize, i64, Vec<Option<crate::platform::FileId>>)>,
 }
 
-/// The store's link rows, as `Store::link_index_stats` reads them:
-/// (info_hash, session) -> (save_path, measured_at, packed stats).
-pub type LinkRows = std::collections::HashMap<(String, String), (String, i64, Vec<u8>)>;
+impl<'a> RowMatcher<'a> {
+    pub fn new(cat: &'a [CatalogueEntry]) -> Self {
+        let index = cat.iter().enumerate().map(|(i, c)| ((c.info_hash.as_str(), &*c.session), i)).collect();
+        RowMatcher { cat, index, got: Vec::new() }
+    }
+
+    /// One stored row, kept if it measures a copy of the catalogue as it is.
+    pub fn offer(&mut self, info_hash: &str, session: &str, save_path: &str, measured_at: i64, blob: &[u8]) {
+        let Some(&i) = self.index.get(&(info_hash, session)) else { return };
+        let c = &self.cat[i];
+        if save_path != &*c.save_path {
+            return;
+        }
+        let Some(stats) = linkindex::unpack(blob) else { return };
+        if stats.len() != c.files {
+            return;
+        }
+        self.got.push((i, measured_at, stats));
+    }
+
+    /// In catalogue order, whatever order the rows came in: `link_summary`
+    /// lets the copy listed last win, and that has to be the same copy every
+    /// time.
+    pub fn finish(mut self) -> Measured {
+        self.got.sort_unstable_by_key(|(i, _, _)| *i);
+        let mut m = Measured {
+            origin: Vec::with_capacity(self.got.len()),
+            measured_at: Vec::with_capacity(self.got.len()),
+            stats: Vec::with_capacity(self.got.len()),
+        };
+        for (i, at, st) in self.got {
+            m.origin.push(i);
+            m.measured_at.push(at);
+            m.stats.push(st);
+        }
+        m
+    }
+}
+
+/// What the store holds on a catalogue, in step: index in the catalogue,
+/// when, and the stats in file order.
+pub struct Measured {
+    pub origin: Vec<usize>,
+    pub measured_at: Vec<i64>,
+    pub stats: Vec<Vec<Option<crate::platform::FileId>>>,
+}
+
+/// Read the store's measurements of `cat`, row by row. The connection is held
+/// for the read only; the counting happens after, in `links_from_measured`.
+pub fn read_measured(cat: &[CatalogueEntry], store: &Store) -> anyhow::Result<Measured> {
+    let mut m = RowMatcher::new(cat);
+    store.for_each_link_row(|h, s, p, at, blob| m.offer(h, s, p, at, blob))?;
+    Ok(m.finish())
+}
 
 /// The catalogue's link facts as the store last measured them.
 pub struct StoredLinks {
-    pub entries: Vec<linkindex::Entry>,
+    /// Each file named by its `linkindex::path_key`, not its path: see there.
+    pub entries: Vec<linkindex::Entry<u64>>,
     /// Index in the catalogue each entry came from.
     pub origin: Vec<usize>,
     /// When each entry was measured, in step with `entries`.
@@ -411,16 +495,23 @@ pub struct StoredLinks {
 /// (`rulesapi::decide`) and the list's summary (`linkscan::refresh_summary`)
 /// both call this one, so the "Hardlinks" column and a condition on
 /// `external_links` cannot be two definitions of one number.
-pub fn links_from_store(cat: &[CatalogueEntry], rows: &LinkRows) -> StoredLinks {
-    let (entries, origin) = entries_from_store(cat, rows);
-    let measured_at = origin
-        .iter()
-        .map(|&i| {
-            rows.get(&(cat[i].info_hash.clone(), cat[i].session.clone()))
-                .map(|r| r.1)
-                .unwrap_or(0)
-        })
-        .collect();
+///
+/// A copy whose torrent left its engine since the catalogue was taken drops
+/// out here, like a copy with no row: no names counted, nothing claimed.
+pub fn links_from_measured(cat: &[CatalogueEntry], m: Measured) -> StoredLinks {
+    let mut entries = Vec::with_capacity(m.origin.len());
+    let mut origin = Vec::with_capacity(m.origin.len());
+    let mut measured_at = Vec::with_capacity(m.origin.len());
+    for ((i, at), stats) in m.origin.into_iter().zip(m.measured_at).zip(m.stats) {
+        let Some(paths) = cat[i].paths() else { continue };
+        if paths.len() != stats.len() {
+            continue;
+        }
+        let files = paths.iter().map(|p| linkindex::path_key(p)).zip(stats).collect();
+        entries.push((cat[i].info_hash.clone(), files));
+        origin.push(i);
+        measured_at.push(at);
+    }
     let links = linkindex::compute(&entries);
     StoredLinks { entries, origin, measured_at, links }
 }
@@ -451,8 +542,8 @@ pub fn link_summary(
 pub fn link_row(c: &CatalogueEntry, stats: &[Option<crate::platform::FileId>], now: i64) -> crate::store::LinkRow {
     crate::store::LinkRow {
         info_hash: c.info_hash.clone(),
-        session: c.session.clone(),
-        save_path: c.save_path.clone(),
+        session: c.session.to_string(),
+        save_path: c.save_path.to_string(),
         measured_at: now,
         files: stats.len() as i64,
         missing: linkindex::missing_files(stats) as i64,
@@ -966,12 +1057,20 @@ mod tests {
     }
 
     fn cat(hash: &str, session: &str, save_path: &str, paths: &[&str]) -> CatalogueEntry {
-        CatalogueEntry {
-            info_hash: hash.into(),
-            session: session.into(),
-            save_path: save_path.into(),
-            paths: paths.iter().map(std::path::PathBuf::from).collect(),
+        CatalogueEntry::fixed(hash, session, save_path, paths.iter().map(std::path::PathBuf::from).collect())
+    }
+
+    /// Stored rows as `Store::for_each_link_row` hands them over, matched and
+    /// counted the way the scanner and a pass do it.
+    fn from_rows(
+        catalogue: &[CatalogueEntry],
+        rows: &[(&str, &str, &str, i64, Vec<u8>)],
+    ) -> StoredLinks {
+        let mut m = RowMatcher::new(catalogue);
+        for (h, s, p, at, blob) in rows {
+            m.offer(h, s, p, *at, blob);
         }
+        links_from_measured(catalogue, m.finish())
     }
 
     fn fid(index: u64, links: u64) -> Option<crate::platform::FileId> {
@@ -988,15 +1087,59 @@ mod tests {
             cat("never", "hoard", "/d", &["/d/n"]),
             cat("fresh", "race", "/r", &["/r/a"]),
         ];
-        let mut rows = std::collections::HashMap::new();
-        rows.insert(("fresh".to_string(), "hoard".to_string()), ("/d".to_string(), 1, linkindex::pack(&[fid(1, 1)])));
-        rows.insert(("moved".to_string(), "hoard".to_string()), ("/old".to_string(), 1, linkindex::pack(&[fid(2, 1)])));
-        rows.insert(("regrown".to_string(), "hoard".to_string()), ("/d".to_string(), 1, linkindex::pack(&[fid(3, 1)])));
-        let (got, origin) = entries_from_store(&catalogue, &rows);
-        assert_eq!(origin, vec![0], "and it says where it came from");
-        let hashes: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
+        let rows = vec![
+            ("fresh", "hoard", "/d", 1, linkindex::pack(&[fid(1, 1)])),
+            ("moved", "hoard", "/old", 1, linkindex::pack(&[fid(2, 1)])),
+            ("regrown", "hoard", "/d", 1, linkindex::pack(&[fid(3, 1)])),
+            ("absent", "hoard", "/d", 1, linkindex::pack(&[fid(4, 1)])),
+        ];
+        let got = from_rows(&catalogue, &rows);
+        assert_eq!(got.origin, vec![0], "and it says where it came from");
+        let hashes: Vec<&str> = got.entries.iter().map(|(h, _)| h.as_str()).collect();
         assert_eq!(hashes, vec!["fresh"], "moved, regrown, never and the race copy have no valid row");
-        assert_eq!(got[0].1, vec![(std::path::PathBuf::from("/d/a"), fid(1, 1))]);
+        assert_eq!(got.entries[0].1, vec![(linkindex::path_key(std::path::Path::new("/d/a")), fid(1, 1))]);
+    }
+
+    /// Rows come out of the store in no particular order; the answer must not
+    /// depend on it. The copy listed last in the catalogue is the one the
+    /// summary keeps, every time.
+    #[test]
+    fn the_store_order_of_the_rows_changes_nothing() {
+        let catalogue = vec![
+            cat("x", "hoard", "/d", &["/d/x"]),
+            cat("y", "hoard", "/d", &["/d/y"]),
+            cat("x", "race", "/r", &["/r/x"]),
+        ];
+        let rows = vec![
+            ("x", "race", "/r", 30, linkindex::pack(&[fid(1, 1)])),
+            ("y", "hoard", "/d", 20, linkindex::pack(&[fid(2, 1)])),
+            ("x", "hoard", "/d", 10, linkindex::pack(&[fid(1, 1)])),
+        ];
+        let mut reversed = rows.clone();
+        reversed.reverse();
+        let a = from_rows(&catalogue, &rows);
+        let b = from_rows(&catalogue, &reversed);
+        assert_eq!(a.origin, vec![0, 1, 2], "catalogue order");
+        assert_eq!(a.origin, b.origin);
+        assert_eq!(a.measured_at, vec![10, 20, 30]);
+        assert_eq!(a.links, b.links);
+    }
+
+    /// A copy whose torrent left the engine after the catalogue was taken
+    /// is not counted: no names, no answer.
+    #[test]
+    fn a_torrent_gone_since_the_catalogue_drops_out() {
+        let mut gone = cat("gone", "hoard", "/d", &["/d/g"]);
+        gone.source = CatalogueFiles::Torrent(std::sync::Weak::new());
+        let catalogue = vec![cat("kept", "hoard", "/d", &["/d/k"]), gone];
+        let rows = vec![
+            ("kept", "hoard", "/d", 1, linkindex::pack(&[fid(1, 1)])),
+            ("gone", "hoard", "/d", 1, linkindex::pack(&[fid(2, 1)])),
+        ];
+        let got = from_rows(&catalogue, &rows);
+        assert_eq!(got.origin, vec![0]);
+        assert!(!got.links.contains_key("gone"));
+        assert!(catalogue[1].paths().is_none());
     }
 
     /// ⭐ The reason candidates are measured again: the library hardlinked one
@@ -1057,16 +1200,16 @@ mod tests {
             cat("lib", "hoard", &s(&root), &[&s(&lib)]),
             cat("gone", "hoard", &s(&root), &[&s(&root.join("gone.bin"))]),
         ];
-        let plan = catalogue.iter().map(|c| (c.info_hash.clone(), c.paths.clone())).collect();
+        let plan = catalogue.iter().map(|c| (c.info_hash.clone(), c.paths().unwrap())).collect();
         let measured = stat_plan_with(plan, 4);
         let direct = linkindex::compute(&measured);
 
-        let mut rows = std::collections::HashMap::new();
+        let mut rows = Vec::new();
         for (c, (_, files)) in catalogue.iter().zip(&measured) {
             let stats: Vec<_> = files.iter().map(|(_, st)| *st).collect();
-            rows.insert((c.info_hash.clone(), c.session.clone()), (c.save_path.clone(), 1, linkindex::pack(&stats)));
+            rows.push((c.info_hash.as_str(), &*c.session, &*c.save_path, 1, linkindex::pack(&stats)));
         }
-        let stored = linkindex::compute(&entries_from_store(&catalogue, &rows).0);
+        let stored = from_rows(&catalogue, &rows).links;
 
         assert_eq!(direct.len(), stored.len(), "every measured torrent comes back");
         for (h, f) in &direct {

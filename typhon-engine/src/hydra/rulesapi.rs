@@ -494,36 +494,37 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
 
     // On the read connection: a pass must not hold the writer while it reads
     // a million rows.
-    let (stored, rows) = {
+    let known = {
         let store = state.store.read().map_err(|_| "store lock")?;
-        let stored = rulesrun::stored_facts(&state.engines, &store);
-        let rows = store.link_index_stats().map_err(|e| e.to_string())?;
-        (stored, rows)
+        rulesrun::stored_copies(&state.engines, &store)
     };
-    let cat = rulesrun::catalogue_from(&state.engines, &stored);
-    drop(stored);
+    let cat = rulesrun::catalogue_from(&state.engines, &known);
+    drop(known);
+    let measured = {
+        let store = state.store.read().map_err(|_| "store lock")?;
+        rulesrun::read_measured(&cat, &store).map_err(|e| e.to_string())?
+    };
     // The same computation the list's "Hardlinks" column is built from, cf
-    // `rulesrun::links_from_store`.
+    // `rulesrun::links_from_measured`.
     let rulesrun::StoredLinks { mut entries, origin, mut measured_at, links } =
-        rulesrun::links_from_store(&cat, &rows);
-    drop(rows);
+        rulesrun::links_from_measured(&cat, measured);
     let mut facts = gather_all_with(state, &links, rulesrun::Want::of(w));
     let (first, _) = rulesrun::evaluate(w, &facts)?;
 
     let want: std::collections::HashSet<String> =
         first.iter().map(|m| m.info_hash.clone()).collect();
-    let picked: Vec<usize> = (0..entries.len()).filter(|&i| want.contains(&entries[i].0)).collect();
-    let plan = picked
-        .iter()
-        .map(|&i| (entries[i].0.clone(), entries[i].1.iter().map(|(p, _)| p.clone()).collect()))
-        .collect();
+    // The candidates' paths, resolved now: the catalogue does not hold them.
+    let (picked, plan): (Vec<usize>, Vec<_>) = (0..entries.len())
+        .filter(|&i| want.contains(&entries[i].0))
+        .filter_map(|i| Some((i, (entries[i].0.clone(), cat[origin[i]].paths()?))))
+        .unzip();
     let fresh = rulesrun::stat_plan_with(plan, rulesrun::scan_threads());
     let now = crate::store::now_secs();
     let mut rows = Vec::with_capacity(picked.len());
     for (&i, e) in picked.iter().zip(fresh) {
         let stats: Vec<_> = e.1.iter().map(|(_, st)| *st).collect();
         rows.push(rulesrun::link_row(&cat[origin[i]], &stats, now));
-        entries[i] = e;
+        entries[i] = crate::linkindex::keyed(e);
         measured_at[i] = now;
     }
     if !rows.is_empty() {
@@ -1999,11 +2000,11 @@ mod one_number_tests {
         {
             let stored = {
                 let store = s.state.store.read().unwrap();
-                rulesrun::stored_facts(&s.state.engines, &store)
+                rulesrun::stored_copies(&s.state.engines, &store)
             };
             let cat = rulesrun::catalogue_from(&s.state.engines, &stored);
             assert_eq!(cat.len(), 3);
-            let plan = cat.iter().map(|c| (c.info_hash.clone(), c.paths.clone())).collect();
+            let plan = cat.iter().map(|c| (c.info_hash.clone(), c.paths().unwrap())).collect();
             let measured = rulesrun::stat_plan_with(plan, 2);
             let rows: Vec<_> = cat.iter().zip(&measured)
                 .map(|(c, (_, fs))| {
