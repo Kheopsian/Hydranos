@@ -41,7 +41,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   history are kept in bench.db, and `interval_secs` repeats it on its own.
   It said "ok" and measured nothing before. Behind a SOCKS5 proxy it refuses
   with the reason. `iperf3_port`, `duration_secs` and `interval_secs` are
-  read again. "Compare" averages, peaks and p95s every sampled metric over
+  read again: ⚠ a file that kept 3.x's `enabled = true` and
+  `interval_secs = 3600` runs a test every hour again after the upgrade
+  (each one saturates the line for twice `duration_secs`); set
+  `interval_secs = 0` to keep "Run now" only. "Compare" averages, peaks and p95s every sampled metric over
   two periods; it answered zeros. `/api/benchmark/race-snapshots/:hash`
   serves the recorded snapshots instead of null.
 - **Slow torrents leave the queue's count**, qBittorrent's "do not count
@@ -100,6 +103,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   one keeps and shows the settings with nothing left for them to act on.
 
 ### Fixed
+- **qBittorrent shim `num_incomplete`** is the tracker's leecher count, as
+  `num_complete` is its seeders. It was the connected peers, so a swarm of
+  7 leechers read 0 on any torrent with no connection open.
 - **qBittorrent shim, magnets added with options**: `upLimit` / `dlLimit`,
   `sequentialDownload`, `firstLastPiecePrio` and `contentLayout` were
   dropped for a magnet (it had no torrent yet to apply them to). They are
