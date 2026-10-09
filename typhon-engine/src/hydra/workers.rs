@@ -99,6 +99,8 @@ pub fn spawn_download_slots(
         // seed stopped by anything else (an operator, `start_paused`) is not
         // the queue's to resume.
         let mut parked: std::collections::HashSet<typhon_engine::torrent::meta::InfoHash> = Default::default();
+        // Since when each running torrent has been under its slow threshold.
+        let mut slow_since: SlowClock = Default::default();
         loop {
             tokio::time::sleep(DOWNLOAD_SLOT_INTERVAL).await;
             let limits = limits_now();
@@ -115,18 +117,35 @@ pub fn spawn_download_slots(
                     .collect(),
                 Err(_) => Default::default(),
             };
-            enforce_queue(&manager, &cache, &limits, &paused, &mut parked);
+            enforce_queue(&manager, &cache, &limits, &paused, &mut parked, &mut slow_since, std::time::Instant::now());
         }
     });
 }
 
-/// The three ceilings of one engine, `None` = not enforced.
+/// The three ceilings of one engine, `None` = not enforced, and whether slow
+/// torrents are left out of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueueLimits {
     pub downloads: Option<usize>,
     pub seeds: Option<usize>,
     pub total: Option<usize>,
+    pub slow: Option<SlowRule>,
 }
+
+/// qBittorrent's "do not count slow torrents in these limits". A running
+/// download under `dl_bps` (a seed under `ul_bps`) for `after` keeps running
+/// but holds no slot. A threshold of 0 makes nothing slow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlowRule {
+    pub dl_bps: u64,
+    pub ul_bps: u64,
+    pub after: Duration,
+}
+
+/// Since when each running torrent has been under its threshold. Rebuilt on
+/// every pass from the torrents still under it, so it holds the slow running
+/// set and nothing else.
+pub type SlowClock = std::collections::HashMap<typhon_engine::torrent::meta::InfoHash, std::time::Instant>;
 
 impl QueueLimits {
     /// `active_downloads` as it always was: > 0 is a ceiling, anything else
@@ -137,10 +156,16 @@ impl QueueLimits {
     pub fn from_session(s: &crate::config::Session) -> QueueLimits {
         let cap = |v: i64| (v > 0).then_some(v as usize);
         let queueing = s.queueing.unwrap_or(false);
+        let kib = |v: Option<i64>| v.unwrap_or(2).max(0) as u64 * 1024;
         QueueLimits {
             downloads: cap(s.active_downloads),
             seeds: if queueing { s.active_seeds.and_then(cap) } else { None },
             total: if queueing { s.active_limit.and_then(cap) } else { None },
+            slow: s.dont_count_slow_torrents.unwrap_or(false).then(|| SlowRule {
+                dl_bps: kib(s.slow_torrent_dl_rate_threshold),
+                ul_bps: kib(s.slow_torrent_ul_rate_threshold),
+                after: Duration::from_secs(s.slow_torrent_inactive_timer.unwrap_or(60).max(0) as u64),
+            }),
         }
     }
 
@@ -166,6 +191,25 @@ fn holds_everything(t: &typhon_engine::torrent::meta::TorrentState) -> bool {
     }
 }
 
+/// Is this running torrent slow enough to stop counting? Notes it in `next`
+/// while it is under the threshold, keeping the time it went under.
+fn slow_long_enough(
+    after: Duration,
+    threshold: u64,
+    rate: u64,
+    ih: &typhon_engine::torrent::meta::InfoHash,
+    prev: &SlowClock,
+    next: &mut SlowClock,
+    now: std::time::Instant,
+) -> bool {
+    if rate >= threshold {
+        return false;
+    }
+    let since = prev.get(ih).copied().unwrap_or(now);
+    next.insert(*ih, since);
+    now.saturating_duration_since(since) >= after
+}
+
 /// One pass: start the best candidates, stop the excess.
 ///
 /// A torrent the operator paused is not a candidate and not an excess: it is
@@ -182,12 +226,18 @@ fn holds_everything(t: &typhon_engine::torrent::meta::TorrentState) -> bool {
 /// qBittorrent's queue order) rather than by a swarm figure: a ranking that
 /// moves would stop and start seeds every pass, and every stop is a
 /// `stopped` announce.
+///
+/// With `limits.slow`, a running torrent under its threshold for long enough
+/// is skipped by the count: it keeps running, and the next candidate gets the
+/// slot. The clock is `slow_since`, read at `now`.
 fn enforce_queue(
     manager: &Arc<TorrentManager>,
     cache: &Cache,
     limits: &QueueLimits,
     user_paused: &std::collections::HashSet<String>,
     parked: &mut std::collections::HashSet<typhon_engine::torrent::meta::InfoHash>,
+    slow_since: &mut SlowClock,
+    now: std::time::Instant,
 ) {
     let manage_downloads = limits.downloads.is_some() || limits.total.is_some();
     let manage_seeds = limits.seeds.is_some() || limits.total.is_some();
@@ -202,8 +252,10 @@ fn enforce_queue(
         }
     }
     if !manage_downloads && !manage_seeds {
+        slow_since.clear();
         return;
     }
+    let mut still_slow = SlowClock::new();
 
     let mut incomplete: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, i64, bool)> = Vec::new();
     let mut seeds: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, bool)> = Vec::new();
@@ -243,6 +295,12 @@ fn enforce_queue(
         incomplete.sort_by(|a, b| b.1.cmp(&a.1));
         let ceiling = limits.downloads.unwrap_or(usize::MAX).min(limits.total.unwrap_or(usize::MAX));
         for (torrent, _, active) in &incomplete {
+            if let Some(rule) = limits.slow.filter(|_| *active) {
+                let rate = torrent.download_rate.get();
+                if slow_long_enough(rule.after, rule.dl_bps, rate, &torrent.info_hash, slow_since, &mut still_slow, now) {
+                    continue;
+                }
+            }
             if running_downloads < ceiling {
                 if !active {
                     let _ = manager.start_torrent(&torrent.info_hash);
@@ -262,9 +320,16 @@ fn enforce_queue(
             .seeds
             .unwrap_or(usize::MAX)
             .min(limits.total.unwrap_or(usize::MAX).saturating_sub(running_downloads));
-        let (mut started, mut stopped) = (0usize, 0usize);
-        for (i, (torrent, running)) in seeds.iter().enumerate() {
-            if i < ceiling {
+        let (mut started, mut stopped, mut counted) = (0usize, 0usize, 0usize);
+        for (torrent, running) in seeds.iter() {
+            if let Some(rule) = limits.slow.filter(|_| *running) {
+                let rate = torrent.upload_rate.get();
+                if slow_long_enough(rule.after, rule.ul_bps, rate, &torrent.info_hash, slow_since, &mut still_slow, now) {
+                    continue;
+                }
+            }
+            if counted < ceiling {
+                counted += 1;
                 if !running {
                     let _ = manager.start_torrent(&torrent.info_hash);
                     parked.remove(&torrent.info_hash);
@@ -282,6 +347,7 @@ fn enforce_queue(
             tracing::info!(started, stopped, queued = parked.len(), ceiling, "queue: seeds");
         }
     }
+    *slow_since = still_slow;
 }
 
 // --- share limits ------------------------------------------------------------
@@ -1670,7 +1736,7 @@ mod drain_tests {
         // Must not panic, and must not stop anything on an empty library.
         let zero = QueueLimits::from_session(&toml::from_str("active_downloads = 0").unwrap());
         assert!(zero.is_empty());
-        enforce_queue(&mgr, &cache, &zero, &paused, &mut Default::default());
+        enforce_queue(&mgr, &cache, &zero, &paused, &mut Default::default(), &mut SlowClock::new(), std::time::Instant::now());
         assert_eq!(mgr.count(), 0);
     }
 
@@ -1681,7 +1747,7 @@ mod drain_tests {
         let cache = Cache::default();
         let paused = std::collections::HashSet::new();
         let five = QueueLimits { downloads: Some(5), ..Default::default() };
-        enforce_queue(&mgr, &cache, &five, &paused, &mut Default::default());
+        enforce_queue(&mgr, &cache, &five, &paused, &mut Default::default(), &mut SlowClock::new(), std::time::Instant::now());
         assert!(mgr.all().is_empty());
     }
 }
@@ -1958,12 +2024,12 @@ mod queue_tests {
         let all = seeds(&mgr);
         let cache = Cache::default();
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &mut parked);
+        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         let running: Vec<bool> = all.iter().map(|t| !t.is_paused.load(Ordering::Relaxed)).collect();
         assert_eq!(running.iter().filter(|r| **r).count(), 1, "one seed slot");
         assert_eq!(parked.len(), 2);
         // Stable: a second pass moves nothing.
-        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &mut parked);
+        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 1);
         // A parked seed the operator then stops stays stopped when the
         // ceiling is lifted; the others come back.
@@ -1973,7 +2039,7 @@ mod queue_tests {
             .take(1)
             .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
             .collect();
-        enforce_queue(&mgr, &cache, &QueueLimits::default(), &operator, &mut parked);
+        enforce_queue(&mgr, &cache, &QueueLimits::default(), &operator, &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         assert!(parked.is_empty());
         assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 2);
         let _ = std::fs::remove_dir_all(root);
@@ -1985,8 +2051,86 @@ mod queue_tests {
         let (mgr, root) = manager("total");
         let all = seeds(&mgr);
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &limits("queueing = true\nactive_limit = 2"), &HashSet::new(), &mut parked);
+        enforce_queue(&mgr, &Cache::default(), &limits("queueing = true\nactive_limit = 2"), &HashSet::new(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Three incomplete torrents, stopped, waiting for a download slot.
+    fn queued_downloads(mgr: &Arc<TorrentManager>) -> Vec<Arc<typhon_engine::torrent::meta::TorrentState>> {
+        ["d", "e", "f"]
+            .iter()
+            .map(|n| {
+                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                let t = mgr.get(&ih).unwrap();
+                t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.is_paused.store(true, Ordering::Relaxed);
+                t
+            })
+            .collect()
+    }
+
+    /// Run passes at `t0 + secs` and count the running downloads after each.
+    /// A torrent the pass started is set downloading, as the engine would.
+    fn passes(mgr: &Arc<TorrentManager>, all: &[Arc<typhon_engine::torrent::meta::TorrentState>], l: &QueueLimits, at: &[u64]) -> Vec<usize> {
+        let t0 = std::time::Instant::now();
+        let (mut parked, mut clock) = (HashSet::new(), SlowClock::new());
+        at.iter()
+            .map(|secs| {
+                enforce_queue(mgr, &Cache::default(), l, &HashSet::new(), &mut parked, &mut clock, t0 + Duration::from_secs(*secs));
+                for t in all {
+                    if !t.is_paused.load(Ordering::Relaxed) {
+                        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                    }
+                }
+                all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count()
+            })
+            .collect()
+    }
+
+    /// ⭐ The case it exists for: a download stuck with no seed stops holding
+    /// the slot once it has been slow for the timer, keeps running, and the
+    /// next one in the queue starts. Seen slow at 30 s, exempt from 90 s.
+    #[test]
+    fn a_slow_download_frees_its_slot_and_keeps_running() {
+        let (mgr, root) = manager("slow-dl");
+        let all = queued_downloads(&mgr);
+        let l = limits("active_downloads = 1\ndont_count_slow_torrents = true\nslow_torrent_inactive_timer = 60");
+        assert_eq!(l.slow.map(|r| (r.dl_bps, r.ul_bps)), Some((2048, 2048)), "qBittorrent's 2 KiB/s by default");
+        assert_eq!(passes(&mgr, &all, &l, &[0, 30, 60, 100, 130, 200]), vec![1, 1, 1, 2, 2, 3]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Off by default, and a threshold of 0 makes nothing slow: the ceiling
+    /// holds as it always has.
+    #[test]
+    fn without_the_switch_or_with_a_zero_threshold_the_ceiling_holds() {
+        let (mgr, root) = manager("slow-off");
+        let all = queued_downloads(&mgr);
+        assert!(limits("active_downloads = 1").slow.is_none());
+        assert_eq!(passes(&mgr, &all, &limits("active_downloads = 1"), &[0, 100, 200, 300]), vec![1, 1, 1, 1]);
+        let zero = limits("active_downloads = 1\ndont_count_slow_torrents = true\nslow_torrent_dl_rate_threshold = 0");
+        assert_eq!(passes(&mgr, &all, &zero, &[400, 500, 600]), vec![1, 1, 1]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Seeds too, as in qBittorrent: an idle seed holds no `active_seeds`
+    /// slot, so a parked one is started in its place.
+    #[test]
+    fn an_idle_seed_frees_its_seed_slot() {
+        let (mgr, root) = manager("slow-seed");
+        let all = seeds(&mgr);
+        let l = limits("queueing = true\nactive_seeds = 1\ndont_count_slow_torrents = true\nslow_torrent_inactive_timer = 60");
+        let t0 = std::time::Instant::now();
+        let (mut parked, mut clock) = (HashSet::new(), SlowClock::new());
+        let mut run = |secs: u64| {
+            enforce_queue(&mgr, &Cache::default(), &l, &HashSet::new(), &mut parked, &mut clock, t0 + Duration::from_secs(secs));
+            all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count()
+        };
+        // First pass: three running seeds, none slow long enough yet.
+        assert_eq!(run(0), 1);
+        assert_eq!(run(30), 1);
+        assert_eq!(run(70), 2, "the oldest is idle 70 s: it keeps running, a parked seed starts");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1996,7 +2140,7 @@ mod queue_tests {
         let (mgr, root) = manager("dl-only");
         let all = seeds(&mgr);
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &limits("active_downloads = 1"), &HashSet::new(), &mut parked);
+        enforce_queue(&mgr, &Cache::default(), &limits("active_downloads = 1"), &HashSet::new(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         assert!(all.iter().all(|t| !t.is_paused.load(Ordering::Relaxed)));
         assert!(parked.is_empty());
         let _ = std::fs::remove_dir_all(root);

@@ -24,6 +24,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- a race SSD told what the drain freed
 
 ### Added
+- **Slow torrents leave the queue's count**, qBittorrent's "do not count
+  slow torrents in these limits": with `dont_count_slow_torrents = true`, a
+  download under `slow_torrent_dl_rate_threshold` (a seed under
+  `slow_torrent_ul_rate_threshold`, KiB/s, 2 by default) for
+  `slow_torrent_inactive_timer` seconds (60) keeps running but no longer
+  holds a slot in `active_downloads`, `active_seeds` or `active_limit`, and
+  the next torrent in the queue starts. A release stuck at 99 % waiting for a
+  seed no longer takes one of five download slots, so the ceiling can stay
+  small. Off by default, applied live, per engine in Settings, and read and
+  written by qBittorrent's `app/preferences` / `app/setPreferences`.
 - **TRIM after drain**, per race volume, off by default: once a drain pass
   has deleted torrents, the volume is trimmed on a thread of its own, and the
   panel shows when and how long, or why it was refused (no
