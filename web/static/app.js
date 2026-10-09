@@ -6710,6 +6710,9 @@ async function runVpnSpeedtest() {
         document.getElementById("vpn-dl-total").textContent = ((result.dl_mbps ?? 0) + (result.dl_torrent_mbps ?? 0)).toFixed(1) + " Mbps";
         document.getElementById("vpn-ts").textContent = new Date(result.ts * 1000).toLocaleString();
     } catch (e) {
+        // The daemon says why (no server, a SOCKS5 way out, iperf3's own
+        // error): shown where the time of the last test goes.
+        document.getElementById("vpn-ts").textContent = t("Error: {msg}", { msg: e.message });
         console.error("VPN speedtest error:", e);
     } finally {
         btn.disabled = false;
