@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -113,23 +115,128 @@ impl PickOrder {
     }
 }
 
+/// Who reserved a piece: one identity per peer session, one per webseed run.
+pub type Owner = u64;
+
+static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh owner identity. Never reused, so a release that comes late cannot
+/// take away a reservation somebody else has made on the same piece since.
+pub fn new_owner() -> Owner {
+    NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// One engine's pieces in flight and the bytes they really hold.
+///
+/// Kept by the pickers as they store and free blocks, so `/metrics` and the
+/// five-minute allocator line read two atomics instead of walking a million
+/// torrents. Measured on production before this existed: 17.3 GB of a 24 GB
+/// heap sat under `start_piece`, and nothing short of a heap profile could see
+/// it.
+#[derive(Debug, Default)]
+pub struct PieceMem {
+    pieces: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl PieceMem {
+    pub fn pieces(&self) -> u64 {
+        self.pieces.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    fn add(&self, pieces: i64, bytes: i64) {
+        apply(&self.pieces, pieces);
+        apply(&self.bytes, bytes);
+    }
+}
+
+fn apply(c: &AtomicU64, d: i64) {
+    if d >= 0 {
+        c.fetch_add(d as u64, Ordering::Relaxed);
+    } else {
+        c.fetch_sub(d.unsigned_abs(), Ordering::Relaxed);
+    }
+}
+
+/// What became of a block handed to `receive_block`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Block {
+    /// Not stored: no such piece in flight, or not the block it claims to be.
+    Refused,
+    /// That block was already there (endgame, or a peer answering a request
+    /// it had been asked twice).
+    Duplicate,
+    /// Stored; the piece still lacks blocks.
+    Stored,
+    /// Stored, and it was the last one: `take_piece_data` hands the piece over.
+    Complete,
+}
+
 /// Rarest-first piece picker for download mode.
 pub struct PiecePicker {
     num_pieces: u32,
     have: Vec<bool>,           // pieces we have
     availability: Vec<u16>,    // how many peers have each piece (u16: le swarm ne depasse jamais 65535 copies)
-    pending: HashMap<u32, PendingPiece>,  // piece index -> in-flight requests
+    pending: HashMap<u32, PendingPiece>,  // piece index -> in-flight reservation and the blocks received
+    /// Bytes of block data held across `pending`: what this picker costs.
+    held_bytes: u64,
+    /// The engine's totals, which this picker's changes are added to. `None`
+    /// for a picker built outside a manager (a unit test, a magnet).
+    mem: Option<Arc<PieceMem>>,
     /// The torrent's download order, when it is not the default. Boxed so the
     /// default costs one null pointer, and checked once per pick.
     order: Option<Box<PickOrder>>,
 }
 
+/// A piece somebody is fetching.
+///
+/// It costs the blocks that have ARRIVED and nothing else. It used to be a
+/// `vec![0u8; piece_size]` made the moment a peer was asked for the piece:
+/// 4 to 16 MiB reserved on a promise, kept for as long as that peer stayed
+/// connected whether it sent anything or not, and made resident by the zero
+/// fill on recycled allocator extents. On a production hoard (1.1 M torrents,
+/// ~400 incomplete) that came to 17.3 GB under `start_piece`, growing by
+/// ~0.5 GB/h.
 struct PendingPiece {
-    blocks_requested: Vec<bool>,
-    blocks_received: Vec<bool>,
-    data: Vec<u8>,
+    /// One slot per block, filled as the block arrives, at its exact length.
+    blocks: Vec<Option<Box<[u8]>>>,
+    received: u32,
+    bytes: u64,
     block_size: u32,
     piece_size: u32,
+    /// Everyone fetching it. Usually one; several in endgame, where the same
+    /// piece is asked of several peers on purpose. The piece and its blocks go
+    /// when the last of them lets go.
+    owners: Vec<Owner>,
+}
+
+impl PendingPiece {
+    fn block_len(&self, i: usize) -> u32 {
+        let offset = i as u32 * self.block_size;
+        std::cmp::min(self.block_size, self.piece_size.saturating_sub(offset))
+    }
+
+    /// The requests still owed for this piece: every block not yet received.
+    fn missing(&self, piece: u32) -> Vec<(u32, u32, u32)> {
+        (0..self.blocks.len())
+            .filter(|&i| self.blocks[i].is_none())
+            .map(|i| (piece, i as u32 * self.block_size, self.block_len(i)))
+            .collect()
+    }
+}
+
+impl Drop for PiecePicker {
+    /// A torrent that goes takes its pieces in flight out of the engine's
+    /// totals with it.
+    fn drop(&mut self) {
+        if let Some(m) = &self.mem {
+            m.add(-(self.pending.len() as i64), -(self.held_bytes as i64));
+        }
+    }
 }
 
 impl PiecePicker {
@@ -139,8 +246,43 @@ impl PiecePicker {
             have: vec![false; num_pieces as usize],
             availability: vec![0; num_pieces as usize],
             pending: HashMap::new(),
+            held_bytes: 0,
+            mem: None,
             order: None,
         }
+    }
+
+    /// Count this picker in an engine's totals. Whatever it already holds
+    /// moves with it, so attaching twice, or to another engine, stays exact.
+    pub fn attach_mem(&mut self, mem: Arc<PieceMem>) {
+        if self.mem.as_ref().is_some_and(|m| Arc::ptr_eq(m, &mem)) {
+            return;
+        }
+        let (n, b) = (self.pending.len() as i64, self.held_bytes as i64);
+        if let Some(old) = self.mem.take() {
+            old.add(-n, -b);
+        }
+        mem.add(n, b);
+        self.mem = Some(mem);
+    }
+
+    /// Pieces in flight and the block bytes they hold, for this torrent.
+    pub fn in_flight(&self) -> (usize, u64) {
+        (self.pending.len(), self.held_bytes)
+    }
+
+    fn account(&mut self, pieces: i64, bytes: i64) {
+        self.held_bytes = (self.held_bytes as i64 + bytes).max(0) as u64;
+        if let Some(m) = &self.mem {
+            m.add(pieces, bytes);
+        }
+    }
+
+    /// Forget a piece in flight and free its blocks.
+    fn drop_pending(&mut self, piece: u32) -> Option<PendingPiece> {
+        let p = self.pending.remove(&piece)?;
+        self.account(-1, -(p.bytes as i64));
+        Some(p)
     }
 
     /// Install (or, with `None`, drop) the torrent's download order.
@@ -153,7 +295,6 @@ impl PiecePicker {
         self.order.is_some()
     }
 
-    /// Mark a piece as completed.
     /// Clear all have bits. Used before a recheck re-derives ownership
     /// from disk: without it set_have could only add pieces, never detect
     /// a piece that has since become corrupt/missing.
@@ -163,10 +304,11 @@ impl PiecePicker {
         }
     }
 
+    /// Mark a piece as completed.
     pub fn set_have(&mut self, index: u32) {
         if (index as usize) < self.have.len() {
             self.have[index as usize] = true;
-            self.pending.remove(&index);
+            self.drop_pending(index);
         }
     }
 
@@ -313,12 +455,34 @@ impl PiecePicker {
         best_pick
     }
 
-    /// Release a piece from `pending` so another peer can pick it.
-    /// Called on peer disconnect and on hash-mismatch/write-error, so
-    /// abandoned in-flight pieces don't leak and stall the DL.
-    pub fn cancel_piece(&mut self, piece: u32) {
-        if !self.have.get(piece as usize).copied().unwrap_or(false) {
-            self.pending.remove(&piece);
+    /// `owner` lets go of a piece. The last owner out frees it -- blocks and
+    /// all -- so another source can pick it again from scratch.
+    ///
+    /// Called on peer disconnect, on a choke, on a Reject, when a peer has sent
+    /// nothing for the piece in a while, and by the webseed on its failure
+    /// paths. Releasing a piece the owner does not hold is a no-op: the
+    /// reservation may have been completed, or remade by somebody else, since.
+    /// The `have` bit is not consulted: an entry for a piece we hold is dead
+    /// weight however it got there.
+    pub fn release(&mut self, piece: u32, owner: Owner) {
+        let last = match self.pending.get_mut(&piece) {
+            Some(p) => {
+                p.owners.retain(|&o| o != owner);
+                p.owners.is_empty()
+            }
+            None => false,
+        };
+        if last {
+            self.drop_pending(piece);
+        }
+    }
+
+    /// Drop every piece in flight, whoever holds it. For a torrent that is
+    /// being removed: its sessions may linger a moment, its memory must not.
+    pub fn clear_pending(&mut self) {
+        let pieces: Vec<u32> = self.pending.keys().copied().collect();
+        for p in pieces {
+            self.drop_pending(p);
         }
     }
 
@@ -347,82 +511,130 @@ impl PiecePicker {
         }
     }
 
-    /// Generate block requests for a piece.
-    /// Returns (piece_index, offset, length) tuples.
-    pub fn start_piece(&mut self, piece: u32, piece_size: u32, block_size: u32) -> Vec<(u32, u32, u32)> {
-        let num_blocks = (piece_size + block_size - 1) / block_size;
-        let mut requests = Vec::new();
-
-        for i in 0..num_blocks {
-            let offset = i * block_size;
-            let len = std::cmp::min(block_size, piece_size - offset);
-            requests.push((piece, offset, len));
+    /// Reserve a piece for `owner` and return the block requests it owes:
+    /// (piece_index, offset, length).
+    ///
+    /// Nothing is allocated for the data here: a block costs memory when it
+    /// arrives. A piece already in flight is JOINED, not reset -- the endgame
+    /// asks several peers for the same piece on purpose, and a second start
+    /// used to overwrite the first, throwing away every block received for it.
+    /// The joiner is asked only for the blocks still missing.
+    pub fn start_piece(&mut self, piece: u32, piece_size: u32, block_size: u32, owner: Owner) -> Vec<(u32, u32, u32)> {
+        if let Some(p) = self.pending.get_mut(&piece) {
+            if !p.owners.contains(&owner) {
+                p.owners.push(owner);
+            }
+            return p.missing(piece);
         }
-
-        self.pending.insert(piece, PendingPiece {
-            blocks_requested: vec![true; num_blocks as usize],
-            blocks_received: vec![false; num_blocks as usize],
-            data: vec![0u8; piece_size as usize],
+        if block_size == 0 {
+            return Vec::new();
+        }
+        let num_blocks = piece_size.div_ceil(block_size) as usize;
+        let p = PendingPiece {
+            blocks: vec![None; num_blocks],
+            received: 0,
+            bytes: 0,
             block_size,
             piece_size,
-        });
-
+            owners: vec![owner],
+        };
+        let requests = p.missing(piece);
+        self.pending.insert(piece, p);
+        self.account(1, 0);
         requests
     }
 
-    /// Record a received block. Returns true if the piece is now complete.
-    pub fn receive_block(&mut self, piece: u32, offset: u32, data: &[u8]) -> bool {
-        if let Some(pending) = self.pending.get_mut(&piece) {
-            // A block counts as received only once its bytes are actually in
-            // the buffer, and only if it is the block it claims to be.
-            //
-            // Marking the slot before the bounds check let a short, overlong or
-            // unaligned block complete a piece with a hole of zeros in it. The
-            // assembled buffer then failed SHA1 in write_piece, the piece was
-            // re-requested, and with a large peer set that became a permanent
-            // re-download loop: ~24% of completed pieces were being discarded.
-            if pending.block_size == 0 || offset % pending.block_size != 0 {
-                return false;
-            }
-            let block_idx = (offset / pending.block_size) as usize;
-            if block_idx >= pending.blocks_received.len() {
-                return false;
-            }
-            let expected_len =
-                std::cmp::min(pending.block_size, pending.piece_size.saturating_sub(offset))
-                    as usize;
-            if data.len() != expected_len {
-                return false;
-            }
-            let start = offset as usize;
-            let end = start + data.len();
-            if end > pending.data.len() {
-                return false;
-            }
-            pending.data[start..end].copy_from_slice(data);
-            pending.blocks_received[block_idx] = true;
-            // Check if all blocks received
-            pending.blocks_received.iter().all(|&b| b)
+    /// Store a received block, at its exact size.
+    ///
+    /// Anyone's block for a piece in flight is taken, not only its owners':
+    /// the bytes are checked against the piece hash before anything is kept,
+    /// so where they came from does not matter. A block for a piece no longer
+    /// in flight -- released, completed -- is refused and costs nothing.
+    pub fn receive_block(&mut self, piece: u32, offset: u32, data: &[u8]) -> Block {
+        let Some(pending) = self.pending.get_mut(&piece) else {
+            return Block::Refused;
+        };
+        // A block counts as received only once its bytes are actually
+        // stored, and only if it is the block it claims to be.
+        //
+        // Marking the slot before the bounds check let a short, overlong or
+        // unaligned block complete a piece with a hole of zeros in it. The
+        // assembled buffer then failed SHA1 in write_piece, the piece was
+        // re-requested, and with a large peer set that became a permanent
+        // re-download loop: ~24% of completed pieces were being discarded.
+        if pending.block_size == 0 || offset % pending.block_size != 0 {
+            return Block::Refused;
+        }
+        let block_idx = (offset / pending.block_size) as usize;
+        if block_idx >= pending.blocks.len() {
+            return Block::Refused;
+        }
+        if data.len() != pending.block_len(block_idx) as usize {
+            return Block::Refused;
+        }
+        if pending.blocks[block_idx].is_some() {
+            return Block::Duplicate;
+        }
+        // Copied, not kept as the wire's `Bytes`: that one is a view into the
+        // session's read buffer, and holding it would pin the whole buffer
+        // (64 KiB and up) for every 16 KiB block waiting on its piece.
+        pending.blocks[block_idx] = Some(Box::from(data));
+        pending.received += 1;
+        pending.bytes += data.len() as u64;
+        let complete = pending.received as usize == pending.blocks.len();
+        self.account(0, data.len() as i64);
+        if complete {
+            Block::Complete
         } else {
-            false
+            Block::Stored
         }
     }
 
-    /// Get the assembled piece data (after receive_block returned true).
+    /// The assembled piece, once every block is in; `None` before that, so a
+    /// piece with a hole in it can never be handed to the disk.
+    ///
+    /// The one piece-sized buffer left on the download path: `write_piece`
+    /// checks the hash and writes from a contiguous piece, and that path is
+    /// shared with the webseed and deliberately left as it is. It lives from
+    /// here to the end of the write, for the one piece being committed, and
+    /// each block is freed as soon as it has been copied in.
     pub fn take_piece_data(&mut self, piece: u32) -> Option<Vec<u8>> {
-        self.pending.remove(&piece).map(|p| p.data)
+        let ready = self
+            .pending
+            .get(&piece)
+            .is_some_and(|p| p.received as usize == p.blocks.len());
+        if !ready {
+            return None;
+        }
+        let p = self.drop_pending(piece)?;
+        let mut out = Vec::with_capacity(p.piece_size as usize);
+        for b in p.blocks.into_iter().flatten() {
+            out.extend_from_slice(&b);
+        }
+        Some(out)
+    }
+
+    /// Should `owner` still ask for this block? Not when the piece left its
+    /// hands, and not when the block is already in -- from another peer in
+    /// endgame, or from this one after a choke voided the request.
+    pub fn wants_block(&self, piece: u32, offset: u32, owner: Owner) -> bool {
+        match self.pending.get(&piece) {
+            Some(p) if p.owners.contains(&owner) && p.block_size > 0 => {
+                let i = (offset / p.block_size) as usize;
+                i < p.blocks.len() && p.blocks[i].is_none()
+            }
+            _ => false,
+        }
+    }
+
+    /// Does `owner` hold a reservation on this piece?
+    pub fn holds(&self, piece: u32, owner: Owner) -> bool {
+        self.pending.get(&piece).is_some_and(|p| p.owners.contains(&owner))
     }
 
     #[cfg(test)]
     pub fn begin_piece_for_test(&mut self, piece: u32, piece_size: u32, block_size: u32) {
-        let num_blocks = piece_size.div_ceil(block_size);
-        self.pending.insert(piece, PendingPiece {
-            blocks_requested: vec![true; num_blocks as usize],
-            blocks_received: vec![false; num_blocks as usize],
-            data: vec![0u8; piece_size as usize],
-            block_size,
-            piece_size,
-        });
+        self.start_piece(piece, piece_size, block_size, 0);
     }
 
     /// How many pieces do we have?
@@ -475,9 +687,8 @@ impl PiecePicker {
     ///
     /// The webseed pool walks forward from a picked piece to batch a run of
     /// contiguous ones into a single HTTP request, and must stop at anything
-    /// another source already holds: calling `start_piece` on a pending piece
-    /// resets its `blocks_received`, throwing away whatever a peer had already
-    /// delivered for it.
+    /// another source already holds: a run is one HTTP range, and a piece in it
+    /// that a peer is already filling would be fetched twice.
     pub fn is_pending(&self, index: u32) -> bool {
         self.pending.contains_key(&index)
     }
@@ -490,7 +701,8 @@ impl PiecePicker {
 
 #[cfg(test)]
 mod receive_block_tests {
-    use super::PiecePicker;
+    use super::{Block, PieceMem, PiecePicker};
+    use std::sync::Arc;
 
     fn picker_with_one_pending(piece_size: u32, block_size: u32) -> PiecePicker {
         let mut p = PiecePicker::new(1);
@@ -503,20 +715,20 @@ mod receive_block_tests {
     #[test]
     fn short_block_does_not_complete_piece() {
         let mut p = picker_with_one_pending(32, 16);
-        assert!(!p.receive_block(0, 0, &[1u8; 16]));
+        assert_eq!(p.receive_block(0, 0, &[1u8; 16]), Block::Stored);
         // second block arrives truncated -> refused, piece stays incomplete
-        assert!(!p.receive_block(0, 16, &[2u8; 4]));
+        assert_eq!(p.receive_block(0, 16, &[2u8; 4]), Block::Refused);
         // the same block at its real length completes the piece
-        assert!(p.receive_block(0, 16, &[2u8; 16]));
+        assert_eq!(p.receive_block(0, 16, &[2u8; 16]), Block::Complete);
     }
 
     /// An unaligned offset addresses no block slot and must be refused.
     #[test]
     fn unaligned_offset_is_refused() {
         let mut p = picker_with_one_pending(32, 16);
-        assert!(!p.receive_block(0, 5, &[1u8; 16]));
-        assert!(!p.receive_block(0, 0, &[1u8; 16]));
-        assert!(p.receive_block(0, 16, &[2u8; 16]));
+        assert_eq!(p.receive_block(0, 5, &[1u8; 16]), Block::Refused);
+        assert_eq!(p.receive_block(0, 0, &[1u8; 16]), Block::Stored);
+        assert_eq!(p.receive_block(0, 16, &[2u8; 16]), Block::Complete);
     }
 
     /// The front-walking pick skips what we hold and what is reserved, and
@@ -551,8 +763,128 @@ mod receive_block_tests {
     #[test]
     fn short_tail_block_is_accepted() {
         let mut p = picker_with_one_pending(20, 16);
-        assert!(!p.receive_block(0, 0, &[1u8; 16]));
-        assert!(p.receive_block(0, 16, &[2u8; 4]));
+        assert_eq!(p.receive_block(0, 0, &[1u8; 16]), Block::Stored);
+        assert_eq!(p.receive_block(0, 16, &[2u8; 4]), Block::Complete);
+    }
+
+    /// ⭐ A piece in flight costs the blocks received, not the piece: starting
+    /// a 4 MiB piece allocates no data at all, and each block adds exactly its
+    /// length to the picker's and the engine's counters.
+    #[test]
+    fn a_piece_in_flight_holds_only_the_blocks_received() {
+        let mem = Arc::new(PieceMem::default());
+        let mut p = PiecePicker::new(4);
+        p.attach_mem(mem.clone());
+        let reqs = p.start_piece(1, 4 << 20, 16384, 7);
+        assert_eq!(reqs.len(), 256);
+        assert_eq!(p.in_flight(), (1, 0), "reserved, nothing held");
+        assert_eq!((mem.pieces(), mem.bytes()), (1, 0));
+        assert_eq!(p.receive_block(1, 0, &[1u8; 16384]), Block::Stored);
+        assert_eq!(p.receive_block(1, 16384 * 9, &[2u8; 16384]), Block::Stored);
+        assert_eq!(p.in_flight(), (1, 2 * 16384));
+        assert_eq!(mem.bytes(), 2 * 16384);
+        // A refused block costs nothing.
+        assert_eq!(p.receive_block(1, 3, &[0u8; 16384]), Block::Refused);
+        assert_eq!(p.receive_block(1, 16384, &[0u8; 100]), Block::Refused);
+        assert_eq!(mem.bytes(), 2 * 16384);
+        p.release(1, 7);
+        assert_eq!(p.in_flight(), (0, 0));
+        assert_eq!((mem.pieces(), mem.bytes()), (0, 0), "released, all of it");
+    }
+
+    /// Blocks arriving in any order make the same piece, byte for byte; and
+    /// the piece is handed over only once it has no hole left.
+    #[test]
+    fn blocks_out_of_order_assemble_the_same_piece() {
+        let piece: Vec<u8> = (0..40_000u32).map(|i| (i * 7 + 3) as u8).collect();
+        let mut p = PiecePicker::new(1);
+        let reqs = p.start_piece(0, piece.len() as u32, 16384, 1);
+        assert_eq!(reqs, vec![(0, 0, 16384), (0, 16384, 16384), (0, 32768, 40_000 - 32768)]);
+        assert!(p.take_piece_data(0).is_none(), "nothing to hand over yet");
+        assert_eq!(p.receive_block(0, 32768, &piece[32768..]), Block::Stored);
+        assert_eq!(p.receive_block(0, 0, &piece[..16384]), Block::Stored);
+        assert!(p.take_piece_data(0).is_none(), "a hole is never handed to the disk");
+        assert_eq!(p.receive_block(0, 0, &piece[..16384]), Block::Duplicate);
+        assert_eq!(p.receive_block(0, 16384, &piece[16384..32768]), Block::Complete);
+        assert_eq!(p.take_piece_data(0).as_deref(), Some(&piece[..]));
+        assert_eq!(p.in_flight(), (0, 0));
+        assert_eq!(p.receive_block(0, 0, &piece[..16384]), Block::Refused, "gone once taken");
+    }
+
+    /// ⭐ Endgame: a second peer joins the piece instead of resetting it, is
+    /// asked only for what is missing, and the piece completes once.
+    #[test]
+    fn endgame_joins_a_piece_and_completes_it_once() {
+        let mut p = PiecePicker::new(1);
+        assert_eq!(p.start_piece(0, 32768, 16384, 1).len(), 2);
+        assert_eq!(p.receive_block(0, 0, &[1u8; 16384]), Block::Stored);
+        let second = p.start_piece(0, 32768, 16384, 2);
+        assert_eq!(second, vec![(0, 16384, 16384)], "only the missing block");
+        assert_eq!(p.in_flight(), (1, 16384), "the first block survived the join");
+        assert!(!p.wants_block(0, 0, 2), "already in");
+        assert!(p.wants_block(0, 16384, 2));
+        assert_eq!(p.receive_block(0, 16384, &[2u8; 16384]), Block::Complete);
+        assert_eq!(p.receive_block(0, 16384, &[2u8; 16384]), Block::Duplicate, "the other peer's copy");
+        assert!(p.take_piece_data(0).is_some());
+        assert!(p.take_piece_data(0).is_none(), "one piece, one hand-over");
+        p.release(0, 1);
+        p.release(0, 2);
+        assert_eq!(p.in_flight(), (0, 0));
+    }
+
+    /// The piece stays while one owner still holds it, and goes with the last.
+    /// A release that comes late cannot touch a reservation made since.
+    #[test]
+    fn the_last_owner_out_frees_the_piece() {
+        let mut p = PiecePicker::new(2);
+        p.start_piece(0, 32768, 16384, 1);
+        p.start_piece(0, 32768, 16384, 2);
+        p.receive_block(0, 0, &[1u8; 16384]);
+        p.release(0, 1);
+        assert_eq!(p.in_flight(), (1, 16384), "owner 2 is still on it");
+        p.release(0, 2);
+        assert_eq!(p.in_flight(), (0, 0));
+        p.start_piece(0, 32768, 16384, 3);
+        p.release(0, 1);
+        assert!(p.holds(0, 3), "owner 1 let go long ago; 3's reservation stands");
+    }
+
+    /// A torrent dropped with pieces in flight takes them out of the engine's
+    /// totals; so does a removal, before the last session is gone.
+    #[test]
+    fn a_dropped_or_cleared_picker_gives_its_bytes_back() {
+        let mem = Arc::new(PieceMem::default());
+        let mut p = PiecePicker::new(4);
+        p.attach_mem(mem.clone());
+        p.start_piece(0, 32768, 16384, 1);
+        p.receive_block(0, 0, &[1u8; 16384]);
+        p.start_piece(1, 32768, 16384, 2);
+        assert_eq!((mem.pieces(), mem.bytes()), (2, 16384));
+        p.clear_pending();
+        assert_eq!((mem.pieces(), mem.bytes()), (0, 0));
+        p.start_piece(2, 32768, 16384, 1);
+        p.receive_block(2, 16384, &[1u8; 16384]);
+        // Attaching again, or elsewhere, moves the totals rather than doubling them.
+        p.attach_mem(mem.clone());
+        assert_eq!((mem.pieces(), mem.bytes()), (1, 16384));
+        let other = Arc::new(PieceMem::default());
+        p.attach_mem(other.clone());
+        assert_eq!((mem.pieces(), mem.bytes()), (0, 0));
+        assert_eq!((other.pieces(), other.bytes()), (1, 16384));
+        drop(p);
+        assert_eq!((other.pieces(), other.bytes()), (0, 0));
+    }
+
+    /// `set_have` frees a piece in flight, whoever holds it.
+    #[test]
+    fn having_a_piece_frees_its_reservation() {
+        let mem = Arc::new(PieceMem::default());
+        let mut p = PiecePicker::new(2);
+        p.attach_mem(mem.clone());
+        p.start_piece(1, 32768, 16384, 1);
+        p.receive_block(1, 0, &[1u8; 16384]);
+        p.set_have(1);
+        assert_eq!((mem.pieces(), mem.bytes()), (0, 0));
     }
 }
 

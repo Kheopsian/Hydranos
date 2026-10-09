@@ -124,6 +124,30 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   counted by an 8-byte key instead of their path. The numbers are the same:
   the column, `external_links`, `link_count`, `freeable_bytes` and the disk
   usage figures are computed as before.
+- **A choke no longer strands pieces, and downloads no longer stall on
+  it.** The requests a choke voids (BEP 3) were forgotten rather than kept:
+  after the unchoke the piece waited forever for blocks nobody asked for
+  again, the download stalled, and the piece stayed reserved for the life
+  of the connection. They are now asked again first. Pieces a choking peer
+  had sent nothing of go back to the swarm at once.
+- **Download memory.** A piece being fetched no longer reserves its whole
+  size (4-16 MiB, zero-filled) the moment a peer is asked for it; it costs
+  the blocks actually received. On a 1.1M-torrent library a heap profile
+  put 17.3 GB of a 24 GB heap under the piece reservations, growing by
+  ~0.5 GB/h with nothing else moving. New gauges
+  `hydra_pieces_in_flight` and `hydra_piece_buffer_bytes` (per engine, in
+  `/metrics`, `/api/engines` and the five-minute allocator line) show what
+  downloading holds.
+- **A peer that stops sending lets go.** A piece with no new block from its
+  peer for 120 s is given back and its requests cancelled, even while the
+  peer stays connected and keeps sending Haves. A BEP 6 Reject gives the
+  piece back.
+- **Endgame no longer throws blocks away.** A second peer joining one of
+  the last pieces used to reset it; it now joins, is asked only for the
+  missing blocks, and the piece is written once.
+- **Removing a torrent frees its download at once.** Its peer sessions now
+  end, and it no longer keeps reserving pieces whose blocks were being
+  discarded.
 
 ## v4.3.2 -- managed WireGuard that holds, a kill switch that follows the mode
 

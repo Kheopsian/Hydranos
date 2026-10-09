@@ -234,6 +234,9 @@ pub struct TorrentManager {
     limiter: Arc<crate::tracker::dial_limiter::DialLimiter>,
     /// Byte-rate caps for this engine, and the client pair above them.
     rates: Arc<ratelimit::EngineRates>,
+    /// Pieces in flight across this engine's torrents and the block bytes
+    /// they hold, kept by the pickers as they go.
+    piece_mem: Arc<piece_picker::PieceMem>,
     /// Asks the announcer to announce one torrent now, because it owes its
     /// trackers an event. Set by the announcer, which lives in the binary and
     /// cannot be named from here; unset, events wait for the next scheduled
@@ -451,6 +454,11 @@ impl TorrentManager {
         &self.rates
     }
 
+    /// Pieces in flight on this engine and the bytes they hold.
+    pub fn piece_mem(&self) -> &Arc<piece_picker::PieceMem> {
+        &self.piece_mem
+    }
+
     /// This engine's PEX / IPv6 policy.
     pub fn policy(&self) -> &Arc<crate::peer::extension::PeerPolicy> {
         &self.policy
@@ -560,6 +568,7 @@ impl TorrentManager {
             completed_rx: std::sync::Mutex::new(Some(completed_rx)),
             limiter: Default::default(),
             rates: Default::default(),
+            piece_mem: Default::default(),
             announce_hook: std::sync::OnceLock::new(),
             completion_hook: std::sync::OnceLock::new(),
             state_db,
@@ -946,6 +955,11 @@ impl TorrentManager {
         let to_delete: Option<(Vec<std::path::PathBuf>, Option<std::path::PathBuf>)> =
             if let Some(t) = entry {
                 t.is_removed.store(true, Ordering::Relaxed);
+                // Its pieces in flight go now, not when the last session
+                // holding the TorrentState notices the flag and ends.
+                if let Some(p) = t.picker.get() {
+                    p.lock().unwrap().clear_pending();
+                }
                 // is_removed is only observed when the get_peers stream next
                 // yields, which may be never — cancel the task outright.
                 self.untrack_in_dht(info_hash);
@@ -1196,6 +1210,9 @@ impl TorrentManager {
         let _ = state.limiter.set(self.limiter.clone());
         let _ = state.rates.set(self.rates.clone());
         let _ = state.completed_tx.set(self.completed_tx.clone());
+        if let Some(p) = state.picker.get() {
+            p.lock().unwrap().attach_mem(self.piece_mem.clone());
+        }
         if let Some(src) = self.blob_source.read().ok().and_then(|s| s.clone()) {
             let _ = state.blob_source.set(src);
         }
@@ -2086,6 +2103,9 @@ impl TorrentManager {
         // A new picker starts with no order: give it the torrent's, in case
         // the recheck finds pieces to fetch.
         if created {
+            if let Some(p) = t.picker.get() {
+                p.lock().unwrap().attach_mem(self.piece_mem.clone());
+            }
             t.apply_download_order();
         }
         // A recheck is somebody saying the underlying problem is dealt with.
@@ -2901,6 +2921,50 @@ mod manager_tests {
         mgr.add_torrent_bytes(&torrent_bytes(name, &["https://tracker.example/announce"]), "/tmp", true, true)
             .unwrap_or_else(|e| panic!("add {name}: {e}"))
             .0
+    }
+
+    /// ⭐ A torrent removed while it downloads keeps nothing in flight, even
+    /// while a session still holds its state: the pieces go with the removal,
+    /// the engine's counters say so, and the lingering session asks for no
+    /// more.
+    #[test]
+    fn a_torrent_removed_mid_download_keeps_no_piece_in_flight() {
+        let (mgr, root) = manager("remove-inflight");
+        let blob = torrent_bytes("delta", &["https://tracker.example/announce"]);
+        let ih = mgr
+            .add_torrent_bytes(&blob, &root.join("data").to_string_lossy(), true, false)
+            .unwrap()
+            .0;
+        let t = mgr.get(&ih).unwrap();
+        let picker = t.picker.get().expect("a download has a picker").clone();
+        picker.lock().unwrap().start_piece(0, 16384, 16384, 41);
+        picker.lock().unwrap().receive_block(0, 0, &[0u8; 8192]); // refused: wrong size
+        assert_eq!(mgr.piece_mem().pieces(), 1, "the engine counts the picker it adopted");
+        // A second torrent's piece, to show the removal takes only its own.
+        let other = mgr
+            .add_torrent_bytes(&torrent_bytes("echo", &["https://tracker.example/announce"]), &root.join("data").to_string_lossy(), true, false)
+            .unwrap()
+            .0;
+        mgr.get(&other).unwrap().picker.get().unwrap().lock().unwrap().start_piece(0, 16384, 16384, 42);
+        assert_eq!(mgr.piece_mem().pieces(), 2);
+
+        // `t` stands for a session still holding the torrent.
+        mgr.remove_torrent(&ih, true).expect("removed");
+        assert_eq!(picker.lock().unwrap().in_flight(), (0, 0));
+        assert_eq!((mgr.piece_mem().pieces(), mgr.piece_mem().bytes()), (1, 0), "only the other torrent's");
+
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.is_paused.store(false, Ordering::Relaxed);
+        let mut dl = crate::peer::download::DownloadState::new(t.clone(), Arc::new(DiskManager::new(4)));
+        dl.on_have_all();
+        dl.on_unchoke();
+        assert!(dl.get_requests().is_empty(), "a removed torrent asks for nothing");
+        drop(dl);
+        drop(t);
+        drop(picker);
+        mgr.remove_torrent(&other, true).expect("removed");
+        assert_eq!((mgr.piece_mem().pieces(), mgr.piece_mem().bytes()), (0, 0));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// ⭐ The header reads totals once a second per tab; they must be the same

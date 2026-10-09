@@ -1,15 +1,15 @@
 //! Download logic for a peer connection.
 //! Manages piece requesting, block assembly, and completion.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use bytes::Bytes;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 use crate::disk::DiskManager;
 use crate::torrent::meta::{TorrentState, TorrentStatus};
-use crate::torrent::piece_picker::PiecePicker;
+use crate::torrent::piece_picker::{self, Block, Owner};
 
 const BLOCK_SIZE: u32 = 16384;
 /// How many pieces in a row may fail to reach the disk before the torrent
@@ -21,6 +21,29 @@ const BLOCK_SIZE: u32 = 16384;
 /// upload.
 const DISK_FAILURES_BEFORE_ERROR: u32 = 3;
 const MAX_PIPELINE: usize = 32; // max in-flight requests (was 16; bumped — MAX_PIPELINE=32 doubles the in-flight window without overwhelming the picker mutex on multi-peer scenarios)
+/// How long a peer may hold a piece without sending a block of it before the
+/// piece is given back, blocks and all.
+///
+/// The idle timeout cannot do this job: any message keeps a session alive, so
+/// a peer that chokes us, or simply stops answering, while it goes on sending
+/// Haves kept its pieces for the life of the connection -- the accumulation
+/// measured in production (+192 MB in 22 minutes, nothing else moving).
+///
+/// 120 s, not less: a piece's first block can wait behind a full pipeline of
+/// the previous one (32 blocks, 512 KiB), so a peer delivering 4.3 KiB/s still
+/// gets each piece's first block in time. Not more: it is well inside the
+/// 300 s idle timeout, so it bites before a silent peer would be dropped
+/// anyway, and it bounds what a stalled torrent can hold to two minutes of
+/// whatever its peers sent.
+pub const PIECE_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A piece this peer is fetching.
+struct Started {
+    /// When the piece was started or last advanced by this peer.
+    since: Instant,
+    /// Blocks of it this peer has delivered.
+    got: u32,
+}
 
 pub struct DownloadState {
     torrent: Arc<TorrentState>,
@@ -28,7 +51,16 @@ pub struct DownloadState {
     peer_bitfield: Vec<u8>,
     pub am_interested: bool,
     pub peer_choking: bool,
-    pending_requests: usize,
+    /// This session's identity on the shared picker. Releases are by owner, so
+    /// letting go of a piece never takes it away from another peer racing for
+    /// it in endgame, or from whoever reserved it again since.
+    owner: Owner,
+    /// Requests on the wire, not yet answered. A choke voids them (BEP 3), so
+    /// they are kept rather than counted: after the unchoke they are the first
+    /// ones owed. Merely counting them lost them -- the piece then waited
+    /// forever for blocks nobody would ask for again, and its reservation
+    /// stayed for the life of the connection.
+    inflight: VecDeque<(u32, u32, u32)>,
     /// FIFO of blocks already picked from the picker (via start_piece) but not
     /// yet emitted on the wire. Emptied by get_requests as pipeline budget
     /// allows. Required because start_piece returns ALL blocks of a piece at
@@ -37,10 +69,12 @@ pub struct DownloadState {
     /// pieces never completed on large torrents (only tiny ones with <16
     /// blocks fit in one pipeline).
     pending_block_queue: VecDeque<(u32, u32, u32)>,
-    /// Pieces this peer has `start_piece`'d on the shared picker. Released
-    /// via `cancel_piece` on disconnect so abandoned in-flight pieces don't
-    /// stay stuck in `pending` forever (was the DL-stall-at-N% bug).
-    started_pieces: HashSet<u32>,
+    /// Pieces this peer has reserved on the shared picker. Each is given back
+    /// when the peer chokes us before sending any of it, rejects a request for
+    /// it, sends none of it for `PIECE_STALL_TIMEOUT`, or disconnects -- a
+    /// reservation nobody fills is a piece nobody else may fetch, and the
+    /// blocks it already holds are memory nothing else will free.
+    started: HashMap<u32, Started>,
 }
 
 impl DownloadState {
@@ -51,9 +85,10 @@ impl DownloadState {
             peer_bitfield: Vec::new(),
             am_interested: false,
             peer_choking: true,
-            pending_requests: 0,
+            owner: piece_picker::new_owner(),
+            inflight: VecDeque::new(),
             pending_block_queue: VecDeque::new(),
-            started_pieces: HashSet::new(),
+            started: HashMap::new(),
         }
     }
 
@@ -114,9 +149,91 @@ impl DownloadState {
         self.peer_choking = false;
     }
 
+    /// The peer stops serving us.
+    ///
+    /// Every request on the wire is void (BEP 3): they go back to the front of
+    /// the queue, to be asked again first after an unchoke. A fast-extension
+    /// peer may still answer some, and the block is then simply not asked
+    /// again. Pieces this peer has sent nothing of go back to the picker now,
+    /// for any other peer to take: a choke can last for the rest of the
+    /// connection. Pieces it has started delivering stay ours for
+    /// `PIECE_STALL_TIMEOUT`, so an unchoke soon after loses nothing.
     pub fn on_choke(&mut self) {
         self.peer_choking = true;
-        self.pending_requests = 0;
+        while let Some(r) = self.inflight.pop_back() {
+            self.pending_block_queue.push_front(r);
+        }
+        let untouched: Vec<u32> = self
+            .started
+            .iter()
+            .filter(|(_, s)| s.got == 0)
+            .map(|(&p, _)| p)
+            .collect();
+        self.release(&untouched);
+    }
+
+    /// BEP 6: the peer will not send this block. The piece goes back to the
+    /// picker -- asking the same peer again could only be refused again.
+    /// A Reject for a request no longer on the wire (the ones a choke already
+    /// voided) changes nothing.
+    pub fn on_reject(&mut self, index: u32, begin: u32, length: u32) {
+        let Some(i) = self.inflight.iter().position(|r| *r == (index, begin, length)) else {
+            return;
+        };
+        self.inflight.remove(i);
+        self.release(&[index]);
+    }
+
+    /// Is this peer holding any piece? Lets the session skip the clock read
+    /// for the stall check on the many connections that fetch nothing.
+    pub fn has_started(&self) -> bool {
+        !self.started.is_empty()
+    }
+
+    /// Give back every piece this peer has not advanced for
+    /// `PIECE_STALL_TIMEOUT`, received blocks included. Returns the requests
+    /// still on the wire for them, for the caller to Cancel; a block that
+    /// arrives anyway finds no piece and is dropped.
+    ///
+    /// Runs whatever the torrent's state: a paused, errored or rechecking
+    /// torrent requests nothing new, and this is what lets its pieces go.
+    pub fn release_stalled(&mut self, now: Instant) -> Vec<(u32, u32, u32)> {
+        let stalled: Vec<u32> = self
+            .started
+            .iter()
+            .filter(|(_, s)| now.saturating_duration_since(s.since) >= PIECE_STALL_TIMEOUT)
+            .map(|(&p, _)| p)
+            .collect();
+        if stalled.is_empty() {
+            return Vec::new();
+        }
+        let cancels = self
+            .inflight
+            .iter()
+            .filter(|r| stalled.contains(&r.0))
+            .copied()
+            .collect();
+        self.release(&stalled);
+        cancels
+    }
+
+    /// Let go of these pieces: off our books, out of the queue and the
+    /// pipeline, and released on the picker under our owner.
+    fn release(&mut self, pieces: &[u32]) {
+        if pieces.is_empty() {
+            return;
+        }
+        for p in pieces {
+            self.started.remove(p);
+        }
+        self.pending_block_queue.retain(|r| !pieces.contains(&r.0));
+        self.inflight.retain(|r| !pieces.contains(&r.0));
+        if let Some(picker) = self.torrent.picker.get() {
+            let mut pk = picker.lock().unwrap();
+            for &p in pieces {
+                pk.release(p, self.owner);
+            }
+        }
     }
 
     /// Check if we should send Interested to this peer.
@@ -159,7 +276,14 @@ impl DownloadState {
         // went on downloading at full speed while the interface said stopped.
         // Blocks already in flight still arrive; the pipeline is bounded, so
         // that is a handful of them and then silence.
-        if self.torrent.is_paused.load(Ordering::Relaxed) {
+        //
+        // A removed torrent neither: its blocks are dropped on arrival, so
+        // every piece started for it was a reservation that could never
+        // complete, and the next one was started as soon as the pipeline
+        // drained.
+        if self.torrent.is_paused.load(Ordering::Relaxed)
+            || self.torrent.is_removed.load(Ordering::Relaxed)
+        {
             return Vec::new();
         }
         if !self.is_downloading() || self.peer_choking {
@@ -173,16 +297,23 @@ impl DownloadState {
 
         let mut requests = Vec::new();
         let mut picker = picker.lock().unwrap();
+        let now = Instant::now();
 
-        while self.pending_requests < MAX_PIPELINE {
+        while self.inflight.len() < MAX_PIPELINE {
             // Drain queue first.
             if let Some(req) = self.pending_block_queue.pop_front() {
+                // Not ours to ask for any more: the block came in meanwhile
+                // (from another peer in endgame, or from this one after a
+                // choke voided the request), or the piece left our hands.
+                if !picker.wants_block(req.0, req.1, self.owner) {
+                    continue;
+                }
                 if !admit(req.2) {
                     self.pending_block_queue.push_front(req);
                     break;
                 }
                 requests.push(req);
-                self.pending_requests += 1;
+                self.inflight.push_back(req);
                 continue;
             }
             // Queue empty — pick the next piece.
@@ -194,18 +325,23 @@ impl DownloadState {
                 // asked of the same peer twice, and without this guard the
                 // loop below refilled the whole pipeline with copies of the
                 // block it had just requested.
-                //
-                // Worse than wasted requests: `start_piece` inserts, so a
-                // second start on a piece already in flight overwrote its
-                // `blocks_received` and threw away everything received for it.
-                Some(p) if self.started_pieces.contains(&p) => break,
+                Some(p) if self.started.contains_key(&p) => {
+                    if picker.holds(p, self.owner) {
+                        break;
+                    }
+                    // Our record outlived the reservation: another peer
+                    // completed the piece and it failed its hash, say. Start
+                    // it afresh rather than refuse it for good.
+                    self.started.remove(&p);
+                    p
+                }
                 Some(p) => p,
                 None => break,
             };
             let piece_size = self.torrent.meta.piece_size(piece);
-            let piece_requests = picker.start_piece(piece, piece_size, BLOCK_SIZE);
+            let piece_requests = picker.start_piece(piece, piece_size, BLOCK_SIZE, self.owner);
             self.pending_block_queue.extend(piece_requests);
-            self.started_pieces.insert(piece);
+            self.started.insert(piece, Started { since: now, got: 0 });
         }
 
         requests
@@ -213,7 +349,9 @@ impl DownloadState {
 
     /// Process received Piece data. Returns Some(piece_index) if a piece completed.
     pub async fn on_piece(&mut self, index: u32, begin: u32, data: &[u8]) -> Option<u32> {
-        self.pending_requests = self.pending_requests.saturating_sub(1);
+        if let Some(i) = self.inflight.iter().position(|r| r.0 == index && r.1 == begin) {
+            self.inflight.remove(i);
+        }
 
         // Skip if torrent was removed mid-flight — otherwise write_piece
         // (create=true) would recreate the files we just deleted.
@@ -226,24 +364,27 @@ impl DownloadState {
             None => return None,
         };
 
-        let complete = {
+        // Stored and, if it was the last block, taken in the same lock: two
+        // peers finishing the same endgame piece cannot both hand it over.
+        let (outcome, piece_data) = {
             let mut p = picker.lock().unwrap();
-            p.receive_block(index, begin, data)
+            let outcome = p.receive_block(index, begin, data);
+            let piece_data = if outcome == Block::Complete { p.take_piece_data(index) } else { None };
+            (outcome, piece_data)
         };
+        if matches!(outcome, Block::Stored | Block::Complete | Block::Duplicate) {
+            if let Some(s) = self.started.get_mut(&index) {
+                s.since = Instant::now();
+                s.got += 1;
+            }
+        }
 
-        if complete {
-            let piece_data = {
-                let mut p = picker.lock().unwrap();
-                p.take_piece_data(index)
-            };
-
-            if let Some(piece_data) = piece_data {
-                // Off this peer's books either way: commit_piece hands the
-                // piece back to the picker itself when it fails to verify.
-                self.started_pieces.remove(&index);
-                if commit_piece(&self.torrent, &self.disk, index, piece_data).await {
-                    return Some(index);
-                }
+        if let Some(piece_data) = piece_data {
+            // Off this peer's books either way: the picker no longer holds it,
+            // and blocks of it still queued are skipped by `wants_block`.
+            self.started.remove(&index);
+            if commit_piece(&self.torrent, &self.disk, index, piece_data).await {
+                return Some(index);
             }
         }
         None
@@ -251,26 +392,27 @@ impl DownloadState {
 
     /// Cleanup when peer disconnects. Releases pieces this peer had started
     /// but not finished, so other peers can pick them up. Without this, any
-    /// piece in `started_pieces` leaks into the picker's `pending` map and
-    /// is never re-picked — the torrent stalls near completion.
+    /// piece in `started` leaks into the picker's `pending` map and is never
+    /// re-picked — the torrent stalls near completion.
     ///
     /// Called explicitly at the end of a session, and again by `Drop` for every
-    /// other way out. Draining `started_pieces` makes the second call a no-op.
+    /// other way out. Draining `started` makes the second call a no-op.
     pub fn on_disconnect(&mut self) {
+        let pieces: Vec<u32> = self.started.keys().copied().collect();
+        self.release(&pieces);
+        self.pending_block_queue.clear();
+        self.inflight.clear();
         if let Some(picker) = self.torrent.picker.get() {
             let mut p = picker.lock().unwrap();
             if !self.peer_bitfield.is_empty() {
                 p.remove_bitfield(&self.peer_bitfield);
                 // Idempotence, and it is not optional: this runs once from
-                // `session::run` and once more from `Drop`. `started_pieces`
-                // is drained so the piece half replays harmlessly, but
+                // `session::run` and once more from `Drop`. `started` is
+                // drained so the piece half replays harmlessly, but
                 // `remove_bitfield` DECREMENTS availability counters -- running
                 // it twice would understate how rare every piece this peer held
                 // is, and rarest-first picks on those counters.
                 self.peer_bitfield.clear();
-            }
-            for piece in self.started_pieces.drain() {
-                p.cancel_piece(piece);
             }
         }
     }
@@ -280,10 +422,10 @@ impl DownloadState {
 ///
 /// `on_disconnect` is reached from exactly one place -- the end of
 /// `session::run` -- so any other way out kept every piece this peer had
-/// started in the picker's `pending` map, each holding a full piece-sized
-/// buffer that nothing would ever free or re-pick. Early returns, a panic in
-/// the session task, and task cancellation at an await point all take that
-/// path, and an engine accepting 76 inbound connections a second takes it
+/// started in the picker's `pending` map, each holding whatever had been
+/// received for it, that nothing would ever free or re-pick. Early returns, a
+/// panic in the session task, and task cancellation at an await point all take
+/// that path, and an engine accepting 76 inbound connections a second takes it
 /// often.
 ///
 /// Measured on production 2026-09-08, two heap profiles 26 minutes apart:
@@ -310,7 +452,8 @@ impl Drop for DownloadState {
 /// complete torrent had its bitfield erased on the following sweep.
 ///
 /// Returns true when the piece verified and is now owned. On failure the piece
-/// is released back to the picker so another source can retry it.
+/// is simply missing again -- `take_piece_data` already took it out of the
+/// picker -- so any source can fetch it anew.
 pub async fn commit_piece(
     torrent: &Arc<TorrentState>,
     disk: &Arc<DiskManager>,
@@ -374,8 +517,9 @@ pub async fn commit_piece(
         Ok(false) => {
             // The peer lied about its data. Asking somebody else is exactly
             // right, and it says nothing about the disk.
+            // Nothing to release: the piece left the picker when it was taken
+            // for this write, and is picked again like any missing piece.
             tracing::warn!("[download] piece {} SHA1 mismatch, re-requesting", index);
-            picker.lock().unwrap().cancel_piece(index);
             false
         }
         Err(e) => {
@@ -384,9 +528,8 @@ pub async fn commit_piece(
             // swarm again -- so this downloaded the same piece forever, at full
             // speed, making no progress and showing none.
             tracing::warn!("[download] piece {} write failed: {}", index, e);
-            // Released either way: the buffer is a whole piece, and nothing
-            // else would free it.
-            picker.lock().unwrap().cancel_piece(index);
+            // The piece left the picker when it was taken for this write: the
+            // buffer goes with this call, and the piece is missing again.
 
             let failures = torrent.disk_write_failures.fetch_add(1, Ordering::Relaxed) + 1;
             if failures >= DISK_FAILURES_BEFORE_ERROR {
@@ -817,5 +960,221 @@ mod disk_failure_tests {
             "counting starts again from the last success"
         );
         assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Downloading as u8);
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use crate::torrent::meta::TorrentMeta;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    const PIECE: u32 = 4 * BLOCK_SIZE; // four blocks a piece
+
+    fn torrent(num_pieces: u32, piece_length: u32) -> Arc<TorrentState> {
+        let t = Arc::new(TorrentState::new(
+            TorrentMeta {
+                info_hash: [7u8; 20],
+                name: "t".into(),
+                num_pieces,
+                piece_length,
+                total_size: num_pieces as u64 * piece_length as u64,
+                files: Vec::new(),
+                trackers: Vec::new(),
+                url_list: Vec::new(),
+                private: false,
+                multi_file: false,
+                info_dict_len: 0,
+                v2: false,
+            },
+            PathBuf::from("/tmp"),
+            false,
+        ));
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t
+    }
+
+    fn peer(t: &Arc<TorrentState>) -> DownloadState {
+        let mut dl = DownloadState::new(t.clone(), Arc::new(DiskManager::new(4)));
+        dl.on_have_all();
+        dl.on_unchoke();
+        dl
+    }
+
+    fn in_flight(t: &TorrentState) -> (usize, u64) {
+        t.picker.get().unwrap().lock().unwrap().in_flight()
+    }
+
+    fn holds(t: &TorrentState, piece: u32, dl: &DownloadState) -> bool {
+        t.picker.get().unwrap().lock().unwrap().holds(piece, dl.owner)
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    fn block() -> Vec<u8> {
+        vec![0xA5; BLOCK_SIZE as usize]
+    }
+
+    /// ⭐ A choke gives back the pieces this peer sent nothing of, keeps the
+    /// one it was delivering, and does not touch another peer's.
+    #[test]
+    fn a_choke_frees_the_untouched_pieces_and_only_this_peers() {
+        let t = torrent(64, PIECE);
+        let mut a = peer(&t);
+        let mut b = peer(&t);
+        let ra = a.get_requests();
+        assert_eq!(ra.len(), MAX_PIPELINE);
+        let a_pieces: HashSet<u32> = ra.iter().map(|r| r.0).collect();
+        assert_eq!(a_pieces.len(), 8, "32 blocks of four-block pieces");
+        let rb = b.get_requests();
+        let b_pieces: HashSet<u32> = rb.iter().map(|r| r.0).collect();
+        assert!(a_pieces.is_disjoint(&b_pieces));
+        assert_eq!(in_flight(&t), (16, 0), "sixteen reserved, not a byte held");
+
+        let first = ra[0].0;
+        rt().block_on(a.on_piece(first, 0, &block()));
+        assert_eq!(in_flight(&t), (16, BLOCK_SIZE as u64), "one block held");
+
+        a.on_choke();
+        assert_eq!(in_flight(&t), (9, BLOCK_SIZE as u64), "A's seven untouched pieces went back");
+        assert!(holds(&t, first, &a), "the piece A was delivering stays A's");
+        for p in &b_pieces {
+            assert!(holds(&t, *p, &b), "B's piece {p} is B's business");
+        }
+
+        // After the unchoke the voided requests of the kept piece go first,
+        // and the block already in is not asked again.
+        a.on_unchoke();
+        let again = a.get_requests();
+        assert_eq!(
+            &again[..3],
+            &[(first, BLOCK_SIZE, BLOCK_SIZE), (first, 2 * BLOCK_SIZE, BLOCK_SIZE), (first, 3 * BLOCK_SIZE, BLOCK_SIZE)],
+            "the rest of the piece, first: {again:?}"
+        );
+        assert!(!again.contains(&(first, 0, BLOCK_SIZE)));
+    }
+
+    /// ⭐ The production leak: a peer that stays connected and stops sending
+    /// kept its pieces for the life of the connection. Past the stall delay
+    /// they go back, received blocks included; a block that turns up later
+    /// is dropped and costs nothing.
+    #[test]
+    fn a_piece_with_no_new_block_for_the_delay_is_given_back() {
+        let t = torrent(64, PIECE);
+        let mut a = peer(&t);
+        let reqs = a.get_requests();
+        let p = reqs[0].0;
+        rt().block_on(a.on_piece(p, 0, &block()));
+        let now = Instant::now();
+        assert!(a.release_stalled(now + PIECE_STALL_TIMEOUT / 2).is_empty(), "not yet");
+        assert_eq!(in_flight(&t).0, 8);
+
+        let cancels = a.release_stalled(now + PIECE_STALL_TIMEOUT + Duration::from_secs(1));
+        assert_eq!(cancels.len(), MAX_PIPELINE - 1, "every request still on the wire is withdrawn");
+        assert_eq!(in_flight(&t), (0, 0), "the partial piece went too, blocks and all");
+        assert!(!a.has_started());
+
+        // The late block: no panic, no piece, no byte held.
+        assert_eq!(rt().block_on(a.on_piece(p, BLOCK_SIZE, &block())), None);
+        assert_eq!(in_flight(&t), (0, 0));
+        // And the peer can start afresh.
+        assert!(!a.get_requests().is_empty());
+    }
+
+    /// A paused torrent asks for nothing new; the stall delay is what lets
+    /// the pieces it was fetching go.
+    #[test]
+    fn a_paused_torrents_pieces_still_go_after_the_delay() {
+        let t = torrent(64, PIECE);
+        let mut a = peer(&t);
+        a.get_requests();
+        t.is_paused.store(true, Ordering::Relaxed);
+        a.release_stalled(Instant::now() + PIECE_STALL_TIMEOUT + Duration::from_secs(1));
+        assert_eq!(in_flight(&t), (0, 0));
+    }
+
+    /// BEP 6: a rejected request gives the piece back; a Reject for a request
+    /// that is not on the wire changes nothing.
+    #[test]
+    fn a_reject_gives_the_piece_back() {
+        let t = torrent(64, PIECE);
+        let mut a = peer(&t);
+        let reqs = a.get_requests();
+        a.on_reject(999, 0, BLOCK_SIZE);
+        assert_eq!(in_flight(&t).0, 8);
+        let (p, begin, len) = reqs[1];
+        a.on_reject(p, begin, len);
+        assert_eq!(in_flight(&t).0, 7);
+        assert!(!holds(&t, p, &a));
+        // The rejects a fast peer sends after a choke are for requests the
+        // choke already voided: they do not cost the piece being delivered.
+        let q = reqs[8].0;
+        rt().block_on(a.on_piece(q, 0, &block()));
+        a.on_choke();
+        a.on_reject(q, BLOCK_SIZE, BLOCK_SIZE);
+        assert!(holds(&t, q, &a));
+    }
+
+    /// ⭐ Endgame: two peers on the same last piece. Each block is stored once,
+    /// the piece is handed to the disk once, and nothing is left behind.
+    #[test]
+    fn endgame_two_peers_one_piece_one_write_nothing_left() {
+        // A one-piece torrent is always in endgame. No piece hashes: the write
+        // fails, which counts it -- the count IS the number of writes.
+        let t = torrent(1, 2 * BLOCK_SIZE);
+        let mut a = peer(&t);
+        let mut b = peer(&t);
+        assert_eq!(a.get_requests().len(), 2);
+        assert_eq!(b.get_requests().len(), 2, "B joins the same piece");
+        assert_eq!(in_flight(&t).0, 1, "one piece, two owners");
+        let rt = rt();
+        rt.block_on(a.on_piece(0, 0, &block()));
+        rt.block_on(b.on_piece(0, 0, &block())); // duplicate
+        assert_eq!(in_flight(&t), (1, BLOCK_SIZE as u64), "a duplicate is not stored twice");
+        rt.block_on(b.on_piece(0, BLOCK_SIZE, &block()));
+        rt.block_on(a.on_piece(0, BLOCK_SIZE, &block()));
+        assert_eq!(t.disk_write_failures.load(Ordering::Relaxed), 1, "one write, not two");
+        assert_eq!(in_flight(&t), (0, 0));
+        drop(a);
+        drop(b);
+        assert_eq!(in_flight(&t), (0, 0));
+    }
+
+    /// Disconnect and drop free what a peer held, whatever it had received.
+    #[test]
+    fn disconnect_and_drop_always_free() {
+        let t = torrent(64, PIECE);
+        let mut a = peer(&t);
+        let mut b = peer(&t);
+        let ra = a.get_requests();
+        b.get_requests();
+        rt().block_on(a.on_piece(ra[0].0, 0, &block()));
+        a.on_disconnect();
+        a.on_disconnect();
+        assert_eq!(in_flight(&t), (8, 0), "only B's eight left");
+        drop(b);
+        assert_eq!(in_flight(&t), (0, 0));
+    }
+
+    /// The memory a piece costs follows the blocks received, on the engine's
+    /// counters too.
+    #[test]
+    fn the_engine_counters_follow_the_blocks() {
+        let t = torrent(64, PIECE);
+        let mem = Arc::new(crate::torrent::piece_picker::PieceMem::default());
+        t.picker.get().unwrap().lock().unwrap().attach_mem(mem.clone());
+        let mut a = peer(&t);
+        let reqs = a.get_requests();
+        assert_eq!((mem.pieces(), mem.bytes()), (8, 0));
+        let rt = rt();
+        for r in reqs.iter().take(3) {
+            rt.block_on(a.on_piece(r.0, r.1, &block()));
+        }
+        assert_eq!(mem.bytes(), 3 * BLOCK_SIZE as u64);
+        drop(a);
+        assert_eq!((mem.pieces(), mem.bytes()), (0, 0));
     }
 }
