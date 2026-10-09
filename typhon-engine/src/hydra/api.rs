@@ -8257,14 +8257,17 @@ async fn qbit_transfer_info(
     let cfg = state.cfg();
     let _ = cfg;
 
-    let (up, down) = state.engines.session_totals();
+    // qBittorrent's `*_info_data` is "this session": bytes moved since the
+    // start. `session_totals` is a sum of lifetime counters over the torrents
+    // loaded now, and fell by a torrent's whole history at each removal.
+    let (up, down) = state.engines.moved_totals();
     // The engines' own rates, summed: 4.3 answered 0 for both speeds.
     let (up_speed, down_speed) = state.engines.engines().iter().fold((0u64, 0u64), |acc, e| {
         (acc.0 + e.manager.upload_rate.get(), acc.1 + e.manager.download_rate.get())
     });
     Json(serde_json::json!({
         "connection_status": "connected",
-        "dht_nodes": 0,
+        "dht_nodes": state.engines.dht_nodes(),
         "dl_info_data": down,
         "dl_info_speed": down_speed,
         // The client-wide caps, bytes/s, 0 = none. Were constant zeroes.
@@ -10661,6 +10664,20 @@ async fn qbit_torrents_download_limit(State(state): State<AppState>, RawQuery(qu
 
 /// Cap every local copy of each torrent, as the shim's other per-torrent
 /// verbs do: a qBit client names a hash, never an engine.
+/// What an add asked of a torrent once it exists: speed caps (bytes/s) and
+/// download order. Shared by the `.torrent` add and a magnet's resolution.
+pub(crate) fn apply_add_options(state: &AppState, hash: &str, up: Option<u64>, down: Option<u64>, sequential: bool, first_last: bool) {
+    if up.is_some() || down.is_some() {
+        shim_cap_torrents(state, &[hash.to_string()], up, down);
+    }
+    if sequential || first_last {
+        edit_download_order(state, &torrent_copies(state, hash, ""), |o| {
+            o.sequential |= sequential;
+            o.first_last |= first_last;
+        });
+    }
+}
+
 fn shim_cap_torrents(state: &AppState, hashes: &[String], up: Option<u64>, down: Option<u64>) {
     for hash in hashes {
         for (engine, t) in torrent_copies(state, hash, "") {
@@ -11952,8 +11969,17 @@ async fn qbit_torrent_add(
             let (st, u2) = (state.clone(), u.clone());
             let (c, sp, tg) = (category.clone(), save_path.clone(), tags.clone());
             let shared = share_at_add.clone();
+            // Kept with the request: applied once the metadata is in.
+            let opts = crate::magnets::AddOptions {
+                up_limit,
+                dl_limit,
+                sequential,
+                first_last,
+                subfolder,
+                no_subfolder,
+            };
             tokio::task::spawn_blocking(move || {
-                crate::magnets::request_with(&st, &u2, &c, &sp, &tg, paused, seed_mode, "").map(|hash| {
+                crate::magnets::request_with_options(&st, &u2, &c, &sp, &tg, paused, seed_mode, "", &opts).map(|hash| {
                     // Keyed by hash, so a magnet's limits wait for it in the
                     // store and apply once it has resolved.
                     shared(&st, hash);
@@ -12004,22 +12030,12 @@ async fn qbit_torrent_add(
             }
         };
         match add_torrent_bytes(&state, bytes, &category, &save_path, &tags, paused, seed_mode, "") {
-            // upLimit / dlLimit land on the torrent the moment it exists, and
-            // persist with it. A magnet has no torrent yet to cap: its caps
-            // are not kept (set them once it has resolved).
+            // upLimit / dlLimit and the download order land on the torrent
+            // the moment it exists, and persist with it. A magnet keeps them
+            // with its request until then (`magnets::AddOptions`).
             Ok((hash, _)) => {
                 share_at_add(&state, hash.clone());
-                if up_limit.is_some() || dl_limit.is_some() {
-                    shim_cap_torrents(&state, std::slice::from_ref(&hash), up_limit, dl_limit);
-                }
-                // Same terms as the caps: on the torrent once it exists, so
-                // a magnet's order is not kept.
-                if sequential || first_last {
-                    edit_download_order(&state, &torrent_copies(&state, &hash, ""), |o| {
-                        o.sequential |= sequential;
-                        o.first_last |= first_last;
-                    });
-                }
+                apply_add_options(&state, &hash, up_limit, dl_limit, sequential, first_last);
             }
             // "already added" is not a failure to a client that retries a
             // release it has seen before; qBit answers Ok. for it too.
@@ -14654,7 +14670,8 @@ async fn qbit_sync_maindata(State(state): State<AppState>, RawQuery(query): RawQ
         categories.insert(name.clone(), serde_json::json!({"name": name, "savePath": c.save_path}));
     }
     let tags = state.store.lock().unwrap().registered_tags().unwrap_or_default();
-    let (up, down) = state.engines.session_totals();
+    // This session, as `transfer/info`.
+    let (up, down) = state.engines.moved_totals();
     let (up_speed, down_speed) = state.engines.engines().iter().fold((0u64, 0u64), |acc, e| {
         (acc.0 + e.manager.upload_rate.get(), acc.1 + e.manager.download_rate.get())
     });
@@ -14668,7 +14685,7 @@ async fn qbit_sync_maindata(State(state): State<AppState>, RawQuery(query): RawQ
         "trackers": {},
         "server_state": {
             "connection_status": "connected",
-            "dht_nodes": 0,
+            "dht_nodes": state.engines.dht_nodes(),
             "dl_info_data": down,
             "dl_info_speed": down_speed,
             "dl_rate_limit": rates.down.rate(),

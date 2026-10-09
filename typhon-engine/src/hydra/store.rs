@@ -143,6 +143,9 @@ pub struct MagnetRow {
     /// Trust the data already at the save path once the metadata is in
     /// (qBit's skip_checking). 4.3 dropped it for magnets.
     pub seed_mode: bool,
+    /// What the add asked for beyond the columns above, to apply once the
+    /// torrent exists: `magnets::AddOptions` as JSON, empty for none.
+    pub options: String,
     pub added_at: i64,
     pub attempts: i64,
     /// Not before this time (seconds) is the next resolution started.
@@ -843,7 +846,8 @@ impl Store {
                  next_try INTEGER NOT NULL DEFAULT 0,
                  state TEXT NOT NULL DEFAULT 'resolving',
                  error TEXT NOT NULL DEFAULT '',
-                 seed_mode INTEGER NOT NULL DEFAULT 0);
+                 seed_mode INTEGER NOT NULL DEFAULT 0,
+                 options TEXT NOT NULL DEFAULT '');
              CREATE TABLE IF NOT EXISTS workflow_events (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  at INTEGER NOT NULL,
@@ -859,6 +863,15 @@ impl Store {
         if !has_seed_mode {
             self.conn
                 .execute_batch("ALTER TABLE magnets ADD COLUMN seed_mode INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        // Nor does a 4.4.0-rc store have its options.
+        let has_options = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('magnets') WHERE name = 'options'")?
+            .exists([])?;
+        if !has_options {
+            self.conn
+                .execute_batch("ALTER TABLE magnets ADD COLUMN options TEXT NOT NULL DEFAULT '';")?;
         }
         Ok(())
     }
@@ -1001,12 +1014,12 @@ impl Store {
         self.conn.execute(
             "INSERT OR REPLACE INTO magnets
                  (info_hash, uri, name, engine, category, save_path, tags, paused,
-                  added_at, attempts, next_try, state, error, seed_mode)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                  added_at, attempts, next_try, state, error, seed_mode, options)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             rusqlite::params![
                 m.info_hash, m.uri, m.name, m.engine, m.category, m.save_path, m.tags,
                 i64::from(m.paused), m.added_at, m.attempts, m.next_try, m.state, m.error,
-                i64::from(m.seed_mode)
+                i64::from(m.seed_mode), m.options
             ],
         )?;
         Ok(())
@@ -1015,7 +1028,7 @@ impl Store {
     pub fn magnets(&self) -> anyhow::Result<Vec<MagnetRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT info_hash, uri, name, engine, category, save_path, tags, paused,
-                    added_at, attempts, next_try, state, error, seed_mode
+                    added_at, attempts, next_try, state, error, seed_mode, options
              FROM magnets ORDER BY added_at",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1034,6 +1047,7 @@ impl Store {
                 state: r.get(11)?,
                 error: r.get(12)?,
                 seed_mode: r.get::<_, i64>(13)? != 0,
+                options: r.get(14)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())

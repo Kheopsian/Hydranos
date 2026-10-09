@@ -166,6 +166,11 @@ impl DhtSession {
         self.dht.clone()
     }
 
+    /// Nodes in this engine's routing table: qBittorrent's `dht_nodes`.
+    pub fn node_count(&self) -> usize {
+        self.dht.stats().routing_table_size
+    }
+
     /// Number of torrents currently streaming peers from the DHT.
     pub fn tracked_count(&self) -> usize {
         self.tracked.len()
