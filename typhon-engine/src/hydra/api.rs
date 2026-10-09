@@ -1837,10 +1837,15 @@ async fn get_vpn_speedtest_latest(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    // With no measurement stored yet the answer is the flag alone. Once the
-    // bench database is ported, its row is merged in and `enabled` is added on
-    // top of it -- the Go side overwrites the key, so the flag always wins.
-    Json(serde_json::json!({"enabled": cfg.vpn_speedtest.enabled})).into_response()
+    // The newest test with the switch on top: no test yet = the switch alone.
+    let mut out = state
+        .bench
+        .as_ref()
+        .and_then(|b| b.lock().unwrap_or_else(|e| e.into_inner()).latest_speedtest())
+        .and_then(|m| serde_json::to_value(m).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    out["enabled"] = cfg.vpn_speedtest.enabled.into();
+    Json(out).into_response()
 }
 
 async fn get_vpn_speedtest_history(
@@ -1850,8 +1855,18 @@ async fn get_vpn_speedtest_history(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    Json(serde_json::Value::Array(vec![])).into_response()
+    let hours = query_param(&query, "hours").and_then(|v| v.parse::<f64>().ok()).unwrap_or(168.0).max(0.0);
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+        - hours * 3600.0;
+    let rows = state
+        .bench
+        .as_ref()
+        .and_then(|b| b.lock().unwrap_or_else(|e| e.into_inner()).speedtests_since(since).ok())
+        .unwrap_or_default();
+    Json(rows).into_response()
 }
 
 /// Is a newer Hydra published?
@@ -6267,21 +6282,48 @@ async fn get_bench_compare(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-
-    let empty = || serde_json::json!({"avg": 0, "count": 0, "max": 0, "p95": 0});
+    // Two periods from three instants: P1 = [start, mid), P2 = [mid, end).
+    let f = |k: &str| query_param(&query, k).and_then(|v| v.parse::<f64>().ok());
+    let (Some(start), Some(mid), Some(end)) = (f("start"), f("mid"), f("end")) else {
+        return bad_request("need start, mid and end (unix seconds)");
+    };
+    if !(start < mid && mid < end) {
+        return bad_request("need start < mid < end");
+    }
+    let Some(bench) = state.bench.as_ref() else {
+        return Json(serde_json::json!({"metrics": null, "p1_count": 0, "p2_count": 0})).into_response();
+    };
+    let ((n1, s1), (n2, s2)) = {
+        let db = bench.lock().unwrap_or_else(|e| e.into_inner());
+        match (db.period_stats(start, mid, BENCH_METRICS), db.period_stats(mid, end, BENCH_METRICS)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!("bench compare query failed: {e}");
+                return Json(serde_json::json!({"metrics": null, "p1_count": 0, "p2_count": 0})).into_response();
+            }
+        }
+    };
+    // No sample on either side: nothing to compare, which the screen says.
+    if n1 == 0 || n2 == 0 {
+        return Json(serde_json::json!({"metrics": null, "p1_count": n1, "p2_count": n2})).into_response();
+    }
+    let side = |n: usize, st: &crate::benchdb::PeriodStat| {
+        serde_json::json!({"avg": st.avg, "count": n, "max": st.max, "p95": st.p95})
+    };
     let mut metrics = serde_json::Map::new();
-    for name in BENCH_METRICS {
+    for (i, name) in BENCH_METRICS.iter().enumerate() {
+        let (a, b) = (&s1[i], &s2[i]);
+        // Relative to P1; a metric at 0 in P1 has no relative change.
+        let delta = if a.avg != 0.0 { (b.avg - a.avg) / a.avg.abs() * 100.0 } else { 0.0 };
         metrics.insert(
             (*name).to_string(),
-            serde_json::json!({"delta_avg_pct": 0, "p1": empty(), "p2": empty()}),
+            serde_json::json!({"delta_avg_pct": delta, "p1": side(n1, a), "p2": side(n2, b)}),
         );
     }
-
     Json(serde_json::json!({
         "metrics": serde_json::Value::Object(metrics),
-        "p1_count": 0,
-        "p2_count": 0,
+        "p1_count": n1,
+        "p2_count": n2,
     }))
     .into_response()
 }
@@ -11266,20 +11308,18 @@ async fn vpn_speedtest_run(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-
-    // Disabled counts as unconfigured: 3.x answers the same refusal either
-    // way, and a speedtest that ran while switched off would send traffic the
-    // operator turned off on purpose.
-    if !cfg.vpn_speedtest.enabled || cfg.vpn_speedtest.iperf3_server.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":
-                "iperf3_server not configured in [vpn_speedtest]"})),
-        )
-            .into_response();
+    // Runs while the request waits (2 x duration_secs): the screen prints
+    // the result it gets back. Disabled counts as unconfigured.
+    match crate::speedtest::run(&state).await {
+        Ok(m) => Json(m).into_response(),
+        Err(e) if e.contains("not configured") || e.contains("SOCKS5") => {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response()
+        }
+        Err(e) if e.contains("already running") => {
+            (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response(),
     }
-    Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -15189,15 +15229,21 @@ async fn get_race_events(
 /// Recorded snapshots of one race torrent. null when none were taken.
 async fn race_snapshots(
     State(state): State<AppState>,
-    Path(_info_hash): Path<String>,
+    Path(info_hash): Path<String>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-    let _ = cfg;
-    Json(serde_json::Value::Null).into_response()
+    // The snapshots the timeline draws (`/api/race/timeline/:hash`), alone.
+    let snaps = state.bench.as_ref().and_then(|bench| {
+        let db = bench.lock().unwrap_or_else(|e| e.into_inner());
+        db.snapshots_for(&info_hash.to_lowercase()).ok()
+    });
+    match snaps {
+        Some(v) if !v.is_empty() => Json(v).into_response(),
+        _ => Json(serde_json::Value::Null).into_response(),
+    }
 }
 
 

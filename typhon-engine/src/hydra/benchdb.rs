@@ -85,6 +85,10 @@ CREATE INDEX IF NOT EXISTS idx_tracker_samples_ts ON tracker_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_tracker_samples_trk_ts ON tracker_samples(tracker, ts);
 DROP INDEX IF EXISTS idx_tracker_samples_trk;
 CREATE TABLE IF NOT EXISTS bench_meta (key TEXT PRIMARY KEY, value REAL);
+CREATE TABLE IF NOT EXISTS vpn_speedtest (
+    ts REAL NOT NULL, ul_mbps REAL DEFAULT 0, dl_mbps REAL DEFAULT 0,
+    ul_torrent_mbps REAL DEFAULT 0, dl_torrent_mbps REAL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_vpn_speedtest_ts ON vpn_speedtest(ts);
 ";
 
 /// Tracker samples younger than this stay as recorded; older ones are folded
@@ -389,6 +393,14 @@ impl RaceRecorder {
     }
 }
 
+/// One metric over one period of `period_stats`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PeriodStat {
+    pub avg: f64,
+    pub max: f64,
+    pub p95: f64,
+}
+
 /// A race torrent as it stood at one instant.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RaceSnapshot {
@@ -550,6 +562,88 @@ impl BenchDb {
             values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
         self.conn.execute(&sql, params.as_slice())?;
         Ok(())
+    }
+
+    /// Average, maximum and 95th percentile of each of `cols` over the
+    /// samples between two instants, and how many samples there were. One
+    /// pass over the window: the comparison of two periods reads each row once.
+    pub fn period_stats(&self, start: f64, end: f64, cols: &[&str]) -> anyhow::Result<(usize, Vec<PeriodStat>)> {
+        let known: Vec<&str> = BENCH_COLUMNS.split(',').map(|c| c.trim()).collect();
+        if let Some(c) = cols.iter().find(|c| !known.contains(c)) {
+            anyhow::bail!("not a bench column: {c}");
+        }
+        let sql = format!("SELECT {} FROM bench_samples WHERE ts >= ?1 AND ts < ?2", cols.join(", "));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut values: Vec<Vec<f64>> = vec![Vec::new(); cols.len()];
+        let mut rows = stmt.query(rusqlite::params![start, end])?;
+        while let Some(row) = rows.next()? {
+            for (i, v) in values.iter_mut().enumerate() {
+                v.push(row.get::<_, Option<f64>>(i)?.unwrap_or(0.0));
+            }
+        }
+        let count = values.first().map(Vec::len).unwrap_or(0);
+        let stats = values
+            .into_iter()
+            .map(|mut v| {
+                if v.is_empty() {
+                    return PeriodStat::default();
+                }
+                v.sort_by(|a, b| a.total_cmp(b));
+                let n = v.len();
+                PeriodStat {
+                    avg: v.iter().sum::<f64>() / n as f64,
+                    max: v[n - 1],
+                    // Nearest rank.
+                    p95: v[((n as f64 * 0.95).ceil() as usize).clamp(1, n) - 1],
+                }
+            })
+            .collect();
+        Ok((count, stats))
+    }
+
+    /// Keep one line test (`speedtest`).
+    pub fn record_speedtest(&self, m: &crate::speedtest::Measurement) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO vpn_speedtest (ts, ul_mbps, dl_mbps, ul_torrent_mbps, dl_torrent_mbps) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![m.ts as f64, m.ul_mbps, m.dl_mbps, m.ul_torrent_mbps, m.dl_torrent_mbps],
+        )?;
+        Ok(())
+    }
+
+    /// Line tests since `since` (unix seconds), oldest first.
+    pub fn speedtests_since(&self, since: f64) -> anyhow::Result<Vec<crate::speedtest::Measurement>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, ul_mbps, dl_mbps, ul_torrent_mbps, dl_torrent_mbps FROM vpn_speedtest WHERE ts >= ?1 ORDER BY ts",
+        )?;
+        let rows = stmt.query_map([since], |r| {
+            Ok(crate::speedtest::Measurement {
+                ts: r.get::<_, f64>(0)? as i64,
+                ul_mbps: r.get(1)?,
+                dl_mbps: r.get(2)?,
+                ul_torrent_mbps: r.get(3)?,
+                dl_torrent_mbps: r.get(4)?,
+            })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// The newest line test, if any.
+    pub fn latest_speedtest(&self) -> Option<crate::speedtest::Measurement> {
+        self.conn
+            .query_row(
+                "SELECT ts, ul_mbps, dl_mbps, ul_torrent_mbps, dl_torrent_mbps FROM vpn_speedtest ORDER BY ts DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok(crate::speedtest::Measurement {
+                        ts: r.get::<_, f64>(0)? as i64,
+                        ul_mbps: r.get(1)?,
+                        dl_mbps: r.get(2)?,
+                        ul_torrent_mbps: r.get(3)?,
+                        dl_torrent_mbps: r.get(4)?,
+                    })
+                },
+            )
+            .ok()
     }
 
     /// Performance samples between two instants, oldest first.
@@ -1086,6 +1180,37 @@ pub type Shared = Arc<Mutex<BenchDb>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #90: the A/B comparison reads real samples. P1 = [start, mid), P2 =
+    /// [mid, end); average, max and nearest-rank p95 per column.
+    #[test]
+    fn period_stats_summarise_each_side_of_the_split() {
+        let db = BenchDb::open_in_memory().unwrap();
+        for (ts, up) in [(100.0, 10.0), (105.0, 30.0), (110.0, 20.0), (200.0, 50.0), (205.0, 70.0)] {
+            db.record_sample(&serde_json::json!({"ts": ts, "race_upload_rate": up})).unwrap();
+        }
+        let (n1, s1) = db.period_stats(100.0, 200.0, &["race_upload_rate"]).unwrap();
+        let (n2, s2) = db.period_stats(200.0, 300.0, &["race_upload_rate"]).unwrap();
+        assert_eq!((n1, n2), (3, 2), "the sample at mid belongs to P2 only");
+        assert_eq!(s1[0], PeriodStat { avg: 20.0, max: 30.0, p95: 30.0 });
+        assert_eq!(s2[0], PeriodStat { avg: 60.0, max: 70.0, p95: 70.0 });
+        let (n0, s0) = db.period_stats(0.0, 50.0, &["race_upload_rate"]).unwrap();
+        assert_eq!((n0, s0[0]), (0, PeriodStat::default()), "an empty period is zeros, not an error");
+        assert!(db.period_stats(0.0, 1.0, &["ts; DROP TABLE bench_samples"]).is_err(), "only known columns");
+    }
+
+    /// Line tests are kept, the newest is the latest, the window filters.
+    #[test]
+    fn speedtests_round_trip() {
+        let db = BenchDb::open_in_memory().unwrap();
+        assert!(db.latest_speedtest().is_none());
+        let m = |ts: i64, ul: f64| crate::speedtest::Measurement { ts, ul_mbps: ul, dl_mbps: 2.0 * ul, ul_torrent_mbps: 1.0, dl_torrent_mbps: 0.5 };
+        db.record_speedtest(&m(1000, 100.0)).unwrap();
+        db.record_speedtest(&m(2000, 300.0)).unwrap();
+        assert_eq!(db.latest_speedtest(), Some(m(2000, 300.0)));
+        assert_eq!(db.speedtests_since(1500.0).unwrap(), vec![m(2000, 300.0)]);
+        assert_eq!(db.speedtests_since(0.0).unwrap().len(), 2);
+    }
 
     /// #92: an `[[engine]]` block is charted from its own rows, and counted
     /// in the Records through the `extra_*` sums.

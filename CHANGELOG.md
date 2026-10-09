@@ -24,6 +24,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- a race SSD told what the drain freed
 
 ### Added
+- **The Benchmark tab's line test and A/B comparison are real.** "Run now"
+  runs iperf3 against `[vpn_speedtest] iperf3_server`, upload then
+  download, from the race engine's interface (so a tunnel measures the
+  tunnel), and shows what the torrents moved meanwhile; the result and its
+  history are kept in bench.db, and `interval_secs` repeats it on its own.
+  It said "ok" and measured nothing before. Behind a SOCKS5 proxy it refuses
+  with the reason. `iperf3_port`, `duration_secs` and `interval_secs` are
+  read again. "Compare" averages, peaks and p95s every sampled metric over
+  two periods; it answered zeros. `/api/benchmark/race-snapshots/:hash`
+  serves the recorded snapshots instead of null.
 - **Slow torrents leave the queue's count**, qBittorrent's "do not count
   slow torrents in these limits": with `dont_count_slow_torrents = true`, a
   download under `slow_torrent_dl_rate_threshold` (a seed under

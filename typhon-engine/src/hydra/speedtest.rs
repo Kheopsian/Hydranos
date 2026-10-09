@@ -1,21 +1,66 @@
-//! Measuring the tunnel with iperf3.
+//! Measuring the line with iperf3: `[vpn_speedtest]`.
 //!
-//! Started from a request and outliving it: a run takes tens of seconds, and
-//! the HTTP call that asks for one returns immediately. The result lands in
-//! the bench database, which is what `/api/vpn-speedtest/latest` reads.
+//! From the way out the engines use -- the race engine's `bind_interface`,
+//! with SO_BINDTODEVICE like every engine socket -- so a tunnelled seedbox
+//! measures its tunnel and not the host's own route. The torrents keep
+//! running meanwhile, and what they move during the test is reported beside
+//! it: iperf3 alone measures what was LEFT of the line.
+//!
+//! The result lands in the bench database (`vpn_speedtest`), which is what
+//! `/api/vpn-speedtest/latest` and `/history` read.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// One measurement, both directions.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+use crate::api::AppState;
+
+/// One measurement, both directions, in megabits per second.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct Measurement {
     pub ts: i64,
-    /// Megabits per second.
-    pub upload_mbps: f64,
-    pub download_mbps: f64,
+    pub ul_mbps: f64,
+    pub dl_mbps: f64,
+    /// What the engines uploaded / downloaded meanwhile.
+    pub ul_torrent_mbps: f64,
+    pub dl_torrent_mbps: f64,
+}
+
+/// Where and how long, read from the config at each run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plan {
     pub server: String,
-    pub error: String,
+    pub port: u16,
+    pub secs: u64,
+    /// SO_BINDTODEVICE, empty = the default route.
+    pub device: String,
+}
+
+/// The plan for this config, or why there is none.
+pub fn plan(cfg: &crate::config::Config) -> Result<Plan, String> {
+    let v = &cfg.vpn_speedtest;
+    if !v.enabled || v.iperf3_server.trim().is_empty() {
+        return Err("iperf3_server not configured in [vpn_speedtest]".into());
+    }
+    let engines = cfg.local_engines();
+    let session = engines
+        .iter()
+        .find(|l| l.role == "race")
+        .or(engines.first())
+        .map(|l| l.session.clone())
+        .unwrap_or_else(|| cfg.race.clone());
+    let device = session.bind_interface.trim().to_string();
+    // iperf3 has no SOCKS5: past a proxy it would measure the host's route
+    // and call it the tunnel.
+    if device.is_empty() && !session.socks5_outbound_host.trim().is_empty() {
+        return Err("the engines go out through a SOCKS5 proxy, which iperf3 cannot use".into());
+    }
+    Ok(Plan {
+        server: v.iperf3_server.trim().to_string(),
+        port: v.iperf3_port.unwrap_or(5201),
+        secs: v.duration_secs.unwrap_or(10).clamp(1, 60),
+        device,
+    })
 }
 
 /// A run in flight, so two cannot overlap.
@@ -23,108 +68,123 @@ pub struct Measurement {
 /// iperf3 saturates the link by design. Two at once measure each other, and
 /// the number they produce is meaningless -- worse than no number, because it
 /// looks like one.
-#[derive(Default)]
-pub struct Runner {
-    running: std::sync::atomic::AtomicBool,
-    last: std::sync::RwLock<Option<Measurement>>,
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Frees the slot however the run ends, a dropped request included.
+struct Slot;
+impl Drop for Slot {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::Release);
+    }
 }
 
-impl Runner {
-    pub fn last(&self) -> Option<Measurement> {
-        self.last.read().unwrap().clone()
-    }
+fn take_slot() -> Option<Slot> {
+    RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).ok().map(|_| Slot)
+}
 
-    pub fn is_running(&self) -> bool {
-        self.running.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Start a run unless one is already going. Returns false when refused.
-    pub fn start(self: &Arc<Self>, server: String, port: u16) -> bool {
-        if self
-            .running
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_err()
-        {
-            return false;
+/// Run one test now, record it, return it.
+pub async fn run(state: &AppState) -> Result<Measurement, String> {
+    let plan = plan(&state.cfg())?;
+    let _slot = take_slot().ok_or("a speedtest is already running")?;
+    let engines = state.engines.clone();
+    let m = measure(&plan, move || {
+        engines.engines().iter().fold((0u64, 0u64), |acc, e| {
+            (acc.0 + e.manager.upload_rate.get(), acc.1 + e.manager.download_rate.get())
+        })
+    })
+    .await?;
+    if let Some(bench) = state.bench.as_ref() {
+        let db = bench.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = db.record_speedtest(&m) {
+            tracing::warn!("speedtest not recorded: {e}");
         }
-        let me = self.clone();
-        tokio::spawn(async move {
-            let result = measure(&server, port).await;
-            *me.last.write().unwrap() = Some(result);
-            me.running.store(false, std::sync::atomic::Ordering::Release);
-        });
-        true
     }
+    tracing::info!(ul = m.ul_mbps, dl = m.dl_mbps, device = %plan.device, "speedtest");
+    Ok(m)
 }
 
-/// Upload then download, one after the other.
+/// The periodic test, when `interval_secs` > 0. Read live: a change in the
+/// settings applies at the next wake.
+pub fn spawn(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            let every = state.cfg().vpn_speedtest.interval_secs.unwrap_or(0);
+            if every == 0 || plan(&state.cfg()).is_err() {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+            tokio::time::sleep(Duration::from_secs(every.max(300))).await;
+            if let Err(e) = run(&state).await {
+                tracing::warn!("periodic speedtest: {e}");
+            }
+        }
+    });
+}
+
+/// Upload then download, one after the other, the engines' own rates read
+/// in the middle of each leg.
 ///
 /// Never together: iperf3 in both directions at once splits the link between
 /// them and reports half of each.
-async fn measure(server: &str, port: u16) -> Measurement {
+async fn measure(plan: &Plan, rates: impl Fn() -> (u64, u64)) -> Result<Measurement, String> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    let mbps = |bytes: u64| bytes as f64 * 8.0 / 1_000_000.0;
+    let half = Duration::from_millis(plan.secs * 500);
 
-    let upload = run_iperf3(server, port, false).await;
-    let download = run_iperf3(server, port, true).await;
-
-    match (upload, download) {
-        (Ok(u), Ok(d)) => Measurement {
+    let (up, mid_up) = tokio::join!(run_iperf3(plan, false), async {
+        tokio::time::sleep(half).await;
+        rates()
+    });
+    let (down, mid_down) = tokio::join!(run_iperf3(plan, true), async {
+        tokio::time::sleep(half).await;
+        rates()
+    });
+    match (up, down) {
+        (Ok(u), Ok(d)) => Ok(Measurement {
             ts,
-            upload_mbps: u,
-            download_mbps: d,
-            server: server.to_string(),
-            error: String::new(),
-        },
-        (u, d) => {
-            // Report which direction failed. "iperf3 failed" alone sends an
-            // operator to look at the whole tunnel when only one leg is shut.
-            let mut why = Vec::new();
-            if let Err(e) = &u {
-                why.push(format!("upload: {e}"));
-            }
-            if let Err(e) = &d {
-                why.push(format!("download: {e}"));
-            }
-            Measurement {
-                ts,
-                upload_mbps: u.unwrap_or(0.0),
-                download_mbps: d.unwrap_or(0.0),
-                server: server.to_string(),
-                error: why.join(", "),
-            }
-        }
+            ul_mbps: u,
+            dl_mbps: d,
+            ul_torrent_mbps: mbps(mid_up.0),
+            dl_torrent_mbps: mbps(mid_down.1),
+        }),
+        // Which direction failed: "iperf3 failed" alone sends an operator to
+        // look at the whole tunnel when only one leg is shut.
+        (u, d) => Err([u.err().map(|e| format!("upload: {e}")), d.err().map(|e| format!("download: {e}"))]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ")),
     }
 }
 
 /// One direction. Returns megabits per second.
-async fn run_iperf3(server: &str, port: u16, reverse: bool) -> Result<f64, String> {
+async fn run_iperf3(plan: &Plan, reverse: bool) -> Result<f64, String> {
     let mut cmd = tokio::process::Command::new("iperf3");
-    cmd.arg("-c")
-        .arg(server)
-        .arg("-p")
-        .arg(port.to_string())
-        .arg("-J")
-        .arg("-t")
-        .arg("10");
+    cmd.arg("-c").arg(&plan.server).arg("-p").arg(plan.port.to_string()).arg("-J").arg("-t").arg(plan.secs.to_string());
+    if !plan.device.is_empty() {
+        cmd.arg("--bind-dev").arg(&plan.device);
+    }
     if reverse {
         cmd.arg("-R");
     }
-    let out = tokio::time::timeout(Duration::from_secs(40), cmd.output())
+    // Killed with the request that started it: a closed tab must not leave
+    // the link saturated.
+    cmd.kill_on_drop(true);
+    let limit = plan.secs * 2 + 20;
+    let out = tokio::time::timeout(Duration::from_secs(limit), cmd.output())
         .await
-        .map_err(|_| "iperf3 did not finish in 40s".to_string())?
+        .map_err(|_| format!("iperf3 did not finish in {limit}s"))?
         .map_err(|e| format!("cannot run iperf3: {e}"))?;
-
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.trim().chars().take(200).collect());
+        // -J puts iperf3's own error in the JSON, stderr is often empty.
+        let json_err = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+        let err = json_err.unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(err.chars().take(200).collect());
     }
     parse_bits_per_second(&out.stdout).map(|bps| bps / 1_000_000.0)
 }
@@ -164,15 +224,33 @@ mod tests {
         assert!(parse_bits_per_second(b"not json").is_err());
     }
 
-    #[tokio::test]
-    async fn two_runs_cannot_overlap() {
-        let r = Arc::new(Runner::default());
-        // A host that cannot resolve: the run fails fast but still occupies
-        // the slot while it does.
-        assert!(r.start("iperf-nonexistent.invalid".into(), 5201));
-        assert!(
-            !r.start("iperf-nonexistent.invalid".into(), 5201),
-            "two iperf3 runs at once measure each other, not the link"
-        );
+    #[test]
+    fn two_runs_cannot_overlap() {
+        let a = take_slot().expect("free");
+        assert!(take_slot().is_none(), "two iperf3 runs at once measure each other, not the link");
+        drop(a);
+        assert!(take_slot().is_some(), "the slot is freed however the run ends");
+    }
+
+    fn cfg(src: &str) -> crate::config::Config {
+        toml::from_str(src).unwrap()
+    }
+
+    /// The race engine's way out, the port and the length the file says.
+    #[test]
+    fn the_plan_follows_the_config() {
+        assert!(plan(&cfg("[vpn_speedtest]\nenabled = false\niperf3_server = \"x\"\n")).is_err(), "off");
+        assert!(plan(&cfg("[vpn_speedtest]\nenabled = true\n")).is_err(), "no server");
+        let p = plan(&cfg("[race]\nbind_interface = \"wg0\"\n[vpn_speedtest]\nenabled = true\niperf3_server = \"ping.example\"\niperf3_port = 5202\nduration_secs = 5\n")).unwrap();
+        assert_eq!((p.server.as_str(), p.port, p.secs, p.device.as_str()), ("ping.example", 5202, 5, "wg0"));
+        let d = plan(&cfg("[vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n")).unwrap();
+        assert_eq!((d.port, d.secs, d.device.as_str()), (5201, 10, ""), "defaults, default route");
+    }
+
+    /// Behind a SOCKS5 proxy iperf3 would measure the host's own route.
+    #[test]
+    fn a_socks5_way_out_is_refused_by_name() {
+        let e = plan(&cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\n[vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n")).unwrap_err();
+        assert!(e.contains("SOCKS5"), "{e}");
     }
 }
