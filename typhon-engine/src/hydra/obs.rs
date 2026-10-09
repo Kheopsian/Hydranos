@@ -55,6 +55,10 @@ pub struct EngineStats {
     pub listening: bool,
     /// Dials and announces held by `start_paused` until released.
     pub held: bool,
+    /// Pieces being fetched across the engine's torrents, and the bytes of
+    /// block data they hold: what downloading costs in memory, right now.
+    pub pieces_in_flight: u64,
+    pub piece_buffer_bytes: u64,
 }
 
 pub fn engine_stats(host: &EngineHost) -> Vec<EngineStats> {
@@ -99,6 +103,8 @@ fn one(e: &Engine, trackers: Option<&[crate::benchsampler::TrackerRow]>) -> Engi
         unchoke_slots: policy.unchoke_slots(),
         listening: e.listening.load(Relaxed),
         held: m.limiter().dials_paused(),
+        pieces_in_flight: m.piece_mem().pieces(),
+        piece_buffer_bytes: m.piece_mem().bytes(),
     }
 }
 
@@ -576,6 +582,18 @@ pub fn metrics(state: &AppState) -> String {
         "1 while start_paused holds the engine's dials and announces.",
         &per(&|s| s.held as u8 as f64),
     );
+    x.family(
+        "hydra_pieces_in_flight",
+        "gauge",
+        "Pieces being fetched (reserved by a peer or a webseed, not yet verified).",
+        &per(&|s| s.pieces_in_flight as f64),
+    );
+    x.family(
+        "hydra_piece_buffer_bytes",
+        "gauge",
+        "Bytes of received blocks held by the pieces in flight.",
+        &per(&|s| s.piece_buffer_bytes as f64),
+    );
     if let Some((allocated, resident)) = crate::allocdiag::memory() {
         x.family(
             "hydra_memory_allocated_bytes",
@@ -676,6 +694,33 @@ mod tests {
         }
         #[cfg(unix)]
         assert!(text.contains("hydra_memory_resident_bytes "), "jemalloc figures on Unix");
+    }
+
+    /// The pieces in flight are read from the engine's counters, which the
+    /// pickers keep: a block received shows at once, and goes with its piece.
+    #[tokio::test]
+    async fn metrics_show_the_pieces_in_flight_and_what_they_hold() {
+        use typhon_engine::torrent::piece_picker::PiecePicker;
+        let (s, _) = three_engines("obs-pieces");
+        let (_, text) = get(&s, "/metrics").await;
+        assert!(text.contains("# TYPE hydra_pieces_in_flight gauge"), "{text}");
+        assert!(text.contains("hydra_piece_buffer_bytes{engine=\"hoard\"} 0"), "{text}");
+
+        let mem = s.state.engines.get("hoard").unwrap().manager.piece_mem().clone();
+        let mut p = PiecePicker::new(4);
+        p.attach_mem(mem);
+        p.start_piece(2, 4 << 20, 16384, 1);
+        p.receive_block(2, 0, &[7u8; 16384]);
+        let (_, text) = get(&s, "/metrics").await;
+        assert!(text.contains("hydra_pieces_in_flight{engine=\"hoard\"} 1"), "{text}");
+        assert!(
+            text.contains("hydra_piece_buffer_bytes{engine=\"hoard\"} 16384"),
+            "one block held, not the 4 MiB piece: {text}"
+        );
+        assert!(text.contains("hydra_pieces_in_flight{engine=\"race\"} 0"), "{text}");
+        drop(p);
+        let (_, text) = get(&s, "/metrics").await;
+        assert!(text.contains("hydra_piece_buffer_bytes{engine=\"hoard\"} 0"), "{text}");
     }
 
     /// #87: /health looks. An offline test host is healthy (nothing was

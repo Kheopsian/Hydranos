@@ -15,7 +15,39 @@
 //! The handlers below are lifted from `src/main.rs`, so both binaries answer
 //! the same signals.
 
+use std::sync::{Arc, Mutex};
+
 use tracing;
+use typhon_engine::torrent::piece_picker::PieceMem;
+
+/// Each engine's pieces-in-flight counters, for the five-minute line.
+static PIECES: Mutex<Vec<(String, Arc<PieceMem>)>> = Mutex::new(Vec::new());
+
+/// Put an engine's pieces in flight on the five-minute line. The heap is the
+/// process's, and the pieces being fetched were, before the counters existed,
+/// most of it on a node with a few hundred downloads (17.3 GB of 24): the line
+/// that says how much is allocated should say how much of that they hold.
+pub fn register_pieces(engine: &str, mem: Arc<PieceMem>) {
+    if let Ok(mut v) = PIECES.lock() {
+        v.retain(|(id, _)| id != engine);
+        v.push((engine.to_string(), mem));
+    }
+}
+
+/// ` pieces hoard=3/12MiB race=0/0MiB`: per engine, pieces in flight and the
+/// block bytes they hold. Empty when no engine is registered.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn pieces_summary() -> String {
+    let Ok(v) = PIECES.lock() else { return String::new() };
+    if v.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(" pieces");
+    for (id, m) in v.iter() {
+        out.push_str(&format!(" {}={}/{:.0}MiB", id, m.pieces(), m.bytes() as f64 / (1024.0 * 1024.0)));
+    }
+    out
+}
 
 /// Install the SIGUSR1 heap dump, the SIGUSR2 decay purge, and the five-minute
 /// stats line. No-ops on Windows, which has no jemalloc and no signals.
@@ -173,13 +205,37 @@ fn spawn_stats() {
                 stats::retained::read(),
             ) {
                 (Ok(al), Ok(ac), Ok(re), Ok(ma), Ok(rt)) => tracing::info!(
-                    "jemalloc allocated={:.0}MiB active={:.0}MiB resident={:.0}MiB mapped={:.0}MiB retained={:.0}MiB metadata={:.0}MiB slop={:.0}MiB dirty={:.0}MiB",
+                    "jemalloc allocated={:.0}MiB active={:.0}MiB resident={:.0}MiB mapped={:.0}MiB retained={:.0}MiB metadata={:.0}MiB slop={:.0}MiB dirty={:.0}MiB{}",
                     mb(al), mb(ac), mb(re), mb(ma), mb(rt),
                     mb(stats::metadata::read().unwrap_or(0)),
-                    mb(ac.saturating_sub(al)), mb(re.saturating_sub(ac))
+                    mb(ac.saturating_sub(al)), mb(re.saturating_sub(ac)),
+                    pieces_summary()
                 ),
                 _ => tracing::warn!("jemalloc stats unavailable"),
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_stats_line_names_each_engine_s_pieces() {
+        let m = Arc::new(PieceMem::default());
+        register_pieces("allocdiag-test", m.clone());
+        let mut p = typhon_engine::torrent::piece_picker::PiecePicker::new(1);
+        p.attach_mem(m.clone());
+        p.start_piece(0, 2 << 20, 16384, 1);
+        for i in 0..128u32 {
+            p.receive_block(0, i * 16384, &[0u8; 16384]);
+        }
+        let line = pieces_summary();
+        assert!(line.starts_with(" pieces"), "{line}");
+        assert!(line.contains(" allocdiag-test=1/2MiB"), "{line}");
+        // Registering again replaces, it does not list the engine twice.
+        register_pieces("allocdiag-test", m);
+        assert_eq!(pieces_summary().matches("allocdiag-test=").count(), 1);
+    }
 }
