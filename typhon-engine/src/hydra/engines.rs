@@ -699,6 +699,12 @@ impl EngineHost {
         (up, down)
     }
 
+    /// DHT nodes known to every engine that runs a DHT, summed: what
+    /// qBittorrent's `dht_nodes` reports. 0 when no engine runs one.
+    pub fn dht_nodes(&self) -> u64 {
+        self.engines.iter().filter_map(|e| e.manager.dht()).map(|d| d.node_count() as u64).sum()
+    }
+
     /// The same for ONE engine; (0, 0) for an engine this node does not host.
     pub fn moved_of(&self, engine_id: &str) -> (i64, i64) {
         self.get(engine_id)

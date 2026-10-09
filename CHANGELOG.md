@@ -80,6 +80,17 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   one keeps and shows the settings with nothing left for them to act on.
 
 ### Fixed
+- **qBittorrent shim, magnets added with options**: `upLimit` / `dlLimit`,
+  `sequentialDownload`, `firstLastPiecePrio` and `contentLayout` were
+  dropped for a magnet (it had no torrent yet to apply them to). They are
+  now kept with the request, across a restart, and land on the torrent once
+  the metadata is in; `NoSubfolder` on a magnet that turns out multi-file
+  fails the request with that reason instead of a silent layout change.
+- **`transfer/info` and `sync/maindata`**: `dl_info_data` / `up_info_data`
+  are this session's bytes, as qBittorrent's. They were a sum of lifetime
+  counters over the loaded torrents, which fell by a torrent's whole
+  history each time one was removed. `dht_nodes` is the real routing-table
+  size instead of a constant 0.
 - **A torrent no longer overwrites another torrent's files.** Two different
   torrents naming the same folder and file names -- a re-upload that kept the
   release name, an encode published twice under one title -- shared the
