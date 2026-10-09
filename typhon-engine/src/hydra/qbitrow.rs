@@ -170,7 +170,10 @@ pub fn build(native: &Value, engine_name: &str, now: i64) -> Value {
         "num_seeds": i(native, "num_seeds"),
         "num_leechs": i(native, "num_peers"),
         "num_complete": i(native, "num_seeds"),
-        "num_incomplete": i(native, "num_peers"),
+        // The tracker's leechers, as num_complete is its seeders: qBittorrent's
+        // swarm totals. Was the connected peers, which made a swarm of 7
+        // leechers read 0 on any torrent with no connection open.
+        "num_incomplete": i(native, "swarm_leechers"),
         "ratio": crate::row::num_json(ratio),
         "seeding_time": i(native, "seeding_time"),
         // This torrent's own caps, bytes/s, -1 = none (qBittorrent's
@@ -308,7 +311,14 @@ mod tests {
     }
 
     #[test]
-    fn ratio_is_rounded_to_two_decimals() {
+    fn the_swarm_totals_are_the_trackers_not_the_connections() {
+        let row = build(&json!({"num_seeds": 42, "swarm_leechers": 7, "num_peers": 0}), "hoard", 0);
+        assert_eq!((row["num_complete"].clone(), row["num_incomplete"].clone()), (json!(42), json!(7)));
+        assert_eq!(row["num_leechs"], 0, "connected leechers stay the connections");
+    }
+
+    #[test]
+        fn ratio_is_rounded_to_two_decimals() {
         let row = build(&json!({"total_upload": 1000, "total_download": 300}), "race", 0);
         assert_eq!(row["ratio"], json!(3.33));
     }
