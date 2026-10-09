@@ -37,6 +37,7 @@ use super::http::{AnnounceResponse, IpMode};
 const PROTOCOL_ID: u64 = 0x0417_2710_1980;
 const ACTION_CONNECT: u32 = 0;
 const ACTION_ANNOUNCE: u32 = 1;
+const ACTION_SCRAPE: u32 = 2;
 const ACTION_ERROR: u32 = 3;
 
 /// How long a connection id is used. BEP 15 lets a client keep one for a
@@ -424,6 +425,37 @@ impl Client {
         answer
     }
 
+    /// BEP 15 scrape of up to 74 torrents, over IPv4 when the tracker has an
+    /// IPv4 address, else IPv6: counts are the same either way.
+    async fn scrape(&self, tracker: &str, hashes: &[[u8; 20]]) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
+        let (host, port, _) = split_url(tracker).ok_or_else(|| "udp: not a udp://host:port tracker URL".to_string())?;
+        let v6 = self.resolve(&host, port, false).await.is_err();
+        let fam = self.family(v6)?;
+        let to = self.resolve(&host, port, v6).await?;
+        let conn = match self.conns.get(&to).filter(|e| e.1.elapsed() < CONNECTION_TTL).map(|e| e.0) {
+            Some(id) => id,
+            None => {
+                let (reply, tx) = fam.exchange(to, connect_packet(0).to_vec(), CONNECT_TX_AT).await?;
+                let id = parse_connect(&reply, tx)?;
+                self.conns.insert(to, (id, Instant::now()));
+                id
+            }
+        };
+        let hashes = &hashes[..hashes.len().min(74)];
+        let mut p = Vec::with_capacity(16 + 20 * hashes.len());
+        p.extend_from_slice(&conn.to_be_bytes());
+        p.extend_from_slice(&ACTION_SCRAPE.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        for h in hashes {
+            p.extend_from_slice(h);
+        }
+        let answer = fam.exchange(to, p, 12).await.and_then(|(reply, tx)| parse_scrape(&reply, tx, hashes));
+        if answer.is_err() {
+            self.conns.remove(&to);
+        }
+        answer
+    }
+
     pub async fn announce(&self, a: &UdpAnnounce, mode: IpMode) -> Result<AnnounceResponse, String> {
         let (host, port, url_data) =
             split_url(&a.tracker).ok_or_else(|| "udp: not a udp://host:port tracker URL".to_string())?;
@@ -486,9 +518,61 @@ pub async fn send_announce_on(a: &UdpAnnounce, mode: IpMode, device: &str, proxy
     client.announce(a, mode).await
 }
 
+/// A scrape reply: seeders, completed, leechers per hash, in request order.
+pub(crate) fn parse_scrape(buf: &[u8], tx: u32, hashes: &[[u8; 20]]) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
+    let body = reply_body(buf, tx, ACTION_SCRAPE)?;
+    Ok(body
+        .chunks_exact(12)
+        .zip(hashes)
+        .map(|(c, h)| super::scrape::ScrapeEntry {
+            info_hash: *h,
+            complete: u32::from_be_bytes(c[0..4].try_into().unwrap()),
+            incomplete: u32::from_be_bytes(c[8..12].try_into().unwrap()),
+        })
+        .collect())
+}
+
+/// Scrape a `udp://` tracker from the engine's interface. Refused while the
+/// engine's announces are proxied, exactly as an announce is: sent around
+/// the proxy, it would show the tracker this host's own address.
+pub async fn send_scrape_on(tracker: &str, hashes: &[[u8; 20]], device: &str, proxy: &str) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
+    if super::http::announces_proxied(proxy) {
+        return Err(UDP_PROXIED_REFUSAL.into());
+    }
+    let device = device.trim();
+    if device.is_empty() {
+        return CLIENT.get_or_init(Client::default).scrape(tracker, hashes).await;
+    }
+    let client = {
+        let map = PINNED.get_or_init(Default::default);
+        let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
+        map.entry(device.to_string())
+            .or_insert_with(|| Arc::new(Client { device: device.to_string(), ..Client::default() }))
+            .clone()
+    };
+    client.scrape(tracker, hashes).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BEP 15 scrape reply: 12 bytes per hash, leechers last.
+    #[test]
+    fn a_udp_scrape_reply_is_read_in_request_order() {
+        let mut r = Vec::new();
+        r.extend_from_slice(&ACTION_SCRAPE.to_be_bytes());
+        r.extend_from_slice(&7u32.to_be_bytes());
+        for (s, c, l) in [(5u32, 100u32, 2u32), (0, 1, 9)] {
+            r.extend_from_slice(&s.to_be_bytes());
+            r.extend_from_slice(&c.to_be_bytes());
+            r.extend_from_slice(&l.to_be_bytes());
+        }
+        let got = parse_scrape(&r, 7, &[[1; 20], [2; 20]]).unwrap();
+        assert_eq!((got[0].complete, got[0].incomplete, got[1].complete, got[1].incomplete), (5, 2, 0, 9));
+        assert_eq!(got[1].info_hash, [2; 20]);
+        assert!(parse_scrape(&r, 8, &[[1; 20]]).is_err(), "another transaction");
+    }
 
     /// The UDP announcer resolves through the tunnel's DNS server too.
     #[tokio::test]

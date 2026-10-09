@@ -71,7 +71,7 @@ pub fn redact_proxy(url: &str) -> String {
 /// A URL that does not parse is an ERROR, not "no proxy": the operator asked
 /// for one, and announcing directly instead would publish exactly the address
 /// they set it up to hide.
-fn proxy_for(configured: &str) -> Result<Option<reqwest::Proxy>, String> {
+pub(crate) fn proxy_for(configured: &str) -> Result<Option<reqwest::Proxy>, String> {
     let Some(url) = effective_proxy(configured) else {
         return Ok(None);
     };
@@ -642,7 +642,7 @@ async fn finish_announce(resp: reqwest::Response) -> Result<AnnounceResponse, St
     parse_announce_response(&body)
 }
 
-fn url_encode_binary(data: &[u8]) -> String {
+pub(crate) fn url_encode_binary(data: &[u8]) -> String {
     let mut result = String::with_capacity(data.len() * 3);
     for &b in data {
         match b {

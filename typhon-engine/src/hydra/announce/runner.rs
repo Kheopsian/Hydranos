@@ -210,6 +210,9 @@ pub fn start(
     // One breaker for the engine, not one per torrent: an outage belongs to the
     // host, and every torrent listing it has to learn from the same evidence.
     let breaker = Arc::new(Breaker::default());
+    // Swarm counts for what has not been announced yet: same policy, same
+    // breaker, never the announce cache (`scrape`).
+    super::scrape::spawn(manager.clone(), policy.clone(), cache.clone(), breaker.clone());
 
     let announce = Arc::new(move |job: Job| {
         let manager = manager.clone();

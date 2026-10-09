@@ -1,5 +1,6 @@
 pub mod dial_limiter;
 pub mod http;
+pub mod scrape;
 pub mod udp;
 
 use std::sync::Arc;
