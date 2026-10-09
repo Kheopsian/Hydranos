@@ -373,6 +373,13 @@ pub async fn run(
             crate::tracker::MSE_SESSIONS_DROPPED.fetch_add(1, Ordering::Relaxed);
             break;
         }
+        // A removed torrent's sessions end here. Nothing else ends them: the
+        // idle deadline is pushed by any message, so a peer that keeps sending
+        // Haves kept the removed torrent -- and every piece it had in flight --
+        // alive for as long as it stayed connected.
+        if torrent.is_removed.load(Ordering::Relaxed) {
+            break;
+        }
         // Flush any pending Choke/Unchoke produced by the choking engine.
         let cur_gen = stats.choking_gen.load(Ordering::Relaxed);
         if cur_gen != local_choking_gen {
@@ -417,6 +424,21 @@ pub async fn run(
             }
         }
 
+        // Pieces this peer holds and has stopped feeding go back to the
+        // picker, and what is still asked for them is withdrawn. Woken at
+        // least once per choke tick, so a silent peer is caught too.
+        if dl.has_started() {
+            let cancels = dl.release_stalled(std::time::Instant::now());
+            if !cancels.is_empty() {
+                for (index, begin, length) in cancels {
+                    framed.feed(Message::Cancel { index, begin, length }).await.ok();
+                }
+                if framed.flush().await.is_err() {
+                    tracing::debug!("[peer-debug] {} BREAK flush-cancels failed", addr);
+                    break;
+                }
+            }
+        }
         if dl.is_downloading() && !dl.am_interested && dl.should_be_interested() {
             dl.am_interested = true;
             framed.send(Message::Interested).await.ok();
@@ -545,6 +567,10 @@ pub async fn run(
                                 guard.mark_interested(false);
                             }
                             Message::Choke => dl.on_choke(),
+                            // BEP 6: a request the peer will not serve.
+                            Message::Reject { index, begin, length } => {
+                                dl.on_reject(index, begin, length)
+                            }
                             Message::Unchoke => dl.on_unchoke(),
                             Message::Bitfield { data } => {
                                 let count = choking::count_bitfield_pieces(&data, num_pieces);

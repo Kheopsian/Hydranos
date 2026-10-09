@@ -248,6 +248,7 @@ impl EngineHost {
                 }));
             }
 
+            crate::allocdiag::register_pieces(id, manager.piece_mem().clone());
             engines.push(Engine {
                 id: id.to_string(),
                 role: local.role.clone(),

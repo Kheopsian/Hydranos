@@ -342,6 +342,9 @@ async fn drive_torrent(
     let num_pieces = t.meta.num_pieces();
     let mut done = 0u32;
     let mut budget = MAX_PIECES_PER_CLAIM;
+    // This run's identity on the picker, as a peer session has one: its
+    // releases cannot take a piece away from a peer that joined it.
+    let owner = crate::torrent::piece_picker::new_owner();
 
     while budget > 0 {
         if !wants_webseed(t) {
@@ -368,7 +371,7 @@ async fn drive_torrent(
             };
             let mut run = Vec::new();
             let mut bytes = t.meta.piece_size(first) as u64;
-            p.start_piece(first, t.meta.piece_size(first), BLOCK_SIZE);
+            p.start_piece(first, t.meta.piece_size(first), BLOCK_SIZE, owner);
             run.push(first);
 
             let mut next = first + 1;
@@ -381,7 +384,7 @@ async fn drive_torrent(
                     break;
                 }
                 let sz = t.meta.piece_size(next);
-                p.start_piece(next, sz, BLOCK_SIZE);
+                p.start_piece(next, sz, BLOCK_SIZE, owner);
                 run.push(next);
                 bytes += sz as u64;
                 next += 1;
@@ -418,7 +421,7 @@ async fn drive_torrent(
             None => {
                 let mut p = picker.lock().unwrap();
                 for &i in &run {
-                    p.cancel_piece(i);
+                    p.release(i, owner);
                 }
                 return Err(last_err);
             }
@@ -441,7 +444,11 @@ async fn drive_torrent(
                 let mut b = 0u32;
                 while (b as usize) < piece_bytes.len() {
                     let end = (b as usize + BLOCK_SIZE as usize).min(piece_bytes.len());
-                    c = p.receive_block(index, b, &piece_bytes[b as usize..end]);
+                    // Any block may be the one that completes it: a peer
+                    // racing for the same piece in endgame may have filled
+                    // the rest, and those come back as duplicates.
+                    c |= p.receive_block(index, b, &piece_bytes[b as usize..end])
+                        == crate::torrent::piece_picker::Block::Complete;
                     b = end as u32;
                 }
                 c
@@ -450,7 +457,7 @@ async fn drive_torrent(
             if !complete {
                 let mut p = picker.lock().unwrap();
                 for &i in &run[n..] {
-                    p.cancel_piece(i);
+                    p.release(i, owner);
                 }
                 return Err(format!("piece {} refused by the picker", index));
             }
@@ -467,12 +474,13 @@ async fn drive_torrent(
                 done += 1;
                 budget = budget.saturating_sub(1);
             } else {
-                // SHA1 mismatch or write error: commit_piece already released
-                // this piece. Release the rest of the run too — a mirror
-                // serving wrong bytes is a real failure, not a retry loop.
+                // SHA1 mismatch or write error: this piece already left the
+                // picker when it was taken for the write. Release the rest of
+                // the run too — a mirror serving wrong bytes is a real
+                // failure, not a retry loop.
                 let mut p = picker.lock().unwrap();
                 for &i in &run[n + 1..] {
-                    p.cancel_piece(i);
+                    p.release(i, owner);
                 }
                 return Err(format!("piece {} failed verification", index));
             }

@@ -49,8 +49,13 @@ fn sha1(data: &[u8]) -> [u8; 20] {
 /// every piece it receives and re-request it forever, which looks exactly like
 /// a broken transfer and has nothing to do with what is under test.
 fn build_torrent(name: &str, data: &[u8]) -> Vec<u8> {
-    let mut pieces = Vec::with_capacity(PIECES * 20);
-    for chunk in data.chunks(PIECE_LEN) {
+    build_torrent_with(name, data, PIECE_LEN)
+}
+
+/// `build_torrent` with a chosen piece length.
+fn build_torrent_with(name: &str, data: &[u8], piece_len: usize) -> Vec<u8> {
+    let mut pieces = Vec::with_capacity(data.len().div_ceil(piece_len) * 20);
+    for chunk in data.chunks(piece_len) {
         pieces.extend_from_slice(&sha1(chunk));
     }
 
@@ -58,7 +63,7 @@ fn build_torrent(name: &str, data: &[u8]) -> Vec<u8> {
     info.push(b'd');
     info.extend_from_slice(format!("6:lengthi{}e", data.len()).as_bytes());
     info.extend_from_slice(format!("4:name{}:{name}", name.len()).as_bytes());
-    info.extend_from_slice(format!("12:piece lengthi{PIECE_LEN}e").as_bytes());
+    info.extend_from_slice(format!("12:piece lengthi{piece_len}e").as_bytes());
     info.extend_from_slice(format!("6:pieces{}:", pieces.len()).as_bytes());
     info.extend_from_slice(&pieces);
     info.push(b'e');
@@ -834,4 +839,119 @@ async fn a_torrent_survives_a_peer_that_goes_away_and_finishes_from_another() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(got, data, "the torrent must finish from the peer that stayed");
+}
+
+/// ⭐⭐ A real transfer of multi-block pieces through a peer that chokes us in
+/// the middle of it, then unchokes.
+///
+/// The leecher is a real engine running a real session; the other end is a
+/// hand-written seeder serving real bytes, because a choke at a chosen moment
+/// is not something a real seeder can be asked for. BEP 3: a choke voids
+/// every request outstanding. Before 4.4 those requests were merely counted
+/// down and forgotten -- never asked again -- so every piece they belonged to
+/// waited for ever for its missing blocks, holding its reservation (and, then,
+/// a full piece-sized buffer) for the life of the connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_download_survives_a_choke_in_the_middle_of_multi_block_pieces() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_util::codec::Framed;
+    use typhon_engine::crypto::stream::CryptoStream;
+    use typhon_engine::peer::message::Message;
+    use typhon_engine::peer::transport::PeerTransport;
+    use typhon_engine::wire::codec::BtCodec;
+
+    const BLOCK: usize = 16384;
+    const PIECE: usize = 4 * BLOCK;
+    const N: usize = 16; // 64 blocks: two full pipelines
+    let mut data = Vec::with_capacity(PIECE * N);
+    let mut x: u32 = 0x9e37_79b9;
+    for _ in 0..PIECE * N {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        data.push((x >> 24) as u8);
+    }
+    let torrent = build_torrent_with("payload.bin", &data, PIECE);
+
+    let leecher = engine("choke-mid", torrent.clone());
+    let (ih, _) = leecher
+        .mgr
+        .add_torrent_bytes(&torrent, &leecher.root.join("data").to_string_lossy(), false, false)
+        .expect("added");
+    let t = leecher.mgr.get(&ih).expect("the torrent");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dialled = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
+    let (ours, _) = listener.accept().await.unwrap();
+    let theirs = dialled.await.unwrap();
+    let framed = |s| Framed::new(CryptoStream::plain(PeerTransport::Tcp(s)), BtCodec::new());
+    tokio::spawn(typhon_engine::peer::session::run(
+        framed(ours),
+        "127.0.0.1:6881".parse().unwrap(),
+        t.clone(),
+        leecher.disk.clone(),
+        pid("leecher"),
+        pid("seeder"),
+        false,
+        false, // no fast extension: a choke voids everything, silently
+        false,
+        None,
+        0,
+    ));
+
+    let mut peer = framed(theirs);
+    peer.send(Message::Bitfield { data: bytes::Bytes::from(vec![0xFF, 0xFF]) }).await.unwrap();
+    peer.send(Message::Unchoke).await.unwrap();
+
+    let target = leecher.root.join("data").join("payload.bin");
+    let block = |index: u32, begin: u32, length: u32| {
+        let at = index as usize * PIECE + begin as usize;
+        bytes::Bytes::copy_from_slice(&data[at..at + length as usize])
+    };
+    // Serve six blocks, choke with the rest of the pipeline outstanding, stay
+    // choked a moment, unchoke, then serve whatever is asked.
+    let mut served = 0usize;
+    let mut voided = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut done = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), peer.next()).await {
+            Ok(Some(Ok(Message::Request { index, begin, length }))) => {
+                peer.send(Message::Piece { index, begin, data: block(index, begin, length) }).await.unwrap();
+                served += 1;
+                if served == 6 {
+                    peer.send(Message::Choke).await.unwrap();
+                    // Everything asked before the choke and not yet read is
+                    // dropped unanswered, as a BEP 3 peer does.
+                    let until = tokio::time::Instant::now() + Duration::from_millis(300);
+                    while let Ok(Some(Ok(m))) = tokio::time::timeout_at(until, peer.next()).await {
+                        if matches!(m, Message::Request { .. }) {
+                            voided += 1;
+                        }
+                    }
+                    peer.send(Message::Unchoke).await.unwrap();
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(e))) => panic!("unreadable: {e}"),
+            Ok(None) => break,
+            Err(_) => {
+                if std::fs::read(&target).map(|b| b == data).unwrap_or(false)
+                    && t.picker.get().unwrap().lock().unwrap().is_complete()
+                {
+                    done = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(voided > 0, "the choke left requests unanswered");
+    assert!(
+        done,
+        "the download never completed after a choke (served {served} blocks, {voided} voided, downloaded {})",
+        t.total_downloaded.load(Ordering::Relaxed)
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), data, "the bytes that arrived are the bytes served");
+    assert_eq!(t.picker.get().unwrap().lock().unwrap().in_flight(), (0, 0), "nothing left in flight");
+    assert_eq!(leecher.mgr.piece_mem().pieces(), 0);
+    assert_eq!(leecher.mgr.piece_mem().bytes(), 0);
 }
