@@ -222,6 +222,40 @@ pub fn request(
     request_with(state, uri, category, save_path, tags, paused, false, engine_override)
 }
 
+/// What a qBittorrent add asks of the torrent beyond where it goes: kept with
+/// the request and applied once the metadata is in, as for a `.torrent`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AddOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dl_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sequential: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first_last: bool,
+    /// `contentLayout` Subfolder: a single file gets a folder of its name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subfolder: bool,
+    /// `contentLayout` NoSubfolder: refused on a multi-file torrent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_subfolder: bool,
+}
+
+impl AddOptions {
+    fn encode(&self) -> String {
+        if *self == AddOptions::default() {
+            String::new()
+        } else {
+            serde_json::to_string(self).unwrap_or_default()
+        }
+    }
+
+    fn decode(s: &str) -> AddOptions {
+        serde_json::from_str(s).unwrap_or_default()
+    }
+}
+
 /// `request`, with `seed_mode`: once the metadata is in, the data at the save
 /// path is trusted rather than hash-checked.
 #[allow(clippy::too_many_arguments)]
@@ -234,6 +268,22 @@ pub fn request_with(
     paused: bool,
     seed_mode: bool,
     engine_override: &str,
+) -> Result<String, String> {
+    request_with_options(state, uri, category, save_path, tags, paused, seed_mode, engine_override, &AddOptions::default())
+}
+
+/// `request_with`, and what the add asked of the torrent (`AddOptions`).
+#[allow(clippy::too_many_arguments)]
+pub fn request_with_options(
+    state: &AppState,
+    uri: &str,
+    category: &str,
+    save_path: &str,
+    tags: &str,
+    paused: bool,
+    seed_mode: bool,
+    engine_override: &str,
+    options: &AddOptions,
 ) -> Result<String, String> {
     let m = parse(uri)?;
     let hash = hex(&m.info_hash);
@@ -255,6 +305,7 @@ pub fn request_with(
         tags: tags.to_string(),
         paused,
         seed_mode,
+        options: options.encode(),
         added_at: crate::store::now_secs(),
         attempts: 0,
         next_try: 0,
@@ -367,10 +418,24 @@ pub(crate) fn complete(state: &AppState, row: &mut crate::store::MagnetRow, dict
     }
     let trackers = parse(&row.uri).map(|m| m.trackers).unwrap_or_default();
     let bytes = torrent_from_dict(dict, &trackers);
+    let opts = AddOptions::decode(&row.options);
+    // The layout is only knowable now: whether the torrent is one file.
+    if opts.no_subfolder && typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).is_ok_and(|m| m.multi_file) {
+        fail(state, row, "contentLayout NoSubfolder on a multi-file torrent is not supported");
+        return false;
+    }
+    let save_path = match crate::api::add_save_path(state, &bytes, &row.category, &row.engine, &row.save_path, opts.subfolder) {
+        Ok(p) => p,
+        Err(e) => {
+            fail(state, row, &e);
+            return false;
+        }
+    };
     match crate::api::add_torrent_bytes(
-        state, &bytes, &row.category, &row.save_path, &row.tags, row.paused, row.seed_mode, &row.engine,
+        state, &bytes, &row.category, &save_path, &row.tags, row.paused, row.seed_mode, &row.engine,
     ) {
-        Ok(_) => {
+        Ok((hash, _)) => {
+            crate::api::apply_add_options(state, &hash, opts.up_limit, opts.dl_limit, opts.sequential, opts.first_last);
             tracing::info!(info_hash = %row.info_hash, name = %row.name, "magnet resolved and added");
             forget(state, &row.info_hash);
             true
@@ -633,6 +698,49 @@ mod flow_tests {
         assert_eq!(tags, vec!["books".to_string(), "new".to_string()]);
         // And a second request for it is refused: it is here now.
         assert!(request(&s.state, &uri, "", "/tmp", "", false, "hoard").unwrap_err().contains("already added"));
+    }
+
+    /// ⭐ What a qBittorrent add asked -- caps, download order, a folder for
+    /// a single file -- survives the wait for the metadata, a restart
+    /// included (it is in the store), and lands on the torrent.
+    #[test]
+    fn a_magnets_add_options_wait_for_it_and_land_on_the_torrent() {
+        let s = st("mag-opts");
+        let (dict, uri) = dict_and_magnet("opts-book");
+        let opts = AddOptions { up_limit: Some(51_200), dl_limit: None, sequential: true, first_last: false, subfolder: true, no_subfolder: false };
+        let hash = request_with_options(&s.state, &uri, "", "/tmp", "", true, false, "hoard", &opts).expect("accepted");
+        let mut r = row(&s, &hash).expect("kept");
+        assert_eq!(AddOptions::decode(&r.options), opts, "kept with the request");
+        assert!(complete(&s.state, &mut r, &dict, crate::store::now_secs()));
+        let (_, t) = crate::api::find_torrent(&s.state, &hash).expect("added");
+        assert_eq!(t.rate_limits().0, 51_200, "upLimit");
+        assert!(t.download_order().sequential, "sequentialDownload");
+        assert_eq!(*t.save_path.read(), std::path::PathBuf::from("/tmp/opts-book"), "Subfolder on a single file");
+    }
+
+    /// NoSubfolder on a multi-file torrent is refused, as for a `.torrent`,
+    /// and the request says why instead of resolving forever.
+    #[test]
+    fn no_subfolder_on_a_multi_file_magnet_fails_with_the_reason() {
+        let s = st("mag-nosub");
+        let dict = b"d5:filesld6:lengthi16384e4:pathl1:aeee4:name5:multi12:piece lengthi16384e6:pieces20:CCCCCCCCCCCCCCCCCCCCe".to_vec();
+        let ih: [u8; 20] = Sha1::digest(&dict).into();
+        let uri = format!("magnet:?xt=urn:btih:{}&dn=multi", hex(&ih));
+        let opts = AddOptions { no_subfolder: true, ..Default::default() };
+        let hash = request_with_options(&s.state, &uri, "", "/tmp", "", true, false, "hoard", &opts).unwrap();
+        let mut r = row(&s, &hash).unwrap();
+        assert!(!complete(&s.state, &mut r, &dict, crate::store::now_secs()));
+        assert!(crate::api::find_torrent(&s.state, &hash).is_none());
+        let r = row(&s, &hash).unwrap();
+        assert_eq!(r.state, "failed");
+        assert!(r.error.contains("NoSubfolder"), "{}", r.error);
+    }
+
+    /// No options: nothing stored, the column stays empty.
+    #[test]
+    fn default_options_are_not_stored() {
+        assert_eq!(AddOptions::default().encode(), "");
+        assert_eq!(AddOptions::decode(""), AddOptions::default());
     }
 
     /// Metadata that does not hash to the magnet is a stranger's: not added,
