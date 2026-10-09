@@ -142,21 +142,6 @@ pub const DEAD_KEYS: &[DeadKey] = &[
         "a workflow with a webhook action (Workflows tab)",
     ),
     dead(
-        Scope::Root("vpn_speedtest.iperf3_port"),
-        "there is no periodic speedtest and nothing reads this key",
-        "nothing; delete the key",
-    ),
-    dead(
-        Scope::Root("vpn_speedtest.interval_secs"),
-        "there is no periodic speedtest and nothing reads this key",
-        "nothing; delete the key",
-    ),
-    dead(
-        Scope::Root("vpn_speedtest.duration_secs"),
-        "there is no periodic speedtest and nothing reads this key",
-        "nothing; delete the key",
-    ),
-    dead(
         Scope::Root("race_drain.min_age_minutes"),
         "the drain protects a torrent by its tracker's minimum seed time, not by its age",
         "the tracker's Minimum seed on the Trackers tab ([announce_min_seed_hours])",
@@ -438,9 +423,6 @@ id = "race-0"
             "[peer_intel]",
             "[arr_cleanup]",
             "[notify]",
-            "vpn_speedtest.iperf3_port",
-            "vpn_speedtest.interval_secs",
-            "vpn_speedtest.duration_secs",
             "race_drain.min_age_minutes",
         ];
         for loc in expect {

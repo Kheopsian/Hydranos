@@ -352,6 +352,16 @@ pub struct VpnSpeedtest {
     pub enabled: bool,
     #[serde(default)]
     pub iperf3_server: String,
+    /// Absent = 5201, iperf3's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iperf3_port: Option<u16>,
+    /// Seconds between two automatic tests; absent or 0 = only "Run now".
+    /// Never under 300: each test saturates the line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
+    /// Seconds per direction, 1-60. Absent = 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
 }
 
 /// Per-tracker client identity override.

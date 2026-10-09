@@ -220,6 +220,11 @@ enabled = true
 # Public target: measures real peer-facing capacity (against a public iperf3
 # server) instead of a VPS loopback that over-estimates.
 iperf3_server = "ping.online.net"
+# iperf3_port = 5201
+# Seconds per direction (1-60).
+# duration_secs = 10
+# Automatic test every N seconds (never under 300); 0 or absent = "Run now" only.
+# interval_secs = 0
 
 # ─────────────────────────────────────────────
 # RACE DRAIN - automatic NVMe purge (hand back space)

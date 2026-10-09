@@ -1000,6 +1000,8 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Magnets waiting for their metadata, including the ones a restart
     // interrupted: their requests are in the store.
     magnets::spawn(state.clone());
+    // The periodic line test, when [vpn_speedtest] interval_secs asks for one.
+    speedtest::spawn(state.clone());
     // Block lists and bans, before the engines take their first peers.
     ipfilter::spawn(state.clone());
     // Watched folders: a .torrent or .magnet dropped in is added.
