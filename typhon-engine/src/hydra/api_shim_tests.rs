@@ -502,6 +502,31 @@ async fn under_queueing_the_queue_ceilings_are_written() {
     assert_eq!((p["max_active_uploads"].as_i64(), p["max_active_torrents"].as_i64()), (Some(4), Some(9)));
 }
 
+/// The slow-torrent rule round-trips through the qBittorrent page, and a
+/// client posting back the defaults it read writes nothing.
+#[tokio::test]
+async fn the_slow_torrent_rule_is_read_and_written_like_qbittorrent() {
+    let s = st("shim-prefs-slow", "[race]\nactive_downloads = 5\n");
+    let p = prefs(&s).await;
+    assert_eq!(p["dont_count_slow_torrents"], false);
+    assert_eq!(
+        (p["slow_torrent_dl_rate_threshold"].as_i64(), p["slow_torrent_ul_rate_threshold"].as_i64(), p["slow_torrent_inactive_timer"].as_i64()),
+        (Some(2), Some(2), Some(60)),
+        "qBittorrent's defaults"
+    );
+    let before = std::fs::read_to_string(&s.state.config_path).unwrap();
+    let (code, _) = set_prefs(&s, p.clone()).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(std::fs::read_to_string(&s.state.config_path).unwrap(), before, "the page posted back changes nothing");
+
+    let (code, _) = set_prefs(&s, serde_json::json!({"dont_count_slow_torrents": true, "slow_torrent_dl_rate_threshold": 5, "slow_torrent_inactive_timer": 120})).await;
+    assert_eq!(code, StatusCode::OK);
+    let p = prefs(&s).await;
+    assert_eq!(p["dont_count_slow_torrents"], true);
+    assert_eq!((p["slow_torrent_dl_rate_threshold"].as_i64(), p["slow_torrent_inactive_timer"].as_i64()), (Some(5), Some(120)));
+    assert_eq!(p["slow_torrent_ul_rate_threshold"].as_i64(), Some(2), "untouched");
+}
+
 // ---------------------------------------------------------------------------
 // #30: properties
 // ---------------------------------------------------------------------------

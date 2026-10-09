@@ -8221,6 +8221,12 @@ async fn qbit_preferences(
         "up_limit": state.engines.client_rates().up.rate(),
         "dl_limit": state.engines.client_rates().down.rate(),
         "queueing_enabled": queueing,
+        // The slow-torrent rule of the race engine, with qBittorrent's
+        // defaults when its file says nothing (KiB/s, seconds).
+        "dont_count_slow_torrents": cfg.race.dont_count_slow_torrents.unwrap_or(false),
+        "slow_torrent_dl_rate_threshold": cfg.race.slow_torrent_dl_rate_threshold.unwrap_or(2),
+        "slow_torrent_ul_rate_threshold": cfg.race.slow_torrent_ul_rate_threshold.unwrap_or(2),
+        "slow_torrent_inactive_timer": cfg.race.slow_torrent_inactive_timer.unwrap_or(60),
         // Where an add with no category and no savepath lands, as a client
         // set it (`setPreferences`). Was the constant `/downloads`, a folder
         // nothing ever wrote to; empty until a client sets one, because
@@ -10181,6 +10187,8 @@ const CLIENT_RATE_LIMITS_KEY: &str = "client_rate_limits";
 const LIVE_SESSION_KEYS: &[&str] = &[
     "upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent",
     "active_downloads", "queueing", "active_seeds", "active_limit",
+    "dont_count_slow_torrents", "slow_torrent_dl_rate_threshold", "slow_torrent_ul_rate_threshold",
+    "slow_torrent_inactive_timer",
     "max_ratio", "max_seeding_time", "max_inactive_seeding_time", "share_limit_action",
 ];
 
@@ -14301,6 +14309,8 @@ const QBIT_PREFERENCES_APPLIED: &[&str] = &[
     "max_inactive_seeding_time_enabled", "max_inactive_seeding_time", "max_ratio_act",
     "lsd", "up_limit", "dl_limit", "dht", "pex", "save_path",
     "max_active_downloads", "max_active_uploads", "max_active_torrents",
+    "dont_count_slow_torrents", "slow_torrent_dl_rate_threshold", "slow_torrent_ul_rate_threshold",
+    "slow_torrent_inactive_timer",
 ];
 
 /// Where a qBittorrent client said adds land when neither a category nor a
@@ -14325,6 +14335,9 @@ pub(crate) fn qbit_default_save_path(state: &AppState) -> String {
 ///   / `max_active_torrents` -> `active_seeds` / `active_limit`, only while
 ///   queueing is on, as qBittorrent reads them. Queueing itself is switched in
 ///   Hydranos, not by a client: turning it on stops seeds.
+/// - `dont_count_slow_torrents` and its three `slow_torrent_*` figures (KiB/s,
+///   seconds) -> the same keys, live, with or without queueing: Hydranos's
+///   `active_downloads` is a ceiling either way.
 /// - `save_path`: where a shim add with no category and no `savepath` lands.
 fn qbit_apply_more_preferences(state: &AppState, doc: &serde_json::Value) -> Result<(), String> {
     let num = |k: &str| doc.get(k).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).or_else(|| v.as_str()?.trim().parse().ok()));
@@ -14372,6 +14385,18 @@ fn qbit_apply_more_preferences(state: &AppState, doc: &serde_json::Value) -> Res
         }
         if let Some(v) = num("max_active_torrents").filter(|v| *v != shown(cfg.race.active_limit)) {
             all("active_limit", &v.max(-1).to_string())?;
+        }
+    }
+    if let Some(on) = flag("dont_count_slow_torrents").filter(|on| *on != cfg.race.dont_count_slow_torrents.unwrap_or(false)) {
+        all("dont_count_slow_torrents", if on { "true" } else { "false" })?;
+    }
+    for (key, shown) in [
+        ("slow_torrent_dl_rate_threshold", cfg.race.slow_torrent_dl_rate_threshold.unwrap_or(2)),
+        ("slow_torrent_ul_rate_threshold", cfg.race.slow_torrent_ul_rate_threshold.unwrap_or(2)),
+        ("slow_torrent_inactive_timer", cfg.race.slow_torrent_inactive_timer.unwrap_or(60)),
+    ] {
+        if let Some(v) = num(key).filter(|v| *v != shown) {
+            all(key, &v.max(0).to_string())?;
         }
     }
     if let Some(p) = doc.get("save_path").and_then(|v| v.as_str()).map(|s| s.trim().to_string()) {
