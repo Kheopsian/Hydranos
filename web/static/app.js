@@ -7703,6 +7703,10 @@ const _SETTINGS_DESC = {
     active_limit: "Max torrents running at once, downloads and seeds together, read only while queueing is on (-1 = unlimited). Applied live.",
     active_downloads: "Max torrents actively downloading at once (0 or -1 = unlimited). Applied live.",
     queueing: "qBittorrent's queue: enforce active_seeds and active_limit. Seeds past the ceiling are stopped, oldest kept first, and started again when a slot frees. Off by default. Applied live.",
+    dont_count_slow_torrents: "qBittorrent's \"do not count slow torrents in these limits\": a torrent under the threshold below for the inactivity timer keeps running but frees its slot in active_downloads, active_seeds and active_limit. Keeps a small download ceiling while releases stuck at 99% wait for a seed. Off by default. Applied live.",
+    slow_torrent_dl_rate_threshold: "A download under this speed, in KiB/s, is slow (2 = qBittorrent's default; 0 = never slow). Applied live.",
+    slow_torrent_ul_rate_threshold: "A seed uploading under this speed, in KiB/s, is slow (2 = qBittorrent's default; 0 = never slow). Applied live.",
+    slow_torrent_inactive_timer: "Seconds a torrent must stay under its threshold before it stops counting (60 = qBittorrent's default). Applied live.",
     max_ratio: "Share limit: a seed whose ratio reaches this is stopped or removed (share_limit_action). -1 = off. Never before the tracker's minimum seeding time: a tracker without one declared is left alone. Applied live.",
     max_seeding_time: "Share limit: minutes of seeding after which a seed is stopped or removed. -1 = off. Applied live.",
     max_inactive_seeding_time: "Share limit: minutes a seed may upload nothing before it is stopped or removed. Counted from the daemon's start. -1 = off. Applied live.",
@@ -7732,10 +7736,12 @@ const _SETTINGS_COMMON = new Set([
     "race::listen_port", "race::bind_interface", "race::enable_ipv6", "race::max_connections", "race::max_uploads_per_torrent",
     "race::upload_rate_limit", "race::download_rate_limit", "race::choking",
     "race::active_downloads", "race::active_seeds", "race::active_limit", "race::queueing",
+    "race::dont_count_slow_torrents", "race::slow_torrent_dl_rate_threshold", "race::slow_torrent_ul_rate_threshold", "race::slow_torrent_inactive_timer",
     "race::max_ratio", "race::max_seeding_time", "race::max_inactive_seeding_time", "race::share_limit_action",
     "hoard::listen_port", "hoard::bind_interface", "hoard::enable_ipv6", "hoard::max_connections", "hoard::max_uploads_per_torrent",
     "hoard::upload_rate_limit", "hoard::download_rate_limit", "hoard::choking",
     "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit", "hoard::queueing",
+    "hoard::dont_count_slow_torrents", "hoard::slow_torrent_dl_rate_threshold", "hoard::slow_torrent_ul_rate_threshold", "hoard::slow_torrent_inactive_timer",
     "hoard::max_ratio", "hoard::max_seeding_time", "hoard::max_inactive_seeding_time", "hoard::share_limit_action",
     // Peer sources: not advanced tuning. Someone on a private tracker has to
     // be able to find these without hunting through the advanced list.
@@ -7783,6 +7789,8 @@ const _SETTINGS_DEFAULT = {
     "hoard::inactivity_timeout": 90,
     "hoard::active_seeds": -1, "hoard::active_limit": -1, "hoard::active_downloads": 10,
     "race::queueing": false, "hoard::queueing": false,
+    "race::dont_count_slow_torrents": false, "race::slow_torrent_dl_rate_threshold": 2, "race::slow_torrent_ul_rate_threshold": 2, "race::slow_torrent_inactive_timer": 60,
+    "hoard::dont_count_slow_torrents": false, "hoard::slow_torrent_dl_rate_threshold": 2, "hoard::slow_torrent_ul_rate_threshold": 2, "hoard::slow_torrent_inactive_timer": 60,
     "race::max_ratio": -1, "race::max_seeding_time": -1, "race::max_inactive_seeding_time": -1, "race::share_limit_action": "stop",
     "hoard::max_ratio": -1, "hoard::max_seeding_time": -1, "hoard::max_inactive_seeding_time": -1, "hoard::share_limit_action": "stop",
     "race::upload_rate_limit": 0, "race::download_rate_limit": 0, "race::choking": false,
@@ -7800,6 +7808,7 @@ const _LIVE_ENGINE_KEY_DEFAULTS = {
     upload_rate_limit: 0, download_rate_limit: 0, choking: false,
     // The queue and the share limits, off.
     queueing: false, active_seeds: -1, active_limit: -1,
+    dont_count_slow_torrents: false, slow_torrent_dl_rate_threshold: 2, slow_torrent_ul_rate_threshold: 2, slow_torrent_inactive_timer: 60,
     max_ratio: -1, max_seeding_time: -1, max_inactive_seeding_time: -1, share_limit_action: "stop",
 };
 function _withLiveEngineKeys(cfg) {
@@ -8078,6 +8087,7 @@ function _readSettingField(id, orig) {
 //   full   = the whole daemon restarts ([daemon], [auth], services)
 const _LIVE_ENGINE_KEYS = new Set(["upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent",
     "active_downloads", "queueing", "active_seeds", "active_limit",
+    "dont_count_slow_torrents", "slow_torrent_dl_rate_threshold", "slow_torrent_ul_rate_threshold", "slow_torrent_inactive_timer",
     "max_ratio", "max_seeding_time", "max_inactive_seeding_time", "share_limit_action"]);
 function _settingTier(section, key) {
     if (section === "daemon" || section === "auth") return "full";

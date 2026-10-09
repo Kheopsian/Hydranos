@@ -131,6 +131,24 @@ pub struct Session {
     /// Torrents (downloads + seeds) allowed to run at once under `queueing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_limit: Option<i64>,
+    /// qBittorrent's "do not count slow torrents in these limits": a running
+    /// torrent that has stayed under its threshold for
+    /// `slow_torrent_inactive_timer` seconds keeps running but frees its slot
+    /// in `active_downloads` / `active_seeds` / `active_limit`, so a release
+    /// stuck at 99 % waiting for a seed does not hold one of five slots.
+    /// Off unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dont_count_slow_torrents: Option<bool>,
+    /// KiB/s under which a download is slow. Absent = 2, qBittorrent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_torrent_dl_rate_threshold: Option<i64>,
+    /// KiB/s under which a seed is slow. Absent = 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_torrent_ul_rate_threshold: Option<i64>,
+    /// Seconds a torrent must stay under its threshold before it stops
+    /// counting. Absent = 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_torrent_inactive_timer: Option<i64>,
     /// Share limits, qBittorrent's: when a seed reaches ANY of them, the
     /// share-limit worker applies `share_limit_action`. Each one absent or
     /// negative = off, which is the default -- Options rather than plain
