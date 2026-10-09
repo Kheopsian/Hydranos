@@ -1,0 +1,203 @@
+//! Tracker scrape (BEP 48 over HTTP, BEP 15 action 2 over UDP).
+//!
+//! Counts only: seeders and leechers for a batch of torrents, without
+//! announcing any of them. Sent from the same interface and through the same
+//! proxy as the engine's announces -- a scrape carries the passkey and comes
+//! from an address, and a tracker must never learn one the announces hide.
+
+use crate::torrent::meta::InfoHash;
+
+/// Hashes per request. 74 is what fits in one UDP datagram (BEP 15); HTTP
+/// trackers commonly cap a multi-scrape lower, so both use 50.
+pub const BATCH: usize = 50;
+
+/// What a tracker said about one torrent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrapeEntry {
+    pub info_hash: InfoHash,
+    pub complete: u32,
+    pub incomplete: u32,
+}
+
+/// The scrape URL of an HTTP announce URL (BEP 48): the last path segment
+/// must start with `announce`, which becomes `scrape`; anything else has no
+/// scrape. The query (a passkey) is kept.
+pub fn scrape_url(announce: &str) -> Option<String> {
+    let (base, query) = match announce.find('?') {
+        Some(i) => (&announce[..i], &announce[i..]),
+        None => (announce, ""),
+    };
+    let slash = base.rfind('/')?;
+    let last = &base[slash + 1..];
+    if !last.starts_with("announce") || !(base.starts_with("http://") || base.starts_with("https://")) {
+        return None;
+    }
+    Some(format!("{}/scrape{}{}", &base[..slash], &last["announce".len()..], query))
+}
+
+/// Scrape an HTTP tracker for up to `BATCH` torrents.
+pub async fn http_scrape_on(
+    scrape_url: &str,
+    hashes: &[InfoHash],
+    user_agent: &str,
+    device: &str,
+    proxy: &str,
+) -> Result<Vec<ScrapeEntry>, String> {
+    let mut url = scrape_url.to_string();
+    for (i, h) in hashes.iter().take(BATCH).enumerate() {
+        let sep = if i == 0 && !url.contains('?') { '?' } else { '&' };
+        url.push(sep);
+        url.push_str("info_hash=");
+        url.push_str(&super::http::url_encode_binary(h));
+    }
+    let mut builder = super::http::pin_builder(
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).user_agent(user_agent),
+        device,
+    )?;
+    if let Some(px) = super::http::proxy_for(proxy)? {
+        builder = builder.proxy(px);
+    }
+    let client = builder.build().map_err(|e| format!("http client: {e}"))?;
+    // The error names the host, never the URL: it carries the passkey.
+    let resp = client.get(&url).send().await.map_err(|e| format!("scrape request: {}", e.without_url()))?;
+    if !resp.status().is_success() {
+        return Err(format!("scrape: HTTP {}", resp.status().as_u16()));
+    }
+    let body = resp.bytes().await.map_err(|e| format!("scrape body: {}", e.without_url()))?;
+    parse_http_scrape(&body)
+}
+
+/// `d5:filesd<20-byte hash>d8:completei..e10:incompletei..e...e...ee`.
+///
+/// Its own walker: the keys of `files` are raw hashes, and the general
+/// decoder turns dict keys into (lossy) strings.
+pub fn parse_http_scrape(data: &[u8]) -> Result<Vec<ScrapeEntry>, String> {
+    let mut p = Parser { d: data, i: 0 };
+    p.expect(b'd')?;
+    let mut out = Vec::new();
+    while p.peek()? != b'e' {
+        let key = p.bytes()?.to_vec();
+        match key.as_slice() {
+            b"files" => {
+                p.expect(b'd')?;
+                while p.peek()? != b'e' {
+                    let hash = p.bytes()?;
+                    let ih: Option<InfoHash> = hash.try_into().ok();
+                    let (mut complete, mut incomplete) = (0i64, 0i64);
+                    p.expect(b'd')?;
+                    while p.peek()? != b'e' {
+                        match p.bytes()? {
+                            b"complete" => complete = p.int()?,
+                            b"incomplete" => incomplete = p.int()?,
+                            _ => p.skip()?,
+                        }
+                    }
+                    p.i += 1;
+                    if let Some(info_hash) = ih {
+                        out.push(ScrapeEntry {
+                            info_hash,
+                            complete: complete.clamp(0, u32::MAX as i64) as u32,
+                            incomplete: incomplete.clamp(0, u32::MAX as i64) as u32,
+                        });
+                    }
+                }
+                p.i += 1;
+            }
+            b"failure reason" => {
+                let why = p.bytes()?;
+                return Err(format!("tracker: {}", String::from_utf8_lossy(why)));
+            }
+            _ => p.skip()?,
+        }
+    }
+    Ok(out)
+}
+
+struct Parser<'a> {
+    d: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn peek(&self) -> Result<u8, String> {
+        self.d.get(self.i).copied().ok_or_else(|| "scrape: truncated".to_string())
+    }
+    fn expect(&mut self, c: u8) -> Result<(), String> {
+        if self.peek()? != c {
+            return Err(format!("scrape: expected {:?} at {}", c as char, self.i));
+        }
+        self.i += 1;
+        Ok(())
+    }
+    fn bytes(&mut self) -> Result<&'a [u8], String> {
+        let colon = self.d[self.i..].iter().position(|&b| b == b':').ok_or("scrape: bad string")?;
+        let len: usize = std::str::from_utf8(&self.d[self.i..self.i + colon])
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or("scrape: bad string length")?;
+        let start = self.i + colon + 1;
+        let end = start.checked_add(len).filter(|e| *e <= self.d.len()).ok_or("scrape: truncated")?;
+        self.i = end;
+        Ok(&self.d[start..end])
+    }
+    fn int(&mut self) -> Result<i64, String> {
+        self.expect(b'i')?;
+        let end = self.d[self.i..].iter().position(|&b| b == b'e').ok_or("scrape: bad int")?;
+        let v = std::str::from_utf8(&self.d[self.i..self.i + end]).ok().and_then(|s| s.parse().ok()).ok_or("scrape: bad int")?;
+        self.i += end + 1;
+        Ok(v)
+    }
+    fn skip(&mut self) -> Result<(), String> {
+        match self.peek()? {
+            b'i' => self.int().map(|_| ()),
+            b'l' | b'd' => {
+                self.i += 1;
+                while self.peek()? != b'e' {
+                    self.skip()?;
+                }
+                self.i += 1;
+                Ok(())
+            }
+            _ => self.bytes().map(|_| ()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_scrape_url_is_bep_48s() {
+        assert_eq!(scrape_url("http://t.example/announce").as_deref(), Some("http://t.example/scrape"));
+        assert_eq!(scrape_url("https://t.example/x/announce.php?passkey=k").as_deref(), Some("https://t.example/x/scrape.php?passkey=k"));
+        assert_eq!(scrape_url("https://t.example/abc/announce").as_deref(), Some("https://t.example/abc/scrape"));
+        assert_eq!(scrape_url("https://t.example/a"), None, "no announce segment, no scrape");
+        assert_eq!(scrape_url("https://t.example/announce/x"), None, "announce must be the last segment");
+        assert_eq!(scrape_url("udp://t.example:80/announce"), None, "UDP has its own scrape");
+    }
+
+    #[test]
+    fn a_multi_scrape_answer_is_read_with_binary_hashes() {
+        let a = [0xFFu8; 20];
+        let b = [0x41u8; 20];
+        let mut body = b"d5:filesd20:".to_vec();
+        body.extend_from_slice(&a);
+        body.extend_from_slice(b"d8:completei12e10:downloadedi99e10:incompletei3e4:name3:fooe20:");
+        body.extend_from_slice(&b);
+        body.extend_from_slice(b"d8:completei0e10:incompletei7eee5:flagsd20:min_request_intervali1800eee");
+        let got = parse_http_scrape(&body).unwrap();
+        assert_eq!(got, vec![
+            ScrapeEntry { info_hash: a, complete: 12, incomplete: 3 },
+            ScrapeEntry { info_hash: b, complete: 0, incomplete: 7 },
+        ]);
+    }
+
+    #[test]
+    fn a_refusal_or_garbage_is_an_error_not_zeroes() {
+        assert!(parse_http_scrape(b"d14:failure reason9:forbiddene").unwrap_err().contains("forbidden"));
+        assert!(parse_http_scrape(b"<html>").is_err());
+        assert!(parse_http_scrape(b"d5:filesd20:short").is_err());
+        assert_eq!(parse_http_scrape(b"d5:filesdee").unwrap(), vec![], "nothing known is an empty answer");
+    }
+}

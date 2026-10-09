@@ -24,6 +24,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- a race SSD told what the drain freed
 
 ### Added
+- **Scrape for torrents not announced yet.** A torrent waiting behind the
+  boot sweep of a large library, or stopped, showed 0 seeders / 0 leechers,
+  which reads as a dead swarm. Every 5 minutes each engine scrapes up to
+  5000 such torrents (BEP 48 over HTTP, BEP 15 over UDP, 50 per request, one
+  request per tracker every 2 s, again after an hour if still unannounced).
+  Counts only: it fills the swarm columns and nothing else -- the announce
+  record, the scheduler, the race timeline and the trackers tab never see
+  it. Same interface, proxy and passkey override as the announces; nothing
+  while the engine holds its trackers (`start_paused`), nothing to a tracker
+  whose breaker is open, no UDP scrape behind a proxy.
 - **The Benchmark tab's line test and A/B comparison are real.** "Run now"
   runs iperf3 against `[vpn_speedtest] iperf3_server`, upload then
   download, from the race engine's interface (so a tunnel measures the

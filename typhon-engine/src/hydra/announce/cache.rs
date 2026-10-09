@@ -430,6 +430,12 @@ impl Cache {
         )
     }
 
+    /// Has any tracker answered an announce for this torrent? Without the
+    /// copy `get` makes.
+    pub fn has(&self, info_hash: &str) -> bool {
+        self.entries.read().unwrap().contains_key(info_hash)
+    }
+
     pub fn get(&self, info_hash: &str) -> Option<Entry> {
         self.entries.read().unwrap().get(info_hash).cloned()
     }
