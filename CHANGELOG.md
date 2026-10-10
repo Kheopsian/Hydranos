@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a race SSD told what the drain freed
+## v4.4.0 -- RSS, download order, qBittorrent's queue and share limits, and the 4.3 gaps closed
 
 ### Added
 - **Scrape for torrents not announced yet.** A torrent waiting behind the
