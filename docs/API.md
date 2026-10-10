@@ -1,8 +1,8 @@
 # REST API
 
-*Applies to Hydranos 4.3.1.*
+*Applies to Hydranos 4.4.0.*
 
-For scripting Hydranos: every native API route (`/api/*`) in 4.3.1, which work, which are stubs, `curl` examples. The qBittorrent-compatible API (`/api/v2/*`) is documented on [qBittorrent Shim and Automation](https://github.com/Kheopsian/Hydranos/wiki/qBittorrent-Shim-and-Automation) (changes in 4.3.1: *qBittorrent shim* below), and the MCP endpoint on [MCP Server](https://github.com/Kheopsian/Hydranos/wiki/MCP-Server).
+For scripting Hydranos: every native API route (`/api/*`) in 4.4, which work, which are stubs, `curl` examples. The qBittorrent-compatible API (`/api/v2/*`) is documented on [qBittorrent Shim and Automation](https://github.com/Kheopsian/Hydranos/wiki/qBittorrent-Shim-and-Automation) (changes in 4.4: *qBittorrent shim* below), and the MCP endpoint on [MCP Server](https://github.com/Kheopsian/Hydranos/wiki/MCP-Server).
 
 ## Basics
 
@@ -104,7 +104,7 @@ curl -s -H "X-Api-Key: $KEY" -H "Content-Type: application/json" \
 
 ## Torrents and adding
 
-Status: ✓ works · ◐ works with a caveat. Stub routes appear only in *Routes that are stubs in 4.3.1*.
+Status: ✓ works · ◐ works with a caveat. Stub routes appear only in *Routes that are stubs in 4.4*.
 
 | Route | Method | Purpose | Status |
 |---|---|---|---|
@@ -139,7 +139,7 @@ How an add picks its engine and save path: [Categories and Routing](https://gith
 
 ## Lists and engines
 
-Each `/api/engines/:id/...` row also answers as `/api/hoard/...` and `/api/race/...`, except `pinned`, `pause-all` and `resume-all` (hoard alias only).
+Each `/api/engines/:id/...` row also answers as `/api/hoard/...` and `/api/race/...`, except `pinned`, `pause-all` and `resume-all` (hoard alias only) and `share-limits` / `rate-limits` (only under `/api/engines/:id/`).
 
 | Route | Method | Purpose | Status |
 |---|---|---|---|
@@ -247,10 +247,10 @@ See [Race Drain, Graduation and Seed Obligations](https://github.com/Kheopsian/H
 | `/api/auth/api-key/confirm` | POST | Node side, step 2, authenticated by the pending key in `X-Api-Key`: written to `[daemon] api_key`, live at once; the old key is refused from the next request. 401 for any other key. Logged-in browser sessions stay valid. | ✓ |
 | `/api/nodes/enrol`, `/api/nodes/register` | POST | One-time token + install command; called by the new machine with the token. A name already taken is refused before the token is spent. | ✓ |
 | `/api/nodes/:name/{handoff,fetch,move-engine}` | POST | Push / pull / move between that node's engines (bodies: [Nodes and Multiple Machines](https://github.com/Kheopsian/Hydranos/wiki/Nodes-and-Multiple-Machines)). | ✓ |
-
-**Move to a node** (`handoff` with `"then":"remove"`, 4.4): the answer carries `"job"`, a persistent job of type `handoff` in state `waiting` (Jobs tab, `GET /api/jobs`), with `params` `{"name","target","node","engine","deadline"}`. Every 30 s it asks the node, through `/api/engines/<id>/page` (every engine of the node when none was named), how much it holds and records it as the job's progress; once the node holds 100 % the job is `done` and the local copy is removed from every engine with its files. It survives a restart (the 6-hour deadline is stored), and ends `failed` with the local copy kept when the deadline passes or the node is removed. `DELETE /api/jobs/:id` stops it. A second move of the same torrent while one waits → 409; `then` other than `keep`/`remove` → 400. Up to 4.3.1 the wait was a task lost on restart, and a move to a node's extra engine (`vpn1`) was never confirmed.
 | `/node/:name/open` | GET | Redirect to the node's UI with its key. | ✓ |
 | `/install.sh` | GET | Enrolment script (public). | ✓ |
+
+**Move to a node** (`handoff` with `"then":"remove"`, 4.4): the answer carries `"job"`, a persistent job of type `handoff` in state `waiting` (Jobs tab, `GET /api/jobs`), with `params` `{"name","target","node","engine","deadline"}`. Every 30 s it asks the node, through `/api/engines/<id>/page` (every engine of the node when none was named), how much it holds and records it as the job's progress; once the node holds 100 % the job is `done` and the local copy is removed from every engine with its files. It survives a restart (the 6-hour deadline is stored), and ends `failed` with the local copy kept when the deadline passes or the node is removed. `DELETE /api/jobs/:id` stops it. A second move of the same torrent while one waits → 409; `then` other than `keep`/`remove` → 400. Up to 4.3.1 the wait was a task lost on restart, and a move to a node's extra engine (`vpn1`) was never confirmed.
 
 The legacy 3.x routes `/api/agents*` were removed in 4.4. Any path under `/api/agents` and any method gets `410 Gone` with `{"error":"…","see":["/api/engines","/api/nodes"]}`. Up to 4.3.1, `GET /api/agents` listed the local engines as `local-<id>`, and the other agent routes were stubs. Use `/api/engines` for the engines on this machine and `/api/nodes` for other machines ([Upgrading from 3.x](https://github.com/Kheopsian/Hydranos/wiki/Upgrading-from-3x)).
 
@@ -298,7 +298,7 @@ Import wizard: [Migrating from qBittorrent](https://github.com/Kheopsian/Hydrano
 
 **Network.** A feed and its `.torrent`s are fetched by the way out of the engine the torrent will go to (the first enabled rule's category, else the engine an add without category goes to): its WireGuard tunnel, interface or SOCKS5 proxy, and its `announce_proxy` when it has one -- the route its announces take, so the tracker sees one address. An engine the kill switch keeps off the network fetches nothing: the feed's `last_error` (and `blocked` in the list) says why. 30 s timeout, 5 MiB per feed, 10 MiB per `.torrent`, the client's User-Agent. URLs are logged with the query and any key-like path segment replaced by `***`.
 
-**Config** (`[rss]`, optional): `enabled` (default true; false = nothing fetched or added, feeds kept), `max_articles` per feed (default 200, the newest kept), `refresh_minutes` (default 30, minimum 5; each feed has its own `refresh_secs`). With no feed, the worker reads one empty table every 30 s.
+**Config** (`[rss]`, optional): `enabled` (default true; false = no automatic refresh and no rule runs, feeds kept; the manual Refresh and Download still work), `max_articles` per feed (default 200, the newest kept), `refresh_minutes` (default 30, minimum 5; each feed has its own `refresh_secs`). With no feed, the worker reads one empty table every 30 s.
 
 ## Network and IP filter
 
@@ -339,7 +339,7 @@ A forgotten password is reset on the host with `hydranos reset-password <passwor
 |---|---|---|---|
 | `/health` | GET | Public. `{"status","version","uptime","checks":{"store","engines":[{id,torrents,online,listening,held,blocked}]},"problems":[…]}`. `healthy` (200); `degraded` (200: an online engine without a listener, held by `start_paused`, or blocked by the kill switch — `blocked` carries the reason —, even when every engine is); `unhealthy` (**503**: the store does not answer a query, or no online engine listens); `starting` (200, with `startup`) while the catalogue loads. | ✓ |
 | `/metrics` | GET | Public, Prometheus with `# HELP`/`# TYPE`, per engine (extra engines included): torrents, by state, paused, rates, session bytes (counters), lifetime bytes, peers, seed size, announces ok/failed (engine and tracker), tracker errors last hour by class, announce in flight / slots / late / needed, rate caps (engine and client), choker, listening, held, pieces in flight and the block bytes they hold (`hydra_pieces_in_flight`, `hydra_piece_buffer_bytes`), jemalloc allocated/resident, build info, uptime. From kept counters: no catalogue walk per scrape. While starting: `hydra_up`, `hydra_starting`, `hydra_startup_restored{engine}`, `hydra_startup_records{engine}`. | ✓ |
-| `/api/startup` | GET | Public. `{"ready","phase","total","restored","engines":[{id,restored,total}],"uptime"}`. The port opens before the catalogue loads; `phase` is `loading`, `connecting`, `opening_store`, `starting_workers`, then `ready`. While not ready, every other route except `/`, `/static/*`, `/health`, `/metrics` and `GET /api/setup` answers 503 `{"error","startup"}` with `Retry-After: 5`. | ✓ |
+| `/api/startup` | GET | Public. `{"ready","phase","total","restored","engines":[{id,restored,total}],"uptime"}`. The port opens before the catalogue loads; `phase` is `loading`, `connecting`, `opening_store`, `starting_workers`, then `ready`. While not ready, every other route except `/`, `/static/*`, `/health`, `/metrics` `/api/startup` and `GET /api/setup` answers 503 (`POST /api/setup` is refused as an unrouted method) `{"error","startup"}` with `Retry-After: 5`. | ✓ |
 | `/api/status` | GET | Header and Overview figures. | ✓ |
 | `/api/events` | GET | SSE stream of status snapshots. Ends itself when the daemon stops. | ✓ |
 | `/api/logs` | GET | The in-memory ring (last 2000 lines). Filters, server side: `level` (minimum: `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`), `module` (substring of the module path), `q` (substring of the message and its fields), `since` (`5m`, `1h`, `24h`, `2d` or Unix s), `after` (a `seq`), `limit` (newest N). An unreadable filter → 400. `{"entries":[{ts,source,level,module,msg,seq}],"last_seq","modules":[…]}`. | ✓ |
@@ -372,7 +372,7 @@ What each monitoring route reports: [Monitoring and Logs](https://github.com/Khe
 
 ## qBittorrent shim
 
-Documented on [qBittorrent Shim and Automation](https://github.com/Kheopsian/Hydranos/wiki/qBittorrent-Shim-and-Automation). Changes in 4.3.1:
+Documented on [qBittorrent Shim and Automation](https://github.com/Kheopsian/Hydranos/wiki/qBittorrent-Shim-and-Automation). Changes in 4.3.1 and 4.4:
 
 - `torrents/files`, `torrents/properties` and `torrents/trackers` read `hash` from a POST form body as well as the query string (cross-seed sends every call as a POST). An unknown hash on `torrents/trackers` is a 404. Its `** [LSD] **` row is real: `status` 0 with `msg` "LSD is off for this engine" or "This torrent is private", else 2 with `num_peers` = LAN peers Local Service Discovery found for the torrent since the engine started.
 - `torrents/categories` and `torrents/tags` answer POST as well as GET.
@@ -418,7 +418,7 @@ Changes in 4.4:
 - **`app/buildInfo`** keeps answering qBittorrent's version numbers (`qt`, `libtorrent`, `boost`, `openssl`, `bitness`): clients test them to pick an API dialect, and Hydranos's own versions would make them choose wrongly. Hydranos's version is `GET /api/status` `version`.
   - The worker acts on seeds only, every 2 minutes: never on a download, a check or a torrent the operator stopped, and **never before the tracker's minimum seeding time** (`announce_min_seed_hours`): a seed that still owes it, or whose tracker declares none, is left seeding whatever the limit says. A stop is the operator's kind (`stoppedUP`, not restarted by the queue). A removal takes the API's path: `stopped` to the trackers, files only with the last copy for `remove_with_files`.
 
-## Routes that are stubs in 4.3.1
+## Routes that are stubs in 4.4
 
 These routes answer but do not do what their name says.
 

@@ -26,9 +26,9 @@ three uses of one instance:
 - **Race.** Grab and seed new releases fast. Hydranos runs a *race* engine and
   a *hoard* engine side by side in one process, each tuned for its job, so a
   large library never slows a race down.
-- **Stay light.** Holding 290,000 torrents takes 2.8 GiB of RAM (about
-  10 KiB per torrent), where the other clients we measured needed 12 to
-  31 GiB.
+- **Stay light.** Holding 290,000 torrents took 2.8 GiB of RAM (about
+  10 KiB per torrent, measured on 4.2), where the other clients we measured
+  needed 12 to 31 GiB.
 
 How Hydranos and three other clients behave at
 [290,000 torrents](docs/scale-290k.md), measured on the same machine.
@@ -62,15 +62,17 @@ their state rather than ours. Both run on every push. In short:
 - **Your floors hold.** `min interval`, BEP 31 `retry in` and `Retry-After` are
   obeyed per tracker, races included. Only a re-announce a person forces
   crosses `min interval`, as qBittorrent's does. An unregistered race is
-  retried like autobrr does it (7 s, 50 times). BEP 12 tier order is
+  retried every 5 s for 6 minutes (`registration_retry_minutes`), the
+  window autobrr uses. BEP 12 tier order is
   respected, and `tracker id` is echoed back.
 - **One identity.** Peer id `-HY####-`, the same to every tracker and every
   peer, `User-Agent: Hydranos/<version>`, a stable secret `key`. No client
   spoofing.
 - **Private torrents stay private** (BEP 27): no DHT, PEX, hole punching or
   LSD, and peers named by other peers are ignored.
-- **HTTP trackers only.** No UDP, and no scrape requests: swarm counts come
-  from the announce response.
+- **Scrape only for what is not announced yet.** Swarm counts come from the
+  announce response; a torrent no tracker has answered for (queued at boot,
+  stopped) is scraped (BEP 48 / BEP 15) for its counts and nothing else.
 
 ---
 

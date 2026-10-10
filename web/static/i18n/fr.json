@@ -650,7 +650,7 @@
   "Started": "Démarré",
   "Starting…": "Démarrage…",
   "Startup pause": "Pause au démarrage",
-  "Startup pause: {engines} not announcing": "Pause au démarrage : {moteurs} n'annonce rien",
+  "Startup pause: {engines} not announcing": "Pause au démarrage : {engines} n'annonce rien",
   "State": "État",
   "Status": "Statut",
   "Stay here": "Rester ici",
