@@ -86,7 +86,7 @@ and `interop`).
 | 23 | Compact peer lists | Implemented |
 | 27 | Private torrents | Implemented, on what we send *and* on what we receive |
 | 31 | Tracker returns `retry in` | Implemented |
-| 48 | Scrape | **Not implemented**: we never scrape |
+| 48 | Scrape | Only for torrents no tracker has answered an announce for (queued, stopped): counts only, at most 5000 per engine every 5 min |
 | 52 | BitTorrent v2 | Implemented for `.torrent` files: v2-only (SHA-256 merkle checks, truncated SHA-256 as the identity) and hybrid (checked through its v1 hashes). A magnet with only a v2 hash is refused by name |
 | 55 | Hole punching (`ut_holepunch`) | Implemented. Never for a private torrent |
 | — | MSE/PE encrypted connections | Implemented, both directions |
@@ -244,7 +244,7 @@ nowhere else.** For such a torrent:
   hole-punch `connect` naming a peer is ignored. Not advertising an extension
   does not stop a peer from sending its messages anyway, so the guard sits on
   what we receive (`peer_sources_allowed`);
-- no local discovery (LSD is not implemented at all).
+- no local discovery (LSD never announces a private torrent).
 
 The flag is read as BEP 27 defines it: `private = 1` and nothing else. An
 absent key is public, and so is `private = 0`.
@@ -467,12 +467,19 @@ UDP announces are not sent at all while announces go through a proxy
 (`TYPHON_ANNOUNCE_PROXY`): a SOCKS proxy carries TCP, and a UDP announce sent
 beside it would show the tracker the very address the proxy hides.
 
-### Scrape is not implemented
+### Scrape is limited to torrents not announced yet
 
-Hydranos never sends a scrape request. Swarm counts come from the `complete`
-and `incomplete` fields of the announce response. BEP 48 is an extension and
-nothing requires a client to scrape. You will see no scrapes from this client
-because it sends none.
+Swarm counts come from the `complete` and `incomplete` fields of the announce
+response. Only a torrent no tracker has answered an announce for -- queued
+behind a large library's boot sweep, or stopped -- is scraped, to show its
+counts: HTTP (BEP 48, the URL's last `announce` segment becomes `scrape`, 50
+hashes per request) or UDP (BEP 15, refused behind a proxy as the announce
+is). At most 5000 torrents per engine every 5 minutes, one request per
+tracker every 2 s, and again after an hour if still unannounced. Same
+interface, proxy and passkey as the announces; nothing while the engine holds
+its trackers at startup, nothing to a tracker whose breaker is open. A
+tracker whose passkey sits after `announce` (`/announce/<key>`) has no scrape
+URL and is never scraped.
 
 ### Two address families, one announce each
 
@@ -498,11 +505,12 @@ tracker that is down is retried at every announce until it lands, but it lives
 in memory: a restart before it lands loses it. The snatch then shows as a seed
 that never downloaded.
 
-### Magnet links are not resolved
+### Magnet links
 
-The daemon adds `.torrent` files only; a magnet link is refused at the API.
-Every announce Hydranos sends therefore comes from the announcer described
-here, for a torrent whose metadata it holds.
+A magnet is resolved (BEP 9 metadata from the swarm, through the trackers it
+names and the DHT when the engine runs one), checked against its info hash,
+then added as a `.torrent` would be. Its announces come from the announcer
+described here once the metadata is in.
 
 ## What the audits changed
 
@@ -529,7 +537,7 @@ that failed was fixed, and the tests that caught them are the ones above.
 | A stop overwrote an owed `completed` | Finished-then-stopped lost the snatch | Fixed |
 | A resume sent no `started` | The tracker had dropped us at `stopped` and saw a periodic announce from an unknown peer | Fixed |
 | `min interval` did not hold back races | A floor the tracker stated could be crossed on our own initiative | Fixed: enforced per tracker. A re-announce a person forces crosses it, as qBittorrent's does |
-| A race refused as "unregistered" was retried 30 minutes later, and five refusals opened the breaker | Races lost to clients running autobrr's 7-second reannounce | Fixed: autobrr's cadence (7 s, 50 times), and a refusal counts as the answer it is |
+| A race refused as "unregistered" was retried 30 minutes later, and five refusals opened the breaker | Races lost to clients running autobrr's 7-second reannounce | Fixed: retried every 5 s for 6 minutes (`registration_retry_minutes`, autobrr's window), and a refusal counts as the answer it is |
 | `left` was `size − downloaded` | Data already on disk was reported as missing; a 90 % torrent announced as 0 % | Fixed: from the piece map |
 | `tracker id` was ignored | BEP 3 asks for it to be echoed back | Fixed |
 | BEP 31 `retry in` and HTTP `Retry-After` were ignored | A tracker asking for quiet was asked again on schedule | Fixed |
