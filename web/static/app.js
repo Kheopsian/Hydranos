@@ -6899,12 +6899,13 @@ function _rpVolCard(v, i) {
         + '<div class="rp2-body"><div class="rp2-f">' + t("Quota")
         + '<span class="rp2-info">i<span class="rp2-tip" style="left:auto;right:0">' + esc(t("On a shared disk (a seedbox slot), the space you are allowed rather than the disk's size. The percentages and the drain then count the data of this engine's torrents against it. Empty: the whole disk.")) + "</span></span>"
         + '<input type="number" min="0" step="1" style="width:90px" placeholder="' + t("whole disk") + '" value="'
-        + (v.quota ? Math.round(v.quota / 1e9) : "") + '" onchange="_rpVolSave(' + i + ',\'quota_gb\',parseFloat(this.value)||0)"> GB</div></div></div>'
-        + '<div class="rp2-row"><div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox"'
+        + (v.quota ? Math.round(v.quota / 1e9) : "") + '" onchange="_rpVolSave(' + i + ',\'quota_gb\',parseFloat(this.value)||0)"> GB</div></div>'
+        // TRIM closes the same row: it is a drain setting like the others.
+        + '<div class="rp2-lbl"><label class="rp2-sw"><input type="checkbox"'
         + (v.trim_after_drain ? " checked" : "") + ' onchange="_rpVolSave(' + i + ',\'trim_after_drain\',this.checked)">'
         + '<span class="rp2-sl"></span></label>' + t("TRIM after drain")
-        + '<span class="rp2-info">i<span class="rp2-tip">' + esc(t("Tells the SSD which blocks the drain just freed. An SSD that is never trimmed treats deleted races as live data and can fall to a fraction of its write speed. Needs CAP_SYS_ADMIN; ZFS, network shares and hard disks refuse it.")) + "</span></span></div>"
-        + '<div class="rp2-spacer"></div>' + _rpTrimLast(v.last_trim) + "</div>"
+        + '<span class="rp2-info">i<span class="rp2-tip" style="left:auto;right:0">' + esc(t("Tells the SSD which blocks the drain just freed. An SSD that is never trimmed treats deleted races as live data and can fall to a fraction of its write speed. Needs CAP_SYS_ADMIN; ZFS, network shares and hard disks refuse it.")) + "</span></span></div>"
+        + _rpTrimLast(v.last_trim) + "</div>"
         + '<div class="rp2-row rp2-drain-result" id="rp-res-' + i + '" style="display:none"></div>'
         + '<div class="rp2-hist" id="rp-hist-' + i + '" style="display:none"></div>'
         + "</div></div>";
