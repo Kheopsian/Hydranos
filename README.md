@@ -39,9 +39,23 @@ Sonarr/Radarr, autobrr and cross-seed talk to Hydranos unchanged.
 If you seed a few hundred torrents, qBittorrent or Transmission will serve you
 with less to learn.
 
-Also in the box: SOCKS5 / PROXY-v2 relay / gluetun networking with hot
-listen-port rebind, engines spread over several machines behind one front, and
-adds that hash-check data already on disk instead of downloading over it.
+Also in the box:
+
+- **Networking per engine**: managed WireGuard (a tunnel per engine, with
+  port forwarding), gluetun, SOCKS5 or a PROXY-v2 relay, an interface pin,
+  and a kill switch that keeps an engine off the network when its way out
+  is down.
+- **qBittorrent's day-to-day features**: the download queue (including
+  "do not count slow torrents"), share limits, speed limits, RSS feeds with
+  automatic download rules, file priorities, sequential download, magnets,
+  UDP trackers and LSD.
+- **Several machines behind one UI**: engines on other machines enrol as
+  nodes, and torrents move between them.
+- **Existing data**: an add hash-checks what is already on disk instead of
+  downloading over it, and a qBittorrent library can be imported as is.
+- **Observability**: Prometheus `/metrics`, a benchmark tab with a line
+  speedtest and before/after comparison, and an MCP server for AI assistants.
+- **Linux (Docker or bare metal) and Windows.**
 
 ---
 
@@ -122,14 +136,19 @@ Install steps, architecture, every networking mode and the edge cases live in
 the **[Wiki](https://github.com/Kheopsian/Hydranos/wiki)**:
 
 - [Installation & First Run](https://github.com/Kheopsian/Hydranos/wiki/Installation-and-First-Run)
+- [Migrating from qBittorrent](https://github.com/Kheopsian/Hydranos/wiki/Migrating-from-qBittorrent)
 - [Architecture](https://github.com/Kheopsian/Hydranos/wiki/Architecture)
 - [Networking Modes](https://github.com/Kheopsian/Hydranos/wiki/Networking-Modes)
 - [Deployment Topologies](https://github.com/Kheopsian/Hydranos/wiki/Deployment-Topologies)
 - [Categories & Routing](https://github.com/Kheopsian/Hydranos/wiki/Categories-and-Routing)
 - [Adding Torrents & Existing Data](https://github.com/Kheopsian/Hydranos/wiki/Adding-Torrents-and-Existing-Data)
 - [qBittorrent Shim & Automation](https://github.com/Kheopsian/Hydranos/wiki/qBittorrent-Shim-and-Automation)
+- [Queue, Share and Speed Limits](https://github.com/Kheopsian/Hydranos/wiki/Queue-Share-and-Speed-Limits)
+- [RSS & Automatic Downloads](https://github.com/Kheopsian/Hydranos/wiki/RSS-and-Automatic-Downloads)
+- [VPN & Egress](https://github.com/Kheopsian/Hydranos/wiki/VPN-and-Egress) · [Managed WireGuard](https://github.com/Kheopsian/Hydranos/wiki/Managed-WireGuard)
+- [Prometheus Metrics](https://github.com/Kheopsian/Hydranos/wiki/Prometheus-Metrics)
 - [Configuration Reference](https://github.com/Kheopsian/Hydranos/wiki/Configuration-Reference)
-- [Troubleshooting](https://github.com/Kheopsian/Hydranos/wiki/Troubleshooting)
+- [Troubleshooting](https://github.com/Kheopsian/Hydranos/wiki/Troubleshooting) · [Known Limitations](https://github.com/Kheopsian/Hydranos/wiki/Known-Limitations)
 
 API reference: [`docs/API.md`](docs/API.md). Companion VPS relay:
 [hydra-relay](https://github.com/Kheopsian/hydra-relay).
