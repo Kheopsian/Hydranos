@@ -4359,11 +4359,8 @@ async function _showEnginePicker(ev, then) {
     // hoard to a VPN-bound engine to change which tunnel a torrent seeds from
     // costs nothing, because both engines read the same files.
     //
-    // DUPLICATE is refused here, and not out of tidiness: two local engines
-    // pointed at one set of files are two writers on the same bytes the first
-    // time either repairs a piece. Shown and explained rather than hidden --
-    // "why can I copy to another machine but not to the engine next door" is
-    // exactly the question this menu should answer.
+    // DUPLICATE to an engine here points a second engine at the SAME files, in
+    // seed mode: the daemon refuses it until the source copy is complete.
     // Over a filter the rows are not in the page: treat it as this node's, and
     // the daemon skips any copy that turns out to live elsewhere.
     const sources = new Set([..._selected.values()].map(v => _selAgent(v)));

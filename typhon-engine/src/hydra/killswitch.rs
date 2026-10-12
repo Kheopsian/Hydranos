@@ -322,7 +322,7 @@ pub fn report_of(cfg: &Config, p: &Plan, running_blocked: &dyn Fn(&str) -> Optio
             "socks5_host": cfg.proxy.socks5_host,
             "socks5_port": cfg.proxy.socks5_port,
             "socks5_user": cfg.proxy.socks5_user,
-            "socks5_pass": cfg.proxy.socks5_pass,
+            "socks5_pass": crate::api::mask_secret(&cfg.proxy.socks5_pass),
             "bind_interface": cfg.daemon.bind_interface,
             "direct": route.is_direct() && route.refusal.is_empty(),
             "error": route.preflight().err().unwrap_or_default(),
@@ -487,7 +487,11 @@ pub async fn post_egress(
         if !(0..=65535).contains(&port) || (!host.is_empty() && port == 0) {
             return bad("the proxy port must be between 1 and 65535".into());
         }
-        let pass = v.get("socks5_pass").and_then(Value::as_str).unwrap_or_default().to_string();
+        // The mask the GET answered means "the one already saved".
+        let pass = match v.get("socks5_pass").and_then(Value::as_str).unwrap_or_default() {
+            crate::api::SECRET_MASK => state.cfg().proxy.socks5_pass.clone(),
+            p => p.to_string(),
+        };
         Some((host, port, txt("socks5_user"), pass))
     } else {
         None

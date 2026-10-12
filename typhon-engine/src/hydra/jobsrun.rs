@@ -147,6 +147,14 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let ih = typhon_engine::torrent::hex_decode(&hash).map_err(|e| e)?;
     let t = src.manager.get(&ih).ok_or("the source engine no longer holds it")?;
 
+    // The same checks a move inside an engine makes, before anything stops:
+    // 4.4 renamed each file onto its destination unseen, so the drain could
+    // overwrite another torrent's file of the same name in the hoard folder.
+    let plan = plan_move_checked(state, &t, std::path::Path::new(&dest_root));
+    if let Some((_, why)) = plan.refusal() {
+        return Err(format!("{why}; nothing was moved"));
+    }
+
     // The torrent's own resume record, captured BEFORE it leaves the engine:
     // pieces, edited trackers, byte counters, seed time, stopped state. 4.3
     // re-added the .torrent in seed mode instead, which marked incomplete data
@@ -760,11 +768,11 @@ pub fn queue_move(
 fn roll_back(
     engine: &crate::engines::Engine,
     metainfo: &[u8],
-    old_root: &std::path::Path,
-    paused: bool,
+    original: &typhon_engine::torrent::fastresume::ResumeData,
     renamed: &[(std::path::PathBuf, std::path::PathBuf)],
     copied: &[std::path::PathBuf],
 ) -> String {
+    let old_root = std::path::Path::new(&original.save_path);
     let mut problems = Vec::new();
     for (from, to) in renamed.iter().rev() {
         if let Err(e) = std::fs::rename(to, from) {
@@ -774,7 +782,7 @@ fn roll_back(
     for c in copied {
         let _ = std::fs::remove_file(c);
     }
-    if let Err(e) = engine.manager.add_torrent_bytes(metainfo, &old_root.to_string_lossy(), paused, true) {
+    if let Err(e) = engine.manager.import_state_bytes(original, metainfo) {
         problems.push(format!("could not re-add it at {}: {e}", old_root.display()));
     }
     if problems.is_empty() {
@@ -795,7 +803,10 @@ fn roll_back(
 ///  1. files on ANOTHER filesystem are copied while the torrent keeps seeding
 ///     from the originals -- that is the long part, and nothing stops for it;
 ///  2. the torrent leaves the engine (data kept), same-filesystem files are
-///     renamed, and it is re-added at the new root without a recheck;
+///     renamed, and its own resume record is re-imported at the new root --
+///     pieces, edited trackers, counters, seed time and stopped state with it.
+///     4.4 re-added the .torrent in seed mode instead, which marked an
+///     incomplete torrent complete and dropped every tracker edit;
 ///  3. only then are the originals of the copied files deleted.
 /// A failure in 1 deletes the copies; a failure in 2 undoes the renames and
 /// re-adds the torrent where it was. Nothing is ever deleted before the new
@@ -883,11 +894,18 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         progress(done);
     }
 
-    // 2. Stop, rename, re-add.
-    let now = typhon_engine::torrent::meta::now_secs();
-    let seeded = t.seed_time_now(now);
-    let paused = t.is_paused.load(std::sync::atomic::Ordering::Relaxed);
+    // 2. Stop, rename, re-import. The record is taken now, after the copies,
+    // so it holds every piece fetched while they ran.
     drop(t);
+    let original = match engine.manager.export_state(&ih) {
+        Some(rd) => rd,
+        None => {
+            for c in &copied {
+                let _ = std::fs::remove_file(c);
+            }
+            return Err("the engine no longer holds it; the copies were removed, nothing moved".into());
+        }
+    };
     if let Err(e) = engine.manager.remove_torrent(&ih, true) {
         for c in &copied {
             let _ = std::fs::remove_file(c);
@@ -905,7 +923,7 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             .unwrap_or(Ok(()))
             .and_then(|_| std::fs::rename(&f.from, &f.to));
         if let Err(e) = r {
-            let undo = roll_back(engine, &metainfo, &plan.old_root, paused, &renamed, &copied);
+            let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
             return Err(format!("renaming {}: {e}; {undo}", f.from.display()));
         }
         renamed.push((f.from.clone(), f.to.clone()));
@@ -914,24 +932,12 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     }
 
     let new_root = plan.new_root.to_string_lossy().to_string();
-    match engine.manager.add_torrent_bytes(&metainfo, &new_root, paused, true) {
-        Ok((added, _)) if added == ih => {}
-        Ok((added, _)) => {
-            let _ = engine.manager.remove_torrent(&added, true);
-            let undo = roll_back(engine, &metainfo, &plan.old_root, paused, &renamed, &copied);
-            return Err(format!(
-                "the metainfo for {hash} describes {} instead; {undo}",
-                typhon_engine::torrent::hex_encode(&added)
-            ));
-        }
-        Err(e) => {
-            let undo = roll_back(engine, &metainfo, &plan.old_root, paused, &renamed, &copied);
-            return Err(format!("the engine refused it at {new_root}: {e}; {undo}"));
-        }
-    }
-    if let Some(nt) = engine.manager.get(&ih) {
-        nt.seed_secs.store(seeded, std::sync::atomic::Ordering::Relaxed);
-        nt.fold_seed_time(typhon_engine::torrent::meta::now_secs());
+    let mut record = original.clone();
+    record.save_path = new_root.clone();
+    // `import_state_bytes` refuses a metainfo that is not this torrent's.
+    if let Err(e) = engine.manager.import_state_bytes(&record, &metainfo) {
+        let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
+        return Err(format!("the engine refused it at {new_root}: {e}; {undo}"));
     }
     set_labels(Some(&new_root));
 
@@ -1050,6 +1056,60 @@ mod graduate_tests {
         assert_eq!(*t.live_trackers.read(), vec![vec!["https://edited.example/announce".to_string()]]);
         assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a stopped torrent stays stopped");
         assert!(dst.join("grad").exists() && !src.join("grad").exists());
+    }
+
+    /// ⭐ A move inside the engine keeps the torrent as it was. 4.4 re-added
+    /// it in seed mode: an incomplete torrent came out "complete", its tracker
+    /// edits were gone and its counters were back to zero.
+    #[test]
+    fn a_move_carries_the_torrent_as_it_was() {
+        let s = state_from("move-keeps", "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
+        // NOT seed mode, and never checked: incomplete. Straight into the
+        // engine, because the API's add starts a recheck on the runtime.
+        let blob = torrent_bytes("grad");
+        let root = src.display().to_string();
+        let race = s.state.engines.get("race").unwrap();
+        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        s.state.store.lock().unwrap().insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
+        race.manager.set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]]).unwrap();
+        race.manager.get(&ih).unwrap().restore_lifetime(5_000, 700);
+
+        let mut j = job(&hash, &dst);
+        j.kind = "move_data".into();
+        j.params = serde_json::json!({
+            "engine": "race", "category": "", "save_path": dst.display().to_string(),
+        })
+        .to_string();
+        move_data(&s.state, &j).expect("moved");
+
+        let t = race.manager.get(&ih).expect("still in race");
+        assert!(!t.seed_mode, "an incomplete torrent is not made a seed by moving it");
+        assert_eq!(*t.live_trackers.read(), vec![vec!["https://edited.example/announce".to_string()]]);
+        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a stopped torrent stays stopped");
+        assert_eq!(t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 5_000);
+        assert_eq!(*t.save_path.read(), dst);
+        assert!(dst.join("grad").exists() && !src.join("grad").exists());
+    }
+
+    /// ⭐ The drain graduated onto whatever sat at the destination: rename(2)
+    /// replaced another torrent's file of the same name without a word.
+    #[test]
+    fn a_graduation_onto_a_taken_path_is_refused() {
+        let (s, hash, src, dst) = setup("grad-taken");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("grad"), b"somebody else's grad").unwrap();
+
+        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("refused");
+        assert!(err.contains("already exist"), "{err}");
+        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), b"somebody else's grad");
+        assert!(src.join("grad").exists());
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_some(), "still in race");
     }
 
     /// ⭐ A target that refuses puts everything back: the files return and the
