@@ -2030,7 +2030,9 @@ async fn get_settings(
                 .into_response()
         }
     };
-    Json(toml_to_json(&parsed)).into_response()
+    let mut out = toml_to_json(&parsed);
+    mask_secrets(&mut out);
+    Json(out).into_response()
 }
 
 /// Convert a parsed TOML tree to JSON the way the Go side does.
@@ -4893,6 +4895,47 @@ async fn get_trackers(
     Json(rows).into_response()
 }
 
+/// What a GET answers in place of a credential that is set.
+///
+/// The network secrets -- SOCKS5 passwords, the gluetun API key -- went out in
+/// clear to anything holding the API key: an *arr, an MCP agent, a browser's
+/// network tab, a pasted HAR. A form shows the mask; posting it back means
+/// "unchanged", so a save of the tab as it was keeps the real value.
+pub(crate) const SECRET_MASK: &str = "********";
+
+/// The keys masked on the way out, in whichever section they sit.
+pub(crate) const SECRET_KEYS: &[&str] = &["socks5_outbound_pass", "socks5_pass", "gluetun_api_key"];
+
+/// The mask for a set secret, nothing for an empty one: "is one set" stays
+/// readable.
+pub(crate) fn mask_secret(v: &str) -> &'static str {
+    if v.is_empty() { "" } else { SECRET_MASK }
+}
+
+/// A posted value that stands for "keep what the file has".
+pub(crate) fn is_kept_secret(key: &str, v: &serde_json::Value) -> bool {
+    SECRET_KEYS.contains(&key) && v.as_str() == Some(SECRET_MASK)
+}
+
+/// `toml_to_json`'s output with every set secret replaced by the mask.
+fn mask_secrets(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if SECRET_KEYS.contains(&k.as_str()) {
+                    if let Some(s) = x.as_str() {
+                        *x = serde_json::Value::String(mask_secret(s).to_string());
+                    }
+                } else {
+                    mask_secrets(x);
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(mask_secrets),
+        _ => {}
+    }
+}
+
 /// The Network tab's fields as the file says them now: what `GET
 /// /api/network/mode` answers, and what a `POST` starts from, so a field it
 /// does not send keeps its value instead of being written as 0 or empty.
@@ -4967,7 +5010,9 @@ async fn get_network_mode(
     let race = &cfg.race;
     let hoard = &cfg.hoard;
     let mode = crate::netmode::current(&cfg);
-    let fields = network_fields(&cfg);
+    let mut fields = network_fields(&cfg);
+    fields.socks5_pass = mask_secret(fields.socks5_pass);
+    fields.gluetun_api_key = mask_secret(fields.gluetun_api_key);
 
     // The OUTER object is a struct too, so its key order is mode, fields,
     // env_overrides, warnings, extra_engines -- not the alphabetical order a
@@ -7016,7 +7061,12 @@ pub(crate) fn apply_pause_to_engine(state: &AppState, engine_id: &str, hash: &st
     let _ = if paused {
         engine.manager.stop_torrent(&info_hash)
     } else {
-        engine.manager.start_torrent(&info_hash)
+        // Through the path claim: a torrent still downloading must not write
+        // into a file another torrent reads.
+        match engine.manager.get(&info_hash) {
+            Some(t) => crate::pathclaim::guarded_start(state, engine_id, &t),
+            None => Ok(()),
+        }
     };
 }
 
@@ -9968,6 +10018,9 @@ async fn post_settings(
     };
 
     for change in &req.changes {
+        if is_kept_secret(&change.key, &change.value) {
+            continue;
+        }
         let literal = match crate::tomledit::toml_scalar(&change.value) {
             Ok(v) => v,
             Err(message) => {
@@ -12498,7 +12551,9 @@ fn remove_one_inner(
 ///
 /// Added in seed mode: the data is there and already verified, and rechecking a
 /// large payload to learn what the first engine already knows would cost hours
-/// of disk for nothing.
+/// of disk for nothing. Which is only true of a COMPLETE source: 4.4 trusted
+/// any copy, so duplicating a torrent still downloading made the second engine
+/// serve pieces nobody had fetched. An incomplete or checking source is refused.
 async fn post_torrent_copy(
     State(state): State<AppState>,
     Path(info_hash): Path<String>,
@@ -12546,6 +12601,22 @@ async fn post_torrent_copy(
     };
     let Some(blob) = blob else { return not_found() };
     let Some(dst) = state.engines.get(&target) else { return not_found() };
+    // Seed mode is a promise that every byte is on disk; only a whole source
+    // copy can make it.
+    let whole = find_copy(&state, &existing, &hash).is_some_and(|t| {
+        t.status.load(std::sync::atomic::Ordering::Relaxed)
+            != typhon_engine::torrent::meta::TorrentStatus::Checking as u8
+            && crate::workers::holds_everything(&t)
+    });
+    if !whole {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("{existing} does not hold all of it yet; duplicate it once it is complete")
+            })),
+        )
+            .into_response();
+    }
     if let Err(e) = dst.manager.add_torrent_bytes(&blob, &save_path, false, true) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -13987,6 +14058,9 @@ async fn post_network_mode(
     let mut merged = serde_json::to_value(network_fields(&cfg)).unwrap_or_default();
     if let (Some(m), Some(sent)) = (merged.as_object_mut(), parsed.get("fields").and_then(|f| f.as_object())) {
         for (k, v) in sent {
+            if is_kept_secret(k, v) {
+                continue;
+            }
             m.insert(k.clone(), v.clone());
         }
     }
@@ -22593,6 +22667,26 @@ mod qbit_shim_post_tests {
         assert_eq!(shim_param("", "category=a%20b", "category").as_deref(), Some("a b"));
         assert_eq!(shim_param("", "", "hash"), None);
     }
+
+    /// Duplicate to a local engine adds in seed mode, which promises every
+    /// byte is on disk: a source still downloading must be refused, or the
+    /// second engine serves pieces nobody fetched.
+    #[tokio::test]
+    async fn duplicating_an_incomplete_torrent_is_refused() {
+        let s = state_from("copy-incomplete", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let dir = s.dir.join("partial").display().to_string();
+        let (partial, _) = add_torrent_bytes(&s.state, &multi_file_bytes(), "", &dir, "", true, false, "race")
+            .expect("added");
+        let (st, body) = call(&s, "POST", &format!("/api/torrents/{partial}/copy"), r#"{"engine":"hoard"}"#).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&body));
+        assert!(find_copy(&s.state, "hoard", &partial).is_none(), "nothing was added to hoard");
+
+        let (whole, _) = add_torrent_bytes(&s.state, &single_file_bytes(), "", "/tmp", "", true, true, "race")
+            .expect("added");
+        let (st, body) = call(&s, "POST", &format!("/api/torrents/{whole}/copy"), r#"{"engine":"hoard"}"#).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert!(find_copy(&s.state, "hoard", &whole).is_some());
+    }
 }
 
 #[cfg(test)]
@@ -22642,6 +22736,35 @@ mod network_mode_tests {
         assert_eq!(f["socks5_host"], "10.0.0.1", "the proxy host it did not send is kept");
         assert_eq!(f["race_listen_port"], 16171, "and the listen ports");
         assert_eq!(f["hoard_listen_port"], 16172);
+    }
+
+    /// ⭐ The SOCKS5 password does not leave the daemon: the GETs answer the
+    /// mask, and a save that posts the mask back keeps the real one.
+    #[tokio::test]
+    async fn network_secrets_are_masked_and_a_masked_save_keeps_them() {
+        let file = SOCKS_FILE.replace(
+            "socks5_outbound_port = 1080\n",
+            "socks5_outbound_port = 1080\nsocks5_outbound_user = \"u\"\nsocks5_outbound_pass = \"s3cr3t-pw\"\n",
+        );
+        let s = state_from("netmode-secret", &file);
+        let f = &load(&s).await["fields"];
+        assert_eq!(f["socks5_pass"], SECRET_MASK);
+        assert_eq!(f["socks5_user"], "u", "only the secret is masked");
+        let settings = body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert!(!settings.to_string().contains("s3cr3t-pw"), "{settings}");
+        assert_eq!(settings["race"]["socks5_outbound_pass"], SECRET_MASK);
+
+        let (st, body) = save(&s, form("socks5", serde_json::json!({
+            "socks5_host": "10.0.0.1", "socks5_port": 1080, "socks5_user": "u", "socks5_pass": SECRET_MASK,
+        }))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(s.cfg().race.socks5_outbound_pass, "s3cr3t-pw", "the mask was written as the password");
+
+        let (st, body) = save(&s, form("socks5", serde_json::json!({
+            "socks5_host": "10.0.0.1", "socks5_port": 1080, "socks5_user": "u", "socks5_pass": "new-pw",
+        }))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(s.cfg().race.socks5_outbound_pass, "new-pw", "a new one is written");
     }
 
     /// ⭐⭐ Leaving SOCKS5 for direct REMOVES the proxy keys -- from race, from

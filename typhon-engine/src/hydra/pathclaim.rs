@@ -742,6 +742,13 @@ impl Job {
 /// The files of `t` (relative to its root) that another torrent names with
 /// other bytes.
 pub fn protected_files(state: &AppState, t: &TorrentState) -> HashSet<PathBuf> {
+    guarded_files(state, t, false)
+}
+
+/// `protected_files`, plus -- with `links` -- the files on disk no torrent
+/// names that have another name somewhere (an *arr library's hardlink): the
+/// same set an add proves before it lets the torrent write.
+fn guarded_files(state: &AppState, t: &TorrentState, links: bool) -> HashSet<PathBuf> {
     let hash = typhon_engine::torrent::hex_encode(&t.meta.info_hash);
     let Some(bytes) = ({
         let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -758,7 +765,14 @@ pub fn protected_files(state: &AppState, t: &TorrentState) -> HashSet<PathBuf> {
     let found = claimants(state, &bytes, &save, top.as_deref(), &mine, &skip);
     let ov = overlap(&mine, &found);
     let rel_of: HashMap<PathBuf, PathBuf> = all.iter().map(|(a, r, _)| (path_key(a), r.clone())).collect();
-    ov.conflicts.iter().chain(&ov.unproven).filter_map(|p| rel_of.get(p).cloned()).collect()
+    let mut out: HashSet<PathBuf> =
+        ov.conflicts.iter().chain(&ov.unproven).filter_map(|p| rel_of.get(p).cloned()).collect();
+    if links {
+        let claimed: HashSet<PathBuf> =
+            found.iter().flat_map(|c| c.files.iter().map(|(p, _)| path_key(p))).collect();
+        out.extend(foreign_links(&all, &claimed));
+    }
+    out
 }
 
 /// Recheck a torrent without letting it fetch over a file another torrent
@@ -808,6 +822,58 @@ pub fn guarded_recheck(state: &AppState, engine_id: &str, t: &Arc<TorrentState>)
     } else {
         std::thread::Builder::new()
             .name("pathclaim-recheck".into())
+            .spawn(move || job.run())
+            .map_err(|e| format!("cannot start the check: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Start a torrent without letting it download over a file another torrent
+/// names, or one with another name on disk.
+///
+/// An add proves those files before it releases the torrent, and holds it
+/// paused meanwhile -- but the proof lived in memory: after a restart, or on a
+/// torrent left paused in error because the proof failed, Start went straight
+/// to the engine and the download wrote into the other torrent's file. Start
+/// now asks the same question an add does. A torrent that holds everything
+/// writes nothing and starts at once; so does one with nothing to protect.
+pub fn guarded_start(state: &AppState, engine_id: &str, t: &Arc<TorrentState>) -> Result<(), String> {
+    let Some(engine) = state.engines.get(engine_id) else {
+        return Err(format!("no engine {engine_id}"));
+    };
+    if t.seed_mode || crate::workers::holds_everything(t) {
+        return engine.manager.start_torrent(&t.info_hash);
+    }
+    let guarded = guarded_files(state, t, true);
+    if guarded.is_empty() {
+        return engine.manager.start_torrent(&t.info_hash);
+    }
+    let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
+    // Paused until proven, in the store as in the engine: the job releases it.
+    {
+        let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = store.set_paused(&hash, engine_id, true);
+    }
+    let _ = engine.manager.stop_torrent(&t.info_hash);
+    let metainfo = {
+        let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.torrent_blob(&hash).ok().flatten()
+    };
+    let job = Job {
+        metainfo,
+        state: state.clone(),
+        engine_id: engine_id.to_string(),
+        hash,
+        isolate_from: None,
+        prove_in_place: Some(guarded),
+        resume: true,
+        rt: tokio::runtime::Handle::try_current().ok(),
+    };
+    if cfg!(test) {
+        job.run();
+    } else {
+        std::thread::Builder::new()
+            .name("pathclaim-start".into())
             .spawn(move || job.run())
             .map_err(|e| format!("cannot start the check: {e}"))?;
     }
@@ -1143,6 +1209,11 @@ mod tests {
         let t = s.state.engines.get("hoard").unwrap().manager.get(&crate::store::hex20(&other).unwrap()).unwrap();
         assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "asked to run, must stay held");
         assert!(recent().iter().any(|e| e.info_hash == other && e.action == "held"));
+        assert_eq!(std::fs::read(lib.join("ep.mkv")).unwrap(), vec![3u8; 20_000]);
+
+        // Start, as after a restart forgot the proof: asked again, still held.
+        crate::api::apply_pause_to_engine(&s.state, "hoard", &other, false);
+        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "Start let it write over the library");
         assert_eq!(std::fs::read(lib.join("ep.mkv")).unwrap(), vec![3u8; 20_000]);
     }
 

@@ -176,7 +176,7 @@ impl QueueLimits {
 
 /// Has this torrent all of its data? Read without the picker lock whenever
 /// the status already says so.
-fn holds_everything(t: &typhon_engine::torrent::meta::TorrentState) -> bool {
+pub(crate) fn holds_everything(t: &typhon_engine::torrent::meta::TorrentState) -> bool {
     let status = t.status.load(Ordering::Relaxed);
     if status == TorrentStatus::Seeding as u8 {
         return true;
@@ -1151,6 +1151,11 @@ pub fn drain_once(
     // ten hours on 2026-09-16 with nothing in the log to explain it.
     let mut stuck_graduate_here: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
+    // Torrents whose graduation would land on files already at the
+    // destination, by category: the job would refuse them, and queueing it
+    // anyway would fail the same way every tick.
+    let mut stuck_dest_taken: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for torrent in torrents {
         if to_free <= 0.0 {
             break;
@@ -1197,6 +1202,16 @@ pub fn drain_once(
                 // every 60s over the whole volume, so a line each would be
                 // hundreds a minute -- and the category is the thing to fix.
                 *stuck_graduate_here
+                    .entry(crate::api::category_of_hash(state, &hash, engine_id))
+                    .or_insert(0usize) += 1;
+                stuck += 1;
+                continue;
+            }
+            // Checked here as well as in the job, and only the cheap half (the
+            // destination, no scan of the other torrents): a refusal is a
+            // property of the disk, and it would come back every tick.
+            if crate::jobsrun::plan_move(&torrent, std::path::Path::new(&save_path)).refusal().is_some() {
+                *stuck_dest_taken
                     .entry(crate::api::category_of_hash(state, &hash, engine_id))
                     .or_insert(0usize) += 1;
                 stuck += 1;
@@ -1261,6 +1276,18 @@ pub fn drain_once(
             volume = %volume.id,
             categories = %detail,
             "graduate_to points back at this engine, so these torrents can never leave the volume:              set graduate_to to a category that files under a DIFFERENT engine"
+        );
+    }
+    if !stuck_dest_taken.is_empty() {
+        let detail = stuck_dest_taken
+            .iter()
+            .map(|(cat, n)| format!("{cat} x{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            volume = %volume.id,
+            categories = %detail,
+            "not graduated: files of the same name already sit at the destination, and moving onto them would overwrite them"
         );
     }
     if to_free > 0.0 {
