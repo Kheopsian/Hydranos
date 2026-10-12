@@ -1869,6 +1869,10 @@ impl TorrentManager {
         // The source engine counted these bytes when it moved them, and
         // settles the rest when it lets go: this side counts from here on.
         state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
+        // And so does what a tracker is told: an adoption opens a session, as
+        // a boot does. Without this the first announce after a graduation or
+        // a move reported the whole lifetime as uploaded this session.
+        state.begin_announce_session();
         // Bitfield before status, for the same reason the startup path does it
         // in that order: the status is derived from completeness.
         if !resume_bits.is_empty() {
@@ -3473,6 +3477,7 @@ mod manager_tests {
         assert_eq!(src.moved(), (100, 0), "the source keeps what it moved, no more");
         assert_eq!(dst.moved(), (0, 0), "the destination did not move 4 GB by adopting it");
         assert_eq!(dst.get(&ih).unwrap().total_uploaded.load(Ordering::Relaxed), 4_000_000_100);
+        assert_eq!(dst.get(&ih).unwrap().session_uploaded(), 0, "a tracker is not told 4 GB went up just now");
 
         dst.get(&ih).unwrap().total_uploaded.fetch_add(25, Ordering::Relaxed);
         dst.update_rates();
