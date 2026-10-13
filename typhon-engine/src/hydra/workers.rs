@@ -1557,6 +1557,10 @@ mod reconcile_tests {
     }
 }
 
+/// How long a row this process just wrote is spared by the store reconcile:
+/// two passes, far longer than any add takes to reach the engine.
+const RECONCILE_GRACE: Duration = Duration::from_secs(10 * 60);
+
 pub fn spawn_store_reconcile(
     engines: Arc<crate::engines::EngineHost>,
     store: Arc<crate::store::StoreLock>,
@@ -1569,6 +1573,25 @@ pub fn spawn_store_reconcile(
             // hoard row is not an orphan just because the race does not hold
             // that torrent.
             for engine in engines.engines() {
+                // Listed on the read connection -- a million rows, and it used
+                // to hold every write for a second -- and dropped through the
+                // shared one, below: the read connection cannot write, and a
+                // delete sent there fails without a word.
+                let listed = store.read().unwrap().all_hashes(&engine.id);
+                let known = match listed {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!(engine = %engine.id, error = %e, "store reconcile: cannot list");
+                        continue;
+                    }
+                };
+                // The engine is looked at AFTER the rows are listed. The other
+                // way round, a torrent added between the two -- the listing
+                // takes seconds at a million rows -- was in the rows and not in
+                // the engine's picture, and lost its row while it kept running
+                // (13/10/2026: no metainfo, every piece refused as "cannot
+                // write to disk"). A row written but not yet loaded is covered
+                // by the grace of `delete_settled_copy` below.
                 let live: std::collections::HashSet<String> = engine
                     .manager
                     .all()
@@ -1582,18 +1605,6 @@ pub fn spawn_store_reconcile(
                     tracing::warn!(engine = %engine.id, "store reconcile: no torrent, skipping");
                     continue;
                 }
-                // Listed on the read connection -- a million rows, and it used
-                // to hold every write for a second -- and dropped through the
-                // shared one, below: the read connection cannot write, and a
-                // delete sent there fails without a word.
-                let listed = store.read().unwrap().all_hashes(&engine.id);
-                let known = match listed {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::warn!(engine = %engine.id, error = %e, "store reconcile: cannot list");
-                        continue;
-                    }
-                };
                 // A record the loader REFUSED is not an orphan: its .torrent
                 // on disk holds a different torrent, so the store row is the
                 // last copy of its metainfo and the next start can repair from
@@ -1622,7 +1633,7 @@ pub fn spawn_store_reconcile(
                         // This engine's row only: `all_hashes` listed this
                         // engine's half, and 4.3's delete by info hash took
                         // another engine's copy of the same torrent with it.
-                        if store.delete_copy(&hash, &engine.id).unwrap_or(false) {
+                        if store.delete_settled_copy(&hash, &engine.id, RECONCILE_GRACE).unwrap_or(false) {
                             dropped += 1;
                         }
                     }
