@@ -12387,6 +12387,11 @@ async fn delete_torrent(
     let resolved = timed_store(&state, &mut timings.lookup_wait, &mut timings.lookup_hold, |store| {
         store.resolve_hash(&hash)
     });
+    // An engine can run a torrent the store no longer lists (13/10/2026: a row
+    // dropped by the reconcile mid-add). Answering 404 left it unremovable by
+    // any route -- the shim's delete resolves through the store too -- and a
+    // re-add is refused as "already added": only a restart got rid of it.
+    let resolved = resolved.or_else(|| find_torrent(&state, &hash).map(|_| hash.clone()));
     let Some(hash) = resolved else {
         return (
             StatusCode::NOT_FOUND,
@@ -12411,9 +12416,15 @@ async fn delete_torrent(
     // before a torrent could be in two places.
     let want = engine_param(&query, "");
     let sessions: Vec<String> = if want.is_empty() {
-        timed_store(&state, &mut timings.lookup_wait, &mut timings.lookup_hold, |store| {
+        let listed = timed_store(&state, &mut timings.lookup_wait, &mut timings.lookup_hold, |store| {
             store.sessions_of(&hash)
-        })
+        });
+        if listed.is_empty() {
+            // No row: the engines that hold it are the copies.
+            state.engines.engines().iter().filter(|e| find_copy(&state, &e.id, &hash).is_some()).map(|e| e.id.clone()).collect()
+        } else {
+            listed
+        }
     } else {
         vec![want.clone()]
     };
@@ -20609,6 +20620,27 @@ mod populated_tests {
 
         let after = engine_page_value(&s.state, "race", "").await["total"].as_i64();
         assert_eq!(after, Some(1), "the catalogue followed the deletion");
+    }
+
+    /// 13/10/2026: a torrent the engine runs with no store row (lost to the
+    /// reconcile mid-add) answered 404 to every delete, and could not be
+    /// re-added either. The engine's copy is what gets removed now.
+    #[tokio::test]
+    async fn a_torrent_with_no_store_row_can_still_be_removed() {
+        let (s, hashes) = populated("pop-delete-strayed");
+        let h = hashes[0].clone();
+        assert!(s.state.store.lock().unwrap().delete_torrent(&h).unwrap(), "the row is gone");
+        assert!(find_torrent(&s.state, &h).is_some(), "the engine still runs it");
+
+        let resp = super::delete_torrent(
+            State(s.state.clone()),
+            axum::extract::Path(h.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        assert!(find_torrent(&s.state, &h).is_none(), "and now the engine does not");
     }
 }
 
