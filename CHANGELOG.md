@@ -21,6 +21,64 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## v4.4.1 -- moves that keep their data, torrents that cannot lose their row, and watched folders on network shares
+
+### Fixed
+- **Set location, a category move and the workflow "move files" no longer
+  re-add the torrent as complete.** The data was moved, then the torrent was
+  added back in seed mode: an incomplete one was marked complete, edited
+  trackers were lost and the counters went to zero. The move now carries the
+  torrent's own state across, as a graduation does.
+- **Duplicate to engine** refuses (409) a source that is not complete or is
+  still being checked, instead of seeding a copy of missing data.
+- **A drain graduation checks its destination first** and leaves a torrent
+  where it is when another torrent already holds that name, instead of
+  writing over it.
+- **Start goes through the same path guard as a recheck**: a torrent no
+  longer starts writing into files another torrent owns.
+- **A torrent added while the store reconcile was listing its rows lost its
+  row** and went on running with no metainfo, refusing every piece with
+  "cannot write to disk: no piece hashes" -- a message that pointed at the
+  disk and was wrong. The reconcile now lists the rows before looking at the
+  engine, and spares a row written in the last ten minutes.
+- **A torrent the engine runs with no store row can be removed**
+  (`DELETE /api/torrents/:hash`). It answered 404 there and "Ok." with
+  nothing done through the qBit shim, and a re-add was refused as already
+  added: only a restart removed it.
+- **The first announce after a graduation or a move to another engine** no
+  longer reports the torrent's lifetime bytes as this session's.
+- **Saving a category without `mode`** keeps its mode, instead of turning it
+  into a race category the drain could purge.
+- **Renaming a category** follows it everywhere it is named -- graduation
+  targets, RSS rules, watched folders, workflow conditions and actions,
+  pending magnets and queued jobs -- not just the torrents' labels. The
+  answer lists what followed.
+- **Force Start** works under a download queue (it answered 409 with the
+  hoard's default of 10 active downloads), and a forced torrent runs past the
+  limit without counting against it. **Force download** actually starts the
+  torrent; it only set a flag nothing read.
+- **`POST /api/torrents` answers 400 or 409 for a refusal** -- disk full,
+  `path_collision = refuse`, an invalid magnet -- and keeps 500 for a store
+  failure.
+- **Secrets are masked** in `GET /api/network/mode`, `/api/network/egress`
+  and `/api/settings` (SOCKS5 passwords, the gluetun API key). Saving the
+  mask back keeps the stored value.
+- **Watched folders on a network share.** All folders were scanned in turn
+  on one thread, and a share that stops answering does not fail -- it waits
+  in the kernel -- so one stuck folder stopped every folder, a local one
+  included, with every status left at zero. Each folder now scans on its
+  own; one with no answer for 60 s says so on its row. The status also shows
+  how many files the last scan saw ("seen 0" while files are dropped in
+  points at the mount), and "not scanned yet" instead of zeros.
+- **Watched folders on Windows** accept a UNC share (`\\server\share\watch`)
+  and `C:/...`; only `X:\...` was taken. Saving the list keeps a folder's
+  forced engine.
+- **Reloading the page on Config** showed an empty watched-folder list (and
+  IP filter): they loaded on a click only. One Save on that empty list
+  erased every folder.
+- **Filter chips keep their width** when a filter narrows their counts, so
+  the chip under the cursor stays the one aimed at.
+
 ## v4.4.0 -- RSS, download order, qBittorrent's queue and share limits, and the 4.3 gaps closed
 
 ### Added
