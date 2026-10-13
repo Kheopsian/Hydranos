@@ -56,6 +56,11 @@ pub struct FolderStatus {
     pub last_scan: i64,
     pub added: u64,
     pub refused: u64,
+    /// `.torrent` and `.magnet` files the last scan saw, waiting or not. A
+    /// folder that reads fine and always shows 0 while files are dropped in is
+    /// not the folder they land in: typically a network share mounted on the
+    /// host after the container started, which then sees the empty mountpoint.
+    pub files_seen: u64,
     /// Why the folder itself could not be read, if it could not.
     pub error: String,
     pub last_refusal: String,
@@ -174,9 +179,11 @@ fn scan_folder(state: &AppState, f: &Folder, seen: &Seen, seen_next: &mut Seen, 
         }
         Err(e) => {
             st.error = format!("cannot read the folder: {e}");
+            st.files_seen = 0;
             return;
         }
     };
+    st.files_seen = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         let lower = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
@@ -187,6 +194,7 @@ fn scan_folder(state: &AppState, f: &Folder, seen: &Seen, seen_next: &mut Seen, 
         if !meta.is_file() {
             continue;
         }
+        st.files_seen += 1;
         let sig = (meta.len(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH));
         // New, or changed since the last scan: still being written.
         if seen.get(&path) != Some(&sig) {
@@ -267,7 +275,10 @@ async fn put_route(State(state): State<AppState>, RawQuery(q): RawQuery, headers
     };
     let cats = crate::api::category_names(&state);
     for f in &list {
-        if !f.path.starts_with('/') && !(cfg!(windows) && f.path.get(1..3) == Some(":\\")) {
+        // The platform's own notion: on Windows that takes `C:/…` and a UNC
+        // share `\\server\share\…`, which a test on `X:\` alone turned away --
+        // the very path someone watching a NAS types.
+        if !Path::new(&f.path).is_absolute() {
             return bad(format!("{:?}: the folder must be an absolute path", f.path));
         }
         if !Path::new(&f.path).is_dir() {
@@ -344,6 +355,9 @@ mod tests {
 
         scan(&s.state);
         assert!(dir.join("one.torrent").exists(), "seen once: not touched yet");
+        // Counted while it waits: "0 seen" is how an empty mountpoint shows.
+        let seen = STATUS.lock().unwrap().as_ref().unwrap()[&dir.to_string_lossy().to_string()].files_seen;
+        assert_eq!(seen, 1, "the waiting file is counted");
         scan(&s.state);
         assert!(!dir.join("one.torrent").exists());
         assert!(dir.join("added/one.torrent").exists(), "moved aside, not deleted");

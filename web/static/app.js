@@ -7114,10 +7114,12 @@ function _watchRow(f, st) {
     let status = "";
     if (st) {
         if (st.error) status = `<span style="color:var(--danger)">${esc(st.error)}</span>`;
-        else status = esc(`${t("added")} ${fmtInt(st.added || 0)} · ${t("refused")} ${fmtInt(st.refused || 0)}`)
+        else status = esc(`${t("seen")} ${fmtInt(st.files_seen || 0)} · ${t("added")} ${fmtInt(st.added || 0)} · ${t("refused")} ${fmtInt(st.refused || 0)}`)
             + (st.last_refusal ? `<br><span class="sr-desc">${esc(st.last_refusal)}</span>` : "");
     }
-    return `<tr class="watch-row">
+    // The engine is kept on the row: the form has no field for it, and a save
+    // that left it out reset a folder's forced engine to "the category's".
+    return `<tr class="watch-row" data-engine="${esc(f.engine || "")}">
         <td><input type="text" class="sr-input w-path" value="${esc(f.path || "")}" placeholder="/data/watch/books"></td>
         <td><select class="sr-input w-cat">${opts}</select></td>
         <td><input type="checkbox" class="w-paused" ${f.paused ? "checked" : ""}></td>
@@ -7149,6 +7151,7 @@ async function saveWatch() {
     const list = [...document.querySelectorAll("#watch-rows .watch-row")].map(r => ({
         path: r.querySelector(".w-path").value.trim(),
         category: r.querySelector(".w-cat").value,
+        engine: r.dataset.engine || "",
         paused: r.querySelector(".w-paused").checked,
         enabled: r.querySelector(".w-on").checked,
     })).filter(f => f.path);
