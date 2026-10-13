@@ -695,6 +695,21 @@ tr:hover td {
 .chip-count {
     color: var(--text-primary);
     font-weight: 600;
+    /* Two items in a column, the count and its widest value (data-w, set by
+       _chipCount) drawn invisible at zero height: the box is as wide as the
+       wider of the two, so a narrowing filter leaves the chips where they are.
+       Tabular figures, or "111" would be narrower than "999". The ghost goes
+       LAST: an inline-flex box takes its baseline from its first item. */
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+    font-variant-numeric: tabular-nums;
+}
+.chip-count::after {
+    content: attr(data-w);
+    visibility: hidden;
+    height: 0;
+    overflow: hidden;
 }
 
 .chip.active {
