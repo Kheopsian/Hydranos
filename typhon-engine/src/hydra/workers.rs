@@ -117,7 +117,11 @@ pub fn spawn_download_slots(
                     .collect(),
                 Err(_) => Default::default(),
             };
-            enforce_queue(&manager, &cache, &limits, &paused, &mut parked, &mut slow_since, std::time::Instant::now());
+            let forced: std::collections::HashSet<String> = match store.read() {
+                Ok(store) => store.pinned(&engine_id).unwrap_or_default().into_iter().collect(),
+                Err(_) => Default::default(),
+            };
+            enforce_queue(&manager, &cache, &limits, &paused, &forced, &mut parked, &mut slow_since, std::time::Instant::now());
         }
     });
 }
@@ -235,6 +239,7 @@ fn enforce_queue(
     cache: &Cache,
     limits: &QueueLimits,
     user_paused: &std::collections::HashSet<String>,
+    forced: &std::collections::HashSet<String>,
     parked: &mut std::collections::HashSet<typhon_engine::torrent::meta::InfoHash>,
     slow_since: &mut SlowClock,
     now: std::time::Instant,
@@ -266,6 +271,17 @@ fn enforce_queue(
         }
         let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
         if user_paused.contains(&hash) {
+            continue;
+        }
+        // Forced (Force download, qBittorrent's setForceStart): it runs past
+        // the ceiling and takes no slot, as in qBittorrent. 4.4 stored the pin
+        // and this loop never read it, so a forced torrent waited its turn
+        // like any other -- or was parked again within a minute.
+        if forced.contains(&hash) {
+            if t.is_paused.load(Ordering::Relaxed) {
+                let _ = manager.start_torrent(&t.info_hash);
+            }
+            parked.remove(&t.info_hash);
             continue;
         }
         let running = !t.is_paused.load(Ordering::Relaxed);
@@ -1763,7 +1779,7 @@ mod drain_tests {
         // Must not panic, and must not stop anything on an empty library.
         let zero = QueueLimits::from_session(&toml::from_str("active_downloads = 0").unwrap());
         assert!(zero.is_empty());
-        enforce_queue(&mgr, &cache, &zero, &paused, &mut Default::default(), &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(&mgr, &cache, &zero, &paused, &Default::default(), &mut Default::default(), &mut SlowClock::new(), std::time::Instant::now());
         assert_eq!(mgr.count(), 0);
     }
 
@@ -1774,7 +1790,7 @@ mod drain_tests {
         let cache = Cache::default();
         let paused = std::collections::HashSet::new();
         let five = QueueLimits { downloads: Some(5), ..Default::default() };
-        enforce_queue(&mgr, &cache, &five, &paused, &mut Default::default(), &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(&mgr, &cache, &five, &paused, &Default::default(), &mut Default::default(), &mut SlowClock::new(), std::time::Instant::now());
         assert!(mgr.all().is_empty());
     }
 }
@@ -2051,12 +2067,12 @@ mod queue_tests {
         let all = seeds(&mgr);
         let cache = Cache::default();
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         let running: Vec<bool> = all.iter().map(|t| !t.is_paused.load(Ordering::Relaxed)).collect();
         assert_eq!(running.iter().filter(|r| **r).count(), 1, "one seed slot");
         assert_eq!(parked.len(), 2);
         // Stable: a second pass moves nothing.
-        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 1);
         // A parked seed the operator then stops stays stopped when the
         // ceiling is lifted; the others come back.
@@ -2066,7 +2082,7 @@ mod queue_tests {
             .take(1)
             .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
             .collect();
-        enforce_queue(&mgr, &cache, &QueueLimits::default(), &operator, &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(&mgr, &cache, &QueueLimits::default(), &operator, &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         assert!(parked.is_empty());
         assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 2);
         let _ = std::fs::remove_dir_all(root);
@@ -2078,7 +2094,7 @@ mod queue_tests {
         let (mgr, root) = manager("total");
         let all = seeds(&mgr);
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &limits("queueing = true\nactive_limit = 2"), &HashSet::new(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(&mgr, &Cache::default(), &limits("queueing = true\nactive_limit = 2"), &HashSet::new(), &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2104,7 +2120,7 @@ mod queue_tests {
         let (mut parked, mut clock) = (HashSet::new(), SlowClock::new());
         at.iter()
             .map(|secs| {
-                enforce_queue(mgr, &Cache::default(), l, &HashSet::new(), &mut parked, &mut clock, t0 + Duration::from_secs(*secs));
+                enforce_queue(mgr, &Cache::default(), l, &HashSet::new(), &Default::default(), &mut parked, &mut clock, t0 + Duration::from_secs(*secs));
                 for t in all {
                     if !t.is_paused.load(Ordering::Relaxed) {
                         t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
@@ -2151,7 +2167,7 @@ mod queue_tests {
         let t0 = std::time::Instant::now();
         let (mut parked, mut clock) = (HashSet::new(), SlowClock::new());
         let mut run = |secs: u64| {
-            enforce_queue(&mgr, &Cache::default(), &l, &HashSet::new(), &mut parked, &mut clock, t0 + Duration::from_secs(secs));
+            enforce_queue(&mgr, &Cache::default(), &l, &HashSet::new(), &Default::default(), &mut parked, &mut clock, t0 + Duration::from_secs(secs));
             all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count()
         };
         // First pass: three running seeds, none slow long enough yet.
@@ -2161,13 +2177,32 @@ mod queue_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// ⭐ A forced torrent runs past the ceiling and takes no slot: two
+    /// downloads under `active_downloads = 1`, the forced one stopped -- it
+    /// is started, and the other keeps the one slot.
+    #[test]
+    fn a_forced_download_runs_past_the_ceiling() {
+        let (mgr, root) = manager("forced");
+        let mut ts = Vec::new();
+        for n in ["a", "b"] {
+            let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false).unwrap();
+            ts.push(mgr.get(&ih).unwrap());
+        }
+        let forced: HashSet<String> = [typhon_engine::torrent::hex_encode(&ts[0].info_hash)].into();
+        let mut parked = HashSet::new();
+        enforce_queue(&mgr, &Cache::default(), &limits("active_downloads = 1"), &HashSet::new(), &forced, &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        assert!(!ts[0].is_paused.load(Ordering::Relaxed), "the forced one waits its turn");
+        assert!(!ts[1].is_paused.load(Ordering::Relaxed), "the forced one took the only slot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The download ceiling alone never touches a seed.
     #[test]
     fn a_download_ceiling_leaves_the_seeds_alone() {
         let (mgr, root) = manager("dl-only");
         let all = seeds(&mgr);
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &limits("active_downloads = 1"), &HashSet::new(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(&mgr, &Cache::default(), &limits("active_downloads = 1"), &HashSet::new(), &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
         assert!(all.iter().all(|t| !t.is_paused.load(Ordering::Relaxed)));
         assert!(parked.is_empty());
         let _ = std::fs::remove_dir_all(root);
