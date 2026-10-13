@@ -583,6 +583,12 @@ pub struct Store {
     slim: std::collections::HashMap<String, std::sync::Arc<SlimFacts>>,
     slim_version: i64,
     tracks_changes: bool,
+    /// Copies (`info_hash/session`) this process wrote a row for, and when.
+    /// The add path writes the row BEFORE the engine holds the torrent, so for
+    /// a moment a new row looks exactly like an orphan; the reconcile asks here
+    /// before calling it one. In memory on purpose: `added_time` is no witness,
+    /// an import carries the date of the client it comes from.
+    fresh: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl Store {
@@ -672,7 +678,7 @@ impl Store {
     }
 
     fn bare(conn: Connection) -> Self {
-        Store { conn, slim: Default::default(), slim_version: -1, tracks_changes: false }
+        Store { conn, slim: Default::default(), slim_version: -1, tracks_changes: false, fresh: Default::default() }
     }
 
     /// Create anything missing. Every statement is IF NOT EXISTS, so this is a
@@ -2811,7 +2817,30 @@ impl Store {
                 tags
             ],
         )?;
+        if n > 0 {
+            self.mark_fresh(info_hash, session);
+        }
         Ok(n > 0)
+    }
+
+    fn mark_fresh(&self, info_hash: &str, session: &str) {
+        let mut fresh = self.fresh.lock().unwrap_or_else(|e| e.into_inner());
+        fresh.insert(format!("{info_hash}/{session}"), std::time::Instant::now());
+    }
+
+    /// `delete_copy`, unless this process wrote that row less than `grace` ago:
+    /// for the store reconcile, which must not take a torrent still on its way
+    /// into the engine for one that left it. A row lost that way strands a live
+    /// torrent with no metainfo, and every piece it receives is refused.
+    pub fn delete_settled_copy(&self, info_hash: &str, session: &str, grace: std::time::Duration) -> anyhow::Result<bool> {
+        {
+            let mut fresh = self.fresh.lock().unwrap_or_else(|e| e.into_inner());
+            fresh.retain(|_, at| at.elapsed() < grace);
+            if fresh.contains_key(&format!("{info_hash}/{session}")) {
+                return Ok(false);
+            }
+        }
+        self.delete_copy(info_hash, session)
     }
 
     /// Re-home a torrent to another engine of this node.
@@ -2827,10 +2856,15 @@ impl Store {
     /// has no single meaning, and updating them all would silently collapse
     /// three copies into one.
     pub fn set_session(&self, info_hash: &str, from: &str, to: &str) -> anyhow::Result<()> {
-        self.conn.execute(
+        let n = self.conn.execute(
             "UPDATE torrents SET session = ?3 WHERE info_hash = ?1 AND session = ?2",
             rusqlite::params![info_hash, from, to],
         )?;
+        // A row re-homed ahead of the engine that will hold it is as new there
+        // as an inserted one.
+        if n > 0 {
+            self.mark_fresh(info_hash, to);
+        }
         Ok(())
     }
 
@@ -4367,6 +4401,21 @@ mod absorb_and_copies_tests {
         add(&s, H, "race");
         assert!(s.delete_copy(H, "race").unwrap());
         assert!(!s.delete_copy(H, "race").unwrap(), "the second call has nothing to drop");
+    }
+
+    /// 13/10/2026: a torrent added during a reconcile pass had its row taken
+    /// for an orphan -- written, not yet in the engine -- and kept running with
+    /// no metainfo, refusing every piece. A row this process just wrote waits
+    /// out the grace; past it, it goes like any other.
+    #[test]
+    fn the_reconcile_leaves_a_row_written_moments_ago() {
+        let s = store();
+        add(&s, H, "hoard");
+        let grace = std::time::Duration::from_secs(600);
+        assert!(!s.delete_settled_copy(H, "hoard", grace).unwrap(), "just written: kept");
+        assert_eq!(s.sessions_of(H), vec!["hoard".to_string()]);
+        assert!(s.delete_settled_copy(H, "hoard", std::time::Duration::ZERO).unwrap(), "settled: dropped");
+        assert!(s.sessions_of(H).is_empty());
     }
 
     #[test]
