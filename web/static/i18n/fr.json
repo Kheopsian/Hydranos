@@ -959,6 +959,7 @@
   "On": "Actif",
   "+ Folder": "+ Dossier",
   "added": "ajoutés",
+  "seen": "vus",
   "refused": "refusés",
   "A .torrent or .magnet file dropped in one of these folders is added in the folder's category, which decides the engine and the save path. Checked every 10 seconds; a file is read once it has stopped changing. Added files move to added/; a refused one is renamed .invalid with a .txt saying why. Nothing is deleted.": "Un fichier .torrent ou .magnet déposé dans un de ces dossiers est ajouté dans la catégorie du dossier, qui décide du moteur et du chemin. Vérifié toutes les 10 secondes ; un fichier est lu une fois qu'il ne change plus. Les fichiers ajoutés vont dans added/ ; un fichier refusé est renommé .invalid avec un .txt qui explique pourquoi. Rien n'est supprimé.",
   "Hardlinks": "Liens physiques",
