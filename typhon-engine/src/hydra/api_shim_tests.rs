@@ -330,9 +330,10 @@ async fn rename_and_queue_positions_are_refused_with_the_reason() {
     assert_eq!(body, "Torrent queueing is not enabled", "qBittorrent's own answer");
 }
 
-/// `setForceStart`: a start where no queue applies; refused where one does.
+/// `setForceStart`: a start, and under a queue a forced one the queue leaves
+/// running. 4.4 refused it (409) wherever a queue applied.
 #[tokio::test]
-async fn force_start_starts_a_stopped_torrent_unless_a_queue_would_undo_it() {
+async fn force_start_starts_a_stopped_torrent_even_under_a_queue() {
     let s = st("shim-force", "");
     let t = single("force-alpha");
     add(&s, &t, &[("savepath", &data(&s)), ("paused", "true")]).await;
@@ -347,8 +348,16 @@ async fn force_start_starts_a_stopped_torrent_unless_a_queue_would_undo_it() {
     add(&q, &t, &[("savepath", &data(&q)), ("paused", "true")]).await;
     let h = hash_of(&t);
     let (code, body) = call(&q, "POST", "/api/v2/torrents/setForceStart", &format!("hashes={h}&value=true")).await;
-    assert_eq!(code, StatusCode::CONFLICT, "{body}");
-    assert!(held(&q, &h).unwrap().is_paused.load(std::sync::atomic::Ordering::Relaxed), "nothing started");
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert!(!held(&q, &h).unwrap().is_paused.load(std::sync::atomic::Ordering::Relaxed), "started");
+    let forced = |q: &TestState| {
+        let store = q.state.store.lock().unwrap();
+        ["race", "hoard"].iter().any(|e| store.pinned(e).unwrap_or_default().contains(&h))
+    };
+    assert!(forced(&q), "marked forced, so the queue leaves it running");
+    let (code, _) = call(&q, "POST", "/api/v2/torrents/setForceStart", &format!("hashes={h}&value=false")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(!forced(&q), "value=false lifts it");
 }
 
 /// `setLocation` takes the native move's refusals.

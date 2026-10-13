@@ -4581,6 +4581,20 @@ async fn get_categories_orphans(
 /// A category as the API receives it, checked: `mode` is `race` or `hoard`
 /// in lower case. 4.3 stored whatever came, and any value other than exactly
 /// "hoard" -- "Hoard" from a script, say -- routed the category to race.
+/// One category's entry as stored, every field it has -- including the ones
+/// `Category` does not model, which a merge must not drop.
+fn stored_category(state: &AppState, name: &str) -> Option<serde_json::Value> {
+    let cfg = state.cfg();
+    let raw = {
+        let store = state.store.lock().unwrap();
+        store.meta_doc("categories")
+    }
+    .filter(|doc| !doc.is_empty())
+    .or_else(|| std::fs::read_to_string(std::path::Path::new(&cfg.daemon.data_dir).join("categories.json")).ok())?;
+    let doc: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    doc.get(name).cloned()
+}
+
 fn checked_category(mut incoming: serde_json::Value) -> Result<serde_json::Value, String> {
     let obj = incoming.as_object_mut().ok_or("the body must be a JSON object")?;
     let mode = obj.get("mode").and_then(|m| m.as_str()).unwrap_or("race").trim().to_ascii_lowercase();
@@ -7634,7 +7648,18 @@ async fn category_update(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let incoming: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let sent: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    // What is not sent keeps its current value. The body used to replace the
+    // whole entry, and a missing `mode` read as race: a PUT naming only a new
+    // save path turned a hoard category into one the drain purges.
+    let mut incoming = stored_category(&state, &name).unwrap_or_else(|| serde_json::json!({}));
+    if let (Some(cur), Some(new)) = (incoming.as_object_mut(), sent.as_object()) {
+        for (k, v) in new {
+            cur.insert(k.clone(), v.clone());
+        }
+    } else {
+        incoming = sent;
+    }
     let incoming = match checked_category(incoming) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
@@ -7659,15 +7684,122 @@ async fn category_update(
     let _ = edit_categories(&state, |doc| {
         if old != new {
             doc.remove(&old);
+            // Another category graduating INTO this one follows it.
+            for (_, entry) in doc.iter_mut() {
+                if entry.get("graduate_to").and_then(|v| v.as_str()) == Some(old.as_str()) {
+                    entry["graduate_to"] = serde_json::Value::String(new.clone());
+                }
+            }
         }
         doc.insert(new, incoming.clone());
     });
-    let relabelled = if new_name != name {
-        state.store.lock().unwrap().relabel_category(&name, &new_name).unwrap_or(0)
-    } else {
-        0
-    };
-    Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": relabelled})).into_response()
+    if new_name == name {
+        return Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": 0})).into_response();
+    }
+    let relabelled = state.store.lock().unwrap().relabel_category(&name, &new_name).unwrap_or(0);
+    let followed = rename_category_references(&state, &name, &new_name);
+    Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": relabelled, "followed": followed}))
+        .into_response()
+}
+
+/// Everything stored that names a category by its name, renamed with it.
+///
+/// 4.4 renamed the definition and the torrents' labels only: an RSS rule, a
+/// watched folder, a workflow, a magnet waiting for metadata or a queued move
+/// kept the old name and from then on filed torrents under a category that no
+/// longer existed -- race by default, which the drain purges. A workflow
+/// condition is renamed only where it compares for equality: a `contains` or
+/// a regex is the operator's text, not a reference.
+fn rename_category_references(state: &AppState, old: &str, new: &str) -> serde_json::Value {
+    let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut rss, mut watch, mut workflows, mut magnets, mut jobs) = (0usize, 0usize, 0usize, 0usize, 0usize);
+
+    for (rule_name, doc) in store.rss_rules().unwrap_or_default() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&doc) else { continue };
+        let Ok(mut r) = crate::rss::matcher::Rule::from_json(&rule_name, &v) else { continue };
+        if r.category == old {
+            r.category = new.to_string();
+            if store.rss_rule_put(&rule_name, &r.to_json().to_string()).is_ok() {
+                rss += 1;
+            }
+        }
+    }
+    if rss > 0 {
+        crate::rss::rules_changed();
+    }
+
+    if let Some(mut list) = store
+        .setting("watch_folders")
+        .ok()
+        .flatten()
+        .and_then(|d| serde_json::from_str::<Vec<crate::watch::Folder>>(&d).ok())
+    {
+        for f in list.iter_mut().filter(|f| f.category == old) {
+            f.category = new.to_string();
+            watch += 1;
+        }
+        if watch > 0 {
+            let _ = store.put_setting("watch_folders", &serde_json::to_string(&list).unwrap_or_default());
+        }
+    }
+
+    fn walk(n: &mut crate::rules::Node, old: &str, new: &str) -> usize {
+        use crate::rules::{Node, Op};
+        match n {
+            Node::All { of } | Node::Any { of } => of.iter_mut().map(|c| walk(c, old, new)).sum(),
+            Node::Not { of } => walk(of, old, new),
+            Node::Cond(c) if c.field == "category" && matches!(c.op, Op::Eq | Op::Ne) && c.value.eq_ignore_ascii_case(old) => {
+                c.value = new.to_string();
+                1
+            }
+            Node::Cond(_) => 0,
+        }
+    }
+    for mut stored in store.workflows().unwrap_or_default() {
+        let Ok(mut w) = serde_json::from_str::<crate::rules::Workflow>(&stored.body) else { continue };
+        let mut n = walk(&mut w.when, old, new);
+        for a in w.then.iter_mut() {
+            if let crate::rules::Action::SetCategory { to } = a {
+                if to == old {
+                    *to = new.to_string();
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            stored.body = serde_json::to_string(&w).unwrap_or(stored.body);
+            if store.put_workflow(&stored).is_ok() {
+                workflows += 1;
+            }
+        }
+    }
+
+    for mut m in store.magnets().unwrap_or_default() {
+        if m.category == old {
+            m.category = new.to_string();
+            if store.put_magnet(&m).is_ok() {
+                magnets += 1;
+            }
+        }
+    }
+
+    for j in store.list_jobs(10_000).unwrap_or_default() {
+        if !matches!(j.state.as_str(), "queued" | "waiting") {
+            continue;
+        }
+        let Ok(mut p) = serde_json::from_str::<serde_json::Value>(&j.params) else { continue };
+        let mut hit = false;
+        for k in ["to_category", "category"] {
+            if p.get(k).and_then(|v| v.as_str()) == Some(old) {
+                p[k] = serde_json::Value::String(new.to_string());
+                hit = true;
+            }
+        }
+        if hit && store.set_job_params(&j.id, &p.to_string()).is_ok() {
+            jobs += 1;
+        }
+    }
+    serde_json::json!({"rss_rules": rss, "watch_folders": watch, "workflows": workflows, "magnets": magnets, "jobs": jobs})
 }
 
 async fn category_delete(
@@ -11760,13 +11892,23 @@ pub(crate) async fn post_torrent_add(
         )
             .into_response()
     };
+    // 500 is for what failed on this side: the store. Everything else the add
+    // path refuses is a decision about this request -- the race disk is full,
+    // `path_collision = refuse`, a v2-only magnet -- and 4.4 answered those
+    // 500 too, so a client retried what would never succeed and an operator
+    // went looking for a crash.
     let refusal_code = |e: &str| {
-        if e.contains("already added") {
-            StatusCode::CONFLICT
-        } else if e.contains("did not parse") || e.contains("no save path") || e.contains("not a magnet") || e.contains("no engine") {
+        if e.starts_with("store:") {
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else if e.contains("did not parse")
+            || e.contains("no save path")
+            || e.contains("not a magnet")
+            || e.contains("no engine")
+            || e.contains("info hash")
+        {
             StatusCode::BAD_REQUEST
         } else {
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::CONFLICT
         }
     };
 
@@ -14590,35 +14732,28 @@ async fn qbit_set_location(State(state): State<AppState>, RawQuery(query): RawQu
 
 /// `torrents/setForceStart`: start, past the queue.
 ///
-/// Hydranos's queue has no "forced" exemption, so a forced start is only what
-/// it says where no queue applies: there it is a start, exactly. A torrent in
-/// an engine with a ceiling (`active_downloads`, or queueing) is refused with
-/// 409 and nothing is started -- the queue would stop it again within a
-/// minute, which is not what the client asked for. `value=false` forces
-/// nothing off, because nothing is ever forced.
+/// `value=true` marks every copy forced (the pin Force download sets) and
+/// starts it; the queue runs a forced torrent whatever its ceiling, without
+/// counting it, as qBittorrent does. `value=false` lifts the mark and leaves
+/// the torrent to the queue.
 async fn qbit_set_force_start(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let form = shim_form(&query, &body);
     let on = matches!(form.get("value").map(String::as_str), Some("true") | Some("1"));
+    let hashes = shim_resolved_hashes(&state, &form);
+    // Forced is the pin the queue reads: it runs past the ceiling and takes
+    // no slot. 4.4 refused this with 409 on any engine with a queue -- the
+    // hoard's default `active_downloads = 10` included -- so Sonarr's Force
+    // Start did nothing on a default install.
+    {
+        let store = state.store.lock().unwrap();
+        for hash in &hashes {
+            let _ = store.set_pinned_everywhere(hash, on);
+        }
+    }
     if !on {
         return qbit_ok();
-    }
-    let cfg = state.cfg();
-    let queued_engines: std::collections::HashSet<String> = cfg
-        .local_engines()
-        .into_iter()
-        .filter(|l| !crate::workers::QueueLimits::from_session(&l.session).is_empty())
-        .map(|l| l.id)
-        .collect();
-    let hashes = shim_resolved_hashes(&state, &form);
-    for hash in &hashes {
-        if let Some((engine, _)) = torrent_copies(&state, hash, "").into_iter().find(|(e, _)| queued_engines.contains(e)) {
-            return qbit_refuse(
-                StatusCode::CONFLICT,
-                &format!("{engine} runs a queue (active_downloads / queueing): a forced start past it is not supported; use start"),
-            );
-        }
     }
     let joined = hashes.join("|");
     let mut f = Fields::new();
@@ -14718,13 +14853,26 @@ async fn qbit_rename(State(state): State<AppState>, RawQuery(query): RawQuery, h
 ///
 /// qBittorrent answers 409 when queueing is off, and Hydranos's queue, when
 /// on, orders by age: there is no position to move a torrent to.
-async fn qbit_queue_prio(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn qbit_queue_prio(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    if !state.cfg().race.queueing.unwrap_or(false) {
+    // The queues of the engines holding these torrents, not `[race] queueing`
+    // alone: the hoard queues downloads by default (`active_downloads`).
+    let form = shim_form(&query, &body);
+    let queued: std::collections::HashSet<String> = state
+        .cfg()
+        .local_engines()
+        .into_iter()
+        .filter(|l| !crate::workers::QueueLimits::from_session(&l.session).is_empty())
+        .map(|l| l.id)
+        .collect();
+    let any_queued = shim_resolved_hashes(&state, &form)
+        .iter()
+        .any(|h| torrent_copies(&state, h, "").iter().any(|(e, _)| queued.contains(e)));
+    if !any_queued {
         return qbit_refuse(StatusCode::CONFLICT, "Torrent queueing is not enabled");
     }
-    qbit_refuse(StatusCode::CONFLICT, "Hydranos queues torrents by age: queue positions cannot be set")
+    qbit_refuse(StatusCode::CONFLICT, "Hydranos orders its queue itself (most seeders first for downloads, oldest first for seeds): positions cannot be set; force start runs a torrent past it")
 }
 
 /// `app/defaultSavePath`: the `save_path` of `app/preferences`.
@@ -18977,6 +19125,62 @@ mod category_lifecycle_tests {
         assert_eq!(v[0]["mode"], "hoard");
         assert_eq!(v[0]["save_path"], "/data");
     }
+
+    /// ⭐ A rename follows every reference: another category's graduate_to,
+    /// an RSS rule, a watched folder, a workflow's condition and action.
+    #[tokio::test]
+    async fn a_rename_follows_every_reference() {
+        let s = state_from("cat-follow", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        for body in [
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#,
+            r#"{"name":"race-films","save_path":"/race/films","mode":"race","graduate_to":"films"}"#,
+        ] {
+            let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY), body.into()).await;
+            assert_eq!(r.status(), StatusCode::CREATED);
+        }
+        {
+            let store = s.state.store.lock().unwrap();
+            store.rss_rule_put("r1", r#"{"enabled":true,"mustContain":"x","assignedCategory":"films","torrentParams":{"category":"films"}}"#).unwrap();
+            store.put_setting("watch_folders", r#"[{"path":"/w","category":"films"}]"#).unwrap();
+            let w = serde_json::json!({
+                "id": "w1", "name": "w", "enabled": false,
+                "when": {"kind": "cond", "field": "category", "op": "eq", "value": "Films"},
+                "then": [{"type": "set_category", "to": "films"}],
+            });
+            store.put_workflow(&crate::store::StoredWorkflow {
+                id: "w1".into(), name: "w".into(), body: w.to_string(), enabled: false,
+                position: 0, interval_secs: 0, last_run: 0,
+            }).unwrap();
+        }
+        let r = category_update(State(s.state.clone()), Path("films".into()), RawQuery(None), keyed(KEY),
+            r#"{"name":"movies"}"#.into()).await;
+        let v = body_json(r).await;
+        assert_eq!(v["followed"]["rss_rules"], 1, "{v}");
+        assert_eq!(categories_map(&s.state)["race-films"].graduate_to, "movies");
+        assert_eq!(categories_map(&s.state)["movies"].mode, "hoard");
+        let store = s.state.store.lock().unwrap();
+        let (_, rule) = store.rss_rules().unwrap().into_iter().find(|(n, _)| n == "r1").unwrap();
+        assert!(rule.contains("movies") && !rule.contains("\"films\""), "{rule}");
+        assert!(store.setting("watch_folders").unwrap().unwrap().contains("\"movies\""));
+        let body = &store.workflows().unwrap()[0].body;
+        assert!(!body.to_lowercase().contains("\"films\""), "{body}");
+    }
+
+    /// A PUT naming only what changes keeps the rest: a missing `mode` used
+    /// to read as race, and the drain purges race.
+    #[tokio::test]
+    async fn a_partial_update_keeps_the_mode() {
+        let s = state_from("cat-partial", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.into()).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let r = category_update(State(s.state.clone()), Path("films".into()), RawQuery(None), keyed(KEY),
+            r#"{"save_path":"/data/movies"}"#.into()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let c = &categories_map(&s.state)["films"];
+        assert_eq!(c.mode, "hoard", "a PUT without mode made it race");
+        assert_eq!(c.save_path, "/data/movies");
+    }
 }
 
 #[cfg(test)]
@@ -19000,6 +19204,18 @@ mod native_add_tests {
         let r = post_torrent_add(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
         let code = r.status();
         (code, body_json(r).await)
+    }
+
+    /// A request the daemon refuses is not a crash: a v2-only magnet is the
+    /// caller's to fix (400), never a 500.
+    #[tokio::test]
+    async fn a_refused_add_is_not_a_server_error() {
+        let s = state_from("native-add-refused", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let (code, v) = add(&s, serde_json::json!({
+            "magnet_uri": format!("magnet:?xt=urn:btmh:1220{}", "ab".repeat(32)),
+            "save_path": s.dir.display().to_string(),
+        })).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
     }
 
     /// The Add tab's options do what they say: the mode picks the engine,
