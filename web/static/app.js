@@ -1064,8 +1064,11 @@ function _activateTabNow(name) {
     // The hoard table skips its render while off screen, so pay the deferred
     // one now rather than leaving a stale table until the next snapshot.
     if (name === "hoard" && _hoardRenderDirty) _scheduleHoardRender();
-    if (name === "config") { updateSettings(); renderPersonalisation(); }
-    else if (name === "add") refreshCategoryOptions();
+    // Every loader of a tab belongs HERE, not in a click handler: a reload
+    // restores the tab from the URL without a click, and the watched folders
+    // came up empty -- one Save away from erasing them all.
+    if (name === "config") { updateSettings(); renderPersonalisation(); loadIpFilter(); loadWatch(); }
+    else if (name === "add") { refreshCategoryOptions(); updateMagnets(); }
     else if (name === "changelog") loadChangelog();
     else if (name === "nodes") { updateNodes(); }
     else if (name === "workflows") { updateWorkflows(); }
@@ -7114,6 +7117,8 @@ function _watchRow(f, st) {
     let status = "";
     if (st) {
         if (st.error) status = `<span style="color:var(--danger)">${esc(st.error)}</span>`;
+        // Zeros from a folder never scanned read as "nothing to do"; say it.
+        else if (!st.last_scan) status = `<span class="sr-desc">${esc(t("not scanned yet"))}</span>`;
         else status = esc(`${t("seen")} ${fmtInt(st.files_seen || 0)} · ${t("added")} ${fmtInt(st.added || 0)} · ${t("refused")} ${fmtInt(st.refused || 0)}`)
             + (st.last_refusal ? `<br><span class="sr-desc">${esc(st.last_refusal)}</span>` : "");
     }
@@ -7223,8 +7228,6 @@ document.querySelectorAll(".tab").forEach(tab => {
         if (t === "hoard") await updateHoardStats();
         if (t === "categories") await updateCategories();
         if (t === "benchmark") await updateBenchmark();
-        if (t === "add") await updateMagnets();
-        if (t === "config") { loadIpFilter(); loadWatch(); }
     });
 });
 

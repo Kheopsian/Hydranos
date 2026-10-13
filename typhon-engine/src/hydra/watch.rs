@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -145,10 +145,18 @@ pub fn take(state: &AppState, f: &Folder, file: &Path) -> Outcome {
     outcome
 }
 
-/// One pass over every enabled folder.
+/// One pass over every enabled folder, in turn. The daemon does not use this
+/// (see `spawn`); the tests do, where every folder is local.
 pub fn scan(state: &AppState) {
-    let now = crate::store::now_secs();
     for f in folders(state).into_iter().filter(|f| f.enabled) {
+        scan_one(state, &f);
+    }
+}
+
+/// One pass over one folder.
+fn scan_one(state: &AppState, f: &Folder) {
+    let now = crate::store::now_secs();
+    {
         let seen: Seen = SEEN
             .lock()
             .ok()
@@ -161,7 +169,7 @@ pub fn scan(state: &AppState) {
             .and_then(|g| g.as_ref().and_then(|m| m.get(&f.path).cloned()))
             .unwrap_or_default();
         st.last_scan = now;
-        scan_folder(state, &f, &seen, &mut seen_next, &mut st);
+        scan_folder(state, f, &seen, &mut seen_next, &mut st);
         if let Ok(mut g) = SEEN.lock() {
             g.get_or_insert_with(HashMap::new).insert(f.path.clone(), seen_next);
         }
@@ -224,12 +232,57 @@ fn take_refused(file: &Path, why: &str) -> std::io::Result<()> {
     std::fs::write(PathBuf::from(format!("{}.txt", bad.display())), format!("{why}\n"))
 }
 
+/// Folders whose scan has not returned yet, and since when.
+static IN_FLIGHT: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+/// A scan still running after this is reported as stuck on its folder's row.
+const STUCK_AFTER: Duration = Duration::from_secs(60);
+
+/// Each folder on its own blocking thread, never two at once for one folder.
+///
+/// One pass over every folder in turn was a single thread, and a network share
+/// that stops answering does not fail: `read_dir` and `stat` wait in the
+/// kernel, with no timeout we can set. Reported 13/10/2026 on a Raspberry Pi
+/// watching an SMB share: that wait held the whole pass, so no folder was ever
+/// scanned again -- a local one included -- and every status stayed at zero,
+/// never written. Now the stuck folder says so, and the others go on.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(SCAN_EVERY).await;
-            let st = state.clone();
-            let _ = tokio::task::spawn_blocking(move || scan(&st)).await;
+            for f in folders(&state).into_iter().filter(|f| f.enabled) {
+                let busy_since = {
+                    let mut g = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+                    let m = g.get_or_insert_with(HashMap::new);
+                    match m.get(&f.path) {
+                        Some(t) => Some(*t),
+                        None => {
+                            m.insert(f.path.clone(), Instant::now());
+                            None
+                        }
+                    }
+                };
+                if let Some(since) = busy_since {
+                    if since.elapsed() >= STUCK_AFTER {
+                        if let Ok(mut g) = STATUS.lock() {
+                            let st = g.get_or_insert_with(HashMap::new).entry(f.path.clone()).or_default();
+                            st.error = format!(
+                                "no answer from this folder for {} s -- a network share that stopped responding? The other folders are still scanned",
+                                since.elapsed().as_secs()
+                            );
+                        }
+                    }
+                    continue;
+                }
+                let st = state.clone();
+                tokio::task::spawn_blocking(move || {
+                    scan_one(&st, &f);
+                    if let Ok(mut g) = IN_FLIGHT.lock() {
+                        if let Some(m) = g.as_mut() {
+                            m.remove(&f.path);
+                        }
+                    }
+                });
+            }
         }
     });
 }
