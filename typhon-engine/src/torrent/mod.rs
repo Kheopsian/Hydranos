@@ -1173,6 +1173,12 @@ impl TorrentManager {
         }
     }
 
+    /// Has a store been wired as the metainfo source? Without one, every piece
+    /// downloaded is refused for want of its hash.
+    pub fn has_blob_source(&self) -> bool {
+        self.blob_source.read().map(|s| s.is_some()).unwrap_or(false)
+    }
+
     /// The metainfo of one resume record. The store, and nothing else.
     ///
     /// Keyed by the record's own info-hash, so what comes back IS the right
