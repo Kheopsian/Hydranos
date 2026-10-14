@@ -471,7 +471,7 @@ pub fn net_admin_in(status: &str) -> Option<bool> {
 pub const NEEDS_LINUX: &str =
     "Managed WireGuard needs Linux. On this system, bring the tunnel up yourself and pick its interface in Direct mode.";
 pub const NEEDS_NET_ADMIN: &str =
-    "Managed WireGuard needs the NET_ADMIN capability, and Hydranos does not have it. In Docker, add cap_add: [NET_ADMIN] (docker run --cap-add=NET_ADMIN); with PUID/PGID, also set HYDRANOS_CAP_NET_ADMIN=1. Under systemd, AmbientCapabilities=CAP_NET_ADMIN (the shipped unit has it).";
+    "Managed WireGuard needs the NET_ADMIN capability, and Hydranos does not have it. In Docker, add cap_add: [NET_ADMIN] (docker run --cap-add=NET_ADMIN); with PUID/PGID, also set HYDRANOS_CAP_NET_ADMIN=1. Under systemd, add AmbientCapabilities=CAP_NET_ADMIN with systemctl edit (the shipped unit has it commented out).";
 pub const NEEDS_TOOLS: &str =
     "Managed WireGuard needs the ip (iproute2) and wg (wireguard-tools) commands, and one of them is not installed.";
 

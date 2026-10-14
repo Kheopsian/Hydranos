@@ -44,9 +44,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   the tunnel down.** The `from <address>` rule named no device and stayed
   behind; one brought back up next to an interface holding the same address
   kept a rule it must not have. Rules now go by the tunnel's own table.
-- **The systemd unit grants `CAP_NET_ADMIN`** (ambient, and the only
-  capability in its bounding set): managed WireGuard could not create its
-  device under the shipped unit.
+- **The systemd unit says how to grant `CAP_NET_ADMIN`**, which managed
+  WireGuard and a hand-set `fwmark` need: two commented lines to add with
+  `systemctl edit`. Left off by default, and the missing-privilege message
+  says so.
 - **Advanced settings:** the hints show what a fresh install ships (hoard
   `max_connections` 12000, `max_uploads_per_torrent` -1,
   `inactivity_timeout` 20; `create_torrent_folder` off); the live
