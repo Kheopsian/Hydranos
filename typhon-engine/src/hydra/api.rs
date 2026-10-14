@@ -4041,6 +4041,18 @@ async fn get_race_torrents(
     Json(rows).into_response()
 }
 
+/// The query without the caller's `offset`/`limit`. `query_param` reads the
+/// first one, so a sent `offset` won over the one `list_rows` appends: every
+/// page was the same page, and a filter matching 5000 rows or more looped
+/// forever.
+fn without_paging(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|p| !matches!(p.split_once('=').map_or(*p, |(k, _)| k), "offset" | "limit"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// A list route's rows: the page filters applied when the query has any.
 /// 4.3 ignored every filter on these routes and returned the whole engine.
 async fn list_rows(state: &AppState, engine_id: &str, query: &str) -> Vec<serde_json::Value> {
@@ -4048,6 +4060,7 @@ async fn list_rows(state: &AppState, engine_id: &str, query: &str) -> Vec<serde_
     if !filtered {
         return engine_rows(state, engine_id);
     }
+    let query = without_paging(query);
     let mut out = Vec::new();
     let mut offset = 0usize;
     loop {
@@ -17098,6 +17111,17 @@ mod pure_tests {
         assert_eq!(percent_decode("%41%42"), "AB");
         assert_eq!(percent_decode("a%2Fb"), "a/b");
         assert_eq!(percent_decode("100%25"), "100%");
+    }
+
+    /// The list routes page on their own: a caller's offset/limit must not
+    /// pin every page to the same rows.
+    #[test]
+    fn a_list_query_loses_the_callers_paging_only() {
+        assert_eq!(without_paging("category=tv&offset=5000&limit=10&tag=a"), "category=tv&tag=a");
+        assert_eq!(without_paging("offset=1"), "");
+        assert_eq!(without_paging("category=offset&limiter=1"), "category=offset&limiter=1");
+        let q = format!("{}&offset=5000&limit=5000", without_paging("category=tv&offset=0"));
+        assert_eq!(query_param(&q, "offset").as_deref(), Some("5000"), "the appended offset is the one read");
     }
 
     /// A stray `%` is not an escape and must come back as itself rather than

@@ -453,6 +453,13 @@ async fn the_worker_does_nothing_when_disabled() {
     add_feed(&s, &fake.url("/rss"), "Off", None).unwrap();
     tick(&s).await;
     assert_eq!(fake.hits("/rss"), 0);
+    // Nor by hand: a refresh and a Download are refused, and say why.
+    let id = feeds(&s)[0].id;
+    assert!(matches!(refresh_feed(&s, id).await, Err(Refusal::Conflict(_))));
+    assert_eq!(fake.hits("/rss"), 0, "a manual refresh fetched while disabled");
+    let (code, body) = call(&s, "POST", &format!("/api/rss/feeds/{id}/download"), &json!({"guid": "g1"}).to_string()).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("disabled"), "{body}");
     let on = st("rss-on", "\n[rss]\nrefresh_minutes = 1\n");
     assert_eq!(settings(&on.cfg()).refresh_secs, MIN_REFRESH_SECS, "never under five minutes");
     let f2 = Fake::start().await;
@@ -462,4 +469,18 @@ async fn the_worker_does_nothing_when_disabled() {
     assert_eq!(f2.hits("/rss"), 1, "a new feed is due at once");
     tick(&on).await;
     assert_eq!(f2.hits("/rss"), 1, "and not again before its interval");
+}
+
+/// The RSS tab's form sends no `torrentParams`: a save from it kept the rule
+/// but emptied its tags.
+#[tokio::test]
+async fn a_rule_saved_without_tags_keeps_them() {
+    let s = st("rss-tags-kept", "");
+    let feed = "http://127.0.0.1:9/rss";
+    put_rule(&s, "t", &json!({"affectedFeeds": [feed], "torrentParams": {"tags": ["a", "b"]}})).unwrap();
+    put_rule(&s, "t", &json!({"affectedFeeds": [feed], "mustContain": "x"})).unwrap();
+    let r = load_rules(&s).into_iter().find(|r| r.name == "t").unwrap();
+    assert_eq!((r.tags.clone(), r.must_contain.as_str()), (vec!["a".to_string(), "b".to_string()], "x"));
+    put_rule(&s, "t", &json!({"affectedFeeds": [feed], "torrentParams": {"tags": []}})).unwrap();
+    assert!(load_rules(&s).into_iter().find(|r| r.name == "t").unwrap().tags.is_empty(), "an explicit empty list clears them");
 }

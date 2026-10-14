@@ -567,11 +567,19 @@ impl Drop for Loading {
     }
 }
 
+/// Why a fetch or an add is refused while RSS is switched off.
+pub(crate) const DISABLED: &str = "RSS is disabled ([rss] enabled = false): nothing is fetched or added";
+
 /// Fetch one feed now, store what it holds, and run the rules on it. The
 /// feed's row as it stands after; a failed fetch is in its `last_error`,
 /// not an `Err` (that is for a feed that does not exist).
 pub async fn refresh_feed(state: &AppState, id: i64) -> Result<RssFeedRow, Refusal> {
     let feed = feeds(state).into_iter().find(|f| f.id == id).ok_or_else(|| Refusal::NotFound(format!("no feed {id}")))?;
+    // `enabled = false` means nothing is fetched: a refresh by hand, or the
+    // one a new feed asks for, fetched all the same.
+    if !settings(&state.cfg()).enabled {
+        return Err(Refusal::Conflict(DISABLED.into()));
+    }
     let _guard = {
         let mut l = loading().lock().map_err(|_| Refusal::Failed("lock".into()))?;
         let key = loading_key(state, id);
@@ -701,6 +709,11 @@ pub fn put_rule(state: &AppState, name: &str, def: &Value) -> Result<Rule, Refus
         }
         if def.get("previouslyMatchedEpisodes").is_none() {
             rule.previously_matched = old.previously_matched;
+        }
+        // Tags only exist in `torrentParams`, which the RSS tab's form (and a
+        // 4.x document) does not send: a save from it emptied them.
+        if def.get("torrentParams").and_then(|t| t.get("tags")).is_none() {
+            rule.tags = old.tags;
         }
     }
     store.rss_rule_put(name, &rule.to_json().to_string()).map_err(failed)?;
