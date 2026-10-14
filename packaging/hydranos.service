@@ -19,6 +19,12 @@ RestartSec=5
 TimeoutStopSec=150
 # Peer connections and files at scale -> raise the fd limit.
 LimitNOFILE=1048576
+# Managed WireGuard creates the tunnel device, its routes and its rules: that
+# needs NET_ADMIN, and the service runs as an unprivileged user. Ambient, so
+# the `ip` and `wg` it runs get it too; the bounding set keeps it the only one.
+# Remove both lines if you never use managed WireGuard.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
