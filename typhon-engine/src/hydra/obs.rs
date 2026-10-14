@@ -59,6 +59,10 @@ pub struct EngineStats {
     /// block data they hold: what downloading costs in memory, right now.
     pub pieces_in_flight: u64,
     pub piece_buffer_bytes: u64,
+    /// Assembled pieces waiting for their write, and the budget the pieces in
+    /// flight and these writes share (0 = none).
+    pub piece_write_bytes: u64,
+    pub piece_budget_bytes: u64,
 }
 
 pub fn engine_stats(host: &EngineHost) -> Vec<EngineStats> {
@@ -105,6 +109,8 @@ fn one(e: &Engine, trackers: Option<&[crate::benchsampler::TrackerRow]>) -> Engi
         held: m.limiter().dials_paused(),
         pieces_in_flight: m.piece_mem().pieces(),
         piece_buffer_bytes: m.piece_mem().bytes(),
+        piece_write_bytes: m.piece_mem().writing(),
+        piece_budget_bytes: m.piece_mem().budget(),
     }
 }
 
@@ -593,6 +599,18 @@ pub fn metrics(state: &AppState) -> String {
         "gauge",
         "Bytes of received blocks held by the pieces in flight.",
         &per(&|s| s.piece_buffer_bytes as f64),
+    );
+    x.family(
+        "hydra_piece_write_bytes",
+        "gauge",
+        "Bytes of complete pieces handed to the disk and not yet written.",
+        &per(&|s| s.piece_write_bytes as f64),
+    );
+    x.family(
+        "hydra_piece_budget_bytes",
+        "gauge",
+        "Download memory budget: no new piece is started while the pieces in flight (at full size) and the writes in progress reach it. 0 = none.",
+        &per(&|s| s.piece_budget_bytes as f64),
     );
     if let Some((allocated, resident)) = crate::allocdiag::memory() {
         x.family(

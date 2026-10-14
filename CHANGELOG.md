@@ -24,6 +24,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- the last blockers before a wider announcement
 
 ### Fixed
+- **A disk slower than the network no longer fills the RAM.** Each peer
+  connection could hold a whole piece waiting for its write, with nothing
+  bounding the sum: on a 30 MB/s disk with 16 MiB pieces and many peers the
+  engine reached 24 GB in five minutes and climbing, and a Raspberry Pi ran
+  out of memory on its first big download. Each engine now has a download
+  memory budget (`piece_memory_mb`, 0 = an eighth of the memory available,
+  the container's limit if it has one, at least 256 MiB) covering the pieces
+  being downloaded and the pieces waiting to be written; over it, no new piece
+  is started until writes catch up. New metrics `hydra_piece_write_bytes` and
+  `hydra_piece_budget_bytes`.
 - **The password in `announce_proxy` no longer goes out in clear.**
   `GET /api/settings` and `GET /api/network/mode` answer
   `scheme://user:********@host:port`, as they already did for the SOCKS5

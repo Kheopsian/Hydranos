@@ -75,6 +75,9 @@ pub struct DownloadState {
     /// reservation nobody fills is a piece nobody else may fetch, and the
     /// blocks it already holds are memory nothing else will free.
     started: HashMap<u32, Started>,
+    /// The last refill stopped on the engine's download budget: wake on the
+    /// next write that frees some (see `PieceMem`).
+    held_back: bool,
 }
 
 impl DownloadState {
@@ -89,7 +92,16 @@ impl DownloadState {
             inflight: VecDeque::new(),
             pending_block_queue: VecDeque::new(),
             started: HashMap::new(),
+            held_back: false,
         }
+    }
+
+    /// The engine's totals, when the last refill was held back by its budget.
+    pub fn held_back_by(&self) -> Option<Arc<piece_picker::PieceMem>> {
+        if !self.held_back {
+            return None;
+        }
+        self.torrent.picker.get()?.lock().unwrap().mem().cloned()
     }
 
     pub fn is_downloading(&self) -> bool {
@@ -268,6 +280,7 @@ impl DownloadState {
     /// stops there. The pipeline is then refilled when the cap allows, instead
     /// of being sized by a number the cap knows nothing about.
     pub fn get_requests_gated(&mut self, mut admit: impl FnMut(u32) -> bool) -> Vec<(u32, u32, u32)> {
+        self.held_back = false;
         // A paused torrent asks for nothing. This is the single choke point
         // for the download side: `stop_torrent` sets the flag and untracks the
         // DHT, but it does not tear down sessions that are already connected,
@@ -339,6 +352,13 @@ impl DownloadState {
                 None => break,
             };
             let piece_size = self.torrent.meta.piece_size(piece);
+            // The engine's download memory is spent: start nothing new until
+            // pieces in flight finish and their writes return. Joining one
+            // already in flight (endgame) costs nothing more.
+            if !picker.is_pending(piece) && !picker.may_start(piece_size) {
+                self.held_back = true;
+                break;
+            }
             let piece_requests = picker.start_piece(piece, piece_size, BLOCK_SIZE, self.owner);
             self.pending_block_queue.extend(piece_requests);
             self.started.insert(piece, Started { since: now, got: 0 });
@@ -465,6 +485,8 @@ pub async fn commit_piece(
         None => return false,
     };
     let len = piece_data.len() as u64;
+    // Counted in the engine's download budget until the write returns.
+    let _writing = picker.lock().unwrap().mem().map(|m| m.hold_write(len));
     match disk.write_piece(torrent, index, piece_data).await {
         Ok(true) => {
             torrent.total_downloaded.fetch_add(len, Ordering::Relaxed);

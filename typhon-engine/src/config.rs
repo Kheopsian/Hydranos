@@ -107,6 +107,11 @@ pub struct EngineConfig {
     /// that actually bounds them. See `tracker::dial_limiter`.
     #[serde(default)]
     pub max_dials_per_sec: f64,
+    /// Download memory budget, MiB: pieces in flight plus pieces waiting for
+    /// their write. Over it no new piece is started. 0 = an eighth of the
+    /// memory available, at least 256 MiB (`piece_picker::default_budget`).
+    #[serde(default)]
+    pub piece_memory_mb: u64,
     /// Run the choker. Off by default, and deliberately: see
     /// `peer::choking::choking_loop` for what it did to a hoard.
     #[serde(default)]
