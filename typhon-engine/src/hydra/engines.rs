@@ -807,6 +807,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_fresh_install_gets_its_piece_hashes_from_the_first_start() {
+        // Empty data_dir, no hydra.db: a first start. The engines used to try
+        // the read-only store before anything had created it, ran without a
+        // metainfo source, and refused every piece until a restart.
+        let dir = std::env::temp_dir().join(format!("hydra-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        config.daemon.data_dir = dir.to_string_lossy().into_owned();
+        config.race.listen_port = 16171;
+        config.hoard.listen_port = 16172;
+
+        let host = EngineHost::offline(&config, &dir);
+        assert!(dir.join("hydra.db").exists(), "the store is created on the first start");
+        assert!(!host.engines().is_empty());
+        for e in host.engines() {
+            assert!(e.manager.has_blob_source(), "engine {} started without its piece hashes", e.id);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// ⭐ WireGuard mode, no engine assigned: the kill switch keeps every one
     /// off the network. `start` -- the production path, not `offline` --
     /// gives none of them a config, a listener, an announce loop or a bound
