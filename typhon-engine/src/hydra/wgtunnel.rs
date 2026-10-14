@@ -235,6 +235,30 @@ pub fn teardown_plan(device: &str) -> Vec<Step> {
     vec![v4, v6, step(&["ip", "link", "del", "dev", device], OnFail::Ignore)]
 }
 
+/// Remove every rule into a tunnel's table, the `from` rules of
+/// [`source_steps`] included. Those name no device, so `teardown_plan` left
+/// them behind: a tunnel taken down kept its `from <address>` rule, and one
+/// brought back up beside an interface holding that address kept the rule it
+/// must not have. The table is ours alone (`TABLE_BASE`).
+pub fn table_teardown(table: u32) -> Vec<Step> {
+    let table = table.to_string();
+    ["-4", "-6"]
+        .iter()
+        .map(|fam| {
+            let mut s = step(&["ip", fam, "rule", "del", "table", &table], OnFail::Ignore);
+            s.repeat = true;
+            s
+        })
+        .collect()
+}
+
+/// A device and its table, as `managed.list` keeps them.
+fn managed_teardown(device: &str, table: Option<u32>) -> Vec<Step> {
+    let mut plan = table.map(table_teardown).unwrap_or_default();
+    plan.extend(teardown_plan(device));
+    plan
+}
+
 /// Bring one tunnel up from scratch.
 ///
 /// Idempotent by construction: it starts with the teardown, so a device left
@@ -250,6 +274,7 @@ pub fn up_plan(w: &Want, conf: &Conf) -> Result<Vec<Step>, String> {
     let table = w.table.to_string();
     let pref = w.pref.to_string();
     let mut plan = teardown_plan(dev);
+    plan.extend(table_teardown(w.table));
     plan.push(step(&["ip", "link", "add", "dev", dev, "type", "wireguard"], OnFail::Abort));
     let mut setconf = step(&["wg", "setconf", dev, "/dev/stdin"], OnFail::Abort);
     setconf.stdin = Some(wgtun::setconf_text(conf));
@@ -446,7 +471,7 @@ pub fn net_admin_in(status: &str) -> Option<bool> {
 pub const NEEDS_LINUX: &str =
     "Managed WireGuard needs Linux. On this system, bring the tunnel up yourself and pick its interface in Direct mode.";
 pub const NEEDS_NET_ADMIN: &str =
-    "Managed WireGuard needs the NET_ADMIN capability, and Hydranos does not have it. In Docker, add cap_add: [NET_ADMIN] (docker run --cap-add=NET_ADMIN); with PUID/PGID, also set HYDRANOS_CAP_NET_ADMIN=1.";
+    "Managed WireGuard needs the NET_ADMIN capability, and Hydranos does not have it. In Docker, add cap_add: [NET_ADMIN] (docker run --cap-add=NET_ADMIN); with PUID/PGID, also set HYDRANOS_CAP_NET_ADMIN=1. Under systemd, AmbientCapabilities=CAP_NET_ADMIN (the shipped unit has it).";
 pub const NEEDS_TOOLS: &str =
     "Managed WireGuard needs the ip (iproute2) and wg (wireguard-tools) commands, and one of them is not installed.";
 
@@ -647,19 +672,31 @@ fn managed_path(dir: &Path) -> PathBuf {
     dir.join("managed.list")
 }
 
-pub fn read_managed(dir: &Path) -> Vec<String> {
+/// `device table` per line; a file from before 4.5 has the device alone.
+pub fn read_managed(dir: &Path) -> Vec<(String, Option<u32>)> {
     std::fs::read_to_string(managed_path(dir))
-        .map(|t| t.lines().map(str::trim).filter(|l| l.starts_with(PREFIX)).map(String::from).collect())
+        .map(|t| {
+            t.lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with(PREFIX))
+                .map(|l| {
+                    let mut it = l.split_whitespace();
+                    let dev = it.next().unwrap_or_default().to_string();
+                    (dev, it.next().and_then(|x| x.parse().ok()))
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-pub fn write_managed(dir: &Path, devices: &[String]) {
+pub fn write_managed(dir: &Path, devices: &[(String, u32)]) {
     if devices.is_empty() {
         let _ = std::fs::remove_file(managed_path(dir));
         return;
     }
     if create_private_dir(dir).is_ok() {
-        let _ = std::fs::write(managed_path(dir), devices.join("\n") + "\n");
+        let text: String = devices.iter().map(|(d, t)| format!("{d} {t}\n")).collect();
+        let _ = std::fs::write(managed_path(dir), text);
     }
 }
 
@@ -762,9 +799,9 @@ pub fn live(runner: &mut dyn Runner, device: &str) -> Option<(Option<u64>, Strin
 /// pinned to the missing device and reaches nobody.
 pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: &Registry) {
     let wanted_devices: Vec<String> = wants.iter().map(|w| w.device.clone()).collect();
-    for stale in read_managed(dir) {
+    for (stale, table) in read_managed(dir) {
         if !wanted_devices.contains(&stale) {
-            let _ = execute(runner, &teardown_plan(&stale));
+            let _ = execute(runner, &managed_teardown(&stale, table));
             typhon_engine::tunneldns::forget(&stale);
             tracing::info!(device = %stale, "wireguard: tunnel no longer asked for, taken down");
         }
@@ -821,7 +858,7 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
             .and_then(|plan| {
                 // Recorded before running: a plan that dies halfway still
                 // leaves a device that must be taken down later.
-                made.push(w.device.clone());
+                made.push((w.device.clone(), w.table));
                 write_managed(dir, &made);
                 execute(runner, &plan)
             });
@@ -865,14 +902,14 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
 
 /// Take every tunnel of this process down. Blocking.
 pub fn down_all(runner: &mut dyn Runner, dir: &Path, registry: &Registry) -> usize {
-    let mut devices: Vec<String> = registry.drain().into_iter().map(|t| t.device).collect();
-    for d in read_managed(dir) {
-        if !devices.contains(&d) {
-            devices.push(d);
+    let mut devices: Vec<(String, Option<u32>)> = read_managed(dir);
+    for t in registry.drain() {
+        if !devices.iter().any(|(d, _)| *d == t.device) {
+            devices.push((t.device, None));
         }
     }
-    for d in &devices {
-        let _ = execute(runner, &teardown_plan(d));
+    for (d, table) in &devices {
+        let _ = execute(runner, &managed_teardown(d, *table));
         typhon_engine::tunneldns::forget(d);
     }
     write_managed(dir, &[]);
@@ -1046,7 +1083,11 @@ Endpoint = 192.0.2.10:51820
         let plan = up_plan(&want("race"), &conf).unwrap();
         let first_add = plan.iter().position(|s| s.argv.join(" ").starts_with("ip link add")).unwrap();
         let before: Vec<String> = plan[..first_add].iter().map(|s| s.argv.join(" ")).collect();
-        assert_eq!(before, ["ip -4 rule del oif wg-race", "ip -6 rule del oif wg-race", "ip link del dev wg-race"]);
+        let table = want("race").table;
+        assert_eq!(before, [
+            "ip -4 rule del oif wg-race".to_string(), "ip -6 rule del oif wg-race".into(), "ip link del dev wg-race".into(),
+            format!("ip -4 rule del table {table}"), format!("ip -6 rule del table {table}"),
+        ]);
         assert!(plan[..first_add].iter().all(|s| s.on_fail == OnFail::Ignore));
 
         // "Cannot find device" on a first run is not a failure; a rule del
@@ -1185,13 +1226,19 @@ Endpoint = 192.0.2.10:51820
     fn only_our_own_stale_devices_are_taken_down() {
         let dir = std::env::temp_dir().join(format!("wgtunnel-managed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        write_managed(&dir, &["wg-old".into()]);
+        write_managed(&dir, &[("wg-old".into(), TABLE_BASE + 3)]);
         let mut fake = Fake::new(|_| None);
         let reg = Registry::default();
         reconcile(&mut fake, &dir, &[], &reg);
         assert!(fake.ran.contains(&"ip link del dev wg-old".to_string()), "{:#?}", fake.ran);
+        // Its `from` rule names no device: it goes by the table.
+        assert!(fake.ran.contains(&format!("ip -4 rule del table {}", TABLE_BASE + 3)), "{:#?}", fake.ran);
         assert!(!fake.ran.iter().any(|l| l.contains("wg-host")));
         assert!(read_managed(&dir).is_empty());
+        // A list from before 4.5 (device alone) still reads.
+        create_private_dir(&dir).unwrap();
+        std::fs::write(managed_path(&dir), "wg-older\n").unwrap();
+        assert_eq!(read_managed(&dir), vec![("wg-older".to_string(), None)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
