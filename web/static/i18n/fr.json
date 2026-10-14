@@ -583,7 +583,6 @@
   "Running": "En cours",
   "Running…": "En cours…",
   "SOCKS5 + PROXY-v2 relay": "Proxy SOCKS5 + relais PROXY-v2",
-  "SOCKS5 host used by the orchestrator (public IP + speedtest).": "Hôte SOCKS5 utilisé par l'orchestrateur (IP publique et test de débit).",
   "SOCKS5 password (if authenticated).": "Mot de passe SOCKS5 (si authentifié).",
   "SOCKS5 port.": "Port SOCKS5.",
   "SOCKS5 proxy": "Proxy SOCKS5",
@@ -1138,5 +1137,10 @@
   "no tunnel and not direct. The kill switch keeps this engine off the network until it is given one.": "ni tunnel ni direct. Le kill switch tient cet engine hors du réseau tant qu'on ne lui en donne pas.",
   "TRIM after drain": "TRIM après drain",
   "Tells the SSD which blocks the drain just freed. An SSD that is never trimmed treats deleted races as live data and can fall to a fraction of its write speed. Needs CAP_SYS_ADMIN; ZFS, network shares and hard disks refuse it.": "Indique au SSD les blocs que le drain vient de libérer. Un SSD jamais trimmé traite les races supprimées comme des données vivantes et peut tomber à une fraction de sa vitesse d'écriture. Demande CAP_SYS_ADMIN ; ZFS, partages réseau et disques durs le refusent.",
-  "last trim: {secs} s, {ago}": "dernier TRIM : {secs} s, {ago}"
+  "last trim: {secs} s, {ago}": "dernier TRIM : {secs} s, {ago}",
+  "SOCKS5 proxy for the daemon's own requests (tracker lists, update checks, public IP). Set from the Network tab.": "Proxy SOCKS5 des requêtes propres au démon (listes de trackers, recherche de mises à jour, IP publique). Se règle dans l'onglet Réseau.",
+  "Port of the iperf3 server (5201 when not set).": "Port du serveur iperf3 (5201 s'il n'est pas indiqué).",
+  "Run the speed test on its own every this many seconds. 0 = never (Run now only). A run saturates the link for its duration.": "Lance le test de débit tout seul toutes les N secondes. 0 = jamais (seulement « Lancer maintenant »). Un test sature le lien pendant toute sa durée.",
+  "How long one run measures, in seconds (10 when not set, 1 to 60).": "Durée d'une mesure, en secondes (10 si non indiquée, de 1 à 60).",
+  "The network goes back to Direct and the kill switch is turned off: until you set them again, the engines connect from this machine's own address.": "Le réseau repasse en Direct et le kill switch est désactivé : tant que vous ne les avez pas réglés à nouveau, les moteurs se connectent depuis l'adresse de cette machine."
 }
