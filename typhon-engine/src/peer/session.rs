@@ -496,7 +496,19 @@ pub async fn run(
             }
         }
 
+        // Held back by the engine's download budget: a write that frees some
+        // wakes this session, rather than its next choke tick.
+        let budget_wait = dl.held_back_by();
+
         tokio::select! {
+            _ = async {
+                match budget_wait.as_ref() {
+                    Some(m) => m.freed().await,
+                    None => std::future::pending().await,
+                }
+            }, if budget_wait.is_some() => {
+                continue;
+            }
             // A capped block's slot has come; the top of the loop sends it.
             _ = async {
                 match rate_timer.as_mut() {

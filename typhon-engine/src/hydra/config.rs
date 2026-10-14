@@ -93,6 +93,10 @@ pub struct Session {
     /// route's change was the only way to set it and a restart lost it.
     #[serde(default)]
     pub max_dials_per_sec: f64,
+    /// Download memory budget in MiB (pieces in flight and pieces waiting
+    /// for their write); 0 = automatic, an eighth of the memory available.
+    #[serde(default)]
+    pub piece_memory_mb: i64,
     // On unless switched off, as the template and the documentation say: in
     // 4.3 a section without these keys turned DHT, PEX and webseeds off.
     #[serde(default = "default_true")]

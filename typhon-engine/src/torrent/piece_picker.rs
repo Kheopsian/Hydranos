@@ -133,10 +133,31 @@ pub fn new_owner() -> Owner {
 /// torrents. Measured on production before this existed: 17.3 GB of a 24 GB
 /// heap sat under `start_piece`, and nothing short of a heap profile could see
 /// it.
+///
+/// It is also the engine's download memory BUDGET. A piece costs its full size
+/// from the moment it is started until its write is done: first as blocks
+/// arriving, then as the assembled buffer `write_piece` hashes and writes.
+/// Nothing bounded the sum. Every peer session holds one piece at a time, so
+/// with a disk slower than the network the engine held one piece per
+/// connection: measured 2026-10-14 on a 30 MB/s disk, 1 600 sessions of
+/// 16 MiB pieces, RssAnon 6.7 GB at 16 s and 24.6 GB at 284 s, still climbing
+/// -- the out-of-memory a Raspberry Pi install hit on a big download.
+/// Over budget, no NEW piece is started; pieces already started go on, so the
+/// budget drains by finishing and writing them and can never wedge.
 #[derive(Debug, Default)]
 pub struct PieceMem {
     pieces: AtomicU64,
     bytes: AtomicU64,
+    /// Full size of every piece in flight: what they will hold when complete.
+    reserved: AtomicU64,
+    /// Assembled pieces handed to the disk and not yet written.
+    writing: AtomicU64,
+    /// Bytes `reserved + writing` may reach before no piece is started. 0 =
+    /// no limit.
+    budget: AtomicU64,
+    /// Woken when a write returns: sessions held back by the budget try again
+    /// at once instead of at their next choke tick.
+    freed: tokio::sync::Notify,
 }
 
 impl PieceMem {
@@ -148,9 +169,91 @@ impl PieceMem {
         self.bytes.load(Ordering::Relaxed)
     }
 
+    /// Bytes of assembled pieces waiting for their write.
+    pub fn writing(&self) -> u64 {
+        self.writing.load(Ordering::Relaxed)
+    }
+
+    /// Bytes the pieces in flight and the writes in progress may come to.
+    pub fn committed(&self) -> u64 {
+        self.reserved.load(Ordering::Relaxed) + self.writing()
+    }
+
+    pub fn budget(&self) -> u64 {
+        self.budget.load(Ordering::Relaxed)
+    }
+
+    pub fn set_budget(&self, bytes: u64) {
+        self.budget.store(bytes, Ordering::Relaxed);
+    }
+
+    /// May a new piece of `size` bytes be started? Always when nothing is
+    /// committed, so a piece larger than the whole budget still downloads, one
+    /// at a time.
+    pub fn admits(&self, size: u64) -> bool {
+        let budget = self.budget();
+        let committed = self.committed();
+        budget == 0 || committed == 0 || committed + size <= budget
+    }
+
+    /// Count `len` bytes as being written until the hold is dropped.
+    pub fn hold_write(self: &Arc<Self>, len: u64) -> WriteHold {
+        self.writing.fetch_add(len, Ordering::Relaxed);
+        WriteHold { mem: self.clone(), len }
+    }
+
+    /// Resolves at the next write that gives budget back.
+    pub async fn freed(&self) {
+        self.freed.notified().await
+    }
+
     fn add(&self, pieces: i64, bytes: i64) {
         apply(&self.pieces, pieces);
         apply(&self.bytes, bytes);
+    }
+
+    fn reserve(&self, bytes: i64) {
+        apply(&self.reserved, bytes);
+    }
+}
+
+/// An assembled piece on its way to the disk, counted in the budget until the
+/// write returns, whichever way it returns.
+#[derive(Debug)]
+pub struct WriteHold {
+    mem: Arc<PieceMem>,
+    len: u64,
+}
+
+impl Drop for WriteHold {
+    fn drop(&mut self) {
+        self.mem.writing.fetch_sub(self.len, Ordering::Relaxed);
+        self.mem.freed.notify_waiters();
+    }
+}
+
+/// Default budget when the config leaves it at 0: an eighth of the memory this
+/// process may use (the cgroup limit when there is one, else the machine's),
+/// and never under 256 MiB. Per engine.
+pub fn default_budget() -> u64 {
+    const FLOOR: u64 = 256 << 20;
+    memory_ceiling().map_or(0, |m| (m / 8).max(FLOOR))
+}
+
+fn memory_ceiling() -> Option<u64> {
+    let total = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| {
+        s.lines()
+            .find_map(|l| l.strip_prefix("MemTotal:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+    });
+    let cgroup = ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    match (total, cgroup) {
+        (Some(t), Some(c)) => Some(t.min(c)),
+        (t, c) => t.or(c),
     }
 }
 
@@ -184,6 +287,8 @@ pub struct PiecePicker {
     pending: HashMap<u32, PendingPiece>,  // piece index -> in-flight reservation and the blocks received
     /// Bytes of block data held across `pending`: what this picker costs.
     held_bytes: u64,
+    /// Full size of the pieces in `pending`: what they will cost complete.
+    reserved_bytes: u64,
     /// The engine's totals, which this picker's changes are added to. `None`
     /// for a picker built outside a manager (a unit test, a magnet).
     mem: Option<Arc<PieceMem>>,
@@ -235,6 +340,7 @@ impl Drop for PiecePicker {
     fn drop(&mut self) {
         if let Some(m) = &self.mem {
             m.add(-(self.pending.len() as i64), -(self.held_bytes as i64));
+            m.reserve(-(self.reserved_bytes as i64));
         }
     }
 }
@@ -247,6 +353,7 @@ impl PiecePicker {
             availability: vec![0; num_pieces as usize],
             pending: HashMap::new(),
             held_bytes: 0,
+            reserved_bytes: 0,
             mem: None,
             order: None,
         }
@@ -259,11 +366,26 @@ impl PiecePicker {
             return;
         }
         let (n, b) = (self.pending.len() as i64, self.held_bytes as i64);
+        let r = self.reserved_bytes as i64;
         if let Some(old) = self.mem.take() {
             old.add(-n, -b);
+            old.reserve(-r);
         }
         mem.add(n, b);
+        mem.reserve(r);
         self.mem = Some(mem);
+    }
+
+    /// The engine's totals this picker counts in, for a write to be held
+    /// against them.
+    pub fn mem(&self) -> Option<&Arc<PieceMem>> {
+        self.mem.as_ref()
+    }
+
+    /// May a new piece of `size` bytes be started under the engine's budget?
+    /// Always for a picker outside an engine.
+    pub fn may_start(&self, size: u32) -> bool {
+        self.mem.as_ref().is_none_or(|m| m.admits(size as u64))
     }
 
     /// Pieces in flight and the block bytes they hold, for this torrent.
@@ -282,6 +404,10 @@ impl PiecePicker {
     fn drop_pending(&mut self, piece: u32) -> Option<PendingPiece> {
         let p = self.pending.remove(&piece)?;
         self.account(-1, -(p.bytes as i64));
+        self.reserved_bytes = self.reserved_bytes.saturating_sub(p.piece_size as u64);
+        if let Some(m) = &self.mem {
+            m.reserve(-(p.piece_size as i64));
+        }
         Some(p)
     }
 
@@ -541,6 +667,10 @@ impl PiecePicker {
         let requests = p.missing(piece);
         self.pending.insert(piece, p);
         self.account(1, 0);
+        self.reserved_bytes += piece_size as u64;
+        if let Some(m) = &self.mem {
+            m.reserve(piece_size as i64);
+        }
         requests
     }
 
@@ -885,6 +1015,59 @@ mod receive_block_tests {
         p.receive_block(1, 0, &[1u8; 16384]);
         p.set_have(1);
         assert_eq!((mem.pieces(), mem.bytes()), (0, 0));
+        assert_eq!(mem.committed(), 0, "and its place in the budget");
+    }
+
+    #[test]
+    fn a_piece_counts_in_the_budget_from_its_start_to_the_end_of_its_write() {
+        let mem = Arc::new(PieceMem::default());
+        mem.set_budget(2 * 32768);
+        let mut p = PiecePicker::new(4);
+        p.attach_mem(mem.clone());
+        p.start_piece(0, 32768, 16384, 1);
+        assert_eq!(mem.committed(), 32768, "its full size, before a byte arrived");
+        assert!(p.may_start(32768), "a second one fits");
+        p.start_piece(1, 32768, 16384, 2);
+        assert!(!p.may_start(32768), "a third one does not");
+
+        p.receive_block(0, 0, &[1u8; 16384]);
+        p.receive_block(0, 16384, &[1u8; 16384]);
+        let data = p.take_piece_data(0).unwrap();
+        let hold = p.mem().unwrap().hold_write(data.len() as u64);
+        assert_eq!(mem.committed(), 2 * 32768, "taken for its write, still counted");
+        assert!(!p.may_start(32768), "a slow disk keeps the budget spent");
+        drop(hold);
+        assert_eq!(mem.committed(), 32768);
+        assert!(p.may_start(32768), "the write returned: room again");
+
+        p.release(1, 2);
+        assert_eq!(mem.committed(), 0, "a released piece gives its place back");
+    }
+
+    #[test]
+    fn a_piece_larger_than_the_budget_still_downloads_alone() {
+        let mem = Arc::new(PieceMem::default());
+        mem.set_budget(16384);
+        let mut p = PiecePicker::new(2);
+        p.attach_mem(mem.clone());
+        assert!(p.may_start(32768), "nothing committed: never wedged");
+        p.start_piece(0, 32768, 16384, 1);
+        assert!(!p.may_start(32768));
+        mem.set_budget(0);
+        assert!(p.may_start(32768), "0 is no limit");
+    }
+
+    #[test]
+    fn a_dropped_or_moved_picker_takes_its_reservations_with_it() {
+        let mem = Arc::new(PieceMem::default());
+        let other = Arc::new(PieceMem::default());
+        let mut p = PiecePicker::new(2);
+        p.attach_mem(mem.clone());
+        p.start_piece(0, 32768, 16384, 1);
+        p.attach_mem(other.clone());
+        assert_eq!((mem.committed(), other.committed()), (0, 32768));
+        drop(p);
+        assert_eq!(other.committed(), 0);
     }
 }
 
