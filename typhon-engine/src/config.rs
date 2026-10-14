@@ -37,10 +37,12 @@ pub struct Binding {
     /// Optional public IP we'd like trackers to advertise for us.
     #[serde(default)]
     pub public_ip: String,
-    /// netfilter fwmark applied via SO_MARK on outbound peer dial sockets
-    /// so the kernel routes them through the right WG tunnel
-    /// (`ip rule fwmark X lookup tableX`). 0 = no fwmark (single-tunnel
-    /// FOU/wstunnel path).
+    /// netfilter fwmark for `ip rule fwmark X lookup tableX`. Only the
+    /// tracker dial applies it (SO_MARK, refused when it cannot be set):
+    /// peer dials do NOT read it, so a binding steered by a mark alone would
+    /// send its peer traffic by the default route. Hydranos never passes
+    /// `bindings` (see `hydra::engines::engine_config`), so this is always 0
+    /// there; the pinning it ships is `bind_device`. 0 = no fwmark.
     #[serde(default)]
     pub fwmark: u32,
 }
@@ -550,8 +552,8 @@ impl EngineConfig {
 }
 
 /// Resolved binding: ready-to-use config for one network tunnel. `addr` is
-/// the listen socket address; `fwmark` is applied via SO_MARK on outbound
-/// dial sockets to steer them through the matching WG interface.
+/// the listen socket address; `fwmark` is applied via SO_MARK on tracker
+/// dials only (see `Binding::fwmark`).
 /// `advertised_port` is the port we tell remote peers about in the BEP-10
 /// extension handshake (NAT-PMP external port for Proton WG, equal to
 /// addr.port() in the legacy direct-listen case).
