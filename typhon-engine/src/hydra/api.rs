@@ -4931,12 +4931,53 @@ pub(crate) fn is_kept_secret(key: &str, v: &serde_json::Value) -> bool {
     SECRET_KEYS.contains(&key) && v.as_str() == Some(SECRET_MASK)
 }
 
+/// The proxy URL whose password is masked: `announce_proxy` carries one in
+/// `scheme://user:pass@host`, and went out in clear where the SOCKS5 password
+/// beside it was masked.
+const PROXY_URL_KEYS: &[&str] = &["announce_proxy"];
+
+/// Where the password sits in a proxy URL: the range after `user:` and before
+/// the `@` that ends the authority. None for a URL without one.
+fn proxy_password_span(url: &str) -> Option<std::ops::Range<usize>> {
+    let start = url.find("://")? + 3;
+    let end = url[start..].find(['/', '?', '#']).map_or(url.len(), |i| start + i);
+    let at = start + url[start..end].rfind('@')?;
+    let colon = start + url[start..at].find(':')?;
+    (colon + 1 < at).then_some(colon + 1..at)
+}
+
+/// The proxy URL with its password replaced by the mask; user, host and port
+/// stay readable.
+pub(crate) fn mask_proxy_url(url: &str) -> String {
+    match proxy_password_span(url) {
+        Some(r) => format!("{}{}{}", &url[..r.start], SECRET_MASK, &url[r.end..]),
+        None => url.to_string(),
+    }
+}
+
+/// A posted proxy URL with the mask for its password gets the stored one
+/// back, so a save of the form as it was keeps working. A mask with nothing
+/// stored behind it is dropped rather than written as the password.
+pub(crate) fn unmask_proxy_url(sent: &str, stored: &str) -> String {
+    let Some(r) = proxy_password_span(sent).filter(|r| &sent[r.clone()] == SECRET_MASK) else {
+        return sent.to_string();
+    };
+    match proxy_password_span(stored) {
+        Some(s) => format!("{}{}{}", &sent[..r.start], &stored[s], &sent[r.end..]),
+        None => format!("{}{}", &sent[..r.start - 1], &sent[r.end..]),
+    }
+}
+
 /// `toml_to_json`'s output with every set secret replaced by the mask.
 fn mask_secrets(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Object(m) => {
             for (k, x) in m.iter_mut() {
-                if SECRET_KEYS.contains(&k.as_str()) {
+                if PROXY_URL_KEYS.contains(&k.as_str()) {
+                    if let Some(s) = x.as_str() {
+                        *x = serde_json::Value::String(mask_proxy_url(s));
+                    }
+                } else if SECRET_KEYS.contains(&k.as_str()) {
                     if let Some(s) = x.as_str() {
                         *x = serde_json::Value::String(mask_secret(s).to_string());
                     }
@@ -5024,7 +5065,9 @@ async fn get_network_mode(
     let race = &cfg.race;
     let hoard = &cfg.hoard;
     let mode = crate::netmode::current(&cfg);
+    let masked_proxy = mask_proxy_url(&race.announce_proxy);
     let mut fields = network_fields(&cfg);
+    fields.announce_proxy = &masked_proxy;
     fields.socks5_pass = mask_secret(fields.socks5_pass);
     fields.gluetun_api_key = mask_secret(fields.gluetun_api_key);
 
@@ -10153,7 +10196,33 @@ async fn post_settings(
         if is_kept_secret(&change.key, &change.value) {
             continue;
         }
-        let literal = match crate::tomledit::toml_scalar(&change.value) {
+        let unmasked;
+        let value = match change.value.as_str() {
+            Some(sent) if PROXY_URL_KEYS.contains(&change.key.as_str()) => {
+                // The table set_toml_value edits: the first one under that
+                // header, so the first entry of an [[engine]] array.
+                let lookup = || {
+                    let t = toml::from_str::<toml::Value>(&doc).ok()?;
+                    let table = change.section.split('.').filter(|s| !s.is_empty())
+                        .try_fold(&t, |t, s| {
+                            let v = t.get(s)?;
+                            v.as_array().map_or(Some(v), |a| a.first())
+                        })?;
+                    table.get(&change.key)?.as_str().map(String::from)
+                };
+                let masked = proxy_password_span(sent).is_some_and(|r| &sent[r] == SECRET_MASK);
+                let stored = match (masked, lookup()) {
+                    (false, _) => String::new(),
+                    (true, Some(s)) => s,
+                    // A mask whose password cannot be found: keep the file.
+                    (true, None) => continue,
+                };
+                unmasked = serde_json::Value::String(unmask_proxy_url(sent, &stored));
+                &unmasked
+            }
+            _ => &change.value,
+        };
+        let literal = match crate::tomledit::toml_scalar(value) {
             Ok(v) => v,
             Err(message) => {
                 return (
@@ -14212,6 +14281,12 @@ async fn post_network_mode(
     if let (Some(m), Some(sent)) = (merged.as_object_mut(), parsed.get("fields").and_then(|f| f.as_object())) {
         for (k, v) in sent {
             if is_kept_secret(k, v) {
+                continue;
+            }
+            if let (true, Some(sent)) = (PROXY_URL_KEYS.contains(&k.as_str()), v.as_str()) {
+                let stored = m.get(k).and_then(|x| x.as_str()).unwrap_or_default();
+                let url = unmask_proxy_url(sent, stored);
+                m.insert(k.clone(), serde_json::Value::String(url));
                 continue;
             }
             m.insert(k.clone(), v.clone());
@@ -23013,6 +23088,50 @@ mod network_mode_tests {
         }))).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(s.cfg().race.socks5_outbound_pass, "new-pw", "a new one is written");
+    }
+
+    #[test]
+    fn a_proxy_url_masks_its_password_only() {
+        assert_eq!(mask_proxy_url("socks5h://u:pw@10.0.0.1:1080"), "socks5h://u:********@10.0.0.1:1080");
+        assert_eq!(mask_proxy_url("http://u:p@ss@h:3128/x"), "http://u:********@h:3128/x", "the last @ ends the userinfo");
+        assert_eq!(mask_proxy_url("socks5h://u@10.0.0.1:1080"), "socks5h://u@10.0.0.1:1080", "no password, nothing to hide");
+        assert_eq!(mask_proxy_url("socks5h://10.0.0.1:1080"), "socks5h://10.0.0.1:1080");
+        assert_eq!(mask_proxy_url(""), "");
+        assert_eq!(mask_proxy_url("http://h:3128/a@b"), "http://h:3128/a@b", "an @ in the path is not userinfo");
+
+        let stored = "socks5h://u:pw@10.0.0.1:1080";
+        assert_eq!(unmask_proxy_url("socks5h://u:********@10.0.0.1:1080", stored), stored);
+        assert_eq!(unmask_proxy_url("socks5h://u:********@10.0.0.9:1080", stored), "socks5h://u:pw@10.0.0.9:1080", "host edited, password kept");
+        assert_eq!(unmask_proxy_url("socks5h://u:new@10.0.0.1:1080", stored), "socks5h://u:new@10.0.0.1:1080");
+        assert_eq!(unmask_proxy_url("socks5h://u:********@10.0.0.1:1080", ""), "socks5h://u@10.0.0.1:1080", "the mask is never written");
+    }
+
+    /// ⭐ `announce_proxy` carries its password in the URL: masked in both GETs,
+    /// and a save posting the mask back -- from the Network tab or the
+    /// settings screen -- keeps the real one.
+    #[tokio::test]
+    async fn the_announce_proxy_password_is_masked_and_kept() {
+        let file = SOCKS_FILE.replace(
+            "announce_ip = ",
+            "announce_proxy = \"socks5h://u:s3cr3t-pw@10.0.0.1:1080\"\nannounce_ip = ",
+        );
+        let s = state_from("netmode-proxy-secret", &file);
+        let masked = "socks5h://u:********@10.0.0.1:1080";
+        assert_eq!(load(&s).await["fields"]["announce_proxy"], masked);
+        let settings = body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert!(!settings.to_string().contains("s3cr3t-pw"), "{settings}");
+        assert_eq!(settings["race"]["announce_proxy"], masked);
+
+        let (st, body) = save(&s, form("socks5", serde_json::json!({
+            "socks5_host": "10.0.0.1", "socks5_port": 1080, "announce_proxy": masked,
+        }))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(s.cfg().race.announce_proxy, "socks5h://u:s3cr3t-pw@10.0.0.1:1080", "the Network tab wrote the mask");
+
+        let change = serde_json::json!({"changes": [{"section": "race", "key": "announce_proxy", "value": masked}]});
+        let r = post_settings(State(s.clone()), RawQuery(None), keyed(KEY), change.to_string()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(s.cfg().race.announce_proxy, "socks5h://u:s3cr3t-pw@10.0.0.1:1080", "the settings screen wrote the mask");
     }
 
     /// ⭐⭐ Leaving SOCKS5 for direct REMOVES the proxy keys -- from race, from
