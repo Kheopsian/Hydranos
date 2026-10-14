@@ -45,7 +45,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   behind; one brought back up next to an interface holding the same address
   kept a rule it must not have. Rules now go by the tunnel's own table.
 - **The systemd unit says how to grant `CAP_NET_ADMIN`**, which managed
-  WireGuard and a hand-set `fwmark` need: two commented lines to add with
+  WireGuard needs: two commented lines to add with
   `systemctl edit`. Left off by default, and the missing-privilege message
   says so.
 - **Advanced settings:** the hints show what a fresh install ships (hoard
