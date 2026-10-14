@@ -122,10 +122,12 @@ pub fn start(
         map.insert(info_hash, Job { state: JobState::Resolving, started: Instant::now() });
     }
 
-    // Pick the tunnel this resolution goes out on. Dialling peers with no
-    // fwmark would leave via the default route and show our real address to
-    // the whole swarm, so we always resolve on a binding -- by default the
-    // same one the torrent will land on.
+    // Pick the binding this resolution goes out on, so its peer dials carry
+    // the engine's egress -- `bind_device` and the outbound SOCKS5 -- like the
+    // torrent's own: dialling with none would leave by the default route and
+    // show our real address to the whole swarm. By default the same binding
+    // the torrent will land on. (Its fwmark is not applied to peer dials, and
+    // Hydranos never sets one: see `Binding::fwmark`.)
     let bindings = config.resolved_bindings();
     let binding = match binding_id {
         Some(want) => bindings.iter().find(|b| b.id == want).or_else(|| bindings.first()),
