@@ -28,6 +28,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   `GET /api/settings` and `GET /api/network/mode` answer
   `scheme://user:********@host:port`, as they already did for the SOCKS5
   passwords; a save that posts the mask back keeps the real password.
+- **Force download starts a torrent the user stopped**, as qBittorrent's
+  force start does. It only marked it forced, and a stopped torrent stayed
+  stopped. The start goes through the same path guard as Start.
 
 ## v4.4.1 -- moves that keep their data, torrents that cannot lose their row, and watched folders on network shares
 
