@@ -973,6 +973,7 @@ fn engine_config(
         "enable_ipv6": session.enable_ipv6,
         "max_connections": session.max_connections.max(0),
         "max_dials_per_sec": if session.max_dials_per_sec.is_finite() { session.max_dials_per_sec.max(0.0) } else { 0.0 },
+        "piece_memory_mb": session.piece_memory_mb.max(0),
         "max_uploads_per_torrent": session.max_uploads_per_torrent.clamp(i32::MIN as i64, i32::MAX as i64),
         // Rate caps, the idle timeout and the choker: the same values
         // `apply_live_settings` puts on the running engine, so a start and a
