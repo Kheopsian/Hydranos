@@ -186,7 +186,24 @@ impl EngineHost {
             // Read-only, and its own handle: the shared store is opened later
             // in main, after the engines are up, and reordering a daemon's
             // startup to borrow it would be a bigger change than this is worth.
+            //
+            // The writer is opened FIRST because it is what creates hydra.db
+            // and its schema. On a fresh install the file did not exist yet
+            // when the read-only handle was tried, so the engine ran its whole
+            // first session with no source of piece hashes and refused every
+            // piece it downloaded ("cannot write to disk: no piece hashes")
+            // until the daemon was restarted.
             let blob_db = std::path::Path::new(&config.daemon.data_dir).join("hydra.db");
+            let rw = match crate::store::Store::open(&blob_db, false) {
+                Ok(rw) => Some(std::sync::Mutex::new(rw)),
+                Err(e) => {
+                    tracing::error!(
+                        engine = id,
+                        "cannot open the store to migrate metainfo ({e}); torrents whose blob is missing will not load"
+                    );
+                    None
+                }
+            };
             match crate::store::Store::open(&blob_db, true) {
                 Ok(store) => {
                     let store = Arc::new(std::sync::Mutex::new(store));
@@ -204,30 +221,21 @@ impl EngineHost {
             // store before resume runs, because resume no longer looks
             // anywhere else. On an install that already migrated this finds
             // nothing and costs one query per torrent.
-            {
+            if let Some(rw) = rw {
                 let uploads = std::path::Path::new(&config.daemon.data_dir).join("uploads");
-                match crate::store::Store::open(&blob_db, false) {
-                    Ok(rw) => {
-                        let rw = std::sync::Mutex::new(rw);
-                        let sink = |hash: &str, bytes: &[u8]| -> Result<(), String> {
-                            rw.lock()
-                                .map_err(|_| "store lock".to_string())?
-                                .insert_torrent(hash, id, bytes, "", "", 0.0, false, "")
-                                .map(|_| ())
-                                .map_err(|e| e.to_string())
-                        };
-                        let (imported, lost) = manager.import_missing_blobs(&uploads, &sink);
-                        if imported > 0 || lost > 0 {
-                            tracing::warn!(
-                                engine = id, imported, unrecoverable = lost,
-                                "metainfo migrated out of uploads/ and into the store"
-                            );
-                        }
-                    }
-                    Err(e) => tracing::error!(
-                        engine = id,
-                        "cannot open the store to migrate metainfo ({e}); torrents whose blob is missing will not load"
-                    ),
+                let sink = |hash: &str, bytes: &[u8]| -> Result<(), String> {
+                    rw.lock()
+                        .map_err(|_| "store lock".to_string())?
+                        .insert_torrent(hash, id, bytes, "", "", 0.0, false, "")
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                };
+                let (imported, lost) = manager.import_missing_blobs(&uploads, &sink);
+                if imported > 0 || lost > 0 {
+                    tracing::warn!(
+                        engine = id, imported, unrecoverable = lost,
+                        "metainfo migrated out of uploads/ and into the store"
+                    );
                 }
             }
 
