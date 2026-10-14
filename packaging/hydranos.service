@@ -20,8 +20,7 @@ TimeoutStopSec=150
 # Peer connections and files at scale -> raise the fd limit.
 LimitNOFILE=1048576
 # Managed WireGuard (it creates the tunnel device, its routes and its rules)
-# and a hand-set `fwmark` (SO_MARK) need NET_ADMIN; nothing else does, the
-# kill switch included. Off by default: a daemon facing the internet that can
+# needs NET_ADMIN; nothing else does, the kill switch included. Off by default: a daemon facing the internet that can
 # rewrite its own routes can also route around its tunnel. To use either,
 # `systemctl edit hydranos` and add these two lines under [Service] -- ambient
 # so the `ip` and `wg` it runs get it too, the bounding set keeping it the only one:
