@@ -24,6 +24,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ## Unreleased -- the last blockers before a wider announcement
 
 ### Fixed
+- **A fresh install downloads from its first start.** The engines looked for
+  the database before it had been created, ran their first session without
+  the piece hashes it keeps, and refused every piece downloaded ("cannot
+  write to disk: no piece hashes") until Hydranos was restarted once.
 - **A disk slower than the network no longer fills the RAM.** Each peer
   connection could hold a whole piece waiting for its write, with nothing
   bounding the sum: on a 30 MB/s disk with 16 MiB pieces and many peers the
