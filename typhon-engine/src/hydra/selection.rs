@@ -1027,15 +1027,29 @@ async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, ta
                     SetEdit::Tags { tags, add } => crate::store::BulkEdit::Tags { tags, add: *add },
                     SetEdit::ShareLimits { .. } => unreachable!("written above"),
                 };
-                store.bulk_edit(&rows, edit)
+                let changed = store.bulk_edit(&rows, edit);
+                // Force download STARTS the torrent, as qBittorrent's force
+                // start does: a pin alone left one the user had stopped
+                // stopped, forced in name only.
+                if changed.is_ok() && matches!(e, SetEdit::Pinned(true)) {
+                    store.bulk_edit(&rows, crate::store::BulkEdit::Paused(false)).and(changed)
+                } else {
+                    changed
+                }
             };
             // The engines, after the store and outside its lock: stopping a
             // torrent touches the engine and its announces, not the database.
             // Every copy, changed or not -- a row already marked stopped says
-            // nothing about whether its engine agrees.
-            if let (Ok(_), SetEdit::Paused(p)) = (&changed, &e) {
+            // nothing about whether its engine agrees. A start goes through
+            // the path claim (`apply_pause_to_engine`).
+            let paused = match &e {
+                SetEdit::Paused(p) => Some(*p),
+                SetEdit::Pinned(true) => Some(false),
+                _ => None,
+            };
+            if let (Ok(_), Some(p)) = (&changed, paused) {
                 for (h, engine) in &rows {
-                    crate::api::apply_pause_to_engine(&st, engine, h, *p);
+                    crate::api::apply_pause_to_engine(&st, engine, h, p);
                 }
             }
             changed
@@ -1406,6 +1420,42 @@ mod tests {
             store.paused_hashes("hoard").map(|p| p.contains(&h[2]) as i64 + 2 * p.contains(&h[0]) as i64).unwrap_or(-1)
         };
         assert_eq!(paused, 1, "the series torrent is stopped, the movies are not");
+    }
+
+    /// ⭐ Force download STARTS a torrent the user stopped, as qBittorrent's
+    /// force start does -- from the selection and from the single-torrent
+    /// route. 4.4.1 only pinned it, and it stayed stopped.
+    #[tokio::test]
+    async fn force_download_starts_a_stopped_torrent() {
+        use tower::ServiceExt;
+        let (s, h) = library("sel-force");
+        let (_, v) = start(&s, "stop", json!({"selection": {"filter": "category=movies", "expect": 2}})).await;
+        wait(&s, v["job"].as_str().unwrap()).await;
+        let engine_paused = |hash: &str| {
+            let (_, t) = crate::api::find_torrent(&s.state, hash).expect("held");
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let stored_paused = |hash: &str| s.state.store.read().unwrap().paused_hashes("hoard").unwrap().iter().any(|p| p == hash);
+        assert!(engine_paused(&h[0]) && stored_paused(&h[0]), "stopped first");
+
+        let (st, v) = start(&s, "pin", json!({"selection": {"items": [{"hash": h[0], "agent": "local-hoard"}]}})).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+        let j = wait(&s, v["job"].as_str().unwrap()).await;
+        assert_eq!(j["failed"], 0, "{j}");
+        assert!(!stored_paused(&h[0]), "the intent says started");
+        assert!(!engine_paused(&h[0]), "and the engine runs it");
+        assert!(engine_paused(&h[1]), "the other movie was not selected");
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/hoard/torrents/{}/pin", h[1]))
+            .header("X-API-Key", KEY)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let r = crate::api::router(s.state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(!stored_paused(&h[1]) && !engine_paused(&h[1]), "the single route starts it too");
+        assert!(s.state.store.read().unwrap().pinned("hoard").unwrap().contains(&h[1]));
     }
 
     #[tokio::test]

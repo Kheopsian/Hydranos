@@ -130,7 +130,7 @@ Status: ✓ works · ◐ works with a caveat. Stub routes appear only in *Routes
 | `/api/{hoard,race}/torrents/:info_hash/move-preview` | GET | What a move would do, without doing it. | ✓ |
 | `/api/{hoard,race}/torrents/:info_hash/tags` | POST | `{"tags":[...]}` replaces the whole set. | ✓ |
 | `/api/{hoard,race}/torrents/:info_hash/{pause,resume}` | POST | Stop / start one torrent. | ✓ |
-| `/api/hoard/torrents/:info_hash/{pin,unpin}` | POST | Force download / stop forcing. | ✓ |
+| `/api/hoard/torrents/:info_hash/{pin,unpin}` | POST | Force download (starts the torrent, past the queue) / stop forcing. | ✓ |
 | `/api/hoard/torrents/:info_hash/verify` | POST | Recheck (`?engine=` picks the copy). | ✓ |
 | `/api/race/torrents/:info_hash/purge` | POST | Remove the **race copy** (engine first). Its data is deleted when no other copy of the torrent remains; files another torrent reads are kept. Other copies are untouched. `404` if the torrent is not in race. | ✓ |
 | `/api/race/timeline/:info_hash`, `/api/trackers` | GET | Race timeline; Trackers tab table. | ✓ |
