@@ -47,6 +47,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - **The systemd unit grants `CAP_NET_ADMIN`** (ambient, and the only
   capability in its bounding set): managed WireGuard could not create its
   device under the shipped unit.
+- **Advanced settings:** the hints show what a fresh install ships (hoard
+  `max_connections` 12000, `max_uploads_per_torrent` -1,
+  `inactivity_timeout` 20; `create_torrent_folder` off); the live
+  `[vpn_speedtest]` keys (`interval_secs`, `duration_secs`, `iperf3_port`)
+  are listed again, not hidden as dead; the Network tab's keys in `[daemon]`,
+  `[proxy]` and `[network]` are no longer listed beside it; and
+  `max_uploads_per_torrent`, `peer_timeout` and `active_downloads` can be set
+  on a file that lacks them.
+- **Reset to defaults says that it turns the kill switch off** and puts the
+  network back to Direct.
 
 ## v4.4.1 -- moves that keep their data, torrents that cannot lose their row, and watched folders on network shares
 

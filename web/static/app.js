@@ -7659,7 +7659,12 @@ const NET_OWNED_KEYS = new Set([
     // saved by the Network tab's "Daemon traffic" card.
     "kill_switch", "socks5_host", "socks5_port", "socks5_user", "socks5_pass",
     "egress", "allow_direct",
+    // The gluetun port forward, a card of the same tab.
+    "gluetun_port_forward", "gluetun_url", "gluetun_api_key",
 ]);
+// Where those keys live: the engines' own sections, and [daemon] / [proxy]
+// for the daemon's traffic. Elsewhere a key of the same name is not the tab's.
+const _NET_OWNED_SECTIONS = new Set(["race", "hoard", "daemon", "proxy"]);
 
 // Keys and sections nothing reads ("section::key", or a whole "section" and its
 // sub-tables). A file carried over from 3.x still holds them, and listed here
@@ -7674,7 +7679,6 @@ const _DEAD_SETTINGS = new Set([
     "race.custom_choking", "hoard.custom_choking",
     "race.disk_slots", "hoard.disk_slots",
     "bench", "metrics", "peer_intel", "arr_cleanup", "notify",
-    "vpn_speedtest::iperf3_port", "vpn_speedtest::interval_secs", "vpn_speedtest::duration_secs",
     "race_drain::min_age_minutes",
 ]);
 function _isDeadSetting(path, k) {
@@ -7737,8 +7741,11 @@ const _SETTINGS_DESC = {
     announce_rate_limit: "Cap on outbound tracker announces for this session, in announces per second. 0 = unlimited. Use it when a VPN or a firewall drops the burst a large library sends at once: the same announces then go out spread over time. Fractional values allowed (0.5 = one announce every 2 seconds).",
     // [vpn_speedtest]
     iperf3_server: "iperf3 server used to measure peer-facing bandwidth.",
+    iperf3_port: "Port of the iperf3 server (5201 when not set).",
+    interval_secs: "Run the speed test on its own every this many seconds. 0 = never (Run now only). A run saturates the link for its duration.",
+    duration_secs: "How long one run measures, in seconds (10 when not set, 1 to 60).",
     // [proxy]
-    socks5_host: "SOCKS5 host used by the orchestrator (public IP + speedtest).",
+    socks5_host: "SOCKS5 proxy for the daemon's own requests (tracker lists, update checks, public IP). Set from the Network tab.",
     socks5_port: "SOCKS5 port.",
     socks5_user: "SOCKS5 username (if authenticated).",
     socks5_pass: "SOCKS5 password (if authenticated).",
@@ -7792,7 +7799,7 @@ function _collectSections(obj, path, out) {
 const _SETTINGS_DEFAULT = {
     "daemon::api_host": "0.0.0.0", "daemon::api_port": 8199,
     "daemon::data_dir": "/config",
-    "daemon::create_torrent_folder": true,
+    "daemon::create_torrent_folder": false,
     "race::enable_dht": true, "race::enable_pex": true,
     "hoard::enable_dht": true, "hoard::enable_pex": true,
     "race::enable_lsd": true, "hoard::enable_lsd": false,
@@ -7804,10 +7811,11 @@ const _SETTINGS_DEFAULT = {
     // -1 and not 3.x's 50 / 100: shown as a default, they read as a value to
     // copy, and under `queueing` they would stop all but 50 seeds.
     "race::active_seeds": -1, "race::active_limit": -1, "race::active_downloads": 0,
-    "hoard::listen_port": 16172, "hoard::max_connections": 8000,
-    "hoard::max_uploads_per_torrent": 20,
+    // What a fresh install's default.toml holds.
+    "hoard::listen_port": 16172, "hoard::max_connections": 12000,
+    "hoard::max_uploads_per_torrent": -1,
     "hoard::peer_timeout": 300,
-    "hoard::inactivity_timeout": 90,
+    "hoard::inactivity_timeout": 20,
     "hoard::active_seeds": -1, "hoard::active_limit": -1, "hoard::active_downloads": 10,
     "race::queueing": false, "hoard::queueing": false,
     "race::dont_count_slow_torrents": false, "race::slow_torrent_dl_rate_threshold": 2, "race::slow_torrent_ul_rate_threshold": 2, "race::slow_torrent_inactive_timer": 60,
@@ -7818,6 +7826,7 @@ const _SETTINGS_DEFAULT = {
     "hoard::upload_rate_limit": 0, "hoard::download_rate_limit": 0, "hoard::choking": false,
     "race_drain::enabled": true, "race_drain::check_interval_seconds": 60,
     "race_drain::high_watermark_pct": 95, "race_drain::low_watermark_pct": 85,
+    "vpn_speedtest::interval_secs": 0, "vpn_speedtest::duration_secs": 10, "vpn_speedtest::iperf3_port": 5201,
 };
 const _SETTINGS_ENUM = { share_limit_action: ["stop", "remove", "remove_with_files"] };
 
@@ -7827,6 +7836,9 @@ const _SETTINGS_ENUM = { share_limit_action: ["stop", "remove", "remove_with_fil
 // would offer no way to set them: they are shown at their default instead.
 const _LIVE_ENGINE_KEY_DEFAULTS = {
     upload_rate_limit: 0, download_rate_limit: 0, choking: false,
+    // What the engine runs when the file says nothing: 0 = 4 unchoke slots,
+    // 0 = a 300 s peer timeout, 0 = no download ceiling.
+    max_uploads_per_torrent: 0, peer_timeout: 0, active_downloads: 0,
     // The queue and the share limits, off.
     queueing: false, active_seeds: -1, active_limit: -1,
     dont_count_slow_torrents: false, slow_torrent_dl_rate_threshold: 2, slow_torrent_ul_rate_threshold: 2, slow_torrent_inactive_timer: 60,
@@ -7982,7 +7994,9 @@ async function updateSettings() {
             for (const { path, scalars } of sections) {
                 let rows = "";
                 for (const [k, v] of scalars) {
-                    if (NET_OWNED_KEYS.has(k) && (path === "race" || path === "hoard")) continue;
+                    if (NET_OWNED_KEYS.has(k) && _NET_OWNED_SECTIONS.has(path)) continue;
+                    // The mode the Network tab saved: only that tab may change it.
+                    if (path === "network") continue;
                     if (_isDeadSetting(path, k)) continue;
                     const id = "set__" + path + "__" + k;
                     if (!Array.isArray(v)) _settingsOrig[id] = { section: path, key: k, value: v };
@@ -8256,6 +8270,7 @@ async function resetSettings() {
         <h3>${t("Reset to defaults")}</h3>
         <p class="modal-desc">${esc(t("Every setting goes back to what a fresh install ships: ports, network mode, tracker passkeys, client spoofs, engine tuning."))}</p>
         <p class="modal-desc">${esc(t("Your login, your API key and your data directory are kept, so you do not lock yourself out. A copy of the current config is saved next to it first."))}</p>
+        <p class="modal-desc" style="color:var(--accent-red)">${esc(t("The network goes back to Direct and the kill switch is turned off: until you set them again, the engines connect from this machine's own address."))}</p>
         <div class="modal-actions">
             <button class="btn-small" id="reset-cancel">${t("Cancel")}</button>
             <button class="btn-small btn-danger" id="reset-go">${t("Reset and restart")}</button>
