@@ -314,6 +314,10 @@ async fn download_one(
         return refuse(Refusal::Bad("guid is required".into()));
     }
     let paused = v.get("paused").and_then(Value::as_bool).unwrap_or(false);
+    // Switched off means nothing is added, by hand either.
+    if !super::settings(&state.cfg()).enabled {
+        return refuse(Refusal::Conflict(super::DISABLED.into()));
+    }
     match super::download(&state, id, &guid, &s("category"), &s("save_path"), paused).await {
         Ok(a) => Json(json!({"info_hash": a.info_hash, "already": a.already})).into_response(),
         Err(super::AddError::Transient(e)) => (StatusCode::BAD_GATEWAY, Json(json!({"error": e}))).into_response(),

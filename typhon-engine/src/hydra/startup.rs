@@ -188,10 +188,13 @@ fn starting_router(early: Early) -> Router {
         .route("/health", get(|| async { starting_health() }))
         .route("/metrics", get(|| async { starting_metrics() }))
         .route("/api/startup", get(|| async { Json(snapshot()) }))
+        // The setup screen is shown while starting, so its POST arrives
+        // here too: a GET-only route answered 405, read as "Setup failed
+        // (405)". The 503 says why, and to come back.
         .route("/api/setup", get(move || {
             let setup = setup.clone();
             async move { Json(setup) }
-        }))
+        }).post(|| async { not_yet() }))
         .fallback(|| async { not_yet() })
 }
 
@@ -313,6 +316,9 @@ mod tests {
         let (st, body) = call(&gate, "/api/setup").await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["store_repair"], false);
+        let req = axum::http::Request::builder().method("POST").uri("/api/setup").body(axum::body::Body::from("{}")).unwrap();
+        let r = gate.clone().oneshot(req).await.unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE, "a setup posted while starting is told to wait, not 405");
 
         let _ = slot.set(Router::new().route("/api/status", get(|| async { Json(serde_json::json!({"version": "x"})) })));
         let (st, body) = call(&gate, "/api/status").await;

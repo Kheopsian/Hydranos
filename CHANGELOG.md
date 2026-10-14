@@ -31,6 +31,15 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - **Force download starts a torrent the user stopped**, as qBittorrent's
   force start does. It only marked it forced, and a stopped torrent stayed
   stopped. The start goes through the same path guard as Start.
+- **A filtered `GET /api/hoard/torrents` (or race) with an `offset`** no
+  longer loops forever once the filter matches 5000 torrents or more: the
+  caller's `offset`/`limit` pinned every internal page to the same rows.
+- **The first-run setup posted while the daemon is still starting** gets a
+  503 saying how far the start is, instead of "Setup failed (405)".
+- **Saving an RSS rule from the RSS tab keeps its tags.** The form sends no
+  `torrentParams`, and the save emptied them.
+- **`[rss] enabled = false` stops a manual refresh and Download too** (409),
+  not only the background worker.
 
 ## v4.4.1 -- moves that keep their data, torrents that cannot lose their row, and watched folders on network shares
 
