@@ -40,6 +40,13 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   `torrentParams`, and the save emptied them.
 - **`[rss] enabled = false` stops a manual refresh and Download too** (409),
   not only the background worker.
+- **Managed WireGuard removes the tunnel's source-address rule when it takes
+  the tunnel down.** The `from <address>` rule named no device and stayed
+  behind; one brought back up next to an interface holding the same address
+  kept a rule it must not have. Rules now go by the tunnel's own table.
+- **The systemd unit grants `CAP_NET_ADMIN`** (ambient, and the only
+  capability in its bounding set): managed WireGuard could not create its
+  device under the shipped unit.
 
 ## v4.4.1 -- moves that keep their data, torrents that cannot lose their row, and watched folders on network shares
 
