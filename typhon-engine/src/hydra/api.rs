@@ -7267,9 +7267,15 @@ torrent_write!(hoard_resume_one, "hoard", "torrent not found", |_ih: &str| serde
     apply_pause_to_engine(state, engine, hash, false);
 });
 
+// Force download starts the torrent too, through the path claim, as
+// qBittorrent's force start does: the pin alone left a stopped one stopped.
 torrent_write!(hoard_pin_one, "hoard", "torrent not in hoard: {}", |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
-    let store = state.store.lock().unwrap();
-    let _ = store.set_pinned(hash, engine, true);
+    {
+        let store = state.store.lock().unwrap();
+        let _ = store.set_pinned(hash, engine, true);
+        let _ = store.set_paused(hash, engine, false);
+    }
+    apply_pause_to_engine(state, engine, hash, false);
 });
 
 /// Unpin, which unlike pin accepts a torrent from ANY session.
