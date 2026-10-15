@@ -861,6 +861,17 @@ impl TorrentManager {
             state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         }
 
+        // skip_checking vouches for the bytes, not for the path. A save_path
+        // one folder off (2026-10-15, a book on a private tracker: a subfolder
+        // too many) used to come up "seeding 100%", no error, and announce to
+        // the tracker a torrent that could serve nothing. One stat per file says whether the
+        // data the caller vouched for is there at all; the hashes stay trusted.
+        if seed_mode {
+            if let Some(why) = seed_mode_data_absent(&state) {
+                state.mark_error(&why);
+            }
+        }
+
         // Save resume data
         let rd = fastresume::ResumeData {
             info_hash: hex_encode(&ih),
@@ -1063,6 +1074,14 @@ impl TorrentManager {
         // final Seeding/Downloading itself when it finishes.
         if t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
             t.fold_seed_time(crate::torrent::meta::now_secs());
+            return Ok(());
+        }
+        // Data found missing (`mark_error`) is not undone by a resume: a start
+        // would put it back to Seeding and announce it whole. A recheck is
+        // what clears it, once the files are where they should be.
+        if t.status.load(Ordering::Relaxed) == TorrentStatus::Error as u8
+            && t.serving_suspended.load(Ordering::Relaxed)
+        {
             return Ok(());
         }
         if t.seed_mode || t.picker.get().is_none() {
@@ -2058,6 +2077,37 @@ fn recheck_sem() -> &'static Semaphore {
     })
 }
 
+/// Why a seed_mode torrent cannot be what it claims, or None when every file
+/// is on disk at its declared size.
+///
+/// Presence and size only: reading the bytes is the recheck that skip_checking
+/// exists to skip. A zero-length file is not looked for -- no piece depends on
+/// it, and several clients never create one.
+fn seed_mode_data_absent(t: &TorrentState) -> Option<String> {
+    let save_path = t.save_path.read().clone();
+    for f in t.meta.files.iter().filter(|f| f.length > 0) {
+        let full = if t.meta.multi_file {
+            save_path.join(&t.meta.name).join(&f.path)
+        } else {
+            save_path.join(&f.path)
+        };
+        match std::fs::metadata(&full) {
+            Ok(m) if m.is_file() && m.len() == f.length => {}
+            Ok(m) if m.is_file() => {
+                return Some(format!(
+                    "skip_checking: wrong size for {}: {} bytes on disk, {} expected",
+                    full.display(),
+                    m.len(),
+                    f.length
+                ))
+            }
+            Ok(_) => return Some(format!("skip_checking: not a file: {}", full.display())),
+            Err(e) => return Some(format!("skip_checking: missing file {}: {e}", full.display())),
+        }
+    }
+    None
+}
+
 impl TorrentManager {
     /// True if the torrent's first file already exists on disk at its
     /// save_path. Cheap gate for auto-recheck: a fresh download with no data
@@ -2406,6 +2456,55 @@ mod lifecycle_tests {
     // -----------------------------------------------------------------------
     // Adding and finding
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // skip_checking on a path that does not hold the data
+    // -----------------------------------------------------------------------
+
+    fn add_seed(mgr: &Arc<TorrentManager>, root: &std::path::Path, name: &str, stopped: bool) -> Arc<TorrentState> {
+        let save = root.join("data").to_string_lossy().into_owned();
+        let bytes = torrent_bytes(name, "https://tracker.example/announce", 16384);
+        let ih = mgr.add_torrent_bytes(&bytes, &save, stopped, true).unwrap().0;
+        mgr.get(&ih).unwrap()
+    }
+
+    #[test]
+    fn a_skip_checking_add_with_its_file_present_seeds() {
+        let (mgr, root) = manager("seed-ok");
+        std::fs::write(root.join("data").join("book.epub"), vec![0u8; 16384]).unwrap();
+        let t = add_seed(&mgr, &root, "book.epub", false);
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Seeding as u8);
+        assert!(t.error_msg.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_skip_checking_add_with_its_file_missing_is_an_error_not_a_seed() {
+        let (mgr, root) = manager("seed-missing");
+        let t = add_seed(&mgr, &root, "book.epub", false);
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+        let msg = t.error_msg.lock().unwrap().clone();
+        assert!(msg.contains("missing file") && msg.contains("book.epub"), "{msg}");
+        assert!(t.serving_suspended.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_skip_checking_add_with_a_file_of_the_wrong_size_is_an_error() {
+        let (mgr, root) = manager("seed-size");
+        std::fs::write(root.join("data").join("book.epub"), vec![0u8; 100]).unwrap();
+        let t = add_seed(&mgr, &root, "book.epub", false);
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+        let msg = t.error_msg.lock().unwrap().clone();
+        assert!(msg.contains("wrong size") && msg.contains("100 bytes"), "{msg}");
+    }
+
+    #[test]
+    fn resuming_a_torrent_whose_data_is_missing_does_not_make_it_a_seed() {
+        let (mgr, root) = manager("seed-resume");
+        let t = add_seed(&mgr, &root, "book.epub", true);
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+        mgr.start_torrent(&t.info_hash).unwrap();
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+    }
 
     #[test]
     fn an_added_torrent_is_found_by_every_route() {

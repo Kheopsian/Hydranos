@@ -11887,6 +11887,9 @@ fn detail_payload(
         "swarm_leechers": i(&row, "swarm_leechers"),
         "swarm_seeds": i(&row, "swarm_seeds"),
         "torrent_error": row.get("torrent_error").cloned().unwrap_or(serde_json::Value::Bool(false)),
+        // The panel prints it under the error badge; without it every error
+        // read "unknown error", the path that would fix it included.
+        "torrent_error_msg": row.get("torrent_error_msg").cloned().unwrap_or_else(|| "".into()),
         "total_done": i(&raw, "total_done"),
         "total_download": total_download,
         "total_size": i(&row, "total_size"),

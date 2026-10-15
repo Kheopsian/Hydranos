@@ -1050,6 +1050,22 @@ mod announce_one_tests {
         out
     }
 
+    /// A folder holding the fixture's one file at its declared size: a
+    /// skip_checking add stats it, and parks the torrent in error without it.
+    /// One folder per call, so two tests using the same name never see each
+    /// other's file half-written.
+    fn seed_dir(name: &str) -> String {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "hydra-runner-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), vec![0u8; 16384]).unwrap();
+        dir.to_string_lossy().into_owned()
+    }
+
     struct FakeTracker {
         url: String,
         _stop: tokio::sync::oneshot::Sender<()>,
@@ -1084,7 +1100,7 @@ mod announce_one_tests {
     /// silently made six of these tests assert the wrong thing.
     fn add(mgr: &Arc<TorrentManager>, name: &str, announce: &str) -> String {
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(name, announce), "/tmp", false, true)
+            .add_torrent_bytes(&torrent_bytes(name, announce), &seed_dir(name), false, true)
             .expect("the fixture torrent parses");
         let t = mgr.get(&ih).expect("just added");
         {
@@ -1740,7 +1756,7 @@ mod announce_one_tests {
         let t = recording_tracker(OPEN_BODY).await;
         let (mgr, root) = manager("edited");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes("edit", "http://127.0.0.1:1/announce"), "/tmp", false, true)
+            .add_torrent_bytes(&torrent_bytes("edit", "http://127.0.0.1:1/announce"), &seed_dir("edit"), false, true)
             .expect("parses");
         let hash = typhon_engine::torrent::hex_encode(&ih);
         *state(&mgr, &hash).live_trackers.write() = vec![vec![t.url.clone()]];

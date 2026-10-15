@@ -304,6 +304,8 @@ async fn native_download_order_route() {
 
     // A seed: accepted, shown, nothing to act on.
     let u = single("native-seed");
+    // skip_checking stats the file it vouches for: it has to be there.
+    std::fs::write(std::path::Path::new(&data(&s)).join("native-seed"), vec![0u8; 16384]).unwrap();
     add(&s, &u, &[("savepath", &data(&s)), ("skip_checking", "true")]).await;
     let hu = hash_of(&u);
     let (code, body) = call(&s, "POST", &format!("/api/torrents/{hu}/download-order"), r#"{"first_last_piece":true}"#).await;
@@ -586,4 +588,27 @@ async fn an_import_that_added_torrents_is_recorded_and_served() {
     super::record_provenance(&s.state, "Transmission", &empty);
     let v = body_json(super::get_provenance(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert_eq!(v["source_client"], "qBittorrent");
+}
+
+// ---------------------------------------------------------------------------
+// skip_checking on a save path that does not hold the data (a private tracker, 2026-10-15)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_skip_checking_add_on_the_wrong_folder_shows_the_missing_path() {
+    let s = st("skip-wrong-folder", "");
+    let t = single("book");
+    std::fs::write(std::path::Path::new(&data(&s)).join("book"), vec![0u8; 16384]).unwrap();
+    // The data one folder up from where the add says it is.
+    let wrong = format!("{}/book-dir", data(&s));
+    let (code, body) = add(&s, &t, &[("savepath", &wrong), ("skip_checking", "true")]).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let h = hash_of(&t);
+    let (code, body) = call(&s, "GET", &format!("/api/race/torrents/{h}"), "").await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["state"], "error", "{body}");
+    assert_eq!(v["torrent_error"], true);
+    let msg = v["torrent_error_msg"].as_str().unwrap_or("");
+    assert!(msg.contains("missing file") && msg.contains("book-dir/book"), "{msg}");
 }

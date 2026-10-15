@@ -35,6 +35,25 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   of the torrent's files, the field a workflow condition reads); the column
   shows it minus one.
 
+### Fixed
+
+- **An add with `skip_checking` on files that are not there is an error, not a
+  seed.** The flag vouches for the bytes, and Hydranos also took it to vouch
+  for the path: a save path one folder too deep, or a file of the wrong size,
+  came up "seeding 100 %", with no error, and was announced to the tracker as
+  a seed that could serve nothing. Each file is now looked up at the add (one
+  `stat`, the data is still not read): missing or of another size, the torrent
+  goes to the error state, names the file and the size found, and says nothing
+  to any tracker. Resuming it does not make it a seed again; moving it to the
+  right folder and rechecking does. Only the add is checked, not a restart.
+- **Resuming a torrent whose data has gone no longer announces it as a seed.**
+  The same holds for a torrent parked in error because a read found its files
+  missing: a resume used to put it back to seeding while it still refused
+  every piece, so trackers were told of a seed that served nothing. It now
+  stays in error until a recheck finds the data.
+- **The torrent panel shows why a torrent is in error.** The detail route
+  never sent the message, so the panel read "unknown error" for every one.
+
 ## v4.4.2 -- a slow disk cannot fill the RAM, a fresh install downloads at once, and the last blockers before a wider announcement
 
 ### Security

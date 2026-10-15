@@ -665,8 +665,13 @@ mod tests {
             ),
         );
         let mut hashes = Vec::new();
+        // skip_checking stats the files it vouches for: they have to be there.
+        let data = s.dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let save = data.to_string_lossy().into_owned();
         for (engine, name) in [("race", "alpha"), ("hoard", "bravo"), ("vpn7", "charlie")] {
-            let (h, _) = crate::api::add_torrent_bytes(&s.state, &torrent_bytes(name), "", "/tmp", "", false, true, engine)
+            std::fs::write(data.join(name), vec![0u8; 16384]).unwrap();
+            let (h, _) = crate::api::add_torrent_bytes(&s.state, &torrent_bytes(name), "", &save, "", false, true, engine)
                 .unwrap_or_else(|e| panic!("add to {engine}: {e}"));
             hashes.push(h);
         }
