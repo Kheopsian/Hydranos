@@ -51,7 +51,12 @@ pub async fn http_scrape_on(
         url.push_str(&super::http::url_encode_binary(h));
     }
     let mut builder = super::http::pin_builder(
-        reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).user_agent(user_agent),
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            // Same as announce: the scrape URL carries the passkey, so a forged
+            // redirect must not replay it to another host.
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(user_agent),
         device,
     )?;
     if let Some(px) = super::http::proxy_for(proxy)? {

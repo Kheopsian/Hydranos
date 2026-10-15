@@ -491,6 +491,11 @@ fn family_client(v6: bool, device: &str, proxy: &str) -> Result<reqwest::Client,
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .http1_only()
+        // Never follow a redirect: the announce URL carries the passkey, and a
+        // tracker (or a MITM on an http hop) that answers 30x with a forged
+        // Location would otherwise have reqwest replay the whole URL -- passkey
+        // included -- to an attacker-chosen host.
+        .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(64);
     match proxy_for(proxy)? {
         // Through a proxy, no family bind: the socket we open goes to the

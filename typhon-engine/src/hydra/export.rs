@@ -257,8 +257,17 @@ fn string_body(s: &[u8]) -> &[u8] {
     }
 }
 
+/// Greatest bencode nesting `skip` will recurse into. A stored .torrent that
+/// nests past this (whether forged before the parser was hardened, or reached
+/// by a path that did not validate it) must error, not overflow the stack.
+const MAX_SKIP_DEPTH: usize = 100;
+
 /// The offset just past the bencoded value that starts at `pos`.
 fn skip(data: &[u8], pos: usize) -> Result<usize, String> {
+    skip_depth(data, pos, 0)
+}
+
+fn skip_depth(data: &[u8], pos: usize, depth: usize) -> Result<usize, String> {
     match data.get(pos) {
         None => Err("unexpected end of data".into()),
         Some(b'i') => {
@@ -266,12 +275,15 @@ fn skip(data: &[u8], pos: usize) -> Result<usize, String> {
             Ok(pos + 1 + end + 1)
         }
         Some(b'l') | Some(b'd') => {
+            if depth >= MAX_SKIP_DEPTH {
+                return Err("bencode nested too deep".into());
+            }
             let mut p = pos + 1;
             loop {
                 match data.get(p) {
                     None => return Err("unterminated container".into()),
                     Some(b'e') => return Ok(p + 1),
-                    Some(_) => p = skip(data, p)?,
+                    Some(_) => p = skip_depth(data, p, depth + 1)?,
                 }
             }
         }

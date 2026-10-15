@@ -35,7 +35,19 @@ pub fn page(front_only: bool) -> Response {
     let html = render(INDEX_HTML, front_only);
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))],
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8")),
+            // Clickjacking: the interface is never meant to be framed.
+            (header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")),
+            // Defense in depth. Only directives that cannot break a same-origin
+            // single-page app are set: no plugins, no <base> hijack, no framing.
+            // A stricter script-src (dropping 'unsafe-inline') would disable the
+            // inline handlers the page is built on and needs separate UI review.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("frame-ancestors 'none'; object-src 'none'; base-uri 'self'"),
+            ),
+        ],
         html,
     )
         .into_response()

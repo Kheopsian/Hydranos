@@ -133,7 +133,18 @@ fn serve_metadata_block(torrent: &Arc<TorrentState>, piece: u32) -> Vec<u8> {
 /// Checked when the request arrives AND again when a deferred one finally goes
 /// out: a torrent paused, or a peer choked, while a request waited behind the
 /// upload cap must not be served it afterwards.
-fn may_serve(torrent: &TorrentState, stats: &PeerStats, index: u32, length: u32) -> bool {
+fn may_serve(torrent: &TorrentState, stats: &PeerStats, index: u32, begin: u32, length: u32) -> bool {
+    // A peer must not name a piece past the end, nor a block past the end of its
+    // piece: a seeding torrent "has" every index, so without this an out-of-range
+    // Request reaches the disk layer, where begin/length drive the read size and
+    // a forged offset underflows into a multi-gigabyte allocation.
+    let piece_size = torrent.meta.piece_size(index);
+    if index >= torrent.meta.num_pieces()
+        || length == 0
+        || length as u64 + begin as u64 > piece_size as u64
+    {
+        return false;
+    }
     // Serve a piece we actually have, even while still downloading
     // (tit-for-tat). Seeding => we have all; downloading => check the
     // picker (verified pieces only). Without this, leechers on a hot
@@ -404,7 +415,7 @@ pub async fn run(
             ul_wait = None;
             let mut broken = false;
             while let Some(&(index, begin, length)) = ul_queue.front() {
-                if !may_serve(&torrent, &stats, index, length) {
+                if !may_serve(&torrent, &stats, index, begin, length) {
                     ul_queue.pop_front();
                     if fast_ext && framed.send(Message::Reject { index, begin, length }).await.is_err() {
                         broken = true;
@@ -638,7 +649,7 @@ pub async fn run(
                                 }
                             }
                             Message::Request { index, begin, length } => {
-                                if !may_serve(&torrent, &stats, index, length) {
+                                if !may_serve(&torrent, &stats, index, begin, length) {
                                     if fast_ext {
                                         framed
                                             .send(Message::Reject { index, begin, length })

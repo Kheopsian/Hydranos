@@ -21,6 +21,46 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- the CVE sweep: a forged .torrent, peer or DHT packet is held off
+
+### Security
+
+Found by cross-reading the published CVEs of other BitTorrent clients
+(Transmission, qBittorrent, Deluge, rTorrent, Vuze, aria2, BitComet, KTorrent,
+libtorrent) against this code, then reproduced on an isolated bench before the
+fix and confirmed gone after it.
+
+- **The web UI no longer runs script from a tracker, category, tag or folder
+  name.** A tracker host taken from a `.torrent` was spliced raw into a chip's
+  inline `onclick`, and a folder name into the path picker: a crafted name
+  executed in the page -- with no click -- and could read the API key from
+  local storage. The hostile values now go through the escaped `data-*`
+  attribute the handler reads back, never into inline JS. A `Content-Security-Policy`
+  and `X-Frame-Options: DENY` are set as well (frame-ancestors, object-src,
+  base-uri; a stricter script-src is left for a reviewed UI change).
+- **A `.torrent` can no longer borrow another torrent's identity.** The
+  info-hash was taken from the first `4:info` found anywhere in the file, so a
+  string field (`comment`) holding `4:infod...e` set the hash while the real
+  files came from the true `info` dict -- confusing dedup, cross-seed and the
+  path-overlap guard. The hash is now read from the real top-level `info` key.
+- **A forged string length in a `.torrent` can no longer spin a core forever.**
+  The raw info-dict scanner advanced by `1 + len` without a checked add, so a
+  near-`2^64` length wrapped the cursor backwards into an infinite loop. It is
+  now a checked add with a depth cap.
+- **A DHT node can no longer crash the client with one nested packet.** The
+  KRPC decoder recursed without a depth limit; a 16 KiB datagram of nested
+  lists would overflow the stack. A structural pre-scan now rejects anything
+  nested past 100 before it is decoded.
+- **A peer can no longer force a huge allocation with an out-of-range Request.**
+  A seeding torrent answered a Request for any piece index; an index past the
+  end underflowed the read-size arithmetic into a multi-gigabyte buffer. The
+  index and block range are now bounded, with a checked subtraction behind them.
+- **A forged redirect can no longer carry a passkey to another host.** The
+  announce and scrape clients followed redirects, replaying the passkey-bearing
+  URL to an attacker-chosen `Location`; they no longer follow redirects.
+- **A `.torrent` named `.` is refused**, closing a path-overlap ambiguity, and
+  the CSV export's bencode walker is depth-capped like the others.
+
 ## v4.4.3 -- a peer can no longer crash the client, and two hardlink columns
 
 ### Security
