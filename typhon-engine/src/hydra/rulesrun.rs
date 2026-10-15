@@ -533,7 +533,11 @@ pub fn link_summary(
         let (Some(f), Some(raw)) = (links.get(hash), crate::store::hex20(hash)) else {
             continue;
         };
-        out.insert(raw, linkindex::Cached { external_links: f.external_links, measured_at: at });
+        out.insert(raw, linkindex::Cached {
+            external_links: f.external_links,
+            link_count: f.link_count,
+            measured_at: at,
+        });
     }
     out
 }

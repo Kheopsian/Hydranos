@@ -2037,6 +2037,15 @@ mod one_number_tests {
         assert_eq!(col[&never]["external_links"], serde_json::Value::Null, "never measured is not 0");
         assert_eq!(col[&ours]["links_checked_at"], serde_json::json!(measured_at));
         assert_eq!(col[&never]["links_checked_at"], serde_json::Value::Null);
+        // The "Hardlinks" column counts every name, ours included: the very
+        // case where the two columns part -- a cross-seed is shared, not kept.
+        assert_eq!(col[&ours]["link_count"], serde_json::json!(2), "our cross-seed is a second name");
+        assert_eq!(col[&cross]["link_count"], serde_json::json!(2));
+        assert_eq!(col[&lib]["link_count"], serde_json::json!(2));
+        assert_eq!(col[&never]["link_count"], serde_json::Value::Null, "never measured is not 1");
+        let by_links = crate::api::engine_page_value(&s.state, "hoard", "sort=link_count&order=asc").await;
+        let last = by_links["rows"].as_array().unwrap().last().unwrap()["info_hash"].as_str().unwrap().to_string();
+        assert_eq!(last, never, "unmeasured sorts last on this column too");
 
         let w = parse(&serde_json::json!({
             "id": "", "name": "noHL", "enabled": true, "interval_secs": 3600, "cap": 10,

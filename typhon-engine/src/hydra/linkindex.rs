@@ -190,6 +190,9 @@ pub struct Cached {
     /// `LinkFacts::external_links`, the very number a workflow condition on
     /// `external_links` reads.
     pub external_links: u64,
+    /// `LinkFacts::link_count`: the highest `nlink` across the files, our own
+    /// names included. Shown, never acted on -- see the field it copies.
+    pub link_count: u64,
     /// When the files behind it were measured (unix seconds).
     pub measured_at: i64,
 }

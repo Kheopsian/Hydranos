@@ -2774,7 +2774,7 @@ const _hoardCollator = new Intl.Collator();
 // Columns where null means "never measured": those rows sort last in both
 // directions, as the server orders them (`unmeasured_key`). Reading null as 0
 // would re-sort the page the server sent and put them among the zeros.
-const _HOARD_NULL_LAST = new Set(["external_links", "links_checked_at"]);
+const _HOARD_NULL_LAST = new Set(["external_links", "link_count", "links_checked_at"]);
 function _hoardCmp(col, asc) {
     const nullLast = _HOARD_NULL_LAST.has(col);
     return (a, b) => {
@@ -9274,10 +9274,13 @@ const TABLE_COLS = {
         { id: "tracker_host", label: "Tracker", sort: "tracker_host", render: t => `<td>${esc(incoTracker(t.tracker_host) || "-")}</td>` },
         { id: "category", label: "Category", sort: "category", render: t => `<td>${esc(incoCat(t.category))}</td>` },
         { id: "save_path", label: "Save Path", sort: null, hidden: true, render: t => `<td class="col-path" title="${esc(t.save_path || "")}">${esc(t.save_path || "-")}</td>` },
+        // Every other name of these files, our own cross-seeds included: the raw
+        // `link_count` (nlink) minus the file itself. Says "shared", not "safe".
+        { id: "link_count", label: "Hardlinks", sort: "link_count", hidden: true, render: _allLinksCell },
         // The link index's answer, as the workflows read it (`external_links`):
         // names of these files held outside the client. null = never measured,
         // which is not 0 -- 0 means only the client holds the data.
-        { id: "external_links", label: "Hardlinks", sort: "external_links", hidden: true, render: _hardlinksCell },
+        { id: "external_links", label: "External hardlinks", sort: "external_links", hidden: true, render: _hardlinksCell },
         { id: "links_checked_at", label: "Checked", sort: "links_checked_at", hidden: true, render: _linksCheckedCell },
         { id: "tags", label: "Tags", sort: null, render: t => `<td>${(t.tags && t.tags.length) ? esc(t.tags.join(", ")) : "-"}</td>` },
         { id: "added_time", label: "Added", sort: "added_time", render: t => `<td>${formatDate(t.added_time)}</td>` },
@@ -9322,6 +9325,14 @@ function _hardlinksCell(r) {
     if (typeof n !== "number") return `<td title="${esc(t("Not measured yet"))}">-</td>`;
     if (n === 0) return `<td class="hl-zero" title="${esc(t("Only Hydranos holds these files"))}">0</td>`;
     return `<td title="${esc(t("Names of these files outside Hydranos"))}">${n}</td>`;
+}
+
+// "Hardlinks" cell: the other names of the most-linked file, ours included.
+// The raw nlink would read 1 for a file with no hardlink at all.
+function _allLinksCell(r) {
+    const n = r.link_count;
+    if (typeof n !== "number") return `<td title="${esc(t("Not measured yet"))}">-</td>`;
+    return `<td title="${esc(t("Other names of these files, Hydranos cross-seeds included"))}">${Math.max(0, n - 1)}</td>`;
 }
 
 // "Checked" cell: how old the hardlink measurement is, the date in the tooltip.
