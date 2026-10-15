@@ -750,6 +750,23 @@ pub static HAVE_RX_DISARMED: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 /// Previously swallowed by `.ok()`, so an overflowing ring was invisible.
 pub static HAVE_RX_LAGGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Inbound handshakes refused because the torrent asked for is stopped.
+pub static INBOUND_REFUSED_PAUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether an inbound peer may open a session on this torrent.
+///
+/// A stopped torrent -- by the operator, the queue, or held by a path claim
+/// until its files are proven -- takes no session at all. The session itself
+/// neither requests nor serves while the flag is set (`download.rs`,
+/// `session.rs`), but accepting it kept a connection open on a torrent the
+/// user stopped, and any moment the flag was lifted it became a live transfer
+/// with a peer the user never let in. Refused at the handshake, the peer
+/// learns nothing: same answer as for a torrent we do not have.
+pub fn accepts_inbound(t: &crate::torrent::meta::TorrentState) -> bool {
+    use std::sync::atomic::Ordering;
+    !t.is_paused.load(Ordering::Relaxed) && !t.is_removed.load(Ordering::Relaxed)
+}
+
 async fn handle_incoming(
     mut stream: PeerTransport,
     addr: SocketAddr,
@@ -813,7 +830,11 @@ async fn handle_incoming(
         let ext_proto = (rest[24] & 0x10) != 0; // reserved[5] in the full 68-byte HS = rest[24]
 
         let torrent = match torrent_mgr.get(&info_hash) {
-            Some(t) => t,
+            Some(t) if accepts_inbound(&t) => t,
+            Some(_) => {
+                INBOUND_REFUSED_PAUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
             None => return,
         };
 
@@ -874,7 +895,11 @@ async fn handle_incoming(
         match mse_res {
             Ok((enc, dec, hs)) => {
                 let torrent = match torrent_mgr.get(&hs.info_hash) {
-                    Some(t) => t,
+                    Some(t) if accepts_inbound(&t) => t,
+                    Some(_) => {
+                        INBOUND_REFUSED_PAUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
                     None => return,
                 };
                 (CryptoStream::new(stream, Some(enc), Some(dec)), torrent, hs.fast_extension, hs.extended_protocol, hs.peer_id, true)
@@ -1060,5 +1085,88 @@ mod proxy_v2_accept_tests {
         assert!(err.contains("untrusted"), "{err}");
         let listed: std::net::IpAddr = "203.0.113.20".parse().unwrap();
         assert!(accept_as("203.0.113.66:40000", &[listed], header(real)).await.is_err(), "another listed IP is not this one");
+    }
+}
+
+#[cfg(test)]
+mod paused_inbound_tests {
+    use super::handle_incoming;
+    use crate::torrent::TorrentManager;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn manager(tag: &str) -> (Arc<TorrentManager>, Arc<crate::disk::DiskManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("typhon-inb-{tag}-{}", std::process::id()));
+        let (data, resume) = (root.join("data"), root.join("resume"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let disk = Arc::new(crate::disk::DiskManager::new(16));
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        (mgr, disk, root)
+    }
+
+    /// A private one-piece torrent; the bencode lengths are computed.
+    fn torrent_bytes() -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(b"d6:lengthi16384e4:name5:inbnd12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[0x5Au8; 20]);
+        info.extend_from_slice(b"7:privatei1ee");
+        let announce = "https://tracker.example/announce";
+        let mut out = format!("d8:announce{}:{announce}4:info", announce.len()).into_bytes();
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// One plaintext handshake from a real TCP peer; what came back, if anything,
+    /// before the server side closed or 5 s passed.
+    async fn knock(mgr: Arc<TorrentManager>, disk: Arc<crate::disk::DiskManager>, ih: [u8; 20]) -> Vec<u8> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (s, addr) = listener.accept().await.unwrap();
+            handle_incoming(super::PeerTransport::Tcp(s), addr, mgr, disk, [7u8; 20], None, at.port()).await;
+        });
+        let mut c = tokio::net::TcpStream::connect(at).await.unwrap();
+        let mut hs = vec![19u8];
+        hs.extend_from_slice(b"BitTorrent protocol");
+        hs.extend_from_slice(&[0u8; 8]);
+        hs.extend_from_slice(&ih);
+        hs.extend_from_slice(&[9u8; 20]);
+        c.write_all(&hs).await.unwrap();
+        let mut got = vec![0u8; 68];
+        let n = match tokio::time::timeout(std::time::Duration::from_secs(5), c.read(&mut got)).await {
+            Ok(Ok(n)) => n,
+            _ => 0,
+        };
+        drop(c);
+        server.abort();
+        got.truncate(n);
+        got
+    }
+
+    /// ⭐ A stopped torrent takes no inbound session: the handshake is closed
+    /// unanswered, as for a torrent we do not have. Started, the same torrent
+    /// answers -- so the refusal is the pause, not the fixture.
+    #[tokio::test]
+    async fn a_stopped_torrent_refuses_an_inbound_handshake() {
+        let (mgr, disk, root) = manager("stopped");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), true, false)
+            .unwrap();
+
+        let refused = knock(mgr.clone(), disk.clone(), ih).await;
+        assert!(refused.is_empty(), "a stopped torrent answered a handshake: {} bytes", refused.len());
+
+        mgr.start_torrent(&ih).unwrap();
+        let answered = knock(mgr.clone(), disk.clone(), ih).await;
+        assert!(answered.len() >= 48 && answered[0] == 19, "a started torrent must answer");
+        assert_eq!(&answered[28..48], &ih, "with its own info hash");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

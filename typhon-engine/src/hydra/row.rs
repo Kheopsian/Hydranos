@@ -57,9 +57,15 @@ fn num(value: f64) -> Value {
 /// The state the API reports, from the engine's raw state and the user's intent.
 ///
 /// The engine says "paused" for anything halted, and cannot tell a scheduler
-/// hold from a user pressing stop. The intent flag is authoritative because the
-/// engine may still be reporting the state it had a tick before the stop
-/// landed.
+/// hold from a user pressing stop: the intent decides between "stopped" and
+/// "queued". It does NOT override an engine that is moving bytes. The stop
+/// sets the engine's pause flag synchronously and `state_str` reads that flag
+/// first, so an engine still reporting downloading, seeding or checking for a
+/// torrent the user stopped is not a tick late -- it is running. Folding that
+/// into "stopped" (until 2026-10-15) hid a stopped torrent downloading 449 MB
+/// from a private tracker behind a row that said "stopped". The engine's word
+/// is shown, and `workers::enforce_queue` stops it and logs the mismatch.
+/// An errored torrent the user stopped still reads "stopped", as before.
 /// `derive_state` without the allocation.
 ///
 /// Every value it can return is one of a fixed set, so the list pass -- which
@@ -70,7 +76,7 @@ pub fn derive_state_static(raw: &'static str, user_stopped: bool) -> &'static st
         "paused" | STATE_STOPPED | STATE_QUEUED | "" => {
             if user_stopped { STATE_STOPPED } else { STATE_QUEUED }
         }
-        _ if user_stopped => STATE_STOPPED,
+        "error" if user_stopped => STATE_STOPPED,
         other => other,
     }
 }
@@ -80,7 +86,7 @@ pub fn derive_state(raw: &str, user_stopped: bool) -> String {
         "paused" | STATE_STOPPED | STATE_QUEUED | "" => {
             if user_stopped { STATE_STOPPED } else { STATE_QUEUED }.to_string()
         }
-        _ if user_stopped => STATE_STOPPED.to_string(),
+        "error" if user_stopped => STATE_STOPPED.to_string(),
         other => other.to_string(),
     }
 }
@@ -268,8 +274,14 @@ mod tests {
         assert_eq!(derive_state("paused", false), "queued");
         assert_eq!(derive_state("paused", true), "stopped");
         assert_eq!(derive_state("", false), "queued");
-        // Intent wins even when the engine still claims to be seeding.
-        assert_eq!(derive_state("seeding", true), "stopped");
+        // An engine moving bytes is shown as it is, whatever the intent: the
+        // stop sets its pause flag at once, so this is a torrent that runs.
+        assert_eq!(derive_state("seeding", true), "seeding");
+        assert_eq!(derive_state("downloading", true), "downloading");
+        assert_eq!(derive_state_static("downloading", true), "downloading");
+        // A stopped torrent in error still reads stopped.
+        assert_eq!(derive_state("error", true), "stopped");
+        assert_eq!(derive_state("error", false), "error");
         assert_eq!(derive_state("seeding", false), "seeding");
     }
 
