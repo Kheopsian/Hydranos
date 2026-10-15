@@ -53,6 +53,24 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   stays in error until a recheck finds the data.
 - **The torrent panel shows why a torrent is in error.** The detail route
   never sent the message, so the panel read "unknown error" for every one.
+- **A stopped torrent shows what the engine is really doing.** A torrent the
+  user stopped was listed "stopped" even while the engine downloaded or seeded
+  it, so the one sign that the stop had not held was hidden. The list, the
+  qBittorrent API and workflow conditions now report the engine's own state
+  when it is moving bytes; a halted torrent still reads "stopped" or
+  "queued" as before.
+- **A torrent the user stopped is stopped again if the engine runs it.** On a
+  large batch of torrents added stopped, a few hundred downloaded anyway; the
+  cause is still being looked for. The queue pass now puts the user's stop
+  back within 30 s and logs `stopped by the user but running in the engine`.
+  It runs wherever a download or seed limit is set, which the default
+  configuration does.
+- **A stopped torrent takes no peer connection.** An incoming handshake for a
+  stopped torrent is closed unanswered, as for a torrent Hydranos does not
+  have, and stopping a torrent ends the sessions it had, as qBittorrent does.
+  Before, a stopped torrent kept its peers and accepted new ones; it neither
+  sent nor asked for data, but the instant its stop was lifted the transfer
+  resumed with all of them.
 
 ## v4.4.2 -- a slow disk cannot fill the RAM, a fresh install downloads at once, and the last blockers before a wider announcement
 

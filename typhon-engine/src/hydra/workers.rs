@@ -271,6 +271,15 @@ fn enforce_queue(
         }
         let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
         if user_paused.contains(&hash) {
+            // Stopped by the user, running in the engine: the stop did not
+            // hold. Measured 2026-10-14, 305 torrents added stopped downloaded
+            // ~416 GB from a private tracker -- the cause is not found yet, and
+            // whatever it is, the intent is what the user asked for. Enforce
+            // it, and say so: this line is the bug's only trace.
+            if !t.is_paused.load(Ordering::Relaxed) {
+                tracing::warn!(hash = %hash, status, "stopped by the user but running in the engine; stopping it");
+                let _ = manager.stop_torrent(&t.info_hash);
+            }
             continue;
         }
         // Forced (Force download, qBittorrent's setForceStart): it runs past
@@ -2070,6 +2079,23 @@ mod queue_tests {
         assert!(limits("").is_empty());
         assert!(limits("queueing = true\nactive_seeds = -1\nactive_limit = -1").is_empty());
         assert_eq!(limits("active_downloads = 10").downloads, Some(10), "active_downloads works as before");
+    }
+
+    #[test]
+    fn a_torrent_the_user_stopped_is_stopped_again_if_the_engine_runs_it() {
+        // The store says stopped, the engine runs it: whatever lifted the
+        // pause, the queue pass puts the user's stop back.
+        let (mgr, root) = manager("intent");
+        let all = seeds(&mgr);
+        let t = &all[0];
+        mgr.start_torrent(&t.info_hash).unwrap();
+        assert!(!t.is_paused.load(Ordering::Relaxed), "fixture: running");
+        let stopped_by_user: HashSet<String> = [typhon_engine::torrent::hex_encode(&t.info_hash)].into();
+        let mut parked = HashSet::new();
+        enforce_queue(&mgr, &Cache::default(), &limits("queueing = true\nactive_seeds = 5"), &stopped_by_user, &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        assert!(t.is_paused.load(Ordering::Relaxed), "the user's stop holds");
+        assert!(parked.is_empty(), "a user stop is not the queue's to undo");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
