@@ -21,7 +21,13 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- the last blockers before a wider announcement
+## v4.4.2 -- a slow disk cannot fill the RAM, a fresh install downloads at once, and the last blockers before a wider announcement
+
+### Security
+- **The password in `announce_proxy` no longer goes out in clear.**
+  `GET /api/settings` and `GET /api/network/mode` answer
+  `scheme://user:********@host:port`, as they already did for the SOCKS5
+  passwords; a save that posts the mask back keeps the real password.
 
 ### Fixed
 - **A fresh install downloads from its first start.** The engines looked for
@@ -38,10 +44,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   being downloaded and the pieces waiting to be written; over it, no new piece
   is started until writes catch up. New metrics `hydra_piece_write_bytes` and
   `hydra_piece_budget_bytes`.
-- **The password in `announce_proxy` no longer goes out in clear.**
-  `GET /api/settings` and `GET /api/network/mode` answer
-  `scheme://user:********@host:port`, as they already did for the SOCKS5
-  passwords; a save that posts the mask back keeps the real password.
 - **Force download starts a torrent the user stopped**, as qBittorrent's
   force start does. It only marked it forced, and a stopped torrent stayed
   stopped. The start goes through the same path guard as Start.
