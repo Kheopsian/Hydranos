@@ -25,7 +25,7 @@ fn check_contained(rel: &std::path::Path) -> Result<(), String> {
     }
     for c in rel.components() {
         match c {
-            Component::Normal(_) | Component::CurDir => {}
+            Component::Normal(_) => {}
             _ => {
                 return Err(format!(
                     "unsafe path in torrent: {:?} would be written outside the download folder",
@@ -526,28 +526,49 @@ pub fn info_dict_from_file(path: &str) -> Result<Vec<u8>, String> {
     find_info_raw(&data)
 }
 
+/// The raw bytes of the top-level `info` value, for the info_hash.
+///
+/// Walks the OUTER dict key by key and returns the value under the real `info`
+/// key. It must never scan for the bytes `4:info` across the whole file: a
+/// `comment` (or any string that sorts before `info`) can embed `4:infod...e`
+/// and steal the identity of another torrent, or embed a length that loops the
+/// scanner. Reading each value by its declared length skips such strings whole.
 fn find_info_raw(data: &[u8]) -> Result<Vec<u8>, String> {
-    // Find "4:infod" pattern and extract until matching end
-    let needle = b"4:info";
-    let pos = find_bytes(data, needle).ok_or("cannot find info dict")?;
-    let info_start = pos + needle.len();
-    if info_start >= data.len() || data[info_start] != b'd' {
-        return Err("info value is not a dict".into());
+    if data.first() != Some(&b'd') {
+        return Err("torrent is not a dict".into());
     }
-    let end = find_dict_end(data, info_start)?;
-    Ok(data[info_start..end].to_vec())
+    let mut i = 1;
+    while i < data.len() && data[i] != b'e' {
+        let (key, after) = raw_string(data, i)?;
+        let end = skip_value(data, after)?;
+        if key == b"info" {
+            if data.get(after) != Some(&b'd') {
+                return Err("info value is not a dict".into());
+            }
+            return Ok(data[after..end].to_vec());
+        }
+        i = end;
+    }
+    Err("cannot find info dict".into())
 }
 
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
+/// Depth beyond which a bencode structure is refused rather than recursed into
+/// or walked. Matches the peer decoder's cap; a legitimate .torrent never nests
+/// anywhere near this.
+const MAX_BENCODE_DEPTH: i32 = 100;
 
 fn find_dict_end(data: &[u8], start: usize) -> Result<usize, String> {
     let mut depth = 0i32;
     let mut i = start;
     while i < data.len() {
         match data[i] {
-            b'd' | b'l' => { depth += 1; i += 1; }
+            b'd' | b'l' => {
+                depth += 1;
+                if depth > MAX_BENCODE_DEPTH {
+                    return Err("bencode nested too deep".into());
+                }
+                i += 1;
+            }
             b'i' => {
                 i += 1;
                 while i < data.len() && data[i] != b'e' { i += 1; }
@@ -564,7 +585,11 @@ fn find_dict_end(data: &[u8], start: usize) -> Result<usize, String> {
                 let len_str = std::str::from_utf8(&data[num_start..i])
                     .map_err(|_| "invalid string length")?;
                 let len: usize = len_str.parse().map_err(|_| "invalid string length")?;
-                i += 1 + len; // skip ':' + string data
+                // checked: a forged huge length must not wrap `i` backwards and
+                // spin the scanner forever (release has no overflow-checks).
+                i = i.checked_add(1)
+                    .and_then(|x| x.checked_add(len))
+                    .ok_or("string length overflow")?;
             }
             _ => return Err(format!("unexpected byte {} at {}", data[i], i)),
         }

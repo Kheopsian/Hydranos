@@ -182,7 +182,11 @@ impl DiskManager {
         DISK_CACHE_MISS.fetch_add(1, Ordering::Relaxed);
 
         let block_end = (block_start + CACHE_BLOCK_SIZE).min(torrent.meta.total_size);
-        let block_len = (block_end - block_start) as u32;
+        // A block past the end must not wrap the subtraction into a huge read.
+        let block_len = match block_end.checked_sub(block_start) {
+            Some(n) => n as u32,
+            None => return Err(format!("block start {} past end {}", block_start, block_end)),
+        };
         let block_piece = (block_start / piece_size) as u32;
         let block_offset_in_piece = (block_start % piece_size) as u32;
 

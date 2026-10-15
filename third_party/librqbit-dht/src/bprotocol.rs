@@ -476,10 +476,68 @@ pub fn serialize_message<'a, W: Write, BufT: Serialize + From<&'a [u8]>>(
     }
 }
 
+/// Greatest bencode nesting a KRPC datagram may carry. The serde decoder
+/// recurses once per level with no limit of its own, so a single ~16 KiB packet
+/// of nested lists (even in a field the message ignores) would otherwise
+/// overflow the worker stack and abort the whole process.
+const MAX_KRPC_DEPTH: usize = 100;
+
+/// Structural pre-scan: reject a datagram that nests past `MAX_KRPC_DEPTH`
+/// before any recursive deserialize touches it. Skips string payloads by their
+/// declared length so their bytes are never mistaken for structure.
+fn krpc_depth_within_limit(buf: &[u8]) -> bool {
+    let mut depth: usize = 0;
+    let mut i = 0usize;
+    while i < buf.len() {
+        match buf[i] {
+            b'd' | b'l' => {
+                depth += 1;
+                if depth > MAX_KRPC_DEPTH {
+                    return false;
+                }
+                i += 1;
+            }
+            b'e' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b'i' => {
+                i += 1;
+                while i < buf.len() && buf[i] != b'e' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'0'..=b'9' => {
+                let start = i;
+                while i < buf.len() && buf[i] != b':' {
+                    i += 1;
+                }
+                let len: usize = match std::str::from_utf8(&buf[start..i])
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                {
+                    Some(n) => n,
+                    None => return true, // malformed length: let the real decoder reject it
+                };
+                i = match i.checked_add(1).and_then(|x| x.checked_add(len)) {
+                    Some(n) => n,
+                    None => return true,
+                };
+            }
+            _ => return true, // not our concern: the real decoder will error
+        }
+    }
+    true
+}
+
 pub fn deserialize_message<'de, BufT>(buf: &'de [u8]) -> anyhow::Result<Message<BufT>>
 where
     BufT: Deserialize<'de> + AsRef<[u8]>,
 {
+    if !krpc_depth_within_limit(buf) {
+        anyhow::bail!("krpc message nested too deep");
+    }
     let de: RawMessage<ByteBuf> = bencode::from_bytes(buf)?;
     match de.message_type {
         MessageType::Request => match (&de.arguments, &de.method_name, &de.response, &de.error) {
