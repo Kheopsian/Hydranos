@@ -21,7 +21,18 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- two hardlink columns
+## v4.4.3 -- a peer can no longer crash the client, and two hardlink columns
+
+### Security
+
+- **A peer or a tracker can no longer crash the whole client with one
+  malformed message.** The bencode decoders read a peer's extension handshake,
+  a tracker's announce or scrape reply, and `.torrent` files, and they recursed
+  without a depth limit: a message that is nothing but opening tokens
+  (`llll...`) overflowed the stack and aborted the entire process -- every
+  torrent at once -- not just the one connection. It needed no authentication
+  and worked on private torrents too. Nesting is now capped, and string lengths
+  can no longer overflow into an out-of-bounds read.
 
 ### Changed
 
