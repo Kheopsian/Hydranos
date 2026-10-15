@@ -148,12 +148,21 @@ impl<'a> Parser<'a> {
         Ok(v)
     }
     fn skip(&mut self) -> Result<(), String> {
+        self.skip_depth(0)
+    }
+    // A hostile tracker can answer a scrape with nothing but opening tokens
+    // (`llll...`); skipping it recursively would overflow the stack and abort
+    // the whole process. Honest scrape replies nest only a couple deep.
+    fn skip_depth(&mut self, depth: usize) -> Result<(), String> {
+        if depth >= 100 {
+            return Err("scrape: nested too deep".into());
+        }
         match self.peek()? {
             b'i' => self.int().map(|_| ()),
             b'l' | b'd' => {
                 self.i += 1;
                 while self.peek()? != b'e' {
-                    self.skip()?;
+                    self.skip_depth(depth + 1)?;
                 }
                 self.i += 1;
                 Ok(())
@@ -166,6 +175,14 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deeply_nested_scrape_is_rejected_not_overflow() {
+        // A hostile tracker can answer a scrape with nothing but `l`; skipping
+        // it must error out before overflowing the stack and aborting.
+        let bomb = vec![b'l'; 200_000];
+        assert!(parse_http_scrape(&bomb).is_err());
+    }
 
     #[test]
     fn the_scrape_url_is_bep_48s() {

@@ -617,19 +617,29 @@ impl<'a> BencodeDict<'a> {
     }
 }
 
+/// Max bencode nesting depth. A hostile tracker response or a forged `.torrent`
+/// can be nothing but opening tokens (`llll...`); decoding it recursively would
+/// overflow the stack and abort the whole process. Real metainfo and tracker
+/// replies nest only a handful deep, so this ceiling is never reached by honest
+/// data.
+const MAX_DEPTH: usize = 100;
+
 pub fn bencode_decode(data: &[u8]) -> Result<BencodeValue, String> {
-    let (val, _) = decode_value(data, 0)?;
+    let (val, _) = decode_value(data, 0, 0)?;
     Ok(val)
 }
 
-fn decode_value(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), String> {
+fn decode_value(data: &[u8], pos: usize, depth: usize) -> Result<(BencodeValue, usize), String> {
+    if depth >= MAX_DEPTH {
+        return Err("bencode nested too deep".into());
+    }
     if pos >= data.len() {
         return Err("unexpected end of data".into());
     }
     match data[pos] {
         b'i' => decode_int(data, pos),
-        b'l' => decode_list(data, pos),
-        b'd' => decode_dict(data, pos),
+        b'l' => decode_list(data, pos, depth),
+        b'd' => decode_dict(data, pos, depth),
         b'0'..=b'9' => decode_string(data, pos),
         b => Err(format!("unexpected byte '{}' at {}", b as char, pos)),
     }
@@ -651,24 +661,25 @@ fn decode_string(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), Strin
         .map_err(|_| "invalid string length")?;
     let len: usize = len_str.parse().map_err(|_| "invalid string length")?;
     let start = pos + colon + 1;
-    if start + len > data.len() {
+    let end = start.checked_add(len).ok_or("string length overflow")?;
+    if end > data.len() {
         return Err("string extends past end".into());
     }
-    Ok((BencodeValue::Bytes(data[start..start+len].to_vec()), start + len))
+    Ok((BencodeValue::Bytes(data[start..end].to_vec()), end))
 }
 
-fn decode_list(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), String> {
+fn decode_list(data: &[u8], pos: usize, depth: usize) -> Result<(BencodeValue, usize), String> {
     let mut items = Vec::new();
     let mut i = pos + 1;
     while i < data.len() && data[i] != b'e' {
-        let (val, next) = decode_value(data, i)?;
+        let (val, next) = decode_value(data, i, depth + 1)?;
         items.push(val);
         i = next;
     }
     Ok((BencodeValue::List(items), i + 1))
 }
 
-fn decode_dict(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), String> {
+fn decode_dict(data: &[u8], pos: usize, depth: usize) -> Result<(BencodeValue, usize), String> {
     let mut items = Vec::new();
     let mut i = pos + 1;
     while i < data.len() && data[i] != b'e' {
@@ -683,7 +694,7 @@ fn decode_dict(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), String>
             BencodeValue::Bytes(b) => String::from_utf8_lossy(&b).into_owned(),
             _ => return Err("dict key not string".into()),
         };
-        let (val, next2) = decode_value(data, next)?;
+        let (val, next2) = decode_value(data, next, depth + 1)?;
         items.push((key, val));
         i = next2;
     }
@@ -693,6 +704,20 @@ fn decode_dict(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deeply_nested_bencode_is_rejected_not_overflow() {
+        // A hostile tracker reply or forged .torrent of nothing but `l` must
+        // error out before it can overflow the stack and abort the process.
+        let bomb = vec![b'l'; 200_000];
+        assert!(bencode_decode(&bomb).is_err());
+    }
+
+    #[test]
+    fn huge_string_length_does_not_panic() {
+        // A length that overflows start + len must error, not panic on slice.
+        assert!(bencode_decode(b"99999999999999999999:x").is_err());
+    }
 
     /// A torrent from its name and file list, lengths computed.
     fn with_paths(name: &str, files: &[&[&str]]) -> Vec<u8> {
