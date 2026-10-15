@@ -380,6 +380,13 @@ pub async fn run(
         if torrent.is_removed.load(Ordering::Relaxed) {
             break;
         }
+        // A stopped torrent's too, as qBittorrent drops its peers on a pause.
+        // The flag already stopped requests and serving, but the session stayed
+        // open, so the instant something lifted it the transfer resumed with a
+        // peer the stop was meant to shut out.
+        if torrent.is_paused.load(Ordering::Relaxed) {
+            break;
+        }
         // Flush any pending Choke/Unchoke produced by the choking engine.
         let cur_gen = stats.choking_gen.load(Ordering::Relaxed);
         if cur_gen != local_choking_gen {
