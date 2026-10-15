@@ -2702,7 +2702,7 @@ async function _showTagPicker(ev) {
     const rows = known.map(t => {
         const jsT = String(t).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         const on = cur.has(t);
-        return `<div class="ctx-item" onclick="_toggleTagSelected('${jsT}', ${on ? "false" : "true"})">${on ? "✓ " : " "}${esch(t)}</div>`;
+        return `<div class="ctx-item" data-tag="${esch(t)}" onclick="_toggleTagSelected(this.dataset.tag, ${on ? "false" : "true"})">${on ? "✓ " : " "}${esch(t)}</div>`;
     }).join("");
     const label = tp(n, "Edit tags, {n} torrent", "Edit tags, {n} torrents");
     _openCtxSubmenu(
@@ -3154,7 +3154,7 @@ function _renderHoardCounts() {
     const container = document.getElementById("hoard-cat-chips");
     if (container) {
         let html = cats.map(c =>
-            `<button class="chip chip-cat${(catCounts[c] || 0) ? "" : " chip-orphan"}${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${c}" onclick="setHoardCatFilter(this,'${c}')" oncontextmenu="setHoardCatFilter(this,'${c}',true);return false" title="Click to include, right-click to exclude">${esc(incoCat(c))} ${_chipCount("cat:" + c, catCounts[c] || 0)}</button>`
+            `<button class="chip chip-cat${(catCounts[c] || 0) ? "" : " chip-orphan"}${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${esc(c)}" onclick="setHoardCatFilter(this,this.dataset.cat)" oncontextmenu="setHoardCatFilter(this,this.dataset.cat,true);return false" title="Click to include, right-click to exclude">${esc(incoCat(c))} ${_chipCount("cat:" + c, catCounts[c] || 0)}</button>`
         ).join("");
         // Meta-filter: only meaningful when at least one real category exists and
         // some torrents lack one (e.g. after a category was deleted).
@@ -3171,7 +3171,7 @@ function _renderHoardCounts() {
     const trkContainer = document.getElementById("hoard-tracker-chips");
     if (trkContainer) {
         let trkHtml = trks.map(h =>
-            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,'${h}')" oncontextmenu="setHoardTrackerFilter(this,'${h}',true);return false" title="Click to include, right-click to exclude">${esc(incoTracker(h))} ${_chipCount("tracker:" + h, trkCounts[h] || 0)}</button>`
+            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,this.dataset.tracker)" oncontextmenu="setHoardTrackerFilter(this,this.dataset.tracker,true);return false" title="Click to include, right-click to exclude">${esc(incoTracker(h))} ${_chipCount("tracker:" + h, trkCounts[h] || 0)}</button>`
         ).join("");
         // First in the row, like Uncategorized and Untagged: a torrent with no
         // tracker at all was in no facet and matched by no filter, so the only
@@ -3209,7 +3209,7 @@ function _renderHoardCounts() {
     const tagContainer = document.getElementById("hoard-tag-chips");
     if (tagContainer) {
         let html = tagNames.map(tg =>
-            `<button class="chip chip-tag${(tagCounts[tg] || 0) ? "" : " chip-orphan"}${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,'${tg}')" oncontextmenu="setHoardTagFilter(this,'${tg}',true);return false" title="Click to include, right-click to exclude">${esc(tg)} ${_chipCount("tag:" + tg, tagCounts[tg] || 0)}</button>`
+            `<button class="chip chip-tag${(tagCounts[tg] || 0) ? "" : " chip-orphan"}${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,this.dataset.tag)" oncontextmenu="setHoardTagFilter(this,this.dataset.tag,true);return false" title="Click to include, right-click to exclude">${esc(tg)} ${_chipCount("tag:" + tg, tagCounts[tg] || 0)}</button>`
         ).join("");
         // Untagged meta-filter: only when tags are actually in use.
         if (tagNames.length > 0 && nUntagged > 0) _hoardSeenChips.untagged = true;
@@ -5810,7 +5810,7 @@ function _renderFsDropdown(browsedPath, dirs, fragment) {
     let acc = "";
     for (const p of parts) {
         acc += "/" + p;
-        crumbs += ` <span class="fs-crumb" data-path="${acc.replace(/"/g, "&quot;")}">${p}</span> /`;
+        crumbs += ` <span class="fs-crumb" data-path="${esc(acc)}">${esc(p)}</span> /`;
     }
     crumbs += "</div>";
 
@@ -5822,7 +5822,7 @@ function _renderFsDropdown(browsedPath, dirs, fragment) {
         ? '<div class="fs-dir-item fs-empty">- no folders -</div>'
         : filtered.map(d => {
             const full = browsedPath === "/" ? "/" + d : browsedPath + "/" + d;
-            return `<div class="fs-dir-item" data-path="${full.replace(/"/g, "&quot;")}">📁 ${d}</div>`;
+            return `<div class="fs-dir-item" data-path="${esc(full)}">📁 ${esc(d)}</div>`;
         }).join("");
 
     dropdown.innerHTML = crumbs + items;
