@@ -3361,8 +3361,9 @@ pub(crate) async fn engine_page_value(
                     "total_download" => total_download as f64,
                     "completed_time" => completed as f64,
                     "seeding_time" => if completed > 0 { (now_secs() - completed).max(0) as f64 } else { 0.0 },
-                    "external_links" | "links_checked_at" => match link_summary.get(&t.info_hash) {
+                    "external_links" | "link_count" | "links_checked_at" => match link_summary.get(&t.info_hash) {
                         Some(c) if sort == "external_links" => c.external_links as f64,
+                        Some(c) if sort == "link_count" => c.link_count as f64,
                         Some(c) => c.measured_at as f64,
                         None => unmeasured_key(asc),
                     },
@@ -3553,17 +3554,24 @@ pub(crate) async fn engine_page_value(
     })
 }
 
-/// The hoard list's two hardlink columns, on a page row.
+/// The hoard list's hardlink columns, on a page row.
 ///
 /// Added here and not in `row::build`: that row is the 3.x key set, which the
 /// qBittorrent shim, the stream and every other reader share, and a list
 /// column has no business there. JSON null when never measured -- "0" would
 /// claim that only the client holds the files.
+///
+/// `link_count` is the raw `nlink`, as a workflow condition reads it; the list
+/// shows it minus one ("other names"), which is a display choice, not a fact.
 fn with_link_columns(row: &mut serde_json::Value, cached: Option<crate::linkindex::Cached>) {
     let Some(obj) = row.as_object_mut() else { return };
     obj.insert(
         "external_links".into(),
         cached.map_or(serde_json::Value::Null, |c| c.external_links.into()),
+    );
+    obj.insert(
+        "link_count".into(),
+        cached.map_or(serde_json::Value::Null, |c| c.link_count.into()),
     );
     obj.insert(
         "links_checked_at".into(),
@@ -3610,7 +3618,7 @@ fn row_sort_key_dir(row: &serde_json::Value, sort: &str, asc: bool) -> (String, 
         | "total_upload" | "total_download" | "completed_time" | "seeding_time" => {
             (String::new(), n(sort))
         }
-        "external_links" | "links_checked_at" => (
+        "external_links" | "link_count" | "links_checked_at" => (
             String::new(),
             row.get(sort).and_then(|v| v.as_f64()).unwrap_or_else(|| unmeasured_key(asc)),
         ),

@@ -21,6 +21,20 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- two hardlink columns
+
+### Changed
+
+- **The hoard list has two hardlink columns instead of one.** The column that
+  said "Hardlinks" counted only the names held outside Hydranos, and is now
+  called **External hardlinks**: 0 there still means removing the torrent loses
+  nothing. The new **Hardlinks** column counts every other name of the files,
+  Hydranos's own cross-seeds included, so a cross-seed reads 1 in Hardlinks and
+  0 in External hardlinks. Both are optional columns, sortable, with unmeasured
+  torrents last. The page rows carry the raw `link_count` (the highest `nlink`
+  of the torrent's files, the field a workflow condition reads); the column
+  shows it minus one.
+
 ## v4.4.2 -- a slow disk cannot fill the RAM, a fresh install downloads at once, and the last blockers before a wider announcement
 
 ### Security

@@ -86,6 +86,8 @@
   "{n} left in place (hardlinks)": "{n} lasciati al loro posto (hardlink)",
   "{n} more not listed": "e altri {n}, non elencati",
   "Hardlinks": "Hardlink",
+  "External hardlinks": "Hardlink esterni",
+  "Other names of these files, Hydranos cross-seeds included": "Altri nomi di questi file, cross-seed di Hydranos compresi",
   "Checked": "Verificato",
   "Not measured yet": "Non ancora misurato",
   "Drag to resize, double-click to fit every column": "Trascina per ridimensionare, doppio clic per adattare tutte le colonne",
