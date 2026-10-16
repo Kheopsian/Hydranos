@@ -132,6 +132,22 @@ pub async fn verify_exit(cfg: &crate::config::Config) -> Result<String, String> 
     }
 }
 
+/// How many times "block" checks before it blocks, and the wait between two
+/// checks: gluetun's control server and tunnel are often not up yet when the
+/// daemon starts. The check is still made at startup only.
+const BLOCK_ATTEMPTS: u32 = 4;
+#[cfg(not(test))]
+const BLOCK_RETRY_DELAY: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const BLOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
+
+/// What is said for a `gluetun_verify` value that is none of the three.
+pub fn unknown_value_warning(value: &str) -> String {
+    format!(
+        "[daemon] gluetun_verify = {value:?} is not a known value (off, warn or block): reading it as off, the exit is NOT checked"
+    )
+}
+
 /// `[daemon] gluetun_verify` at boot, in gluetun mode: the reason to keep
 /// every engine off the network, if there is one. "warn" only says it.
 pub async fn gate(cfg: &crate::config::Config) -> Option<String> {
@@ -141,14 +157,25 @@ pub async fn gate(cfg: &crate::config::Config) -> Option<String> {
     let mode = match Verify::parse(&cfg.daemon.gluetun_verify) {
         Some(m) => m,
         None => {
-            tracing::warn!(value = %cfg.daemon.gluetun_verify, "[daemon] gluetun_verify is off, warn or block: reading it as off");
+            tracing::warn!("{}", unknown_value_warning(cfg.daemon.gluetun_verify.trim()));
             return None;
         }
     };
     if mode == Verify::Off {
         return None;
     }
-    match verify_exit(cfg).await {
+    let mut result = verify_exit(cfg).await;
+    if mode == Verify::Block {
+        // A few spaced tries before blocking: not an engine kept off for good
+        // because gluetun answered a few seconds late.
+        for attempt in 1..BLOCK_ATTEMPTS {
+            let Err(why) = &result else { break };
+            tracing::warn!("gluetun_verify = block: {why} (try {attempt} of {BLOCK_ATTEMPTS}, again in {BLOCK_RETRY_DELAY:?})");
+            tokio::time::sleep(BLOCK_RETRY_DELAY).await;
+            result = verify_exit(cfg).await;
+        }
+    }
+    match result {
         Ok(ip) => {
             tracing::info!(exit = %ip, "gluetun_verify: the exit is gluetun's tunnel");
             None
@@ -309,5 +336,58 @@ mod tests {
         assert!(why.starts_with(VERIFY_BLOCK), "{why}");
         let why = gate(&gluetun_cfg("block", "", &echo, "http://127.0.0.1:9")).await.unwrap();
         assert!(why.starts_with(VERIFY_BLOCK), "{why}");
+    }
+
+    /// "block" tries a few times before it blocks: a control server that is
+    /// not up yet on the first tries does not keep the engines off for good.
+    #[tokio::test]
+    async fn gluetun_verify_block_retries_a_control_server_that_is_late() {
+        let echo = serve(axum::Router::new().route("/", axum::routing::get(|| async { "203.0.113.5" }))).await;
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = calls.clone();
+        let control = serve(axum::Router::new().route(
+            "/v1/publicip/ip",
+            axum::routing::get(move || {
+                let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
+                    } else {
+                        r#"{"public_ip":"203.0.113.5"}"#.into_response()
+                    }
+                }
+            }),
+        ))
+        .await;
+        assert_eq!(gate(&gluetun_cfg("block", "", &echo, &control)).await, None);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3, "two late answers, then the match");
+    }
+
+    /// A control server that never answers still blocks, after the tries.
+    #[tokio::test]
+    async fn gluetun_verify_block_still_blocks_once_the_tries_are_spent() {
+        let echo = serve(axum::Router::new().route("/", axum::routing::get(|| async { "203.0.113.5" }))).await;
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = calls.clone();
+        let control = serve(axum::Router::new().route(
+            "/v1/publicip/ip",
+            axum::routing::get(move || {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { StatusCode::SERVICE_UNAVAILABLE }
+            }),
+        ))
+        .await;
+        let why = gate(&gluetun_cfg("block", "", &echo, &control)).await.unwrap();
+        assert!(why.starts_with(VERIFY_BLOCK), "{why}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), BLOCK_ATTEMPTS);
+    }
+
+    /// A misspelt value is read as off, and the warning names it and the
+    /// accepted values.
+    #[test]
+    fn an_unknown_gluetun_verify_value_is_named_in_the_warning() {
+        assert_eq!(Verify::parse("blok"), None);
+        let said = unknown_value_warning("blok");
+        assert!(said.contains("\"blok\"") && said.contains("off, warn or block") && said.contains("NOT checked"), "{said}");
     }
 }
