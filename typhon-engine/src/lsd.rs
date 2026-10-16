@@ -233,6 +233,7 @@ pub struct LsdSession {
     hashes_announced: AtomicU64,
     peers_found: AtomicU64,
     own_ignored: AtomicU64,
+    foreign_ignored: AtomicU64,
     /// Peers found per torrent, for the `[LSD]` line of a torrent's trackers.
     /// Only torrents LSD found someone for have an entry.
     found: DashMap<InfoHash, u32>,
@@ -268,6 +269,7 @@ impl LsdSession {
                         hashes_announced: AtomicU64::new(0),
                         peers_found: AtomicU64::new(0),
                         own_ignored: AtomicU64::new(0),
+                        foreign_ignored: AtomicU64::new(0),
                         found: DashMap::new(),
                     }));
                 }
@@ -319,6 +321,13 @@ impl LsdSession {
             IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
             v4 => v4,
         };
+        // Local discovery is for the LAN. A datagram from anywhere else -- a
+        // port 6771 reachable from outside, a forged source -- would have us
+        // dial whatever address it names.
+        if !is_local_source(ip) {
+            self.foreign_ignored.fetch_add(1, Ordering::Relaxed);
+            return 0;
+        }
         let peer = SocketAddr::new(ip, msg.port);
         let mut offered = 0;
         for ih in &msg.info_hashes {
@@ -351,7 +360,24 @@ impl LsdSession {
             "hashes_announced": self.hashes_announced.load(Ordering::Relaxed),
             "peers_found": self.peers_found.load(Ordering::Relaxed),
             "own_ignored": self.own_ignored.load(Ordering::Relaxed),
+            "foreign_ignored": self.foreign_ignored.load(Ordering::Relaxed),
         })
+    }
+}
+
+/// Whether an LSD datagram's source can be on our LAN: a loopback, private,
+/// link-local or CGNAT IPv4 address, or a loopback, link-local or
+/// unique-local IPv6 one.
+fn is_local_source(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            let s0 = v6.segments()[0];
+            v6.is_loopback() || (s0 & 0xffc0) == 0xfe80 || (s0 & 0xfe00) == 0xfc00
+        }
     }
 }
 
@@ -598,6 +624,23 @@ mod tests {
 
     fn free_udp_port() -> u16 {
         std::net::UdpSocket::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port()
+    }
+
+    /// ⭐ An announce from an address that cannot be on the LAN is not turned
+    /// into a dial; the same announce from a LAN address is.
+    #[tokio::test]
+    async fn an_announce_from_outside_the_lan_is_ignored() {
+        let session = LsdSession::bind(None, free_udp_port()).await.expect("an LSD socket");
+        let (mgr, root) = manager("foreign");
+        let (h, _) = mgr.add_torrent_bytes(&torrent_bytes("foreign", false), "/tmp", false, false).unwrap();
+        let msg = Announce { port: 6881, info_hashes: vec![h], cookie: Some("other".into()) };
+        assert_eq!(session.offer(&mgr, "93.184.216.34:6771".parse().unwrap(), &msg), 0, "a public source is ignored");
+        assert_eq!(session.offer(&mgr, "[2606:2800:220:1::1]:6771".parse().unwrap(), &msg), 0, "public v6 too");
+        assert_eq!(session.offer(&mgr, "192.168.99.20:6771".parse().unwrap(), &msg), 1, "a LAN source is offered");
+        // The socket is dual-stack: a LAN peer's IPv4 arrives v4-mapped.
+        assert_eq!(session.offer(&mgr, "[::ffff:192.168.0.7]:6771".parse().unwrap(), &msg), 1, "v4-mapped LAN too");
+        assert_eq!(session.offer(&mgr, "[::ffff:93.184.216.34]:6771".parse().unwrap(), &msg), 0, "v4-mapped public is not");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// ⭐ Two engines on one host find each other, and neither takes its own
