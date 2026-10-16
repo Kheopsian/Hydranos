@@ -436,6 +436,7 @@ let _setupOpen = false;
 // Ecran de premier lancement : aucun compte admin n existe encore, l humain
 // choisit son mot de passe. Hydranos n en genere plus aucun -> rien a perdre si le
 // demarrage echoue en route. POST /api/setup renvoie l API key comme /api/login.
+// Il exige le code a usage unique que le demon ecrit dans son journal au boot.
 function promptFirstRunSetup(networkStorage) {
     if (_setupOpen) return;
     _setupOpen = true;
@@ -457,7 +458,9 @@ function promptFirstRunSetup(networkStorage) {
         ${warn}
         <input type="text" id="setup-user" placeholder="${t("Username")}" autocomplete="username" value="admin" style="width:100%;margin-bottom:8px">
         <input type="password" id="setup-pass" placeholder="${t("Password (min 8 characters)")}" autocomplete="new-password" style="width:100%;margin-bottom:8px">
-        <input type="password" id="setup-pass2" placeholder="${t("Confirm password")}" autocomplete="new-password" style="width:100%">
+        <input type="password" id="setup-pass2" placeholder="${t("Confirm password")}" autocomplete="new-password" style="width:100%;margin-bottom:8px">
+        <p class="modal-desc">${t("The setup code is printed in the Hydranos log at startup (docker logs hydranos, journalctl -u hydranos, or hydranos.log).")}</p>
+        <input type="text" id="setup-code" placeholder="${t("Setup code")}" autocomplete="one-time-code" spellcheck="false" style="width:100%">
         <div class="modal-actions">
             <button class="btn-primary" id="setup-go">${t("Create account")}</button>
         </div>
@@ -472,6 +475,7 @@ function promptFirstRunSetup(networkStorage) {
     const user = ov.querySelector("#setup-user");
     const pass = ov.querySelector("#setup-pass");
     const pass2 = ov.querySelector("#setup-pass2");
+    const code = ov.querySelector("#setup-code");
     const msg = ov.querySelector("#setup-msg");
     pass.focus();
     const fail = (t) => { msg.textContent = t; msg.style.color = "var(--accent-red)"; };
@@ -482,7 +486,7 @@ function promptFirstRunSetup(networkStorage) {
             const res = await fetch("/api/setup", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ username: user.value, password: pass.value }),
+                body: JSON.stringify({ username: user.value, password: pass.value, setup_code: code.value }),
             });
             const d = await res.json().catch(() => ({}));
             if (!res.ok) return fail(d.error || t("Setup failed ({status})", { status: res.status }));
@@ -493,7 +497,7 @@ function promptFirstRunSetup(networkStorage) {
         }
     };
     ov.querySelector("#setup-go").addEventListener("click", go);
-    [user, pass, pass2].forEach(el => el.addEventListener("keydown", e => { if (e.key === "Enter") go(); }));
+    [user, pass, pass2, code].forEach(el => el.addEventListener("keydown", e => { if (e.key === "Enter") go(); }));
 }
 
 // Sign out. The page holds the API key in localStorage, so signing out means

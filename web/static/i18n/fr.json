@@ -225,6 +225,8 @@
   "Create a per-torrent subfolder for single-file torrents (like qBittorrent's subfolder option). Off = single files saved directly in the category folder; multi-file torrents always keep their own folder. Applies to newly added torrents only.": "Créer un sous-dossier par torrent pour les torrents à fichier unique (comme l'option de qBittorrent). Désactivé = les fichiers uniques vont directement dans le dossier de la catégorie ; les torrents multi-fichiers gardent toujours leur dossier. Ne s'applique qu'aux nouveaux torrents.",
   "Create account": "Créer le compte",
   "Create one category per destination folder": "Créer une catégorie par dossier de destination",
+  "Setup code": "Code de configuration",
+  "The setup code is printed in the Hydranos log at startup (docker logs hydranos, journalctl -u hydranos, or hydranos.log).": "Le code de configuration est écrit dans le journal de Hydranos au démarrage (docker logs hydranos, journalctl -u hydranos ou hydranos.log).",
   "Create your admin account to get started.": "Créez votre compte administrateur pour commencer.",
   "Creating categories…": "Création des catégories…",
   "Current UL:": "Envoi actuel :",

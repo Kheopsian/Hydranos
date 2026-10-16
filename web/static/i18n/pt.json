@@ -16,6 +16,8 @@
   "Configuration": "Configuracao",
   "Confirm password": "Confirmar palavra-passe",
   "Create account": "Criar conta",
+  "Setup code": "Codigo de configuracao",
+  "The setup code is printed in the Hydranos log at startup (docker logs hydranos, journalctl -u hydranos, or hydranos.log).": "O codigo de configuracao aparece no registo do Hydranos ao arrancar (docker logs hydranos, journalctl -u hydranos ou hydranos.log).",
   "Create your admin account to get started.": "Crie a sua conta de administrador para comecar.",
   "Delete": "Eliminar",
   "Delete agent local-{id}? Its engine stops seeding right away.": "Eliminar o agente local-{id}? O seu motor para de semear de imediato.",

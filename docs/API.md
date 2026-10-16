@@ -39,9 +39,9 @@ There is one credential, the **API key** (`[daemon] api_key`, 48 hex characters,
 | `/api/v2/*` (qBittorrent shim) | `403` | plain text `Forbidden.` (Sonarr and Radarr expect 403 before login) |
 | `/mcp` | `401` | JSON as above + header `WWW-Authenticate: Bearer` |
 | `POST /api/nodes/register` | `401` | `{"error":"enrolment token unknown, already used, or expired"}` |
-| `POST /api/setup` | `409` once an admin exists; `403` if the caller is not on loopback or a private network | JSON |
+| `POST /api/setup` | `409` once an admin exists; `403` if the caller is not on loopback or a private network, or without the setup code from the log | JSON |
 
-`POST /api/setup` judges the caller by the socket peer first: a public peer is refused whatever headers it sends, and a private peer (a reverse proxy) that sends `X-Forwarded-For` must name a private client there too.
+`POST /api/setup` judges the caller by the socket peer first: a public peer is refused whatever headers it sends, and a private peer (a reverse proxy) must name only private addresses in `X-Forwarded-For` (every entry, every header line), `X-Real-IP` and `Forwarded`. It also wants `setup_code`: a one-time code the daemon prints in its log at startup while no admin exists (`no admin account yet: ... setup code XXXXX-XXXXX`). It is in memory only, changes at every start, is never returned by any route, and stops working once the account exists.
 
 **Public routes** (no key): `/health`, `/metrics` (`[daemon] metrics_require_key = true` puts it behind the key), `/`, `/static/*`, `/changelog.md`, `/install.sh`, `GET|POST /api/setup`, `POST /api/login`, `GET /api/startup`, `POST /api/v2/auth/login`, `POST /api/v2/auth/logout`, `POST /api/nodes/register` (enrolment token instead of the key), and `POST /api/auth/api-key/confirm` (the pending key of a rotation instead of the key).
 
@@ -322,7 +322,7 @@ What works and what does not on the Network tab: [Networking](https://github.com
 
 | Route | Method | Purpose | Status |
 |---|---|---|---|
-| `/api/setup` | GET, POST | First run: `{"needs_setup","network_storage",...}` (`network_storage` is `"network share"` when `data_dir` is on NFS, SMB or FUSE, where the database cannot use WAL; `""` otherwise; always `""` up to 4.3.1) / create the admin `{"username","password"}` (8+ chars) → API key. Public, loopback or private network only. | ✓ |
+| `/api/setup` | GET, POST | First run: `{"needs_setup","network_storage",...}` (`network_storage` is `"network share"` when `data_dir` is on NFS, SMB or FUSE, where the database cannot use WAL; `""` otherwise; always `""` up to 4.3.1) / create the admin `{"username","password","setup_code"}` (8+ chars; the code from the startup log) → API key. Public, loopback or private network only. | ✓ |
 | `/api/login` | POST | `{"username","password"}` → `{"api_key"}`. Public. | ✓ |
 | `/api/auth/password` | POST | `{"password"}` (8+ chars): stored hashed in `[auth] password_hash`, as setup does. | ✓ |
 | `/api/settings` | GET, POST | Whole config as JSON; the SOCKS5 passwords, the gluetun key, the proxy URL's password and every tracker passkey come back as `********` (posting that mask back leaves the stored value alone) / `{"changes":[{"section","key","value"}]}` edits existing keys only, except the live engine keys of `[race]`/`[hoard]` (`upload_rate_limit`, `download_rate_limit`, `peer_timeout`, `choking`, `max_uploads_per_torrent`), which are created when absent, and `enable_lsd`, created when absent too but applied at the next start. Those are put on the running engines at once; the answer carries `applied_live` (engines updated) and `restart_required` (false when every change is one of them). | ✓ |

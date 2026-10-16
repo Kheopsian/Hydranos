@@ -16949,6 +16949,71 @@ mod tests {
         }
     }
 
+    /// An unconfigured instance whose config is a real file, so first-run
+    /// setup can write the account.
+    fn unconfigured(name: &str) -> (AppState, std::path::PathBuf) {
+        let path = std::env::temp_dir()
+            .join(format!("hydra-setup-{}-{name}.toml", std::process::id()));
+        std::fs::write(&path, include_str!("../../../configs/default.toml")).unwrap();
+        let mut st = state("k", "");
+        st.config_path = path.clone();
+        (st, path)
+    }
+
+    async fn setup_call(st: &AppState, body: &str) -> (StatusCode, String) {
+        let peer: std::net::SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        let r = crate::bootstrap::setup_password(
+            State(st.clone()),
+            axum::extract::ConnectInfo(peer),
+            HeaderMap::new(),
+            body.to_string(),
+        )
+        .await;
+        let status = r.status();
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Being local is not proof of owning the instance: behind Docker's port
+    /// forwarding or a NAT every caller is loopback or private. The code in
+    /// the daemon's log is, so setup wants it even from 127.0.0.1.
+    #[tokio::test]
+    async fn first_run_setup_wants_the_log_code_even_from_loopback() {
+        let (st, path) = unconfigured("nocode");
+        let before = std::fs::read_to_string(&path).unwrap();
+        for body in [
+            r#"{"username":"x","password":"AAAAAAAA"}"#,
+            r#"{"username":"x","password":"AAAAAAAA","setup_code":"WRONG-CODE2"}"#,
+        ] {
+            let (status, _) = setup_call(&st, body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "no account written");
+        assert!(st.cfg().auth.password_hash.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The right code creates the account once, never shows up in an
+    /// answer, and is gone afterwards.
+    #[tokio::test]
+    async fn the_log_code_creates_the_account_once() {
+        let (st, path) = unconfigured("code");
+        crate::bootstrap::set_setup_code_for_test("ABCDE-FGH23");
+        let (status, text) =
+            setup_call(&st, r#"{"password":"AAAAAAAA","setup_code":"WRONG-CODE2"}"#).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(!text.contains("ABCDE") && !text.contains("FGH23"), "{text}");
+        let (status, text) =
+            setup_call(&st, r#"{"password":"AAAAAAAA","setup_code":" abcde fgh23 "}"#).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(!st.cfg().auth.password_hash.is_empty());
+        assert!(!crate::bootstrap::setup_code_pending(), "the code dies with the first account");
+        let (status, _) =
+            setup_call(&st, r#"{"password":"BBBBBBBB","setup_code":"ABCDE-FGH23"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let _ = std::fs::remove_file(&path);
+    }
+
     fn with_key(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert("X-Api-Key", value.parse().unwrap());

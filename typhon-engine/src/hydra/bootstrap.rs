@@ -43,13 +43,86 @@ pub(crate) fn network_storage(data_dir: &str) -> &'static str {
     }
 }
 
+/// The one-time code first-run setup asks for, while no admin account exists.
+///
+/// Whoever reaches the port is not proof of being the owner: behind Docker's
+/// port forwarding, a NAT or a rootless network every caller can look local.
+/// Reading the daemon's log is: the code is written there at boot and nowhere
+/// else -- not in `/api/setup`, not in an error, not in `/metrics`. It lives
+/// in memory only, so a restart prints a new one, and it is dropped as soon
+/// as an account exists.
+static SETUP_CODE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Ambiguous letters and digits left out: the code is read off a terminal
+/// and typed by hand.
+const SETUP_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/// Draw the setup code and print it, if the instance has no admin account.
+/// Called once at boot, after logging is up.
+pub fn announce_setup_code(config: &crate::config::Config) {
+    if !config.auth.password_hash.is_empty() {
+        return;
+    }
+    let code = fresh_setup_code();
+    *SETUP_CODE.lock().unwrap_or_else(|e| e.into_inner()) = Some(code.clone());
+    let line = format!(
+        "no admin account yet: open the web UI and enter the setup code {code} \
+         (or run `hydranos reset-password <password>` on the host)"
+    );
+    tracing::warn!("{line}");
+    // A log filter above warn would hide the only place the code is written.
+    if !tracing::enabled!(tracing::Level::WARN) {
+        eprintln!("{line}");
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_setup_code_for_test(code: &str) {
+    *SETUP_CODE.lock().unwrap_or_else(|e| e.into_inner()) = Some(code.to_string());
+}
+
+#[cfg(test)]
+pub(crate) fn setup_code_pending() -> bool {
+    SETUP_CODE.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+fn fresh_setup_code() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 10];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    // 32 symbols: five bits each, no modulo bias. 50 bits in all.
+    let chars: String = bytes
+        .iter()
+        .map(|b| SETUP_CODE_ALPHABET[(*b & 31) as usize] as char)
+        .collect();
+    format!("{}-{}", &chars[..5], &chars[5..])
+}
+
+/// Whether `presented` is the code the log shows. Case, dashes and spaces
+/// do not count; the comparison takes the same time whatever matches.
+fn setup_code_matches(expected: Option<&str>, presented: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_whitespace() && *c != '-')
+            .flat_map(char::to_uppercase)
+            .collect()
+    };
+    match expected {
+        Some(code) => {
+            let presented = norm(presented);
+            !presented.is_empty()
+                && crate::api::constant_time_eq(presented.as_bytes(), norm(code).as_bytes())
+        }
+        None => false,
+    }
+}
+
 /// Create the admin account, first run only.
 ///
-/// Two guards, because this hands out the API key. It refuses once a password
-/// exists, so it cannot take over a configured instance; and it answers only
-/// callers on loopback or a private network, so an instance port-forwarded to
-/// the internet before its owner finished setting it up cannot be claimed by
-/// whoever finds it first.
+/// Three guards, because this hands out the API key. It refuses once a
+/// password exists, so it cannot take over a configured instance; it answers
+/// only callers on loopback or a private network; and it wants the setup code
+/// from the daemon's log, since in many deployments every caller looks local.
 pub async fn setup_password(
     State(state): State<AppState>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -80,6 +153,8 @@ pub async fn setup_password(
         username: String,
         #[serde(default)]
         password: String,
+        #[serde(default)]
+        setup_code: String,
     }
     let Ok(req) = serde_json::from_str::<Setup>(&body) else {
         return (
@@ -88,6 +163,20 @@ pub async fn setup_password(
         )
             .into_response();
     };
+    // Held across the write below: two callers with the right code cannot
+    // both get past it, and the code is gone once the account exists.
+    let mut code = SETUP_CODE.lock().unwrap_or_else(|e| e.into_inner());
+    if !setup_code_matches(code.as_deref(), &req.setup_code) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "wrong or missing setup code; it is printed in the Hydranos log \
+                          at startup (docker logs hydranos, journalctl -u hydranos, \
+                          or hydranos.log)"
+            })),
+        )
+            .into_response();
+    }
     // The floor 3.x enforced. Short enough not to annoy, long enough that the
     // bcrypt cost is doing real work.
     if req.password.chars().count() < 8 {
@@ -132,6 +221,8 @@ pub async fn setup_password(
         )
             .into_response();
     }
+    *code = None;
+    drop(code);
 
     // The key comes back with the account because this is the only moment the
     // browser can learn it: it is generated at boot and written to a file the
@@ -369,6 +460,19 @@ mod tests {
         assert!(!is_local_request(public, &h), "a forged header does not make a public peer local");
         let mapped: std::net::IpAddr = "::ffff:192.168.1.20".parse().unwrap();
         assert!(is_local_request(mapped, &HeaderMap::new()), "an IPv4-mapped LAN peer is local");
+    }
+
+    #[test]
+    fn the_setup_code_is_typeable_and_matched_loosely_but_never_when_absent() {
+        let a = fresh_setup_code();
+        assert_eq!(a.len(), 11);
+        assert!(a.chars().all(|c| c == '-' || SETUP_CODE_ALPHABET.contains(&(c as u8))), "{a}");
+        assert_ne!(a, fresh_setup_code());
+        assert!(setup_code_matches(Some(&a), &a.to_lowercase().replace('-', " ")));
+        assert!(!setup_code_matches(Some(&a), ""));
+        assert!(!setup_code_matches(Some("ABCDE-FGH23"), "ABCDE-FGH24"));
+        assert!(!setup_code_matches(None, ""), "no code drawn means no setup by code");
+        assert!(!setup_code_matches(None, "ABCDE-FGH23"));
     }
 
     /// A local disk must answer "", or every install would show the

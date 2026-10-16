@@ -57,8 +57,9 @@ echo
 echo "Hydranos installed and started. UI: http://<this-host>:8199"
 echo
 echo "Create the admin account by opening the UI. For safety that first-run"
-echo "screen only answers callers on the same machine or a private network, so"
-echo "an instance exposed to the internet cannot be claimed by a stranger."
+echo "screen only answers callers on the same machine or a private network, and"
+echo "asks for the one-time setup code printed in the log at startup:"
+echo "  journalctl -u hydranos | grep 'setup code'"
 echo "On a remote host (a seedbox), set the password here instead:"
 echo "  $PREFIX/hydranos reset-password '<newpassword>' $CFG/default.toml"
 echo "  systemctl restart hydranos"
