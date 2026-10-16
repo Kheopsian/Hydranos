@@ -699,67 +699,26 @@ pub(crate) async fn open_peer(
     }
     let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false)
         || policy.block_mse();
-    // TCP plaintext (preferred)
-    if let Some(mut t) = try_tcp(addr, egress).await {
-        let hs_res = match tokio::time::timeout(
-            DIAL_HS_TIMEOUT,
-            crate::peer::handshake::outgoing(&mut t, info_hash, peer_id),
-        ).await {
-            Ok(r) => r,
-            Err(_) => {
-                DIAL_HS_TIMED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
-                Err("handshake timeout".to_string())
+    // Leg order. `allow`: plaintext, then MSE. `prefer`: MSE, then plaintext.
+    // `require`: MSE only, and offered as RC4 only. A skipped MSE leg stays
+    // skipped in every mode (block_mse, TYPHON_NO_MSE).
+    let mode = policy.encryption();
+    let plain_ok = mode != crate::peer::extension::Encryption::Require;
+    let rc4_only = !plain_ok;
+    let mse_first = mode != crate::peer::extension::Encryption::Allow;
+    let legs: [bool; 2] = if mse_first { [true, false] } else { [false, true] }; // true = MSE
+    for mse in legs {
+        if mse {
+            if skip_mse {
+                MSE_OUTBOUND_SKIPPED.fetch_add(1, AtomicOrdering::Relaxed);
+                continue;
             }
-        };
-        match hs_res {
-            Ok(hs) => {
-                DIAL_PLAIN_OK.fetch_add(1, AtomicOrdering::Relaxed);
-                if traced {
-                    info!("[dialtrace] {} tcp/plain handshake OK", addr);
-                }
-                return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
+            if let Some(r) = dial_tcp_mse(addr, egress, info_hash, peer_id, rc4_only, traced).await {
+                return Some(r);
             }
-            Err(e) => {
-                DIAL_PLAIN_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
-                if traced {
-                    info!("[dialtrace] {} tcp/plain handshake FAIL: {}", addr, e);
-                }
-            }
-        }
-    } else if traced {
-        info!("[dialtrace] {} tcp connect FAIL (plain leg)", addr);
-    }
-    // TCP MSE (fallback for require-encryption peers)
-    if skip_mse {
-        MSE_OUTBOUND_SKIPPED.fetch_add(1, AtomicOrdering::Relaxed);
-    }
-    if !skip_mse {
-        if let Some(mut t) = try_tcp(addr, egress).await {
-            DIAL_MSE_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
-            let mse_res = match tokio::time::timeout(
-                DIAL_HS_TIMEOUT,
-                crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id),
-            ).await {
-                Ok(r) => r,
-                Err(_) => {
-                    DIAL_HS_TIMED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
-                    Err("MSE handshake timeout".to_string())
-                }
-            };
-            match mse_res {
-                Ok((enc, dec, hs)) => {
-                    DIAL_MSE_OK.fetch_add(1, AtomicOrdering::Relaxed);
-                    if traced {
-                        info!("[dialtrace] {} tcp/MSE handshake OK", addr);
-                    }
-                    return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
-                }
-                Err(e) => {
-                    DIAL_MSE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
-                    if traced {
-                        info!("[dialtrace] {} tcp/MSE handshake FAIL: {}", addr, e);
-                    }
-                }
+        } else if plain_ok {
+            if let Some(r) = dial_tcp_plain(addr, egress, info_hash, peer_id, traced).await {
+                return Some(r);
             }
         }
     }
@@ -772,28 +731,115 @@ pub(crate) async fn open_peer(
         return None;
     }
     if let Some(sock) = utp_socket.as_ref() {
-        // uTP plaintext (preferred)
-        if let Some(mut t) = try_utp(addr, sock).await {
-            if let Ok(Ok(hs)) = tokio::time::timeout(
-                DIAL_HS_TIMEOUT,
-                crate::peer::handshake::outgoing(&mut t, info_hash, peer_id),
-            ).await {
-                return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
-            }
-        }
-        // uTP MSE (fallback)
-        if !skip_mse {
-            if let Some(mut t) = try_utp(addr, sock).await {
-                if let Ok(Ok((enc, dec, hs))) = tokio::time::timeout(
-                    DIAL_HS_TIMEOUT,
-                    crate::crypto::mse::handshake_outgoing(&mut t, info_hash, peer_id),
-                ).await {
-                    return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
+        for mse in legs {
+            if mse {
+                if skip_mse {
+                    continue;
+                }
+                if let Some(mut t) = try_utp(addr, sock).await {
+                    if let Ok(Ok((enc, dec, hs))) = tokio::time::timeout(
+                        DIAL_HS_TIMEOUT,
+                        crate::crypto::mse::handshake_outgoing_with(&mut t, info_hash, peer_id, rc4_only),
+                    ).await {
+                        return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
+                    }
+                }
+            } else if plain_ok {
+                if let Some(mut t) = try_utp(addr, sock).await {
+                    if let Ok(Ok(hs)) = tokio::time::timeout(
+                        DIAL_HS_TIMEOUT,
+                        crate::peer::handshake::outgoing(&mut t, info_hash, peer_id),
+                    ).await {
+                        return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
+                    }
                 }
             }
         }
     }
     None
+}
+
+type Opened = (CryptoStream, bool, bool, [u8; 20], bool);
+
+/// The TCP plaintext leg of `open_peer`.
+async fn dial_tcp_plain(
+    addr: std::net::SocketAddr,
+    egress: &crate::netpin::Egress,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    traced: bool,
+) -> Option<Opened> {
+    let Some(mut t) = try_tcp(addr, egress).await else {
+        if traced {
+            info!("[dialtrace] {} tcp connect FAIL (plain leg)", addr);
+        }
+        return None;
+    };
+    let hs_res = match tokio::time::timeout(
+        DIAL_HS_TIMEOUT,
+        crate::peer::handshake::outgoing(&mut t, info_hash, peer_id),
+    ).await {
+        Ok(r) => r,
+        Err(_) => {
+            DIAL_HS_TIMED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
+            Err("handshake timeout".to_string())
+        }
+    };
+    match hs_res {
+        Ok(hs) => {
+            DIAL_PLAIN_OK.fetch_add(1, AtomicOrdering::Relaxed);
+            if traced {
+                info!("[dialtrace] {} tcp/plain handshake OK", addr);
+            }
+            Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false))
+        }
+        Err(e) => {
+            DIAL_PLAIN_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+            if traced {
+                info!("[dialtrace] {} tcp/plain handshake FAIL: {}", addr, e);
+            }
+            None
+        }
+    }
+}
+
+/// The TCP MSE leg of `open_peer`.
+async fn dial_tcp_mse(
+    addr: std::net::SocketAddr,
+    egress: &crate::netpin::Egress,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    rc4_only: bool,
+    traced: bool,
+) -> Option<Opened> {
+    let mut t = try_tcp(addr, egress).await?;
+    DIAL_MSE_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
+    let mse_res = match tokio::time::timeout(
+        DIAL_HS_TIMEOUT,
+        crate::crypto::mse::handshake_outgoing_with(&mut t, info_hash, peer_id, rc4_only),
+    ).await {
+        Ok(r) => r,
+        Err(_) => {
+            DIAL_HS_TIMED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
+            Err("MSE handshake timeout".to_string())
+        }
+    };
+    match mse_res {
+        Ok((enc, dec, hs)) => {
+            DIAL_MSE_OK.fetch_add(1, AtomicOrdering::Relaxed);
+            if traced {
+                info!("[dialtrace] {} tcp/MSE handshake OK", addr);
+            }
+            Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true))
+        }
+        Err(e) => {
+            DIAL_MSE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
+            if traced {
+                info!("[dialtrace] {} tcp/MSE handshake FAIL: {}", addr, e);
+            }
+            None
+        }
+    }
 }
 
 
@@ -1215,5 +1261,85 @@ mod socks_dial_tests {
         let dial = tokio::spawn(async move { try_tcp(peer, &crate::netpin::Egress::default()).await.is_some() });
         assert!(tokio::time::timeout(Duration::from_secs(3), tcp.accept()).await.is_ok());
         assert!(dial.await.unwrap());
+    }
+
+    /// What each connection to a fake peer opened with: `true` = the plaintext
+    /// BitTorrent handshake, `false` = anything else (an MSE key exchange).
+    /// Every connection is read once and dropped, so the dial moves to its next
+    /// leg at once.
+    async fn dial_openings(mode: &str) -> Vec<bool> {
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = tcp.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = tcp.accept().await else { return };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = [0u8; 20];
+                    let n = tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await;
+                    let plain = matches!(n, Ok(Ok(20))) && buf == *b"\x13BitTorrent protocol";
+                    log.lock().unwrap().push(plain);
+                });
+            }
+        });
+        let policy = crate::peer::extension::PeerPolicy::default();
+        policy.set_encryption(mode);
+        let out = open_peer(peer, &None, &[7u8; 20], &[8u8; 20], &crate::netpin::Egress::default(), &policy, false).await;
+        assert!(out.is_none(), "the fake peer completes no handshake");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let v = seen.lock().unwrap().clone();
+        v
+    }
+
+    /// `peer_encryption = allow` is what every install has run with: plaintext
+    /// first, MSE only as the fallback.
+    #[tokio::test]
+    async fn encryption_allow_dials_plaintext_then_mse() {
+        assert_eq!(dial_openings("allow").await, vec![true, false]);
+        assert_eq!(dial_openings("").await, vec![true, false], "absent = allow");
+        assert_eq!(dial_openings("nonsense").await, vec![true, false], "a typo is allow, not require");
+    }
+
+    /// `prefer` tries MSE first and falls back to plaintext.
+    #[tokio::test]
+    async fn encryption_prefer_dials_mse_then_plaintext() {
+        assert_eq!(dial_openings("prefer").await, vec![false, true]);
+    }
+
+    /// `require` never puts a plaintext handshake on the wire.
+    #[tokio::test]
+    async fn encryption_require_never_dials_plaintext() {
+        assert_eq!(dial_openings("require").await, vec![false]);
+    }
+
+    /// Parent-compatible control: with the default policy a dial opens in the
+    /// clear and falls back to MSE ([plain, mse]). Uses no `peer_encryption`
+    /// symbol, so it also runs on the code before the option existed.
+    #[tokio::test]
+    async fn the_default_policy_dials_plaintext_then_mse() {
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = tcp.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = tcp.accept().await else { return };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = [0u8; 20];
+                    let n = tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await;
+                    log.lock().unwrap().push(matches!(n, Ok(Ok(20))) && buf == *b"\x13BitTorrent protocol");
+                });
+            }
+        });
+        let policy = crate::peer::extension::PeerPolicy::default();
+        let out = open_peer(peer, &None, &[7u8; 20], &[8u8; 20], &crate::netpin::Egress::default(), &policy, false).await;
+        assert!(out.is_none());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(*seen.lock().unwrap(), vec![true, false]);
     }
 }
