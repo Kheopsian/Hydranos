@@ -57,6 +57,31 @@ pub struct Daemon {
     /// header, as before.
     #[serde(default)]
     pub public_url: String,
+    /// Whether the daemon asks an address-echo service which address it leaves
+    /// by (the header's exit address, `/api/public-ip`, the Network tab's
+    /// check). Absent = yes. `false` sends nothing to any echo service: what
+    /// depends on the exit address then reads "unknown".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_probe: Option<bool>,
+    /// The echo service `exit_probe` asks, answering a bare address. Empty =
+    /// the default one. A custom service is asked over IPv4 or IPv6 as the
+    /// system picks, so the IPv6-only measurement is not made for it.
+    #[serde(default)]
+    pub exit_probe_url: String,
+}
+
+/// The echo service asked when `[daemon] exit_probe_url` is empty.
+pub const DEFAULT_EXIT_PROBE_URL: &str = "https://api.ipify.org/";
+
+impl Daemon {
+    pub fn exit_probe_enabled(&self) -> bool {
+        self.exit_probe.unwrap_or(true)
+    }
+
+    pub fn exit_probe_url(&self) -> String {
+        let u = self.exit_probe_url.trim();
+        if u.is_empty() { DEFAULT_EXIT_PROBE_URL.to_string() } else { u.to_string() }
+    }
 }
 
 /// `[proxy]`: the SOCKS5 proxy the daemon's own requests go through. The

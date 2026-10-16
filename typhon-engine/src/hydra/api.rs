@@ -4186,10 +4186,16 @@ async fn get_public_ip(
     guard!(state, headers, query);
     let cfg = state.cfg();
     if query_param(&query, "refresh").as_deref() == Some("1") {
-        crate::netprobe::measure(&state.engines, &state.net_engines, &state.public_ip).await;
+        crate::netprobe::measure(&state.engines, &state.net_engines, &state.public_ip, &crate::netprobe::Probe::from_config(&cfg)).await;
     }
     let cache = state.public_ip.lock().await;
-    Json(serde_json::json!({"ip": cache.0.clone(), "ip_v6": cache.1.clone()})).into_response()
+    let mut out = serde_json::json!({"ip": cache.0.clone(), "ip_v6": cache.1.clone()});
+    if !cfg.daemon.exit_probe_enabled() {
+        // Said, not left blank: an empty address reads as "lookup failed".
+        out["exit_probe"] = "off".into();
+        out["detail"] = "exit address unknown: [daemon] exit_probe = false".into();
+    }
+    Json(out).into_response()
 }
 
 /// Live session settings of one engine.
@@ -5568,13 +5574,12 @@ async fn get_network_engines(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    let _ = cfg;
 
     // `refresh=1` is the header's refresh button. It re-measures rather than
     // serving the cached pass, which is the only way an operator can confirm a
     // tunnel came back without waiting out the three-minute timer.
     if query_param(&query, "refresh").as_deref() == Some("1") {
-        crate::netprobe::measure(&state.engines, &state.net_engines, &state.public_ip).await;
+        crate::netprobe::measure(&state.engines, &state.net_engines, &state.public_ip, &crate::netprobe::Probe::from_config(&cfg)).await;
     }
 
     let (rows, measured_at) = {
@@ -14033,9 +14038,6 @@ async fn post_transmission_import_start(
 }
 
 
-/// The echo service 3.x asks "what address do you see me from".
-const DEFAULT_ECHO_URL: &str = "https://api.ipify.org/";
-
 /// Diagnose what the outside world sees of this node: a real leak test.
 ///
 /// Until 4.4 this made four identical requests by the default route (race
@@ -14068,13 +14070,22 @@ async fn post_network_check(
     guard!(state, headers, query);
     let cfg = state.cfg();
 
-    let echo = serde_json::from_str::<serde_json::Value>(&body)
+    let asked = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("echo_url").and_then(|u| u.as_str()).map(str::to_string))
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_ECHO_URL.to_string());
-
+        .filter(|u| !u.trim().is_empty());
     let mode = crate::netmode::current(&cfg);
+    // `[daemon] exit_probe = false`: no echo service is asked unless the
+    // request names one itself. Every comparison here needs an address, so
+    // they are said to be unknown rather than failed.
+    if asked.is_none() && !cfg.daemon.exit_probe_enabled() {
+        let results = vec![serde_json::json!({
+            "id": "exit_probe", "label": "Exit address", "status": "warn",
+            "detail": "unknown: [daemon] exit_probe = false, so no echo service is asked and no leak can be compared here",
+        })];
+        return Json(serde_json::json!({"mode": mode, "results": results})).into_response();
+    }
+    let echo = asked.unwrap_or_else(|| cfg.daemon.exit_probe_url());
 
     // Each probe leaves the way the traffic it stands for leaves: the
     // announce probe through the engine's announce proxy, the peer probe
@@ -19185,6 +19196,66 @@ mod body_route_tests {
         let d = row(&rows, "default_route");
         assert_eq!(d["status"], "warn");
         assert!(d["detail"].as_str().unwrap().contains("kill switch"), "{d}");
+    }
+
+    /// An echo that counts the requests it gets.
+    async fn counting_echo(body: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = l.accept().await {
+                h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), hits)
+    }
+
+    /// `[daemon] exit_probe_url` names the echo service the exit address is
+    /// asked of.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_exit_probe_asks_the_configured_echo_service() {
+        let (url, hits) = counting_echo("203.0.113.7").await;
+        let s = state_from(
+            "exitprobe-url",
+            &format!("[daemon]\napi_key = \"{KEY}\"\nexit_probe_url = \"{url}\"\n"),
+        );
+        let v = body_json(super::get_public_ip(State(s.state.clone()), RawQuery(Some("refresh=1".into())), keyed(KEY)).await).await;
+        assert_eq!(v["ip"], "203.0.113.7", "{v}");
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    /// `[daemon] exit_probe = false` sends nothing to any echo service, and
+    /// what depended on the exit address says it is unknown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_probe_false_asks_nothing_and_says_unknown() {
+        let (url, hits) = counting_echo("203.0.113.7").await;
+        let s = state_from(
+            "exitprobe-off",
+            &format!("[daemon]\napi_key = \"{KEY}\"\nexit_probe = false\nexit_probe_url = \"{url}\"\n\n[race]\nlisten_port = 16172\n"),
+        );
+        let v = body_json(super::get_public_ip(State(s.state.clone()), RawQuery(Some("refresh=1".into())), keyed(KEY)).await).await;
+        assert_eq!(v["ip"], "", "{v}");
+        assert_eq!(v["exit_probe"], "off", "{v}");
+        let n = body_json(super::get_network_engines(State(s.state.clone()), RawQuery(Some("refresh=1".into())), keyed(KEY)).await).await;
+        let rows = n["engines"].as_array().unwrap();
+        assert!(!rows.is_empty(), "{n}");
+        for r in rows {
+            assert_eq!(r["state"], "unknown", "{r}");
+            assert!(r.get("exit_ip").is_none(), "{r}");
+        }
+        let resp = super::post_network_check(State(s.state.clone()), RawQuery(None), keyed(KEY), "{}".into()).await;
+        let c = body_json(resp).await;
+        assert_eq!(c["results"][0]["id"], "exit_probe", "{c}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "no request reached the echo service");
     }
 
     /// ⭐ #62. Where no socket can be pinned, any `bind_interface` in a write

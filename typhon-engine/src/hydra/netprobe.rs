@@ -18,7 +18,6 @@ use crate::engines::EngineHost;
 /// The v4 and AAAA-only echoes 3.x used. The v6 one has no A record on
 /// purpose: a v6 measurement that quietly answered over v4 would report an
 /// address the engine never announces.
-const ECHO_V4: &str = "https://api.ipify.org/";
 const ECHO_V6: &str = "https://api6.ipify.org/";
 
 /// How often the exits are re-measured. Each pass costs one request per engine
@@ -32,22 +31,61 @@ const ATTEMPT: Duration = Duration::from_secs(6);
 /// One engine's network identity, in the shape the header reads.
 pub type Snapshot = Arc<tokio::sync::Mutex<(Vec<serde_json::Value>, i64)>>;
 
-pub fn spawn(engines: Arc<EngineHost>, snapshot: Snapshot, public_ip: crate::api::PublicIp) {
+/// What `[daemon] exit_probe` and `exit_probe_url` say, read from the live
+/// config at each pass.
+#[derive(Clone, Debug)]
+pub struct Probe {
+    /// `false`: no request is sent to any echo service.
+    pub enabled: bool,
+    v4: String,
+    /// None for a custom URL: it cannot be known to answer over IPv6 only.
+    v6: Option<String>,
+}
+
+impl Probe {
+    pub fn from_config(cfg: &crate::config::Config) -> Probe {
+        let v4 = cfg.daemon.exit_probe_url();
+        let v6 = (v4 == crate::config::DEFAULT_EXIT_PROBE_URL).then(|| ECHO_V6.to_string());
+        Probe { enabled: cfg.daemon.exit_probe_enabled(), v4, v6 }
+    }
+}
+
+pub fn spawn(
+    engines: Arc<EngineHost>,
+    snapshot: Snapshot,
+    public_ip: crate::api::PublicIp,
+    config: Arc<std::sync::RwLock<Arc<crate::config::Config>>>,
+) {
     tokio::spawn(async move {
         loop {
-            measure(&engines, &snapshot, &public_ip).await;
+            let probe = Probe::from_config(&config.read().unwrap_or_else(|e| e.into_inner()).clone());
+            measure(&engines, &snapshot, &public_ip, &probe).await;
             tokio::time::sleep(INTERVAL).await;
         }
     });
 }
 
 /// Take one measurement pass now.
-pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: &crate::api::PublicIp) {
+pub async fn measure(
+    engines: &Arc<EngineHost>,
+    snapshot: &Snapshot,
+    public_ip: &crate::api::PublicIp,
+    probe: &Probe,
+) {
     // The process's own exit, for the header's fallback line and /api/public-ip:
     // the DAEMON's way out (`[proxy]`, `[daemon] bind_interface`), which is
     // what 3.x measured too, and refused under a kill switch with none.
-    let proc_v4 = echo_daemon(ECHO_V4).await;
-    let proc_v6 = echo_daemon(ECHO_V6).await;
+    let (proc_v4, proc_v6) = if probe.enabled {
+        (
+            echo_daemon(&probe.v4).await,
+            match &probe.v6 {
+                Some(u) => echo_daemon(u).await,
+                None => None,
+            },
+        )
+    } else {
+        (None, None)
+    };
     let daemon_route = typhon_engine::egress::route();
     {
         let mut cache = public_ip.lock().await;
@@ -77,11 +115,17 @@ pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: 
             _ if engine.blocked.get().is_some() => (None, None),
             None if daemon_route.is_direct() => (proc_v4.clone(), proc_v6.clone()),
             None if daemon_route.kill_switch => (None, None),
-            None => (echo(None, ECHO_V4).await, echo(None, ECHO_V6).await),
-            Some(_) => (echo(bound, ECHO_V4).await, echo(bound, ECHO_V6).await),
+            // The probe is off: nothing is asked for this engine either.
+            _ if !probe.enabled => (None, None),
+            None => (echo(None, &probe.v4).await, echo_v6(None, probe).await),
+            Some(_) => (echo(bound, &probe.v4).await, echo_v6(bound, probe).await),
         };
 
-        rows.push(row(&engine, bound.is_some(), v4, v6));
+        let mut r = row(&engine, bound.is_some(), v4, v6);
+        if !probe.enabled && engine.blocked.get().is_none() {
+            mark_unknown(&mut r);
+        }
+        rows.push(r);
     }
 
     let now = std::time::SystemTime::now()
@@ -90,6 +134,21 @@ pub async fn measure(engines: &Arc<EngineHost>, snapshot: &Snapshot, public_ip: 
         .unwrap_or(0);
     let mut slot = snapshot.lock().await;
     *slot = (rows, now);
+}
+
+/// The probe is off: the row says its exit address is unknown, not that the
+/// probe failed.
+fn mark_unknown(row: &mut serde_json::Value) {
+    row["state"] = "unknown".into();
+    row["exit_probe"] = "off".into();
+    row["detail"] = "exit address unknown: [daemon] exit_probe = false".into();
+}
+
+async fn echo_v6(device: Option<&str>, probe: &Probe) -> Option<String> {
+    match &probe.v6 {
+        Some(u) => echo(device, u).await,
+        None => None,
+    }
 }
 
 /// One engine's row of the header panel.

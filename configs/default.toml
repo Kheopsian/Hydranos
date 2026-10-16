@@ -42,6 +42,14 @@ create_torrent_folder = false
 # the Nodes page prints). Empty = the Host header of the request that asked for
 # it, which is whatever name the browser used. Set it behind a reverse proxy.
 # public_url = "https://hydra.example.net:9443"
+# Exit-address probe. The daemon asks an address-echo service which address it
+# leaves by (header, /api/public-ip, Network tab check) every 3 minutes.
+# exit_probe = false sends nothing to any echo service: whatever needs that
+# address then reads "unknown". exit_probe_url names another service (it must
+# answer a bare address); the IPv6-only measurement is made for the default
+# service only.
+# exit_probe = true
+# exit_probe_url = "https://api.ipify.org/"
 
 # SOCKS5 proxy for the daemon's own requests with egress = "proxy" (socks5h:
 # names are resolved by the proxy). The engines' proxy is socks5_outbound_* in
