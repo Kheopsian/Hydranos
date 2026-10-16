@@ -62,6 +62,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   past it, instead of being held whole in memory; at most 1000 peers are
   taken from one answer; an error page is quoted from its first 800 bytes
   without reading the rest.
+- A webseed range is read up to the size asked for and refused past it. A
+  webseed redirect is no longer followed to a loopback, private or
+  link-local address unless it stays on the mirror's own host.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
