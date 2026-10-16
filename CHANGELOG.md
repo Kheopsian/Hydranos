@@ -54,18 +54,22 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   make it refused. A multi-file torrent with a file whose path names nothing,
   and a truncated bencoded list or dict, are refused as well.
 - A block from a peer is kept only if that peer was fetching its piece. A
-  peer that alone sent two pieces failing their hash is disconnected, and
-  refused on that torrent while it downloads; a piece filled by several peers
-  in endgame charges none of them.
+  peer that alone sent two pieces failing their hash is disconnected, and its
+  address refused on that torrent until the torrent completes (everyone
+  behind the same address with it); a piece filled by several peers in
+  endgame charges none of them.
 
-Each of these was reproduced by a failing test before the fix.
+Each of these was reproduced by a failing test before the fix, except the
+refusal of the address, which was shown on an isolated bench only.
 
 ### Fixed
 
 - Hardened without a reproduction: the files pieces were written to are
   synced to disk before the resume sweep and the completion record save the
-  bitfield that claims them, so after a power cut a torrent cannot hold a
-  piece marked verified whose bytes never reached the disk.
+  bitfield that claims them (a completion syncs only its own torrent's files),
+  so after a power cut a torrent cannot hold a piece marked verified whose
+  bytes never reached the disk. A file whose sync fails is retried at the next
+  sweep; the state is saved regardless.
 - A download folder that cannot be created is reported as such, instead of
   as the failed open that followed it.
 
