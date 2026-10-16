@@ -91,6 +91,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A peer message's announced length is no longer reserved in full before
   its bytes arrive: the read buffer grows 32 KiB at a time, so a frame
   announced and never sent does not hold 256 KiB per connection.
+- The web UI's event stream no longer waits on a page that stops reading,
+  and the engine's event bus no longer keeps every event since for it. What
+  the page cannot take yet is folded (the latest figures per torrent, every
+  removal) and sent once it reads again.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
