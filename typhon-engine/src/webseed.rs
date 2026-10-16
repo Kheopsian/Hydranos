@@ -112,6 +112,16 @@ pub struct WebseedState {
     n_spans: std::sync::atomic::AtomicU64,
     n_reqs: std::sync::atomic::AtomicU64,
     n_bytes: std::sync::atomic::AtomicU64,
+    /// `webseed_private = false`: a private torrent never contacts the mirrors
+    /// of its `url-list`. Inverted so the Default (false) is the behaviour so
+    /// far; `start` sets it from the config.
+    no_private: std::sync::atomic::AtomicBool,
+}
+
+impl WebseedState {
+    pub fn set_private_allowed(&self, allowed: bool) {
+        self.no_private.store(!allowed, Ordering::Relaxed);
+    }
 }
 
 fn add_ns(c: &std::sync::atomic::AtomicU64, t: std::time::Instant) {
@@ -381,6 +391,14 @@ fn wants_webseed(t: &TorrentState) -> bool {
     }
 }
 
+/// `wants_webseed`, and the engine's `webseed_private` setting.
+fn wants_webseed_in(t: &TorrentState, ws: &WebseedState) -> bool {
+    if t.meta.private && ws.no_private.load(Ordering::Relaxed) {
+        return false;
+    }
+    wants_webseed(t)
+}
+
 /// Pull pieces for one torrent until it completes, stalls, or hits the claim
 /// budget. Returns how many pieces were verified and written.
 async fn drive_torrent(
@@ -400,7 +418,7 @@ async fn drive_torrent(
     let owner = crate::torrent::piece_picker::new_owner();
 
     while budget > 0 {
-        if !wants_webseed(t) {
+        if !wants_webseed_in(t, ws) {
             break;
         }
         let picker = match t.picker.get() {
@@ -628,7 +646,7 @@ async fn scanner(mgr: Arc<TorrentManager>) {
                     // opens on `url_list.is_empty()`, so the two DashMap
                     // lookups below -- two SipHash rounds each -- are now paid
                     // only for torrents that could actually use a mirror.
-                    if !wants_webseed(t) {
+                    if !wants_webseed_in(t, ws) {
                         return false;
                     }
                     let ih = t.info_hash;
@@ -665,7 +683,7 @@ fn next_candidate(mgr: &TorrentManager) -> Option<Arc<TorrentState>> {
             continue; // another worker got there first
         }
         match mgr.get(&ih) {
-            Some(t) if wants_webseed(&t) => return Some(t),
+            Some(t) if wants_webseed_in(&t, ws) => return Some(t),
             _ => {
                 // Gone or finished between the scan and now.
                 ws.claimed.remove(&ih);
@@ -772,6 +790,7 @@ pub fn start(mgr: Arc<TorrentManager>, cfg: &EngineConfig) {
             return;
         }
     };
+    mgr.webseed().set_private_allowed(cfg.webseed_private);
     let workers = cfg.webseed_max_concurrent.max(1);
     let disk = mgr.disk().clone();
     {
@@ -1077,6 +1096,10 @@ mod gate_tests {
     /// Bencode lengths are COMPUTED. `url-list` is what makes a torrent
     /// webseedable at all.
     fn torrent_bytes(name: &str, webseed: Option<&str>) -> Vec<u8> {
+        torrent_bytes_with(name, webseed, false)
+    }
+
+    fn torrent_bytes_with(name: &str, webseed: Option<&str>, private: bool) -> Vec<u8> {
         let mut info = Vec::new();
         info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
         info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
@@ -1084,6 +1107,9 @@ mod gate_tests {
         piece[0] = name.as_bytes()[0];
         piece[1] = name.len() as u8;
         info.extend_from_slice(&piece);
+        if private {
+            info.extend_from_slice(b"7:privatei1e");
+        }
         info.push(b'e');
 
         let announce = "https://tracker.example/announce";
@@ -1157,6 +1183,43 @@ mod gate_tests {
             t.status.store(status as u8, Ordering::Relaxed);
             assert!(!wants_webseed(&t), "{status:?} must not pull");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Default unchanged (no new symbol, so it also compiles on the parent): a
+    /// private torrent with a `url-list` still wants its webseeds.
+    #[test]
+    fn a_private_torrent_with_a_url_list_still_pulls_by_default() {
+        let (mgr, root) = manager("privdefault");
+        let bytes = torrent_bytes_with("privdef", Some("https://archive.example/files/"), true);
+        let (ih, _) = mgr.add_torrent_bytes(&bytes, "/tmp", false, false).unwrap();
+        let t = mgr.get(&ih).unwrap();
+        assert!(t.meta.private, "the fixture must really be private");
+        assert!(wants_webseed(&t));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With `webseed_private = false` a private torrent never contacts the
+    /// mirrors its `url-list` names; a public one is unaffected, and the
+    /// default (private allowed) is the behaviour so far.
+    #[test]
+    fn a_private_torrent_skips_its_webseeds_when_the_option_says_so() {
+        let (mgr, root) = manager("privopt");
+        let mut ids = Vec::new();
+        for (name, private) in [("pub", false), ("priv", true)] {
+            let bytes = torrent_bytes_with(name, Some("https://archive.example/files/"), private);
+            let (ih, _) = mgr.add_torrent_bytes(&bytes, "/tmp", false, false).unwrap();
+            ids.push(mgr.get(&ih).unwrap());
+        }
+        let (public, private) = (&ids[0], &ids[1]);
+        assert!(private.meta.private, "the fixture must really be private");
+        let ws = mgr.webseed();
+        assert!(wants_webseed_in(public, ws) && wants_webseed_in(private, ws), "default: both pull");
+        ws.set_private_allowed(false);
+        assert!(wants_webseed_in(public, ws), "a public torrent still pulls");
+        assert!(!wants_webseed_in(private, ws), "a private torrent no longer does");
+        ws.set_private_allowed(true);
+        assert!(wants_webseed_in(private, ws));
         let _ = std::fs::remove_dir_all(root);
     }
 
