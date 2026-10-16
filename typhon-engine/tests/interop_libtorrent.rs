@@ -469,7 +469,7 @@ async fn interop_hydranos_resolves_a_magnet_from_libtorrent() {
     }
     if dict.is_none() {
         let b = &cfg.resolved_bindings()[0];
-        let direct = typhon_engine::peer::metadata::fetch_from_peer(peer, ih, b.peer_id, None, b.advertised_port, b.egress.clone()).await;
+        let direct = typhon_engine::peer::metadata::fetch_from_peer(peer, ih, b.peer_id, None, b.advertised_port, b.egress.clone(), us.mgr.policy().clone()).await;
         eprintln!("[interop] magnet: last failure {last:?}; asked directly: {:?}; qBittorrent says {}", direct.map(|d| d.len()), q.info(&hash).await);
     }
     let dict = dict.expect("the metadata arrived within a minute");
