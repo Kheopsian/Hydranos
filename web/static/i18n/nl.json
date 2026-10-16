@@ -17,6 +17,8 @@
   "Configuration": "Configuratie",
   "Confirm password": "Wachtwoord bevestigen",
   "Create account": "Account aanmaken",
+  "Setup code": "Installatiecode",
+  "The setup code is printed in the Hydranos log at startup (docker logs hydranos, journalctl -u hydranos, or hydranos.log).": "De installatiecode staat bij het opstarten in het Hydranos-logboek (docker logs hydranos, journalctl -u hydranos of hydranos.log).",
   "Create your admin account to get started.": "Maak uw beheerdersaccount aan om te beginnen.",
   "Delete": "Verwijderen",
   "Delete engine {id}? It stops seeding right away.": "Agent local-{id} verwijderen? De agent stopt meteen met seeden.",

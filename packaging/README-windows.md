@@ -18,6 +18,8 @@ folder and `hydranos.log` beside itself on first run, generating an API key.
 You will find it in the notification area, next to the clock.
 
 3. Open the web UI at `http://127.0.0.1:8199` - or double-click the tray icon.
+   To create the admin account it asks for a one-time setup code: it is the
+   `setup code` line near the top of `hydranos.log`.
 
 To change ports or paths, edit the `default.toml` it created and restart.
 Pass `--config <path>` to keep it somewhere else.
