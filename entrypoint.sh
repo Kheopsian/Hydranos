@@ -38,54 +38,64 @@ set -- --config "$CFG_DIR/default.toml" "$@"
 # covers a shell that does not.
 ulimit -n 1000000 2>/dev/null || ulimit -n 200000 2>/dev/null || true
 
-# PUID/PGID (linuxserver convention): when either is set, run as that uid/gid so
-# the files Hydra writes are owned by your user and *arr can hardlink them.
-# Unset (the default) keeps the historical behaviour: everything runs as root.
-if [ -n "$PUID" ] || [ -n "$PGID" ]; then
-    if [ "$(id -u)" != "0" ]; then
+# PUID/PGID (linuxserver convention): the uid/gid the daemon runs as, 1000 when
+# unset, so the files it writes are owned by your user and *arr can hardlink
+# them. Like qBittorrent's image, it never runs as root unless asked: PUID=0
+# keeps root, which is how every container ran before 4.5.
+if [ "$(id -u)" != "0" ]; then
+    if [ -n "$PUID" ] || [ -n "$PGID" ]; then
         echo "hydranos: already running as uid $(id -u), ignoring PUID/PGID"
-    else
-        RUN_UID="${PUID:-1000}"
-        RUN_GID="${PGID:-1000}"
-        # Re-point the baked-in hydranos account, reusing an existing account when
-        # the id is already taken (uid 99/gid 100 on Unraid map to nobody/users).
-        EXIST_GRP="$(getent group "$RUN_GID" | cut -d: -f1)"
-        if [ -z "$EXIST_GRP" ]; then
-            groupmod -o -g "$RUN_GID" hydranos
-            EXIST_GRP=hydranos
-        fi
-        EXIST_USR="$(getent passwd "$RUN_UID" | cut -d: -f1)"
-        if [ -z "$EXIST_USR" ]; then
-            usermod -o -u "$RUN_UID" -g "$RUN_GID" hydranos
-            EXIST_USR=hydranos
-        fi
-        # The config directory is small (config, resume data, SQLite store), so
-        # a recursive chown is cheap. The payload directory is NOT touched: it
-        # can hold millions of files, and its ownership is yours to manage.
-        # Skip with HYDRANOS_SKIP_CHOWN=1 if you already got the permissions right.
-        if [ "$HYDRANOS_SKIP_CHOWN" != "1" ]; then
-            chown -R "$RUN_UID:$RUN_GID" "$CFG_DIR" 2>/dev/null || \
-                echo "hydranos: could not chown $CFG_DIR, continuing"
-        fi
-        echo "hydranos: dropping privileges to $RUN_UID:$RUN_GID ($EXIST_USR:$EXIST_GRP)"
-        # Managed WireGuard (the Network tab's WireGuard mode) runs `ip` and
-        # `wg`, and fwmark-based VPN routing sets SO_MARK: both need
-        # CAP_NET_ADMIN. It is lost when we drop privileges, so keep it as an
-        # AMBIENT capability -- inherited by `ip` and `wg` -- only when asked
-        # for (HYDRANOS_CAP_NET_ADMIN=1). It is not needed otherwise.
-        if [ "$HYDRANOS_CAP_NET_ADMIN" = "1" ] && command -v capsh >/dev/null 2>&1; then
-            # The container only has CAP_NET_ADMIN if it was granted one
-            # (--cap-add=NET_ADMIN or --privileged). Probe before exec'ing, so a
-            # container without it still starts instead of dying on capsh.
-            if capsh --caps="cap_net_admin+eip cap_setuid+ep cap_setgid+ep" \
-                --addamb=cap_net_admin -- -c true >/dev/null 2>&1; then
-                exec capsh --caps="cap_net_admin+eip cap_setuid+ep cap_setgid+ep" \
-                    --keep=1 --user="$EXIST_USR" --addamb=cap_net_admin \
-                    -- -c 'exec hydranos "$@"' hydranos "$@"
-            fi
-            echo "hydranos: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN for managed WireGuard and fwmark routing"
-        fi
-        exec gosu "$RUN_UID:$RUN_GID" hydranos "$@"
     fi
+elif [ "${PUID:-1000}" = "0" ]; then
+    echo "hydranos: PUID=0, running as root"
+else
+    RUN_UID="${PUID:-1000}"
+    RUN_GID="${PGID:-1000}"
+    # Re-point the baked-in hydranos account, reusing an existing account when
+    # the id is already taken (uid 99/gid 100 on Unraid map to nobody/users).
+    EXIST_GRP="$(getent group "$RUN_GID" | cut -d: -f1)"
+    if [ -z "$EXIST_GRP" ]; then
+        groupmod -o -g "$RUN_GID" hydranos
+        EXIST_GRP=hydranos
+    fi
+    EXIST_USR="$(getent passwd "$RUN_UID" | cut -d: -f1)"
+    if [ -z "$EXIST_USR" ]; then
+        usermod -o -u "$RUN_UID" -g "$RUN_GID" hydranos
+        EXIST_USR=hydranos
+    fi
+    # The config directory is small (config, resume data, SQLite store), so
+    # a recursive chown is cheap. The payload directory is NOT touched: it
+    # can hold millions of files, and its ownership is yours to manage.
+    # Skip with HYDRANOS_SKIP_CHOWN=1 if you already got the permissions right.
+    # The payload directory itself is handed over too, not what is in it, so
+    # a fresh volume is writable; folders an older root container created
+    # in it are left for you to chown.
+    if [ "$HYDRANOS_SKIP_CHOWN" != "1" ]; then
+        chown -R "$RUN_UID:$RUN_GID" "$CFG_DIR" 2>/dev/null || \
+            echo "hydranos: could not chown $CFG_DIR, continuing"
+        if [ -d /data ]; then
+            chown "$RUN_UID:$RUN_GID" /data 2>/dev/null || \
+                echo "hydranos: could not chown /data, continuing"
+        fi
+    fi
+    echo "hydranos: dropping privileges to $RUN_UID:$RUN_GID ($EXIST_USR:$EXIST_GRP)"
+    # Managed WireGuard (the Network tab's WireGuard mode) runs `ip` and
+    # `wg`, and fwmark-based VPN routing sets SO_MARK: both need
+    # CAP_NET_ADMIN. It is lost when we drop privileges, so keep it as an
+    # AMBIENT capability -- inherited by `ip` and `wg` -- only when asked
+    # for (HYDRANOS_CAP_NET_ADMIN=1). It is not needed otherwise.
+    if [ "$HYDRANOS_CAP_NET_ADMIN" = "1" ] && command -v capsh >/dev/null 2>&1; then
+        # The container only has CAP_NET_ADMIN if it was granted one
+        # (--cap-add=NET_ADMIN or --privileged). Probe before exec'ing, so a
+        # container without it still starts instead of dying on capsh.
+        if capsh --caps="cap_net_admin+eip cap_setuid+ep cap_setgid+ep" \
+            --addamb=cap_net_admin -- -c true >/dev/null 2>&1; then
+            exec capsh --caps="cap_net_admin+eip cap_setuid+ep cap_setgid+ep" \
+                --keep=1 --user="$EXIST_USR" --addamb=cap_net_admin \
+                -- -c 'exec hydranos "$@"' hydranos "$@"
+        fi
+        echo "hydranos: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN for managed WireGuard and fwmark routing"
+    fi
+    exec gosu "$RUN_UID:$RUN_GID" hydranos "$@"
 fi
 exec hydranos "$@"

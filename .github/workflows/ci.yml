@@ -99,13 +99,15 @@ jobs:
           shellcheck tools/interop/run.sh
           shellcheck -s sh packaging/install.sh packaging/test-install.sh
           shellcheck -s sh install.sh packaging/test-enrol.sh
-          shellcheck -s sh packaging/test-unit.sh
+          shellcheck -s sh packaging/test-unit.sh packaging/test-entrypoint.sh
       - name: Bare-metal installer, run as root in a container
         run: sh packaging/test-install.sh
       - name: Node enrolment script, against a stand-in controller
         run: sh packaging/test-enrol.sh
       - name: systemd unit sandboxing, rated by systemd-analyze
         run: sh packaging/test-unit.sh
+      - name: Container entrypoint, who the daemon runs as
+        run: sh packaging/test-entrypoint.sh
 
   # The conformance suite in `rust` checks the client against OUR reading of
   # the BEPs, on trackers we wrote for the purpose. This checks it against
