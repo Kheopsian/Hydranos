@@ -17,7 +17,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -129,13 +129,22 @@ fn admit_quota(total: usize) -> usize {
 ///
 /// FNV-1a over the hash: no dependency, and hex info hashes differing in one
 /// character land far apart.
+///
+/// Salted with a value drawn once per process: stable for the whole session,
+/// so everything above holds, but the phase is not a function of the info hash
+/// alone -- it differs between two installs and across a restart.
 fn spread(info_hash: &str, window: Duration) -> Duration {
+    static SALT: OnceLock<u64> = OnceLock::new();
+    spread_with_salt(*SALT.get_or_init(rand::random::<u64>), info_hash, window)
+}
+
+fn spread_with_salt(salt: u64, info_hash: &str, window: Duration) -> Duration {
     let millis = window.as_millis() as u64;
     if millis == 0 {
         return Duration::ZERO;
     }
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in info_hash.as_bytes() {
+    for b in salt.to_le_bytes().iter().chain(info_hash.as_bytes()) {
         h ^= *b as u64;
         h = h.wrapping_mul(0x1000_0000_01b3);
     }
@@ -1101,6 +1110,23 @@ mod tests {
             "two torrents must not share one offset"
         );
         assert_eq!(spread(&h, Duration::ZERO), Duration::ZERO, "a zero window is not a panic");
+    }
+
+    /// The phase is not a property of the info hash alone: two processes (two
+    /// installs, or one install across a restart) place the same torrent at
+    /// different offsets, so where a torrent announces cannot be predicted
+    /// from its hash by anyone outside.
+    #[test]
+    fn the_offset_changes_with_the_process_salt() {
+        let h = "a".repeat(40);
+        let window = RECONCILE;
+        assert_eq!(spread_with_salt(1, &h, window), spread_with_salt(1, &h, window));
+        let distinct: std::collections::HashSet<Duration> =
+            (0..16u64).map(|salt| spread_with_salt(salt, &h, window)).collect();
+        assert!(
+            distinct.len() > 1,
+            "16 different salts gave one phase: the offset is a function of the hash alone"
+        );
     }
 
     fn fresh(hash: &str) -> State {
