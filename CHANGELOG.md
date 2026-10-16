@@ -46,6 +46,28 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   with the cap. The default applies to upgraded installs too, whose config
   file predates the key; an explicit `max_dials_per_sec = 0` keeps the old
   unlimited behaviour.
+- A `.torrent` with two top-level `info` dicts is refused: the info-hash and
+  the file list are always read from the same one.
+- The numbers of a `.torrent` are checked rather than cast: a piece length
+  that is not a positive 32-bit value, a negative file length, file lengths
+  whose sum overflows, or a piece count that does not match the total size
+  make it refused. A multi-file torrent with a file whose path names nothing,
+  and a truncated bencoded list or dict, are refused as well.
+- A block from a peer is kept only if that peer was fetching its piece. A
+  peer that alone sent two pieces failing their hash is disconnected, and
+  refused on that torrent while it downloads; a piece filled by several peers
+  in endgame charges none of them.
+
+Each of these was reproduced by a failing test before the fix.
+
+### Fixed
+
+- Hardened without a reproduction: the files pieces were written to are
+  synced to disk before the resume sweep and the completion record save the
+  bitfield that claims them, so after a power cut a torrent cannot hold a
+  piece marked verified whose bytes never reached the disk.
+- A download folder that cannot be created is reported as such, instead of
+  as the failed open that followed it.
 
 ### Correction to v4.4.4
 
