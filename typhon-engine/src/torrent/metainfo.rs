@@ -533,23 +533,32 @@ pub fn info_dict_from_file(path: &str) -> Result<Vec<u8>, String> {
 /// `comment` (or any string that sorts before `info`) can embed `4:infod...e`
 /// and steal the identity of another torrent, or embed a length that loops the
 /// scanner. Reading each value by its declared length skips such strings whole.
+///
+/// A second `info` key is refused: the hash would name the first while the
+/// decoder's map keeps the last, so the torrent would carry one identity and
+/// another's files.
 fn find_info_raw(data: &[u8]) -> Result<Vec<u8>, String> {
     if data.first() != Some(&b'd') {
         return Err("torrent is not a dict".into());
     }
+    let mut found: Option<(usize, usize)> = None;
     let mut i = 1;
     while i < data.len() && data[i] != b'e' {
         let (key, after) = raw_string(data, i)?;
         let end = skip_value(data, after)?;
         if key == b"info" {
+            if found.is_some() {
+                return Err("torrent has two info dicts".into());
+            }
             if data.get(after) != Some(&b'd') {
                 return Err("info value is not a dict".into());
             }
-            return Ok(data[after..end].to_vec());
+            found = Some((after, end));
         }
         i = end;
     }
-    Err("cannot find info dict".into())
+    let (start, end) = found.ok_or("cannot find info dict")?;
+    Ok(data[start..end].to_vec())
 }
 
 /// Depth beyond which a bencode structure is refused rather than recursed into
@@ -1012,6 +1021,29 @@ mod tests {
         let single = parse_torrent_bytes(&v.torrent).unwrap();
         assert!(!single.multi_file, "one file at the top is a single-file torrent");
         assert_eq!(single.files[0].path, std::path::PathBuf::from("a.bin"));
+    }
+
+    /// The info hash is taken over the first `info` and the files were read
+    /// from the last: one torrent's identity with another's names. A metainfo
+    /// has one `info`; two are refused.
+    #[test]
+    fn a_second_info_dict_is_refused() {
+        let info = |name: &str| {
+            let mut i = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+            i.extend([1u8; 20]);
+            i.push(b'e');
+            i
+        };
+        let mut t = b"d4:info".to_vec();
+        t.extend(info("a.bin"));
+        t.extend(b"4:info");
+        t.extend(info("b.exe"));
+        t.push(b'e');
+        match parse_torrent_bytes(&t) {
+            Ok(m) => panic!("accepted two info dicts, hashed one and named {:?}", m.name),
+            Err(e) => assert!(e.contains("info"), "{e}"),
+        }
+        assert!(piece_hashes_from_bytes(&t).is_err());
     }
 
     #[test]
