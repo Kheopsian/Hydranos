@@ -790,6 +790,68 @@ pub fn accepts_inbound(t: &crate::torrent::meta::TorrentState) -> bool {
     !t.is_paused.load(Ordering::Relaxed) && !t.is_removed.load(Ordering::Relaxed)
 }
 
+/// Inbound connections still in their handshake, all listeners together.
+/// A handshake takes a round trip or two; these bound what silent sockets can
+/// hold for the 30 s the handshake is given, before any torrent is named.
+const MAX_HANDSHAKING: usize = 4096;
+/// The same, per source: an IPv4 address, or an IPv6 /64 (one host's usual
+/// allocation, which it can spread connections over freely).
+const MAX_HANDSHAKING_PER_SOURCE: u32 = 32;
+static HANDSHAKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HANDSHAKING_BY_SOURCE: std::sync::OnceLock<dashmap::DashMap<std::net::IpAddr, u32>> = std::sync::OnceLock::new();
+
+/// Inbound connections closed unread because too many were already in their
+/// handshake, from that source or overall.
+pub static INBOUND_REFUSED_BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn handshake_source(ip: std::net::IpAddr) -> std::net::IpAddr {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let s = v6.segments();
+                IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+        v4 => v4,
+    }
+}
+
+/// One inbound connection's place among those in their handshake, given back
+/// when dropped.
+struct HandshakeSlot(std::net::IpAddr);
+
+impl HandshakeSlot {
+    fn take(ip: std::net::IpAddr) -> Option<HandshakeSlot> {
+        use std::sync::atomic::Ordering;
+        if HANDSHAKING.fetch_add(1, Ordering::Relaxed) >= MAX_HANDSHAKING {
+            HANDSHAKING.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        let key = handshake_source(ip);
+        let mut n = HANDSHAKING_BY_SOURCE.get_or_init(Default::default).entry(key).or_insert(0);
+        if *n >= MAX_HANDSHAKING_PER_SOURCE {
+            drop(n);
+            HANDSHAKING.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        *n += 1;
+        Some(HandshakeSlot(key))
+    }
+}
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        HANDSHAKING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        let map = HANDSHAKING_BY_SOURCE.get_or_init(Default::default);
+        if let Some(mut n) = map.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+        }
+        map.remove_if(&self.0, |_, n| *n == 0);
+    }
+}
+
 async fn handle_incoming(
     mut stream: PeerTransport,
     addr: SocketAddr,
@@ -810,7 +872,13 @@ async fn handle_incoming(
         crate::ipfilter::BLOCKED_IN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     }
-    info!("[peer] incoming {} from {}", stream.kind(), addr);
+    let Some(slot) = HandshakeSlot::take(addr.ip()) else {
+        INBOUND_REFUSED_BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return;
+    };
+    // Debug, not info: anyone who can reach the port decides how often it is
+    // written. `INBOUND_ACCEPTED` counts them.
+    tracing::debug!("[peer] incoming {} from {}", stream.kind(), addr);
     if !crate::tracker::is_self_ip(addr.ip()) {
         INBOUND_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         torrent_mgr.note_inbound_peer();
@@ -934,6 +1002,7 @@ async fn handle_incoming(
         }
     };
 
+    drop(slot);
     let framed = Framed::new(crypto_stream, BtCodec::new());
     // What the peer is told to call back on (BEP 10 `p`): read now, so it is
     // the public port behind a translating NAT and the new one after a rebind.
@@ -1262,5 +1331,107 @@ mod accept_error_tests {
             let spent = cpu_ms() - before;
             assert!(spent < 300, "the accept loop burnt {spent} ms of CPU in one second");
         });
+    }
+}
+
+#[cfg(test)]
+mod handshake_cap_tests {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncReadExt;
+
+    fn manager(tag: &str) -> (Arc<crate::torrent::TorrentManager>, Arc<crate::disk::DiskManager>) {
+        let root = std::env::temp_dir().join(format!("typhon-hscap-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("r")).unwrap();
+        let disk = Arc::new(crate::disk::DiskManager::new(1));
+        let mgr = Arc::new(crate::torrent::TorrentManager::new(
+            root.to_string_lossy().into_owned(),
+            root.join("r").to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        (mgr, disk)
+    }
+
+    /// ⭐ One source cannot park more than 32 silent connections in the
+    /// handshake: past that, the listener closes them at once instead of
+    /// holding each for the 30 s handshake timeout. The source is 127.0.0.77
+    /// so no other test's connections share its count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_source_cannot_park_more_than_32_silent_handshakes() {
+        let (mgr, disk) = manager("src");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let server = tokio::spawn(super::tcp_accept_loop(listener, mgr, disk, [7u8; 20], None, at.port()));
+        let mut socks = Vec::new();
+        for _ in 0..64 {
+            let s = tokio::net::TcpSocket::new_v4().unwrap();
+            s.bind("127.0.0.77:0".parse().unwrap()).unwrap();
+            socks.push(s.connect(at).await.unwrap());
+        }
+        let closed = futures::future::join_all(socks.iter_mut().map(|s| async move {
+            let mut b = [0u8; 1];
+            matches!(tokio::time::timeout(std::time::Duration::from_secs(2), s.read(&mut b)).await, Ok(Ok(0)) | Ok(Err(_)))
+        }))
+        .await
+        .into_iter()
+        .filter(|c| *c)
+        .count();
+        server.abort();
+        assert_eq!(closed, 32, "the 32 connections past the cap are closed, the first 32 are not");
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    /// An inbound connection writes nothing at the default level (info):
+    /// whoever reaches the port would otherwise choose how fast the log grows.
+    /// Run alone in a child process: `tracing` caches per call site whether
+    /// anyone listens, and a test on another thread can leave it at "no".
+    #[test]
+    fn an_inbound_connection_is_not_logged_at_info() {
+        const NAME: &str = "peer::handshake_cap_tests::an_inbound_connection_is_not_logged_at_info";
+        if std::env::var_os("TYPHON_LOG_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env("TYPHON_LOG_CHILD", "1")
+                .output()
+                .unwrap();
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && text.contains("1 passed"), "{text}");
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(inbound_log_child());
+    }
+
+    async fn inbound_log_child() {
+        let out = Captured::default();
+        let sub = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).with_writer(out.clone()).finish();
+        let _g = tracing::subscriber::set_default(sub);
+        let (mgr, disk) = manager("log");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let c = tokio::net::TcpStream::connect(at).await.unwrap();
+        let (s, addr) = listener.accept().await.unwrap();
+        drop(c);
+        super::handle_incoming(super::PeerTransport::Tcp(s), addr, mgr, disk, [7u8; 20], None, at.port()).await;
+        tracing::info!("[peer] control line");
+        let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
+        assert!(text.contains("control line"), "the capture works: {text:?}");
+        assert!(!text.contains("incoming"), "logged at info: {text}");
     }
 }
