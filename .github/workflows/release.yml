@@ -15,6 +15,11 @@ on:
 
 permissions:
   contents: write
+  # Signed build provenance for each archive (actions/attest-build-provenance):
+  # a short-lived OIDC identity, no key to keep. Check one with
+  #   gh attestation verify <archive> --repo Kheopsian/Hydranos
+  id-token: write
+  attestations: write
 
 # The tag this run is about. On a tag push it is the pushed tag, which keeps the
 # automatic path byte-identical to what it was; on a manual run it is the input.
@@ -177,6 +182,11 @@ jobs:
           tar czf "${DIR}.tar.gz" "$DIR"
           sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
 
+      - name: Attest the archive's provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: hydranos-*-linux-*.tar.gz
+
       - name: Publish to the GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -256,6 +266,11 @@ jobs:
           Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"
           $hash = (Get-FileHash "$DIR.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $DIR.zip" | Out-File -Encoding ascii "$DIR.zip.sha256"
+
+      - name: Attest the archive's provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: hydranos-*-windows-*.zip
 
       - name: Publish to the GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

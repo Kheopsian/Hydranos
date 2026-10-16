@@ -135,6 +135,10 @@ refusal of the address, which was shown on an isolated bench only.
 - Builds are reproducible from the repository: GitHub Actions are pinned by
   commit SHA, base images by digest, and every cargo build is `--locked`. CI
   enforces it.
+- Each release archive carries a signed build provenance from GitHub
+  Actions: `gh attestation verify <archive> --repo Kheopsian/Hydranos` checks
+  that it was built by this repository's release workflow. The updater and
+  the enrolment script still check the SHA-256 only.
 - The release purge workflow only acts on tag-shaped names (hardened without
   a reproduction).
 - A Transmission library upload is held in memory once instead of twice
