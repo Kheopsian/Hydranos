@@ -145,6 +145,7 @@ pub fn start(
     // when it has one. A magnet announced directly would hand the tracker
     // this host's address before the torrent even exists.
     let http_proxy = config.http_proxy();
+    let ip_mode = announce_ip_mode(config.enable_ipv6);
     let jobs = self.clone();
     tokio::spawn(async move {
         // Rounds until the budget runs out, not one. A peer that is still
@@ -165,7 +166,7 @@ pub fn start(
             round += 1;
             if discovered_at.map_or(true, |t| t.elapsed() >= DISCOVERY_EVERY) {
                 discovered_at = Some(Instant::now());
-                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone(), &egress.device, &http_proxy).await {
+                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone(), &egress.device, &http_proxy, ip_mode).await {
                     if !peers.contains(&p) {
                         peers.push(p);
                     }
@@ -205,6 +206,16 @@ pub fn start(
 }
 }
 
+/// The address family a magnet's announces use: both only when the engine
+/// listens on IPv6, v4 alone otherwise -- as its torrents' announces do.
+fn announce_ip_mode(enable_ipv6: bool) -> crate::tracker::http::IpMode {
+    if enable_ipv6 {
+        crate::tracker::http::IpMode::Auto
+    } else {
+        crate::tracker::http::IpMode::V4
+    }
+}
+
 /// Collect peer candidates from the magnet's trackers and the DHT.
 async fn discover(
     info_hash: [u8; 20],
@@ -218,6 +229,9 @@ async fn discover(
     device: &str,
     // The engine's announce proxy (`EngineConfig::http_proxy`).
     proxy: &str,
+    // The family the announces keep to: the engine's own announces are v4
+    // only unless `enable_ipv6`, and a magnet's must not be the exception.
+    ip_mode: crate::tracker::http::IpMode,
 ) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -243,9 +257,9 @@ async fn discover(
                 num_want: 200,
                 port,
             };
-            crate::tracker::udp::send_announce_on(&a, crate::tracker::http::IpMode::Auto, device, proxy).await
+            crate::tracker::udp::send_announce_on(&a, ip_mode, device, proxy).await
         } else if url.starts_with("http://") || url.starts_with("https://") {
-            crate::tracker::http::announce_on(url, &info_hash, peer_id, port, 0, 0, UNKNOWN_LEFT, "started", device, proxy).await
+            crate::tracker::http::announce_on_mode(url, &info_hash, peer_id, port, 0, 0, UNKNOWN_LEFT, "started", device, proxy, ip_mode).await
         } else {
             continue;
         };
@@ -322,6 +336,16 @@ mod tests {
     /// empty document is the configuration a fresh install runs with.
     fn test_config() -> crate::config::EngineConfig {
         toml::from_str("").expect("every EngineConfig field has a serde default")
+    }
+
+    /// A magnet follows the engine's family policy: with IPv6 off its announces
+    /// are v4 only, like every other announce of the engine.
+    #[test]
+    fn a_magnet_announces_v4_only_while_ipv6_is_off() {
+        use crate::tracker::http::IpMode;
+        assert!(!test_config().enable_ipv6, "the default engine is v4 only");
+        assert_eq!(announce_ip_mode(test_config().enable_ipv6), IpMode::V4);
+        assert_eq!(announce_ip_mode(true), IpMode::Auto);
     }
 
     fn ih(n: u8) -> [u8; 20] {
