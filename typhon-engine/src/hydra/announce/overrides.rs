@@ -33,20 +33,21 @@ pub fn override_host(target: &str) -> String {
     }
 }
 
-/// The host part of a URL, without pulling in a URL parser for one field.
-fn url_host(u: &str) -> Option<&str> {
-    let rest = u.split_once("://")?.1;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    if let Some(end) = authority.strip_prefix('[').and_then(|a| a.find(']')) {
-        return Some(&authority[1..=end]);
-    }
-    let host = authority.split(':').next()?;
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
-    }
+/// The host part of a URL, read by the `url` crate -- the parser reqwest sends
+/// the request with.
+///
+/// ⚠ Not a hand-rolled split. One existed, and it read the host differently
+/// from reqwest wherever the WHATWG rules are surprising (a `\` ends the host
+/// of an http URL, tabs and newlines are dropped): the passkey was then picked
+/// for one host and the request went to another.
+fn url_host(u: &str) -> Option<String> {
+    let parsed = url::Url::parse(u).ok()?;
+    let host = match parsed.host()? {
+        url::Host::Domain(d) => d.to_string(),
+        url::Host::Ipv4(a) => a.to_string(),
+        url::Host::Ipv6(a) => a.to_string(),
+    };
+    (!host.is_empty()).then_some(host)
 }
 
 /// Whether a tracker host matches a configured key: the same host, or a
@@ -90,6 +91,18 @@ mod tests {
         assert_eq!(override_host("Tracker.Torr9.NET"), "tracker.torr9.net");
         assert_eq!(override_host("[2a01:e0a::1]:6969"), "2a01:e0a::1");
         assert_eq!(override_host("   "), "");
+    }
+
+    /// The host is the one reqwest will connect to. A `\` ends an http host
+    /// (WHATWG), so these go to `evil.example`, and no key for the tracker
+    /// may be picked for them.
+    #[test]
+    fn the_host_is_the_one_the_request_goes_to() {
+        assert_eq!(override_host("https://evil.example\\@tracker.example/announce/k"), "evil.example");
+        assert_eq!(override_host("https://evil.example\\.tracker.example/announce/k"), "evil.example");
+        assert_eq!(override_host("https://user:pw@tracker.example:8443/announce"), "tracker.example");
+        assert_eq!(override_host("http://[2a01:e0a::1]:6969/announce"), "2a01:e0a::1");
+        assert!(!host_key_matches(&override_host("https://evil.example\\@tracker.example/a"), "tracker.example"));
     }
 
     /// ⭐ The bug this rule exists for. A key that is a prefix of another

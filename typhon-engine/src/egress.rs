@@ -362,7 +362,9 @@ pub fn route() -> Arc<Route> {
 macro_rules! apply_route {
     ($builder:expr, $route:expr) => {{
         let route: &Route = $route;
-        let mut b = $builder.user_agent(crate::config::user_agent());
+        // No Referer: a `.torrent` link is often `/dl/ID/PASSKEY`, and a
+        // redirect to a CDN or a mirror would carry it there in the header.
+        let mut b = $builder.user_agent(crate::config::user_agent()).referer(false);
         if !route.proxy.is_empty() {
             // `no_proxy` first: an HTTP_PROXY in the environment is a second
             // way out the operator did not write here.

@@ -464,6 +464,7 @@ pub(super) async fn announce_one(
                         if let Some(w) = &resp.warning {
                             // Accepted, with a remark. Worth an operator's eye,
                             // not an error: the announce counted.
+                            let w = redact(&scrub_url_secrets(w, &req.url));
                             tracing::info!(tracker = %host, warning = %w, "tracker warning");
                         }
                         if event == "stopped" {
@@ -568,6 +569,11 @@ pub(super) async fn announce_one(
                         }
                     }
                     Err(e) => {
+                        // A tracker may quote the passkey back in its own
+                        // words ("invalid passkey KEY"), or echo the bare path:
+                        // no URL for `redact` to find, the key in clear all
+                        // the same.
+                        let e = scrub_url_secrets(&e, &req.url);
                         let kind = classify(&redact(&e));
                         // A 429 is an answer, not an outage: the tracker is up
                         // and asking us to slow down, which the scheduler does,
@@ -709,6 +715,29 @@ fn redact(message: &str) -> String {
         rest = &tail[end..];
     }
     out.push_str(rest);
+    out
+}
+
+/// A message with every long path segment or query value of `url` masked.
+///
+/// `redact` only finds a URL that starts with `http`. A passkey quoted alone
+/// -- in a tracker's failure reason, or in a relative path an error page
+/// shows -- slips past it. Short pieces (`announce`, `1`) are left: they are
+/// not credentials, and masking them would mangle the message.
+fn scrub_url_secrets(message: &str, url: &str) -> String {
+    const MIN: usize = 12;
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let path = path.split_once('/').map_or("", |(_, p)| p);
+    let pieces = path
+        .split('/')
+        .chain(query.split('&').filter_map(|kv| kv.split_once('=').map(|(_, v)| v)));
+    let mut out = message.to_string();
+    for piece in pieces {
+        if piece.len() >= MIN && !piece.starts_with("announce") {
+            out = out.replace(piece, "<redacted>");
+        }
+    }
     out
 }
 
@@ -920,6 +949,20 @@ mod classify_tests {
 
         let two = redact("https://a.example/x?k=1 and https://b.example/y?k=2");
         assert!(!two.contains("k=1") && !two.contains("k=2"), "got {two}");
+    }
+
+    /// A passkey quoted without its URL around it: `redact` has nothing to
+    /// find, the scrub takes it out by value.
+    #[test]
+    fn a_passkey_quoted_alone_is_scrubbed() {
+        let url = "https://tracker.example/abcdef0123456789abcdef0123456789/announce?info_hash=%AB";
+        let out = scrub_url_secrets("invalid passkey abcdef0123456789abcdef0123456789", url);
+        assert!(!out.contains("abcdef0123456789"), "the passkey survived: {out}");
+        let q = "https://tracker.example/announce.php?passkey=Q1w2E3r4T5y6U7i8";
+        let out = scrub_url_secrets("GET /announce.php?passkey=Q1w2E3r4T5y6U7i8: 403", q);
+        assert!(!out.contains("Q1w2E3r4T5y6U7i8"), "a query passkey survived: {out}");
+        assert!(out.contains("announce.php") && out.contains("403"), "the rest is kept: {out}");
+        assert_eq!(scrub_url_secrets("unregistered torrent", url), "unregistered torrent");
     }
 
     #[test]

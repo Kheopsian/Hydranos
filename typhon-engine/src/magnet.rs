@@ -252,7 +252,7 @@ async fn discover(
         match asked {
             Ok(resp) => {
                 if let Some(f) = resp.failure {
-                    debug!("[magnet] tracker {} refused: {}", url, f);
+                    debug!("[magnet] tracker {} refused: {}", log_host(url), f);
                     continue;
                 }
                 for p in resp.peers {
@@ -261,7 +261,7 @@ async fn discover(
                     }
                 }
             }
-            Err(e) => debug!("[magnet] tracker {} failed: {}", url, e),
+            Err(e) => debug!("[magnet] tracker {} failed: {}", log_host(url), e),
         }
         if out.len() >= MAX_PEERS {
             return out;
@@ -299,6 +299,14 @@ async fn dht_peers(
             },
         }
     }
+}
+
+/// The tracker's host, for a log line: the URL itself carries the passkey.
+fn log_host(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "<tracker>".into())
 }
 
 /// Hex for arbitrary byte slices (the torrent one is fixed at 20 bytes).
