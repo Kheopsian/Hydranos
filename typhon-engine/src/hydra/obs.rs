@@ -158,6 +158,9 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
     // left offline (`HYDRANOS_ENGINE_NET=0`, a test host) has no listener by
     // design, and calling that a fault would make the probe lie the other way.
     let online = |e: &Engine| e.engine_config.get().is_some();
+    // ... and one that chose not to listen (`listen_when_proxied = false`)
+    // is not expected to.
+    let expects_listener = |e: &Engine| e.engine_config.get().is_some_and(|c| c.listens());
     let engines: Vec<serde_json::Value> = state
         .engines
         .engines()
@@ -165,7 +168,7 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
         .map(|e| {
             let listening = e.listening.load(Relaxed);
             let held = e.manager.limiter().dials_paused();
-            if online(e) && !listening {
+            if expects_listener(e) && !listening {
                 problems.push(serde_json::json!({
                     "check": "engine", "engine": e.id, "severity": "warn",
                     "detail": format!("engine {} is not listening for peers (port {} not bound, or its tunnel is down)", e.id, e.listen_port),
@@ -194,7 +197,7 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
             })
         })
         .collect();
-    let on: Vec<&Engine> = state.engines.engines().iter().filter(|e| online(e)).collect();
+    let on: Vec<&Engine> = state.engines.engines().iter().filter(|e| expects_listener(e)).collect();
     if !on.is_empty() && on.iter().all(|e| !e.listening.load(Relaxed)) {
         fatal = true;
         problems.push(serde_json::json!({

@@ -944,6 +944,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    async fn proxied_engine(tag: &str, extra: &str) -> (EngineHost, std::path::PathBuf, u16) {
+        let dir = std::env::temp_dir().join(format!("hydra-engtest-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = free();
+        let text = format!(
+            "[daemon]\ndata_dir = {:?}\n[race]\nlisten_port = {port}\n\
+             socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = 9\n{extra}\n[hoard]\nlisten_port = {}\n\
+             socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = 9\n{extra}\n",
+            dir.to_string_lossy(),
+            free()
+        );
+        let config: Config = toml::from_str(&text).unwrap();
+        let phase = crate::startup::phase();
+        let host = EngineHost::start(&config, &dir).await;
+        crate::startup::set_phase(phase);
+        (host, dir, port)
+    }
+
+    /// `listen_when_proxied = false`: behind a SOCKS5 proxy the engine binds
+    /// no listening port, TCP or UDP.
+    #[tokio::test]
+    async fn listen_when_proxied_false_binds_no_port_behind_socks5() {
+        let (host, dir, port) = proxied_engine("noproxylisten", "listen_when_proxied = false").await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        for e in host.engines() {
+            assert!(e.engine_config.get().is_some(), "{} is on the network, proxied", e.id);
+            assert!(!e.listening.load(std::sync::atomic::Ordering::Relaxed), "{}: listening", e.id);
+            std::net::TcpListener::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: TCP {} is bound: {err}", e.id, e.listen_port));
+            std::net::UdpSocket::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: UDP {} is bound: {err}", e.id, e.listen_port));
+        }
+        let _ = port;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default is unchanged: a proxied engine still listens.
+    #[tokio::test]
+    async fn a_proxied_engine_listens_by_default() {
+        let (host, dir, _) = proxied_engine("proxylisten", "").await;
+        let race = host.engines().iter().find(|e| e.id == "race").unwrap().clone();
+        for _ in 0..100 {
+            if race.listening.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(race.listening.load(std::sync::atomic::Ordering::Relaxed), "the listener is up");
+        assert!(std::net::TcpListener::bind(("0.0.0.0", race.listen_port)).is_err(), "its port is held");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The switch is off only for the three spellings a bench would use, and
     /// on for everything else -- including an empty or misspelt value. An
     /// engine that silently stayed offline because someone wrote `HYDRANOS_ENGINE_NET=no`
@@ -1108,6 +1159,7 @@ fn engine_config(
         "listen_port_proxy_v2": pv2_port,
         "listen_addr_proxy_v2": pv2_addr,
         "proxy_v2_trusted_sources": session.proxy_v2_trusted_sources,
+        "listen_when_proxied": session.listen_when_proxied.unwrap_or(true),
     });
     // An unwritten port keeps the engine's own default (1080) rather than 0,
     // which no SOCKS5 server listens on.

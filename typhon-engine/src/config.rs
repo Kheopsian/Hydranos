@@ -199,6 +199,13 @@ pub struct EngineConfig {
     /// torrent never contacts a webseed; public torrents are unaffected.
     #[serde(default = "default_true")]
     pub webseed_private: bool,
+    /// Open the peer listening port (TCP, uTP and the PROXY v2 relay) while
+    /// `socks5_outbound_host` is set. On by default: the proxy carries what
+    /// this engine dials, and the port is what incoming peers reach, which a
+    /// forwarded port seeds through. Off: nothing is bound for listening
+    /// behind the proxy, so no inbound peer reaches the host's own address.
+    #[serde(default = "default_true")]
+    pub listen_when_proxied: bool,
     /// How many webseed fetches may be in flight for the whole engine.
     /// A fixed pool, not a task per torrent: the HTTP origin bounds
     /// throughput long before the size of the catalogue does.
@@ -389,6 +396,11 @@ mod fingerprint_tests {
 fn default_user_agent() -> String { user_agent() }
 
 impl EngineConfig {
+    /// Whether this engine opens a peer listening port at all.
+    pub fn listens(&self) -> bool {
+        self.listen_when_proxied || self.socks5_outbound_host.trim().is_empty()
+    }
+
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let data = fs::read_to_string(path)?;
         let mut config: Self = serde_json::from_str(&data)?;
