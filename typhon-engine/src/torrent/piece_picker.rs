@@ -296,7 +296,7 @@ pub struct PiecePicker {
     /// default costs one null pointer, and checked once per pick.
     order: Option<Box<PickOrder>>,
     /// Addresses cut off for sending pieces that failed their hash, refused
-    /// for as long as this torrent downloads.
+    /// until this torrent completes (see `set_have`).
     banned: std::collections::HashSet<std::net::IpAddr>,
 }
 
@@ -442,6 +442,11 @@ impl PiecePicker {
         if (index as usize) < self.have.len() {
             self.have[index as usize] = true;
             self.drop_pending(index);
+            // Complete, nothing more is fetched: the bans that protected the
+            // download end with it. Checked only when there is one to end.
+            if !self.banned.is_empty() && self.is_complete() {
+                self.banned.clear();
+            }
         }
     }
 
@@ -785,7 +790,7 @@ impl PiecePicker {
         Some((out, sole))
     }
 
-    /// Refuse this address for as long as the torrent downloads.
+    /// Refuse this address until the torrent completes.
     pub fn ban(&mut self, ip: std::net::IpAddr) {
         self.banned.insert(ip);
     }
@@ -888,6 +893,20 @@ mod receive_block_tests {
         let mut p = PiecePicker::new(1);
         p.begin_piece_for_test(0, piece_size, block_size);
         p
+    }
+
+    /// A ban lasts while the torrent downloads: once complete it fetches
+    /// nothing, and the address (and everyone behind the same NAT) may
+    /// download from us like anyone else.
+    #[test]
+    fn a_ban_ends_when_the_torrent_completes() {
+        let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let mut p = PiecePicker::new(2);
+        p.ban(ip);
+        p.set_have(0);
+        assert!(p.is_banned(ip), "still downloading");
+        p.set_have(1);
+        assert!(!p.is_banned(ip), "complete, the ban is over");
     }
 
     /// A block whose bytes do not fit must not be counted: counting it used to
