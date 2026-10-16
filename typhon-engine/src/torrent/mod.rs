@@ -1102,18 +1102,23 @@ impl TorrentManager {
         {
             return Ok(());
         }
-        if t.seed_mode || t.picker.get().is_none() {
-            t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        let target = if t.seed_mode || t.picker.get().is_none() {
+            TorrentStatus::Seeding
         } else {
             // Has a picker = was added without seed_mode = download mode
             let picker = t.picker.get().unwrap();
             let p = picker.lock().unwrap();
-            if p.is_complete() {
-                t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-            } else {
-                t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
-            }
-        }
+            if p.is_complete() { TorrentStatus::Seeding } else { TorrentStatus::Downloading }
+        };
+        // In one step with the two checks above: a recheck setting Checking
+        // between a plain read and a plain write was overwritten, which is
+        // the very clobber those checks are there to prevent.
+        let suspended = t.serving_suspended.load(Ordering::Relaxed);
+        let _ = t.status.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+            let busy = cur == TorrentStatus::Checking as u8
+                || (cur == TorrentStatus::Error as u8 && suspended);
+            (!busy).then_some(target as u8)
+        });
         // The status is settled: open the interval if this is now a seed.
         t.fold_seed_time(crate::torrent::meta::now_secs());
         Ok(())
@@ -2200,6 +2205,11 @@ impl TorrentManager {
     /// explicit skip_checking, which stays the trust-fast path.
     pub fn recheck(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
+        // One at a time per torrent: the one under way reads the files as
+        // they are now anyway.
+        if t.rechecking.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
         // A seed_mode torrent has no picker (data trusted; no bitfield -> cheap at
         // scale). To recheck it, create an all-missing picker on demand so
         // run_recheck can populate it from disk. Only rechecked torrents pay for a
@@ -2232,7 +2242,8 @@ impl TorrentManager {
         let ih = *info_hash;
         tokio::spawn(async move {
             let _permit = recheck_sem().acquire().await;
-            mgr.run_recheck(ih, t).await;
+            mgr.run_recheck(ih, t.clone()).await;
+            t.rechecking.store(false, Ordering::SeqCst);
         });
         Ok(())
     }

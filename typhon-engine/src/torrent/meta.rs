@@ -502,6 +502,10 @@ pub struct TorrentState {
     /// Without it, zombie peer tasks keep servicing Piece messages and
     /// write_piece (create=true) re-creates the files we just deleted.
     pub is_removed: AtomicBool,
+    /// A recheck of this torrent is queued or running. A second one asked
+    /// meanwhile would read and hash the whole torrent again, and the two
+    /// verdicts would land in whichever order they finish.
+    pub rechecking: AtomicBool,
 
     /// The torrent's 20-byte piece hashes: loaded from the store the
     /// first time something needs to verify data, dropped again the moment the
@@ -1090,6 +1094,7 @@ impl TorrentState {
             seed_since: AtomicI64::new(0),
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
+            rechecking: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
             v2_checks: Mutex::new(None),
             picker,
