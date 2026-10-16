@@ -54,8 +54,9 @@ COPY configs/ /app/configs/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Unprivileged account used when PUID/PGID are set (see entrypoint.sh). The
-# container still runs as root by default, so existing setups are unchanged.
+# The account the daemon runs as: uid/gid 1000 unless PUID/PGID say otherwise
+# (see entrypoint.sh). The entrypoint starts as root only to hand /config over
+# and drop to it; PUID=0 keeps root.
 RUN groupadd -g 1000 hydranos \
  && useradd -u 1000 -g 1000 -d /config -s /usr/sbin/nologin hydranos
 

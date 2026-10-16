@@ -47,8 +47,8 @@ services:
       - "16171:16171/udp"    # race uTP
       - "16172:16172/tcp"    # hoard engine BT listen
       - "16172:16172/udp"    # hoard uTP
-    # Run as your own user so downloads are not owned by root. Leave both
-    # unset to keep running as root (the historical behaviour).
+    # The user the daemon runs as: 1000:1000 when unset. Set your own so the
+    # downloads are yours; PUID: 0 keeps root, as before 4.5.
     # environment:
     #   PUID: 1000
     #   PGID: 1000
