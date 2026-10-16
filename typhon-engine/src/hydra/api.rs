@@ -13906,11 +13906,13 @@ async fn post_transmission_upload(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let mut zip: Option<Vec<u8>> = None;
+    // Kept as the Bytes the multipart reader filled: copying them into a Vec
+    // held the archive twice, up to twice the 4 GiB this route accepts.
+    let mut zip: Option<bytes::Bytes> = None;
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("file") {
             match field.bytes().await {
-                Ok(b) => zip = Some(b.to_vec()),
+                Ok(b) => zip = Some(b),
                 Err(e) => return bad_request(&format!("upload: {e}")),
             }
         }
