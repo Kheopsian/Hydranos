@@ -49,6 +49,11 @@ impl EventBus {
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
     }
+
+    /// Events still held for the slowest subscriber.
+    pub fn backlog(&self) -> usize {
+        self.tx.len()
+    }
 }
 
 /// Wire format matches Hydra-Go's existing `ltclient.Event` struct:
