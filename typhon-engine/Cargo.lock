@@ -2979,6 +2979,8 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures",
+ "hyper",
+ "hyper-util",
  "libc",
  "librqbit-dht",
  "librqbit-dualstack-sockets",
