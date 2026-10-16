@@ -46,6 +46,81 @@ pub struct Policy {
     /// How long a race retries a tracker that has not registered the torrent
     /// yet. Zero = the default window.
     pub registration_window: Duration,
+    /// What to do with a passkey that would travel over plain `http://`.
+    /// `Warn` by default: one log line per tracker host, the announce goes
+    /// out unchanged.
+    pub cleartext_passkey: CleartextPasskey,
+}
+
+/// `announce_cleartext_passkey`: the policy for an `http://` tracker whose
+/// announce URL carries a passkey.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CleartextPasskey {
+    /// Announce, and say so in the log once per tracker host.
+    #[default]
+    Warn,
+    /// Announce, silently.
+    Allow,
+    /// Do not announce: the URL is not built and nothing is sent.
+    Refuse,
+}
+
+impl CleartextPasskey {
+    /// Unknown or empty values mean `Warn`, the behaviour before the option.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "allow" => Self::Allow,
+            "refuse" => Self::Refuse,
+            _ => Self::Warn,
+        }
+    }
+}
+
+/// Whether `s` looks like a key: alphanumeric (plus `-` and `_`), at least 16
+/// characters with at least one digit and one letter, so `announce`,
+/// `announce.php` and compound words like `public-tracker-announce` never
+/// qualify.
+fn looks_like_key(s: &str) -> bool {
+    s.len() >= 16
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && s.bytes().any(|b| b.is_ascii_digit())
+        && s.bytes().any(|b| b.is_ascii_alphabetic())
+}
+
+/// Whether announcing to `tracker_url` would put a passkey on a plain-text
+/// connection: an `http://` URL with a passkey configured for its host, or a
+/// path segment that looks like a key (anywhere in the path), or a query
+/// parameter whose value looks like a key (the name does not matter).
+pub fn sends_passkey_in_clear(policy: &Policy, tracker_url: &str) -> bool {
+    let is_http = tracker_url.get(..7).map(|p| p.eq_ignore_ascii_case("http://")).unwrap_or(false);
+    if !is_http {
+        return false;
+    }
+    if passkey_for(policy, tracker_url).is_some() {
+        return true;
+    }
+    let (base, query) = match tracker_url[7..].split_once('?') {
+        Some((b, q)) => (b, q),
+        None => (&tracker_url[7..], ""),
+    };
+    let path = base.split_once('/').map(|(_, p)| p).unwrap_or("");
+    path.split('/').any(looks_like_key)
+        || query.split('&').filter_map(|kv| kv.split_once('=')).any(|(_, v)| looks_like_key(v))
+}
+
+/// Whether the policy is `refuse` and this announce would carry a passkey in
+/// clear: the one decision both `prepare` and the runner's error report use.
+pub fn refused_for_cleartext(policy: &Policy, tracker_url: &str) -> bool {
+    policy.cleartext_passkey == CleartextPasskey::Refuse && sends_passkey_in_clear(policy, tracker_url)
+}
+
+/// True the first time this host is seen, false after: the warning is once
+/// per tracker host, not once per announce.
+fn first_cleartext_note(host: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SEEN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).insert(host.to_string())
 }
 
 /// The passkey this tracker should be given, if it is not the one already in
@@ -136,6 +211,16 @@ pub fn prepare(
     numwant_override: Option<u32>,
     tracker_id: Option<&str>,
 ) -> Option<Request> {
+    if refused_for_cleartext(policy, tracker_url) {
+        return None;
+    }
+    if policy.cleartext_passkey == CleartextPasskey::Warn && sends_passkey_in_clear(policy, tracker_url) {
+        let host = override_host(tracker_url);
+        if first_cleartext_note(&host) {
+            // The host only: the URL carries the passkey.
+            tracing::warn!(tracker = %host, "announce URL carries a passkey over plain http://; set announce_cleartext_passkey to \"refuse\" to stop announcing to it");
+        }
+    }
     let url_with_key = match passkey_for(policy, tracker_url) {
         Some(k) => apply_passkey(tracker_url, k),
         None => tracker_url.to_string(),
@@ -302,6 +387,69 @@ mod tests {
 
         let http = prepare(&p, "https://tr4ker.net/announce/OLDKEY", &"ab".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
         assert!(http.udp.is_none(), "an HTTP tracker gets no UDP request");
+    }
+
+    const IH40: &str = "abababababababababababababababababababab";
+
+    /// The default policy announces a passkey over http:// exactly as it always
+    /// did (no new symbol: this compiles on the parent commit too).
+    #[test]
+    fn a_passkey_over_plain_http_is_announced_unchanged_by_default() {
+        let p = policy();
+        let ih = "ab".repeat(20);
+        let r = prepare(&p, "http://tr4ker.net/announce/OLDKEY", &ih, 6881, 0, 0, 0, "", None, None).expect("announces");
+        let expected = format!(
+            "http://tr4ker.net/announce/NEWKEY?info_hash={}&peer_id=-TY0001-abcdefghijkl&port=6881&uploaded=0&downloaded=0&left=0&compact=1&numwant=0&key={}",
+            "%AB".repeat(20),
+            url::key_for(&p.peer_id, &"ab".repeat(20)),
+        );
+        assert_eq!(r.url, expected);
+    }
+
+    /// `allow` is the same URL as the default; warn and allow never refuse.
+    #[test]
+    fn only_refuse_refuses_a_cleartext_passkey() {
+        let u = "http://clear-default.example/announce/0123456789abcdef0123456789abcdef";
+        let mut p = policy();
+        let default = prepare(&p, u, IH40, 6881, 0, 0, 0, "", None, None).expect("default announces");
+        for mode in [CleartextPasskey::Warn, CleartextPasskey::Allow] {
+            p.cleartext_passkey = mode;
+            assert!(!refused_for_cleartext(&p, u));
+            assert_eq!(prepare(&p, u, IH40, 6881, 0, 0, 0, "", None, None).expect("announces").url, default.url);
+        }
+        p.cleartext_passkey = CleartextPasskey::Refuse;
+        assert!(refused_for_cleartext(&p, u));
+        assert_eq!(CleartextPasskey::parse(""), CleartextPasskey::Warn);
+        assert_eq!(CleartextPasskey::parse("Refuse"), CleartextPasskey::Refuse);
+    }
+
+    /// With `refuse` no request is built, so none can leave; https, udp and
+    /// http URLs without anything key-shaped are untouched.
+    #[test]
+    fn refuse_builds_no_request_for_a_cleartext_passkey() {
+        let mut p = policy();
+        p.passkeys.insert("configured.example".into(), "NEWKEY".into());
+        p.cleartext_passkey = CleartextPasskey::Refuse;
+        let refused = |u: &str| prepare(&p, u, IH40, 1, 0, 0, 0, "", None, None).is_none();
+        assert!(refused("http://t.example/announce/0123456789abcdef0123456789abcdef"), "key after announce");
+        assert!(refused("http://t.example/0123456789abcdef0123456789abcdef/announce"), "key before announce");
+        assert!(refused("http://t.example/announce?pk=0123456789abcdef0123"), "key in a query value");
+        assert!(refused("http://configured.example/announce"), "configured override");
+        assert!(!refused("https://t.example/announce/0123456789abcdef0123456789abcdef"));
+        assert!(!refused("udp://t.example:6969/announce"));
+        assert!(!refused("http://t.example/announce"));
+        assert!(!refused("http://t.example/announce.php"));
+        assert!(!refused("http://t.example/announce?foo=1"));
+        assert!(!refused("http://t.example/tracker/ann"));
+        assert!(!refused("http://t.example/opentracker_announce"));
+        assert!(!refused("http://t.example/public-tracker-announce"));
+    }
+
+    #[test]
+    fn the_cleartext_note_comes_once_per_host() {
+        assert!(first_cleartext_note("once.example"));
+        assert!(!first_cleartext_note("once.example"));
+        assert!(first_cleartext_note("twice.example"));
     }
 
     #[test]

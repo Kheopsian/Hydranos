@@ -261,6 +261,11 @@ low_watermark_pct = 85
 # [announce_passkeys]
 # "tracker.example.net" = "your-passkey-here"
 
+# A passkey on a plain http:// tracker travels unencrypted. "warn" (default):
+# one log line per tracker host (never the URL), the announce goes out as
+# usual. "allow": silent. "refuse": no announce, shown as a tracker error.
+# announce_cleartext_passkey = "warn"
+
 [auth]
 username = "admin"
 # bcrypt hash — generate with: hydra hash-password <password>

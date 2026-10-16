@@ -72,6 +72,7 @@ pub fn policy_from_config(config: &Config, peer_id: String, public_ip: String) -
     Policy {
         passkeys: config.announce_passkeys.clone(),
         ip_modes: config.announce_ip_modes.clone(),
+        cleartext_passkey: policy::CleartextPasskey::parse(&config.announce_cleartext_passkey),
         peer_id,
         // The User-Agent carries the product and the version, and it is the
         // SAME string the engine uses everywhere else: a tracker operator
