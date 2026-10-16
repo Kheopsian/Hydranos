@@ -80,6 +80,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   faster than the dial pacer lets them out are dropped and counted
   (`dial_queue_full`), not queued without limit; the next announce hands
   them back.
+- Local Service Discovery only takes peers from announces whose source can
+  be on the LAN (private, loopback, link-local or CGNAT IPv4; link-local or
+  unique-local IPv6). Others are counted as `foreign_ignored`. An IPv6 LAN
+  peer announcing from a global address is no longer picked up by LSD; its
+  IPv4 announce still is.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
