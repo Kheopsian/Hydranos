@@ -127,10 +127,13 @@ ProtectClock=yes
 ProtectHostname=yes
 RestrictNamespaces=yes"
 fi
+# An address as it goes in a URL: an IPv6 literal gets its brackets.
+LISTEN=${LISTEN#[}; LISTEN=${LISTEN%]}
+url_host() { case "$1" in *:*) printf '[%s]' "$1" ;; *) printf '%s' "$1" ;; esac; }
 # Where the node answers on this machine: loopback, unless --listen narrowed it.
 case "$LISTEN" in
-    0.0.0.0|::|"[::]") HEALTH_HOST="127.0.0.1" ;;
-    *) HEALTH_HOST="$LISTEN" ;;
+    0.0.0.0|::) HEALTH_HOST="127.0.0.1"; LISTEN_SPECIFIC="" ;;
+    *) HEALTH_HOST=$(url_host "$LISTEN"); LISTEN_SPECIFIC="$LISTEN" ;;
 esac
 
 if [ "$MODE" = "system" ] && [ "$(id -u)" -ne 0 ]; then
@@ -146,6 +149,10 @@ controller_host=$(echo "$REGISTER_TO" | sed -e 's|^[a-z]*://||' -e 's|[:/].*$||'
 SELF_IP=$(ip route get "$(getent hosts "$controller_host" | awk '{print $1; exit}' || echo "$controller_host")" 2>/dev/null \
           | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
 [ -n "${SELF_IP:-}" ] || { echo "cannot work out which address to publish; pass --name and edit the node afterwards" >&2; exit 1; }
+# --listen with a precise address: the node answers there and nowhere else, so
+# that is the address the controller is told, not the route's source address.
+[ -z "$LISTEN_SPECIFIC" ] || SELF_IP="$LISTEN_SPECIFIC"
+SELF_URL_HOST=$(url_host "$SELF_IP")
 
 API_KEY=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
@@ -156,7 +163,7 @@ CTRL_VER=$(curl -fsS -m 10 "$REGISTER_TO/health" 2>/dev/null | sed -n 's/.*"vers
 VER="${HYDRANOS_VERSION_PIN:-${CTRL_VER:+v$CTRL_VER}}"
 
 echo "==> node   : $NAME"
-echo "==> address: $SELF_IP:$PORT"
+echo "==> address: $SELF_URL_HOST:$PORT"
 echo "==> mode   : $MODE"
 echo "==> config : $CONFIG"
 echo "==> data   : $DATA_DIR"
@@ -425,7 +432,7 @@ done
 
 echo "==> registering with $REGISTER_TO"
 body=$(printf '{"token":"%s","name":"%s","url":"http://%s:%s","api_key":"%s"}' \
-        "$TOKEN" "$NAME" "$SELF_IP" "$PORT" "$API_KEY")
+        "$TOKEN" "$NAME" "$SELF_URL_HOST" "$PORT" "$API_KEY")
 if curl -fsS -m 15 -H 'Content-Type: application/json' -d "$body" \
      "$REGISTER_TO/api/nodes/register"; then
     echo ""
@@ -433,6 +440,6 @@ if curl -fsS -m 15 -H 'Content-Type: application/json' -d "$body" \
 else
     echo "" >&2
     echo "the node is installed and running, but registering failed." >&2
-    echo "add it by hand: url http://$SELF_IP:$PORT  key $API_KEY" >&2
+    echo "add it by hand: url http://$SELF_URL_HOST:$PORT  key $API_KEY" >&2
     exit 1
 fi
