@@ -1921,7 +1921,7 @@ pub(crate) async fn fetch_release_tags(url: &str) -> Result<String, String> {
     let r = typhon_engine::egress::client()?
         .get(url)
         .timeout(std::time::Duration::from_secs(5))
-        .header("User-Agent", format!("Hydra/{HYDRANOS_VERSION}"))
+        .header("User-Agent", typhon_engine::config::user_agent())
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
@@ -23667,5 +23667,40 @@ mod wireguard_route_tests {
         assert_eq!(race["dht_running"], false);
         assert_eq!(race["dht_note"], "offline", "an engine not on the network says so");
         assert!(mode["warnings"].to_string().contains("DHT is off behind the SOCKS5 proxy"), "{mode}");
+    }
+}
+
+#[cfg(test)]
+mod release_check_identity_tests {
+    /// The version check names itself the way every other request of the
+    /// client does: one identity, not a second one for GitHub to tell apart.
+    #[tokio::test]
+    async fn the_release_check_sends_the_clients_user_agent() {
+        use axum::http::HeaderMap;
+        use axum::routing::get;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let s2 = seen.clone();
+        let app = axum::Router::new().route(
+            "/tags",
+            get(move |h: HeaderMap| {
+                let s2 = s2.clone();
+                async move {
+                    *s2.lock().unwrap() = h
+                        .get("user-agent")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    "[]"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let body = super::fetch_release_tags(&format!("http://{addr}/tags")).await;
+        assert_eq!(body.as_deref(), Ok("[]"));
+        assert_eq!(*seen.lock().unwrap(), typhon_engine::config::user_agent());
     }
 }
