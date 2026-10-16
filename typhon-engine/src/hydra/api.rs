@@ -5761,6 +5761,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "seed_seed_dropped": typhon_engine::peer::SEED_SEED_DROPPED.load(std::sync::atomic::Ordering::Relaxed),
             "hs_timed_out": typhon_engine::peer::HS_TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed),
             "inbound_accepted": typhon_engine::peer::INBOUND_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
+            "inbound_refused_busy": typhon_engine::peer::INBOUND_REFUSED_BUSY.load(std::sync::atomic::Ordering::Relaxed),
             "worker_threads": typhon_engine::runtime::worker_threads(),
             // Size of the incomplete index the webseed scanner walks. Watched
             // rather than assumed: if this ever drifts toward the catalogue

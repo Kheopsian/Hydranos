@@ -47,7 +47,7 @@ services:
     #   HYDRANOS_LOG_STDOUT: 1
     # /config/hydranos.log rotates itself at 128 MiB, four old files kept.
     # Nothing rotates Docker's json-file driver unless you say so, and this is
-    # a chatty log -- one line per inbound peer connection. Same ceiling here.
+    # a busy instance logs a lot. Same ceiling here.
     logging:
       driver: json-file
       options:
