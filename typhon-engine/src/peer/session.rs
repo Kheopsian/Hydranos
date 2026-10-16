@@ -369,6 +369,7 @@ pub async fn run(
     let mut dl_wait: Option<tokio::time::Instant> = None;
     let mut rate_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     let mut rate_timer_at: Option<tokio::time::Instant> = None;
+    let mut connect_budget = crate::peer::holepunch::ConnectBudget::default();
 
     loop {
         // A ban has to reach the peers already connected, not only the next
@@ -778,7 +779,9 @@ pub async fn run(
                                         // is opening its hole at this instant
                                         // and it closes in seconds.
                                         Some(Punch::Connect(addr)) => {
-                                            if crate::peer::holepunch::is_punchable(&addr) {
+                                            if crate::peer::holepunch::is_punchable(&addr)
+                                                && connect_budget.take(std::time::Instant::now())
+                                            {
                                                 crate::tracker::enqueue_dial(addr, torrent.clone());
                                             }
                                         }

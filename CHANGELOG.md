@@ -85,6 +85,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   unique-local IPv6). Others are counted as `foreign_ignored`. An IPv6 LAN
   peer announcing from a global address is no longer picked up by LSD; its
   IPv4 announce still is.
+- A connected peer's hole-punch `Connect` messages are acted on ten per
+  minute at most; the rest are ignored and counted
+  (`holepunch_connects_ignored`).
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.

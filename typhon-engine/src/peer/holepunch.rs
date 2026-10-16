@@ -28,6 +28,39 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 /// Our advertised extended message id for `ut_holepunch` (BEP 10 `m` dict).
 pub const OUR_UT_HOLEPUNCH_ID: u8 = 3;
 
+/// How many `Connect` from one peer we act on per minute. A real rendezvous
+/// is one message per introduction; past the budget a Connect is ignored.
+pub const CONNECTS_PER_MINUTE: u32 = 10;
+
+/// `Connect` messages ignored because their peer was over its budget.
+pub static CONNECTS_IGNORED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One session's `Connect` budget: `CONNECTS_PER_MINUTE` per window.
+#[derive(Default)]
+pub struct ConnectBudget {
+    window: Option<std::time::Instant>,
+    used: u32,
+}
+
+impl ConnectBudget {
+    /// Whether one more Connect may be acted on at `now`.
+    pub fn take(&mut self, now: std::time::Instant) -> bool {
+        match self.window {
+            Some(start) if now.duration_since(start) < std::time::Duration::from_secs(60) => {}
+            _ => {
+                self.window = Some(now);
+                self.used = 0;
+            }
+        }
+        if self.used >= CONNECTS_PER_MINUTE {
+            CONNECTS_IGNORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+        self.used += 1;
+        true
+    }
+}
+
 pub const MSG_RENDEZVOUS: u8 = 0;
 pub const MSG_CONNECT: u8 = 1;
 pub const MSG_ERROR: u8 = 2;
