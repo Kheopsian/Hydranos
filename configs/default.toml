@@ -31,6 +31,13 @@ create_torrent_folder = false
 #   false  disarm it: leaks accepted knowingly, every engine runs
 #   true   arm it even in direct mode: nothing without a way out leaves
 # kill_switch = false
+# /health answers anyone with {status, version}. With this on, the engines, the
+# store, the problems and the uptime need the API key; the status code does not
+# change. A Docker or Kubernetes probe reads the code and keeps working.
+# health_detail_requires_key = false
+# /metrics is public. With this on it wants the API key (X-Api-Key, or ?apikey=
+# for a scraper that cannot set a header): give Prometheus one before enabling it.
+# metrics_require_key = false
 
 # SOCKS5 proxy for the daemon's own requests with egress = "proxy" (socks5h:
 # names are resolved by the proxy). The engines' proxy is socks5_outbound_* in
