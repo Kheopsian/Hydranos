@@ -140,6 +140,15 @@ refusal of the address, which was shown on an isolated bench only.
 - A Transmission library upload is held in memory once instead of twice
   (hardened without a reproduction).
 
+### Changed
+
+- **The container no longer runs the daemon as root.** With PUID/PGID unset it
+  runs as 1000:1000, as qBittorrent's image does; the entrypoint hands
+  `/config` and the `/data` folder itself to that user at start, not what is
+  inside `/data`. An install whose downloads were written by an older, root
+  container must either `chown -R 1000:1000` them (or set PUID/PGID to their
+  owner), or set `PUID=0` and `PGID=0` to keep running as root.
+
 ### Fixed
 
 - Hardened without a reproduction: the files pieces were written to are
