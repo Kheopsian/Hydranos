@@ -22864,7 +22864,7 @@ mod qbit_shim_post_tests {
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         // Added stopped by the fixture; a stopped torrent takes no LSD peer.
         find_torrent(&s.state, &hash).unwrap().1.is_paused.store(false, std::sync::atomic::Ordering::Relaxed);
-        let from: std::net::SocketAddr = "192.0.2.7:6771".parse().unwrap();
+        let from: std::net::SocketAddr = "192.168.0.7:6771".parse().unwrap();
         lsd.offer(&race.manager, from, &typhon_engine::lsd::Announce { port: 6881, info_hashes: vec![ih], cookie: None });
 
         let (_, b) = call(&s, "GET", &format!("/api/v2/torrents/trackers?hash={hash}"), "").await;
