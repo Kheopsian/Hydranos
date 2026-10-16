@@ -17,6 +17,7 @@ below; anything a diff shows beyond this list is not ours.
 - `src/dht.rs`: the UDP reader skips `ConnectionReset` instead of stopping (Windows, error 10054).
 - `src/dht.rs`: `SIO_UDP_CONNRESET` off on the DHT socket (Windows).
 - `src/dht.rs`: `DhtConfig::bind_device` pins the socket with `SO_BINDTODEVICE`, and fails where that is not supported.
+- `src/dht.rs`: the node id is 20 random bytes (no client prefix), and the transaction id counter starts at a random value instead of 0.
 
 ## librqbit-dualstack-sockets 0.7.0
 

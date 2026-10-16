@@ -29,12 +29,11 @@ use futures::{
 
 use leaky_bucket::RateLimiter;
 use librqbit_core::{
-    crate_version,
     hash_id::Id20,
-    peer_id::generate_azereus_style,
     spawn_utils::{spawn, spawn_with_cancel},
 };
 use parking_lot::RwLock;
+use rand::RngCore;
 
 use serde::Serialize;
 use tokio::{
@@ -579,7 +578,9 @@ impl DhtState {
         let routing_table = routing_table.unwrap_or_else(|| RoutingTable::new(id, None));
         Self {
             id,
-            next_transaction_id: AtomicU16::new(0),
+            // Hydra/Typhon patch: random start, so the first tids say nothing about
+            // when this node came up.
+            next_transaction_id: AtomicU16::new(rand::random()),
             inflight_by_transaction_id: Default::default(),
             routing_table: RwLock::new(routing_table),
             worker_sender: sender,
@@ -1229,9 +1230,13 @@ impl DhtState {
                 .context("cannot determine UDP listen addr")?;
             info!("DHT listening on {:?}", listen_addr);
 
-            let peer_id = config
-                .peer_id
-                .unwrap_or_else(|| (generate_azereus_style(*b"rQ", crate_version!())));
+            // Hydra/Typhon patch: a node id is 20 random bytes, with no client
+            // fingerprint in front of them.
+            let peer_id = config.peer_id.unwrap_or_else(|| {
+                let mut id = [0u8; 20];
+                rand::rng().fill_bytes(&mut id);
+                Id20::new(id)
+            });
             info!("starting up DHT with peer id {:?}", peer_id);
             let bootstrap_addrs = config
                 .bootstrap_addrs
@@ -1283,5 +1288,42 @@ impl DhtState {
 
     pub fn clone_routing_table(&self) -> RoutingTable {
         self.routing_table.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn local_node() -> Arc<DhtState> {
+        DhtState::with_config(DhtConfig {
+            listen_addr: Some("127.0.0.1:0".parse().unwrap()),
+            bootstrap_addrs: Some(vec![]),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    // The node id must not carry a client fingerprint ("-rQ....-").
+    #[tokio::test]
+    async fn node_id_has_no_client_prefix() {
+        for _ in 0..8 {
+            let node = local_node().await;
+            assert_ne!(&node.id.0[..3], b"-rQ", "node id {:?} has a client prefix", node.id);
+            node.cancellation_token().cancel();
+        }
+    }
+
+    // The transaction id counter must not start at the same value on every node.
+    #[tokio::test]
+    async fn transaction_counter_starts_random() {
+        let mut starts = std::collections::HashSet::new();
+        for _ in 0..8 {
+            let node = local_node().await;
+            starts.insert(node.next_transaction_id.load(Ordering::Relaxed));
+            node.cancellation_token().cancel();
+        }
+        assert!(starts.len() > 1, "every node started its tid counter at {starts:?}");
     }
 }
