@@ -58,6 +58,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   address refused on that torrent until every piece of it is had (everyone
   behind the same address with it); a piece filled by several peers in
   endgame charges none of them.
+- A tracker's answer (announce or scrape) is read up to 1 MiB and refused
+  past it, instead of being held whole in memory; at most 1000 peers are
+  taken from one answer; an error page is quoted from its first 800 bytes
+  without reading the rest.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
