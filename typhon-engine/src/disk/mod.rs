@@ -124,6 +124,18 @@ pub struct DiskManager {
     read_cache: Mutex<LruCache<CacheKey, CacheEntry>>,
     /// Files written and not yet synced, per torrent.
     written: Arc<Mutex<HashMap<[u8; 20], std::collections::HashSet<PathBuf>>>>,
+    /// Bumped after every piece write, per stripe of cache blocks. A read
+    /// that saw another value before going to disk may hold bytes the write
+    /// has since replaced, so it serves them once but does not cache them.
+    write_gen: Box<[AtomicU64]>,
+}
+
+const WRITE_GEN_STRIPES: usize = 256;
+
+fn gen_stripe(key: &CacheKey) -> usize {
+    let mut h = [0u8; 8];
+    h.copy_from_slice(&key.info_hash[..8]);
+    (u64::from_le_bytes(h) ^ (key.block_start / CACHE_BLOCK_SIZE)) as usize % WRITE_GEN_STRIPES
 }
 
 impl DiskManager {
@@ -136,6 +148,7 @@ impl DiskManager {
                 NonZeroUsize::new(CACHE_MAX_ENTRIES).unwrap()
             )),
             written: Arc::new(Mutex::new(HashMap::new())),
+            write_gen: (0..WRITE_GEN_STRIPES).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 
@@ -230,6 +243,8 @@ impl DiskManager {
         }
 
         DISK_CACHE_MISS.fetch_add(1, Ordering::Relaxed);
+        let stripe = gen_stripe(&key);
+        let seen = self.write_gen[stripe].load(Ordering::SeqCst);
 
         let block_end = (block_start + CACHE_BLOCK_SIZE).min(torrent.meta.total_size);
         // A block past the end must not wrap the subtraction into a huge read.
@@ -252,10 +267,15 @@ impl DiskManager {
         let block_vec: Vec<u8> = block_bytes.to_vec();
         {
             let mut cache = self.read_cache.lock();
-            cache.put(key, CacheEntry {
-                data: Arc::new(block_vec),
-                inserted_at: Instant::now(),
-            });
+            // Checked under the cache lock, which the write takes after its
+            // bump: either this put lands first and the write pops it, or the
+            // write came first and this read may predate it.
+            if self.write_gen[stripe].load(Ordering::SeqCst) == seen {
+                cache.put(key, CacheEntry {
+                    data: Arc::new(block_vec),
+                    inserted_at: Instant::now(),
+                });
+            }
         }
 
         Ok(result)
@@ -273,14 +293,7 @@ impl DiskManager {
         let piece_start = piece as u64 * piece_size;
         let piece_end = piece_start + data.len() as u64;
         let first_block = (piece_start / CACHE_BLOCK_SIZE) * CACHE_BLOCK_SIZE;
-        {
-            let mut cache = self.read_cache.lock();
-            let mut bs = first_block;
-            while bs < piece_end {
-                cache.pop(&CacheKey { info_hash: torrent.info_hash, block_start: bs });
-                bs += CACHE_BLOCK_SIZE;
-            }
-        }
+        self.invalidate(torrent.info_hash, first_block, piece_end);
 
         let ops = torrent.meta.map_block(piece, 0, data.len() as u32);
         let save_path = torrent.save_path.read().clone();
@@ -298,7 +311,7 @@ impl DiskManager {
             )),
         };
 
-        tokio::task::spawn_blocking(move || {
+        let outcome = tokio::task::spawn_blocking(move || {
             if !check.matches(&data) {
                 return Ok(false);
             }
@@ -339,7 +352,22 @@ impl DiskManager {
             Ok(true)
         })
         .await
-        .map_err(|e| format!("spawn_blocking: {}", e))?
+        .map_err(|e| format!("spawn_blocking: {}", e))?;
+        // Again once the bytes are down: a read that went to disk while the
+        // write was under way may have read the old bytes, and must not leave
+        // them cached over the piece just written.
+        for key in blocks(torrent.info_hash, first_block, piece_end) {
+            self.write_gen[gen_stripe(&key)].fetch_add(1, Ordering::SeqCst);
+        }
+        self.invalidate(torrent.info_hash, first_block, piece_end);
+        outcome
+    }
+
+    fn invalidate(&self, info_hash: [u8; 20], first_block: u64, end: u64) {
+        let mut cache = self.read_cache.lock();
+        for key in blocks(info_hash, first_block, end) {
+            cache.pop(&key);
+        }
     }
 
     /// Resolve a piece block to a single backing file handle + byte offset for
@@ -369,6 +397,13 @@ impl DiskManager {
         };
         get_or_open(&full_path).ok().map(|f| (f, op.file_offset))
     }
+}
+
+/// The cache blocks from `first_block` up to `end`.
+fn blocks(info_hash: [u8; 20], first_block: u64, end: u64) -> impl Iterator<Item = CacheKey> {
+    (first_block..end)
+        .step_by(CACHE_BLOCK_SIZE as usize)
+        .map(move |block_start| CacheKey { info_hash, block_start })
 }
 
 /// Stream a piece block straight from the page cache to a plaintext TCP peer
@@ -645,13 +680,20 @@ mod disk_tests {
     /// A single-file torrent whose piece hash is the REAL hash of `content`.
     /// A fixture with a made-up hash can only ever exercise the refusal path.
     fn torrent_bytes(name: &str, content: &[u8]) -> Vec<u8> {
+        // One piece, sized to the content, so the whole file is piece 0.
+        torrent_bytes_in_pieces(name, content, content.len())
+    }
+
+    fn torrent_bytes_in_pieces(name: &str, content: &[u8], piece_len: usize) -> Vec<u8> {
         let mut info = Vec::new();
         info.extend_from_slice(
             format!("d6:lengthi{}e4:name{}:{name}", content.len(), name.len()).as_bytes(),
         );
-        // One piece, sized to the content, so the whole file is piece 0.
-        info.extend_from_slice(format!("12:piece lengthi{}e6:pieces20:", content.len()).as_bytes());
-        info.extend_from_slice(&sha1_of(content));
+        let hashes: Vec<u8> = content.chunks(piece_len).flat_map(sha1_of).collect();
+        info.extend_from_slice(
+            format!("12:piece lengthi{piece_len}e6:pieces{}:", hashes.len()).as_bytes(),
+        );
+        info.extend_from_slice(&hashes);
         info.push(b'e');
         let mut out = Vec::new();
         out.extend_from_slice(b"d4:info");
@@ -674,6 +716,10 @@ mod disk_tests {
     }
 
     fn fixture(tag: &str, content: &[u8]) -> Fixture {
+        fixture_in_pieces(tag, content, content.len())
+    }
+
+    fn fixture_in_pieces(tag: &str, content: &[u8], piece_len: usize) -> Fixture {
         let root = std::env::temp_dir().join(format!(
             "typhon-disk-{tag}-{}-{:?}",
             std::process::id(),
@@ -697,12 +743,12 @@ mod disk_tests {
         // none refuses to verify, which is the right call and makes every
         // write look like a hash mismatch. Set before the add: the state
         // copies the source when it is built.
-        let blob = torrent_bytes("payload.bin", content);
+        let blob = torrent_bytes_in_pieces("payload.bin", content, piece_len);
         mgr.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
 
         let (ih, _) = mgr
             .add_torrent_bytes(
-                &torrent_bytes("payload.bin", content),
+                &torrent_bytes_in_pieces("payload.bin", content, piece_len),
                 data.to_string_lossy().as_ref(),
                 true,
                 false,
@@ -856,6 +902,46 @@ mod disk_tests {
         assert!(got.is_some(), "a single-file torrent has one descriptor");
         let (_, offset) = got.unwrap();
         assert_eq!(offset, 0);
+    }
+
+    /// ⭐ A read that goes to disk while a neighbouring piece is being written
+    /// may read that piece's old bytes. It can serve its own piece from them,
+    /// but it must not cache them over the piece the write has just landed,
+    /// or that piece is served wrong until the block expires.
+    ///
+    /// Holding the descriptor cache parks the reader after its cache miss and
+    /// the writer after its invalidation; on release the reader usually reads
+    /// first. A few rounds make that ordering all but certain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_read_racing_a_write_never_caches_what_the_write_replaced() {
+        const PIECE: usize = 16 * 1024;
+        let mut content = vec![1u8; PIECE];
+        content.extend_from_slice(&[2u8; PIECE]);
+        for round in 0..20 {
+            let f = fixture_in_pieces(&format!("race{round}"), &content, PIECE);
+            assert!(f.disk.write_piece(&f.torrent, 0, content[..PIECE].to_vec()).await.unwrap());
+            // Full length on disk, so piece 1 reads back as zeros until written.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(f.root.join("data").join("payload.bin"))
+                .unwrap()
+                .set_len(content.len() as u64)
+                .unwrap();
+
+            let held = fd_cache().lock();
+            let (disk, t) = (f.disk.clone(), f.torrent.clone());
+            let reader = tokio::spawn(async move { disk.read_block(&t, 0, 0, 16).await });
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let (disk, t, piece) = (f.disk.clone(), f.torrent.clone(), content[PIECE..].to_vec());
+            let writer = tokio::spawn(async move { disk.write_piece(&t, 1, piece).await });
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(held);
+            assert_eq!(&reader.await.unwrap().unwrap()[..], &[1u8; 16][..]);
+            assert!(writer.await.unwrap().unwrap());
+
+            let got = f.disk.read_block(&f.torrent, 1, 0, 16).await.unwrap();
+            assert_eq!(&got[..], &[2u8; 16][..], "round {round}: piece 1 as written");
+        }
     }
 
     fn holds_descriptor_for(path: &std::path::Path) -> bool {
