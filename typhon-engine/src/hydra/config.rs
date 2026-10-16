@@ -158,6 +158,13 @@ pub struct Session {
     /// mirrors. Only matters while `enable_webseed` is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webseed_private: Option<bool>,
+    /// Open this engine's listening port while it goes out through a SOCKS5
+    /// proxy (`socks5_outbound_host`). Absent = yes, as before: the port is
+    /// what a forwarded port seeds through. `false` binds nothing for incoming
+    /// peers behind the proxy (TCP, uTP, PROXY v2); `/health` does not count
+    /// that engine's missing listener as a fault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_when_proxied: Option<bool>,
     /// Announce to `udp://` trackers (BEP 15). Absent means yes: a tracker a
     /// torrent lists is one it expects to hear from. An Option rather than a
     /// bool with a serde default, because a missing `[race]`/`[hoard]` table

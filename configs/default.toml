@@ -172,6 +172,10 @@ share_limit_action = "stop"
 # socks5_outbound_port = 1080
 # socks5_outbound_user = ""
 # socks5_outbound_pass = ""
+# Behind the proxy the engine still opens its listening port (TCP and uTP), for
+# incoming peers and seeding through a forwarded port. false = bind nothing for
+# incoming peers while the proxy is set.
+# listen_when_proxied = true
 #
 # Tracker announces and webseed fetches go through the SOCKS5 proxy above
 # (socks5h: the tracker's name is resolved by the proxy). Set this only to send
@@ -254,6 +258,10 @@ share_limit_action = "stop"
 # socks5_outbound_port = 1080
 # socks5_outbound_user = ""
 # socks5_outbound_pass = ""
+# Behind the proxy the engine still opens its listening port (TCP and uTP), for
+# incoming peers and seeding through a forwarded port. false = bind nothing for
+# incoming peers while the proxy is set.
+# listen_when_proxied = true
 #
 # Tracker announces and webseed fetches go through the SOCKS5 proxy above
 # (socks5h: the tracker's name is resolved by the proxy). Set this only to send

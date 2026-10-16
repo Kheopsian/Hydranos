@@ -178,7 +178,10 @@ pub fn engine_verdict(
             (Coverage::Covered, format!("every socket pinned to {iface}: a missing interface means no network, never the default route"))
         }
     } else if proxied {
-        gaps.push("incoming peers reach the host's own listen port".into());
+        // `listen_when_proxied = false` closes that gap: no port is bound.
+        if s.listen_when_proxied != Some(false) {
+            gaps.push("incoming peers reach the host's own listen port".into());
+        }
         (Coverage::Covered, "peers, announces and webseeds through its SOCKS5 proxy; DHT, UDP trackers and outgoing uTP off".to_string())
     } else if mode == "gluetun" {
         (Coverage::Covered, "inside gluetun's network: gluetun's firewall is the kill switch".to_string())
@@ -607,6 +610,18 @@ mod tests {
     /// route (which inside gluetun would be its `tun0`).
     fn plan_of(text: &str) -> Plan {
         plan_with(&cfg(text), &|_| None, Some("eth0"))
+    }
+
+    /// `listen_when_proxied = false` closes the "incoming peers reach the
+    /// host's own listen port" gap of a proxied engine; the default leaves it.
+    #[test]
+    fn a_proxied_engine_that_does_not_listen_has_no_listen_port_gap() {
+        let text = |extra: &str| {
+            format!("[network]\nmode = \"socks5\"\n[race]\nlisten_port = 16171\nsocks5_outbound_host = \"10.0.0.1\"\n{extra}\n[hoard]\nlisten_port = 16172\nsocks5_outbound_host = \"10.0.0.1\"\n")
+        };
+        let gap = |p: &Plan| p.verdict("race").unwrap().gaps.iter().any(|g| g.contains("listen port"));
+        assert!(gap(&plan_of(&text(""))), "default: the gap is said");
+        assert!(!gap(&plan_of(&text("listen_when_proxied = false"))));
     }
 
     fn state(p: &Plan, id: &str) -> Coverage {
