@@ -38,6 +38,12 @@ pub fn armed(cfg: &Config) -> bool {
     cfg.daemon.kill_switch.unwrap_or_else(|| crate::netmode::current(cfg) != "direct")
 }
 
+/// Whether names that would fall back to the host's resolver are refused:
+/// `[daemon] dns_no_host_fallback`, and only while the switch is armed.
+pub fn refuse_host_dns(cfg: &Config) -> bool {
+    cfg.daemon.dns_no_host_fallback && armed(cfg)
+}
+
 /// Why it is armed or not, in the words of the file.
 pub fn armed_why(cfg: &Config) -> String {
     let mode = crate::netmode::current(cfg);
@@ -269,6 +275,7 @@ pub fn apply(cfg: &Config) {
     if cfg!(test) {
         return;
     }
+    typhon_engine::tunneldns::set_refuse_host_fallback(refuse_host_dns(cfg));
     let p = plan(cfg);
     let shown = p.daemon.via.clone();
     if typhon_engine::egress::set(p.daemon.route) {
@@ -314,6 +321,8 @@ pub fn report_of(cfg: &Config, p: &Plan, running_blocked: &dyn Fn(&str) -> Optio
         "mode": p.mode,
         "armed": p.armed,
         "armed_why": armed_why(cfg),
+        // A name with no tunnel DNS server fails rather than reach the host's resolver.
+        "dns_host_fallback_refused": refuse_host_dns(cfg),
         // As written: null = deduced from the mode.
         "kill_switch": cfg.daemon.kill_switch,
         "egress": if cfg.daemon.egress.trim().is_empty() { "auto" } else { cfg.daemon.egress.trim() },
@@ -622,6 +631,18 @@ mod tests {
         let gap = |p: &Plan| p.verdict("race").unwrap().gaps.iter().any(|g| g.contains("listen port"));
         assert!(gap(&plan_of(&text(""))), "default: the gap is said");
         assert!(!gap(&plan_of(&text("listen_when_proxied = false"))));
+    }
+
+    /// `dns_no_host_fallback` only bites while the switch is armed.
+    #[test]
+    fn the_host_dns_fallback_is_refused_only_when_asked_and_armed() {
+        assert!(!refuse_host_dns(&cfg("[network]\nmode = \"socks5\"\n[race]\nsocks5_outbound_host = \"10.0.0.1\"\n")), "default");
+        let on = |extra: &str| cfg(&format!("[daemon]\ndns_no_host_fallback = true\n{extra}"));
+        assert!(!refuse_host_dns(&on("")), "direct mode: disarmed");
+        assert!(refuse_host_dns(&on("kill_switch = true\n")));
+        assert!(!refuse_host_dns(&on("kill_switch = false\n[network]\nmode = \"socks5\"\n")));
+        let r = report_of(&on("kill_switch = true\n"), &plan_of("[daemon]\nkill_switch = true\n"), &|_| None);
+        assert_eq!(r["dns_host_fallback_refused"], true);
     }
 
     fn state(p: &Plan, id: &str) -> Coverage {

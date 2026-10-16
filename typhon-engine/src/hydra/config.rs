@@ -75,6 +75,12 @@ pub struct Daemon {
     /// (`exit_probe = false`, gluetun's control server unreachable).
     #[serde(default)]
     pub gluetun_verify: String,
+    /// While the kill switch is armed, a tracker name that would go to the
+    /// host's own resolver (a pinned interface with no tunnel DNS server: one
+    /// Hydranos does not manage, or a WireGuard file without `DNS =`) fails
+    /// instead. Off by default. No other resolver is ever added.
+    #[serde(default)]
+    pub dns_no_host_fallback: bool,
 }
 
 /// The echo service asked when `[daemon] exit_probe_url` is empty.

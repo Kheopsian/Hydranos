@@ -60,6 +60,12 @@ create_torrent_folder = false
 #            cannot be made (exit_probe = false, control server unreachable);
 #            the reason is on /api/network/egress and the Network tab
 # gluetun_verify = "off"
+# While the kill switch is armed, refuse to resolve a tracker name with the
+# host's own resolver: a lookup for an engine pinned to an interface with no
+# tunnel DNS server (an interface Hydranos did not create, or a WireGuard file
+# without a `DNS =` line) fails instead. Default false (the host's resolver is
+# used, as before); no other resolver is ever added.
+# dns_no_host_fallback = false
 
 # SOCKS5 proxy for the daemon's own requests with egress = "proxy" (socks5h:
 # names are resolved by the proxy). The engines' proxy is socks5_outbound_* in
