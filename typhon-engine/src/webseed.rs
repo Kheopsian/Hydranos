@@ -194,8 +194,9 @@ async fn fetch_range(
     if status.as_u16() != 206 && !(status.is_success() && whole_file) {
         return Err(format!("{} answered {} for bytes={}-{}", url, status, from, to));
     }
-    let body = resp
-        .bytes()
+    // Never more than the range asked for: a mirror that keeps sending is cut
+    // off at `want` bytes, not read to the end of the 120 s timeout.
+    let body = crate::tracker::http::read_capped(resp, want)
         .await
         .map_err(|e| format!("body {}: {}", url, e))?;
     if body.len() != want {
@@ -206,7 +207,59 @@ async fn fetch_range(
             want
         ));
     }
-    Ok(body.to_vec())
+    Ok(body)
+}
+
+/// Whether `host` (a URL's `host_str`) names something only this machine or
+/// its LAN can reach: `localhost`, or a loopback, private, link-local, CGNAT,
+/// unique-local or unspecified address, IPv4-mapped forms included.
+fn is_internal_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") {
+        return true;
+    }
+    let ip = match h.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(std::net::IpAddr::V6(v6)),
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s0 = v6.segments()[0];
+            v6.is_loopback() || v6.is_unspecified() || (s0 & 0xfe00) == 0xfc00 || (s0 & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Mirrors redirect: archive.org sends every download to a storage node. A
+/// redirect may not lead to an internal host (`is_internal_host`) unless it
+/// stays on the host it came from, so a mirror named in a torrent cannot send
+/// our GETs on to the LAN or the machine itself.
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        let to = attempt.url();
+        if !matches!(to.scheme(), "http" | "https") {
+            return attempt.error("redirect to a scheme other than http(s)");
+        }
+        let from = attempt.previous().last().and_then(|u| u.host_str().map(str::to_string));
+        let to_host = to.host_str().unwrap_or("");
+        if is_internal_host(to_host) && from.as_deref() != Some(to_host) {
+            return attempt.error("redirect to an internal address");
+        }
+        attempt.follow()
+    })
 }
 
 /// Byte window covered by pieces `first..=last`, as a half-open range.
@@ -667,6 +720,7 @@ fn build_client(cfg: &EngineConfig) -> Result<reqwest::Client, String> {
         .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(20))
         .pool_idle_timeout(Duration::from_secs(90))
+        .redirect(redirect_policy())
         // HTTP/1.1 ONLY, and this is the whole performance story.
         //
         // archive.org negotiates h2 (verified: ALPN returns `h2`), and reqwest
@@ -741,6 +795,83 @@ pub fn start(mgr: Arc<TorrentManager>, cfg: &EngineConfig) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn client() -> reqwest::Client {
+        build_client(&toml::from_str::<EngineConfig>("").expect("default config")).expect("client")
+    }
+
+    /// A mirror on `ip` that answers `/r` with a redirect to `to` and `/x`
+    /// with the 4 bytes asked for, counting the `/x` it serves.
+    async fn mirror(ip: &str, to: String) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = axum::Router::new()
+            .route("/r", axum::routing::get(move || async move { (axum::http::StatusCode::FOUND, [("location", to)]) }))
+            .route(
+                "/x",
+                axum::routing::get(move || async move {
+                    h.fetch_add(1, Ordering::Relaxed);
+                    (axum::http::StatusCode::PARTIAL_CONTENT, b"abcd".to_vec())
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind(format!("{ip}:0")).await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    /// ⭐ A mirror that keeps sending past the range is cut off at the range,
+    /// not read into memory until the 120 s timeout.
+    #[tokio::test]
+    async fn a_mirror_sending_past_the_range_is_cut_off_at_it() {
+        let (base, _) = crate::tracker::http::endless::server("206 Partial Content", vec![], b'x').await;
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            fetch_range(&client(), &format!("{base}/f"), 0, 16383, 1 << 30),
+        )
+        .await
+        .expect("the fetch gave up on its own, well before its timeout");
+        let e = out.expect_err("refused");
+        assert!(e.contains("larger than"), "refused for its size: {e}");
+    }
+
+    /// ⭐ A mirror cannot redirect our GET to another internal host: the
+    /// target, on 127.0.0.2, is never reached.
+    #[tokio::test]
+    async fn a_redirect_to_another_internal_host_is_not_followed() {
+        let (inner, hits) = mirror("127.0.0.2", String::new()).await;
+        let (outer, _) = mirror("127.0.0.1", format!("{inner}/x")).await;
+        let out = fetch_range(&client(), &format!("{outer}/r"), 0, 3, 4).await;
+        assert!(out.is_err(), "the redirect was refused: {out:?}");
+        assert_eq!(hits.load(Ordering::Relaxed), 0, "the internal target was never asked");
+    }
+
+    /// A redirect that stays on the mirror's host is still followed: a LAN
+    /// mirror moving a file to another port keeps working.
+    #[tokio::test]
+    async fn a_redirect_on_the_same_host_is_still_followed() {
+        let (inner, hits) = mirror("127.0.0.1", String::new()).await;
+        let (outer, _) = mirror("127.0.0.1", format!("{inner}/x")).await;
+        let out = fetch_range(&client(), &format!("{outer}/r"), 0, 3, 4).await;
+        assert_eq!(out.expect("followed"), b"abcd".to_vec());
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn internal_hosts_are_recognised_in_every_spelling() {
+        for h in ["localhost", "a.localhost", "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.99.1", "169.254.169.254",
+            "100.64.0.1", // leak-ok: CGNAT, internal by definition
+            "0.0.0.0", "[::1]", "[fc00::1]", "[fe80::1]", "[::ffff:127.0.0.1]", "[::ffff:192.168.0.1]"] {
+            assert!(is_internal_host(h), "{h} is internal");
+        }
+        for h in ["archive.org", "[2001:db8::1]",
+            "93.184.216.34", "100.128.0.1", "1.1.1.1", // leak-ok: public addresses, the counter-examples
+        ] {
+            assert!(!is_internal_host(h), "{h} is not");
+        }
+    }
 
     /// Alignment padding between two files (BEP 47, v2): the mirror is asked
     /// for the two files only, and each lands at its place in the stream.
