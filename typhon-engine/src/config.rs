@@ -104,8 +104,10 @@ pub struct EngineConfig {
     /// (the historical behaviour). One announce asks for 200 peers and every
     /// one of them is dialed at once, so limiting announces alone still lets
     /// thousands of new flows a second through a VPN tunnel; this is the knob
-    /// that actually bounds them. See `tracker::dial_limiter`.
-    #[serde(default)]
+    /// that actually bounds them. See `tracker::dial_limiter`. Defaults to 50
+    /// when the key is absent, so an upgrade that keeps an old config file is
+    /// bounded too; write 0 explicitly to keep the old unlimited behaviour.
+    #[serde(default = "default_max_dials_per_sec")]
     pub max_dials_per_sec: f64,
     /// Download memory budget, MiB: pieces in flight plus pieces waiting for
     /// their write. Over it no new piece is started. 0 = an eighth of the
@@ -206,6 +208,7 @@ fn default_webseed_concurrency() -> usize { 48 }
 fn default_data_dir() -> String { "/configs".into() }
 fn default_listen_port() -> u16 { 16172 }
 fn default_max_connections() -> usize { 12000 }
+fn default_max_dials_per_sec() -> f64 { 50.0 }
 fn default_max_uploads_per_torrent() -> i32 { -1 }
 fn default_peer_timeout() -> u64 { 300 }
 fn default_file_pool_size() -> usize { 5000 }

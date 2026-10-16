@@ -91,7 +91,9 @@ pub struct Session {
     /// New outbound peer dials per second, 0 = unlimited. Written by the
     /// dial-limits route; until 4.4 nothing read it from the file, so the
     /// route's change was the only way to set it and a restart lost it.
-    #[serde(default)]
+    /// Defaults to 50 when the key is absent, so an upgrade that keeps an old
+    /// config file is bounded too; write 0 explicitly to keep it unlimited.
+    #[serde(default = "default_max_dials_per_sec")]
     pub max_dials_per_sec: f64,
     /// Download memory budget in MiB (pieces in flight and pieces waiting
     /// for their write); 0 = automatic, an eighth of the memory available.
@@ -268,7 +270,13 @@ impl Session {
     /// A section the file does not have at all: the same defaults as one
     /// that is present but empty.
     pub fn with_defaults() -> Session {
-        Session { enable_dht: true, enable_pex: true, enable_webseed: true, ..Default::default() }
+        Session {
+            enable_dht: true,
+            enable_pex: true,
+            enable_webseed: true,
+            max_dials_per_sec: default_max_dials_per_sec(),
+            ..Default::default()
+        }
     }
 
     /// Whether this engine runs Local Service Discovery: `enable_lsd` when
@@ -429,6 +437,10 @@ impl Default for Dedup {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_dials_per_sec() -> f64 {
+    50.0
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -666,6 +678,27 @@ mod tests {
         let reloaded = Config::load(&path).unwrap();
         assert_eq!(reloaded.daemon.api_key, cfg.daemon.api_key);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// An upgrade keeps the old config file, which has a [race]/[hoard]
+    /// section but no `max_dials_per_sec`. serde must fill 50, not 0, or the
+    /// upgraded install keeps dialing a whole peer list at once; an explicit 0
+    /// still means the historical "unlimited".
+    #[test]
+    fn a_missing_dial_cap_defaults_to_50_and_explicit_zero_stays_unlimited() {
+        let upgraded: Session = toml::from_str("max_connections = 4000\n").unwrap();
+        assert_eq!(upgraded.max_dials_per_sec, 50.0, "absent key must bound to 50");
+        let explicit: Session = toml::from_str("max_dials_per_sec = 0.0\n").unwrap();
+        assert_eq!(explicit.max_dials_per_sec, 0.0, "explicit 0 keeps unlimited");
+    }
+
+    /// A file with no [race]/[hoard] section at all goes through
+    /// `Session::with_defaults`, not serde's field defaults: it must bound too.
+    #[test]
+    fn a_missing_engine_section_defaults_the_dial_cap_to_50() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.race.max_dials_per_sec, 50.0, "absent [race] must bound to 50");
+        assert_eq!(cfg.hoard.max_dials_per_sec, 50.0, "absent [hoard] must bound to 50");
     }
 
     /// The placeholder is published in this repository, so it is not a secret.
