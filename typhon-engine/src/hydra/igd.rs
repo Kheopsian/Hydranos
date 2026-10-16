@@ -30,6 +30,8 @@ const DISCOVERY_WINDOW: Duration = Duration::from_secs(3);
 /// The MX we ask for, in seconds. Kept low so discovery does not hold up boot.
 const MX: u8 = 2;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most of a description document that is read.
+const MAX_DESCRIPTION: usize = 256 * 1024;
 
 /// The service types that can map a port, most modern first.
 const MAPPING_SERVICES: [&str; 3] = [
@@ -124,15 +126,24 @@ pub fn find_service(xml: &str, base: &str) -> Option<Gateway> {
             let block_end = after.find("</service>").unwrap_or(after.len());
             let block = &after[..block_end];
             if let Some(url) = tag_value(block, "controlURL") {
-                return Some(Gateway {
-                    control_url: resolve_url(base, &url),
-                    service_type: wanted.to_string(),
-                });
+                let control_url = resolve_url(base, &url);
+                // On the device that described it, never elsewhere: an
+                // absolute URL to another host would have our SOAP POST sent
+                // wherever the document says.
+                if host_of(&control_url).is_some() && host_of(&control_url) == host_of(base) {
+                    return Some(Gateway { control_url, service_type: wanted.to_string() });
+                }
             }
             rest = &after[wanted.len()..];
         }
     }
     None
+}
+
+/// The host of `url`, brackets off an IPv6 literal.
+fn host_of(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    Some(u.host_str()?.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase())
 }
 
 /// The text of the first `<tag>` in this fragment.
@@ -238,8 +249,8 @@ pub async fn discover_at(target: SocketAddr) -> Result<Gateway, String> {
         if remaining.is_zero() {
             return Err(last);
         }
-        let n = match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
-            Ok(Ok((n, _))) => n,
+        let (n, from) = match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+            Ok(Ok(v)) => v,
             // ⚠ Windows surfaces the ICMP port-unreachable from our own
             // search as WSAECONNRESET on the NEXT recv of the same UDP
             // socket; Linux swallows it. Treating it as fatal turned "no
@@ -257,6 +268,13 @@ pub async fn discover_at(target: SocketAddr) -> Result<Gateway, String> {
         let Some(location) = location_of(&reply) else {
             continue;
         };
+        // Any host on the LAN can answer a search. Only a description served
+        // by the device that answered is fetched: a reply naming another
+        // host would have us GET, then POST to, wherever it chose.
+        if host_of(&location).and_then(|h| h.parse::<std::net::IpAddr>().ok()) != Some(from.ip()) {
+            last = format!("{} answered with a description on another host", from.ip());
+            continue;
+        }
         // Several devices may answer, and not all of them can map a port.
         // Keep asking until one describes a service that can.
         match describe(&location).await {
@@ -270,16 +288,23 @@ pub async fn discover_at(target: SocketAddr) -> Result<Gateway, String> {
 pub async fn describe(location: &str) -> Result<Gateway, String> {
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let body = client
+    let mut resp = client
         .get(location)
         .send()
         .await
-        .map_err(|e| format!("cannot fetch {location}: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("cannot read {location}: {e}"))?;
+        .map_err(|e| format!("cannot fetch {location}: {e}"))?;
+    // A description is a few kilobytes; nothing past `MAX_DESCRIPTION` is read.
+    let mut raw = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("cannot read {location}: {e}"))? {
+        if raw.len() + chunk.len() > MAX_DESCRIPTION {
+            return Err(format!("{location} is larger than {MAX_DESCRIPTION} bytes"));
+        }
+        raw.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&raw);
     find_service(&body, location)
         .ok_or_else(|| format!("{location} describes no port mapping service"))
 }
@@ -625,6 +650,58 @@ mod io_tests {
         let g = rt().block_on(discover_at(ssdp_addr)).expect("a gateway answered");
         assert_eq!(g.service_type, "urn:schemas-upnp-org:service:WANIPConnection:1");
         assert!(g.control_url.ends_with("/ctl/IPConn"));
+    }
+
+    /// A router on `ip` that serves `body` to every request and counts them.
+    fn counting_router(ip: &str, body: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = TcpListener::bind(format!("{ip}:0")).expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        std::thread::spawn(move || {
+            for sock in listener.incoming() {
+                let Ok(mut sock) = sock else { return };
+                h.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut buf = [0u8; 4096];
+                sock.set_read_timeout(Some(std::time::Duration::from_millis(200))).ok();
+                let _ = sock.read(&mut buf);
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = sock.write_all(head.as_bytes());
+                let _ = sock.write_all(body.as_bytes());
+            }
+        });
+        (format!("http://{ip}:{port}/rootDesc.xml"), hits)
+    }
+
+    /// ⭐ A search answered from one host with a description on another is
+    /// not followed: the other host is never asked.
+    #[test]
+    fn an_answer_pointing_at_another_host_is_not_followed() {
+        let (desc_url, hits) = counting_router("127.0.0.2", DESC_DOC);
+        let ssdp = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let ssdp_addr = ssdp.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let Ok((_, from)) = ssdp.recv_from(&mut buf) else { return };
+            let reply = format!("HTTP/1.1 200 OK\r\nLOCATION: {desc_url}\r\n\r\n");
+            let _ = ssdp.send_to(reply.as_bytes(), from);
+        });
+        let out = rt().block_on(discover_at(ssdp_addr));
+        assert!(out.is_err(), "no gateway from another host: {:?}", out.map(|g| g.control_url));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 0, "the other host was never asked");
+    }
+
+    /// ⭐ A description whose control URL names another host yields no
+    /// gateway: the SOAP request stays on the device that described itself.
+    #[test]
+    fn a_control_url_on_another_host_is_refused() {
+        const ELSEWHERE: &str = r#"<root><serviceList><service>
+    <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>
+    <controlURL>http://127.0.0.2:9/ctl/IPConn</controlURL>
+  </service></serviceList></root>"#;
+        let (url, _hits) = counting_router("127.0.0.1", ELSEWHERE);
+        let out = rt().block_on(describe(&url));
+        assert!(out.is_err(), "refused: {:?}", out.map(|g| g.control_url));
     }
 
     /// Nothing on the network is not an error to shout about, and it must not
