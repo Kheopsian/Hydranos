@@ -184,7 +184,8 @@ it is set.
   value is read as `off` and warned about by name.
 - `[daemon] dns_no_host_fallback = true`: while the kill switch is armed, an
   engine pinned to an interface with no tunnel DNS does not fall back to the
-  host's resolver.
+  host's resolver; the engine's exit-address probe follows the same rule (its
+  echo service name goes through the tunnel's DNS when there is one).
 - `[daemon] private_files = true`: `hydranos.log` (and its rotations), the
   config file, `hydra.db` and `bench.db` (with their `-wal`/`-shm`/`-journal`)
   are created 0600, and existing ones are set to 0600 at startup. Anything
