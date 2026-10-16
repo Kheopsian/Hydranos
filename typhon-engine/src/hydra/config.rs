@@ -46,6 +46,10 @@ pub struct Daemon {
     /// `/health` answers anyone with the status word and the version; with
     /// this on, the engines, the store, the problems and the uptime need the
     /// API key. The status code is the same either way. Off by default.
+    /// Exception: while the catalogue loads (before the API is up) `/health`
+    /// still answers its startup form -- status "starting", version, uptime
+    /// and restore progress -- to anyone, as `/api/startup` does: the
+    /// startup screen reads that progress without a key.
     #[serde(default)]
     pub health_detail_requires_key: bool,
     /// `/metrics` needs the API key (`X-Api-Key`, or `?apikey=`). Off by
