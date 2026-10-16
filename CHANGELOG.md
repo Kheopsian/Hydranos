@@ -191,7 +191,9 @@ it is set.
   reading them under another user then loses access. Downloaded files are not
   touched.
 - `[daemon] health_detail_requires_key = true`: without the API key `/health`
-  answers only its status and version (same status code). `[daemon]
+  answers only its status and version (same status code), except while the
+  catalogue is still loading: then `/health` (like `/api/startup`) gives the
+  startup progress, uptime and engine ids without a key. `[daemon]
   metrics_require_key = true`: `/metrics` wants the API key (`X-Api-Key` or
   `?apikey=`).
 - `[daemon] public_url`: the address the enrolment command on the Nodes page
