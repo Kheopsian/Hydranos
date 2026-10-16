@@ -151,10 +151,14 @@ pub async fn start(
     // incoming uTP, which only answers a peer that already found us.
     // The socket sits in a handle a listen-port rebind replaces
     // (`peer::UtpHandle`), so the port moves for uTP as it does for TCP.
+    let no_listen = !config.listens();
+    if no_listen {
+        info!("[engine] listen_when_proxied = false: behind the SOCKS5 proxy no port is opened for incoming peers (TCP, uTP, PROXY v2)");
+    }
     let utp = if std::env::var("TYPHON_DISABLE_UTP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
         info!("[engine] uTP disabled via TYPHON_DISABLE_UTP — TCP-only dial+listen");
         crate::peer::UtpHandle::off()
-    } else if unpinnable {
+    } else if unpinnable || no_listen {
         crate::peer::UtpHandle::off()
     } else {
         match crate::peer::UtpHandle::bind(listen_port, egress.device()).await {
@@ -192,6 +196,7 @@ pub async fn start(
     let utp_for_listen = utp.clone();
     let bindings_for_listen = resolved_bindings.clone();
     let listening_for_listen = listening.clone();
+    if !no_listen {
     tokio::spawn(async move {
         let flag = listening_for_listen.clone();
         if let Err(e) =
@@ -205,6 +210,7 @@ pub async fn start(
             error!("[engine] peer listener failed: {}", e);
         }
     });
+    }
 
     // Optional PROXY v2 listener: a relay (haproxy on a VPS, say) forwards
     // incoming peers here with their real address in a PROXY v2 header.
@@ -212,7 +218,9 @@ pub async fn start(
     // peer reached us through the same engine the tracker lists, so it must
     // see the same identity, and the replies must take the same tunnel.
     // `config.peer_id()` was right only for an engine without bindings.
-    if let (Some(pv2_port), Some(first)) = (config.listen_port_proxy_v2.filter(|p| *p != 0), resolved_bindings.first()) {
+    if let (false, Some(pv2_port), Some(first)) =
+        (no_listen, config.listen_port_proxy_v2.filter(|p| *p != 0), resolved_bindings.first())
+    {
         let tm = mgr.clone();
         let dm = disk.clone();
         let pid = first.peer_id;
