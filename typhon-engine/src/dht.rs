@@ -16,7 +16,7 @@
 //! the heap for as long as the process lives.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -120,6 +120,21 @@ pub struct DhtSession {
     torrents_tracked: AtomicU64,
     peers_discovered: AtomicU64,
     peers_dialed: AtomicU64,
+    /// `dht_follow_seeds`: keep `get_peers` running for finished torrents.
+    /// Starts true, the behaviour so far; `session.rs` sets it from the config.
+    follow_seeds: AtomicBool,
+}
+
+/// Whether a torrent has nothing left to download: seed mode, or no picker
+/// (it seeds), or a complete one.
+fn is_finished(t: &TorrentState) -> bool {
+    t.seed_mode || t.picker.get().is_none_or(|p| p.lock().unwrap_or_else(|e| e.into_inner()).is_complete())
+}
+
+/// Whether the DHT should follow this torrent: never a private one (BEP 27),
+/// and a finished one only when `follow_seeds` is on.
+pub fn tracks_in_dht(t: &TorrentState, follow_seeds: bool) -> bool {
+    t.meta.allows_peer_discovery() && (follow_seeds || !is_finished(t))
 }
 
 impl DhtSession {
@@ -151,6 +166,7 @@ impl DhtSession {
                     torrents_tracked: AtomicU64::new(0),
                     peers_discovered: AtomicU64::new(0),
                     peers_dialed: AtomicU64::new(0),
+                    follow_seeds: AtomicBool::new(true),
                 }))
             }
             Err(e) => {
@@ -158,6 +174,11 @@ impl DhtSession {
                 None
             }
         }
+    }
+
+    /// Set `dht_follow_seeds` (default true) for the torrents tracked from now on.
+    pub fn set_follow_seeds(&self, follow: bool) {
+        self.follow_seeds.store(follow, Ordering::Relaxed);
     }
 
     /// Handle to the node. Magnet resolution needs peers for an info hash that
@@ -195,7 +216,7 @@ impl DhtSession {
     /// than gaining a second one. `start_torrent` calls this on every resume,
     /// and the boot loop calls it for every loaded torrent.
     pub fn track_torrent(self: &Arc<Self>, torrent: Arc<TorrentState>) {
-        if !torrent.meta.allows_peer_discovery() {
+        if !tracks_in_dht(&torrent, self.follow_seeds.load(Ordering::Relaxed)) {
             return;
         }
         let ih = torrent.info_hash;
@@ -209,6 +230,10 @@ impl DhtSession {
             let mut stream = dht.get_peers(info_hash, None);
             while let Some(peer_addr) = stream.next().await {
                 if torrent.is_removed.load(Ordering::Relaxed) {
+                    break;
+                }
+                // Finished since it was tracked, and seeds are not followed.
+                if !tracks_in_dht(&torrent, session.follow_seeds.load(Ordering::Relaxed)) {
                     break;
                 }
                 session.peers_discovered.fetch_add(1, Ordering::Relaxed);
@@ -278,5 +303,71 @@ mod tests {
     #[tokio::test]
     async fn a_dht_pinned_to_a_missing_device_does_not_start() {
         assert!(DhtSession::start(Some("hy-nodev0")).await.is_none());
+    }
+
+    fn manager(tag: &str) -> (Arc<crate::torrent::TorrentManager>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("typhon-dht-{tag}-{}", std::process::id()));
+        let (data, resume) = (root.join("data"), root.join("resume"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(crate::torrent::TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(crate::disk::DiskManager::new(16)),
+        ));
+        (mgr, root)
+    }
+
+    fn torrent_bytes(name: &str, private: bool) -> Vec<u8> {
+        let mut info = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+        let mut piece = [0xCDu8; 20];
+        piece[..name.len().min(20)].copy_from_slice(&name.as_bytes()[..name.len().min(20)]);
+        info.extend_from_slice(&piece);
+        if private {
+            info.extend_from_slice(b"7:privatei1e");
+        }
+        info.push(b'e');
+        let mut out = b"d4:info".to_vec();
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    /// Default unchanged, as far as it can be said without a DHT node (no new
+    /// symbol, so it also compiles on the parent): a finished public torrent
+    /// and a download both allow peer discovery; a private one does not.
+    #[test]
+    fn peer_discovery_is_allowed_for_public_torrents_finished_or_not() {
+        let (mgr, root) = manager("allows");
+        let add = |name: &str, private: bool, seed: bool| {
+            let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(name, private), "/tmp", false, seed).unwrap();
+            mgr.get(&ih).unwrap()
+        };
+        assert!(add("down", false, false).meta.allows_peer_discovery());
+        assert!(add("seed", false, true).meta.allows_peer_discovery());
+        assert!(!add("priv", true, false).meta.allows_peer_discovery());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `dht_follow_seeds = false` keeps finished torrents off the DHT; a
+    /// download is followed either way, and a private torrent never is.
+    #[test]
+    fn finished_torrents_follow_the_dht_only_when_the_option_says_so() {
+        let (mgr, root) = manager("follow");
+        let add = |name: &str, private: bool, seed: bool| {
+            let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(name, private), "/tmp", false, seed).unwrap();
+            mgr.get(&ih).unwrap()
+        };
+        let down = add("down", false, false);
+        let seed = add("seed", false, true);
+        let private = add("priv", true, false);
+        assert!(private.meta.private);
+        for follow in [true, false] {
+            assert!(tracks_in_dht(&down, follow), "a download is followed (follow={follow})");
+            assert!(!tracks_in_dht(&private, follow), "a private torrent never is (follow={follow})");
+        }
+        assert!(tracks_in_dht(&seed, true), "default: a seed is followed");
+        assert!(!tracks_in_dht(&seed, false), "option off: a seed is not");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

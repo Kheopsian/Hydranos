@@ -84,6 +84,10 @@ enable_lsd = true
 # only the torrents still downloading (a seed still dials the LAN peers that
 # announce its hash). Same key in [hoard].
 # lsd_announce_seeds = true
+# The DHT keeps looking for peers of torrents that have finished. false
+# follows only the torrents still downloading (private torrents never use the
+# DHT either way). Same key in [hoard].
+# dht_follow_seeds = true
 # Live peer sessions, dialled and inbound; at the ceiling an inbound handshake
 # is refused. 0 = no ceiling.
 max_connections = 4000

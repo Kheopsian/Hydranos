@@ -127,6 +127,10 @@ pub struct Session {
     /// `false` announces only torrents still downloading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsd_announce_seeds: Option<bool>,
+    /// Keep finished torrents on the DHT. Absent means yes (the behaviour so
+    /// far); `false` follows only torrents still downloading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dht_follow_seeds: Option<bool>,
     #[serde(default)]
     pub aio_threads: Option<usize>,
     #[serde(default)]
