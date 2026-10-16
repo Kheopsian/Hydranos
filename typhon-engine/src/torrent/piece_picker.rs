@@ -253,14 +253,40 @@ fn memory_ceiling_at(root: &std::path::Path) -> Option<u64> {
             .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
             .map(|kb| kb * 1024)
     });
-    let cgroup = ["sys/fs/cgroup/memory.max", "sys/fs/cgroup/memory/memory.limit_in_bytes"]
-        .iter()
-        .find_map(|p| std::fs::read_to_string(root.join(p)).ok())
-        .and_then(|s| s.trim().parse::<u64>().ok());
+    let cgroup = cgroup_v2_limit(root).or_else(|| {
+        ["sys/fs/cgroup/memory.max", "sys/fs/cgroup/memory/memory.limit_in_bytes"]
+            .iter()
+            .find_map(|p| std::fs::read_to_string(root.join(p)).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    });
     match (total, cgroup) {
         (Some(t), Some(c)) => Some(t.min(c)),
         (t, c) => t.or(c),
     }
+}
+
+/// The tightest cgroup v2 `memory.max` from this process's own cgroup up to
+/// the root of the hierarchy. A systemd `MemoryMax=` sits on the service's
+/// cgroup, not on /sys/fs/cgroup itself; "max" means no limit at that level.
+fn cgroup_v2_limit(root: &std::path::Path) -> Option<u64> {
+    let own = std::fs::read_to_string(root.join("proc/self/cgroup")).ok()?;
+    let rel = own.lines().find_map(|l| l.strip_prefix("0::"))?.trim().trim_start_matches('/');
+    // A cgroup outside our namespace shows as "/../..": not under our mount.
+    if rel.split('/').any(|c| c == "..") {
+        return None;
+    }
+    let base = root.join("sys/fs/cgroup");
+    let mut dir = base.join(rel);
+    let mut tightest: Option<u64> = None;
+    loop {
+        if let Some(v) = std::fs::read_to_string(dir.join("memory.max")).ok().and_then(|s| s.trim().parse::<u64>().ok()) {
+            tightest = Some(tightest.map_or(v, |t| t.min(v)));
+        }
+        if dir == base || !dir.pop() || !dir.starts_with(&base) {
+            break;
+        }
+    }
+    tightest
 }
 
 fn apply(c: &AtomicU64, d: i64) {
@@ -1315,5 +1341,91 @@ mod order_tests {
         o.set_file_priority(1, 2, PRIO_HIGH);
         o.set_file_priority(1, 2, PRIO_NORMAL);
         assert!(o.file_prio.is_empty(), "back to all-normal is back to nothing stored");
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::memory_ceiling_at;
+    use std::path::{Path, PathBuf};
+
+    const GIB: u64 = 1 << 30;
+
+    /// A fake / with a 64 GiB machine and the given cgroup files.
+    fn fake_root(tag: &str, self_cgroup: &str, files: &[(&str, &str)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("typhon-ceiling-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let put = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put("proc/meminfo", "MemTotal:       67108864 kB\nMemFree:  1024 kB\n");
+        put("proc/self/cgroup", self_cgroup);
+        for (rel, body) in files {
+            put(rel, body);
+        }
+        root
+    }
+
+    fn done(root: &Path) {
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_service_limit_below_the_cgroup_root_bounds_the_budget() {
+        // systemd MemoryMax=2G: the limit sits on the service's own cgroup,
+        // the root of the hierarchy has no memory.max at all.
+        let root = fake_root(
+            "unit",
+            "0::/system.slice/hydranos.service\n",
+            &[
+                ("sys/fs/cgroup/system.slice/memory.max", "max\n"),
+                ("sys/fs/cgroup/system.slice/hydranos.service/memory.max", "2147483648\n"),
+            ],
+        );
+        assert_eq!(memory_ceiling_at(&root), Some(2 * GIB));
+        done(&root);
+    }
+
+    #[test]
+    fn the_tightest_limit_on_the_way_up_wins() {
+        let root = fake_root(
+            "parent",
+            "0::/machine.slice/box\n",
+            &[
+                ("sys/fs/cgroup/machine.slice/memory.max", "1073741824\n"),
+                ("sys/fs/cgroup/machine.slice/box/memory.max", "max\n"),
+            ],
+        );
+        assert_eq!(memory_ceiling_at(&root), Some(GIB));
+        done(&root);
+    }
+
+    #[test]
+    fn a_container_without_a_limit_falls_back_to_the_machine() {
+        // Docker with its own cgroup namespace: the container is "/", and an
+        // unset limit reads "max".
+        let root = fake_root("nolimit", "0::/\n", &[("sys/fs/cgroup/memory.max", "max\n")]);
+        assert_eq!(memory_ceiling_at(&root), Some(64 * GIB));
+        done(&root);
+    }
+
+    #[test]
+    fn a_container_limit_still_counts() {
+        let root = fake_root("box", "0::/\n", &[("sys/fs/cgroup/memory.max", "4294967296\n")]);
+        assert_eq!(memory_ceiling_at(&root), Some(4 * GIB));
+        done(&root);
+    }
+
+    #[test]
+    fn a_cgroup_v1_limit_still_counts() {
+        let root = fake_root(
+            "v1",
+            "4:memory:/\n",
+            &[("sys/fs/cgroup/memory/memory.limit_in_bytes", "3221225472\n")],
+        );
+        assert_eq!(memory_ceiling_at(&root), Some(3 * GIB));
+        done(&root);
     }
 }
