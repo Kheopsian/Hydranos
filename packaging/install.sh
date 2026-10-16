@@ -18,7 +18,13 @@ if ! id hydranos >/dev/null 2>&1; then
     useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin hydranos
 fi
 
-install -d -o hydranos -g hydranos "$PREFIX" "$CFG" "$DATA"
+# The binaries belong to root: an administrator runs hydranos-update from here
+# with sudo, so the service account must not be able to replace what it runs.
+# The daemon only reads and executes this folder. Re-running fixes the
+# ownership an older installer gave it.
+install -d -o root -g root -m 0755 "$PREFIX"
+chown root:root "$PREFIX"
+install -d -o hydranos -g hydranos "$CFG" "$DATA"
 # hydranos-update ships in the same tarball and replaces both on upgrade; 4.3
 # installed hydranos-engine (a 3.x leftover nothing starts) and left the
 # updater behind.
@@ -26,11 +32,13 @@ install -m 0755 hydranos hydranos-update "$PREFIX"/
 
 # Seed config only on first install; never clobber an existing one.
 if [ ! -f "$CFG/default.toml" ]; then
-    install -m 0644 default.toml.example "$CFG/default.toml"
+    install -m 0600 default.toml.example "$CFG/default.toml"
     sed -i "s#^data_dir = .*#data_dir = \"$DATA\"#" "$CFG/default.toml"
     chown hydranos:hydranos "$CFG/default.toml"
     echo "hydranos: seeded $CFG/default.toml (data_dir=$DATA)"
 fi
+# The daemon writes its API key and password hash into the config: owner only.
+chmod 0600 "$CFG/default.toml"
 
 # The unit is installed once. A re-run used to overwrite it, losing any edit;
 # changes belong in a drop-in (systemctl edit hydranos), and a newer shipped
