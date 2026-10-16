@@ -95,6 +95,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   and the engine's event bus no longer keeps every event since for it. What
   the page cannot take yet is folded (the latest figures per torrent, every
   removal) and sent once it reads again.
+- UPnP port mapping only fetches a description served by the device that
+  answered the search, and only sends its mapping request to that same
+  device. The description is read up to 256 KiB, without following
+  redirects. A router whose search answer names its description by host
+  name rather than by address is no longer used.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
