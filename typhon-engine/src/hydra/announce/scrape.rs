@@ -9,7 +9,9 @@
 //! scrape for an announce. It starts nothing and stops nothing.
 //!
 //! It leaves exactly as the announces do: the engine's interface, its proxy,
-//! the tracker's passkey override, and not at all while the engine holds its
+//! the tracker's passkey override, not at all to a plain-http tracker the
+//! announces refuse for its passkey (`announce_cleartext_passkey`), and not
+//! at all while the engine holds its
 //! trackers (`start_paused`) or for a host whose breaker is open. A `udp://`
 //! tracker is not scraped behind a proxy, as it is not announced there.
 
@@ -25,7 +27,7 @@ use typhon_engine::tracker::scrape::{self as tscrape, ScrapeEntry, BATCH};
 
 use super::breaker::Breaker;
 use super::cache::Cache;
-use super::policy::{apply_passkey, passkey_for, Policy};
+use super::policy::{apply_passkey, passkey_for, refused_for_cleartext, Policy};
 
 /// First pass after the engine starts, then between passes.
 const FIRST: Duration = Duration::from_secs(90);
@@ -61,6 +63,11 @@ impl Target {
 pub fn target_for(policy: &Policy, tracker_url: &str) -> Option<Target> {
     if typhon_engine::tracker::udp::is_udp(tracker_url) {
         return (!policy.skip_udp).then(|| Target::Udp(tracker_url.to_string()));
+    }
+    // `announce_cleartext_passkey = "refuse"`: the announce is not made, and
+    // a scrape of the same tracker would carry the same passkey in clear.
+    if refused_for_cleartext(policy, tracker_url) {
+        return None;
     }
     let url = match passkey_for(policy, tracker_url) {
         Some(k) => apply_passkey(tracker_url, k),
@@ -228,6 +235,34 @@ mod tests {
         assert!(plan(ts.clone().into_iter(), |_| false, &HashMap::new(), &p, |_| true, 100, now).is_empty());
         p.skip_udp = false;
         assert!(plan(ts.into_iter(), |_| false, &HashMap::new(), &p, |h| h != "u.example", 100, now).is_empty(), "breaker open");
+    }
+
+    /// With `announce_cleartext_passkey = "refuse"` the announce to a plain
+    /// http:// tracker that carries a passkey is not made, so no answer is
+    /// cached and the torrent is a scrape candidate: its scrape must be
+    /// refused the same way, whether the passkey is configured or in the URL.
+    #[test]
+    fn refuse_also_stops_the_scrape_of_a_plain_http_tracker_with_a_passkey() {
+        let mut p = Policy::default();
+        p.passkeys.insert("configured.example".into(), "SECRETKEY0123456789".into());
+        let configured = "http://configured.example/announce";
+        let in_url = "http://inurl.example/announce?passkey=0123456789abcdef0123";
+        // Default (warn): scraped as before, passkey applied.
+        assert!(matches!(target_for(&p, configured), Some(Target::Http(_))));
+        assert!(matches!(target_for(&p, in_url), Some(Target::Http(_))));
+        p.cleartext_passkey = super::super::policy::CleartextPasskey::Refuse;
+        assert_eq!(target_for(&p, configured), None);
+        assert_eq!(target_for(&p, in_url), None);
+        // https, udp and a key-free http tracker keep their scrape.
+        assert!(matches!(target_for(&p, "https://configured.example/announce"), Some(Target::Http(_))));
+        assert!(matches!(target_for(&p, "udp://u.example:1337/announce"), Some(Target::Udp(_))));
+        assert!(matches!(target_for(&p, "http://plain.example/announce"), Some(Target::Http(_))));
+        // The plan never selects the refused tracker; it falls to the next.
+        let ts = vec![(ih(4), tiers(&[configured, in_url]))];
+        assert!(plan(ts.clone().into_iter(), |_| false, &HashMap::new(), &p, |_| true, 100, Instant::now()).is_empty());
+        let ts = vec![(ih(4), tiers(&[configured, "https://ok.example/announce"]))];
+        let g = plan(ts.into_iter(), |_| false, &HashMap::new(), &p, |_| true, 100, Instant::now());
+        assert_eq!(g.keys().cloned().collect::<Vec<_>>(), vec![Target::Http("https://ok.example/scrape".into())]);
     }
 
     /// The budget caps a pass, and a torrent scraped recently waits AGAIN.
