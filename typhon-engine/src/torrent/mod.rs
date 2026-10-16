@@ -340,6 +340,8 @@ impl TorrentManager {
     /// nothing was downloaded, and neither a tracker nor a workflow is owed a
     /// completion for it.
     pub fn on_completed(&self, ih: &InfoHash) {
+        // The data before the record that says it is whole.
+        self.disk.sync_written();
         self.persist_completed(ih);
         // `completed` is how a tracker records the snatch: say it now, not at
         // the next scheduled announce half an hour away.
@@ -1611,6 +1613,9 @@ impl TorrentManager {
     }
 
     pub fn save_all_resume(&self) {
+        // The pieces written since the last sweep reach the disk before the
+        // bitfields that claim them.
+        self.disk.sync_written();
         let db = match &self.state_db {
             Some(db) => db.clone(),
             None => {
