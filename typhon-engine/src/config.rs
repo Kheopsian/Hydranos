@@ -182,6 +182,11 @@ pub struct EngineConfig {
     /// way, and sits at 0% with no error to explain it.
     #[serde(default = "default_true")]
     pub enable_webseed: bool,
+    /// Let a `private` torrent (BEP 27) fetch from the `url-list` mirrors its
+    /// .torrent names. On by default, as it has always been. Off, a private
+    /// torrent never contacts a webseed; public torrents are unaffected.
+    #[serde(default = "default_true")]
+    pub webseed_private: bool,
     /// How many webseed fetches may be in flight for the whole engine.
     /// A fixed pool, not a task per torrent: the HTTP origin bounds
     /// throughput long before the size of the catalogue does.

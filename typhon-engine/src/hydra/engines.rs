@@ -1004,6 +1004,7 @@ fn engine_config(
         // that was not resolved runs none.
         "lsd_enabled": session.enable_lsd.unwrap_or(false),
         "enable_webseed": session.enable_webseed,
+        "webseed_private": session.webseed_private.unwrap_or(true),
         "enable_ipv6": session.enable_ipv6,
         "max_connections": session.max_connections.max(0),
         "max_dials_per_sec": if session.max_dials_per_sec.is_finite() { session.max_dials_per_sec.max(0.0) } else { 0.0 },
@@ -1050,6 +1051,14 @@ mod network_wiring_tests {
     fn cfg_of(s: &Session) -> typhon_engine::config::EngineConfig {
         let dir = std::path::Path::new("/tmp");
         engine_config(s, dir, dir).expect("engine config builds")
+    }
+
+    /// `webseed_private` reaches the engine, and absent keeps the old behaviour.
+    #[test]
+    fn webseed_private_reaches_the_engine() {
+        assert!(cfg_of(&session("")).webseed_private, "absent = private torrents may use webseeds");
+        assert!(!cfg_of(&session("webseed_private = false
+")).webseed_private);
     }
 
     /// `enable_lsd` reaches the engine, and only once resolved: the start

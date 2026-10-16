@@ -76,6 +76,10 @@ enable_pex = true
 # the size of the library; never a `private` torrent; off behind a SOCKS5
 # proxy. On by default for race, as in qBittorrent.
 enable_lsd = true
+# Webseeds (BEP 19) are fetched for private torrents too, as they always have
+# been. false keeps a private torrent off the mirrors its .torrent lists
+# (public torrents are unaffected). Same key in [hoard].
+# webseed_private = true
 # Live peer sessions, dialled and inbound; at the ceiling an inbound handshake
 # is refused. 0 = no ceiling.
 max_connections = 4000
