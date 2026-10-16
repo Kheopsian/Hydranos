@@ -65,6 +65,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A webseed range is read up to the size asked for and refused past it. A
   webseed redirect is no longer followed to a loopback, private or
   link-local address unless it stays on the mirror's own host.
+- A peer listener whose `accept` keeps failing (out of file descriptors)
+  backs off from 10 ms to a second between attempts, and logs the 1st, 2nd,
+  4th... failure, instead of retrying at once: the retry loop held a core at
+  100% and wrote a warning per turn.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.

@@ -505,6 +505,21 @@ fn session_runtimes() -> &'static [tokio::runtime::Handle] {
     })
 }
 
+/// After a failed accept, wait before the next one.
+///
+/// Out of descriptors (EMFILE, ENFILE) or buffers, `accept` fails again at
+/// once for as long as the condition lasts: retried immediately, the loop
+/// spins a core and writes a warning per turn. The wait doubles from 10 ms to
+/// a second, and the warning is written on the 1st, 2nd, 4th, 8th... failure.
+async fn accept_backoff(kind: &str, e: &std::io::Error, failures: &mut u32) {
+    *failures = failures.saturating_add(1);
+    if failures.is_power_of_two() {
+        warn!("[peer] {} accept error ({} in a row): {}", kind, failures, e);
+    }
+    let ms = 10u64.saturating_mul(1u64 << (*failures - 1).min(7)).min(1000);
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+}
+
 async fn tcp_accept_loop(
     listener: TcpListener,
     torrent_mgr: Arc<TorrentManager>,
@@ -513,11 +528,15 @@ async fn tcp_accept_loop(
     utp_socket: Option<Arc<UtpSocketUdp>>,
     listen_port: u16,
 ) {
+    let mut failures = 0u32;
     loop {
         let (stream, addr) = match listener.accept().await {
-            Ok(v) => v,
+            Ok(v) => {
+                failures = 0;
+                v
+            }
             Err(e) => {
-                warn!("[peer] tcp accept error: {}", e);
+                accept_backoff("tcp", &e, &mut failures).await;
                 continue;
             }
         };
@@ -603,11 +622,15 @@ pub async fn listen_proxy_v2(
     let listener = socket.listen(4096)?;
     info!("[peer] PROXY v2 TCP listening on {} (backlog=4096)", sockaddr);
 
+    let mut failures = 0u32;
     loop {
         let (stream, wire_addr) = match listener.accept().await {
-            Ok(v) => v,
+            Ok(v) => {
+                failures = 0;
+                v
+            }
             Err(e) => {
-                warn!("[peer] proxy-v2 accept error: {}", e);
+                accept_backoff("proxy-v2", &e, &mut failures).await;
                 continue;
             }
         };
@@ -1168,5 +1191,76 @@ mod paused_inbound_tests {
         assert_eq!(&answered[28..48], &ih, "with its own info hash");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod accept_error_tests {
+    use std::sync::Arc;
+
+    const NAME: &str = "peer::accept_error_tests::a_failing_accept_does_not_spin_a_core";
+
+    fn cpu_ms() -> u64 {
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+        let ms = |t: libc::timeval| t.tv_sec as u64 * 1000 + t.tv_usec as u64 / 1000;
+        ms(ru.ru_utime) + ms(ru.ru_stime)
+    }
+
+    /// ⭐ An accept that keeps failing -- here EMFILE, the process out of
+    /// descriptors with connections waiting -- must not spin a core. Run in a
+    /// child process: the descriptor limit is process-wide and would starve
+    /// every other test.
+    #[test]
+    fn a_failing_accept_does_not_spin_a_core() {
+        if std::env::var_os("TYPHON_ACCEPT_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env("TYPHON_ACCEPT_CHILD", "1")
+                .output()
+                .unwrap();
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && text.contains("1 passed"), "{text}");
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let root = std::env::temp_dir().join(format!("typhon-emfile-{}", std::process::id()));
+            std::fs::create_dir_all(root.join("r")).unwrap();
+            let disk = Arc::new(crate::disk::DiskManager::new(1));
+            let mgr = Arc::new(crate::torrent::TorrentManager::new(
+                root.to_string_lossy().into_owned(),
+                root.join("r").to_string_lossy().into_owned(),
+                disk.clone(),
+            ));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let at = listener.local_addr().unwrap();
+            let _clients: Vec<_> = (0..4).map(|_| std::net::TcpStream::connect(at).unwrap()).collect();
+
+            // No descriptor left to hand out: the limit just above the highest
+            // open one, and every hole below it filled.
+            let highest = std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u64>().ok())
+                .max()
+                .unwrap();
+            let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) };
+            lim.rlim_cur = highest + 1;
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) }, 0);
+            let mut _fill = Vec::new();
+            while let Ok(f) = std::fs::File::open("/dev/null") {
+                _fill.push(f);
+            }
+
+            let before = cpu_ms();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                super::tcp_accept_loop(listener, mgr, disk, [7u8; 20], None, at.port()),
+            )
+            .await;
+            let spent = cpu_ms() - before;
+            assert!(spent < 300, "the accept loop burnt {spent} ms of CPU in one second");
+        });
     }
 }
