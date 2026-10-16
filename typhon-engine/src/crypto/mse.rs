@@ -36,6 +36,11 @@ const G: u32 = 2;
 const VC: [u8; 8] = [0u8; 8];
 const CRYPTO_PLAIN: u32 = 0x01;
 const CRYPTO_RC4: u32 = 0x02;
+/// The longest PadC the spec allows.
+const MAX_PAD_C: usize = 512;
+/// The longest initial payload read from an incoming peer. It carries the
+/// 68-byte BitTorrent handshake.
+const MAX_IA: usize = 512;
 
 /// Result of MSE handshake — contains the initial payload (IA) if we're the receiver.
 pub struct MseHandshakeResult {
@@ -369,6 +374,11 @@ pub async fn handshake_incoming(
     stream.read_exact(&mut pad_c_len_buf).await.map_err(|e| e.to_string())?;
     dec.process(&mut pad_c_len_buf);
     let pad_c_len = u16::from_be_bytes(pad_c_len_buf) as usize;
+    // The spec bounds PadC at 512 bytes. A longer one is refused before it is
+    // allocated or read: the length field alone would reserve 64 KiB.
+    if pad_c_len > MAX_PAD_C {
+        return Err(format!("PadC of {pad_c_len} bytes, more than {MAX_PAD_C}"));
+    }
 
     if pad_c_len > 0 {
         let mut pad_c = vec![0u8; pad_c_len];
@@ -380,6 +390,10 @@ pub async fn handshake_incoming(
     stream.read_exact(&mut ia_len_buf).await.map_err(|e| e.to_string())?;
     dec.process(&mut ia_len_buf);
     let ia_len = u16::from_be_bytes(ia_len_buf) as usize;
+    // IA is the peer's BitTorrent handshake, 68 bytes; at most 512 is read.
+    if ia_len > MAX_IA {
+        return Err(format!("IA of {ia_len} bytes, more than {MAX_IA}"));
+    }
 
     // Read IA (Initial Application data = BT handshake)
     let mut ia = vec![0u8; ia_len];
@@ -599,5 +613,71 @@ mod crypto_tests {
         let p = get_prime();
         // The MSE/PE modulus is 768 bits.
         assert_eq!(p.bits(), 768, "the shared modulus is the 768-bit MSE prime");
+    }
+}
+
+#[cfg(test)]
+mod incoming_bounds_tests {
+    use super::*;
+
+    /// An initiator that gets as far as the encrypted lengths and then claims
+    /// `pad_c` bytes of PadC and `ia` bytes of IA, sending neither.
+    async fn claim(pad_c: u16, ia: u16) -> Result<(), String> {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = l.local_addr().unwrap();
+        let skey = [0x42u8; 20];
+        let client = tokio::spawn(async move {
+            let mut c = tokio::net::TcpStream::connect(at).await.unwrap();
+            let (xa, ya) = gen_keypair();
+            c.write_all(&ya).await.unwrap();
+            let mut yb = [0u8; 96];
+            c.read_exact(&mut yb).await.unwrap();
+            let s = compute_secret(&yb, &xa);
+            c.write_all(&sha1_combine(b"req1", &s)).await.unwrap();
+            let (req2, req3) = (sha1_combine(b"req2", &skey), sha1_combine(b"req3", &s));
+            let x: Vec<u8> = req2.iter().zip(req3.iter()).map(|(a, b)| a ^ b).collect();
+            c.write_all(&x).await.unwrap();
+            let mut enc = make_rc4_keys(b"keyA", &s, &skey);
+            let mut p = VC.to_vec();
+            p.extend_from_slice(&CRYPTO_RC4.to_be_bytes());
+            p.extend_from_slice(&pad_c.to_be_bytes());
+            if pad_c == 0 {
+                p.extend_from_slice(&ia.to_be_bytes());
+            }
+            enc.process(&mut p);
+            c.write_all(&p).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        });
+        let (s, _) = l.accept().await.unwrap();
+        let mut t = PeerTransport::Tcp(s);
+        let mut first = [0u8; 1];
+        t.read_exact(&mut first).await.unwrap();
+        let mut rest = [0u8; 95];
+        t.read_exact(&mut rest).await.unwrap();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            handshake_incoming(&mut t, first[0], &rest, &[7u8; 20], |h| (*h == sha1_combine(b"req2", &skey)).then_some(skey)),
+        )
+        .await;
+        client.abort();
+        match out {
+            Ok(r) => r.map(|_| ()),
+            Err(_) => Err("still waiting for the bytes it was promised".into()),
+        }
+    }
+
+    /// ⭐ A PadC longer than the spec's 512 bytes is refused on its length,
+    /// not allocated and waited for.
+    #[tokio::test]
+    async fn a_padc_longer_than_512_is_refused_on_its_length() {
+        let e = claim(65535, 0).await.expect_err("refused");
+        assert!(e.contains("PadC"), "refused for its PadC: {e}");
+    }
+
+    /// ⭐ Same for the initial payload: 64 KiB of IA is refused on its length.
+    #[tokio::test]
+    async fn an_ia_longer_than_512_is_refused_on_its_length() {
+        let e = claim(0, 65535).await.expect_err("refused");
+        assert!(e.contains("IA"), "refused for its IA: {e}");
     }
 }
