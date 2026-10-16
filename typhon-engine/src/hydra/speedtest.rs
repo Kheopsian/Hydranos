@@ -43,17 +43,24 @@ pub fn plan(cfg: &crate::config::Config) -> Result<Plan, String> {
         return Err("iperf3_server not configured in [vpn_speedtest]".into());
     }
     let engines = cfg.local_engines();
-    let session = engines
-        .iter()
-        .find(|l| l.role == "race")
-        .or(engines.first())
-        .map(|l| l.session.clone())
-        .unwrap_or_else(|| cfg.race.clone());
+    let engine = engines.iter().find(|l| l.role == "race").or(engines.first());
+    let session = engine.map(|l| l.session.clone()).unwrap_or_else(|| cfg.race.clone());
     let device = session.bind_interface.trim().to_string();
     // iperf3 has no SOCKS5: past a proxy it would measure the host's route
     // and call it the tunnel.
     if device.is_empty() && !session.socks5_outbound_host.trim().is_empty() {
         return Err("the engines go out through a SOCKS5 proxy, which iperf3 cannot use".into());
+    }
+    // iperf3 leaves the way the measured engine would, so it may only run where
+    // the kill switch lets that engine out: blocked engine, no run. Inside
+    // gluetun's network, or with allow_direct, the default route is allowed.
+    if let Some(e) = engine {
+        use super::killswitch::{armed, engine_verdict, Coverage};
+        let mode = crate::netmode::current(cfg);
+        let v = engine_verdict(mode, armed(cfg), e, None, crate::portmap::default_interface().as_deref());
+        if v.state == Coverage::Blocked {
+            return Err(format!("the kill switch keeps this engine off the network ({}): iperf3 would leave by the host's route", v.how));
+        }
     }
     Ok(Plan {
         server: v.iperf3_server.trim().to_string(),
@@ -252,5 +259,22 @@ mod tests {
     fn a_socks5_way_out_is_refused_by_name() {
         let e = plan(&cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\n[vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n")).unwrap_err();
         assert!(e.contains("SOCKS5"), "{e}");
+    }
+
+    /// With the kill switch armed, a run with no interface of its own would
+    /// leave by the host's route, which is exactly what the switch forbids.
+    #[test]
+    fn an_armed_kill_switch_refuses_a_run_with_no_interface() {
+        let on = "[daemon]\nkill_switch = true\n[vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n";
+        let e = plan(&cfg(on)).expect_err("armed, no interface");
+        assert!(e.contains("kill switch"), "{e}");
+        let bound = format!("[race]\nbind_interface = \"wg0\"\n{on}");
+        assert_eq!(plan(&cfg(&bound)).unwrap().device, "wg0", "an interface of its own is fine");
+        let off = "[daemon]\nkill_switch = false\n[vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n";
+        assert!(plan(&cfg(off)).is_ok(), "disarmed: the default route is allowed");
+        let gluetun = "[network]\nmode = \"gluetun\"\n[vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n";
+        assert!(plan(&cfg(gluetun)).is_ok(), "inside gluetun the default route is the tunnel");
+        let direct = format!("[race]\nallow_direct = true\n{on}");
+        assert!(plan(&cfg(&direct)).is_ok(), "allow_direct: the kill switch lets the engine out, so the run too");
     }
 }
