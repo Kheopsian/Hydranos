@@ -19,6 +19,30 @@ RestartSec=5
 TimeoutStopSec=150
 # Peer connections and files at scale -> raise the fd limit.
 LimitNOFILE=1048576
+# Sandboxing that costs a BitTorrent client nothing. Left out on purpose:
+# ProtectHome and ProtectSystem=strict/full (downloads and the config live
+# wherever the operator puts them, /etc/hydranos and /home included), UMask
+# (a group sharing the downloads with a media server must keep reading them),
+# ProtectKernelModules (a managed WireGuard device may need its module loaded)
+# and a system call filter.
+# `systemd-analyze security hydranos` rates this unit; packaging/test-unit.sh
+# keeps it under 5.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=true
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
 # Managed WireGuard (it creates the tunnel device, its routes and its rules)
 # needs NET_ADMIN; nothing else does, the kill switch included. Off by default: a daemon facing the internet that can
 # rewrite its own routes can also route around its tunnel. To use either,
