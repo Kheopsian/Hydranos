@@ -339,7 +339,7 @@ impl LsdSession {
             }
             self.peers_found.fetch_add(1, Ordering::Relaxed);
             *self.found.entry(*ih).or_insert(0) += 1;
-            // Same filters as a tracker's peer list (`rpc::add_peers`).
+            // Same filters as a tracker's peer list.
             if t.connected_addrs.contains_key(&peer) || crate::tracker::is_self_ip(peer.ip()) {
                 continue;
             }
