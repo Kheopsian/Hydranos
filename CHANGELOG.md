@@ -55,7 +55,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   and a truncated bencoded list or dict, are refused as well.
 - A block from a peer is kept only if that peer was fetching its piece. A
   peer that alone sent two pieces failing their hash is disconnected, and its
-  address refused on that torrent until the torrent completes (everyone
+  address refused on that torrent until every piece of it is had (everyone
   behind the same address with it); a piece filled by several peers in
   endgame charges none of them.
 
