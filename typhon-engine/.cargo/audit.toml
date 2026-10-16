@@ -1,0 +1,11 @@
+# cargo audit, run by CI (.github/workflows/ci.yml, job "audit"). Every
+# advisory ignored here says why it cannot reach Hydranos, and goes away as
+# soon as the dependency can be upgraded.
+[advisories]
+ignore = [
+    # ringbuf 0.4.8, through librqbit-utp 0.7.0 (the latest release): the
+    # double free needs an element whose Drop panics. The uTP buffers hold
+    # bytes, which have no Drop. The fix is ringbuf 0.5, which librqbit-utp
+    # does not accept yet.
+    "RUSTSEC-2026-0293",
+]

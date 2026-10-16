@@ -59,6 +59,21 @@ jobs:
       - name: Version, changelog and tags agree
         run: python3 .github/scripts/version_guard.py
 
+  # Known vulnerabilities in the locked dependencies, from the RustSec
+  # database as it is on the day of the run: an advisory published tomorrow
+  # turns this red with no change here, which is the point. An advisory that
+  # cannot reach Hydranos is ignored in typhon-engine/.cargo/audit.toml, with
+  # the reason beside it.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        working-directory: typhon-engine
+        run: cargo audit
+
   # entrypoint.sh is the first thing every container runs and it is not covered
   # by any Go test: a syntax error in it turns into a container that exits
   # before hydra is even reached.
