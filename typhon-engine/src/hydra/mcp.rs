@@ -1028,7 +1028,9 @@ pub(crate) async fn fetch_torrent(url: &str) -> Result<Vec<u8>, String> {
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("{url}: {e}"))?;
+        // Without the URL: after a redirect it names the target, which the
+        // caller's masking of `url` does not cover.
+        .map_err(|e| format!("{url}: {}", e.without_url()))?;
     if !resp.status().is_success() {
         return Err(format!("{url} answered {}", resp.status()));
     }

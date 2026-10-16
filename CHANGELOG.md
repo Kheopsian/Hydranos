@@ -21,6 +21,24 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a passkey only goes to its own tracker
+
+### Security
+
+- The tracker announce made while a magnet resolves no longer follows a
+  redirect: a 30x could replay the passkey-bearing URL to another host.
+- The host a configured passkey (`[announce_passkeys]`) is matched against is
+  read by the same URL parser the request is sent with. A crafted announce URL
+  (`http://other\@tracker/...`) could have the tracker's passkey sent to
+  another host.
+- A `.torrent` fetched by URL (API, MCP, RSS, qBittorrent `urls=`) is fetched
+  without a `Referer`: a redirect to a mirror no longer carries the download
+  link, passkey included, to it.
+- An announce URL with no path is never rewritten into a scrape URL, which
+  could change its host.
+- A tracker's error or warning that quotes the passkey back has it masked
+  before it reaches the log or the UI.
+
 ## v4.4.4 -- the CVE sweep: a forged .torrent, peer or DHT packet is held off
 
 ### Security
