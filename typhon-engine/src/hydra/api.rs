@@ -664,11 +664,18 @@ async fn post_node_enrol(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("this-hydra:8199");
     let base = format!("http://{host}");
+    // The script travels over the same plain link as the command's address,
+    // so the command carries its hash: a script altered on the way fails the
+    // check and is never run.
+    let sha: String = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(INSTALL_SCRIPT.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    };
     Json(serde_json::json!({
         "token": token,
         "expires_at": expires,
         "command": format!(
-            "curl -fsSL {base}/install.sh | sh -s -- --register-to {base} --token {token}"
+            "curl -fsSL {base}/install.sh -o hydranos-enrol.sh && echo '{sha}  hydranos-enrol.sh' | sha256sum -c - && sh hydranos-enrol.sh --register-to {base} --token {token}"
         ),
     }))
     .into_response()
@@ -788,10 +795,14 @@ async fn post_node_register(
 }
 
 /// The enrolment script, served so the command is one line.
+/// The node enrolment script, served at /install.sh and pinned by the command
+/// `post_node_enrol` hands out.
+const INSTALL_SCRIPT: &str = include_str!("../../../install.sh");
+
 async fn get_install_script() -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "text/x-shellscript")],
-        include_str!("../../../install.sh"),
+        INSTALL_SCRIPT,
     )
         .into_response()
 }
@@ -20060,6 +20071,27 @@ mod node_route_tests {
             body.get("token").is_some() || text.contains("token"),
             "a token was minted: {body}"
         );
+    }
+
+    /// The command checks the script against the hash of the one this binary
+    /// serves before running it: a script swapped on the way is never run.
+    #[tokio::test]
+    async fn the_enrol_command_runs_only_the_script_it_was_given() {
+        use sha2::{Digest, Sha256};
+        let s = st("node-enrol-pin");
+        let mut h = keyed(KEY);
+        h.insert(axum::http::header::HOST, "10.0.0.2:8199".parse().unwrap());
+        let resp = super::post_node_enrol(State(s.state.clone()), RawQuery(None), h).await;
+        let cmd = body_json(resp).await["command"].as_str().unwrap().to_string();
+        let sha: String = Sha256::digest(include_str!("../../../install.sh").as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert!(!cmd.contains("install.sh |"), "the download is not piped into a shell: {cmd}");
+        assert!(cmd.contains(&format!("{sha}  ")), "the command pins the served script: {cmd}");
+        let check = cmd.find("sha256sum -c").expect("the command checks the hash");
+        let run = cmd.find("sh hydranos-enrol.sh").expect("the command runs the checked file");
+        assert!(check < run, "checked before it runs: {cmd}");
     }
 
     /// Registering with a token nobody minted is refused: the token is the
