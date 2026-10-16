@@ -1907,10 +1907,12 @@ impl Store {
     /// Put jobs that were running when the process died back in the queue.
     ///
     /// A job left "running" belongs to a process that no longer exists, so it
-    /// will never finish and never fail: it would sit in the tab forever. The
-    /// work is re-done rather than resumed -- a half-copied file is not a
-    /// state this can trust, and `copy_then_delete` only unlinks the source
-    /// once the copy is complete, so the source is still there.
+    /// will never finish and never fail: it would sit in the tab forever. A
+    /// half-copied file is not a state to trust, so a file's copy is re-done
+    /// -- `copy_then_delete` only unlinks the source once the copy is
+    /// complete, so the source is still there. A graduation or move that had
+    /// already taken its torrent out of the engine finishes from the record
+    /// it carries.
     pub fn requeue_running_jobs(&self) -> usize {
         self.conn
             .execute(

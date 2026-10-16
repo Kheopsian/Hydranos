@@ -4,10 +4,11 @@
 //! at once with a job id, the work happens on a tokio task, and the row in the
 //! `jobs` table is what survives a restart -- so a move interrupted by a deploy
 //! is resumed rather than left half-done, with the data split across two disks
-//! and neither copy complete.
+//! and neither copy complete. The restart queues it again (`jobsrun::spawn`),
+//! and a graduation or move that had already taken its torrent out of the
+//! engine finishes from the record carried in the job's params.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// A move, planned before anything is touched.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,29 +172,6 @@ pub fn free_space_near(path: &Path) -> Option<u64> {
         }
         cur = cur.parent()?;
     }
-}
-
-/// Resume the jobs a restart interrupted.
-///
-/// A job left `running` in the table has no task behind it any more: the
-/// process that owned it is gone. Picking them back up is the only reason the
-/// state is in the database rather than in memory.
-pub fn resume_interrupted(store: Arc<crate::store::StoreLock>) {
-    let rows = match store.lock().unwrap().list_jobs(500) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot read the job table to resume");
-            return;
-        }
-    };
-    let interrupted: Vec<_> = rows.into_iter().filter(|j| j.state == "running").collect();
-    if interrupted.is_empty() {
-        return;
-    }
-    tracing::warn!(
-        count = interrupted.len(),
-        "jobs were running when the process last stopped"
-    );
 }
 
 #[cfg(test)]
