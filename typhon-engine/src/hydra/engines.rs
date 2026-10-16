@@ -870,18 +870,18 @@ mod tests {
     /// on for everything else -- including an empty or misspelt value. An
     /// engine that silently stayed offline because someone wrote `HYDRANOS_ENGINE_NET=no`
     /// would look alive and seed nothing.
+    ///
+    /// Read through `networking_enabled_by`: setting the variable here raced
+    /// every engine test running in parallel, which could start offline.
     #[test]
     fn only_an_explicit_off_holds_the_engines_back() {
         for off in ["0", "false", "off"] {
-            unsafe { std::env::set_var("HYDRANOS_ENGINE_NET", off) };
-            assert!(!super::networking_enabled(), "{off} should hold the engines off");
+            assert!(!super::networking_enabled_by(Some(off)), "{off} should hold the engines off");
         }
         for on in ["1", "true", "", "no", "yes"] {
-            unsafe { std::env::set_var("HYDRANOS_ENGINE_NET", on) };
-            assert!(super::networking_enabled(), "{on:?} must not be read as off");
+            assert!(super::networking_enabled_by(Some(on)), "{on:?} must not be read as off");
         }
-        unsafe { std::env::remove_var("HYDRANOS_ENGINE_NET") };
-        assert!(super::networking_enabled(), "unset means on");
+        assert!(super::networking_enabled_by(None), "unset means on");
     }
 }
 
@@ -891,10 +891,13 @@ mod tests {
 /// able to answer questions about it without telling 244k torrents' trackers
 /// about a machine nobody meant to publish.
 fn networking_enabled() -> bool {
-    !matches!(
-        std::env::var("HYDRANOS_ENGINE_NET").as_deref(),
-        Ok("0") | Ok("false") | Ok("off")
-    )
+    networking_enabled_by(std::env::var("HYDRANOS_ENGINE_NET").ok().as_deref())
+}
+
+/// `networking_enabled` for a given value of the variable, so a test reads the
+/// rule without setting the process environment under the other tests.
+fn networking_enabled_by(value: Option<&str>) -> bool {
+    !matches!(value, Some("0") | Some("false") | Some("off"))
 }
 
 /// Writes a tunnel's forwarded port, or why there is none, where the
