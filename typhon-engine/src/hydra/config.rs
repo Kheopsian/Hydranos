@@ -530,6 +530,12 @@ pub struct Config {
     #[serde(default)]
     pub announce_passkeys: BTreeMap<String, String>,
 
+    /// A passkey on a plain `http://` tracker: "warn" (default, one log line
+    /// per tracker host, the announce goes out unchanged), "allow" (silent) or
+    /// "refuse" (no announce, shown as a tracker error).
+    #[serde(default)]
+    pub announce_cleartext_passkey: String,
+
     #[serde(default)]
     pub vpn_speedtest: VpnSpeedtest,
 
