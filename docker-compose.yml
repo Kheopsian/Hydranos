@@ -27,7 +27,21 @@ services:
     #   - NET_ADMIN
     # sysctls:
     #   net.ipv6.conf.default.disable_ipv6: 0
+    # Hardening, off by default so the file works as is. Checked together with
+    # PUID/PGID below: the entrypoint needs only these five capabilities to
+    # hand the files to your user and drop to it. Not checked with managed
+    # WireGuard; with it, NET_ADMIN goes into this same cap_add list.
+    # security_opt:
+    #   - no-new-privileges:true
+    # cap_drop: [ALL]
+    # cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
+    # A memory ceiling. Hydranos reads it from its cgroup and sizes its piece
+    # buffers to an eighth of it (piece_memory_mb = 0).
+    # mem_limit: 8g
+    # pids_limit: 4096
     ports:
+      # "127.0.0.1:8199:8199" keeps the UI and API to this machine (a reverse
+      # proxy in front, say); the BitTorrent ports below must stay reachable.
       - "8199:8199"          # web UI + REST API
       - "16171:16171/tcp"    # race engine BT listen
       - "16171:16171/udp"    # race uTP
