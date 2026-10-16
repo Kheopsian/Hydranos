@@ -147,9 +147,9 @@ fn graduation_files(
 
 #[cfg(test)]
 thread_local! {
-    /// Ends the next graduation on this thread right after the torrent left
-    /// its source engine, with nothing undone: what a kill or a power cut
-    /// leaves behind.
+    /// Ends the next graduation or move on this thread right after the
+    /// torrent left its engine, with nothing undone: what a kill or a power
+    /// cut leaves behind.
     static STOP_AFTER_LEAVING_SOURCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -988,6 +988,10 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         return Err(format!("the engine refused to release it: {e}; nothing moved"));
     }
     engine.announce_cache.forget(&hash);
+    #[cfg(test)]
+    if STOP_AFTER_LEAVING_SOURCE.with(|c| c.replace(false)) {
+        return Err("stopped where a crash would".into());
+    }
 
     let mut renamed: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for f in plan.files.iter().filter(|f| f.present && f.rename) {
