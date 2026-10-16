@@ -107,6 +107,12 @@ fn run() -> Result<(), String> {
     }
 
     let asset = pick_asset(&latest)?;
+    if asset.size > MAX_ARCHIVE {
+        return Err(format!(
+            "{} declares {} bytes, more than an archive of this program can be",
+            asset.name, asset.size
+        ));
+    }
     println!("downloading {} ({:.1} MB)", asset.name, asset.size as f64 / 1e6);
 
     let bytes = get_bytes(&asset.url)?;
@@ -389,12 +395,26 @@ fn get_text(url: &str) -> Result<String, String> {
     r.text().map_err(|e| format!("reading {url}: {e}"))
 }
 
+/// The largest archive this updater downloads. A release tarball is around
+/// 55 MB; anything near this is not one.
+const MAX_ARCHIVE: u64 = 1 << 30;
+
 fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
     let r = get(url)?;
     if !r.status().is_success() {
         return Err(format!("GET {url}: HTTP {}", r.status()));
     }
-    Ok(r.bytes().map_err(|e| format!("reading {url}: {e}"))?.to_vec())
+    read_capped(r, MAX_ARCHIVE).map_err(|e| format!("reading {url}: {e}"))
+}
+
+/// Everything `r` holds, refused past `max` bytes rather than buffered.
+fn read_capped(r: impl Read, max: u64) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    r.take(max + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    if out.len() as u64 > max {
+        return Err(format!("more than {max} bytes, refused"));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -603,6 +623,13 @@ fn confirm(tag: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_download_is_refused_past_its_cap() {
+        let body = vec![7u8; 100];
+        assert_eq!(read_capped(&body[..], 100).unwrap().len(), 100);
+        assert!(read_capped(&body[..], 99).is_err());
+    }
 
     #[test]
     fn only_a_release_tag_reaches_the_release_address() {
