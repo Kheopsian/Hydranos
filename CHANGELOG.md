@@ -47,6 +47,13 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   file predates the key; an explicit `max_dials_per_sec = 0` keeps the old
   unlimited behaviour.
 
+### Correction to v4.4.4
+
+Its notes said each fix was reproduced on an isolated bench first. Four were
+(bencode crash, info-hash spoof, `find_dict_end` loop, zero-click XSS); the
+other three (`.` name, out-of-range Request, nested DHT packet) were hardened
+without a reproduction.
+
 ## v4.4.4 -- the CVE sweep: a forged .torrent, peer or DHT packet is held off
 
 ### Security
