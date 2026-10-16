@@ -52,6 +52,11 @@ pub struct Daemon {
     /// default: it is public, as a Prometheus scrape without a key expects.
     #[serde(default)]
     pub metrics_require_key: bool,
+    /// The address this daemon is reached on, as a node being enrolled should
+    /// use it (`https://hydra.example.net:9443`). Empty = the caller's `Host`
+    /// header, as before.
+    #[serde(default)]
+    pub public_url: String,
 }
 
 /// `[proxy]`: the SOCKS5 proxy the daemon's own requests go through. The
