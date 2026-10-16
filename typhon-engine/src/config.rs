@@ -176,6 +176,12 @@ pub struct EngineConfig {
     /// never announced either way.
     #[serde(default)]
     pub lsd_enabled: bool,
+    /// Announce torrents that are no longer downloading (seeds with peers) by
+    /// LSD. On by default, as it has always been. Off, only torrents still
+    /// downloading are announced; a seed still dials the LAN peers that
+    /// announce a hash it holds.
+    #[serde(default = "default_true")]
+    pub lsd_announce_seeds: bool,
     /// Fetch from the BEP 19 `url-list` HTTP mirrors a torrent names.
     /// On by default: a torrent that ships webseeds and has no seeder --
     /// every Internet Archive item is one -- cannot complete any other

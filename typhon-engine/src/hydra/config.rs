@@ -123,6 +123,10 @@ pub struct Session {
     /// `enable_udp_trackers`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_lsd: Option<bool>,
+    /// Announce seeds by LSD too. Absent means yes (the behaviour so far);
+    /// `false` announces only torrents still downloading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsd_announce_seeds: Option<bool>,
     #[serde(default)]
     pub aio_threads: Option<usize>,
     #[serde(default)]

@@ -80,6 +80,10 @@ enable_lsd = true
 # been. false keeps a private torrent off the mirrors its .torrent lists
 # (public torrents are unaffected). Same key in [hoard].
 # webseed_private = true
+# LSD announces seeds that have peers as well as downloads. false announces
+# only the torrents still downloading (a seed still dials the LAN peers that
+# announce its hash). Same key in [hoard].
+# lsd_announce_seeds = true
 # Live peer sessions, dialled and inbound; at the ceiling an inbound handshake
 # is refused. 0 = no ceiling.
 max_connections = 4000
