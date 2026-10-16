@@ -8874,15 +8874,44 @@ async fn qbit_stop(
 /// The credentials are the admin account -- the same one the WebUI signs in
 /// with at `/api/login`. Answers `Ok.` / `Fails.` with a 200 either way,
 /// because that is what qBittorrent answers and the clients parse the body.
-async fn qbit_login(State(state): State<AppState>, body: String) -> Response {
+///
+/// Failed logins count against the caller as on `/api/login`, and a blocked
+/// caller gets qBittorrent's own 403. The API key still opens a session
+/// while blocked, and neither counts nor clears: 256 random bits are not
+/// guessed by trying, and the *arr stack behind the same proxy as a stranger
+/// keeps working. The admin password does not, or the block would confirm it.
+async fn qbit_login(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    body: String,
+) -> Response {
     let cfg = state.cfg();
     let username = form_field(&body, "username").unwrap_or_default();
     let password = form_field(&body, "password").unwrap_or_default();
+    let who = crate::session::Caller::of(peer.ip());
+    let throttle = &state.sessions.throttle;
 
-    if !qbit_credentials_ok(&cfg, &username, &password).await {
-        // One answer for a wrong name, a wrong password and a wrong key alike.
-        tracing::warn!(%username, "qBittorrent login refused: invalid credentials");
-        return (StatusCode::OK, "Fails.").into_response();
+    if !qbit_key_ok(&cfg, &password) {
+        if throttle.blocked_for(who).is_some() {
+            return (
+                StatusCode::FORBIDDEN,
+                "Your IP address has been banned after too many failed authentication attempts.",
+            )
+                .into_response();
+        }
+        match qbit_password_ok(&cfg, &username, &password).await {
+            Ok(true) => throttle.succeeded(who),
+            Ok(false) => {
+                throttle.failed(who);
+                // One answer for a wrong name, a wrong password and a wrong key alike.
+                tracing::warn!(%username, "qBittorrent login refused: invalid credentials");
+                return (StatusCode::OK, "Fails.").into_response();
+            }
+            Err(crate::session::Busy) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, [(axum::http::header::RETRY_AFTER, "2")], "")
+                    .into_response();
+            }
+        }
     }
 
     let sid = state.sessions.create();
@@ -8919,17 +8948,24 @@ async fn qbit_login(State(state): State<AppState>, body: String) -> Response {
 /// An instance with neither a key nor an admin account authorises nobody. That
 /// guard is not decoration: without it an empty password would compare equal
 /// to an empty expected key, which is the 4.14 hole in a new doorway.
-async fn qbit_credentials_ok(cfg: &crate::config::Config, username: &str, password: &str) -> bool {
-    if cfg.daemon.api_key.is_empty() && cfg.auth.password_hash.is_empty() {
-        return false;
+///
+/// Split in two because the throttle treats them apart: the key is checked
+/// first and costs no bcrypt.
+fn qbit_key_ok(cfg: &crate::config::Config, password: &str) -> bool {
+    !cfg.daemon.api_key.is_empty()
+        && !password.is_empty()
+        && constant_time_eq(password.as_bytes(), cfg.daemon.api_key.as_bytes())
+}
+
+async fn qbit_password_ok(
+    cfg: &crate::config::Config,
+    username: &str,
+    password: &str,
+) -> Result<bool, crate::session::Busy> {
+    if cfg.auth.password_hash.is_empty() || username != cfg.auth.username {
+        return Ok(false);
     }
-    // The key first: a client that holds it pays no bcrypt for it.
-    let by_key = !password.is_empty()
-        && constant_time_eq(password.as_bytes(), cfg.daemon.api_key.as_bytes());
-    by_key
-        || (!cfg.auth.password_hash.is_empty()
-            && username == cfg.auth.username
-            && crate::session::verify_password(password, &cfg.auth.password_hash).await)
+    crate::session::verify_password(password, &cfg.auth.password_hash).await
 }
 
 /// End the session this request carries, and tell the client to drop it.
@@ -17118,7 +17154,11 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(qbit_credentials_ok(&state.cfg(), username, password))
+            .block_on(async {
+                let cfg = state.cfg();
+                qbit_key_ok(&cfg, password)
+                    || qbit_password_ok(&cfg, username, password).await == Ok(true)
+            })
     }
 
     /// A bcrypt check is a quarter of a second of CPU. Run inline in the
@@ -17140,13 +17180,15 @@ mod tests {
         tokio::task::yield_now().await;
 
         let before = ticks.load(SeqCst);
-        let r = qbit_login(State(st.clone()), "username=admin&password=wrong".into()).await;
+        let peer = axum::extract::ConnectInfo("192.0.2.1:40000".parse().unwrap());
+        let r = qbit_login(State(st.clone()), peer, "username=admin&password=wrong".into()).await;
         let during_qbit = ticks.load(SeqCst) - before;
         assert_eq!(r.status(), StatusCode::OK);
 
         let before = ticks.load(SeqCst);
         let r = crate::bootstrap::login(
             State(st.clone()),
+            peer,
             r#"{"username":"admin","password":"wrong"}"#.into(),
         )
         .await;
@@ -17156,6 +17198,66 @@ mod tests {
 
         assert!(during_qbit > 0, "/api/v2/auth/login held the runtime for its bcrypt check");
         assert!(during_web > 0, "/api/login held the runtime for its bcrypt check");
+    }
+
+    /// Five wrong passwords from one caller block it on both login routes,
+    /// through the real router. While blocked the right password is refused
+    /// too; on the qBittorrent shim the API key still opens a session; other
+    /// callers are untouched.
+    #[tokio::test]
+    async fn failed_logins_block_the_caller_on_both_routes() {
+        use tower::ServiceExt;
+        let st = state("the-api-key", &bcrypt::hash("right-password", 4).unwrap());
+        let call = |ip: &str, req: axum::http::Request<axum::body::Body>| {
+            let peer = std::net::SocketAddr::new(ip.parse().unwrap(), 40000);
+            super::router(st.clone())
+                .layer(axum::extract::connect_info::MockConnectInfo(peer))
+                .oneshot(req)
+        };
+        let web = |password: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/login")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({"username": "admin", "password": password}).to_string(),
+                ))
+                .unwrap()
+        };
+        let qbit = |password: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v2/auth/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(format!("username=admin&password={password}")))
+                .unwrap()
+        };
+        let text = |r: Response| async move {
+            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap())
+                .into_owned()
+        };
+
+        for _ in 0..3 {
+            assert_eq!(call("203.0.113.9", web("wrong")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        }
+        for _ in 0..2 {
+            let r = call("203.0.113.9", qbit("wrong")).await.unwrap();
+            assert_eq!(text(r).await, "Fails.");
+        }
+
+        let r = call("203.0.113.9", web("right-password")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "blocked, right password or not");
+        assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
+        let r = call("203.0.113.9", qbit("right-password")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = call("203.0.113.9", qbit("the-api-key")).await.unwrap();
+        assert!(r.headers().contains_key(axum::http::header::SET_COOKIE), "the key still opens a session");
+        assert_eq!(text(r).await, "Ok.");
+        let r = call("203.0.113.9", web("right-password")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "and the key lifted nothing");
+
+        let r = call("198.51.100.7", web("right-password")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "another caller is not blocked");
     }
 
     #[test]
