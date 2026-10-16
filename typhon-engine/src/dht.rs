@@ -223,11 +223,24 @@ impl DhtSession {
         if self.tracked.contains_key(&ih) {
             return;
         }
-        let info_hash = Id20::new(ih);
-        let dht = self.dht.clone();
+        let stream = self.dht.get_peers(Id20::new(ih), None);
+        self.track_with(torrent, stream);
+    }
+
+    /// The body of `track_torrent`, over any stream of peers.
+    ///
+    /// When the stream stops being followed (the torrent finished while seeds
+    /// are not followed, was removed, or the stream ended) the entry leaves
+    /// `tracked` and `torrents_tracked` with it, so a torrent that needs peers
+    /// again (a recheck) is tracked afresh and the count stays true.
+    fn track_with<S>(self: &Arc<Self>, torrent: Arc<TorrentState>, stream: S)
+    where
+        S: futures::Stream<Item = std::net::SocketAddr> + Send + 'static,
+    {
+        let ih = torrent.info_hash;
         let session = self.clone();
         let handle = tokio::spawn(async move {
-            let mut stream = dht.get_peers(info_hash, None);
+            let mut stream = Box::pin(stream);
             while let Some(peer_addr) = stream.next().await {
                 if torrent.is_removed.load(Ordering::Relaxed) {
                     break;
@@ -243,6 +256,7 @@ impl DhtSession {
                 session.peers_dialed.fetch_add(1, Ordering::Relaxed);
                 crate::tracker::enqueue_dial(peer_addr, torrent.clone());
             }
+            session.untrack_torrent(&ih);
         });
         // Race: two concurrent track_torrent calls for the same hash both pass
         // the contains_key check. The loser's task is aborted so we never leak
@@ -369,5 +383,60 @@ mod tests {
         assert!(tracks_in_dht(&seed, true), "default: a seed is followed");
         assert!(!tracks_in_dht(&seed, false), "option off: a seed is not");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A node with no bootstrap peers: enough to own a `tracked` table.
+    async fn offline_session() -> Arc<DhtSession> {
+        let config = librqbit_dht::DhtConfig { bootstrap_addrs: Some(Vec::new()), ..Default::default() };
+        let dht = DhtBuilder::with_config(config).await.expect("offline dht node");
+        Arc::new(DhtSession {
+            dht,
+            tracked: DashMap::new(),
+            torrents_tracked: AtomicU64::new(0),
+            peers_discovered: AtomicU64::new(0),
+            peers_dialed: AtomicU64::new(0),
+            follow_seeds: AtomicBool::new(false),
+        })
+    }
+
+    /// `dht_follow_seeds = false`: when the lookup stops because the torrent
+    /// finished, its entry leaves the table and the count, so a torrent that
+    /// needs peers again is tracked afresh and `torrents_tracked` stays true.
+    #[tokio::test]
+    async fn a_lookup_stopped_for_a_finished_torrent_is_forgotten() {
+        let (mgr, root) = manager("forget");
+        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("fin", false), "/tmp", false, false).unwrap();
+        let torrent = mgr.get(&ih).unwrap();
+        let session = offline_session().await;
+        let peer: std::net::SocketAddr = "192.168.99.7:6881".parse().unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        session.track_with(torrent.clone(), tokio_stream_from(rx));
+        assert_eq!((session.tracked_count(), session.torrents_tracked()), (1, 1));
+
+        // The torrent finishes; the next peer found stops the lookup.
+        torrent.picker.get().expect("picker").lock().unwrap().set_have(0);
+        assert!(!tracks_in_dht(&torrent, false));
+        tx.send(peer).unwrap();
+        for _ in 0..100 {
+            if session.tracked_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(session.tracked_count(), 0, "the stopped lookup left its entry behind");
+        assert_eq!(session.torrents_tracked(), 0, "torrents_tracked counts a lookup that is gone");
+
+        // An incomplete torrent can be followed again (the same hash, new task).
+        let (_tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
+        session.track_with(torrent, tokio_stream_from(rx2));
+        assert_eq!((session.tracked_count(), session.torrents_tracked()), (1, 1));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn tokio_stream_from(
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<std::net::SocketAddr>,
+    ) -> impl futures::Stream<Item = std::net::SocketAddr> + Send + 'static {
+        futures::stream::poll_fn(move |cx| rx.poll_recv(cx))
     }
 }

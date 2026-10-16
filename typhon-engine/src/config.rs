@@ -180,8 +180,10 @@ pub struct EngineConfig {
     pub dht_enabled: bool,
     /// Keep a `get_peers` stream running for torrents that have finished
     /// downloading. On by default, as it has always been. Off, a finished
-    /// torrent is not tracked (and a tracked one stops at its next peer);
-    /// only torrents still downloading use the DHT. A stop/start re-checks.
+    /// torrent is not tracked, and one already tracked stops when its lookup
+    /// next finds a peer (its entry is dropped then); only torrents still
+    /// downloading use the DHT. A torrent that needs pieces again is followed
+    /// again the next time it is started or resumed.
     #[serde(default = "default_true")]
     pub dht_follow_seeds: bool,
     /// Take part in BEP 11 peer exchange. On by default. Off, we do not

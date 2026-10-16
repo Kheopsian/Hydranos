@@ -128,7 +128,9 @@ enable_lsd = true
 # lsd_announce_seeds = true
 # The DHT keeps looking for peers of torrents that have finished. false
 # follows only the torrents still downloading (private torrents never use the
-# DHT either way). Same key in [hoard].
+# DHT either way). A finished torrent is not looked up from the start; one
+# already being looked up stops at the next peer the lookup finds. Same key in
+# [hoard].
 # dht_follow_seeds = true
 # Live peer sessions, dialled and inbound; at the ceiling an inbound handshake
 # is refused. 0 = no ceiling.
