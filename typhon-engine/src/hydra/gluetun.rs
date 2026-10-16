@@ -58,6 +58,112 @@ pub async fn fetch(client: &reqwest::Client, url: &str, key: &str) -> Result<u16
     Err(last)
 }
 
+/// What `[daemon] gluetun_verify` asks of the exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verify {
+    Off,
+    Warn,
+    Block,
+}
+
+impl Verify {
+    /// Empty or "off" is no check; an unknown word is read as no check too,
+    /// and said by `gate`.
+    pub fn parse(s: &str) -> Option<Verify> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "off" => Some(Verify::Off),
+            "warn" => Some(Verify::Warn),
+            "block" => Some(Verify::Block),
+            _ => None,
+        }
+    }
+}
+
+/// Starts every reason an engine is kept off by `gluetun_verify = "block"`.
+pub const VERIFY_BLOCK: &str = "gluetun_verify = block: ";
+
+/// The address gluetun's control server reports for its tunnel.
+pub async fn control_public_ip(client: &reqwest::Client, url: &str, key: &str) -> Result<String, String> {
+    let base = if url.trim().is_empty() { DEFAULT_URL } else { url.trim().trim_end_matches('/') };
+    let path = "/v1/publicip/ip";
+    let mut req = client.get(format!("{base}{path}"));
+    if !key.is_empty() {
+        req = req.header("X-API-Key", key);
+    }
+    let resp = req.send().await.map_err(|e| format!("{base}{path}: {e}"))?;
+    let status = resp.status().as_u16();
+    if status == 401 || status == 403 {
+        return Err(format!("{base}{path}: http {status} -- set the gluetun API key, with GET {path} allowed"));
+    }
+    let body = resp.text().await.map_err(|e| format!("{base}{path}: {e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("{base}{path}: http {status}"));
+    }
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| format!("{base}{path}: not JSON"))?;
+    v.get("public_ip")
+        .and_then(|p| p.as_str())
+        .filter(|p| p.parse::<std::net::IpAddr>().is_ok())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{base}{path}: no public address"))
+}
+
+/// Check that the daemon's exit is gluetun's tunnel: the address an echo
+/// service sees equals the one gluetun reports. Ok carries that address.
+pub async fn verify_exit(cfg: &crate::config::Config) -> Result<String, String> {
+    if !cfg.daemon.exit_probe_enabled() {
+        return Err("the exit address is not measured ([daemon] exit_probe = false), so it cannot be compared with gluetun's".into());
+    }
+    let engines = cfg.local_engines();
+    let s = engines.iter().map(|e| &e.session).find(|s| s.gluetun_port_forward);
+    let (url, key) = s.map(|s| (s.gluetun_url.as_str(), s.gluetun_api_key.as_str())).unwrap_or(("", ""));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .no_proxy()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let tunnel = control_public_ip(&client, url, key).await?;
+    let exit = crate::netprobe::echo_daemon(&cfg.daemon.exit_probe_url())
+        .await
+        .ok_or_else(|| "the echo service did not answer, so the exit cannot be compared with gluetun's".to_string())?;
+    if exit == tunnel {
+        Ok(exit)
+    } else {
+        Err(format!("the daemon leaves by {exit}, not by the address gluetun reports for its tunnel ({tunnel})"))
+    }
+}
+
+/// `[daemon] gluetun_verify` at boot, in gluetun mode: the reason to keep
+/// every engine off the network, if there is one. "warn" only says it.
+pub async fn gate(cfg: &crate::config::Config) -> Option<String> {
+    if crate::netmode::current(cfg) != "gluetun" {
+        return None;
+    }
+    let mode = match Verify::parse(&cfg.daemon.gluetun_verify) {
+        Some(m) => m,
+        None => {
+            tracing::warn!(value = %cfg.daemon.gluetun_verify, "[daemon] gluetun_verify is off, warn or block: reading it as off");
+            return None;
+        }
+    };
+    if mode == Verify::Off {
+        return None;
+    }
+    match verify_exit(cfg).await {
+        Ok(ip) => {
+            tracing::info!(exit = %ip, "gluetun_verify: the exit is gluetun's tunnel");
+            None
+        }
+        Err(why) if mode == Verify::Warn => {
+            tracing::warn!("gluetun_verify: {why}");
+            None
+        }
+        Err(why) => {
+            tracing::warn!("gluetun_verify = block: {why}");
+            Some(format!("{VERIFY_BLOCK}{why}"))
+        }
+    }
+}
+
 /// Follow gluetun's port for one engine, for the life of the process.
 pub fn spawn(engine: String, manager: Arc<TorrentManager>, url: String, key: String) {
     manager.set_port_pending(true);
@@ -160,5 +266,48 @@ mod tests {
         );
         let url = serve(app).await;
         assert_eq!(fetch(&reqwest::Client::new(), &url, "").await, Ok(39000));
+    }
+
+    async fn pair(echo_ip: &'static str, control_ip: &'static str) -> (String, String) {
+        let echo = serve(axum::Router::new().route("/", axum::routing::get(move || async move { echo_ip }))).await;
+        let control = serve(axum::Router::new().route(
+            "/v1/publicip/ip",
+            axum::routing::get(move || async move { format!("{{\"public_ip\":\"{control_ip}\"}}") }),
+        ))
+        .await;
+        (echo, control)
+    }
+
+    fn gluetun_cfg(verify: &str, extra: &str, echo: &str, control: &str) -> crate::config::Config {
+        toml::from_str(&format!(
+            "[daemon]\ngluetun_verify = \"{verify}\"\nexit_probe_url = \"{echo}\"\n{extra}\n\
+             [race]\ngluetun_port_forward = true\ngluetun_url = \"{control}\"\n"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gluetun_verify_off_by_default_asks_nothing_and_warn_never_blocks() {
+        let (echo, control) = pair("203.0.113.5", "198.51.100.9").await;
+        // Unset: no check, so no request even to an unreachable server.
+        let unset: crate::config::Config =
+            toml::from_str("[race]\ngluetun_port_forward = true\ngluetun_url = \"http://127.0.0.1:9\"\n").unwrap();
+        assert_eq!(gate(&unset).await, None);
+        assert_eq!(gate(&gluetun_cfg("off", "", &echo, &control)).await, None);
+        // A mismatch is only said under warn.
+        assert_eq!(gate(&gluetun_cfg("warn", "", &echo, &control)).await, None);
+        assert!(verify_exit(&gluetun_cfg("warn", "", &echo, &control)).await.is_err());
+        // The same address on both sides passes, even under block.
+        let (echo, control) = pair("203.0.113.5", "203.0.113.5").await;
+        assert_eq!(gate(&gluetun_cfg("block", "", &echo, &control)).await, None);
+    }
+
+    #[tokio::test]
+    async fn gluetun_verify_block_blocks_on_a_mismatch_and_on_an_unreachable_control_server() {
+        let (echo, control) = pair("203.0.113.5", "198.51.100.9").await;
+        let why = gate(&gluetun_cfg("block", "", &echo, &control)).await.unwrap();
+        assert!(why.starts_with(VERIFY_BLOCK), "{why}");
+        let why = gate(&gluetun_cfg("block", "", &echo, "http://127.0.0.1:9")).await.unwrap();
+        assert!(why.starts_with(VERIFY_BLOCK), "{why}");
     }
 }
