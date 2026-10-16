@@ -107,6 +107,15 @@ async fn host_lookup(host: &str) -> Result<Vec<IpAddr>, String> {
     Ok(addrs.map(|a| a.ip()).collect())
 }
 
+/// Whether a name that would go to the host's resolver (a pinned device with no
+/// tunnel DNS server) is refused instead. Set from `[daemon] dns_no_host_fallback`
+/// while the kill switch is armed; off by default.
+static REFUSE_HOST_FALLBACK: AtomicBool = AtomicBool::new(false);
+
+pub fn set_refuse_host_fallback(on: bool) {
+    REFUSE_HOST_FALLBACK.store(on, Ordering::Relaxed);
+}
+
 /// Resolve `host` for a socket pinned to `device`.
 ///
 /// A literal address is returned as is. A device with tunnel DNS asks that
@@ -116,6 +125,13 @@ async fn host_lookup(host: &str) -> Result<Vec<IpAddr>, String> {
 /// the host's resolver, which for a managed tunnel with no `DNS =` line is
 /// logged once as the name leak it is.
 pub async fn resolve(device: &str, host: &str) -> Result<Vec<IpAddr>, String> {
+    resolve_with(device, host, REFUSE_HOST_FALLBACK.load(Ordering::Relaxed)).await
+}
+
+/// `resolve`, with the host-resolver refusal given rather than read from the
+/// process-wide switch. A socket on no device at all (`device` empty) is the
+/// default route on purpose, and its names are the host's to resolve.
+async fn resolve_with(device: &str, host: &str, refuse_host: bool) -> Result<Vec<IpAddr>, String> {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![ip]);
@@ -126,10 +142,22 @@ pub async fn resolve(device: &str, host: &str) -> Result<Vec<IpAddr>, String> {
     } else {
         registry().read().unwrap_or_else(|p| p.into_inner()).get(device).cloned()
     };
+    let refusal = || {
+        format!(
+            "dns lookup of {host} refused: {device} has no tunnel DNS server, and the host's resolver is \
+             not used while the kill switch is armed ([daemon] dns_no_host_fallback)"
+        )
+    };
     let Some(entry) = entry else {
+        if refuse_host && !device.is_empty() {
+            return Err(refusal());
+        }
         return host_lookup(host).await;
     };
     if entry.servers.is_empty() {
+        if refuse_host {
+            return Err(refusal());
+        }
         if !entry.leak_logged.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 device,
@@ -434,6 +462,44 @@ pub(crate) mod tests {
         assert!(!is_tunnel("wg-nodns"));
         // Literals never reach any resolver.
         assert_eq!(resolve("wg-nodns", "[2001:db8::1]").await.unwrap(), vec!["2001:db8::1".parse::<IpAddr>().unwrap()]);
+    }
+
+    /// `dns_no_host_fallback` while armed: a pinned device with no tunnel DNS
+    /// (unmanaged, or a `.conf` without `DNS =`) fails the lookup instead of
+    /// asking the host; a device on no interface still uses the host, and the
+    /// switch off keeps the fallback.
+    #[tokio::test]
+    async fn a_host_fallback_is_refused_when_asked() {
+        set_servers("wg-refuse-nodns", &[]);
+        let before = host_lookups().lock().unwrap().len();
+        let e = resolve_with("wg-refuse-nodns", "refused-a.example.invalid", true).await.unwrap_err();
+        assert!(e.contains("refused") && e.contains("dns_no_host_fallback"), "{e}");
+        let e = resolve_with("wg-refuse-unmanaged", "refused-b.example.invalid", true).await.unwrap_err();
+        assert!(e.contains("refused"), "{e}");
+        assert!(
+            !host_lookups().lock().unwrap().iter().any(|n| n.starts_with("refused-")),
+            "the host's resolver was not asked ({before} lookups before)"
+        );
+        // Off: the same names still go to the host, as before.
+        let _ = resolve_with("wg-refuse-nodns", "allowed-a.example.invalid", false).await;
+        let _ = resolve_with("wg-refuse-unmanaged", "allowed-b.example.invalid", false).await;
+        // No device: the default route on purpose, never refused.
+        let _ = resolve_with("", "allowed-c.example.invalid", true).await;
+        let seen = host_lookups().lock().unwrap().clone();
+        for n in ["allowed-a", "allowed-b", "allowed-c"] {
+            assert!(seen.iter().any(|h| h.starts_with(n)), "{n} reached the host's resolver: {seen:?}");
+        }
+        // A literal never reaches any resolver.
+        assert!(resolve_with("wg-refuse-nodns", "203.0.113.4", true).await.is_ok());
+        forget("wg-refuse-nodns");
+    }
+
+    /// By default (no refusal) a socket pinned to a device the registry does not
+    /// know still resolves by the host's resolver, as before.
+    #[tokio::test]
+    async fn a_pinned_unmanaged_device_resolves_by_the_host_by_default() {
+        let _ = resolve("wg-default-unmanaged", "default-host.example.invalid").await;
+        assert!(host_lookups().lock().unwrap().iter().any(|n| n == "default-host.example.invalid"));
     }
 
     #[test]
