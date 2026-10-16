@@ -235,7 +235,15 @@ pub async fn setup_password(
 }
 
 /// Exchange credentials for the API key.
-pub async fn login(State(state): State<AppState>, body: String) -> Response {
+///
+/// Five failures from one caller block it for a while (`session::Throttle`);
+/// a blocked caller is refused before its password is looked at, the right
+/// one included, or the answer would tell it which one was right.
+pub async fn login(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    body: String,
+) -> Response {
     let cfg = state.cfg();
     #[derive(serde::Deserialize)]
     struct Creds {
@@ -258,9 +266,21 @@ pub async fn login(State(state): State<AppState>, body: String) -> Response {
         )
             .into_response();
     }
-    let ok = req.username == cfg.auth.username
-        && crate::session::verify_password(&req.password, &cfg.auth.password_hash).await;
+    let who = crate::session::Caller::of(peer.ip());
+    let throttle = &state.sessions.throttle;
+    if let Some(left) = throttle.blocked_for(who) {
+        return too_many_attempts(left);
+    }
+    let ok = if req.username == cfg.auth.username {
+        match crate::session::verify_password(&req.password, &cfg.auth.password_hash).await {
+            Ok(ok) => ok,
+            Err(crate::session::Busy) => return busy(),
+        }
+    } else {
+        false
+    };
     if !ok {
+        throttle.failed(who);
         // One message for a wrong name and a wrong password alike: saying
         // which was right tells an attacker they found the account.
         return (
@@ -269,7 +289,29 @@ pub async fn login(State(state): State<AppState>, body: String) -> Response {
         )
             .into_response();
     }
+    throttle.succeeded(who);
     Json(serde_json::json!({"api_key": cfg.daemon.api_key})).into_response()
+}
+
+/// 429 for a blocked caller, with when to come back.
+pub(crate) fn too_many_attempts(left: std::time::Duration) -> Response {
+    let secs = left.as_secs().max(1);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, secs.to_string())],
+        Json(serde_json::json!({"error": "too many failed logins, try again later", "retry_after": secs})),
+    )
+        .into_response()
+}
+
+/// 503 when every password check stayed taken.
+pub(crate) fn busy() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(axum::http::header::RETRY_AFTER, "2".to_string())],
+        Json(serde_json::json!({"error": "too many logins at once, try again"})),
+    )
+        .into_response()
 }
 
 /// How far the catalogue has got loading.

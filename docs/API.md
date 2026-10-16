@@ -30,6 +30,8 @@ There is one credential, the **API key** (`[daemon] api_key`, 48 hex characters,
 
 `POST /api/login` (JSON `{"username","password"}`) does **not** set a cookie: it returns `{"api_key": "..."}`, which the web UI then sends as `X-Api-Key`. An empty `api_key` in the config refuses every caller.
 
+**Failed logins.** Both login routes count failures per caller: the socket peer address, an IPv6 caller by its /64, never a forwarding header. Five failures within 15 minutes block the caller for 1 minute, and each further block doubles, up to 1 hour; an hour without failures after a block ends starts it over, and a successful login clears it. While blocked, `/api/login` answers `429` with `Retry-After`, and `/api/v2/auth/login` answers qBittorrent's `403` "Your IP address has been banned…", even for the right password. On `/api/v2/auth/login` the API key still opens a session while blocked, and neither counts nor clears anything. Password checks run two at a time; a login that waits more than 2 s for one gets `503` with `Retry-After: 2`. Blocks live in memory: restarting the daemon lifts them, `hydranos reset-password` does not. Behind a reverse proxy every client shares the proxy's address, so failures through the proxy can block the web UI login for everyone behind it until the block ends or the daemon restarts; *arr clients that send the API key are not affected.
+
 **Refusal shapes** (test the status code, not the text):
 
 | Where | Status | Body |
@@ -323,7 +325,7 @@ What works and what does not on the Network tab: [Networking](https://github.com
 | Route | Method | Purpose | Status |
 |---|---|---|---|
 | `/api/setup` | GET, POST | First run: `{"needs_setup","network_storage",...}` (`network_storage` is `"network share"` when `data_dir` is on NFS, SMB or FUSE, where the database cannot use WAL; `""` otherwise; always `""` up to 4.3.1) / create the admin `{"username","password","setup_code"}` (8+ chars; the code from the startup log) → API key. Public, loopback or private network only. | ✓ |
-| `/api/login` | POST | `{"username","password"}` → `{"api_key"}`. Public. | ✓ |
+| `/api/login` | POST | `{"username","password"}` → `{"api_key"}`. Public. `401` wrong credentials, `429` + `Retry-After` while the caller is blocked, `503` when every password check is taken (see *Failed logins*). | ✓ |
 | `/api/auth/password` | POST | `{"password"}` (8+ chars): stored hashed in `[auth] password_hash`, as setup does. | ✓ |
 | `/api/settings` | GET, POST | Whole config as JSON; the SOCKS5 passwords, the gluetun key, the proxy URL's password and every tracker passkey come back as `********` (posting that mask back leaves the stored value alone) / `{"changes":[{"section","key","value"}]}` edits existing keys only, except the live engine keys of `[race]`/`[hoard]` (`upload_rate_limit`, `download_rate_limit`, `peer_timeout`, `choking`, `max_uploads_per_torrent`), which are created when absent, and `enable_lsd`, created when absent too but applied at the next start. Those are put on the running engines at once; the answer carries `applied_live` (engines updated) and `restart_required` (false when every change is one of them). | ✓ |
 | `/api/settings/reset` | POST | Reset to defaults (keeps login, key, data dir). | ✓ |
