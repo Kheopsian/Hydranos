@@ -127,25 +127,34 @@ impl DownloadState {
 
     /// Process incoming Bitfield from peer.
     pub fn on_bitfield(&mut self, data: &[u8]) {
-        self.peer_bitfield = data.to_vec();
+        self.replace_bitfield(data.to_vec());
+    }
+
+    /// The peer's view replaces what it said before, in the picker as here:
+    /// counting a second Bitfield on top of the first left availability up by
+    /// one for good, since the disconnect only takes back the last one.
+    fn replace_bitfield(&mut self, bitfield: Vec<u8>) {
         if let Some(picker) = self.torrent.picker.get() {
-            picker.lock().unwrap().add_bitfield(data);
+            let mut p = picker.lock().unwrap();
+            if !self.peer_bitfield.is_empty() {
+                p.remove_bitfield(&self.peer_bitfield);
+            }
+            p.add_bitfield(&bitfield);
         }
+        self.peer_bitfield = bitfield;
     }
 
     /// Process incoming HaveAll from peer.
     pub fn on_have_all(&mut self) {
         let num_pieces = self.torrent.meta.num_pieces() as usize;
         let byte_len = (num_pieces + 7) / 8;
-        self.peer_bitfield = vec![0xFF; byte_len];
+        let mut all = vec![0xFF; byte_len];
         // Fix trailing bits
         let trailing = num_pieces % 8;
         if trailing > 0 {
-            self.peer_bitfield[byte_len - 1] = 0xFF << (8 - trailing);
+            all[byte_len - 1] = 0xFF << (8 - trailing);
         }
-        if let Some(picker) = self.torrent.picker.get() {
-            picker.lock().unwrap().add_bitfield(&self.peer_bitfield);
-        }
+        self.replace_bitfield(all);
     }
 
     /// Process incoming Have from peer. Returns true iff the piece bit was
@@ -726,6 +735,38 @@ mod tests {
         let mut dl = state(downloading(16, 16384));
         dl.on_bitfield(&[0b1010_1010, 0x00]);
         assert_eq!(dl.peer_bitfield, vec![0b1010_1010, 0x00]);
+    }
+
+    fn copies_seen(dl: &DownloadState) -> u64 {
+        dl.torrent.picker.get().unwrap().lock().unwrap().availability_stats().2
+    }
+
+    /// ⭐ One peer is one copy of what it holds, however many times it says
+    /// so. Each repeat used to add another copy that the disconnect never took
+    /// back, and rarest-first went on trusting those counters for good.
+    #[test]
+    fn a_peer_that_repeats_its_bitfield_still_counts_once() {
+        let mut dl = state(downloading(16, 16384));
+        dl.on_bitfield(&[0b1010_1010, 0x00]);
+        dl.on_bitfield(&[0b1010_1010, 0x00]);
+        dl.on_have_all();
+        dl.on_have_all();
+        assert_eq!(copies_seen(&dl), 16, "one copy of each of the sixteen pieces");
+        dl.on_disconnect();
+        assert_eq!(copies_seen(&dl), 0, "gone with the peer, nothing left behind");
+    }
+
+    /// A Bitfield that drops a piece the peer announced by Have takes that copy
+    /// back: what the peer last said is what it holds.
+    #[test]
+    fn a_later_bitfield_replaces_what_the_haves_said() {
+        let mut dl = state(downloading(16, 16384));
+        assert!(dl.on_have(0));
+        assert!(dl.on_have(9));
+        dl.on_bitfield(&[0b1000_0000, 0x00]);
+        assert_eq!(copies_seen(&dl), 1);
+        dl.on_disconnect();
+        assert_eq!(copies_seen(&dl), 0);
     }
 
     // -----------------------------------------------------------------------
