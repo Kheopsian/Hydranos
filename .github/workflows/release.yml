@@ -110,7 +110,7 @@ jobs:
           key: cargo-musl-${{ matrix.target }}-${{ hashFiles('typhon-engine/Cargo.lock') }}
           restore-keys: cargo-musl-${{ matrix.target }}-
 
-      - name: Build Typhon engine
+      - name: Build the daemon and the updater
         run: |
           mkdir -p "$PWD/.cargo-home"
           docker run --rm \
@@ -123,21 +123,23 @@ jobs:
               apk add --no-cache build-base musl-dev cmake perl
               # Both binaries, one invocation, inside the musl toolchain.
               cargo build --release --target ${{ matrix.target }} \
-                --bin typhon-engine --bin hydranos --bin hydranos-update
+                --bin hydranos --bin hydranos-update
             '
           # The container writes as root; later steps read as the runner user.
           sudo chown -R "$(id -u):$(id -g)" typhon-engine/target .cargo-home
 
-      - name: Check the engine really is static
+      # On the daemon, the binary the tarball ships. This used to check the
+      # standalone engine binary, which the tarball never carried.
+      - name: Check the daemon really is static
         working-directory: typhon-engine
         run: |
-          BIN="target/${{ matrix.target }}/release/typhon-engine"
+          BIN="target/${{ matrix.target }}/release/hydranos"
           file "$BIN"
           # A static build resolves no shared objects, so ldd prints no "=>"
           # lines. Matching on that rather than on ldd's wording, which differs
           # between "statically linked" and "not a dynamic executable".
           if ldd "$BIN" 2>&1 | grep -q "=>"; then
-            echo "::error::the engine links shared libraries; the tarball would not run on older hosts"
+            echo "::error::the daemon links shared libraries; the tarball would not run on older hosts"
             ldd "$BIN" || true
             exit 1
           fi
@@ -225,7 +227,7 @@ jobs:
         working-directory: typhon-engine
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
-        run: cargo build --release --bin typhon-engine --bin hydranos --bin hydranos-update
+        run: cargo build --release --bin hydranos --bin hydranos-update
 
       # The image job learned this the hard way: building an artefact proves
       # nothing about running it. v4.1.0 through v4.1.4 shipped a container
