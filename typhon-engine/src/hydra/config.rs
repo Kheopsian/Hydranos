@@ -72,7 +72,11 @@ pub struct Daemon {
     /// by is the one gluetun reports for its tunnel. "off" (empty, the
     /// default) checks nothing; "warn" logs a mismatch; "block" keeps every
     /// engine off the network on a mismatch, or when the check cannot be made
-    /// (`exit_probe = false`, gluetun's control server unreachable).
+    /// (`exit_probe = false`, gluetun's control server unreachable). An
+    /// unknown word is read as "off" and warned about by name. The check is
+    /// made once, at startup (under "block", up to four tries five seconds
+    /// apart); there is no later re-check, so an engine kept off because
+    /// gluetun stayed unready needs the daemon restarted.
     #[serde(default)]
     pub gluetun_verify: String,
     /// While the kill switch is armed, a tracker name that would go to the

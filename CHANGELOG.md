@@ -179,7 +179,9 @@ it is set.
 - `[daemon] gluetun_verify` = `off` (default), `warn` or `block`: in gluetun
   mode, compare the exit address with the one gluetun reports at startup;
   `block` keeps the engines offline on a mismatch, or when the comparison
-  cannot be made.
+  cannot be made after four tries five seconds apart. The check is made once,
+  at startup, and not repeated: restart the daemon to lift a block. Any other
+  value is read as `off` and warned about by name.
 - `[daemon] dns_no_host_fallback = true`: while the kill switch is armed, an
   engine pinned to an interface with no tunnel DNS does not fall back to the
   host's resolver.

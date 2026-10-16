@@ -66,6 +66,10 @@ create_torrent_folder = false
 #   "block"  keep every engine off the network on a mismatch, or when the check
 #            cannot be made (exit_probe = false, control server unreachable);
 #            the reason is on /api/network/egress and the Network tab
+# The check is made once, at startup (under "block", up to four tries five
+# seconds apart, for a gluetun that is not ready yet), never again: an engine
+# kept off because gluetun stayed unready needs the daemon restarted. A value
+# that is none of the three is read as "off" and warned about by name.
 # gluetun_verify = "off"
 # While the kill switch is armed, refuse to resolve a tracker name with the
 # host's own resolver: a lookup for an engine pinned to an interface with no
