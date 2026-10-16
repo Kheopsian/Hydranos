@@ -61,10 +61,15 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         return parse_v2(dict, &info, &info_raw);
     }
 
-    // Piece length
+    // Piece length. Read as an i64: a bare `as u32` turned 0 into a torrent
+    // that never completes, -1 into 4 GiB, and 2^32 + 16384 into 16384.
     let piece_length = info.get("piece length")
         .ok_or("missing piece length")?
-        .as_int().ok_or("piece length not int")? as u32;
+        .as_int().ok_or("piece length not int")?;
+    let piece_length = u32::try_from(piece_length)
+        .ok()
+        .filter(|&p| p > 0)
+        .ok_or_else(|| format!("piece length {piece_length} out of range"))?;
 
     // Pieces (concatenated 20-byte SHA1 hashes)
     let pieces_raw = info.get("pieces")
@@ -73,7 +78,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
     if pieces_raw.len() % 20 != 0 {
         return Err("pieces length not multiple of 20".into());
     }
-    let num_pieces = (pieces_raw.len() / 20) as u32;
+    let num_hashes = (pieces_raw.len() / 20) as u64;
 
     // Name
     let name = decode_path_str(
@@ -95,8 +100,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         let mut offset = 0u64;
         for f in file_list {
             let fd = f.as_dict().ok_or("file entry not dict")?;
-            let length = fd.get("length").ok_or("missing file length")?
-                .as_int().ok_or("file length not int")? as u64;
+            let length = file_length(fd.get("length").ok_or("missing file length")?)?;
             let path_parts = fd.get("path").ok_or("missing file path")?
                 .as_list().ok_or("file path not list")?;
             let path: PathBuf = path_parts.iter()
@@ -112,17 +116,24 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
             if !is_pad {
                 files.push(FileEntry { path, offset, length });
             }
-            offset += length;
+            offset = offset.checked_add(length).ok_or("file lengths overflow")?;
         }
         (files, offset, true)
     } else {
         // Single-file torrent
-        let length = info.get("length")
-            .ok_or("missing length")?
-            .as_int().ok_or("length not int")? as u64;
+        let length = file_length(info.get("length").ok_or("missing length")?)?;
         let path = PathBuf::from(&name);
         (vec![FileEntry { path, offset: 0, length }], length, false)
     };
+
+    // One hash per piece of the stream, no more, no fewer: every offset the
+    // engine computes from here on assumes it.
+    if total_size.div_ceil(piece_length as u64) != num_hashes {
+        return Err(format!(
+            "{num_hashes} piece hashes for {total_size} bytes in pieces of {piece_length}"
+        ));
+    }
+    let num_pieces = u32::try_from(num_hashes).map_err(|_| "too many pieces")?;
 
     // Every file must stay inside the torrent's folder. The names come from
     // whoever made the .torrent, and joined onto a save path, `..` climbs out
@@ -193,6 +204,12 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         info_dict_len: info_raw.len() as u32,
         v2: false,
     })
+}
+
+/// A file length from the metainfo: an integer that fits a u64.
+fn file_length(v: &BencodeValue) -> Result<u64, String> {
+    let n = v.as_int().ok_or("file length not int")?;
+    u64::try_from(n).map_err(|_| format!("negative file length {n}"))
 }
 
 /// Trackers and web seeds: the same keys, v1 or v2.
@@ -305,19 +322,20 @@ fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<To
     for f in &tree {
         files.push(FileEntry { path: f.path.clone(), offset: pos, length: f.length });
         if f.length > 0 {
-            end = pos + f.length;
-            pos = end.div_ceil(pl) * pl;
+            end = pos.checked_add(f.length).ok_or("file lengths overflow")?;
+            pos = end.div_ceil(pl).checked_mul(pl).ok_or("file lengths overflow")?;
         }
     }
     for f in &files {
         let rel = if multi_file { std::path::Path::new(&name).join(&f.path) } else { f.path.clone() };
         check_contained(&rel)?;
     }
+    let num_pieces = u32::try_from(end.div_ceil(pl)).map_err(|_| "too many pieces")?;
     let (trackers, url_list) = trackers_and_seeds(&dict);
     Ok(TorrentMeta {
         info_hash,
         name,
-        num_pieces: end.div_ceil(pl) as u32,
+        num_pieces,
         piece_length: pl as u32,
         total_size: end,
         files,
@@ -348,8 +366,9 @@ fn raw_string(data: &[u8], pos: usize) -> Result<(&[u8], usize), String> {
     let c = data[pos..].iter().position(|&b| b == b':').ok_or("bad string")?;
     let len: usize = std::str::from_utf8(&data[pos..pos + c]).map_err(|_| "bad string")?.parse().map_err(|_| "bad string")?;
     let start = pos + c + 1;
-    let bytes = data.get(start..start + len).ok_or("string past the end")?;
-    Ok((bytes, start + len))
+    let end = start.checked_add(len).ok_or("string past the end")?;
+    let bytes = data.get(start..end).ok_or("string past the end")?;
+    Ok((bytes, end))
 }
 
 /// `piece layers`, read with its keys as the raw 32 bytes they are: the
@@ -1044,6 +1063,80 @@ mod tests {
             Err(e) => assert!(e.contains("info"), "{e}"),
         }
         assert!(piece_hashes_from_bytes(&t).is_err());
+    }
+
+    /// A single-file torrent from its raw numbers, with `hashes` piece hashes.
+    fn single(length: &str, piece_length: &str, hashes: usize) -> Vec<u8> {
+        let mut b = format!(
+            "d4:infod6:lengthi{length}e4:name1:x12:piece lengthi{piece_length}e6:pieces{}:",
+            hashes * 20
+        )
+        .into_bytes();
+        b.extend(std::iter::repeat(9u8).take(hashes * 20));
+        b.extend(b"ee");
+        b
+    }
+
+    #[test]
+    fn piece_length_is_a_positive_u32() {
+        for pl in ["0", "-1", "4294983680"] {
+            assert!(parse_torrent_bytes(&single("16384", pl, 1)).is_err(), "piece length {pl} accepted");
+        }
+        parse_torrent_bytes(&single("16384", "16384", 1)).expect("a sane one");
+    }
+
+    #[test]
+    fn file_lengths_are_non_negative_and_their_sum_does_not_wrap() {
+        assert!(parse_torrent_bytes(&single("-1", "16384", 1)).is_err(), "negative length accepted");
+        let mut info = b"d5:filesl".to_vec();
+        for n in ["a", "b", "c"] {
+            info.extend(format!("d6:lengthi{}e4:pathl1:{n}ee", i64::MAX).as_bytes());
+        }
+        info.extend(b"e4:name1:x12:piece lengthi16384e6:pieces20:");
+        info.extend([1u8; 20]);
+        info.push(b'e');
+        let mut t = b"d4:info".to_vec();
+        t.extend(info);
+        t.push(b'e');
+        assert!(parse_torrent_bytes(&t).is_err(), "a wrapped total size accepted");
+    }
+
+    #[test]
+    fn the_piece_count_matches_the_size() {
+        assert!(parse_torrent_bytes(&single("100", "16384", 0)).is_err(), "no piece for 100 bytes");
+        assert!(parse_torrent_bytes(&single("16385", "16384", 1)).is_err(), "one piece short");
+        assert!(parse_torrent_bytes(&single("16384", "16384", 2)).is_err(), "one piece too many");
+        assert!(parse_torrent_bytes(&single(&(1u64 << 60).to_string(), "16384", 1)).is_err(), "2^60 bytes in one piece");
+        parse_torrent_bytes(&single("16385", "16384", 2)).expect("exact count");
+    }
+
+    #[test]
+    fn v2_file_lengths_do_not_wrap_nor_overflow_the_piece_index() {
+        let v2 = |lengths: &[u64]| {
+            let mut tree = b"d".to_vec();
+            for (n, len) in ["a", "b", "c"].iter().zip(lengths) {
+                tree.extend(bstr(n.as_bytes()));
+                tree.extend(format!("d0:d6:lengthi{len}e").as_bytes());
+                tree.extend(bstr(b"pieces root"));
+                tree.extend(bstr(&[3u8; 32]));
+                tree.extend(b"ee");
+            }
+            tree.push(b'e');
+            let mut t = b"d4:infod".to_vec();
+            t.extend(bstr(b"file tree"));
+            t.extend(tree);
+            t.extend(b"12:meta versioni2e4:name1:x12:piece lengthi16384eee");
+            t
+        };
+        let m = i64::MAX as u64;
+        assert!(parse_torrent_bytes(&v2(&[m, m, m])).is_err(), "wrapped offsets accepted");
+        assert!(parse_torrent_bytes(&v2(&[1 << 50])).is_err(), "more pieces than a u32 counts");
+        parse_torrent_bytes(&v2(&[100, 20000])).expect("a sane one");
+    }
+
+    #[test]
+    fn a_huge_key_length_is_an_error_not_a_panic() {
+        assert!(piece_hashes_from_bytes(b"d18446744073709551615:x").is_err());
     }
 
     #[test]

@@ -1041,8 +1041,11 @@ mod tests {
     fn write_torrent(dir: &std::path::Path, name: &str, length: u64) -> String {
         let mut info = Vec::new();
         info.extend_from_slice(format!("d6:lengthi{length}e4:name{}:{name}", name.len()).as_bytes());
-        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
-        info.extend_from_slice(&[0xAB; 20]);
+        // One hash per piece: the parser refuses a count that does not cover
+        // the length.
+        let hashes = length.div_ceil(16384) as usize * 20;
+        info.extend_from_slice(format!("12:piece lengthi16384e6:pieces{hashes}:").as_bytes());
+        info.extend(std::iter::repeat(0xAB).take(hashes));
         info.push(b'e');
 
         // Computed, not counted by hand: a bencode length is the one thing in
