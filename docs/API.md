@@ -245,7 +245,7 @@ See [Race Drain, Graduation and Seed Obligations](https://github.com/Kheopsian/H
 | `/api/nodes/:name/rotate-key` | POST | Rotate the node's API key (4.4, node on 4.4): the node mints a key, adopts it once this instance presents it back, refuses the old one from then on; stored here. `{"status","name","api_key","health"}`: the new key is returned once, for the node's other clients. 502 with the reason if the node refused (it then keeps its old key). | ✓ |
 | `/api/auth/api-key/rotate` | POST | Node side, step 1: mint a pending key (valid 10 min, in memory), the current key still valid. `{"pending_key","expires_in"}`. | ✓ |
 | `/api/auth/api-key/confirm` | POST | Node side, step 2, authenticated by the pending key in `X-Api-Key`: written to `[daemon] api_key`, live at once; the old key is refused from the next request. 401 for any other key. Logged-in browser sessions stay valid. | ✓ |
-| `/api/nodes/enrol`, `/api/nodes/register` | POST | One-time token + install command; called by the new machine with the token. A name already taken is refused before the token is spent. | ✓ |
+| `/api/nodes/enrol`, `/api/nodes/register` | POST | One-time token + install command (its address is `[daemon] public_url` when set, else the request's `Host`); called by the new machine with the token. A name already taken is refused before the token is spent. | ✓ |
 | `/api/nodes/:name/{handoff,fetch,move-engine}` | POST | Push / pull / move between that node's engines (bodies: [Nodes and Multiple Machines](https://github.com/Kheopsian/Hydranos/wiki/Nodes-and-Multiple-Machines)). | ✓ |
 | `/node/:name/open` | GET | Redirect to the node's UI with its key. | ✓ |
 | `/install.sh` | GET | Enrolment script (public). | ✓ |
