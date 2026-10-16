@@ -73,6 +73,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   /64), and 4096 in all, may sit in the handshake at once; past that a new
   one is closed unread. Counted as `inbound_refused_busy` in the engine
   counters. Each inbound connection is logged at debug rather than info.
+- An incoming encrypted (MSE) handshake whose PadC or initial payload is
+  declared longer than 512 bytes is refused on that length, before anything
+  is allocated or read.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
