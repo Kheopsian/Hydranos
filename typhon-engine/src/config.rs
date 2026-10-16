@@ -98,6 +98,8 @@ pub struct EngineConfig {
     /// `socks5h://` URL (see `http_proxy`).
     #[serde(default)]
     pub announce_proxy: String,
+    /// Ceiling on live peer sessions for this engine, ours and theirs: at it,
+    /// no new dial goes out and an inbound handshake is refused. 0 = none.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
     /// Cap on new outbound peer dials, in dials per second. 0 = unlimited
