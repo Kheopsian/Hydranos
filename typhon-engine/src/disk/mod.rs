@@ -32,13 +32,20 @@ fn get_or_open(path: &PathBuf) -> std::io::Result<Arc<File>> {
     // (tit-for-tat serve of an already-have piece) cached an O_RDONLY handle
     // first, a later write to that same not-yet-complete file reused the RO fd
     // and pwrite failed with EBADF, wedging the piece into an infinite
-    // re-download loop. All our data dirs are writable, so RW is always safe.
-    let f = Arc::new(
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?,
-    );
+    // re-download loop.
+    let f = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(f) => Arc::new(f),
+        // A file we may read but not write -- a read-only mount, a 0444 seed
+        // -- is still served, from a read-only handle that is NOT cached: a
+        // later write to it opens its own, and fails for the real reason.
+        Err(e) if matches!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+        ) => {
+            return std::fs::File::open(path).map(Arc::new).map_err(|_| e);
+        }
+        Err(e) => return Err(e),
+    };
     let mut cache = fd_cache().lock();
     cache.put(path.clone(), f.clone());
     Ok(f)
