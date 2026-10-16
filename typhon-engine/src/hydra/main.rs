@@ -51,6 +51,7 @@ mod export;
 mod selection;
 mod sharelimits;
 mod store;
+mod privfiles;
 mod tomledit;
 mod trackeredit;
 mod trackerlists;
@@ -437,15 +438,18 @@ fn seed_config(path: &Path) {
 /// The on-disk log, beside the config. None when the operator asked for stdout
 /// only, or when the file cannot be opened -- a daemon that will not start
 /// because its log file is read-only would be a poor trade.
+fn log_path(config_path: &Path) -> PathBuf {
+    match config_path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        Some(d) => d.join("hydranos.log"),
+        None => PathBuf::from("hydranos.log"),
+    }
+}
+
 fn log_file(config_path: &Path) -> Option<RotatingLog> {
     if std::env::var_os("HYDRANOS_LOG_STDOUT").is_some() {
         return None;
     }
-    let dir = config_path.parent().filter(|d| !d.as_os_str().is_empty());
-    let path = match dir {
-        Some(d) => d.join("hydranos.log"),
-        None => PathBuf::from("hydranos.log"),
-    };
+    let path = log_path(config_path);
     match RotatingLog::open(path.clone()) {
         Ok(f) => Some(f),
         Err(e) => {
@@ -525,6 +529,15 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     let stop_budget = stop_budget();
 
     let mut config = Config::load(&config_path)?;
+    // The log was opened before the config could be read, so it is tightened
+    // here with the rest; see privfiles.
+    privfiles::apply(
+        config.daemon.private_files,
+        &config_path,
+        &log_path(&config_path),
+        &std::path::Path::new(&config.daemon.data_dir).join("hydra.db"),
+        &std::path::Path::new(&config.daemon.data_dir).join("bench.db"),
+    );
     // Before anything is served: an install with no key of its own would
     // otherwise answer every caller who sends no key. See config::ensure_api_key.
     config::ensure_api_key(&mut config, &config_path);
@@ -1366,7 +1379,7 @@ const LOG_KEEP: u32 = 4;
 
 impl RotatingLog {
     fn open(path: PathBuf) -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = privfiles::log_open_options().open(&path)?;
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(RotatingLog(std::sync::Arc::new(std::sync::Mutex::new(RotatingInner { path, file, size }))))
     }
@@ -1386,7 +1399,7 @@ impl RotatingInner {
             let _ = std::fs::rename(name(i), name(i + 1));
         }
         let _ = std::fs::rename(&self.path, name(1));
-        self.file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        self.file = privfiles::log_open_options().open(&self.path)?;
         self.size = 0;
         Ok(())
     }

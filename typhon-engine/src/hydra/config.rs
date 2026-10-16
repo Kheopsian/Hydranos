@@ -81,6 +81,14 @@ pub struct Daemon {
     /// instead. Off by default. No other resolver is ever added.
     #[serde(default)]
     pub dns_no_host_fallback: bool,
+    /// The daemon's own files are created 0600, and ones that exist are
+    /// brought back to 0600 at startup: hydranos.log (and its rotated .1 to
+    /// .4), this config file, hydra.db and bench.db, each with its -wal, -shm
+    /// and -journal. NOT covered: categories.json (a 3.x file the daemon only
+    /// reads) and everything downloaded. Default off: another account on the
+    /// host (a backup job, a reader of the config) keeps reading them. Unix only.
+    #[serde(default)]
+    pub private_files: bool,
 }
 
 /// The echo service asked when `[daemon] exit_probe_url` is empty.

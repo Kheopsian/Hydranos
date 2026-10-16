@@ -603,6 +603,9 @@ impl Store {
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI
         };
+        if !read_only && crate::privfiles::enabled() {
+            crate::privfiles::precreate(path);
+        }
         let conn = Connection::open_with_flags(path, flags)?;
         let mut store = Self::bare(conn);
         // 3.x applies its CREATE TABLE IF NOT EXISTS on every open, so a fresh
@@ -613,6 +616,13 @@ impl Store {
             store.ensure_schema()?;
             store.track_changes();
             store.prefer_wal(path);
+            if crate::privfiles::enabled() {
+                // The -wal and -shm exist by now; the next ones SQLite makes
+                // take the database file's mode.
+                for p in crate::privfiles::store_files(path) {
+                    crate::privfiles::tighten(&p);
+                }
+            }
             // 64 MB of page cache for the writer, against SQLite's 2 MB
             // default. A flag change moves an entry in `idx_torrents_cover`
             // (it carries paused, tags and category), and with 2 MB those
