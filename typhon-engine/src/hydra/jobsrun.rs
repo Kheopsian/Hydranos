@@ -126,6 +126,14 @@ pub(crate) fn run_job(state: &AppState, job: &crate::store::Job) -> Result<(), S
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Ends the next graduation on this thread right after the torrent left
+    /// its source engine, with nothing undone: what a kill or a power cut
+    /// leaves behind.
+    static STOP_AFTER_LEAVING_SOURCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Move a torrent and its data to another engine's storage, keeping it seeding.
 ///
 /// The existing `POST /api/torrents/:hash/engine` reassigns an engine WITHOUT
@@ -200,6 +208,10 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         .remove_torrent(&ih, true)
         .map_err(|e| format!("the source engine refused to release it: {e}"))?;
     src.announce_cache.forget(&hash);
+    #[cfg(test)]
+    if STOP_AFTER_LEAVING_SOURCE.with(|c| c.replace(false)) {
+        return Err("stopped where a crash would".into());
+    }
 
     // From here, any failure puts the files back and the torrent back in its
     // source engine, as it was. 4.3 had no way back: an error after the
