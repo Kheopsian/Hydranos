@@ -333,11 +333,14 @@ fn kick(state: &AppState, row: &crate::store::MagnetRow) -> Result<(), String> {
         .engine_config
         .get()
         .ok_or_else(|| format!("engine {} is not on the network", row.engine))?;
+    // The announce option as it is now, not as the engine started with it.
+    let mut cfg = cfg.clone();
+    cfg.announce_cleartext_passkey = state.config.read().unwrap_or_else(|e| e.into_inner()).announce_cleartext_passkey.clone();
     engine.manager.magnet().start(
         m.info_hash,
         m.trackers,
         m.peers,
-        cfg,
+        &cfg,
         None,
         engine.manager.dht().map(|d| d.handle()),
     );
