@@ -744,6 +744,10 @@ fn decode_list(data: &[u8], pos: usize, depth: usize) -> Result<(BencodeValue, u
         items.push(val);
         i = next;
     }
+    // Ran off the end: a truncated list, not a short one.
+    if i >= data.len() {
+        return Err("unterminated list".into());
+    }
     Ok((BencodeValue::List(items), i + 1))
 }
 
@@ -765,6 +769,9 @@ fn decode_dict(data: &[u8], pos: usize, depth: usize) -> Result<(BencodeValue, u
         let (val, next2) = decode_value(data, next, depth + 1)?;
         items.push((key, val));
         i = next2;
+    }
+    if i >= data.len() {
+        return Err("unterminated dict".into());
     }
     Ok((BencodeValue::Dict(items), i + 1))
 }
@@ -1168,6 +1175,16 @@ mod tests {
         assert!(parse_torrent_bytes(&v2(&[m, m, m])).is_err(), "wrapped offsets accepted");
         assert!(parse_torrent_bytes(&v2(&[1 << 50])).is_err(), "more pieces than a u32 counts");
         parse_torrent_bytes(&v2(&[100, 20000])).expect("a sane one");
+    }
+
+    #[test]
+    fn an_unterminated_list_or_dict_is_an_error() {
+        assert!(bencode_decode(b"l1:a").is_err(), "open list accepted");
+        assert!(bencode_decode(b"d1:ai1e").is_err(), "open dict accepted");
+        let (mut t, _) = torrent_bytes(1);
+        assert_eq!(t.pop(), Some(b'e'));
+        assert!(parse_torrent_bytes(&t).is_err(), "a truncated torrent accepted");
+        bencode_decode(b"d1:ali1eee").expect("a closed one");
     }
 
     #[test]
