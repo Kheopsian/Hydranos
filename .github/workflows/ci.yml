@@ -5,7 +5,7 @@ name: ci
 # pull request arrived with nothing run against it at all -- PR #21 and PR #30
 # were both built and tested by hand in a golang container before merging.
 #
-# Deliberately cheap: build, vet and test, no release artifacts. The expensive
+# Deliberately cheap: build, lint and test, no release artifacts. The expensive
 # multi-arch static builds stay in release.yml, where a tag pays for them once.
 on:
   pull_request:
