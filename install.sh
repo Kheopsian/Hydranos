@@ -10,7 +10,12 @@
 # become code execution on the fleet. The only authority that crosses the wire
 # is a token that is single use and expires in thirty minutes.
 #
-#   curl -fsSL http://<hydranos>/install.sh | sh -s -- --register-to http://<hydranos> --token <token>
+#   curl -fsSL http://<hydranos>/install.sh -o hydranos-enrol.sh \
+#     && echo '<sha256>  hydranos-enrol.sh' | sha256sum -c - \
+#     && sh hydranos-enrol.sh --register-to http://<hydranos> --token <token>
+#
+# The controller's Nodes page prints that command with the hash of the script it
+# serves, so a script altered on the way is refused before it runs.
 #
 # Three ways to install, picked in this order unless --user forces the last:
 #   docker  docker is on the PATH: a container, config in --dir (/opt/hydranos)
