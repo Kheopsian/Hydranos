@@ -64,12 +64,11 @@ else
         EXIST_USR=hydranos
     fi
     # The config directory is small (config, resume data, SQLite store), so
-    # a recursive chown is cheap. The payload directory is NOT touched: it
-    # can hold millions of files, and its ownership is yours to manage.
+    # a recursive chown is cheap. Of the payload directory only the folder
+    # itself is handed over, so a fresh volume is writable: what is inside can
+    # hold millions of files, and its ownership is yours to manage (folders an
+    # older root container created there are left for you to chown).
     # Skip with HYDRANOS_SKIP_CHOWN=1 if you already got the permissions right.
-    # The payload directory itself is handed over too, not what is in it, so
-    # a fresh volume is writable; folders an older root container created
-    # in it are left for you to chown.
     if [ "$HYDRANOS_SKIP_CHOWN" != "1" ]; then
         chown -R "$RUN_UID:$RUN_GID" "$CFG_DIR" 2>/dev/null || \
             echo "hydranos: could not chown $CFG_DIR, continuing"
@@ -81,10 +80,12 @@ else
     echo "hydranos: dropping privileges to $RUN_UID:$RUN_GID ($EXIST_USR:$EXIST_GRP)"
     # Managed WireGuard (the Network tab's WireGuard mode) runs `ip` and
     # `wg`, and fwmark-based VPN routing sets SO_MARK: both need
-    # CAP_NET_ADMIN. It is lost when we drop privileges, so keep it as an
-    # AMBIENT capability -- inherited by `ip` and `wg` -- only when asked
-    # for (HYDRANOS_CAP_NET_ADMIN=1). It is not needed otherwise.
-    if [ "$HYDRANOS_CAP_NET_ADMIN" = "1" ] && command -v capsh >/dev/null 2>&1; then
+    # CAP_NET_ADMIN. It is lost when we drop privileges, so it is kept as an
+    # AMBIENT capability -- inherited by `ip` and `wg` -- whenever the
+    # container was granted it (--cap-add=NET_ADMIN): granting it is the ask.
+    # A container that ran as root before 4.5 kept it the same way.
+    # HYDRANOS_CAP_NET_ADMIN=0 drops it anyway.
+    if [ "$HYDRANOS_CAP_NET_ADMIN" != "0" ] && command -v capsh >/dev/null 2>&1; then
         # The container only has CAP_NET_ADMIN if it was granted one
         # (--cap-add=NET_ADMIN or --privileged). Probe before exec'ing, so a
         # container without it still starts instead of dying on capsh.
@@ -94,7 +95,9 @@ else
                 --keep=1 --user="$EXIST_USR" --addamb=cap_net_admin \
                 -- -c 'exec hydranos "$@"' hydranos "$@"
         fi
-        echo "hydranos: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN for managed WireGuard and fwmark routing"
+        if [ "$HYDRANOS_CAP_NET_ADMIN" = "1" ]; then
+            echo "hydranos: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN for managed WireGuard and fwmark routing"
+        fi
     fi
     exec gosu "$RUN_UID:$RUN_GID" hydranos "$@"
 fi

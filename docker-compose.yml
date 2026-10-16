@@ -22,7 +22,8 @@ services:
     # The host's default route is never changed. Keep both IPv4 and IPv6 of a
     # dual-stack provider file with the sysctl (Docker defaults new
     # interfaces to IPv6 off, and it cannot be changed from inside).
-    # With PUID/PGID below, also set HYDRANOS_CAP_NET_ADMIN: 1.
+    # The daemon keeps NET_ADMIN after dropping to PUID/PGID whenever the
+    # container has it; HYDRANOS_CAP_NET_ADMIN: 0 drops it anyway.
     # cap_add:
     #   - NET_ADMIN
     # sysctls:
