@@ -141,8 +141,13 @@ refusal of the address, which was shown on an isolated bench only.
   the enrolment script still check the SHA-256 only.
 - The release purge workflow only acts on tag-shaped names (hardened without
   a reproduction).
-- A Transmission library upload is held in memory once instead of twice
-  (hardened without a reproduction).
+- A Transmission library upload is written to disk as it arrives instead of
+  held in memory (hardened without a reproduction).
+- A private torrent's info dict is no longer served to peers over BEP 9: its
+  metainfo comes from its site (BEP 27). For public torrents, a metadata
+  block that does not exist is refused before anything is read, and the dicts
+  recently served come from a bounded 32 MiB cache instead of a store read and
+  a parse per request.
 
 ### Added
 
@@ -236,6 +241,36 @@ it is set.
   the cgroup the daemon runs in, so a systemd `MemoryMax=` bounds it; it used
   to see only a container's own limit and otherwise sized itself on the whole
   machine.
+- A graduation, or a move across filesystems, interrupted after taking the
+  torrent out of its engine (a kill, an OOM, a power cut during the copy) is
+  finished when its job runs again, instead of failing with the torrent in no
+  engine and its resume record gone.
+- The store reconcile no longer deletes the row, metainfo included, of a
+  torrent that a graduation or move has taken out of its engine on purpose.
+- A state row that cannot be read is kept as a refused record: the torrent
+  used to come up missing and its store row was then deleted as an orphan.
+- A read racing a piece write no longer caches the old bytes over the piece
+  just written, which were served for it until the block expired.
+- A torrent leaving its files (a move, a graduation, a new save path) drops
+  their cached descriptors, which kept the space of the unlinked originals in
+  use.
+- A peer repeating its bitfield no longer inflates piece availability for the
+  life of the torrent.
+- Hardened without a reproduction: the race drain and the store reconcile run
+  on the blocking pool, and so do the reads and hashes of a recheck, instead
+  of holding async workers for a whole pass.
+- Hardened without a reproduction: one recheck at a time per torrent, and a
+  start no longer overwrites a recheck's Checking status.
+- Hardened without a reproduction: the state sweep commits 2000 rows at a
+  time, so a shutdown flush cut short keeps what it committed.
+- Hardened without a reproduction: an `ip` or `wg` command that does not
+  return within 20 s is stopped, including on the way out.
+- Hardened without a reproduction: a file that can be read but not written
+  (read-only mount or permissions) is served.
+- Hardened without a reproduction: the stats emitter forgets removed
+  torrents; a huge `piece_memory_mb` saturates instead of wrapping; the
+  `file_pool_size` notice no longer points at `aio_threads`, which sizes
+  nothing.
 
 ### Removed
 
