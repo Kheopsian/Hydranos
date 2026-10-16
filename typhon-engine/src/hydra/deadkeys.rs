@@ -102,8 +102,8 @@ pub const DEAD_KEYS: &[DeadKey] = &[
     ),
     dead(
         Scope::Engine("file_pool_size"),
-        "not a setting: the open-file pool is sized by aio_threads",
-        "aio_threads",
+        "not a setting: the engine keeps a fixed cache of 10 000 open files, which aio_threads does not change either",
+        "nothing: there is no setting for it",
     ),
     dead(
         Scope::Engine("custom_choking"),
