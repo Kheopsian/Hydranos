@@ -100,32 +100,73 @@ use crate::torrent::ratelimit::{Admit, Dir, Gate};
 use crate::wire::codec::BtCodec;
 
 /// Build the BEP 9 reply for one requested block, or a reject if we cannot
-/// serve it. Re-reading the metainfo per request is fine: requests are rare,
-/// and the alternative is keeping every info dict resident forever.
+/// serve it.
+///
+/// A private torrent's metainfo comes from its site, never from peers (BEP 27):
+/// its info dict is not ours to hand to whoever connects with the hash. And
+/// a block that does not exist is refused before anything is read.
 fn serve_metadata_block(torrent: &Arc<TorrentState>, piece: u32) -> Vec<u8> {
     let total = torrent.meta.info_dict_len as usize;
-    if total == 0 {
-        return extension::build_metadata_reject(piece);
-    }
-    let bytes = match torrent.metainfo_bytes() {
-        Some(b) => b,
-        None => return extension::build_metadata_reject(piece),
-    };
-    let dict = match crate::torrent::metainfo::info_dict_from_bytes(&bytes) {
-        Ok(d) => d,
-        Err(_) => return extension::build_metadata_reject(piece),
-    };
-    // What the store holds must still be the torrent we advertised; serving a
-    // mismatched slice would corrupt the peer's dict.
-    if dict.len() != total {
+    if total == 0 || !torrent.meta.allows_peer_discovery() {
         return extension::build_metadata_reject(piece);
     }
     let offset = piece as usize * extension::METADATA_BLOCK;
     if offset >= total {
         return extension::build_metadata_reject(piece);
     }
+    let dict = match served_info_dict(torrent, total) {
+        Some(d) => d,
+        None => return extension::build_metadata_reject(piece),
+    };
     let end = (offset + extension::METADATA_BLOCK).min(total);
     extension::build_metadata_data(piece, total, &dict[offset..end])
+}
+
+/// Bytes of info dict kept for the torrents most recently served by BEP 9.
+/// A peer fetching a dict asks for every block of it, often more than once:
+/// without this, each request read the whole metainfo from the store and
+/// parsed it again. Keeping every dict resident is out of the question; a
+/// bounded handful of recent ones costs little.
+const SERVED_DICTS_BUDGET: usize = 32 << 20;
+
+struct ServedDicts {
+    lru: lru::LruCache<[u8; 20], Arc<Vec<u8>>>,
+    bytes: usize,
+}
+
+fn served_dicts() -> &'static parking_lot::Mutex<ServedDicts> {
+    static DICTS: std::sync::OnceLock<parking_lot::Mutex<ServedDicts>> = std::sync::OnceLock::new();
+    DICTS.get_or_init(|| {
+        parking_lot::Mutex::new(ServedDicts { lru: lru::LruCache::unbounded(), bytes: 0 })
+    })
+}
+
+fn served_info_dict(torrent: &TorrentState, total: usize) -> Option<Arc<Vec<u8>>> {
+    if let Some(d) = served_dicts().lock().lru.get(&torrent.info_hash) {
+        return Some(d.clone());
+    }
+    let bytes = torrent.metainfo_bytes()?;
+    let dict = crate::torrent::metainfo::info_dict_from_bytes(&bytes).ok()?;
+    // What the store holds must still be the torrent we advertised; serving a
+    // mismatched slice would corrupt the peer's dict.
+    if dict.len() != total {
+        return None;
+    }
+    let dict = Arc::new(dict);
+    if total <= SERVED_DICTS_BUDGET / 4 {
+        let mut cache = served_dicts().lock();
+        if let Some(old) = cache.lru.put(torrent.info_hash, dict.clone()) {
+            cache.bytes -= old.len();
+        }
+        cache.bytes += total;
+        while cache.bytes > SERVED_DICTS_BUDGET {
+            match cache.lru.pop_lru() {
+                Some((_, d)) => cache.bytes -= d.len(),
+                None => break,
+            }
+        }
+    }
+    Some(dict)
 }
 
 /// Whether a block request may be served now.
@@ -751,10 +792,9 @@ pub async fn run(
                                     }
                                 } else if ext_id == extension::OUR_UT_METADATA_ID {
                                     // BEP 9 request from a peer resolving a
-                                    // magnet. Re-read the metainfo rather than
-                                    // hold the dict in memory; on any problem
-                                    // reply reject, which is a valid answer and
-                                    // lets the peer move on to someone else.
+                                    // magnet. On any problem reply reject,
+                                    // which is a valid answer and lets the
+                                    // peer move on to someone else.
                                     if let Some(m) = extension::parse_metadata_message(&payload) {
                                         if m.msg_type == extension::METADATA_REQUEST {
                                             let reply = serve_metadata_block(&torrent, m.piece);
@@ -951,5 +991,73 @@ mod idle_deadline_tests {
         ] {
             assert!(pushes_idle_deadline(&m), "{m:?} should push the deadline");
         }
+    }
+}
+
+#[cfg(test)]
+mod metadata_serve_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A torrent of four metadata blocks whose store reads are counted.
+    fn served(name: &str, private: bool) -> (Arc<TorrentState>, Arc<AtomicUsize>) {
+        let pieces = 3000; // 60 kB of hashes: a dict of four blocks
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("6:lengthi{}e", pieces * 16384).as_bytes());
+        info.extend_from_slice(format!("4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e");
+        info.extend_from_slice(format!("6:pieces{}:", pieces * 20).as_bytes());
+        info.extend(std::iter::repeat(7u8).take(pieces * 20));
+        if private {
+            info.extend_from_slice(b"7:privatei1e");
+        }
+        let mut bytes = b"d4:infod".to_vec();
+        bytes.extend_from_slice(&info);
+        bytes.extend_from_slice(b"ee");
+        let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+        let t = Arc::new(TorrentState::new(meta, std::path::PathBuf::from("/tmp"), true));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        let _ = t.blob_source.set(Arc::new(move |_: &str| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Some(bytes.clone())
+        }));
+        (t, reads)
+    }
+
+    fn kind(reply: &[u8]) -> i64 {
+        extension::parse_metadata_message(reply).unwrap().msg_type
+    }
+
+    #[test]
+    fn a_public_torrent_serves_its_info_dict() {
+        let (t, _) = served("public.bin", false);
+        assert_eq!(kind(&serve_metadata_block(&t, 0)), extension::METADATA_DATA);
+    }
+
+    /// ⭐ A private torrent's metainfo is handed out by its site, to its
+    /// members; a peer that only knows the hash does not get it from us.
+    #[test]
+    fn a_private_torrent_does_not_hand_out_its_info_dict() {
+        let (t, reads) = served("private.bin", true);
+        assert_eq!(kind(&serve_metadata_block(&t, 0)), extension::METADATA_REJECT);
+        assert_eq!(reads.load(Ordering::SeqCst), 0, "nothing was read for it");
+    }
+
+    #[test]
+    fn a_block_past_the_end_is_refused_without_reading_the_store() {
+        let (t, reads) = served("past-end.bin", false);
+        assert_eq!(kind(&serve_metadata_block(&t, 999)), extension::METADATA_REJECT);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    /// Asking for every block, and again, reads the metainfo once.
+    #[test]
+    fn a_peer_asking_again_and_again_costs_one_store_read() {
+        let (t, reads) = served("again.bin", false);
+        for round in 0..50u32 {
+            assert_eq!(kind(&serve_metadata_block(&t, round % 4)), extension::METADATA_DATA);
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 }
