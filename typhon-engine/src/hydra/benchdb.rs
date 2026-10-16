@@ -450,6 +450,9 @@ fn prefer_wal(conn: &Connection, path: &Path) {
 
 impl BenchDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        if crate::privfiles::enabled() {
+            crate::privfiles::precreate(path);
+        }
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
@@ -457,6 +460,11 @@ impl BenchDb {
         prefer_wal(&conn, path);
         conn.execute_batch(SCHEMA)?;
         add_missing_columns(&conn)?;
+        if crate::privfiles::enabled() {
+            for p in crate::privfiles::store_files(path) {
+                crate::privfiles::tighten(&p);
+            }
+        }
         Ok(Self { conn })
     }
 

@@ -19,6 +19,13 @@ create_torrent_folder = false
 # With the kill switch armed, a way out that is missing or unusable REFUSES the
 # request; it is never sent by the default route instead.
 # egress = "auto"
+# The daemon's own files readable by the daemon's user only: created 0600, and
+# existing ones brought back to 0600 at startup. Exactly: hydranos.log (and its
+# rotated .1 to .4), this file, hydra.db and bench.db, each with its -wal, -shm
+# and -journal. NOT covered: categories.json (a 3.x file the daemon only reads)
+# and every downloaded file. Off by default: another account on the host (a
+# backup job, a reader of this file) keeps reading them. Unix only.
+# private_files = false
 # Interface the daemon's own requests are bound to when they go "direct" or
 # through "proxy". The engines have their own, in [race]/[hoard].
 # bind_interface = "wg0"
