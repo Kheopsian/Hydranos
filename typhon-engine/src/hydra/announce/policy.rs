@@ -198,9 +198,9 @@ fn udp_request(a: &Announce, tracker: &str) -> Option<typhon_engine::tracker::ud
         uploaded: a.uploaded.max(0) as u64,
         event: typhon_engine::tracker::udp::event_code(a.event),
         ip: a.public_ip.parse::<std::net::Ipv4Addr>().map(u32::from).unwrap_or(0),
-        // The HTTP `key`, read back as the 32 bits it is: one key per peer,
-        // whichever transport carries it.
-        key: u32::from_str_radix(&url::key_for(a.peer_id), 16).unwrap_or(0),
+        // The HTTP `key`, read back as the 32 bits it is: one key per peer and
+        // torrent, whichever transport carries it.
+        key: u32::from_str_radix(&url::key_for(a.peer_id, a.info_hash), 16).unwrap_or(0),
         num_want: url::numwant(a.left, a.numwant_override) as i32,
         port: a.port,
     })
@@ -255,6 +255,20 @@ mod tests {
         assert_eq!(r.device, "");
     }
 
+    /// Two torrents announced with the same peer id do not share a `key`:
+    /// the value would otherwise tie every torrent we announce together.
+    #[test]
+    fn two_torrents_do_not_share_a_key() {
+        let p = policy();
+        let key_of = |url: &str| url.split("&key=").nth(1).map(|k| k[..8].to_string()).expect("a key");
+        let a = prepare(&p, "udp://tr4ker.net:6969/announce", &"ab".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
+        let b = prepare(&p, "udp://tr4ker.net:6969/announce", &"cd".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
+        assert_ne!(key_of(&a.url), key_of(&b.url), "HTTP key");
+        assert_ne!(a.udp.unwrap().key, b.udp.unwrap().key, "UDP key");
+        let again = prepare(&p, "udp://tr4ker.net:6969/announce", &"ab".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
+        assert_eq!(key_of(&a.url), key_of(&again.url), "stable for one torrent");
+    }
+
     fn policy() -> Policy {
         let mut p = Policy {
             peer_id: "-TY0001-abcdefghijkl".into(),
@@ -284,7 +298,7 @@ mod tests {
         assert_eq!(u.num_want, 200, "still leeching: asks for peers, as the URL does");
         assert!(r.url.contains("&numwant=200"));
         assert_eq!(u.ip, u32::from(std::net::Ipv4Addr::new(203, 0, 113, 9)));
-        assert_eq!(format!("{:08x}", u.key), url::key_for(&p.peer_id), "the same key as &key=");
+        assert_eq!(format!("{:08x}", u.key), url::key_for(&p.peer_id, &"ab".repeat(20)), "the same key as &key=");
 
         let http = prepare(&p, "https://tr4ker.net/announce/OLDKEY", &"ab".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
         assert!(http.udp.is_none(), "an HTTP tracker gets no UDP request");
