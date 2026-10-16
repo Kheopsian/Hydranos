@@ -120,6 +120,8 @@ refusal of the address, which was shown on an isolated bench only.
   runs with `sudo`; re-running it fixes an existing install. The config is
   kept at 0600.
 - `hydranos-update --tag` accepts a release tag (`vX.Y.Z`) and nothing else.
+  The updater also refuses an archive over 1 GiB instead of buffering it
+  whole (hardened without a reproduction).
 - The API's HTTP server gives a connection 30 s to send a request's headers
   and serves at most 1024 connections at once; further ones wait in the
   listen backlog. Responses, the event stream included, are not time-limited.
