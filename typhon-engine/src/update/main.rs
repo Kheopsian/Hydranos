@@ -152,11 +152,16 @@ struct Asset {
     size: u64,
 }
 
-fn resolve(tag: Option<&str>) -> Result<Release, String> {
-    let url = match tag {
+/// The GitHub API address of a release: the latest, or the one `tag` names.
+fn release_url(tag: Option<&str>) -> Result<String, String> {
+    Ok(match tag {
         Some(t) => format!("https://api.github.com/repos/{REPO}/releases/tags/{t}"),
         None => format!("https://api.github.com/repos/{REPO}/releases/latest"),
-    };
+    })
+}
+
+fn resolve(tag: Option<&str>) -> Result<Release, String> {
+    let url = release_url(tag)?;
     let body = get_text(&url)?;
     let v: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("the release index is not JSON: {e}"))?;
