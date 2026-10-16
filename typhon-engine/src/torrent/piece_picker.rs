@@ -241,15 +241,21 @@ pub fn default_budget() -> u64 {
 }
 
 fn memory_ceiling() -> Option<u64> {
-    let total = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| {
+    memory_ceiling_at(std::path::Path::new("/"))
+}
+
+/// `memory_ceiling` read under `root` instead of `/`, so a test can lay out
+/// its own /proc and /sys.
+fn memory_ceiling_at(root: &std::path::Path) -> Option<u64> {
+    let total = std::fs::read_to_string(root.join("proc/meminfo")).ok().and_then(|s| {
         s.lines()
             .find_map(|l| l.strip_prefix("MemTotal:"))
             .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
             .map(|kb| kb * 1024)
     });
-    let cgroup = ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]
+    let cgroup = ["sys/fs/cgroup/memory.max", "sys/fs/cgroup/memory/memory.limit_in_bytes"]
         .iter()
-        .find_map(|p| std::fs::read_to_string(p).ok())
+        .find_map(|p| std::fs::read_to_string(root.join(p)).ok())
         .and_then(|s| s.trim().parse::<u64>().ok());
     match (total, cgroup) {
         (Some(t), Some(c)) => Some(t.min(c)),
