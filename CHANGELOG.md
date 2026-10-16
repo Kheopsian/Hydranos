@@ -50,6 +50,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - Login passwords (`/api/login`, `/api/v2/auth/login`) are checked off the
   async runtime, two at a time, so a burst of logins no longer stalls the
   API and the background tasks.
+- Five failed logins from one address (an IPv6 /64) within 15 minutes block
+  it for a minute, doubling up to an hour, on both login routes:
+  `/api/login` answers `429` with `Retry-After`, `/api/v2/auth/login`
+  qBittorrent's `403`. The API key still logs a qBittorrent client in while
+  blocked. A login that waits more than 2 s for a password check gets `503`.
 
 ## v4.5.4 -- a write the store did not keep is never acknowledged
 
