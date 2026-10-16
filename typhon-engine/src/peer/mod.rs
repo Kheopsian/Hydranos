@@ -776,6 +776,21 @@ pub static HAVE_RX_LAGGED: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// Inbound handshakes refused because the torrent asked for is stopped.
 pub static INBOUND_REFUSED_PAUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Inbound handshakes refused because the engine already holds
+/// `max_connections` live sessions.
+pub static INBOUND_REFUSED_CAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether the engine is at its `max_connections` ceiling. The ceiling used to
+/// bound only the dials we made: a peer reaching us added a session past it.
+/// Checked once the torrent is named, before our handshake goes back.
+fn at_connection_cap(t: &crate::torrent::meta::TorrentState) -> bool {
+    if t.limiter().conn_cap_reached() {
+        INBOUND_REFUSED_CAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
 /// Whether an inbound peer may open a session on this torrent.
 ///
 /// A stopped torrent -- by the operator, the queue, or held by a path claim
@@ -928,6 +943,9 @@ async fn handle_incoming(
             }
             None => return,
         };
+        if at_connection_cap(&torrent) {
+            return;
+        }
 
         // Send our handshake
         let mut reply = Vec::with_capacity(68);
@@ -993,6 +1011,9 @@ async fn handle_incoming(
                     }
                     None => return,
                 };
+                if at_connection_cap(&torrent) {
+                    return;
+                }
                 (CryptoStream::new(stream, Some(enc), Some(dec)), torrent, hs.fast_extension, hs.extended_protocol, hs.peer_id, true)
             }
             Err(e) => {
@@ -1258,6 +1279,29 @@ mod paused_inbound_tests {
         let answered = knock(mgr.clone(), disk.clone(), ih).await;
         assert!(answered.len() >= 48 && answered[0] == 19, "a started torrent must answer");
         assert_eq!(&answered[28..48], &ih, "with its own info hash");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ⭐ An engine at its `max_connections` ceiling takes no inbound session:
+    /// the handshake is closed unanswered. Under the ceiling, the same torrent
+    /// answers -- so the refusal is the ceiling, not the fixture.
+    #[tokio::test]
+    async fn an_engine_at_its_connection_ceiling_refuses_an_inbound_handshake() {
+        let (mgr, disk, root) = manager("ceiling");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .unwrap();
+        let limiter = mgr.limiter().clone();
+        limiter.set_max_connections(1);
+        limiter.connection_opened();
+
+        let refused = knock(mgr.clone(), disk.clone(), ih).await;
+        assert!(refused.is_empty(), "an engine at its ceiling answered a handshake: {} bytes", refused.len());
+
+        limiter.connection_closed();
+        let answered = knock(mgr.clone(), disk.clone(), ih).await;
+        assert!(answered.len() >= 48 && answered[0] == 19, "under the ceiling it answers");
 
         let _ = std::fs::remove_dir_all(&root);
     }

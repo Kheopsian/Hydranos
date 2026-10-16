@@ -76,6 +76,8 @@ enable_pex = true
 # the size of the library; never a `private` torrent; off behind a SOCKS5
 # proxy. On by default for race, as in qBittorrent.
 enable_lsd = true
+# Live peer sessions, dialled and inbound; at the ceiling an inbound handshake
+# is refused. 0 = no ceiling.
 max_connections = 4000
 # Cap on OUTBOUND peer connections started per second (a token bucket; the burst
 # equals the rate). Bounds how fast this engine dials the peers a tracker, PEX
@@ -175,6 +177,8 @@ enable_pex = true
 # Local Service Discovery (see [race]). Off by default here: a seedbox of
 # mostly private torrents downloads little and LSD never announces those.
 enable_lsd = false
+# Live peer sessions, dialled and inbound; at the ceiling an inbound handshake
+# is refused. 0 = no ceiling.
 max_connections = 12000
 # Cap on OUTBOUND peer connections started per second (see [race]). 0 = unlimited.
 max_dials_per_sec = 50

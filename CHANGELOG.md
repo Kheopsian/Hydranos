@@ -100,6 +100,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   device. The description is read up to 256 KiB, without following
   redirects. A router whose search answer names its description by host
   name rather than by address is no longer used.
+- `max_connections` now bounds inbound sessions too: an engine holding that
+  many live sessions refuses a new inbound handshake (counted as
+  `inbound_refused_cap`). It used to bound only the dials we made. An install
+  whose engine runs above its ceiling will take fewer inbound peers after the
+  upgrade; raise `max_connections`, or set it to 0 for no ceiling.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
