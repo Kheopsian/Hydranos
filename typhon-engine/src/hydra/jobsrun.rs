@@ -283,6 +283,13 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             }
             continue;
         }
+        // A destination that appeared while the job was stopped is not ours
+        // to overwrite: give the move up and put everything back.
+        // A graduation copies in place after the torrent left its engine,
+        // so a copy of ours can be cut short: a prefix of the original.
+        if resumed && to_path.exists() && !is_our_copy(from_path, to_path, false) {
+            return Err(put_back(&moved, format!("{} already holds another file", to_path.display())));
+        }
         let size = std::fs::metadata(from_path).map(|m| m.len()).unwrap_or(0) as i64;
         // A cancel is honoured between two files, and undone like a failure.
         let cancelling = {
@@ -1100,6 +1107,20 @@ fn finish_interrupted_move(
     let old_root = std::path::PathBuf::from(&original.save_path);
     let files = graduation_files(&meta, &old_root, save_path);
     tracing::warn!(hash = %hash, engine = %engine.id, "move interrupted after leaving its engine; finishing it");
+    // ⭐ A file found at a destination while its original is still there is
+    // either our copy or a file that appeared there while the job was
+    // stopped. A move copies everything, synced, before the torrent leaves
+    // its engine, so a copy of ours is always whole: an empty or shorter file
+    // is somebody else's, and so is any other content. Only a whole copy lets
+    // the original go; anything else gives the move up, with every file back
+    // where it was and the torrent back in its engine there.
+    if let Some((_, to)) = files
+        .iter()
+        .find(|(from, to)| from != to && from.exists() && to.exists() && !is_our_copy(from, to, true))
+    {
+        let undo = undo_interrupted_move(engine, &files, &original, &metainfo);
+        return Err(format!("{} already holds another file; {undo}", to.display()));
+    }
     for (from, to) in &files {
         if from != to && !to.exists() && from.exists() {
             crate::jobs::run_move_allowing(from, to, allow)
@@ -1133,6 +1154,66 @@ fn finish_interrupted_move(
     }
     let _ = set_carried_record(state, job, p, None);
     Ok(())
+}
+
+/// Is `to` our own copy of `from`: the bytes it holds are the first bytes of
+/// `from`, and all of them when `whole`. Anything else at that path is
+/// another file.
+fn is_our_copy(from: &std::path::Path, to: &std::path::Path, whole: bool) -> bool {
+    use std::io::Read;
+    if same_file(from, to) {
+        return true;
+    }
+    let (Ok(a), Ok(b)) = (std::fs::metadata(from), std::fs::metadata(to)) else {
+        return false;
+    };
+    if b.len() > a.len() || (whole && b.len() != a.len()) {
+        return false;
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(from), std::fs::File::open(to)) else {
+        return false;
+    };
+    let mut left = b.len();
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    while left > 0 {
+        let n = left.min(ba.len() as u64) as usize;
+        if fa.read_exact(&mut ba[..n]).is_err() || fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+            return false;
+        }
+        left -= n as u64;
+    }
+    true
+}
+
+/// Give up an interrupted move: what had moved goes back, our copies go,
+/// and the torrent returns to its engine where it was.
+fn undo_interrupted_move(
+    engine: &crate::engines::Engine,
+    files: &[(std::path::PathBuf, std::path::PathBuf)],
+    original: &typhon_engine::torrent::fastresume::ResumeData,
+    metainfo: &[u8],
+) -> String {
+    let mut problems = Vec::new();
+    for (from, to) in files {
+        if from == to {
+            continue;
+        }
+        if !from.exists() && to.exists() {
+            if let Err(e) = crate::jobs::run_move_allowing(to, from, true) {
+                problems.push(format!("could not put {} back: {e}", from.display()));
+            }
+        } else if from.exists() && to.exists() && is_our_copy(from, to, true) && !same_file(from, to) {
+            let _ = std::fs::remove_file(to);
+        }
+    }
+    if let Err(e) = engine.manager.import_state_bytes(original, metainfo) {
+        problems.push(format!("could not re-add it at {}: {e}", original.save_path));
+    }
+    if problems.is_empty() {
+        format!("the move was given up; the torrent is back at {}", original.save_path)
+    } else {
+        format!("ROLLBACK INCOMPLETE: {}", problems.join("; "))
+    }
 }
 
 /// Remove the directories the move emptied, deepest first, never the old root
@@ -1318,6 +1399,79 @@ mod graduate_tests {
         assert_eq!(*t.save_path.read(), dst);
         assert_eq!(t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 5_000);
         assert!(dst.join("grad").exists() && !src.join("grad").exists());
+    }
+
+    /// ⭐ A file that appears at a graduation's destination while it is
+    /// stopped is somebody else's: the resumed run neither overwrites it nor
+    /// loses the original, and the torrent goes back where it was.
+    #[test]
+    fn a_resumed_graduation_leaves_a_file_that_appeared_at_its_destination() {
+        let (s, hash, src, dst, again) = interrupted("grad-collision");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("grad"), b"somebody else's grad").unwrap();
+
+        let err = graduate(&s.state, &again).expect_err("given up");
+        assert!(err.contains("already holds another file"), "{err}");
+        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), b"somebody else's grad");
+        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384]);
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*back.save_path.read(), src);
+    }
+
+    /// The same for a move: the original is not deleted on the strength of a
+    /// destination that is not its copy.
+    #[test]
+    fn a_resumed_move_leaves_a_file_that_appeared_at_its_destination() {
+        resumed_move_meets(b"somebody else's grad", "move-collision");
+    }
+
+    /// ⭐ An empty file, or one holding the original's first bytes, is not a
+    /// move's copy: a move copies everything before it takes the torrent out
+    /// of its engine. Taking one for the copy deleted the original.
+    #[test]
+    fn a_resumed_move_does_not_take_an_empty_or_short_file_for_its_copy() {
+        resumed_move_meets(b"", "move-empty");
+        resumed_move_meets(&[7u8; 100], "move-short");
+    }
+
+    fn resumed_move_meets(foreign: &[u8], tag: &str) {
+        let s = state_from(tag, "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
+        let blob = torrent_bytes("grad");
+        let root = src.display().to_string();
+        let race = s.state.engines.get("race").unwrap();
+        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        let params = serde_json::json!({
+            "engine": "race", "category": "", "save_path": dst.display().to_string(),
+        })
+        .to_string();
+        let running = {
+            let store = s.state.store.lock().unwrap();
+            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
+            store.create_job("move_data", &hash, &params, 16384).unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
+        move_data(&s.state, &running).expect_err("stopped where a crash would");
+        let again = {
+            let store = s.state.store.lock().unwrap();
+            store.requeue_running_jobs();
+            store.claim_next_job().expect("claimed again")
+        };
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("grad"), foreign).unwrap();
+
+        let err = move_data(&s.state, &again).expect_err("given up");
+        assert!(err.contains("already holds another file"), "{err}");
+        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384], "the original is kept");
+        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), foreign, "and so is the other file");
+        let t = race.manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), src);
     }
 
     /// ⭐ The drain graduated onto whatever sat at the destination: rename(2)

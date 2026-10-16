@@ -244,7 +244,9 @@ it is set.
 - A graduation, or a move across filesystems, interrupted after taking the
   torrent out of its engine (a kill, an OOM, a power cut during the copy) is
   finished when its job runs again, instead of failing with the torrent in no
-  engine and its resume record gone.
+  engine and its resume record gone. A destination file that is not its own
+  copy makes it give up instead, with every file and the torrent back where
+  they were.
 - The store reconcile no longer deletes the row, metainfo included, of a
   torrent that a graduation or move has taken out of its engine on purpose.
 - A state row that cannot be read is kept as a refused record: the torrent
