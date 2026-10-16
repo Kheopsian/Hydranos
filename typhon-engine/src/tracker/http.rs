@@ -259,6 +259,9 @@ pub async fn announce_on(
     let mut builder = pin_builder(
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
+            // Same rule as `family_client`: the URL carries the passkey, a
+            // forged Location must not replay it to another host.
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(crate::config::user_agent()),
         device,
     )?;
@@ -273,7 +276,7 @@ pub async fn announce_on(
     let resp = client.get(&url)
         .send()
         .await
-        .map_err(|e| format!("http request: {}", fmt_err_chain(&e)))?;
+        .map_err(|e| format!("http request: {}", fmt_err_chain(&e.without_url())))?;
 
     if !resp.status().is_success() {
         return Err(http_error(resp).await);

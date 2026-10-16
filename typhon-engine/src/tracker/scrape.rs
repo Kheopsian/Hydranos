@@ -27,7 +27,11 @@ pub fn scrape_url(announce: &str) -> Option<String> {
         Some(i) => (&announce[..i], &announce[i..]),
         None => (announce, ""),
     };
-    let slash = base.rfind('/')?;
+    let after_scheme = base.find("://")? + 3;
+    // The last slash of the PATH. Without a path, `rfind` would land in the
+    // scheme's `//` and "rewrite" the host: `http://announce-x.com?pk=K`
+    // became `http://scrape-x.com?pk=K`, the passkey sent to another domain.
+    let slash = after_scheme + base[after_scheme..].rfind('/')?;
     let last = &base[slash + 1..];
     if !last.starts_with("announce") || !(base.starts_with("http://") || base.starts_with("https://")) {
         return None;
@@ -197,6 +201,9 @@ mod tests {
         assert_eq!(scrape_url("https://t.example/a"), None, "no announce segment, no scrape");
         assert_eq!(scrape_url("https://t.example/announce/x"), None, "announce must be the last segment");
         assert_eq!(scrape_url("udp://t.example:80/announce"), None, "UDP has its own scrape");
+        // No path: the host is never rewritten, whatever it is called.
+        assert_eq!(scrape_url("http://announce-x.example?pk=K"), None);
+        assert_eq!(scrape_url("https://announce.t.example"), None);
     }
 
     #[test]

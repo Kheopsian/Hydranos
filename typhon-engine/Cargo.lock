@@ -3235,6 +3235,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "windows-sys 0.59.0",
  "zip",
 ]
