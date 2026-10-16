@@ -280,6 +280,11 @@ pub struct Session {
     /// direction; peers without MSE are turned away). Applied live.
     #[serde(default)]
     pub peer_encryption: String,
+    /// Inbound handshakes naming an info_hash this engine does not have, per
+    /// source IP per minute, before the source is ignored for ten minutes.
+    /// 0 / absent = no limit (the default). Applied live.
+    #[serde(default)]
+    pub max_unknown_infohash_per_ip: u32,
     #[serde(default)]
     pub enable_ipv6: bool,
     #[serde(default)]

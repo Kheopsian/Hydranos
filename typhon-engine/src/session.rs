@@ -32,6 +32,7 @@ pub async fn start(
     mgr.policy().set_ipv6(config.enable_ipv6);
     mgr.policy().set_idle_timeout_secs(config.peer_timeout);
     mgr.policy().set_encryption(&config.peer_encryption);
+    mgr.policy().set_unknown_hash_limit(config.max_unknown_infohash_per_ip);
     // Engine-wide byte-rate caps, bytes/s (0 = none). Read by nobody until
     // 4.4; the RPC and the binary move them live afterwards.
     mgr.rates().engine.up.set_rate(config.upload_limit);
