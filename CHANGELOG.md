@@ -38,6 +38,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   could change its host.
 - A tracker's error or warning that quotes the passkey back has it masked
   before it reaches the log or the UI.
+- Outbound peer connections are capped at 50 new dials per second per engine
+  by default (`max_dials_per_sec` in `[race]` and `[hoard]`). The pacer
+  existed but defaulted to unlimited, so a tracker, PEX or DHT reply full of
+  peers became the whole list of connection attempts at once: on an isolated
+  bench a 2000-peer reply fired about 3100 SYN in one second, and about 37/s
+  with the cap. The default applies to upgraded installs too, whose config
+  file predates the key; an explicit `max_dials_per_sec = 0` keeps the old
+  unlimited behaviour.
 
 ## v4.4.4 -- the CVE sweep: a forged .torrent, peer or DHT packet is held off
 
