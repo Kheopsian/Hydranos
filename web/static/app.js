@@ -10619,6 +10619,7 @@ function _netStateWord(s) {
     return s === "ok" ? t("exit probe answered")
         : s === "bad" ? t("exit probe got no answer")
         : s === "off" ? t("offline")
+        : s === "unknown" ? t("exit address unknown (exit probe off)")
         : t("no answer yet from its interface");
 }
 
@@ -10637,6 +10638,7 @@ async function updateNetPoly() {
     el.innerHTML = _netPolyMarkup(_netEngines, 30);
     const worst = _netEngines.some(e => e.state === "bad") ? "bad"
         : _netEngines.some(e => e.state === "off") ? "off"
+        : _netEngines.some(e => e.state === "unknown") ? "unknown"
         : _netEngines.some(e => e.state === "warn") ? "warn" : "ok";
     // "engine", not "agent". The dots ARE the engines -- one vertex each --
     // and this panel lists them by engine id, so the tooltip was the only
