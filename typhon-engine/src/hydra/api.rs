@@ -8879,7 +8879,7 @@ async fn qbit_login(State(state): State<AppState>, body: String) -> Response {
     let username = form_field(&body, "username").unwrap_or_default();
     let password = form_field(&body, "password").unwrap_or_default();
 
-    if !qbit_credentials_ok(&cfg, &username, &password) {
+    if !qbit_credentials_ok(&cfg, &username, &password).await {
         // One answer for a wrong name, a wrong password and a wrong key alike.
         tracing::warn!(%username, "qBittorrent login refused: invalid credentials");
         return (StatusCode::OK, "Fails.").into_response();
@@ -8919,16 +8919,17 @@ async fn qbit_login(State(state): State<AppState>, body: String) -> Response {
 /// An instance with neither a key nor an admin account authorises nobody. That
 /// guard is not decoration: without it an empty password would compare equal
 /// to an empty expected key, which is the 4.14 hole in a new doorway.
-fn qbit_credentials_ok(cfg: &crate::config::Config, username: &str, password: &str) -> bool {
+async fn qbit_credentials_ok(cfg: &crate::config::Config, username: &str, password: &str) -> bool {
     if cfg.daemon.api_key.is_empty() && cfg.auth.password_hash.is_empty() {
         return false;
     }
-    let by_password = !cfg.auth.password_hash.is_empty()
-        && username == cfg.auth.username
-        && bcrypt::verify(password, &cfg.auth.password_hash).unwrap_or(false);
+    // The key first: a client that holds it pays no bcrypt for it.
     let by_key = !password.is_empty()
         && constant_time_eq(password.as_bytes(), cfg.daemon.api_key.as_bytes());
-    by_password || by_key
+    by_key
+        || (!cfg.auth.password_hash.is_empty()
+            && username == cfg.auth.username
+            && crate::session::verify_password(password, &cfg.auth.password_hash).await)
 }
 
 /// End the session this request carries, and tell the client to drop it.
@@ -17113,7 +17114,48 @@ mod tests {
 
     /// The real decision `qbit_login` makes, called directly.
     fn qbit_creds_ok(state: &AppState, username: &str, password: &str) -> bool {
-        qbit_credentials_ok(&state.cfg(), username, password)
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(qbit_credentials_ok(&state.cfg(), username, password))
+    }
+
+    /// A bcrypt check is a quarter of a second of CPU. Run inline in the
+    /// handler it held the worker thread, and every task sharing it waited;
+    /// a burst of logins stalled the API. On a one-thread runtime the ticker
+    /// below only advances if the login lets go of the thread meanwhile.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_login_leaves_the_runtime_free_while_bcrypt_runs() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let st = state("k", &bcrypt::hash("right-password", 8).unwrap());
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let t = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            loop {
+                t.fetch_add(1, SeqCst);
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::task::yield_now().await;
+
+        let before = ticks.load(SeqCst);
+        let r = qbit_login(State(st.clone()), "username=admin&password=wrong".into()).await;
+        let during_qbit = ticks.load(SeqCst) - before;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let before = ticks.load(SeqCst);
+        let r = crate::bootstrap::login(
+            State(st.clone()),
+            r#"{"username":"admin","password":"wrong"}"#.into(),
+        )
+        .await;
+        let during_web = ticks.load(SeqCst) - before;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        ticker.abort();
+
+        assert!(during_qbit > 0, "/api/v2/auth/login held the runtime for its bcrypt check");
+        assert!(during_web > 0, "/api/login held the runtime for its bcrypt check");
     }
 
     #[test]

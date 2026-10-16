@@ -104,6 +104,38 @@ impl Sessions {
     }
 }
 
+/// How many password checks may run at once, across both login routes.
+///
+/// A bcrypt check is a quarter of a second of CPU by design. Two at a time is
+/// plenty for the one admin account there is, and a burst of logins then
+/// queues as idle futures instead of taking every core.
+const VERIFY_SLOTS: usize = 2;
+
+/// Check a password against the admin account's bcrypt hash, off the async
+/// runtime.
+///
+/// Run inline in a handler, the check held its worker thread for its whole
+/// cost, and everything else scheduled there -- API, SSE, background tasks --
+/// waited behind it. The slot is moved into the blocking task, so a client
+/// that hangs up mid-check does not free it before the CPU is.
+pub async fn verify_password(password: &str, hash: &str) -> bool {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    if hash.is_empty() {
+        return false;
+    }
+    let slots = SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(VERIFY_SLOTS)));
+    let Ok(slot) = slots.clone().acquire_owned().await else {
+        return false;
+    };
+    let (password, hash) = (password.to_owned(), hash.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        bcrypt::verify(password, &hash).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// 32 bytes of system entropy, hex encoded -- the same source as the API key.
 fn fresh_sid() -> String {
     use rand::RngCore;
