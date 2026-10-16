@@ -2267,12 +2267,11 @@ impl TorrentManager {
                     if t.is_removed.load(Ordering::Relaxed) {
                         return None;
                     }
-                    let data = crate::disk::read_piece_for_check(&t, piece).await?;
                     // No hash table -> we cannot say this piece is good. Leave
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
                     // SHA-1 for v1 and hybrids, the merkle root for v2.
-                    if t.verify_piece(piece, &data)? { Some(piece) } else { None }
+                    if crate::disk::check_piece_on_disk(&t, piece).await? { Some(piece) } else { None }
                 }
             })
             .buffer_unordered(width)
