@@ -166,8 +166,10 @@ it is set.
 - `[race]`/`[hoard]` `lsd_announce_seeds = false`: Local Service Discovery
   announces only torrents still downloading. A seed still connects to a local
   downloader that announces.
-- `[race]`/`[hoard]` `dht_follow_seeds = false`: finished torrents are not
-  announced or looked up on the DHT.
+- `[race]`/`[hoard]` `dht_follow_seeds = false`: a finished torrent is not
+  looked up on the DHT from the start; one already being looked up stops at
+  the next peer its lookup finds, and is followed again if it is started or
+  resumed while incomplete.
 - `[race]`/`[hoard]` `listen_when_proxied = false`: an engine going out
   through a SOCKS5 proxy opens no listening port (no inbound peers, no seeding
   through a forwarded port).
